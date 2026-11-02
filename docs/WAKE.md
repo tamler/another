@@ -43,7 +43,13 @@ wyres wake --agent codex@shop --dry-run
 ```
 
 - The default message is a one-line inbox summary: unread count, urgent count, open requests and up to three subjects. Message bodies are never included.
-- An agent with nothing unread and no open requests is skipped unless you pass `--force`. `--message` replaces the text.
+- An agent with nothing unread and no open requests is skipped unless you pass `--force`. `--message` replaces the text. The default text names the real commands (the `fetch_inbox`, `send_message` and `acknowledge` tools, or `wyres inbox`, `wyres reply`, `wyres ack`).
+- Agents take custom text literally, so name commands that exist. There is no `wyres mail` command. For example:
+
+```bash
+wyres wake --agent codex@shop --force --message "New Wyres mail: run fetch_inbox (or wyres inbox --agent codex@shop), reply with wyres reply <message-id>, then wyres ack <message-id>."
+```
+
 - `--all` wakes every agent that has a stored target and something waiting, which makes it suitable for a cron job or a Herdr action.
 - `--dry-run` prints the commands without running them.
 

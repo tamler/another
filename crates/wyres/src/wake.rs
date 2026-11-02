@@ -96,7 +96,11 @@ fn default_message(store: &Store, agent: &str) -> Result<(Option<String>, String
     if !subjects.is_empty() {
         msg.push_str(&format!(": {}", subjects.join(", ")));
     }
-    msg.push_str(". Check them with fetch_inbox.");
+    msg.push_str(&format!(
+        ". Read them with the fetch_inbox tool (or `wyres inbox --agent {a}`), then reply with \
+         send_message / `wyres reply` and mark them done with acknowledge / `wyres ack`.",
+        a = inbox.agent
+    ));
     Ok((Some(msg), inbox.agent))
 }
 
@@ -121,7 +125,9 @@ pub fn wake(store: &Store, agent: &str, opts: &WakeOptions) -> Result<WakePlan> 
             plan.skipped = Some("nothing unread and no open requests".into());
             return Ok(plan);
         }
-        plan.message = Some(format!("Wyres: check in with fetch_inbox ({address})."));
+        plan.message = Some(format!(
+            "Wyres: check your inbox with the fetch_inbox tool (or `wyres inbox --agent {address}`)."
+        ));
     }
     let Some(via) = plan.via else {
         plan.skipped = Some(format!(

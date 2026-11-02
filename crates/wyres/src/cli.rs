@@ -370,7 +370,8 @@ pub enum NodeCmd {
     /// Show this node's id, name and key fingerprint.
     Show,
     /// Rename this node (do this before pairing; names must be unique across nodes).
-    Name { name: String },
+    /// Without a name, prints the current one.
+    Name { name: Option<String> },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1140,9 +1141,18 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 )
             })
         }
-        Command::Node(NodeCmd::Name { name }) => {
+        Command::Node(NodeCmd::Name { name: Some(name) }) => {
             let n = store.set_node_name(&name)?;
             emit(json, &n, |n| format!("this node is now {}", n.display_name))
+        }
+        Command::Node(NodeCmd::Name { name: None }) => {
+            let n = store.node_entry()?;
+            emit(json, &n, |n| {
+                format!(
+                    "{}\n(rename with `wyres node name <name>`; details with `wyres node show`)",
+                    n.display_name
+                )
+            })
         }
         Command::Pair(PairCmd::Invite {
             url,

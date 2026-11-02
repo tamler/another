@@ -379,11 +379,49 @@ fn apply(change: &mut FileChange) -> Result<()> {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            let tmp = path.with_extension("wyres-tmp");
-            std::fs::write(&tmp, change.after.as_deref().unwrap_or_default())?;
-            std::fs::rename(&tmp, &path)?;
+            write_preserving(&path, change.after.as_deref().unwrap_or_default())
+                .with_context(|| format!("writing {}", path.display()))?;
         }
     }
+    Ok(())
+}
+
+/// Atomically replace `path` with `text`, keeping the existing file's permissions (and, on
+/// unix, its owner where allowed). New files are created private (0600). A symlinked config
+/// is written through to its target so dotfile links survive.
+fn write_preserving(path: &Path, text: &str) -> Result<()> {
+    let path = match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => std::fs::canonicalize(path)?,
+        _ => path.to_path_buf(),
+    };
+    let existing = std::fs::metadata(&path).ok();
+    let tmp = path.with_extension("wyres-tmp");
+    // A stale temp file would keep its old mode; start from a fresh one.
+    let _ = std::fs::remove_file(&tmp);
+    {
+        use std::io::Write;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(&tmp)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+    }
+    if let Some(meta) = &existing {
+        std::fs::set_permissions(&tmp, meta.permissions())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            // Only succeeds when allowed (e.g. same owner, or root); otherwise the new file
+            // keeps the current user's ownership, as before.
+            let _ = std::os::unix::fs::chown(&tmp, Some(meta.uid()), Some(meta.gid()));
+        }
+    }
+    std::fs::rename(&tmp, &path)?;
     Ok(())
 }
 
