@@ -482,7 +482,12 @@ fn federation_cli() {
     let (ok, _, err) = run(&["pair", "invite", "--url", "https://hub.example"]);
     assert!(!ok);
     assert!(err.contains("wyres node name"), "{err}");
+    let (ok, out, _) = run(&["node", "name"]);
+    assert!(ok, "node name with no argument prints the current name");
+    assert!(out.starts_with("local"), "{out}");
     assert!(run(&["node", "name", "studio"]).0);
+    let (ok, out, _) = run(&["node", "name"]);
+    assert!(ok && out.starts_with("studio"), "{out}");
     let (ok, out, _) = run(&["--json", "node", "show"]);
     assert!(ok);
     let node: serde_json::Value = serde_json::from_str(&out).unwrap();

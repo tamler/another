@@ -21,7 +21,8 @@ wyres hook install --client claude
 `--client` takes `claude`, `codex`, `grok`, `cursor`, or `all` (repeat or comma-separate). The installer:
 
 - writes one POSIX wrapper, `$WYRES_HOME/hooks/wyres-hook.sh` (default `~/.wyres/hooks/wyres-hook.sh`), which calls `wyres hook run <event> --client <client>` and always exits 0;
-- adds Wyres entries to each client's **user-level** config, keeping every existing hook and setting in place;
+- adds Wyres entries to each client's **user-level** config in your home directory (`~/.claude/settings.json`, `~/.codex/hooks.json`, `~/.grok/hooks/wyres.json`, `~/.cursor/hooks.json`). Hooks are global for that user, not per project; the project is worked out at run time from the client's working directory. Existing hooks and settings stay in place;
+- keeps each file's permissions (and owner, where allowed) when rewriting it, so a `0600` settings file stays `0600`; files it creates are `0600`. A symlinked config (e.g. from a dotfiles repo) is edited at its target and stays a symlink;
 - is idempotent: running it again changes nothing;
 - copies any file it changes to `<file>.wyres-backup-<timestamp>` first;
 - refuses to touch a file that is not valid JSON (or, for Grok, a `wyres.json` it did not write) and then writes nothing at all.

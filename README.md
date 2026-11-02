@@ -17,13 +17,19 @@ Hooks inject a short digest at session start, so agents actually check their mai
 
 ## Quickstart
 
-**1. Install.** Download a release for macOS (arm64 or x86_64) or Linux (static, x86_64 or arm64) from [GitHub Releases](https://github.com/tamler/wyres/releases), unpack it and put `wyres` on your `PATH`. Or build from source with Rust 1.88+:
+**1. Install** with Rust 1.88 or newer:
 
 ```bash
 cargo install --git https://github.com/tamler/wyres wyres
 ```
 
-On macOS, a downloaded binary may need its quarantine flag removed: `xattr -d com.apple.quarantine ./wyres`.
+Or build from a checkout (the binary ends up at `target/release/wyres`):
+
+```bash
+git clone https://github.com/tamler/wyres && cd wyres && cargo build --release
+```
+
+Once v0.1.0 is published, prebuilt binaries for macOS (arm64, x86_64) and Linux (static, x86_64, arm64) will be on [GitHub Releases](https://github.com/tamler/wyres/releases): unpack one and put `wyres` on your `PATH`. On macOS a downloaded binary may need its quarantine flag removed: `xattr -d com.apple.quarantine ./wyres`.
 
 **2. Create the local node** (`~/.wyres`, or `$WYRES_HOME`):
 
@@ -31,7 +37,7 @@ On macOS, a downloaded binary may need its quarantine flag removed: `xattr -d co
 wyres init
 ```
 
-**3. Let agents check mail automatically** (Claude Code, Codex, Grok CLI, Cursor). This is idempotent, backs up the files it changes, and never overwrites your existing hooks:
+**3. Let agents check mail automatically** (Claude Code, Codex, Grok CLI, Cursor). This installs **user-global** hooks in each client's home-directory config (e.g. `~/.claude/settings.json`, `~/.codex/hooks.json`), not per project. It is idempotent, backs up the files it changes, keeps their permissions (a `0600` settings file stays `0600`), and never overwrites your existing hooks:
 
 ```bash
 wyres hook install --client all
@@ -116,9 +122,9 @@ Every command takes `--json`. `--agent` and `--from` default to `$WYRES_AGENT`, 
 
 | Task | Commands |
 |---|---|
-| Node | `wyres init`, `wyres status`, `wyres node name <name>`, `wyres events` |
+| Node | `wyres init`, `wyres status`, `wyres node show`, `wyres node name [<name>]` (no name prints the current one), `wyres events` |
 | Agents | `wyres agent register <name> --program claude\|codex\|grok\|cursor\|grok_bot\|other [--project PATH]`, `wyres agent list` |
-| Mail | `wyres send`, `wyres inbox`, `wyres reply`, `wyres ack`, `wyres threads`, `wyres thread <id>` |
+| Mail | `wyres send`, `wyres inbox`, `wyres reply <message-id>`, `wyres ack <message-id>`, `wyres threads`, `wyres thread <id>` (there is no `wyres mail` command) |
 | Requests | `wyres requests`, `wyres request claim\|release\|complete\|cancel <id>` |
 | Holds | `wyres hold acquire\|check\|renew\|release`, `wyres holds` (conflicts exit with status 3) |
 | Sessions and feed | `wyres heartbeat [--start\|--end [--keep]]`, `wyres activity [--since 1h] [--kinds mail,request] [--summary]` |

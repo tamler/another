@@ -474,3 +474,108 @@ fn installed_wrapper_script_runs_under_sh() {
     // WYRES_HOME baked in at install time was used.
     assert!(env.wyres_home.join("wyres.db").exists());
 }
+
+#[cfg(unix)]
+fn mode(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+#[cfg(unix)]
+fn set_mode(path: &Path, m: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(m)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn install_and_uninstall_preserve_config_permissions() {
+    let env = Env::new();
+    // Existing private configs for every client that shares a file with other settings.
+    let fixtures = [
+        (".claude/settings.json", json!({ "model": "x" }), 0o600),
+        (".codex/hooks.json", json!({ "hooks": {} }), 0o600),
+        (
+            ".cursor/hooks.json",
+            json!({ "version": 1, "hooks": {} }),
+            0o640,
+        ),
+    ];
+    for (rel, value, m) in &fixtures {
+        env.write(rel, value);
+        set_mode(&env.home.join(rel), *m);
+    }
+
+    env.ok(&["hook", "install", "--client", "all"]);
+    for (rel, _, m) in &fixtures {
+        let path = env.home.join(rel);
+        assert_eq!(ours(&env.read(rel)), 3, "{rel} installed");
+        assert_eq!(mode(&path), *m, "{rel} keeps its mode after install");
+    }
+    // A config Wyres creates is private.
+    assert_eq!(mode(&env.home.join(".grok/hooks/wyres.json")), 0o600);
+    // The wrapper script is executable.
+    assert_eq!(
+        mode(&env.wyres_home.join("hooks/wyres-hook.sh")) & 0o111,
+        0o111
+    );
+
+    env.ok(&["hook", "uninstall", "--client", "all"]);
+    for (rel, value, m) in &fixtures {
+        let path = env.home.join(rel);
+        let after = env.read(rel);
+        assert_eq!(ours(&after), 0, "{rel} cleaned");
+        for (k, v) in value.as_object().unwrap() {
+            if k != "hooks" {
+                assert_eq!(&after[k], v, "{rel} keeps {k}");
+            }
+        }
+        assert_eq!(mode(&path), *m, "{rel} keeps its mode after uninstall");
+    }
+    // No temp files left behind.
+    for (rel, _, _) in &fixtures {
+        let tmp = env.home.join(rel).with_extension("wyres-tmp");
+        assert!(!tmp.exists(), "{}", tmp.display());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn new_client_configs_are_private_and_symlinks_survive() {
+    let env = Env::new();
+    env.ok(&["hook", "install", "--client", "claude,codex,cursor"]);
+    for rel in [
+        ".claude/settings.json",
+        ".codex/hooks.json",
+        ".cursor/hooks.json",
+    ] {
+        assert_eq!(mode(&env.home.join(rel)), 0o600, "{rel}");
+    }
+
+    // A settings file symlinked from a dotfiles repo is edited in place, not replaced.
+    let env = Env::new();
+    let dotfiles = env.home.join("dotfiles");
+    std::fs::create_dir_all(&dotfiles).unwrap();
+    let real = dotfiles.join("claude-settings.json");
+    std::fs::write(&real, "{\"theme\": \"dark\"}").unwrap();
+    set_mode(&real, 0o600);
+    std::fs::create_dir_all(env.home.join(".claude")).unwrap();
+    let link = env.home.join(".claude/settings.json");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    env.ok(&["hook", "install", "--client", "claude"]);
+    assert!(std::fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&real).unwrap()).unwrap();
+    assert_eq!(v["theme"], "dark");
+    assert_eq!(ours(&v), 3);
+    assert_eq!(mode(&real), 0o600);
+    env.ok(&["hook", "uninstall", "--client", "claude"]);
+    assert!(std::fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(mode(&real), 0o600);
+}
