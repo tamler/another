@@ -14,13 +14,13 @@ A **decision** is a request of kind `decision` addressed to a human.
 |---|---|
 | `question` | 1–2000 chars |
 | `options` | 2–6 `{value, label, description?}`. Values are short tokens (`ship`, `wait`), unique; labels are what the phone shows. |
-| `allow_free_text` | Whether an answer may be text instead of, or as well as, an option |
+| `allow_free_text` | Whether an answer may be text instead of, or as well as, an option. When off, a **short note** (≤ 280 chars) may still accompany a chosen option, never replace it (Jacob's decision). |
 | `context_links` | URLs or ids (PRs, CI runs, lanes) for the person deciding |
 | `deadline` | Optional; an RFC 3339 time or a duration (`2h`) |
 | `on_timeout` | What happens at the deadline: `choose_default` (needs `default`, one of the option values), `cancel`, or `keep_open` (the default: one `decision.overdue` reminder, then keep waiting) |
-| `human` | Who is asked. Defaults to `$ANOTHER_DECIDER`, else `jacob`. |
-| `project` | Required, because token scope is checked against it. Taken from the argument, else the lane, else the asking agent's project. |
-| `lane` | Optional. While the decision is open, the lane is `needs_decision`. |
+| `human` | Who is asked. Defaults to the `decider` **node setting** (`another config decider NAME`), else `jacob`. There is no environment variable (Jacob's decision): the setting lives in the node database, so every process on the node agrees. |
+| `project` | Required, because token scope is checked against it. Taken from the argument, else the asking agent's project, else the lane's. It is resolved and scope-checked **before** any lane lookup. |
+| `lane` | Optional. While the decision is open, the lane is `needs_decision`. Looked up **within the decision's project only** (id or name): a lane elsewhere, out of scope or missing is the same `unknown lane` error. |
 | status | `open`, `answered`, `expired`, `cancelled` |
 | answer | `value` and/or `text`, `answered_by` (the person), `relayed_by` (the agent that called the API, if any), `answered_at` |
 
@@ -41,7 +41,7 @@ A **decision** is a request of kind `decision` addressed to a human.
 
 ### Expiry
 
-The existing sweeper (every 30 s in `serve`, and before most writes) handles deadlines:
+The existing sweeper (every 30 s in `serve`, and before most writes) handles deadlines. Its mail is sent by the reserved **system agent `another`** (registered on first use; the name can't be registered by anyone else), never in the person's name (Jacob's decision):
 - `choose_default`: status `expired`, the answer is the default with `answered_by: "timeout"`, and the asking agent is mailed "no answer by the deadline; default X applies".
 - `cancel`: status `expired` with no answer; the asking agent is mailed "no answer by the deadline; decision cancelled".
 - `keep_open`: one `decision.overdue` event and a reminder in the human's inbox; it stays open.
@@ -91,6 +91,8 @@ The existing sweeper (every 30 s in `serve`, and before most writes) handles dea
   - `decision_list` and `decision_show` only cover decisions in the token's projects.
   - `decision_answer` requires the decision's project to be in scope.
   - The token's agent is recorded as `relayed_by`, so a relayed answer can always be traced to the token that sent it. `answered_by` is what the relaying agent says, which is a claim, not proof of identity.
+  - **No self-approval:** the relaying agent may not be the asking agent, and must be a manager bot (`grok_bot`) or a person (`human`). MCP `decision_answer` always names its relaying agent; only the local CLI (the person at the machine) answers without one. The same rule protects spend approvals.
+  - `decision_list` filters (`project`, `lane`) resolve within the caller's scope: hidden and missing give the same `unknown project` / `unknown lane` error.
   - `decision_cancel` is limited to the asking agent.
 - The HTTP endpoints follow the same rules, and everything is audited.
 - Answer text is stored and mailed to the asking agent, never placed in a wake message (wake messages only list subjects).

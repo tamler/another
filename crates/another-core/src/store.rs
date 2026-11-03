@@ -619,6 +619,12 @@ ALTER TABLE resource_leases ADD COLUMN expiry_warned_at INTEGER;
     r#"
 ALTER TABLE requests ADD COLUMN kind TEXT NOT NULL DEFAULT 'task';
 
+CREATE TABLE node_settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE decisions (
     decision_id       TEXT PRIMARY KEY,
     node_id           TEXT NOT NULL REFERENCES nodes(node_id),

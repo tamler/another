@@ -83,7 +83,7 @@ pub struct DecisionAnswerArgs {
     /// The person who decided (default: the person asked).
     pub answered_by: Option<String>,
     /// The agent relaying the answer; remote callers: always the token's agent.
-    pub relayed_by: Option<String>,
+    pub relayed_by: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -190,7 +190,7 @@ impl AnotherMcp {
                     value: a.value,
                     text: a.text,
                     answered_by: a.answered_by,
-                    relayed_by: a.relayed_by,
+                    relayed_by: Some(a.relayed_by),
                 },
                 scope.as_ref(),
             )?;
