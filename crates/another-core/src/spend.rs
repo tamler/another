@@ -1564,6 +1564,45 @@ pub fn spend_markdown(r: &SpendReport) -> String {
     out
 }
 
+/// Spend recorded since `since_ms`, per account (name, unit, amount), as `scope` sees it.
+pub(crate) fn spent_since(
+    conn: &Connection,
+    node_id: &str,
+    since_ms: i64,
+    scope: Option<&TokenScope>,
+) -> Result<Vec<(String, String, f64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.name, a.unit, e.amount, e.project_id, e.agent_id, a.project_id
+         FROM spend_entries e JOIN spend_accounts a ON a.account_id = e.account_id
+         WHERE e.node_id = ?1 AND e.at >= ?2 ORDER BY a.name",
+    )?;
+    let rows = stmt
+        .query_map(params![node_id, since_ms], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, f64>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<String>>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut out: Vec<(String, String, f64)> = Vec::new();
+    for (name, unit, amount, project, agent, account_project) in rows {
+        if !account_visible(conn, scope, account_project.as_deref())?
+            || !attributed_visible(conn, scope, project.as_deref(), agent.as_deref())?
+        {
+            continue;
+        }
+        match out.iter_mut().find(|(n, _, _)| *n == name) {
+            Some(x) => x.2 = round(x.2 + amount),
+            None => out.push((name, unit, round(amount))),
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

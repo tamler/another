@@ -192,6 +192,8 @@ pub fn authorize(
         // Webhook globs are checked against the token's, and only its own webhooks are listed
         // or removed, inside the store.
         "webhook_subscribe" | "webhook_list" | "webhook_remove" => Ok(()),
+        // Built from scoped reads only.
+        "daily_summary" => Ok(()),
         // Lane reads are filtered / checked against the token scope inside the tool.
         "lane_list" | "lane_show" | "holds_by_lane" => Ok(()),
         "lane_create" => {

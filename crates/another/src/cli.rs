@@ -303,6 +303,12 @@ pub enum Command {
     /// manager bot.
     #[command(subcommand)]
     Decision(DecisionCmd),
+    /// Daily summary: what needs you, lanes, decisions, requests, holds, spend, agents.
+    Summary {
+        /// Duration (24h), RFC 3339 time, or event id.
+        #[arg(long, default_value = "24h")]
+        since: String,
+    },
     /// Spend ledger: budgets, spend entries, hourly leases with approval, burn-down report.
     #[command(args_conflicts_with_subcommands = true)]
     Spend {
@@ -1653,6 +1659,11 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Webhook(cmd) => webhook_command(&store, json, cmd)?,
         Command::Decision(cmd) => decision_command(&store, json, cmd)?,
         Command::Spend { cmd, report } => spend_command(&store, json, cmd, report)?,
+        Command::Summary { since } => {
+            let since = another_core::Since::parse(&since, store.now())?;
+            let s = store.daily_summary(Some(since), None)?;
+            emit(json, &s, |s| s.markdown.trim_end().to_string())
+        }
         Command::Audit { limit } => {
             let entries = store.audit_log(limit)?;
             emit(json, &entries, |e| output::audit(e))

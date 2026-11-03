@@ -210,3 +210,70 @@ pub async fn spend(
     .await;
     finish(&store, peer, "GET /spend".into(), detail, result).await
 }
+
+#[derive(Debug, Deserialize)]
+pub struct SummaryParams {
+    pub since: Option<String>,
+    /// `json` (default) or `markdown`.
+    pub format: Option<String>,
+}
+
+/// `GET /summary?since=24h[&format=markdown]` — the daily summary (scoped for remote callers).
+pub async fn summary(
+    State(store): State<Store>,
+    peer: Option<axum::Extension<RemotePeer>>,
+    headers: axum::http::HeaderMap,
+    Query(p): Query<SummaryParams>,
+) -> Response {
+    let peer = peer.map(|p| p.0);
+    let scope = peer.as_ref().map(|p| p.scope.clone());
+    let markdown = p.format.as_deref() == Some("markdown")
+        || headers
+            .get(axum::http::header::ACCEPT)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("text/markdown"));
+    let detail = format!(
+        "since={:?} format={}",
+        p.since,
+        if markdown { "markdown" } else { "json" }
+    );
+    let s = store.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let since = p
+            .since
+            .as_deref()
+            .map(|v| another_core::Since::parse(v, s.now()))
+            .transpose()?;
+        Ok(json!(s.daily_summary(since, scope.as_ref())?))
+    })
+    .await;
+    if markdown {
+        if let Ok(Ok(v)) = &result {
+            let text = v["markdown"].as_str().unwrap_or_default().to_string();
+            if let Some(peer) = &peer {
+                audit(
+                    &store,
+                    AuditRecord {
+                        token_id: Some(peer.scope.token_id.clone()),
+                        agent: Some(peer.scope.agent.clone()),
+                        operation: "GET /summary".into(),
+                        outcome: "ok".into(),
+                        detail: Some(detail),
+                        remote: peer.remote.clone(),
+                    },
+                )
+                .await;
+            }
+            return (
+                StatusCode::OK,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/markdown; charset=utf-8",
+                )],
+                text,
+            )
+                .into_response();
+        }
+    }
+    finish(&store, peer, "GET /summary".into(), detail, result).await
+}
