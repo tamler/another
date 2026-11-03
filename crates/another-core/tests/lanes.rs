@@ -542,3 +542,71 @@ fn links_must_belong_to_the_lanes_project() {
     )
     .unwrap();
 }
+
+#[test]
+fn scoped_list_filters_never_reveal_hidden_projects_or_agents() {
+    let s = store();
+    for p in ["/work/shop", "/work/vault"] {
+        s.register_agent(RegisterAgent {
+            name: "dup".into(),
+            program: Program::Codex,
+            project: Some(p.into()),
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    }
+    for (name, project, lead) in [("a", "shop", "dup@shop"), ("b", "vault", "dup@vault")] {
+        s.create_lane(
+            NewLane {
+                agent: "manager".into(),
+                name: name.into(),
+                project: project.into(),
+                lead: lead.into(),
+                charter: String::new(),
+                status: None,
+            },
+            None,
+        )
+        .unwrap();
+    }
+    let t = s
+        .create_token("manager", &["/work/shop".into()], None, None)
+        .unwrap();
+    let scope = s.verify_token(&t.secret).unwrap();
+    let list = |project: Option<&str>, lead: Option<&str>| {
+        s.lanes(
+            LaneFilter {
+                project: project.map(Into::into),
+                lead: lead.map(Into::into),
+                ..Default::default()
+            },
+            Some(&scope),
+        )
+        .map(|ls| ls.into_iter().map(|l| l.name).collect::<Vec<_>>())
+    };
+    // A hidden project and a missing one look the same: an empty list, no error.
+    assert_eq!(list(Some("vault"), None).unwrap(), Vec::<String>::new());
+    assert_eq!(
+        list(Some("/work/vault"), None).unwrap(),
+        Vec::<String>::new()
+    );
+    assert_eq!(list(Some("nope"), None).unwrap(), Vec::<String>::new());
+    assert_eq!(list(Some("shop"), None).unwrap(), vec!["a"]);
+    // A lead name shared with a hidden agent: no ambiguity error naming it.
+    assert_eq!(list(None, Some("dup")).unwrap(), vec!["a"]);
+    assert_eq!(list(None, Some("dup@vault")).unwrap(), Vec::<String>::new());
+    assert_eq!(list(None, Some("ghost")).unwrap(), Vec::<String>::new());
+    // Local callers keep the precise errors.
+    let local = |lead: &str| {
+        s.lanes(
+            LaneFilter {
+                lead: Some(lead.into()),
+                ..Default::default()
+            },
+            None,
+        )
+    };
+    assert_eq!(local("dup").unwrap_err().code(), "ambiguous");
+    assert_eq!(local("ghost").unwrap_err().code(), "not_found");
+}
