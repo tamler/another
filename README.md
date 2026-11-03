@@ -1,12 +1,14 @@
-# Wyres
+# Another
 
-Free and open source, always: a local-first, vendor-neutral **inbox, activity feed and resource registry for coding agents**. Claude Code, Codex, Grok CLI, Grok Bot, Cursor and anything else that speaks MCP are treated equally, through plain MCP and a shared `wyres` CLI. A sibling agent-tools project under the [WyreUp](https://wyreup.com/) brand.
+**From one agent to another.**
 
-**License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1–6 complete (local core, hooks, resources, remote peers, federation, polish)
+Free and open source, always: a local-first, vendor-neutral **inbox, activity feed and resource registry for coding agents**. Claude Code, Codex, Grok CLI, Grok Bot, Cursor and anything else that speaks MCP are treated equally, through plain MCP and a shared `another` CLI.
+
+**Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1–6 complete (local core, hooks, resources, remote peers, federation, polish)
 
 ## Why
 
-Agents working side by side still coordinate through stale markdown files. Wyres gives them:
+Agents working side by side still coordinate through stale markdown files. Another gives them:
 
 - **Mail** with threads, read and ack receipts, and **requests** with owners;
 - **path holds** that expire;
@@ -20,73 +22,75 @@ Hooks inject a short digest at session start, so agents actually check their mai
 **1. Install** with Rust 1.88 or newer:
 
 ```bash
-cargo install --git https://github.com/tamler/wyres wyres
+cargo install --git https://github.com/tamler/another another
 ```
 
-Or build from a checkout (the binary ends up at `target/release/wyres`):
+Or build from a checkout (the binary ends up at `target/release/another`):
 
 ```bash
-git clone https://github.com/tamler/wyres && cd wyres && cargo build --release
+git clone https://github.com/tamler/another && cd another && cargo build --release
 ```
 
-Once v0.1.0 is published, prebuilt binaries for macOS (arm64, x86_64) and Linux (static, x86_64, arm64) will be on [GitHub Releases](https://github.com/tamler/wyres/releases): unpack one and put `wyres` on your `PATH`. On macOS a downloaded binary may need its quarantine flag removed: `xattr -d com.apple.quarantine ./wyres`.
+Once v0.1.0 is published, prebuilt binaries for macOS (arm64, x86_64) and Linux (static, x86_64, arm64) will be on [GitHub Releases](https://github.com/tamler/another/releases): unpack one and put `another` on your `PATH`. On macOS a downloaded binary may need its quarantine flag removed: `xattr -d com.apple.quarantine ./another`.
 
-**2. Create the local node** (`~/.wyres`, or `$WYRES_HOME`):
+On macOS, when replacing an existing `another` with a new build, **remove the old binary first** (`rm "$(command -v another)"`) and then copy the new one in. Copying over the old file in place leaves a stale code signature cached, and macOS kills the new binary on launch. `cargo install` replaces it safely.
+
+**2. Create the local node** (`~/.another`, or `$ANOTHER_HOME`):
 
 ```bash
-wyres init
+another init
 ```
 
 **3. Let agents check mail automatically** (Claude Code, Codex, Grok CLI, Cursor). This installs **user-global** hooks in each client's home-directory config (e.g. `~/.claude/settings.json`, `~/.codex/hooks.json`), not per project. It is idempotent, backs up the files it changes, keeps their permissions (a `0600` settings file stays `0600`), and never overwrites your existing hooks:
 
 ```bash
-wyres hook install --client all
+another hook install --client all
 ```
 
-**4. Give agents the MCP tools.** Add Wyres as a stdio MCP server in each client:
+**4. Give agents the MCP tools.** Add Another as a stdio MCP server in each client:
 
 ```json
-{ "mcpServers": { "wyres": { "command": "wyres", "args": ["serve", "--stdio"] } } }
+{ "mcpServers": { "another": { "command": "another", "args": ["serve", "--stdio"] } } }
 ```
 
 Or run one loopback daemon and point clients at `http://127.0.0.1:7466/mcp`:
 
 ```bash
-wyres serve
+another serve
 ```
 
 **5. Try it from the shell:**
 
 ```bash
-wyres agent register alice --program claude
+another agent register alice --program claude
 ```
 
 ```bash
-wyres agent register bob --program codex
+another agent register bob --program codex
 ```
 
 ```bash
-wyres send --from alice --to bob --subject "Review PR 12" --body "please" --request
+another send --from alice --to bob --subject "Review PR 12" --body "please" --request
 ```
 
 ```bash
-wyres inbox --agent bob
+another inbox --agent bob
 ```
 
 ```bash
-wyres activity --summary
+another activity --summary
 ```
 
 ## Status
 
 | Milestone | Scope | Status |
 |---|---|---|
-| 1 | Local core: SQLite event log, agents, mail, requests, path holds, MCP (stdio + loopback HTTP), CLI | ✅ tamler/wyres#1 |
-| 2 | Mail checking: activity feed + summary, session events, hook packs, `wyres hook install` | ✅ tamler/wyres#2 |
-| 3 | Resource registry: shared/exclusive leases, orphan scanner, human-approved reap | ✅ tamler/wyres#3 |
-| 4 | Authenticated remote peer (Grok Bot): scoped bearer tokens, audit log, `GET /activity` | ✅ tamler/wyres#4 |
-| 5 | Federation (v2): signed event logs, pairing, hub-and-spoke sync, cross-node mail | ✅ tamler/wyres#5 |
-| 6 | Polish: `wyres wake` (tmux, cmux, Herdr), Herdr plugin, release builds, quickstart, CONTRIBUTING | ✅ complete |
+| 1 | Local core: SQLite event log, agents, mail, requests, path holds, MCP (stdio + loopback HTTP), CLI | ✅ tamler/another#1 |
+| 2 | Mail checking: activity feed + summary, session events, hook packs, `another hook install` | ✅ tamler/another#2 |
+| 3 | Resource registry: shared/exclusive leases, orphan scanner, human-approved reap | ✅ tamler/another#3 |
+| 4 | Authenticated remote peer (Grok Bot): scoped bearer tokens, audit log, `GET /activity` | ✅ tamler/another#4 |
+| 5 | Federation (v2): signed event logs, pairing, hub-and-spoke sync, cross-node mail | ✅ tamler/another#5 |
+| 6 | Polish: `another wake` (tmux, cmux, Herdr), Herdr plugin, release builds, quickstart, CONTRIBUTING | ✅ complete |
 
 Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88.
 
@@ -98,7 +102,7 @@ Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green
 | [docs/RESOURCES.md](docs/RESOURCES.md) | Resource registry, orphans, human-approved reaping |
 | [docs/REMOTE.md](docs/REMOTE.md) | Remote peers (Grok Bot): tokens, `--auth`, tunnels, audit log |
 | [docs/FEDERATION.md](docs/FEDERATION.md) | Several machines: node keys, pairing, sync, permissions |
-| [docs/WAKE.md](docs/WAKE.md) | `wyres wake` adapters (tmux, cmux, Herdr) and the Herdr plugin |
+| [docs/WAKE.md](docs/WAKE.md) | `another wake` adapters (tmux, cmux, Herdr) and the Herdr plugin |
 | [docs/SPEC.md](docs/SPEC.md) | Research and product spec |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | Locked defaults and every design decision made while building |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute (clean-room rules, checks, MSRV) |
@@ -118,28 +122,28 @@ Tool errors are `{"error": {"code", "message"}}` with codes `not_found`, `invali
 
 ## CLI at a glance
 
-Every command takes `--json`. `--agent` and `--from` default to `$WYRES_AGENT`, and `--project` defaults to the current directory.
+Every command takes `--json`. `--agent` and `--from` default to `$ANOTHER_AGENT`, and `--project` defaults to the current directory.
 
 | Task | Commands |
 |---|---|
-| Node | `wyres init`, `wyres status`, `wyres node show`, `wyres node name [<name>]` (no name prints the current one), `wyres events` |
-| Agents | `wyres agent register <name> --program claude\|codex\|grok\|cursor\|grok_bot\|other [--project PATH]`, `wyres agent list` |
-| Mail | `wyres send`, `wyres inbox`, `wyres reply <message-id>`, `wyres ack <message-id>`, `wyres threads`, `wyres thread <id>` (there is no `wyres mail` command) |
-| Requests | `wyres requests`, `wyres request claim\|release\|complete\|cancel <id>` |
-| Holds | `wyres hold acquire\|check\|renew\|release`, `wyres holds` (conflicts exit with status 3) |
-| Sessions and feed | `wyres heartbeat [--start\|--end [--keep]]`, `wyres activity [--since 1h] [--kinds mail,request] [--summary]` |
-| Hooks | `wyres hook install\|uninstall --client <c>\|all [--dry-run]`, `wyres hook status` |
-| Resources | `wyres resources`, `wyres resource register`, `wyres borrow`, `wyres release`, `wyres orphans`, `wyres reap <target> [--confirm]` |
-| Remote peers | `wyres serve --auth`, `wyres token create\|list\|revoke`, `wyres audit` |
-| Federation | `wyres pair invite\|join\|revoke`, `wyres peers`, `wyres sync [--watch]`, `wyres serve --federation` |
-| Wake | `wyres wake [--agent X\|--all]`, `wyres wake set\|clear\|list` |
+| Node | `another init`, `another status`, `another node show`, `another node name [<name>]` (no name prints the current one), `another events` |
+| Agents | `another agent register <name> --program claude\|codex\|grok\|cursor\|grok_bot\|other [--project PATH]`, `another agent list` |
+| Mail | `another send`, `another inbox`, `another reply <message-id>`, `another ack <message-id>`, `another threads`, `another thread <id>` (there is no `another mail` command) |
+| Requests | `another requests`, `another request claim\|release\|complete\|cancel <id>` |
+| Holds | `another hold acquire\|check\|renew\|release`, `another holds` (conflicts exit with status 3) |
+| Sessions and feed | `another heartbeat [--start\|--end [--keep]]`, `another activity [--since 1h] [--kinds mail,request] [--summary]` |
+| Hooks | `another hook install\|uninstall --client <c>\|all [--dry-run]`, `another hook status` |
+| Resources | `another resources`, `another resource register`, `another borrow`, `another release`, `another orphans`, `another reap <target> [--confirm]` |
+| Remote peers | `another serve --auth`, `another token create\|list\|revoke`, `another audit` |
+| Federation | `another pair invite\|join\|revoke`, `another peers`, `another sync [--watch]`, `another serve --federation` |
+| Wake | `another wake [--agent X\|--all]`, `another wake set\|clear\|list` |
 
 ## Concepts
 
 - **Agents** are unique per project and addressed as `name@project`, or `name@project@node` on other nodes. A bare `name` works when it is unambiguous.
 - **Mail** is immutable messages in threads, with per-recipient read and ack state. **Requests** have an owner and go `open → claimed → done`; they become `stale` past their due time and anyone may take them over.
 - **Path holds** are advisory, expiring leases on project-relative globs. Exclusive holds conflict with overlapping holds; across machines, a clash is a warning, never a lock.
-- **Resources** are model and dev servers, ports, GPUs, containers and jobs, held by owner and borrower leases with TTLs. Orphans are listed, and only a human can reap them (`wyres reap … --confirm`); reaping is never remote.
+- **Resources** are model and dev servers, ports, GPUs, containers and jobs, held by owner and borrower leases with TTLs. Orphans are listed, and only a human can reap them (`another reap … --confirm`); reaping is never remote.
 - **Event log**: every change is appended to a signed, chained, append-only log, and the query tables are projections of it. That log is what federation syncs.
 
 ## Safety defaults

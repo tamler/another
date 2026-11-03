@@ -1,6 +1,6 @@
 name: release
 
-# Builds wyres for macOS (arm64, x86_64) and Linux (static musl: x86_64, arm64).
+# Builds another for macOS (arm64, x86_64) and Linux (static musl: x86_64, arm64).
 # - Tag `vX.Y.Z` pushes build and publish a GitHub Release with archives + SHA-256 sums.
 # - Pull requests that touch this workflow, and manual runs, build only (artifacts kept 7 days).
 
@@ -52,25 +52,25 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }} -p wyres
+        run: cargo build --release --locked --target ${{ matrix.target }} -p another
 
       - name: Smoke test
         if: matrix.smoke
         shell: bash
         run: |
-          bin=target/${{ matrix.target }}/release/wyres
+          bin=target/${{ matrix.target }}/release/another
           "$bin" --version
           home=$(mktemp -d)
-          WYRES_HOME="$home" "$bin" --json init > /dev/null
-          WYRES_HOME="$home" "$bin" agent register smoke --program other > /dev/null
+          ANOTHER_HOME="$home" "$bin" --json init > /dev/null
+          ANOTHER_HOME="$home" "$bin" agent register smoke --program other > /dev/null
 
       - name: Package
         shell: bash
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version="${GITHUB_REF_NAME#v}"; else version="dev"; fi
-          name="wyres-${version}-${{ matrix.target }}"
+          name="another-${version}-${{ matrix.target }}"
           mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/wyres" "dist/$name/"
+          cp "target/${{ matrix.target }}/release/another" "dist/$name/"
           cp LICENSE README.md "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
@@ -78,7 +78,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wyres-${{ matrix.target }}
+          name: another-${{ matrix.target }}
           path: |
             dist/*.tar.gz
             dist/*.sha256
@@ -105,5 +105,5 @@ jobs:
           ls -l dist
           gh release create "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Wyres $GITHUB_REF_NAME" \
+            --title "Another $GITHUB_REF_NAME" \
             --generate-notes

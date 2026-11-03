@@ -1,4 +1,4 @@
-# Wyres decisions
+# Another decisions
 
 Locked defaults for v1 (2026-10-28). See [SPEC.md](SPEC.md) for the full research and design.
 
@@ -6,8 +6,8 @@ Locked defaults for v1 (2026-10-28). See [SPEC.md](SPEC.md) for the full researc
 |---|---|---|
 | License | **Apache-2.0** | Patent grant; company-friendly; matches `rmcp` / A2A / Herdr. |
 | Agent names | **Unique per project** | Addressed as `name@project` (an agent registered without a project is just `name`). A bare `name` resolves when exactly one agent on the node has it; otherwise it is rejected as ambiguous and callers must use `name@project`. Across nodes (M5): `name@project@node`, or `name@@node` for agents without a project. |
-| Database location | **`~/.wyres`** (override with `$WYRES_HOME`) | One local node database; not per-repo. |
-| Beads | **Deferred** | Keep requests inside Wyres for now; revisit linkage later. |
+| Database location | **`~/.another`** (override with `$ANOTHER_HOME`) | One local node database; not per-repo. |
+| Beads | **Deferred** | Keep requests inside Another for now; revisit linkage later. |
 | Stack | **Rust + official `rmcp` + SQLite** | Single static binary; hooks stay tiny shell scripts. |
 | Wake strategy | **Hooks-first** | Claude Code, Grok, Codex (Cursor best-effort). Herdr / cmux / tmux are optional adapters, not required for core. |
 | Business model | **Free and open source, always** | Every feature (including federation) ships in the open repo. No paid tier, no paid hosted relay, no open-core upsell. Self-hostable hub; community-run relays optional. |
@@ -24,18 +24,18 @@ Design calls not covered by SPEC, recorded as they were made.
 |---|---|---|
 | D1 | M2 | **Activity feed never carries message bodies** — items are one-line summaries plus ids, so any peer (including a remote Grok Bot later) can read the feed without seeing mail content. |
 | D2 | M2 | **Plain heartbeats are presence, not events.** `session.started` / `session.ended`, hold renewals and every other mutation are logged; a bare heartbeat only updates `last_seen_at`, so per-prompt hooks do not flood the log. |
-| D3 | M2 | **Default hook identity is `<client>@<project>`** (project = nearest git root of the client's cwd), auto-registered on first use; `$WYRES_AGENT` overrides. Same rule for every client. |
-| D4 | M2 | **Grok de-duplication.** Grok also runs Claude/Cursor hook files. A Wyres hook invoked under Grok (`GROK_HOOK_EVENT` set) acts as `grok` and stands down when the Grok pack is installed, so each event runs once. |
+| D3 | M2 | **Default hook identity is `<client>@<project>`** (project = nearest git root of the client's cwd), auto-registered on first use; `$ANOTHER_AGENT` overrides. Same rule for every client. |
+| D4 | M2 | **Grok de-duplication.** Grok also runs Claude/Cursor hook files. An Another hook invoked under Grok (`GROK_HOOK_EVENT` set) acts as `grok` and stands down when the Grok pack is installed, so each event runs once. |
 | D5 | M2 | **Cursor is best effort.** Its prompt hook cannot inject context, so only session start carries the digest there; the prompt hook renews holds and returns `{"continue": true}`. |
-| D6 | M2 | **Prompt notices are once per message.** The last announced message id per agent is kept in `$WYRES_HOME/hooks/state/`, so repeated prompts do not repeat the same notice. |
+| D6 | M2 | **Prompt notices are once per message.** The last announced message id per agent is kept in `$ANOTHER_HOME/hooks/state/`, so repeated prompts do not repeat the same notice. |
 | D7 | M2 | **Hook installer edits user-level configs only**, refuses invalid JSON or foreign files, backs up before writing, and is all-or-nothing across the clients requested. Project-level hook files are left to the user. |
-| D8 | M3 | **Reaping is human-only.** MCP `resource_reap` returns a plan and logs `resource.reap_requested`; it never signals a process. Only `wyres reap --confirm` (CLI) terminates, after a grace period (default 10 min), for the current user's non-system processes; SIGTERM first, SIGKILL only with `--force`. There is no auto-reap. |
+| D8 | M3 | **Reaping is human-only.** MCP `resource_reap` returns a plan and logs `resource.reap_requested`; it never signals a process. Only `another reap --confirm` (CLI) terminates, after a grace period (default 10 min), for the current user's non-system processes; SIGTERM first, SIGKILL only with `--force`. There is no auto-reap. |
 | D9 | M3 | **Lapsed resources stay listed.** A resource with no live lease is an orphan candidate, not deleted; registering or borrowing it again adopts it. `release --stopped` (owner) marks it gone. |
 | D10 | M3 | **Ownership passes to the oldest borrower** when the owner releases a shared resource others still use. |
 | D11 | M3 | **Session end releases holds and resource leases.** `heartbeat --end --keep` keeps resource leases (servers meant to outlive a session); holds are always released. |
-| D12 | M3 | **Orphan scan** uses `lsof` (macOS first, also Linux) with `ss` as a fallback and `ps` for age/command; system daemons and Wyres are allowlisted out. Reaping by pid is limited to unregistered listeners the scan finds; registered resources are reaped by id. |
+| D12 | M3 | **Orphan scan** uses `lsof` (macOS first, also Linux) with `ss` as a fallback and `ps` for age/command; system daemons and Another are allowlisted out. Reaping by pid is limited to unregistered listeners the scan finds; registered resources are reaped by id. |
 | D13 | M3 | **Resource leases** default to 30 minutes, clamped to 1 minute – 24 hours (holds stay 1 minute – 4 hours). |
-| D14 | M4 | **Tokens act as one agent within project globs.** Secrets are `wyr_<id>_<random>`; only a SHA-256 hash is stored and the secret is printed once. No globs means no project access (mailbox, heartbeat and feed still work). |
+| D14 | M4 | **Tokens act as one agent within project globs.** Secrets are `ano_<id>_<random>`; only a SHA-256 hash is stored and the secret is printed once. No globs means no project access (mailbox, heartbeat and feed still work). |
 | D15 | M4 | **`--auth` verifies every request, including loopback ones**, because tunnels (Tailscale Serve, cloudflared, `ssh -R`) deliver from loopback. Run local agents on a separate unauthenticated loopback server or stdio. |
 | D16 | M4 | **Feed, summary and `resource_find` are node-wide read-only awareness for any token** (the feed carries no bodies); mailbox, holds, requests and resource leases are scoped. `orphans_list` never runs a process scan for remote callers. |
 | D17 | M4 | **`resource_reap` is refused for every remote caller**, regardless of token scope. |
@@ -48,11 +48,12 @@ Design calls not covered by SPEC, recorded as they were made.
 | D24 | M5 | **Requests are node-local.** Opening a request with a recipient on another node is refused; plain mail works. |
 | D25 | M5 | **Remote resources**: reachability is a TCP connect from this machine to the endpoint; foreign leases count until their TTL even if the borrower goes offline; stop/reap only on the owning node; a lapsed remote resource can only be adopted on its node. |
 | D26 | M5 | **Cross-node hold clashes are warnings**, matched by project slug (repository name) since paths differ between machines. |
-| D27 | M5 | **Node names must be unique** in a federation and set before pairing (`wyres node name`); the default `local` cannot pair. |
+| D27 | M5 | **Node names must be unique** in a federation and set before pairing (`another node name`); the default `local` cannot pair. |
 | D28 | M5 | **Hub reads relayed mail bodies** (self-hosted hub; end-to-end encryption deferred). Node-to-node requests are signed and time-bounded (±5 min); replays are harmless because push is idempotent and pull is read-only. |
 | D29 | M6 | **Wake adapters are optional extras on top of hooks**: `tmux send-keys`, `cmux send --surface` / `cmux notify`, `herdr agent prompt`, run as argv (no shell, no linking; cmux is GPL and only ever invoked as a separate CLI). |
 | D30 | M6 | **Wake only when something is waiting** (unread mail or open requests) unless `--force`; the message is a one-line summary with subjects, never bodies. |
 | D31 | M6 | **Wake targets are stored per agent**; session hooks auto-capture `$TMUX_PANE` / `$CMUX_SURFACE_ID`, and automatic captures never replace a target set by hand. Herdr targets default to the agent's bare name. |
 | D32 | M6 | **Linux release binaries are static musl** (x86_64, arm64) so one archive runs on any distro; macOS ships arm64 and x86_64 (unsigned; remove quarantine with `xattr`). Releases publish only from `v*` tags; PRs touching the workflow build without publishing. |
-| D33 | M6 | **Herdr plugin uses documented manifest fields only** (`[[actions]]`, `[[panes]]`, argv commands) and calls the `wyres` CLI; `min_herdr_version` is a best-effort floor. |
+| D33 | M6 | **Herdr plugin uses documented manifest fields only** (`[[actions]]`, `[[panes]]`, argv commands) and calls the `another` CLI; `min_herdr_version` is a best-effort floor. |
 | D34 | v0.1.0 | **Hook installs preserve config permissions.** Every config rewrite (install and uninstall, all clients) writes a fresh temp file created `0600`, copies the original file's mode (and owner/group where the OS allows) onto it, then renames it into place; new configs are `0600`. Symlinked configs are written at their target so the link survives. Found by a macOS smoke test where `~/.claude/settings.json` went from `0600` to `0644`. |
+| D35 | v0.1.0 | **Renamed from Wyres to Another** before the first release (home: [toanother.one](https://toanother.one); repo `github.com/tamler/another`; tagline "From one agent to another."). Why: a clearer name, a matching domain, and no clash with the WyreUp file-tools brand. Another is its own product, not a WyreUp sibling. Clean rename with no compatibility aliases (nothing had been released): crate and binary `another`, data dir `~/.another`, `ANOTHER_*` env vars, `another-hook.sh`, the `another.inbox` Herdr plugin, `another-*` protocol strings and headers, and `ano_` token prefixes. The only exception: `another hook install` / `uninstall` still recognise the old `wyres-hook.sh` entries and `~/.grok/hooks/wyres.json`, so development installs clean themselves up. |

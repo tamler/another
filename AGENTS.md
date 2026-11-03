@@ -4,7 +4,7 @@
 
 ## Status
 
-Milestone 6: **complete** (definition of done met). Earlier: M1 local core (tamler/wyres#1), M2 mail checking + activity feed (tamler/wyres#2), M3 resource registry (tamler/wyres#3), M4 authenticated remote peer (tamler/wyres#4), M5 federation (tamler/wyres#5). Keep the [README.md](README.md) status current in every PR.
+Milestone 6: **complete** (definition of done met). Earlier: M1 local core (tamler/another#1), M2 mail checking + activity feed (tamler/another#2), M3 resource registry (tamler/another#3), M4 authenticated remote peer (tamler/another#4), M5 federation (tamler/another#5). Keep the [README.md](README.md) status current in every PR.
 
 ## Clean-room rules (mandatory)
 
@@ -18,14 +18,14 @@ Apache-2.0; agent names unique per project; hooks-first (wake adapters are optio
 
 ## Milestone 6 — in scope
 
-1. **`wyres wake`** — nudge idle agents with unread mail through optional adapters: `tmux` (send-keys), `cmux` (`send --surface` or `notify`), `herdr` (`agent prompt`). Stored per-agent targets (`wyres wake set|clear|list`), auto-captured by session hooks from `$TMUX_PANE` / `$CMUX_SURFACE_ID` (never replacing manual targets); `--all`, `--dry-run`, `--force`, `--message`. Argv only, no shell; skip when nothing is waiting.
+1. **`another wake`** — nudge idle agents with unread mail through optional adapters: `tmux` (send-keys), `cmux` (`send --surface` or `notify`), `herdr` (`agent prompt`). Stored per-agent targets (`another wake set|clear|list`), auto-captured by session hooks from `$TMUX_PANE` / `$CMUX_SURFACE_ID` (never replacing manual targets); `--all`, `--dry-run`, `--force`, `--message`. Argv only, no shell; skip when nothing is waiting.
 2. **Herdr plugin (optional)** — [integrations/herdr](integrations/herdr): `herdr-plugin.toml` with wake + summary actions and a live activity pane; POSIX `sh` helper.
 3. **Release builds** — `.github/workflows/release.yml`: macOS arm64 + x86_64, Linux static musl x86_64 + arm64; smoke tests; SHA-256 sums; GitHub Release on `v*` tags; build-only on PRs touching the workflow.
 4. **Docs** — clean README quickstart, [CONTRIBUTING.md](CONTRIBUTING.md), [docs/WAKE.md](docs/WAKE.md).
 
 ### Definition of done (Milestone 6)
 
-- [x] `wyres wake` with tmux / cmux / Herdr adapters, stored + auto-captured targets, tests with fake adapter binaries
+- [x] `another wake` with tmux / cmux / Herdr adapters, stored + auto-captured targets, tests with fake adapter binaries
 - [x] Optional Herdr plugin (manifest + helper), validated in tests
 - [x] Release workflow for macOS (arm64, x86_64) and Linux, verified by a PR build
 - [x] README quickstart + CONTRIBUTING.md + docs/WAKE.md
