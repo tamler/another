@@ -8,6 +8,7 @@ pub mod mcp;
 mod mcp_decisions;
 mod mcp_lanes;
 mod mcp_push;
+mod mcp_spend;
 mod output;
 pub mod push;
 pub mod reap;

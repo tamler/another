@@ -84,6 +84,8 @@ The manager then relays the answer. Any of these works:
 
 The asking agent receives a high-importance reply, `[decision] Ship behind a flag: …`, with the value, the label, any text, and who answered and relayed it. The request closes, and the lane is released.
 
+Borrowing from a [spend account](SPEND.md) that requires approval asks a decision with the options `approve` and `deny`. Answering `approve` starts the lease.
+
 ## Reading
 
 | Surface | Read |

@@ -5,8 +5,8 @@ use std::fmt::Write;
 use another_core::{
     ActivityFeed, Agent, AuditEntry, Decision, Event, HeartbeatReport, Hold, HoldConflict,
     HoldReport, Inbox, Lane, LaneDetail, LaneHolds, LaneReport, LeaseOutcome, Message, NodeInfo,
-    Peer, Project, Request, Resource, Thread, ThreadSummary, Token, WakeTarget, Webhook,
-    WebhookCreated, WebhookDelivery,
+    Peer, Project, Request, Resource, SpendAccount, SpendLease, Thread, ThreadSummary, Token,
+    WakeTarget, Webhook, WebhookCreated, WebhookDelivery,
 };
 use serde::Serialize;
 
@@ -712,6 +712,83 @@ pub fn lane_holds(gs: &[LaneHolds]) -> String {
         for line in holds(&g.holds).lines() {
             let _ = writeln!(out, "  {line}");
         }
+    }
+    out
+}
+
+pub fn spend_accounts(accts: &[SpendAccount]) -> String {
+    if accts.is_empty() {
+        return "no spend accounts".to_string();
+    }
+    let mut out = String::new();
+    for a in accts {
+        let budget = a
+            .budget
+            .map(|b| {
+                format!(
+                    "{b} {}/{}",
+                    a.unit,
+                    if a.period.as_str() == "monthly" {
+                        format!("month from day {}", a.reset_day)
+                    } else {
+                        "lifetime".into()
+                    }
+                )
+            })
+            .unwrap_or_else(|| "no budget".into());
+        let _ = writeln!(
+            out,
+            "{:<20} {:<12} {}{}{}{}",
+            a.name,
+            a.kind.as_str(),
+            budget,
+            a.cost_per_hour
+                .map(|c| format!(", {c} {}/h", a.unit))
+                .unwrap_or_default(),
+            if a.requires_approval {
+                format!(
+                    ", approval by {}",
+                    a.approver.as_deref().unwrap_or("the decider")
+                )
+            } else {
+                String::new()
+            },
+            a.project
+                .as_ref()
+                .map(|p| format!(" [{p}]"))
+                .unwrap_or_else(|| " [shared]".into())
+        );
+    }
+    out
+}
+
+pub fn spend_leases(ls: &[SpendLease]) -> String {
+    if ls.is_empty() {
+        return "no spend leases".to_string();
+    }
+    let mut out = String::new();
+    for l in ls {
+        let _ = writeln!(
+            out,
+            "{} {:<16} {} by {}{} at {} {}/h: {} {}{}",
+            l.lease_id,
+            l.status.as_str(),
+            l.account,
+            l.owner,
+            l.lane
+                .as_ref()
+                .map(|x| format!(" (lane {x})"))
+                .unwrap_or_default(),
+            l.cost_per_hour,
+            l.unit,
+            l.cost,
+            l.unit,
+            l.expires_at
+                .as_ref()
+                .filter(|_| l.status.as_str() == "active")
+                .map(|e| format!(", until {e}"))
+                .unwrap_or_default()
+        );
     }
     out
 }

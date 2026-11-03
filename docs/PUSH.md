@@ -85,6 +85,7 @@ another webhook remove <webhook-id>
 | `request_answered` | `request.completed`, `request.cancelled`, `decision.answered`, `decision.expired` |
 | `hold_conflict` | `hold.conflict`: an agent was refused a hold because another agent holds an overlapping path; `lane.hold_conflict`: the same, between two lanes |
 | `lease_expiring` | `resource.lease_expiring`: a resource lease has under 5 minutes (or half its TTL) left. Sent once; renewing re-arms it |
+| `budget` | `spend.budget_threshold` (an account crossed 80% or 100% of its budget) and `spend.approval_requested` ([spend](SPEND.md)) |
 | `all` | every visible event except mail and delivery events |
 
 **Remote (MCP) subscriptions:**

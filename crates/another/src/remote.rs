@@ -204,6 +204,13 @@ pub fn authorize(
         "decision_ask" | "decision_cancel" => acting(args, "agent"),
         // The token's agent is always recorded as the relaying agent.
         "decision_answer" => acting(args, "relayed_by"),
+        // Spend: reads are scoped in the store; writes act as the token's agent and must be
+        // attributed to its projects; accounts are configured locally only.
+        "spend_report" | "spend_accounts" | "spend_leases" => Ok(()),
+        "spend_record" | "spend_borrow" | "spend_release" => acting(args, "agent"),
+        "spend_account_upsert" => {
+            Err("spend accounts are configured locally, not by remote peers".into())
+        }
         "orphans_list" => {
             // Remote peers see lapsed registrations only, never a process scan.
             args.insert("scan".into(), Value::Bool(false));

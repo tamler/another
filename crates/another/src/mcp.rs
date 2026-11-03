@@ -34,7 +34,8 @@ impl AnotherMcp {
             tool_router: Self::tool_router()
                 + Self::lane_router()
                 + Self::push_router()
-                + Self::decision_router(),
+                + Self::decision_router()
+                + Self::spend_router(),
         }
     }
 

@@ -116,6 +116,7 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
         .route("/activity", axum::routing::get(crate::remote::activity))
         .route("/events/poll", axum::routing::get(crate::push::poll))
         .route("/events/stream", axum::routing::get(crate::push::stream))
+        .route("/spend", axum::routing::get(crate::http_decisions::spend))
         .route(
             "/decisions",
             axum::routing::get(crate::http_decisions::list),

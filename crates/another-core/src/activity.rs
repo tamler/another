@@ -28,10 +28,11 @@ pub enum ActivityKind {
     System,
     Federation,
     Lane,
+    Spend,
 }
 
 impl ActivityKind {
-    pub const ALL: [ActivityKind; 8] = [
+    pub const ALL: [ActivityKind; 9] = [
         ActivityKind::Mail,
         ActivityKind::Request,
         ActivityKind::Hold,
@@ -40,6 +41,7 @@ impl ActivityKind {
         ActivityKind::System,
         ActivityKind::Federation,
         ActivityKind::Lane,
+        ActivityKind::Spend,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -52,6 +54,7 @@ impl ActivityKind {
             ActivityKind::System => "system",
             ActivityKind::Federation => "federation",
             ActivityKind::Lane => "lane",
+            ActivityKind::Spend => "spend",
         }
     }
 
@@ -65,6 +68,7 @@ impl ActivityKind {
             "session" | "agent" => ActivityKind::Session,
             "lane" => ActivityKind::Lane,
             "decision" => ActivityKind::Request,
+            "spend" => ActivityKind::Spend,
             "peer" | "sync" | "pair" | "federation" => ActivityKind::Federation,
             _ => ActivityKind::System,
         }
@@ -79,7 +83,7 @@ impl std::str::FromStr for ActivityKind {
             .find(|k| k.as_str() == s)
             .ok_or_else(|| {
                 Error::Invalid(format!(
-                    "unknown activity kind {s:?}; expected mail, request, hold, resource, session, system, federation or lane"
+                    "unknown activity kind {s:?}; expected mail, request, hold, resource, session, system, federation, lane or spend"
                 ))
             })
     }
@@ -364,6 +368,72 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
         "decision.cancelled" => (
             format!("{actor} withdrew decision {}", s("decision_id")),
             json!({ "decision_id": s("decision_id"), "lane_id": p.get("lane_id") }),
+        ),
+        "spend.recorded" => (
+            format!(
+                "{actor} spent {} {} on {}{}",
+                p.get("amount").and_then(Value::as_f64).unwrap_or_default(),
+                s("unit"),
+                s("account"),
+                if s("source") == "lease" {
+                    " (lease)"
+                } else {
+                    ""
+                }
+            ),
+            json!({ "entry_id": s("entry_id"), "account_id": s("account_id"), "lane_id": p.get("lane_id") }),
+        ),
+        "spend.lease_started" => (
+            format!(
+                "{actor} started using {} at {} {}/h",
+                s("account"),
+                p.get("cost_per_hour")
+                    .and_then(Value::as_f64)
+                    .unwrap_or_default(),
+                s("unit")
+            ),
+            json!({ "lease_id": s("lease_id"), "account_id": s("account_id") }),
+        ),
+        "spend.lease_ended" => (
+            format!(
+                "lease on {} ended ({}): {} {}",
+                s("account"),
+                s("reason"),
+                p.get("cost").and_then(Value::as_f64).unwrap_or_default(),
+                s("unit")
+            ),
+            json!({ "lease_id": s("lease_id"), "account_id": s("account_id") }),
+        ),
+        "spend.lease_denied" => (
+            format!("borrowing request {} was denied", s("lease_id")),
+            json!({ "lease_id": s("lease_id"), "decision_id": s("decision_id") }),
+        ),
+        "spend.approval_requested" => (
+            format!("{actor} asked to borrow {} (approval needed)", s("account")),
+            json!({ "lease_id": s("lease_id"), "decision_id": s("decision_id") }),
+        ),
+        "spend.budget_threshold" => (
+            format!(
+                "{} reached {}% of its budget ({} / {} {})",
+                s("account"),
+                p.get("pct").and_then(Value::as_f64).unwrap_or_default(),
+                p.get("spent").and_then(Value::as_f64).unwrap_or_default(),
+                p.get("budget").and_then(Value::as_f64).unwrap_or_default(),
+                s("unit")
+            ),
+            json!({ "account_id": s("account_id") }),
+        ),
+        "spend.account_created" | "spend.account_updated" => (
+            format!(
+                "spend account {} {}",
+                s("name"),
+                if row.kind == "spend.account_created" {
+                    "added"
+                } else {
+                    "updated"
+                }
+            ),
+            json!({ "account_id": s("account_id") }),
         ),
         "lane.hold_conflict" => {
             let lane_name = |id: &str| -> Result<String> {
