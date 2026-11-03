@@ -13,7 +13,7 @@ A **lane** is a named unit of work on one node.
 | Field | Notes |
 |---|---|
 | `lane_id` | ULID |
-| `name` | 1–64 chars from `[a-z0-9._-]`, case-folded; unique among open lanes on the node, so `another lane show api-refactor` works. A closed lane's name can be reused. |
+| `name` | 1–64 chars from `[a-z0-9._-]`, case-folded; unique among the open lanes **of its project**. Address a lane by id, `name`, or `name@project` (`api@shop`). A bare name used in several projects is `ambiguous` for local callers. For a scoped token, lanes outside its projects don't exist: lookups return the same `not_found` as an unknown name, and "already named" only considers the project being created in. A closed lane's name can be reused. |
 | `project` | **Required.** It is what remote token scopes are checked against. |
 | `charter` | Free text, up to 16 KiB: the brief. |
 | `lead` | Local agent that owns the work. |
@@ -48,16 +48,24 @@ Delivery reuses `send_message`, so federation, hooks and wake all work unchanged
 
 ## Events
 
-All lane events go into the append-only log and carry `lane_id` and `project_id`:
+All lane events go into the append-only log and carry `lane_id`, `project_id` and the lane `name`. Following the feed rule (summaries and ids, never bodies), **no event carries a charter, report summary, progress, outcome, links or artifacts**. Those live only in the lane tables, which `lane_show` returns to callers allowed to see the lane. This applies to federated peers too, since they receive the same events.
 
-- `lane.created`
-- `lane.updated` (charter, lead)
+- `lane.created {lead_id, status}`
+- `lane.updated {lead_id?, charter_changed?}`
 - `lane.status_changed {from, to}`
 - `lane.linked {kind, ref_id}`
-- `lane.reported {report_id, kind, status, progress}`
-- `lane.closed {status, outcome, pr_url}`
+- `lane.reported {report_id, kind, status}`
+- `lane.closed {status}`
 
-They get a new activity category, `lane`. Federation treats them as feed events (stored and shown; not projected into foreign lane tables in this phase).
+Report mail is shown in the feed by subject, so its subject is `[lane NAME] STATUS: KIND report by AGENT`, and the summary goes in the body.
+
+They get a new activity category, `lane`. For a remote token, `activity_feed`, `activity_summarize` and `GET /activity` only include lane events from its projects. (Phase 2 extends this scoping to every event kind.) Federation treats lane events as feed events: stored and shown, not projected into foreign lane tables in this phase.
+
+**Links** (threads, messages, requests, holds) must belong to the lane:
+- A message, thread or request belongs when its sender or a recipient is an agent of the lane's project, or is the lane's lead or creator.
+- A hold belongs when it is in the lane's project.
+
+Anything else is refused with the same `not_found` as an id that doesn't exist, so linking can't be used to probe other projects.
 
 ## Surfaces
 
@@ -86,7 +94,7 @@ The acting agent comes from `--agent` / `$ANOTHER_AGENT`, as everywhere else.
 
 ## Hooks: reporting automatically
 
-`another hook install --client claude|codex|grok|cursor --lane-reports` additionally installs a **Stop** hook (`Stop`, or `stop` for Cursor). It is opt-in, so existing installs don't change.
+`another hook install --client claude|codex|grok|cursor --lane-reports` additionally installs a **Stop** hook (`Stop`, or `stop` for Cursor). It is opt-in, so existing installs don't change. Before storing the agent's last message as the report summary, the hook **redacts likely secrets**: tokens with known prefixes (`ano_`, `sk-`, `ghp_`, `github_pat_`, `glpat-`, `xox*-`, `hf_`, `AKIA`, `whsec_`) and long hex or mixed-case base64 runs become `[redacted]`.
 
 `another hook run stop` does the following:
 - It resolves the agent as the other hooks do.

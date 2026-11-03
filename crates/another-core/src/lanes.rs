@@ -289,8 +289,29 @@ fn lane_from_row(r: &Row<'_>) -> rusqlite::Result<(Lane, String)> {
 }
 
 /// Resolve a lane by id or name (an open lane with that name, else the newest closed one).
+/// Find a lane by id, `name` or `name@project` (project slug). Names are unique among open
+/// lanes of a project, so a bare name can match lanes in several projects.
 fn resolve_lane(conn: &Connection, node_id: &str, key: &str) -> Result<(Lane, String)> {
+    resolve_lane_in(conn, node_id, key, None)
+}
+
+/// [`resolve_lane`] as `scope` sees it: lanes outside the scope's projects do not exist for
+/// it (the error is the same `not_found` as for an unknown name), and ambiguity is only
+/// reported among lanes it may see.
+fn resolve_lane_in(
+    conn: &Connection,
+    node_id: &str,
+    key: &str,
+    scope: Option<&TokenScope>,
+) -> Result<(Lane, String)> {
     let key = key.trim();
+    let not_found = || Error::NotFound(format!("unknown lane {key:?}"));
+    let visible = |project_id: &str| -> Result<bool> {
+        match scope {
+            None => Ok(true),
+            Some(s) => scope_allows_project(conn, s, project_id),
+        }
+    };
     let by_id = conn
         .query_row(
             &format!("{LANE_SELECT} WHERE l.lane_id = ?1"),
@@ -299,19 +320,43 @@ fn resolve_lane(conn: &Connection, node_id: &str, key: &str) -> Result<(Lane, St
         )
         .optional()?;
     if let Some(found) = by_id {
-        return Ok(found);
+        return if visible(&found.1)? {
+            Ok(found)
+        } else {
+            Err(not_found())
+        };
     }
-    let name = key.to_ascii_lowercase();
-    conn.query_row(
-        &format!(
-            "{LANE_SELECT} WHERE l.node_id = ?1 AND l.name = ?2
-             ORDER BY (l.closed_at IS NULL) DESC, l.created_at DESC LIMIT 1"
-        ),
-        params![node_id, name],
-        lane_from_row,
-    )
-    .optional()?
-    .ok_or_else(|| Error::NotFound(format!("unknown lane {key:?}")))
+    let lowered = key.to_ascii_lowercase();
+    let (name, project) = match lowered.split_once('@') {
+        Some((n, p)) => (n.to_string(), Some(p.to_string())),
+        None => (lowered, None),
+    };
+    let mut stmt = conn.prepare(&format!(
+        "{LANE_SELECT} WHERE l.node_id = ?1 AND l.name = ?2 AND (?3 IS NULL OR p.slug = ?3)
+         ORDER BY (l.closed_at IS NULL) DESC, l.created_at DESC"
+    ))?;
+    let rows = stmt
+        .query_map(params![node_id, name, project], lane_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    // The best match per project: open first, then newest.
+    let mut best: Vec<(Lane, String)> = Vec::new();
+    for (lane, project_id) in rows {
+        if !visible(&project_id)? || best.iter().any(|(_, p)| *p == project_id) {
+            continue;
+        }
+        best.push((lane, project_id));
+    }
+    match best.len() {
+        0 => Err(not_found()),
+        1 => Ok(best.remove(0)),
+        _ => {
+            let projects: Vec<String> = best.iter().map(|(l, _)| l.project.clone()).collect();
+            Err(Error::Ambiguous(format!(
+                "lane name {name:?} is used in several projects ({}); use {name}@<project>",
+                projects.join(", ")
+            )))
+        }
+    }
 }
 
 fn check_scope(conn: &Connection, scope: Option<&TokenScope>, project_id: &str) -> Result<()> {
@@ -417,14 +462,41 @@ fn set_status(
     Ok(())
 }
 
-fn link_exists(tx: &Tx<'_>, kind: LaneLinkKind, id: &str) -> Result<bool> {
+/// Whether `id` exists **and** belongs to the lane. Messages, threads and requests belong
+/// when their sender or a recipient is an agent of the lane's project, or the lane's lead
+/// or creator; holds must be in the lane's project.
+fn link_in_project(
+    tx: &Tx<'_>,
+    kind: LaneLinkKind,
+    id: &str,
+    project_id: &str,
+    lane_id: &str,
+) -> Result<bool> {
+    const PARTY: &str = "EXISTS (SELECT 1 FROM agents a
+          WHERE (a.project_id = ?2
+                 OR a.agent_id IN (SELECT lead_id FROM lanes WHERE lane_id = ?3)
+                 OR a.agent_id IN (SELECT created_by FROM lanes WHERE lane_id = ?3))
+            AND (a.agent_id = m.sender_id
+                 OR a.agent_id IN (SELECT d.agent_id FROM deliveries d WHERE d.message_id = m.message_id)))";
     let sql = match kind {
-        LaneLinkKind::Thread => "SELECT 1 FROM messages WHERE thread_id = ?1 LIMIT 1",
-        LaneLinkKind::Request => "SELECT 1 FROM requests WHERE request_id = ?1",
-        LaneLinkKind::Hold => "SELECT 1 FROM holds WHERE hold_id = ?1",
-        LaneLinkKind::Message => "SELECT 1 FROM messages WHERE message_id = ?1",
+        LaneLinkKind::Thread => {
+            format!("SELECT 1 FROM messages m WHERE m.thread_id = ?1 AND {PARTY} LIMIT 1")
+        }
+        LaneLinkKind::Message => {
+            format!("SELECT 1 FROM messages m WHERE m.message_id = ?1 AND {PARTY}")
+        }
+        LaneLinkKind::Request => format!(
+            "SELECT 1 FROM requests r JOIN messages m ON m.message_id = r.message_id
+             WHERE r.request_id = ?1 AND {PARTY}"
+        ),
+        LaneLinkKind::Hold => {
+            "SELECT 1 FROM holds WHERE hold_id = ?1 AND project_id = ?2 AND ?3 IS NOT NULL".into()
+        }
     };
-    Ok(tx.query_row(sql, [id], |_| Ok(())).optional()?.is_some())
+    Ok(tx
+        .query_row(&sql, params![id, project_id, lane_id], |_| Ok(()))
+        .optional()?
+        .is_some())
 }
 
 fn add_link(
@@ -435,23 +507,14 @@ fn add_link(
     kind: LaneLinkKind,
     id: &str,
 ) -> Result<()> {
-    if !link_exists(tx, kind, id)? {
+    // One error for "does not exist" and "belongs to another project", so linking can't be
+    // used to probe other projects.
+    if !link_in_project(tx, kind, id, project_id, &lane.lane_id)? {
         return Err(Error::NotFound(format!(
-            "no {} with id {id:?} to link",
-            kind.as_str()
+            "no {} {id:?} in lane {}'s project",
+            kind.as_str(),
+            lane.name
         )));
-    }
-    if kind == LaneLinkKind::Hold {
-        let hold_project: String = tx.query_row(
-            "SELECT project_id FROM holds WHERE hold_id = ?1",
-            [id],
-            |r| r.get(0),
-        )?;
-        if hold_project != project_id {
-            return Err(Error::Invalid(
-                "that hold belongs to a different project than the lane".into(),
-            ));
-        }
     }
     let added = tx.execute(
         "INSERT OR IGNORE INTO lane_links (lane_id, kind, ref_id, created_at) VALUES (?1, ?2, ?3, ?4)",
@@ -513,15 +576,16 @@ impl Store {
             check_scope(tx, scope, &project.project_id)?;
             let taken = tx
                 .query_row(
-                    "SELECT 1 FROM lanes WHERE node_id = ?1 AND name = ?2 AND closed_at IS NULL",
-                    params![tx.node_id, name],
+                    "SELECT 1 FROM lanes WHERE node_id = ?1 AND project_id = ?2 AND name = ?3
+                       AND closed_at IS NULL",
+                    params![tx.node_id, project.project_id, name],
                     |_| Ok(()),
                 )
                 .optional()?
                 .is_some();
             if taken {
                 return Err(Error::Conflict(format!(
-                    "an open lane is already named {name:?}"
+                    "an open lane in {} is already named {name:?}", project.slug
                 )));
             }
             let lane_id = new_id();
@@ -534,7 +598,6 @@ impl Store {
                     "name": name,
                     "lead_id": lead.id,
                     "status": status.as_str(),
-                    "charter": input.charter,
                 }),
             )?;
             tx.execute(
@@ -605,7 +668,7 @@ impl Store {
     /// One lane with its links and most recent reports.
     pub fn lane(&self, key: &str, scope: Option<&TokenScope>) -> Result<LaneDetail> {
         self.read(|conn| {
-            let (lane, project_id) = resolve_lane(conn, self.node_id(), key)?;
+            let (lane, project_id) = resolve_lane_in(conn, self.node_id(), key, scope)?;
             check_scope(conn, scope, &project_id)?;
             detail(conn, lane)
         })
@@ -618,7 +681,7 @@ impl Store {
         }
         self.write(|tx| {
             let me = resolve_agent(tx, tx.node_id, &input.agent)?;
-            let (lane, project_id) = resolve_lane(tx, tx.node_id, &input.lane)?;
+            let (lane, project_id) = resolve_lane_in(tx, tx.node_id, &input.lane, scope)?;
             check_scope(tx, scope, &project_id)?;
             if lane.status.is_closed()
                 && (input.charter.is_some() || input.lead.is_some() || input.status.is_some())
@@ -632,7 +695,8 @@ impl Store {
             let mut changed = serde_json::Map::new();
             if let Some(c) = &input.charter {
                 if *c != lane.charter {
-                    changed.insert("charter".into(), json!(c));
+                    // The charter itself stays in the lane row; events carry ids only.
+                    changed.insert("charter_changed".into(), json!(true));
                     tx.execute(
                         "UPDATE lanes SET charter = ?2, updated_at = ?3 WHERE lane_id = ?1",
                         params![lane.lane_id, c, tx.now],
@@ -708,7 +772,7 @@ impl Store {
         }
         self.write(|tx| {
             let me = resolve_agent(tx, tx.node_id, &input.agent)?;
-            let (lane, project_id) = resolve_lane(tx, tx.node_id, &input.lane)?;
+            let (lane, project_id) = resolve_lane_in(tx, tx.node_id, &input.lane, scope)?;
             check_scope(tx, scope, &project_id)?;
             if lane.status.is_closed() {
                 return Err(Error::Conflict(format!(
@@ -733,8 +797,14 @@ impl Store {
             let message = if counterpart != me.id {
                 let to = get_agent(tx, &counterpart)?.address;
                 let label = new_status.unwrap_or(lane.status).as_str();
-                let first = input.summary.lines().next().unwrap_or_default();
-                let subject: String = format!("[lane {}] {label}: {first}", lane.name)
+                // Subjects show up in the activity feed (and on federated peers), so they carry
+                // the lane, status and author only; the summary is in the body.
+                let subject: String = format!(
+                    "[lane {}] {label}: {} report by {}",
+                    lane.name,
+                    input.kind.as_str(),
+                    me.address
+                )
                     .chars()
                     .take(200)
                     .collect();
@@ -786,10 +856,7 @@ impl Store {
                     "name": lane.name,
                     "report_id": report_id,
                     "kind": input.kind.as_str(),
-                    "summary": input.summary,
-                    "progress": input.progress,
                     "status": new_status.map(|s| s.as_str()),
-                    "pr_url": input.pr_url,
                 }),
             )?;
             tx.execute(
@@ -829,7 +896,7 @@ impl Store {
                 tx.emit(
                     &me.address,
                     "lane.closed",
-                    json!({ "lane_id": lane.lane_id, "project_id": project_id, "name": lane.name, "status": "done", "outcome": input.outcome, "pr_url": input.pr_url }),
+                    json!({ "lane_id": lane.lane_id, "project_id": project_id, "name": lane.name, "status": "done" }),
                 )?;
             }
             touch(tx, &me.id)?;
@@ -852,7 +919,7 @@ impl Store {
     ) -> Result<LaneDetail> {
         self.write(|tx| {
             let me = resolve_agent(tx, tx.node_id, agent)?;
-            let (lane, project_id) = resolve_lane(tx, tx.node_id, lane)?;
+            let (lane, project_id) = resolve_lane_in(tx, tx.node_id, lane, scope)?;
             check_scope(tx, scope, &project_id)?;
             let to = if abandon {
                 LaneStatus::Abandoned
@@ -869,7 +936,7 @@ impl Store {
             tx.emit(
                 &me.address,
                 "lane.closed",
-                json!({ "lane_id": lane.lane_id, "project_id": project_id, "name": lane.name, "status": to.as_str(), "outcome": outcome }),
+                json!({ "lane_id": lane.lane_id, "project_id": project_id, "name": lane.name, "status": to.as_str() }),
             )?;
             touch(tx, &me.id)?;
             detail(tx, reload(tx, &lane.lane_id)?)

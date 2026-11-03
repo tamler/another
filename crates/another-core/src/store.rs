@@ -535,7 +535,7 @@ CREATE TABLE lanes (
     closed_at  INTEGER,
     event_id   TEXT NOT NULL
 );
-CREATE UNIQUE INDEX lanes_open_name ON lanes(node_id, name) WHERE closed_at IS NULL;
+CREATE UNIQUE INDEX lanes_open_name ON lanes(node_id, project_id, name) WHERE closed_at IS NULL;
 CREATE INDEX lanes_by_project ON lanes(project_id, status);
 
 CREATE TABLE lane_links (
