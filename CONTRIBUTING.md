@@ -1,6 +1,6 @@
-# Contributing to Wyres
+# Contributing to Another
 
-Thanks for helping. Wyres is free and open source, always: every feature ships in this repository under [Apache-2.0](LICENSE). There is no paid tier, no telemetry and no open-core split.
+Thanks for helping. Another is free and open source, always: every feature ships in this repository under [Apache-2.0](LICENSE). There is no paid tier, no telemetry and no open-core split.
 
 ## Ground rules
 
@@ -21,21 +21,21 @@ Thanks for helping. Wyres is free and open source, always: every feature ships i
 You need Rust **1.88 or newer**; that is the MSRV and CI checks it.
 
 ```bash
-git clone https://github.com/tamler/wyres
+git clone https://github.com/tamler/another
 ```
 
 ```bash
-cd wyres && cargo test
+cd another && cargo test
 ```
 
 The workspace has two crates:
 
 | Crate | What lives there |
 |---|---|
-| `crates/wyres-core` | SQLite store, event log and signatures, agents, mail, requests, holds, activity, resources, tokens, federation logic. No async, no networking beyond reachability checks. |
-| `crates/wyres` | The `wyres` binary and library: CLI, MCP server (`rmcp`), HTTP serving and auth, hook packs, orphan scanner and reaping, federation transport, wake adapters. |
+| `crates/another-core` | SQLite store, event log and signatures, agents, mail, requests, holds, activity, resources, tokens, federation logic. No async, no networking beyond reachability checks. |
+| `crates/another` | The `another` binary and library: CLI, MCP server (`rmcp`), HTTP serving and auth, hook packs, orphan scanner and reaping, federation transport, wake adapters. |
 
-Schema changes are new entries at the end of `MIGRATIONS` in `crates/wyres-core/src/store.rs`; never edit an existing migration. Every mutation appends an event first, then updates projections in the same transaction.
+Schema changes are new entries at the end of `MIGRATIONS` in `crates/another-core/src/store.rs`; never edit an existing migration. Every mutation appends an event first, then updates projections in the same transaction.
 
 ## Before you open a PR
 
@@ -57,7 +57,7 @@ cargo test
 cargo +1.88 check --workspace --all-targets --locked
 ```
 
-- Add tests for new behaviour. Core logic gets tests in `crates/wyres-core/tests`; CLI, MCP, hooks and HTTP get tests in `crates/wyres/tests`, which run the real binary, with a temporary `HOME` / `WYRES_HOME` where relevant.
+- Add tests for new behaviour. Core logic gets tests in `crates/another-core/tests`; CLI, MCP, hooks and HTTP get tests in `crates/another/tests`, which run the real binary, with a temporary `HOME` / `ANOTHER_HOME` where relevant.
 - Keep the **Status** section of [README.md](README.md) and the current [AGENTS.md](AGENTS.md) brief accurate when milestone progress changes.
 - Dependency updates must keep building on Rust 1.88. `.cargo/config.toml` makes `cargo update` prefer compatible versions.
 

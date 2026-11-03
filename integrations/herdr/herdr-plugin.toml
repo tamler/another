@@ -1,28 +1,28 @@
-# Optional Herdr plugin for Wyres. Install with:
-#   herdr plugin install tamler/wyres/integrations/herdr
+# Optional Herdr plugin for Another. Install with:
+#   herdr plugin install tamler/another/integrations/herdr
 # or, from a local checkout:
-#   herdr plugin link /path/to/wyres/integrations/herdr
-id = "wyres.inbox"
-name = "Wyres inbox"
+#   herdr plugin link /path/to/another/integrations/herdr
+id = "another.inbox"
+name = "Another: agent inbox"
 version = "0.1.0"
 min_herdr_version = "0.7.0"
-description = "Wake Herdr agents that have unread Wyres mail, and show the Wyres activity feed in a pane."
+description = "Wake Herdr agents that have unread mail in Another, and show the Another activity feed in a pane."
 platforms = ["linux", "macos"]
 
 [[actions]]
 id = "wake-agents"
-title = "Wyres: wake agents with unread mail"
+title = "Another: wake agents with unread mail"
 contexts = ["workspace"]
-command = ["sh", "wyres-herdr.sh", "wake"]
+command = ["sh", "another-herdr.sh", "wake"]
 
 [[actions]]
 id = "inbox-digest"
-title = "Wyres: activity summary (last hour)"
+title = "Another: activity summary (last hour)"
 contexts = ["workspace"]
-command = ["sh", "wyres-herdr.sh", "summary"]
+command = ["sh", "another-herdr.sh", "summary"]
 
 [[panes]]
 id = "activity"
-title = "Wyres activity"
+title = "Another: activity"
 placement = "split"
-command = ["sh", "wyres-herdr.sh", "activity"]
+command = ["sh", "another-herdr.sh", "activity"]

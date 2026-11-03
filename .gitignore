@@ -20,8 +20,8 @@ Cargo.lock.bak
 credentials.json
 secrets/
 
-# Wyres local data (never commit)
-.wyres/
+# Another local data (never commit)
+.another/
 *.db
 *.db-journal
 *.db-wal
