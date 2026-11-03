@@ -43,6 +43,26 @@ Uninstall removes only entries that reference `another-hook.sh`, and deletes the
 
 `another hook install --client <c> --lane-reports` also installs a **Stop** hook (`stop` for Cursor). It posts an automatic report into the agent's lane: `$ANOTHER_LANE`, or the single open lane the agent leads in that project. Reports are debounced to one every 15 minutes. Installing again without the flag removes the Stop hook. See [LANES.md](LANES.md).
 
+## Optional: hold files before they are edited
+
+`another hook install --client claude,codex --pre-edit` adds a **PreToolUse** hook:
+- Claude Code: matcher `Edit|Write|MultiEdit|NotebookEdit`.
+- Codex: matcher `apply_patch`. File names come from the patch's `*** Add/Update/Delete File:` and `*** Move to:` lines, wherever Codex puts the patch (`tool_input.patch`, `tool_input.command` or a plain string).
+
+**Before each edit**, the hook takes an exclusive hold on the files, with reason `pre-edit`:
+- The hold is for the agent's lane: `$ANOTHER_LANE`, else the one lane it leads there. See [lane-aware holds](LANES.md#path-holds-and-lanes).
+- **If another agent or lane holds a file, the edit is denied** with the standard `permissionDecision: "deny"` output. The reason names the holder, their lane and when the hold expires, so the agent can coordinate or move on.
+- Holds by agents in the same lane never block.
+- Files outside the project are ignored.
+
+**Otherwise** the hook prints nothing, and the client's normal permission flow applies. The hook never approves anything.
+
+**Lifetime:** holds taken this way expire after 30 minutes unless renewed. The prompt hook's heartbeat renews them, and session end releases them.
+
+**Failing open:** if Another is unavailable, the hook prints nothing and the edit goes ahead.
+
+Installing without the flag removes the hook. Your own `PreToolUse` entries are never touched. Grok and Cursor have no equivalent pre-tool hook.
+
 ## Per client
 
 | Client | Config written | Events | Notes |

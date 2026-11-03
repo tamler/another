@@ -77,6 +77,7 @@ async fn exposes_the_tool_surface() {
             "fetch_inbox",
             "heartbeat",
             "hold_paths",
+            "holds_by_lane",
             "lane_close",
             "lane_create",
             "lane_list",

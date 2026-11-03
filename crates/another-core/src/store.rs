@@ -649,6 +649,10 @@ CREATE TABLE decisions (
 CREATE INDEX decisions_by_status ON decisions(node_id, status, deadline_at);
 CREATE INDEX decisions_by_lane ON decisions(lane_id, status);
 "#,
+    r#"
+ALTER TABLE holds ADD COLUMN lane_id TEXT REFERENCES lanes(lane_id);
+CREATE INDEX holds_by_lane ON holds(lane_id, released_at);
+"#,
 ];
 
 fn migrate_to(conn: &mut Connection, limit: usize) -> Result<()> {

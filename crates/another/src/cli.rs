@@ -189,6 +189,9 @@ pub enum Command {
         project: Option<String>,
         #[arg(long)]
         agent: Option<String>,
+        /// Group by lane.
+        #[arg(long)]
+        by_lane: bool,
     },
     /// Session heartbeat: renew holds; with --end release them and go offline.
     Heartbeat {
@@ -758,6 +761,11 @@ pub enum HookCmd {
         /// (debounced to one every 15 minutes). Installing without it removes that hook.
         #[arg(long)]
         lane_reports: bool,
+        /// Also install a pre-edit hook (Claude Code, Codex) that holds files before they are
+        /// edited and denies the edit if another lane or agent holds them. Installing without
+        /// it removes that hook.
+        #[arg(long)]
+        pre_edit: bool,
     },
     /// Remove Another hooks from client configs, leaving other hooks untouched.
     Uninstall {
@@ -832,6 +840,9 @@ pub enum HoldCmd {
         shared: bool,
         #[arg(long)]
         reason: Option<String>,
+        /// Lane the holds are for (default: $ANOTHER_LANE, else the one lane you lead here).
+        #[arg(long, env = "ANOTHER_LANE")]
+        lane: Option<String>,
     },
     /// Report conflicts for paths without acquiring (exit code 3 on conflict).
     Check {
@@ -1170,6 +1181,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             ttl,
             shared,
             reason,
+            lane,
         }) => {
             let project = project_key(&store, &agent.agent, project.project)?;
             let report = store.acquire_holds(AcquireHolds {
@@ -1179,6 +1191,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 ttl_seconds: ttl,
                 exclusive: !shared,
                 reason,
+                lane: lane.filter(|l| !l.trim().is_empty()),
             })?;
             let conflicted = !report.conflicts.is_empty();
             emit(json, &report, output::hold_report);
@@ -1218,7 +1231,15 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let ids = store.release_holds(&agent.agent, &hold_ids)?;
             emit(json, &ids, |ids| format!("released {} hold(s)", ids.len()))
         }
-        Command::Holds { project, agent } => {
+        Command::Holds {
+            project,
+            agent,
+            by_lane: true,
+        } => {
+            let groups = store.holds_by_lane(HoldFilter { project, agent }, None)?;
+            emit(json, &groups, |g| output::lane_holds(g))
+        }
+        Command::Holds { project, agent, .. } => {
             let holds = store.holds(HoldFilter { project, agent })?;
             emit(json, &holds, |h| output::holds(h))
         }
@@ -1561,10 +1582,12 @@ fn hook_command(
             client,
             dry_run,
             lane_reports,
+            pre_edit,
         } => {
             let env = HookEnv::detect(another_home()?)?;
             let opts = hooks::HookOptions {
                 lane_reports: *lane_reports,
+                pre_edit: *pre_edit,
             };
             let report = hooks::install(&env, &clients(client), true, *dry_run, opts)?;
             Ok(emit(json, &report, output::hook_report))
