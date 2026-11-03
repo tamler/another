@@ -24,16 +24,19 @@ pub enum Program {
     Cursor,
     GrokBot,
     Other,
+    /// A person (decision addressee), not a coding agent.
+    Human,
 }
 
 impl Program {
-    pub const ALL: [Program; 6] = [
+    pub const ALL: [Program; 7] = [
         Program::Claude,
         Program::Grok,
         Program::Codex,
         Program::Cursor,
         Program::GrokBot,
         Program::Other,
+        Program::Human,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -44,6 +47,7 @@ impl Program {
             Program::Cursor => "cursor",
             Program::GrokBot => "grok_bot",
             Program::Other => "other",
+            Program::Human => "human",
         }
     }
 }
@@ -56,7 +60,7 @@ impl std::str::FromStr for Program {
             .find(|p| p.as_str() == s)
             .ok_or_else(|| {
                 Error::Invalid(format!(
-                    "unknown program {s:?}; expected one of claude, grok, codex, cursor, grok_bot, other"
+                    "unknown program {s:?}; expected one of claude, grok, codex, cursor, grok_bot, other, human"
                 ))
             })
     }
@@ -426,75 +430,81 @@ impl Store {
     /// Register a new agent or update an existing one's details; touches `last_seen_at`.
     pub fn register_agent(&self, input: RegisterAgent) -> Result<Agent> {
         validate_name(&input.name)?;
-        self.write(|tx| {
-            let project = match &input.project {
-                Some(path) => Some(ensure_project_tx(tx, &input.name, path)?),
-                None => None,
-            };
-            let project_id = project.as_ref().map(|p| p.project_id.clone());
-            let slug = project.as_ref().map(|p| p.slug.as_str());
-            let addr = address(&input.name, slug);
-            let existing: Option<String> = tx
-                .query_row(
-                    "SELECT agent_id FROM agents
-                     WHERE node_id = ?1 AND name = ?2 AND ifnull(project_id, '') = ifnull(?3, '')",
-                    params![tx.node_id, input.name, project_id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            let agent_id = existing.clone().unwrap_or_else(new_id);
-            let event_id = tx.emit(
-                &addr,
-                "agent.registered",
-                json!({
-                    "agent_id": agent_id,
-                    "name": input.name,
-                    "project_id": project_id,
-                    "program": input.program.as_str(),
-                    "model": input.model,
-                    "description": input.description,
-                    "new": existing.is_none(),
-                }),
-            )?;
-            if existing.is_some() {
-                tx.execute(
-                    "UPDATE agents SET program = ?2, model = ?3, description = ?4,
-                       status = 'active', updated_at = ?5, last_seen_at = ?5, event_id = ?6,
-                       address = ?7
-                     WHERE agent_id = ?1",
-                    params![
-                        agent_id,
-                        input.program.as_str(),
-                        input.model,
-                        input.description,
-                        tx.now,
-                        event_id,
-                        addr
-                    ],
-                )?;
-            } else {
-                tx.execute(
-                    "INSERT INTO agents (agent_id, node_id, project_id, name, program, model,
-                       description, status, created_at, updated_at, last_seen_at, event_id, address)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', ?8, ?8, ?8, ?9, ?10)",
-                    params![
-                        agent_id,
-                        tx.node_id,
-                        project_id,
-                        input.name,
-                        input.program.as_str(),
-                        input.model,
-                        input.description,
-                        tx.now,
-                        event_id,
-                        addr
-                    ],
-                )?;
-            }
-            get_agent(tx, &agent_id)
-        })
+        self.write(|tx| register_tx(tx, &input))
     }
+}
 
+/// Register (or refresh) an agent inside a write transaction.
+pub(crate) fn register_tx(tx: &Tx<'_>, input: &RegisterAgent) -> Result<Agent> {
+    validate_name(&input.name)?;
+    let project = match &input.project {
+        Some(path) => Some(ensure_project_tx(tx, &input.name, path)?),
+        None => None,
+    };
+    let project_id = project.as_ref().map(|p| p.project_id.clone());
+    let slug = project.as_ref().map(|p| p.slug.as_str());
+    let addr = address(&input.name, slug);
+    let existing: Option<String> = tx
+        .query_row(
+            "SELECT agent_id FROM agents
+             WHERE node_id = ?1 AND name = ?2 AND ifnull(project_id, '') = ifnull(?3, '')",
+            params![tx.node_id, input.name, project_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let agent_id = existing.clone().unwrap_or_else(new_id);
+    let event_id = tx.emit(
+        &addr,
+        "agent.registered",
+        json!({
+            "agent_id": agent_id,
+            "name": input.name,
+            "project_id": project_id,
+            "program": input.program.as_str(),
+            "model": input.model,
+            "description": input.description,
+            "new": existing.is_none(),
+        }),
+    )?;
+    if existing.is_some() {
+        tx.execute(
+            "UPDATE agents SET program = ?2, model = ?3, description = ?4,
+               status = 'active', updated_at = ?5, last_seen_at = ?5, event_id = ?6,
+               address = ?7
+             WHERE agent_id = ?1",
+            params![
+                agent_id,
+                input.program.as_str(),
+                input.model,
+                input.description,
+                tx.now,
+                event_id,
+                addr
+            ],
+        )?;
+    } else {
+        tx.execute(
+            "INSERT INTO agents (agent_id, node_id, project_id, name, program, model,
+               description, status, created_at, updated_at, last_seen_at, event_id, address)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', ?8, ?8, ?8, ?9, ?10)",
+            params![
+                agent_id,
+                tx.node_id,
+                project_id,
+                input.name,
+                input.program.as_str(),
+                input.model,
+                input.description,
+                tx.now,
+                event_id,
+                addr
+            ],
+        )?;
+    }
+    get_agent(tx, &agent_id)
+}
+
+impl Store {
     /// Look up one agent by address (`name`, `name@project`, or `name@project@node`).
     pub fn agent(&self, who: &str) -> Result<Agent> {
         self.read(|conn| {

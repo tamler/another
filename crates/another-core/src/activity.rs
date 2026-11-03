@@ -64,6 +64,7 @@ impl ActivityKind {
             "resource" | "orphan" => ActivityKind::Resource,
             "session" | "agent" => ActivityKind::Session,
             "lane" => ActivityKind::Lane,
+            "decision" => ActivityKind::Request,
             "peer" | "sync" | "pair" | "federation" => ActivityKind::Federation,
             _ => ActivityKind::System,
         }
@@ -112,7 +113,7 @@ impl Since {
     }
 }
 
-fn parse_duration_ms(raw: &str) -> Option<i64> {
+pub(crate) fn parse_duration_ms(raw: &str) -> Option<i64> {
     let (num, unit) = raw.split_at(raw.find(|c: char| !c.is_ascii_digit())?);
     let n: i64 = num.parse().ok()?;
     let secs = match unit {
@@ -317,6 +318,53 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
                 json!({ "hold_ids": p.get("hold_ids") }),
             )
         }
+        "decision.created" => (
+            format!(
+                "{actor} asked {} to decide: {}",
+                s("human"),
+                s("question").lines().next().unwrap_or_default()
+            ),
+            json!({ "decision_id": s("decision_id"), "request_id": s("request_id"), "lane_id": p.get("lane_id") }),
+        ),
+        "decision.answered" => {
+            let how = p
+                .get("value")
+                .and_then(Value::as_str)
+                .map_or_else(|| "free text".to_string(), |v| format!("`{v}`"));
+            (
+                format!(
+                    "{} answered decision {} with {how}{}",
+                    s("answered_by"),
+                    s("decision_id"),
+                    p.get("relayed_by")
+                        .and_then(Value::as_str)
+                        .map(|r| format!(" (via {r})"))
+                        .unwrap_or_default()
+                ),
+                json!({ "decision_id": s("decision_id"), "lane_id": p.get("lane_id") }),
+            )
+        }
+        "decision.expired" => (
+            match p.get("value").and_then(Value::as_str) {
+                Some(v) => format!(
+                    "decision {} timed out; default `{v}` applies",
+                    s("decision_id")
+                ),
+                None => format!("decision {} timed out and was cancelled", s("decision_id")),
+            },
+            json!({ "decision_id": s("decision_id"), "lane_id": p.get("lane_id") }),
+        ),
+        "decision.overdue" => (
+            format!(
+                "decision {} is past its deadline, still waiting",
+                s("decision_id")
+            ),
+            json!({ "decision_id": s("decision_id"), "lane_id": p.get("lane_id") }),
+        ),
+        "decision.cancelled" => (
+            format!("{actor} withdrew decision {}", s("decision_id")),
+            json!({ "decision_id": s("decision_id"), "lane_id": p.get("lane_id") }),
+        ),
         "hold.conflict" => {
             let project = project_slug(conn, &s("project_id"))?;
             (

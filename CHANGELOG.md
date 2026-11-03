@@ -20,6 +20,16 @@ All notable changes to Another. Unreleased work is listed under the next version
     - MCP tools: `webhook_subscribe`, `webhook_list`, `webhook_remove`.
     - `another serve` delivers them.
   - New events: `hold.conflict`, emitted when an acquire is refused, and `resource.lease_expiring`, emitted once when a lease nears its end.
+- **Human decisions** ([design](docs/design/03-decisions.md), [guide](docs/HUMAN-DECISIONS.md)):
+  - Structured questions from agents to a person: 2–6 options, optional free text, context links, a deadline and what happens at it (`keep_open`, `choose_default`, `cancel`), and an optional lane, which shows `needs_decision` until answered.
+  - The person (default `$ANOTHER_DECIDER`, else `owner`) is an agent with the new program `human`.
+  - Answers are mailed to the asking agent in the same thread, and wake it if it has a wake target. Who answered and who relayed it are both recorded.
+  - Surfaces:
+    - MCP: `decision_ask`, `decision_list`, `decision_show`, `decision_answer`, `decision_cancel`.
+    - HTTP: `GET /decisions`, `GET /decisions/{id}`, `POST /decisions/{id}/answer`.
+    - CLI: `another decision ask|list|show|answer|cancel`.
+  - Events: `decision.created|answered|expired|overdue|cancelled`.
+  - Requests gain a `kind` field (`task` or `decision`).
 - CI also runs on pull requests that target non-`main` branches, so stacked PRs are checked.
 
 ### Changed
@@ -28,4 +38,5 @@ All notable changes to Another. Unreleased work is listed under the next version
 
 ### Database
 - Migration 6 adds the `lanes`, `lane_links` and `lane_reports` tables. It is additive; existing databases upgrade in place.
+- Migration 8 adds the `decisions` table and `requests.kind` (default `task`). It is additive.
 - Migration 7 adds the `webhooks` and `webhook_deliveries` tables and a nullable `resource_leases.expiry_warned_at` column. It is additive.

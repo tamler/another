@@ -614,6 +614,41 @@ CREATE INDEX webhook_deliveries_due ON webhook_deliveries(status, next_attempt_a
 
 ALTER TABLE resource_leases ADD COLUMN expiry_warned_at INTEGER;
 "#,
+    r#"
+ALTER TABLE requests ADD COLUMN kind TEXT NOT NULL DEFAULT 'task';
+
+CREATE TABLE decisions (
+    decision_id       TEXT PRIMARY KEY,
+    node_id           TEXT NOT NULL REFERENCES nodes(node_id),
+    project_id        TEXT NOT NULL REFERENCES projects(project_id),
+    lane_id           TEXT REFERENCES lanes(lane_id),
+    asker_id          TEXT NOT NULL REFERENCES agents(agent_id),
+    human_id          TEXT NOT NULL REFERENCES agents(agent_id),
+    question          TEXT NOT NULL,
+    options           TEXT NOT NULL,
+    allow_free_text   INTEGER NOT NULL DEFAULT 0,
+    context_links     TEXT NOT NULL DEFAULT '[]',
+    deadline_at       INTEGER,
+    on_timeout        TEXT NOT NULL,
+    default_value     TEXT,
+    status            TEXT NOT NULL,
+    answer_value      TEXT,
+    answer_text       TEXT,
+    answered_by       TEXT,
+    relayed_by        TEXT,
+    answered_at       INTEGER,
+    request_id        TEXT NOT NULL REFERENCES requests(request_id),
+    message_id        TEXT NOT NULL,
+    thread_id         TEXT NOT NULL,
+    answer_message_id TEXT,
+    overdue_at        INTEGER,
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL,
+    event_id          TEXT NOT NULL
+);
+CREATE INDEX decisions_by_status ON decisions(node_id, status, deadline_at);
+CREATE INDEX decisions_by_lane ON decisions(lane_id, status);
+"#,
 ];
 
 fn migrate_to(conn: &mut Connection, limit: usize) -> Result<()> {

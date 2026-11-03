@@ -6,6 +6,8 @@ A **lane** is a named unit of work that a manager (often a remote `grok_bot` age
 
 `planned → working ⇄ blocked ⇄ needs_decision → done | abandoned`. Any open status can move to any other open status. `done` and `abandoned` close the lane, and a closed lane's name can be used again.
 
+Asking a [human decision](HUMAN-DECISIONS.md) with `lane` set moves the lane to `needs_decision` automatically. When its last open decision is answered, expires or is cancelled, the lane returns to `working` (if it is still `needs_decision`).
+
 ## CLI
 
 ```bash
