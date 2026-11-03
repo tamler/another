@@ -61,6 +61,19 @@ fn hold(s: &Store, agent: &str, project: &str, path: &str, lane: Option<&str>) -
     .unwrap()
 }
 
+fn shared(s: &Store, agent: &str, path: &str, lane: &str) -> HoldReport {
+    s.acquire_holds(AcquireHolds {
+        agent: agent.into(),
+        project: "shop".into(),
+        paths: vec![path.into()],
+        ttl_seconds: Some(600),
+        exclusive: false,
+        reason: None,
+        lane: Some(lane.into()),
+    })
+    .unwrap()
+}
+
 #[test]
 fn lanes_decide_what_conflicts() {
     let (s, _) = store();
@@ -68,8 +81,15 @@ fn lanes_decide_what_conflicts() {
     let r = hold(&s, "claude@shop", "shop", "src/api/routes.rs", None);
     assert_eq!(r.granted[0].lane.as_deref(), Some("api"));
 
-    // A lane-mate (explicit lane) overlapping: not blocked, reported as a same-lane warning.
-    let mate = hold(&s, "helper@shop", "shop", "src/api/**", Some("api"));
+    // A lane-mate's exclusive hold on the same path is blocked: two exclusive holds block
+    // each other even inside a lane (Jacob's decision).
+    let clash = hold(&s, "helper@shop", "shop", "src/api/**", Some("api"));
+    assert!(clash.granted.is_empty());
+    assert_eq!(clash.conflicts.len(), 1);
+    assert_eq!(clash.conflicts[0].held.agent, "claude@shop");
+    assert!(!clash.conflicts[0].same_lane);
+    // A lane-mate's *shared* hold overlapping: not blocked, a same-lane warning.
+    let mate = shared(&s, "helper@shop", "src/api/**", "api");
     assert_eq!(mate.granted.len(), 1);
     assert!(mate.conflicts.is_empty());
     assert_eq!(mate.warnings.len(), 1);
@@ -230,4 +250,79 @@ fn upgrades_a_database_created_before_lane_holds() {
     let r = hold(&s, "a@shop", "shop", "x.rs", None);
     assert_eq!(r.granted[0].lane, None);
     assert!(Store::schema_version() >= 9);
+}
+
+#[test]
+fn hold_lanes_resolve_within_the_holds_project() {
+    let (s, _) = store();
+    let take = |lane: &str| {
+        s.acquire_holds(AcquireHolds {
+            agent: "claude@shop".into(),
+            project: "shop".into(),
+            paths: vec!["x.rs".into()],
+            ttl_seconds: None,
+            exclusive: true,
+            reason: None,
+            lane: Some(lane.into()),
+        })
+        .unwrap_err()
+    };
+    // The vault project's lane, by name, by name@project and by id: all "unknown lane",
+    // exactly like a lane that doesn't exist.
+    let keys_id = s.lane("keys", None).unwrap().lane.lane_id;
+    let missing = take("nope");
+    for (key, err) in [
+        ("keys", take("keys")),
+        ("keys@vault", take("keys@vault")),
+        (keys_id.as_str(), take(&keys_id)),
+    ] {
+        assert_eq!(err.code(), "not_found", "{key}");
+        assert_eq!(
+            err.to_string().replace(key, "X"),
+            missing.to_string().replace("nope", "X"),
+            "{key}"
+        );
+    }
+}
+
+#[test]
+fn cross_lane_conflicts_mail_the_holding_lead() {
+    let (s, _) = store();
+    hold(&s, "helper@shop", "shop", "src/api/x.rs", Some("api"));
+    for _ in 0..3 {
+        let r = hold(&s, "codex@shop", "shop", "src/api/x.rs", None);
+        assert!(r.granted.is_empty());
+    }
+    // The api lane's lead (claude) hears about it once (debounced), from the system agent.
+    let inbox = s.inbox("claude@shop", InboxQuery::default()).unwrap();
+    let mails: Vec<_> = inbox
+        .messages
+        .iter()
+        .filter(|m| m.message.subject == "[lane api] hold conflict with lane billing")
+        .collect();
+    assert_eq!(
+        mails.len(),
+        1,
+        "{:?}",
+        inbox
+            .messages
+            .iter()
+            .map(|m| &m.message.subject)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(mails[0].message.from, SYSTEM_AGENT);
+    let body = &s.message(&mails[0].message.message_id).unwrap().body;
+    assert!(
+        body.contains("codex@shop (lane billing)") && body.contains("src/api/x.rs"),
+        "{body}"
+    );
+    // Events and the webhook filter keep working alongside.
+    let events = s.events(500).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.kind == "lane.hold_conflict")
+            .count(),
+        3
+    );
 }

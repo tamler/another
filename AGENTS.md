@@ -57,6 +57,14 @@ Every way events leave the node applies the same visibility rule (D38). When add
 - **Automatic mail** (timeouts, reminders) comes from the reserved system agent `another` (`SYSTEM_AGENT`), never in a person's name.
 - **Lookups:** projects are resolved and scope-checked first; lanes are then looked up within that project only. Hidden and missing objects get the same error.
 
+## Lane-aware holds (phase 4)
+
+- **Lane lookup:** a hold's lane is looked up in the hold's project only (`lanes::resolve_lane_in_project`). Never resolve a user-supplied lane name node-wide.
+- **Same lane:** exclusive vs exclusive blocks even inside a lane; otherwise same-lane overlaps are warnings.
+- **Cross-lane conflicts:** emit `lane.hold_conflict` (node-local) and mail the holding lane's lead from the system agent, debounced.
+- **Hooks fail open, visibly:** a problem with the agent's lane degrades to an unlaned hold plus a warning, never to no hold and never to a blocked edit.
+- **Not yet verified:** the pre-edit hook against a real Codex build (`apply_patch` payload). Fleshapron runs that check after these fixes.
+
 ## Review routing rule
 
 Every PR gets a review from a **different model family** than the one that wrote it:

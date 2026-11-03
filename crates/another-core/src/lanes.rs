@@ -291,8 +291,9 @@ fn lane_from_row(r: &Row<'_>) -> rusqlite::Result<(Lane, String)> {
     ))
 }
 
-/// Find a lane by id, `name` or `name@project` (project slug). Names are unique among open
-/// lanes of a project, so a bare name can match lanes in several projects.
+/// Find a lane by id, `name` or `name@project` (project slug). Lane names are per project
+/// (Jacob's rule): unique among a project's open lanes, so a bare name can match lanes in
+/// several projects. Callers with a project in hand use [`resolve_lane_in_project`].
 pub(crate) fn resolve_lane(conn: &Connection, node_id: &str, key: &str) -> Result<(Lane, String)> {
     resolve_lane_in(conn, node_id, key, None)
 }

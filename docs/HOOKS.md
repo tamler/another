@@ -61,7 +61,9 @@ Uninstall removes only entries that reference `another-hook.sh`, and deletes the
 
 **Lifetime:** holds taken this way expire after 30 minutes unless renewed. The prompt hook's heartbeat renews them, and session end releases them.
 
-**Failing open:** if Another is unavailable, the hook prints nothing and the edit goes ahead.
+**Failing open, visibly:** if `$ANOTHER_LANE` names a closed lane or one from another project, the files are still held (without a lane), and the hook shows a warning (`systemMessage`, also on stderr). If Another itself is unavailable, the hook prints nothing and the edit goes ahead.
+
+**Lane-mates:** two agents in the same lane can't both hold the same file for editing. The pre-edit hook takes exclusive holds, and exclusive holds block each other even inside a lane.
 
 Installing without the flag removes the hook. Your own `PreToolUse` entries are never touched. Grok and Cursor have no equivalent pre-tool hook.
 
