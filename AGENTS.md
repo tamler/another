@@ -25,7 +25,7 @@ Keep the [README.md](README.md) status and [CHANGELOG.md](CHANGELOG.md) (Unrelea
 3. **Don't break existing CLI/MCP behaviour**: deprecate rather than remove; new behaviour is opt-in or additive.
 4. **Every remote surface** (MCP tool, HTTP route) sits behind `--auth`, respects token project globs via `remote::current_scope()` / store `scope` arguments, and is audited.
 5. **Scoping rules**:
-   - Out-of-scope objects look exactly like missing ones (same `not_found` error, same message shape).
+   - Out-of-scope objects look exactly like missing ones (same `not_found` error, same message shape). Filters on list tools are matched against what the caller may see; they never resolve names node-wide (no `ambiguous` errors naming hidden objects).
    - Events carry ids, names and statuses, never bodies (charters, summaries, report text, links).
    - A security test proves a token scoped to project A can't read project B's data through every new surface.
 6. **Checks**: `cargo test --workspace`, `cargo +stable clippy --all-targets --all-features -- -D warnings`, `cargo fmt --check`, `cargo +1.88 check --workspace --all-targets --locked`.
