@@ -132,7 +132,9 @@ pub fn plist(spec: &ServiceSpec) -> String {
     <key>KeepAlive</key>
     <true/>
     <key>ProcessType</key>
-    <string>Background</string>
+    <string>Standard</string>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
     <key>StandardOutPath</key>
     {out}
     <key>StandardErrorPath</key>
@@ -147,14 +149,24 @@ pub fn plist(spec: &ServiceSpec) -> String {
     )
 }
 
-/// Quote one word for a systemd `ExecStart=` / `Environment=` line: double quotes, with
-/// backslashes and quotes escaped, `%` doubled (specifiers) and `$` doubled (variables).
+/// Quote one word for a systemd `ExecStart=` line: double quotes, with backslashes and
+/// quotes escaped, `%` doubled (specifiers) and `$` doubled (variable expansion).
 fn systemd_quote(s: &str) -> String {
     let escaped = s
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('%', "%%")
         .replace('$', "$$");
+    format!("\"{escaped}\"")
+}
+
+/// Quote an `Environment=` assignment: like `ExecStart=`, but systemd does not expand `$`
+/// there, so it is kept as is.
+fn systemd_env(s: &str) -> String {
+    let escaped = s
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%");
     format!("\"{escaped}\"")
 }
 
@@ -166,12 +178,11 @@ pub fn unit(spec: &ServiceSpec) -> String {
         .map(|a| systemd_quote(a))
         .collect::<Vec<_>>()
         .join(" ");
-    let env = systemd_quote(&format!("ANOTHER_HOME={}", spec.home.to_string_lossy()));
+    let env = systemd_env(&format!("ANOTHER_HOME={}", spec.home.to_string_lossy()));
     format!(
         "# Written by `another service install`; remove with `another service uninstall`.\n\
          [Unit]\n\
          Description=Another (another serve): local inbox for coding agents\n\
-         After=network.target\n\
          \n\
          [Service]\n\
          Type=simple\n\
@@ -183,7 +194,9 @@ pub fn unit(spec: &ServiceSpec) -> String {
          \n\
          [Install]\n\
          WantedBy=default.target\n",
-        home = systemd_quote(&spec.home.to_string_lossy()),
+        // WorkingDirectory= takes a bare absolute path (quotes are not stripped); only
+        // specifiers need escaping.
+        home = spec.home.to_string_lossy().replace('%', "%%"),
     )
 }
 
@@ -283,6 +296,7 @@ fn bind_of(args: &[String]) -> Option<String> {
 
 struct Out {
     ok: bool,
+    code: Option<i32>,
     stdout: String,
     stderr: String,
 }
@@ -295,19 +309,24 @@ fn run(cmd: &str, args: &[&str]) -> Result<Out> {
         .with_context(|| format!("running {cmd} (is it installed?)"))?;
     Ok(Out {
         ok: out.status.success(),
+        code: out.status.code(),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
     })
 }
 
+fn failure(cmd: &str, args: &[&str], out: &Out) -> anyhow::Error {
+    anyhow!(
+        "{cmd} {} failed: {}",
+        args.join(" "),
+        out.stderr.trim().lines().last().unwrap_or("no output")
+    )
+}
+
 fn must(cmd: &str, args: &[&str]) -> Result<Out> {
     let out = run(cmd, args)?;
     if !out.ok {
-        bail!(
-            "{cmd} {} failed: {}",
-            args.join(" "),
-            out.stderr.trim().lines().last().unwrap_or("no output")
-        );
+        return Err(failure(cmd, args, &out));
     }
     Ok(out)
 }
@@ -319,6 +338,51 @@ fn uid() -> Result<String> {
 
 fn launchd_target() -> Result<String> {
     Ok(format!("gui/{}/{LAUNCHD_LABEL}", uid()?))
+}
+
+fn sleep_ms(ms: u64) {
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+}
+
+/// Unload the launchd job and wait until launchd has really removed it. "Not loaded"
+/// (3, 113) and "in progress" (36) count as success.
+fn launchd_bootout() -> Result<()> {
+    let target = launchd_target()?;
+    let out = run("launchctl", &["bootout", &target])?;
+    if !out.ok && !matches!(out.code, Some(3) | Some(36) | Some(113)) {
+        return Err(failure("launchctl", &["bootout", &target], &out));
+    }
+    for _ in 0..50 {
+        if !run("launchctl", &["print", &target])?.ok {
+            return Ok(());
+        }
+        sleep_ms(100);
+    }
+    bail!("launchd is still unloading {LAUNCHD_LABEL}; try again in a few seconds")
+}
+
+/// Load the plist, retrying while launchd finishes a previous unload (5, 37).
+fn launchd_bootstrap(plist: &Path) -> Result<()> {
+    let domain = format!("gui/{}", uid()?);
+    let path = plist.to_string_lossy().into_owned();
+    let args = ["bootstrap", domain.as_str(), path.as_str()];
+    let mut last = None;
+    for attempt in 0..10 {
+        let out = run("launchctl", &args)?;
+        if out.ok {
+            return Ok(());
+        }
+        if !matches!(out.code, Some(5) | Some(37)) {
+            return Err(failure("launchctl", &args, &out));
+        }
+        last = Some(out);
+        sleep_ms(200 * (attempt + 1));
+    }
+    Err(failure(
+        "launchctl",
+        &args,
+        &last.expect("at least one attempt"),
+    ))
 }
 
 /// (loaded, pid) as the service manager reports them.
@@ -360,27 +424,47 @@ fn manager_state(platform: Platform) -> Result<(bool, Option<u32>)> {
     }
 }
 
-/// Is something already listening on `bind`? Returns a description of it if so.
-fn port_taken(bind: &str) -> Result<Option<(Option<u32>, String)>> {
-    let addr = check_bind(bind, &HttpOptions::default()).or_else(|_| {
-        // Non-loopback binds are validated against the real options by the caller.
-        bind.parse::<std::net::SocketAddr>()
-            .map_err(|e| anyhow!("invalid --bind {bind:?}: {e}"))
-    })?;
+/// Make sure `systemctl --user` can reach a user manager before anything is written.
+fn systemd_reachable() -> Result<()> {
+    let out = run("systemctl", &["--user", "show-environment"])?;
+    if out.ok {
+        return Ok(());
+    }
+    bail!(
+        "cannot reach the systemd user manager ({}). Use a login session with a user bus \
+         (XDG_RUNTIME_DIR set), or run `loginctl enable-linger $USER` first",
+        out.stderr.trim().lines().last().unwrap_or("no output")
+    )
+}
+
+/// Is something already listening where `addr` would bind? Matches the same address or a
+/// wildcard listener on the port (macOS lets a specific bind succeed alongside a wildcard
+/// one, so a test bind alone is not enough). Returns (pid, command) of the listener.
+fn port_taken(addr: std::net::SocketAddr) -> Result<Option<(Option<u32>, String)>> {
+    let ip = addr.ip().to_string();
+    let found = crate::scan::scan_listeners()
+        .listeners
+        .into_iter()
+        .find(|l| {
+            let host = l
+                .address
+                .rsplit_once(':')
+                .map_or("", |(h, _)| h)
+                .trim_matches(['[', ']']);
+            l.port == addr.port()
+                && (host == ip || matches!(host, "*" | "0.0.0.0" | "::" | "") || ip == "0.0.0.0")
+        });
+    if let Some(l) = found {
+        let cmd = crate::scan::process_info(l.pid)
+            .map(|p| p.command)
+            .unwrap_or(l.command);
+        return Ok(Some((Some(l.pid), cmd)));
+    }
+    // No scanner, or nothing seen: fall back to a test bind.
     match std::net::TcpListener::bind(addr) {
         Ok(_) => Ok(None),
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            let who = crate::scan::scan_listeners()
-                .listeners
-                .into_iter()
-                .find(|l| l.port == addr.port())
-                .map(|l| {
-                    let cmd = crate::scan::process_info(l.pid)
-                        .map(|p| p.command)
-                        .unwrap_or(l.command);
-                    (Some(l.pid), cmd)
-                });
-            Ok(Some(who.unwrap_or((None, "an unknown process".into()))))
+            Ok(Some((None, "an unknown process".into())))
         }
         Err(e) => Err(anyhow!("cannot check {addr}: {e}")),
     }
@@ -400,14 +484,27 @@ pub struct InstallReport {
 /// Write (or update) the service definition and (re)start it.
 pub fn install(spec: &ServiceSpec, user_home: &Path, opts: &HttpOptions) -> Result<InstallReport> {
     let platform = Platform::current()?;
-    check_bind(&spec.bind, opts)?;
+    let addr = check_bind(&spec.bind, opts)?;
+    if platform == Platform::Systemd {
+        systemd_reachable()?;
+    }
     let path = definition_path(platform, user_home);
-    let existed = path.exists();
+    let previous = std::fs::read_to_string(&path).ok();
     let (loaded, service_pid) = manager_state(platform)?;
+    let previous_bind = previous
+        .as_deref()
+        .map(|t| installed_args(platform, t))
+        .and_then(|a| bind_of(&a));
 
     // Refuse to fight another server for the port, unless it is this service being updated.
-    if let Some((pid, cmd)) = port_taken(&spec.bind)? {
-        let ours = loaded && pid.is_some() && pid == service_pid;
+    if let Some((pid, cmd)) = port_taken(addr)? {
+        let ours = loaded
+            && match (pid, service_pid) {
+                (Some(p), Some(s)) => p == s,
+                // The scanner could not name the listener: trust the installed definition.
+                (None, _) => previous_bind.as_deref() == Some(spec.bind.as_str()),
+                _ => false,
+            };
         if !ours {
             let what = if cmd.contains("another") && cmd.contains("serve") {
                 format!("another `another serve` ({cmd}")
@@ -430,35 +527,57 @@ pub fn install(spec: &ServiceSpec, user_home: &Path, opts: &HttpOptions) -> Resu
         std::fs::create_dir_all(parent)?;
     }
     std::fs::create_dir_all(spec.log_dir())?;
-    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+    std::fs::write(&path, &text).with_context(|| format!("writing {}", path.display()))?;
     let path_s = path.to_string_lossy().into_owned();
 
-    let mut hints = Vec::new();
-    match platform {
-        Platform::Launchd => {
-            let target = launchd_target()?;
-            if loaded {
-                // Reload so launchd picks up the new definition.
-                let _ = run("launchctl", &["bootout", &target]);
+    let activate = || -> Result<()> {
+        match platform {
+            Platform::Launchd => {
+                if loaded {
+                    // Reload so launchd picks up the new definition.
+                    launchd_bootout()?;
+                }
+                launchd_bootstrap(&path)
             }
-            must(
-                "launchctl",
-                &["bootstrap", &format!("gui/{}", uid()?), &path_s],
-            )?;
-        }
-        Platform::Systemd => {
-            must("systemctl", &["--user", "daemon-reload"])?;
-            must("systemctl", &["--user", "enable", "--now", SYSTEMD_UNIT])?;
-            if existed {
-                must("systemctl", &["--user", "restart", SYSTEMD_UNIT])?;
+            Platform::Systemd => {
+                must("systemctl", &["--user", "daemon-reload"])?;
+                must("systemctl", &["--user", "enable", "--now", SYSTEMD_UNIT])?;
+                if previous.is_some() {
+                    must("systemctl", &["--user", "restart", SYSTEMD_UNIT])?;
+                }
+                Ok(())
             }
-            hints.push(
-                "On a headless box, run `loginctl enable-linger $USER` so the service starts at \
-                 boot without a login session."
-                    .into(),
-            );
         }
+    };
+    if let Err(e) = activate() {
+        // Leave things as they were: restore the old definition, or remove a new one.
+        match &previous {
+            Some(old) => {
+                let _ = std::fs::write(&path, old);
+            }
+            None => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+        if platform == Platform::Systemd {
+            let _ = run("systemctl", &["--user", "daemon-reload"]);
+        }
+        return Err(e.context("the service could not be started; nothing was left installed"));
     }
+
+    let mut hints = Vec::new();
+    if platform == Platform::Systemd {
+        hints.push(
+            "On a headless box, run `loginctl enable-linger $USER` so the service starts at \
+             boot without a login session."
+                .into(),
+        );
+    }
+    hints.push(
+        "The service runs this binary by path; re-run `another service install` after moving \
+         or upgrading it."
+            .into(),
+    );
     if !spec.auth {
         hints.push(
             "The service accepts unauthenticated MCP on loopback only. For remote access, install \
@@ -469,7 +588,12 @@ pub fn install(spec: &ServiceSpec, user_home: &Path, opts: &HttpOptions) -> Resu
     Ok(InstallReport {
         platform,
         definition: path_s,
-        action: if existed { "updated" } else { "installed" }.into(),
+        action: if previous.is_some() {
+            "updated"
+        } else {
+            "installed"
+        }
+        .into(),
         args: spec.args(),
         logs: match platform {
             Platform::Launchd => spec.log_dir().to_string_lossy().into_owned(),
@@ -484,6 +608,7 @@ pub struct UninstallReport {
     pub platform: Platform,
     pub definition: String,
     pub removed: bool,
+    pub warnings: Vec<String>,
 }
 
 /// Stop the service and remove its definition. Safe to run when it is not installed.
@@ -491,17 +616,24 @@ pub fn uninstall(user_home: &Path) -> Result<UninstallReport> {
     let platform = Platform::current()?;
     let path = definition_path(platform, user_home);
     let existed = path.exists();
+    let mut warnings = Vec::new();
     match platform {
         Platform::Launchd => {
             let (loaded, _) = manager_state(platform)?;
             if loaded {
-                must("launchctl", &["bootout", &launchd_target()?])?;
+                launchd_bootout()?;
             }
         }
         Platform::Systemd => {
             if existed {
-                // Disabling a unit that is already stopped is fine.
-                let _ = run("systemctl", &["--user", "disable", "--now", SYSTEMD_UNIT]);
+                let out = run("systemctl", &["--user", "disable", "--now", SYSTEMD_UNIT])?;
+                if !out.ok {
+                    warnings.push(format!(
+                        "systemctl --user disable failed ({}); the enable link may remain under \
+                         ~/.config/systemd/user/default.target.wants/",
+                        out.stderr.trim().lines().last().unwrap_or("no output")
+                    ));
+                }
             }
         }
     }
@@ -510,11 +642,13 @@ pub fn uninstall(user_home: &Path) -> Result<UninstallReport> {
     }
     if platform == Platform::Systemd && existed {
         let _ = run("systemctl", &["--user", "daemon-reload"]);
+        let _ = run("systemctl", &["--user", "reset-failed", SYSTEMD_UNIT]);
     }
     Ok(UninstallReport {
         platform,
         definition: path.to_string_lossy().into_owned(),
         removed: existed,
+        warnings,
     })
 }
 
@@ -539,14 +673,18 @@ fn tail(path: &Path, n: usize) -> Vec<String> {
         .collect()
 }
 
-/// Recent log lines from the service.
+/// Recent log lines from the service. On macOS `serve` logs to stderr, so that file is the
+/// log; anything on stdout is shown after it, labelled.
 pub fn log_lines(platform: Platform, home: &Path, n: usize) -> Result<Vec<String>> {
     Ok(match platform {
         Platform::Launchd => {
             let mut lines = tail(&home.join("logs").join(LOG_ERR), n);
-            lines.extend(tail(&home.join("logs").join(LOG_OUT), n));
-            let skip = lines.len().saturating_sub(n);
-            lines.into_iter().skip(skip).collect()
+            let out = tail(&home.join("logs").join(LOG_OUT), n);
+            if !out.is_empty() {
+                lines.push(format!("-- {LOG_OUT} --"));
+                lines.extend(out);
+            }
+            lines
         }
         Platform::Systemd => {
             let out = run(
@@ -616,20 +754,13 @@ pub fn start_stop(user_home: &Path, start: bool) -> Result<()> {
             if loaded {
                 must("launchctl", &["kickstart", &launchd_target()?])?;
             } else {
-                let path_s = path.to_string_lossy().into_owned();
-                must(
-                    "launchctl",
-                    &["bootstrap", &format!("gui/{}", uid()?), &path_s],
-                )?;
+                launchd_bootstrap(&path)?;
             }
         }
         (Platform::Launchd, false) => {
             // KeepAlive would restart a killed process, so unload it; it loads again at the
             // next login (RunAtLoad) or with `another service start`.
-            let (loaded, _) = manager_state(platform)?;
-            if loaded {
-                must("launchctl", &["bootout", &launchd_target()?])?;
-            }
+            launchd_bootout()?;
         }
         (Platform::Systemd, true) => {
             must("systemctl", &["--user", "start", SYSTEMD_UNIT])?;
@@ -696,6 +827,20 @@ mod tests {
         assert!(u.contains(r#""a&b<c>\"q\"'s""#));
         assert!(u.contains(r#""100%%$$HOME\\x""#), "{u}");
         assert!(u.contains("Environment=\"ANOTHER_HOME=/work/Another Data/home\""));
+        assert!(
+            u.contains("WorkingDirectory=/work/Another Data/home\n"),
+            "{u}"
+        );
+        assert!(!u.contains("After="));
+        let mut dollar = spec();
+        dollar.home = PathBuf::from("/work/a$b%c");
+        let d = unit(&dollar);
+        assert!(
+            d.contains("Environment=\"ANOTHER_HOME=/work/a$b%%c\""),
+            "{d}"
+        );
+        assert!(d.contains("WorkingDirectory=/work/a$b%%c\n"), "{d}");
+        assert!(d.contains("\"/work/a$$b%%c\""), "ExecStart doubles $: {d}");
         assert_eq!(installed_args(Platform::Systemd, &u), s.args());
         assert_eq!(bind_of(&s.args()).as_deref(), Some("127.0.0.1:7499"));
     }

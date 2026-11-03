@@ -399,7 +399,8 @@ pub enum ServiceCmd {
     },
     /// Start the installed service.
     Start,
-    /// Stop the installed service (it starts again at next login; uninstall to remove it).
+    /// Stop the installed service; it stays installed (launchd: loads again at next login;
+    /// systemd: starts again at next boot or user-manager start). Uninstall to remove it.
     Stop,
     /// Print the service's recent log lines.
     Logs {
@@ -1408,7 +1409,16 @@ fn service_command(cmd: &ServiceCmd, json: bool, home: PathBuf) -> anyhow::Resul
             // Make sure the data directory exists and is initialised before the service runs.
             Store::open(&home)?;
             let spec = service::ServiceSpec {
-                exe: std::env::current_exe()?.canonicalize()?,
+                // Keep symlinks (e.g. a stable ~/bin/another link) instead of pinning the
+                // current target, so upgrades behind the link keep working.
+                exe: {
+                    let exe = std::env::current_exe()?;
+                    if exe.is_absolute() {
+                        exe
+                    } else {
+                        std::env::current_dir()?.join(exe)
+                    }
+                },
                 home,
                 bind: bind.clone(),
                 auth: *auth,

@@ -21,8 +21,10 @@ struct Env {
 const FAKES: &[(&str, &str)] = &[
     (
         "systemctl",
-        r#"case "$*" in
-  *"enable --now"*|*" start "*|*restart*) echo active > "$STATE" ;;
+        r#"[ -n "$NO_BUS" ] && { echo "Failed to connect to bus: No medium found" >&2; exit 1; }
+case "$*" in
+  *"enable --now"*) [ -n "$FAIL_ENABLE" ] && { echo "Unit another.service has a bad setting" >&2; exit 1; }; echo active > "$STATE" ;;
+  *" start "*|*restart*) echo active > "$STATE" ;;
   *"disable --now"*|*" stop "*) echo inactive > "$STATE" ;;
   *is-active*) s=$(cat "$STATE" 2>/dev/null || echo inactive); echo "$s"; [ "$s" = active ] || exit 3 ;;
   *MainPID*) if [ "$(cat "$STATE" 2>/dev/null)" = active ]; then echo 4242; else echo 0; fi ;;
@@ -316,4 +318,106 @@ fn paths_with_spaces_survive_both_formats() {
         assert_eq!(Path::new(&args[home_at + 1]), env.data, "{platform}");
         env.json(&["service", "uninstall"]);
     }
+}
+
+#[test]
+fn generated_unit_passes_systemd_analyze_verify() {
+    let Ok(probe) = Command::new("systemd-analyze").arg("--version").output() else {
+        eprintln!("systemd-analyze not available; skipping");
+        return;
+    };
+    if !probe.status.success() {
+        return;
+    }
+    let env = Env::new("systemd");
+    let bind = format!("127.0.0.1:{}", free_port());
+    env.json(&[
+        "service",
+        "install",
+        "--bind",
+        &bind,
+        "--auth",
+        "--allowed-host",
+        "box.ts.net",
+    ]);
+    let out = Command::new("systemd-analyze")
+        // System mode checks the same unit syntax without needing a user manager.
+        .arg("verify")
+        .arg(unit_path(&env))
+        .env("HOME", &env.user_home)
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !text.contains("Failed to initialize manager"),
+        "verify did not run: {text}"
+    );
+    assert!(!text.contains("another.service:"), "{text}");
+    assert!(!text.contains("bad unit file setting"), "{text}");
+    assert!(!text.contains("fatal error"), "{text}");
+}
+
+#[test]
+fn wildcard_listener_on_the_port_is_a_conflict() {
+    let env = Env::new("systemd");
+    let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let out = env.run(&["service", "install", "--bind", &format!("127.0.0.1:{port}")]);
+    if String::from_utf8_lossy(&out.stderr).contains("already listening") {
+        assert!(!out.status.success());
+        assert!(!unit_path(&env).exists());
+    } else {
+        // Linux refuses the test bind anyway; without lsof/ss the scanner can't help.
+        assert!(!out.status.success() || crate_scanner_missing());
+    }
+    drop(listener);
+}
+
+fn crate_scanner_missing() -> bool {
+    Command::new("lsof").arg("-v").output().is_err()
+        && Command::new("ss").arg("-V").output().is_err()
+}
+
+#[test]
+fn failed_activation_leaves_nothing_installed() {
+    let env = Env::new("systemd");
+    let bind = format!("127.0.0.1:{}", free_port());
+    let out = env
+        .cmd(&["service", "install", "--bind", &bind])
+        .env("FAIL_ENABLE", "1")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("nothing was left installed"), "{err}");
+    assert!(!unit_path(&env).exists(), "new unit rolled back");
+
+    // An update that fails restores the previous definition.
+    env.json(&["service", "install", "--bind", &bind]);
+    let before = std::fs::read_to_string(unit_path(&env)).unwrap();
+    let out = env
+        .cmd(&["service", "install", "--bind", &bind, "--federation"])
+        .env("FAIL_ENABLE", "1")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert_eq!(std::fs::read_to_string(unit_path(&env)).unwrap(), before);
+}
+
+#[test]
+fn no_user_bus_is_refused_before_writing() {
+    let env = Env::new("systemd");
+    let bind = format!("127.0.0.1:{}", free_port());
+    let out = env
+        .cmd(&["service", "install", "--bind", &bind])
+        .env("NO_BUS", "1")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("enable-linger"));
+    assert!(!unit_path(&env).exists());
 }
