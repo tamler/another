@@ -93,7 +93,7 @@ another activity --summary
 | 6 | Polish: `another wake` (tmux, cmux, Herdr), Herdr plugin, release builds, quickstart, CONTRIBUTING | ✅ complete |
 | Coordination 1 | Lanes: charters, leads, statuses, structured reports, lane-scoped remote access | 🔄 tamler/another#10 |
 | Coordination 2–6 | Push, human decisions, lane-aware holds, spend ledger, daily summary | 🔄 tamler/another#11–#15 |
-| Coordination 7 | First-class remote agents: invites, join, presence, kick, federation tie-in | 🔄 open PR |
+| Coordination 7 | First-class remote agents: invites, join, presence, kick, federation tie-in | 🔄 tamler/another#16 |
 
 Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88.
 
