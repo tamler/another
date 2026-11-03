@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::decisions::{
-    ask_tx, default_decider, validate, DecisionOption, DecisionTimeout, NewDecision,
+    ask_tx, decider_tx, validate, DecisionOption, DecisionTimeout, NewDecision,
 };
 use crate::error::{Error, Result};
 use crate::identity::{find_project, resolve_agent, AgentRef};
@@ -1185,7 +1185,11 @@ impl Store {
                     ..Default::default()
                 };
                 validate(&decision)?;
-                let approver = a.approver.clone().unwrap_or_else(default_decider);
+                // The account's approver, else the node's `decider` setting.
+                let approver = match a.approver.clone() {
+                    Some(x) => x,
+                    None => decider_tx(tx)?,
+                };
                 if who.project_id.is_none() {
                     return Err(Error::Invalid(
                         "approval needs a project: name a lane, or give the account or agent a project".into(),

@@ -299,6 +299,12 @@ pub enum Command {
     /// Lanes: named units of work with a charter, lead, status and structured reports.
     #[command(subcommand)]
     Lane(LaneCmd),
+    /// Node settings: `another config` lists them, `another config KEY` shows one,
+    /// `another config KEY VALUE` sets it (e.g. `another config decider owner`).
+    Config {
+        key: Option<String>,
+        value: Option<String>,
+    },
     /// Decisions: structured questions from agents to a person, answered here or by the
     /// manager bot.
     #[command(subcommand)]
@@ -388,7 +394,7 @@ pub enum WakeCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum DecisionCmd {
-    /// Ask a person (default $ANOTHER_DECIDER, else owner) a question with 2-6 options.
+    /// Ask a person (default: `another config decider`, else owner) a question with 2-6 options.
     Ask {
         #[command(flatten)]
         agent: AgentArg,
@@ -1653,6 +1659,26 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Webhook(cmd) => webhook_command(&store, json, cmd)?,
         Command::Decision(cmd) => decision_command(&store, json, cmd)?,
         Command::Spend { cmd, report } => spend_command(&store, json, cmd, report)?,
+        Command::Config { key, value } => {
+            let list = match (key, value) {
+                (None, _) => store.settings()?,
+                (Some(k), None) => vec![store.setting(&k)?],
+                (Some(k), Some(v)) => vec![store.set_setting(&k, &v)?],
+            };
+            emit(json, &list, |l| {
+                l.iter()
+                    .map(|s| {
+                        format!(
+                            "{} = {}{}  # {}\n",
+                            s.key,
+                            s.value,
+                            if s.default { " (default)" } else { "" },
+                            s.help
+                        )
+                    })
+                    .collect()
+            })
+        }
         Command::Audit { limit } => {
             let entries = store.audit_log(limit)?;
             emit(json, &entries, |e| output::audit(e))

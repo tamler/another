@@ -591,7 +591,9 @@ CREATE TABLE webhooks (
     created_by    TEXT,
     created_at    INTEGER NOT NULL,
     cursor_seq    INTEGER NOT NULL,
-    removed_at    INTEGER
+    removed_at    INTEGER,
+    disabled_at   INTEGER,
+    disabled_reason TEXT
 );
 
 CREATE TABLE webhook_deliveries (
@@ -616,6 +618,12 @@ ALTER TABLE resource_leases ADD COLUMN expiry_warned_at INTEGER;
 "#,
     r#"
 ALTER TABLE requests ADD COLUMN kind TEXT NOT NULL DEFAULT 'task';
+
+CREATE TABLE node_settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
 
 CREATE TABLE decisions (
     decision_id       TEXT PRIMARY KEY,
