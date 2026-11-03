@@ -626,13 +626,21 @@ impl Store {
     /// matches the token's globs are returned.
     pub fn lanes(&self, filter: LaneFilter, scope: Option<&TokenScope>) -> Result<Vec<Lane>> {
         self.read(|conn| {
-            let project_id = match &filter.project {
-                Some(p) => Some(find_project(conn, self.node_id(), p)?.project_id),
-                None => None,
-            };
-            let lead_id = match &filter.lead {
-                Some(a) => Some(resolve_agent(conn, self.node_id(), a)?.id),
-                None => None,
+            // A scoped caller's filters never resolve anything node-wide: they are matched
+            // against the lanes it may see, so a hidden project or agent behaves exactly like
+            // a missing one (an empty list) and no error can name it.
+            let (project_id, lead_id) = match scope {
+                Some(_) => (None, None),
+                None => (
+                    match &filter.project {
+                        Some(p) => Some(find_project(conn, self.node_id(), p)?.project_id),
+                        None => None,
+                    },
+                    match &filter.lead {
+                        Some(a) => Some(resolve_agent(conn, self.node_id(), a)?.id),
+                        None => None,
+                    },
+                ),
             };
             let mut stmt = conn.prepare(&format!(
                 "{LANE_SELECT} WHERE l.node_id = ?1 AND (?2 IS NULL OR l.status = ?2)
@@ -657,6 +665,19 @@ impl Store {
                 if let Some(s) = scope {
                     if !scope_allows_project(conn, s, &project_id)? {
                         continue;
+                    }
+                    if let Some(p) = &filter.project {
+                        let p = p.trim().trim_end_matches('/');
+                        if lane.project != p && lane.project_path != p {
+                            continue;
+                        }
+                    }
+                    if let Some(a) = &filter.lead {
+                        let a = a.trim();
+                        let bare = lane.lead.split('@').next().unwrap_or_default();
+                        if lane.lead != a && bare != a {
+                            continue;
+                        }
                     }
                 }
                 out.push(lane);
