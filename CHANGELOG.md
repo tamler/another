@@ -22,7 +22,8 @@ All notable changes to Another. Unreleased work is listed under the next version
     - CLI: `another webhook add|list|remove|test|dead|deliveries|retry`.
     - MCP tools: `webhook_subscribe`, `webhook_list`, `webhook_remove`.
     - `another serve` delivers them.
-  - New events: `hold.conflict`, emitted when an acquire is refused, and `resource.lease_expiring`, emitted once when a lease nears its end.
+  - New events: `hold.conflict`, emitted when an acquire is refused, and `resource.lease_expiring`, emitted once when a lease nears its end. Both are node-local and are not federated.
+  - A webhook is disabled once the token that created it is revoked or expires. Webhooks a token created follow its own-agent rule for project-less events, like the stream.
 - CI also runs on pull requests that target non-`main` branches, so stacked PRs are checked.
 
 ### Changed

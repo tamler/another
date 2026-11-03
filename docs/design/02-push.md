@@ -24,7 +24,7 @@ An event's projects are derived from its payload and the tables it points at:
 
 An event with projects is visible to a scope only if one of its projects matches the globs. **Project scope wins over agent identity**: a token acting as `manager` does not see `manager`'s actions in a project outside its globs.
 
-An event with no project (mail between agents without projects, their sessions) is visible only if it concerns the token's own agent: the agent is the actor, or it appears in the payload or among the message's parties. Local callers (CLI, stdio, loopback without `--auth`) see everything, as before. The activity summary's agent, request and hold counts are filtered the same way.
+An event with no project (mail between agents without projects, their sessions) is visible only if it concerns the token's own agent, **matched by agent id, never by name**: the agent's id appears in the payload or among the message's parties, or the event's actor address resolves, on the event's own origin node, to the token's agent. Names are not unique across nodes: another node's project-less `manager` is a different agent. Local callers (CLI, stdio, loopback without `--auth`) see everything, as before. The activity summary's agent, request and hold counts are filtered the same way.
 
 (An earlier draft of this note also showed events that concerned the token's agent in other projects. The phase 2 integration test caught that this leaks another project's lane to a manager token scoped to one project, so the rule above replaced it.)
 
@@ -58,15 +58,16 @@ Items are `ActivityItem`s: one-line summaries plus ids. Message bodies are never
 | `needs_decision` | a lane moving to `needs_decision` (status change, or a report with that status); `decision.created` (phase 3) |
 | `request_created` | `request.created`, `decision.created` |
 | `request_answered` | `request.completed`, `request.cancelled`, `decision.answered`, `decision.expired` |
-| `hold_conflict` | `hold.conflict` (new event when an acquire is refused) |
-| `lease_expiring` | `resource.lease_expiring` (new event, emitted once by the sweeper when a lease has under 5 minutes left, or under half its TTL for short leases; renewing re-arms it) |
+| `hold_conflict` | `hold.conflict` (new event when an acquire is refused; node-local, never federated) |
+| `lease_expiring` | `resource.lease_expiring` (new event, emitted once by the sweeper when a lease has under 5 minutes left, or under half its TTL for short leases; renewing re-arms it; node-local, never federated) |
 | `all` | everything the scope can see, except mail and delivery events |
 
 **Scope.**
 - Every webhook has **project globs**.
 - From the CLI they are required (`--project`, or the explicit `--all-projects`).
 - Through remote MCP they default to the token's globs and can only be narrowed to a subset of them, compared as strings. Remote callers can only list or remove webhooks their own token created.
-- Delivery uses the same visibility rule as streams, so a webhook can never carry an event from a project outside its globs.
+- Delivery uses the same visibility rule as streams, so a webhook can never carry an event from a project outside its globs. A webhook created by a token also gets that token agent's **own-agent rule** for project-less events, exactly as its stream would (Jacob's decision). Webhooks created locally carry project events only, unless they use `--all-projects`.
+- **A webhook lives no longer than its token.** Before every queueing pass, webhooks whose creating token was revoked or has expired are **disabled**: `disabled_at` and `disabled_reason` are set, they never queue again, their pending deliveries become dead (`webhook disabled: token revoked`), and `webhook test` refuses them. `list` shows the reason. Local webhooks have no token and are unaffected.
 
 **Delivery.**
 - `another serve` (HTTP or stdio) runs a delivery worker every 2 seconds:
@@ -86,10 +87,18 @@ Items are `ActivityItem`s: one-line summaries plus ids. Message bodies are never
 
 `another webhook test` sends a synthetic `webhook.test` delivery synchronously; it is not an event in the log.
 
+## Federation
+
+`hold.conflict` and `resource.lease_expiring` are **node-local signals**: they are classified as never shared, so they don't leave the node (Jacob's decision). Other nodes already see the holds and leases themselves (as cross-node warnings, D26), and a refusal or an expiry warning is only actionable on the node where it happened. Each node's own webhooks deliver its own signals.
+
+## Remote `resource_find` stays node-wide
+
+Token scoping covers **events**. `resource_find` keeps D16's node-wide, read-only awareness (Jacob's decision): borrowing a shared model server across projects is a core use case, and resource rows carry no bodies.
+
 ## Migration
 
 Migration 7, additive:
-- the `webhooks` and `webhook_deliveries` tables;
+- the `webhooks` table (including `disabled_at`, `disabled_reason`) and the `webhook_deliveries` table;
 - a `resource_leases.expiry_warned_at` column (nullable, defaults to NULL).
 
 ## Out of scope
