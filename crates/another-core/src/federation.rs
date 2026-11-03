@@ -181,8 +181,18 @@ fn classify(kind: &str, payload: &Value, origin: &str) -> Share {
     let not_origin =
         |nodes: Vec<String>| -> Vec<String> { nodes.into_iter().filter(|n| n != origin).collect() };
     match kind.split('.').next().unwrap_or_default() {
-        "token" | "peer" | "invite" => return Share::Never,
+        // Tokens, peers, the scheduled summary (it carries the digest) and node settings
+        // stay on this node.
+        "token" | "peer" | "invite" | "summary" => return Share::Never,
         _ => {}
+    }
+    // Node-local signals (D38): a refused hold and an expiring lease are about this node's
+    // holds and leases; other nodes see the holds and leases themselves.
+    if matches!(
+        kind,
+        "hold.conflict" | "lane.hold_conflict" | "resource.lease_expiring" | "node.setting_changed"
+    ) {
+        return Share::Never;
     }
     match kind {
         "node.created" | "node.renamed" | "project.ensured" | "agent.registered" => {
@@ -1471,6 +1481,12 @@ mod tests {
         assert_eq!(
             classify("resource.borrowed", &json!({ "resource_node": "B" }), o),
             Share::Feed(vec!["B".into()])
+        );
+        // Node-local signals never leave their node (D38).
+        assert_eq!(classify("hold.conflict", &json!({}), o), Share::Never);
+        assert_eq!(
+            classify("resource.lease_expiring", &json!({}), o),
+            Share::Never
         );
     }
 

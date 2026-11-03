@@ -24,18 +24,22 @@ The message has to read well on a phone. The manager bot wants the same informat
 | `requests` | Open, claimed and stale counts; completed in the window |
 | `holds` | Live holds; hold conflicts in the window (cross-lane ones counted separately) |
 | `spend` | Per account: spent in the window, plus the period's used % and status from `spend_report` |
-| `agents` | Agents active in the window |
+| `agents_active` | Agents active in the window (not the `another` system agent) |
+| `people_active` | People (program `human`) active in the window, listed apart from agents |
+| `truncated` | True when an event list hit the pager's cap (20,000 per section); the markdown says so |
 | `counts` | Events per category |
 | `markdown` | The phone version: a heading, the attention list, then one line per section, about 15 lines at most |
 
-`since` is a duration (default `24h`), an RFC 3339 time, or an event-id cursor, as elsewhere.
+`since` is a duration (default `24h`), an RFC 3339 time, or an event-id cursor, as elsewhere. An event id is resolved through the caller's scoped feed: an event the caller can't see gets the same `not_found` as an unknown id.
+
+**Budgets:** an account over budget whose percentage the caller can't see (no budget figure, or a zero budget) is listed as "over budget" with no percentage.
 
 ## Surfaces
 
 - **CLI:** `another summary [--since 24h] [--json]`. It prints the markdown by default.
 - **MCP:** `daily_summary {since?}` returns the JSON with `markdown` inside it.
 - **HTTP:** `GET /summary?since=24h` returns JSON, or `text/markdown` with `&format=markdown` or `Accept: text/markdown`. It sits behind `--auth`, is scoped and is audited.
-- `activity_summarize` is unchanged: it is the hour-level digest that the hooks use.
+- `activity_summarize` stays the hour-level digest that the hooks use. One change: its request counts now count task requests only (decisions are reported on their own), and the summary reuses them.
 
 ## Scope
 
@@ -46,10 +50,14 @@ Remote callers get each section exactly as the underlying scoped read returns it
 
 So the summary can't show what any one of those reads would hide.
 
+## Scheduled rollup (opt-in)
+
+`another summary schedule --daily HH:MM --to webhook|mail:NAME` (local only; `--off` turns it off, no flags shows it). Stored as the node settings `summary_daily` and `summary_to`.
+- **Runs in the server:** `another serve` checks on every sweep. Once a day, after `HH:MM` local time, it sends the local (unscoped) summary covering the time since the last one (24 h the first time, at most 48 h).
+- **`mail:NAME`:** mail from the reserved system agent `another`.
+- **`webhook`:** emits `summary.daily` (from `another`), delivered through the new `daily_summary` webhook filter. The event is node-local (never federated) and never visible to tokens. So only local webhooks without project globs receive it; token-created webhooks and `all` never do. Its payload is the summary itself: it is the delivery.
+- Pulling with `another summary`, MCP `daily_summary` or `GET /summary` is unchanged.
+
 ## Migration
 
-None.
-
-## Out of scope
-
-- Scheduling. The manager or a cron job calls the endpoint. A scheduled summary that posts itself would need the push from note 02, plus a place to send it, and that belongs to the manager bot.
+None (settings live in `node_settings`, from migration 8).

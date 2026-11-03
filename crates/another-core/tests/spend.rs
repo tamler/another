@@ -23,7 +23,11 @@ fn store() -> (Store, Handle) {
     ] {
         s.register_agent(RegisterAgent {
             name: name.into(),
-            program: Program::Claude,
+            program: if name == "manager" {
+                Program::GrokBot
+            } else {
+                Program::Claude
+            },
             project: project.map(Into::into),
             model: None,
             description: None,
@@ -470,12 +474,11 @@ fn token_scope_hides_other_projects_spend() {
         "only shop's share of the shared account"
     );
     assert!(shared.partial);
-    assert_eq!(
-        shared.budget, None,
-        "remaining would reveal other projects' spend"
-    );
-    assert_eq!(shared.remaining, None);
-    assert_eq!(shared.projected, None);
+    // Budget figures are for the whole shared account (read-only), not who used it.
+    assert_eq!(shared.budget, Some(200.0));
+    assert_eq!(shared.remaining, Some(100.0));
+    assert_eq!(shared.used_pct, Some(50.0));
+    assert!(r.markdown.contains("100 of 200 USD left"), "{}", r.markdown);
     assert!(!r.markdown.contains("vault"));
     assert!(!serde_json::to_string(&r).unwrap().contains("vaulter"));
     assert_eq!(find(&r, "shop-gpu").spent, 10.0);
@@ -560,4 +563,266 @@ fn upgrades_a_database_created_before_spend() {
     assert!(s.spend_accounts(None).unwrap().is_empty());
     account(&s, "x", SpendKind::Server, "USD", Some(5.0), |_| {});
     assert!(Store::schema_version() >= 10);
+}
+
+fn gpu_with_approval(s: &Store) {
+    account(s, "gpu-h100", SpendKind::GpuPod, "USD", Some(500.0), |a| {
+        a.cost_per_hour = Some(4.0);
+        a.requires_approval = true;
+        a.approver = Some("sam".into());
+    });
+}
+
+fn borrow(s: &Store, agent: &str, account: &str, lane: Option<&str>) -> SpendLeaseOutcome {
+    s.borrow_spend(
+        BorrowSpend {
+            agent: agent.into(),
+            account: account.into(),
+            lane: lane.map(Into::into),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap()
+}
+
+#[test]
+fn releasing_a_pending_lease_withdraws_its_decision() {
+    let (s, _) = store();
+    gpu_with_approval(&s);
+    let pending = borrow(&s, "codex@shop", "gpu-h100", Some("train"));
+    let decision_id = pending.decision_id.clone().unwrap();
+    assert_eq!(
+        s.lane("train", None).unwrap().lane.status,
+        LaneStatus::NeedsDecision
+    );
+
+    let l = s
+        .release_spend("codex@shop", &pending.lease.lease_id, None)
+        .unwrap();
+    assert_eq!(l.status, SpendLeaseStatus::Denied);
+    assert_eq!(
+        s.decision(&decision_id, None).unwrap().status,
+        DecisionStatus::Cancelled,
+        "the approver is no longer asked"
+    );
+    assert_eq!(
+        s.lane("train", None).unwrap().lane.status,
+        LaneStatus::Working,
+        "the lane leaves needs_decision"
+    );
+    let ev = s.events(200).unwrap();
+    let w = ev
+        .iter()
+        .find(|e| e.kind == "spend.lease_withdrawn")
+        .expect("spend.lease_withdrawn");
+    assert_eq!(w.payload["lease_id"], pending.lease.lease_id);
+    assert_eq!(w.payload["decision_id"], decision_id);
+    // Answering it now is refused: it is closed.
+    let late = s.answer_decision(
+        AnswerDecision {
+            decision: decision_id,
+            value: Some("approve".into()),
+            relayed_by: Some("manager".into()),
+            ..Default::default()
+        },
+        None,
+    );
+    assert_eq!(late.unwrap_err().code(), "conflict");
+}
+
+#[test]
+fn the_borrower_cannot_approve_its_own_spend() {
+    let (s, _) = store();
+    gpu_with_approval(&s);
+    // A manager bot may relay answers, but not for a lease it asked for itself.
+    let pending = borrow(&s, "manager", "gpu-h100", Some("train"));
+    let answer = |by: &str| {
+        s.answer_decision(
+            AnswerDecision {
+                decision: pending.decision_id.clone().unwrap(),
+                value: Some("approve".into()),
+                relayed_by: Some(by.into()),
+                ..Default::default()
+            },
+            None,
+        )
+    };
+    assert_eq!(answer("manager").unwrap_err().code(), "forbidden");
+    assert_eq!(
+        answer("codex@shop").unwrap_err().code(),
+        "forbidden",
+        "not a manager or person"
+    );
+    let leases = s.spend_leases(false, None).unwrap();
+    assert_eq!(leases[0].status, SpendLeaseStatus::PendingApproval);
+    // The person (or another manager) can.
+    s.register_agent(RegisterAgent {
+        name: "bot2".into(),
+        program: Program::GrokBot,
+        project: None,
+        model: None,
+        description: None,
+    })
+    .unwrap();
+    answer("bot2").unwrap();
+    assert_eq!(
+        s.spend_leases(false, None).unwrap()[0].status,
+        SpendLeaseStatus::Active
+    );
+}
+
+fn gpu_resource(s: &Store, ttl: i64) -> Resource {
+    s.register_resource(RegisterResource {
+        agent: "claude@shop".into(),
+        kind: ResourceKind::Gpu,
+        name: "pod:a100".into(),
+        endpoint: None,
+        port: None,
+        pid: None,
+        project: Some("shop".into()),
+        purpose: Some("rented pod".into()),
+        mode: LeaseMode::Shared,
+        ttl_seconds: Some(ttl),
+        metadata: None,
+    })
+    .unwrap()
+    .resource
+}
+
+#[test]
+fn borrowing_a_linked_resource_goes_through_the_gate_and_accrues() {
+    let (s, clock) = store();
+    gpu_with_approval(&s);
+    let res = gpu_resource(&s, 86_400);
+    let target = ResourceRef::parse("gpu:pod:a100").unwrap();
+    // Linking is local-only and needs an hourly rate.
+    let t = s
+        .create_token("manager", &["/work/shop".into()], None, None)
+        .unwrap();
+    let shop = s.verify_token(&t.secret).unwrap();
+    assert_eq!(
+        s.link_resource_spend(&target, Some("gpu-h100"), Some(&shop))
+            .unwrap_err()
+            .code(),
+        "forbidden"
+    );
+    account(&s, "flat", SpendKind::Server, "USD", None, |_| {});
+    assert_eq!(
+        s.link_resource_spend(&target, Some("flat"), None)
+            .unwrap_err()
+            .code(),
+        "invalid"
+    );
+    let linked = s
+        .link_resource_spend(&target, Some("gpu-h100"), None)
+        .unwrap();
+    assert_eq!(linked.spend_account.as_deref(), Some("gpu-h100"));
+
+    // Borrowing waits for approval: no resource lease yet.
+    let out = s
+        .borrow_resource("codex@shop", &target, Some(10800))
+        .unwrap();
+    assert_eq!(out.outcome, "pending_approval");
+    assert!(out.lease.is_none());
+    let decision_id = out.decision_id.clone().unwrap();
+    assert_eq!(out.resource.refcount, 1, "only the owner");
+    // Asking again doesn't open a second request.
+    let again = s
+        .borrow_resource("codex@shop", &target, Some(10800))
+        .unwrap();
+    assert_eq!(again.decision_id.as_deref(), Some(decision_id.as_str()));
+    assert_eq!(s.spend_leases(false, None).unwrap().len(), 1);
+
+    // Approval starts the spend lease and takes the resource lease.
+    s.answer_decision(
+        AnswerDecision {
+            decision: decision_id,
+            value: Some("approve".into()),
+            relayed_by: Some("manager".into()),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    let r = s.resource(&target).unwrap();
+    assert!(r
+        .leases
+        .iter()
+        .any(|l| l.agent == "codex@shop" && l.role == "borrower"));
+    let lease = &s.spend_leases(false, None).unwrap()[0];
+    assert_eq!(lease.status, SpendLeaseStatus::Active);
+    assert_eq!(lease.resource_id.as_deref(), Some(res.resource_id.as_str()));
+
+    // Two hours later the borrower releases the resource: the spend lease ends with it.
+    advance(&clock, 2 * HOUR);
+    s.borrow_resource("codex@shop", &target, Some(10800))
+        .unwrap(); // renew
+    s.release_resource("codex@shop", &target, false).unwrap();
+    assert!(s.spend_leases(false, None).unwrap().is_empty());
+    let ended = &s.spend_leases(true, None).unwrap()[0];
+    assert_eq!(ended.status, SpendLeaseStatus::Ended);
+    assert_eq!(ended.cost, 8.0, "2 h at 4 USD/h");
+    assert_eq!(find(&report(&s, None), "gpu-h100").spent, 8.0);
+
+    // Borrowing again with an active approval-free account: starts at once, and an expired
+    // resource lease ends the spend lease at the lease's expiry.
+    s.update_spend_account(
+        "gpu-h100",
+        SpendAccountUpdate {
+            requires_approval: Some(false),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    let out = s
+        .borrow_resource("codex@shop", &target, Some(3600))
+        .unwrap();
+    assert_eq!(out.outcome, "borrowed");
+    advance(&clock, 3 * HOUR);
+    s.sweep().unwrap();
+    let all = s.spend_leases(true, None).unwrap();
+    let last = all
+        .iter()
+        .find(|l| l.status == SpendLeaseStatus::Ended && l.cost == 4.0);
+    assert!(last.is_some(), "charged up to the lease expiry: {all:?}");
+
+    // Unlinked resources borrow as before.
+    s.link_resource_spend(&target, None, None).unwrap();
+    let out = s.borrow_resource("codex@shop", &target, None).unwrap();
+    assert_eq!(out.outcome, "borrowed");
+    assert!(s.spend_leases(false, None).unwrap().is_empty());
+}
+
+#[test]
+fn ending_a_session_closes_spend_leases() {
+    let (s, clock) = store();
+    gpu_with_approval(&s);
+    account(&s, "cpu", SpendKind::Server, "USD", None, |a| {
+        a.cost_per_hour = Some(1.0)
+    });
+    let active = borrow(&s, "codex@shop", "cpu", None);
+    let pending = borrow(&s, "codex@shop", "gpu-h100", Some("train"));
+    advance(&clock, HOUR);
+    s.session("codex@shop", SessionPhase::End, SessionInfo::default())
+        .unwrap();
+    let all = s.spend_leases(true, None).unwrap();
+    let get = |id: &str| all.iter().find(|l| l.lease_id == id).unwrap();
+    assert_eq!(get(&active.lease.lease_id).status, SpendLeaseStatus::Ended);
+    assert_eq!(get(&active.lease.lease_id).cost, 1.0);
+    assert_eq!(
+        get(&pending.lease.lease_id).status,
+        SpendLeaseStatus::Denied
+    );
+    assert_eq!(
+        s.decision(pending.decision_id.as_ref().unwrap(), None)
+            .unwrap()
+            .status,
+        DecisionStatus::Cancelled
+    );
+    assert_eq!(
+        s.lane("train", None).unwrap().lane.status,
+        LaneStatus::Working
+    );
 }

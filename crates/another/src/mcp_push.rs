@@ -32,7 +32,8 @@ pub struct WebhookSubscribeArgs {
     /// `https://` URL (plain http only to loopback). Redirects are not followed.
     pub url: String,
     /// Event filters: lane_status, lane_report, needs_decision, request_created,
-    /// request_answered, hold_conflict, lease_expiring, all.
+    /// request_answered, hold_conflict, lease_expiring, budget, all. (`daily_summary`
+    /// is accepted but never delivered to token webhooks: it covers the whole node.)
     pub filters: Vec<WebhookFilter>,
     /// Project path or slug globs. Remote callers default to (and may only narrow) their
     /// token's globs.
@@ -86,7 +87,7 @@ impl AnotherMcp {
     #[tool(
         description = "Subscribe a URL to events (HMAC-SHA256 signed POSTs with retries). \
         Returns the signing secret once. Filters: lane_status, lane_report, needs_decision, \
-        request_created, request_answered, hold_conflict, lease_expiring, all."
+        request_created, request_answered, hold_conflict, lease_expiring, budget, all."
     )]
     async fn webhook_subscribe(
         &self,

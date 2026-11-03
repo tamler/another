@@ -200,6 +200,51 @@ fn spend_cli_flow() {
         &["spend", "release", lease_id, "--agent", "codex@shop"],
     );
 
+    // A registered pod linked to the account: borrowing it asks sam first.
+    ok(
+        home,
+        &[
+            "resource",
+            "register",
+            "gpu",
+            "pod-a100",
+            "--agent",
+            "codex@shop",
+            "--project",
+            repo_s,
+        ],
+    );
+    ok(
+        home,
+        &[
+            "agent",
+            "register",
+            "claude",
+            "--program",
+            "claude",
+            "--project",
+            repo_s,
+        ],
+    );
+    let linked = ok(home, &["spend", "link", "gpu-a100", "gpu:pod-a100"]);
+    assert!(linked.contains("spend:gpu-a100"), "{linked}");
+    let b: Value = serde_json::from_str(&ok(
+        home,
+        &["--json", "borrow", "gpu:pod-a100", "--agent", "claude@shop"],
+    ))
+    .unwrap();
+    assert_eq!(b["outcome"], "pending_approval");
+    assert!(b["decision_id"].is_string() && b["lease"].is_null(), "{b}");
+    let text = ok(home, &["borrow", "gpu:pod-a100", "--agent", "claude@shop"]);
+    assert!(text.contains("waiting for decision"), "{text}");
+    let unlinked = ok(home, &["spend", "unlink", "gpu:pod-a100"]);
+    assert!(!unlinked.contains("spend:"), "{unlinked}");
+    let help = ok(home, &["spend", "account", "add", "--help"]);
+    assert!(
+        help.contains("node's decider") && !help.contains("ANOTHER_DECIDER"),
+        "{help}"
+    );
+
     let md = ok(home, &["spend"]);
     assert!(md.starts_with("**Spend**"), "{md}");
     assert!(md.contains("`claude-api` 12.50 / 200 USD"), "{md}");
@@ -343,7 +388,9 @@ async fn remote_spend_is_scoped_and_audited() {
     assert_eq!(names, vec!["shared-api"]);
     assert_eq!(r["accounts"][0]["spent"], 10.0);
     assert_eq!(r["accounts"][0]["partial"], true);
-    assert!(r["accounts"][0]["budget"].is_null());
+    // The whole shared budget is visible (read-only); spend is only shop's share.
+    assert!(r["accounts"][0]["budget"].is_number(), "{r}");
+    assert!(r["accounts"][0]["remaining"].is_number(), "{r}");
     assert!(!r.to_string().contains("vault"), "{r}");
 
     let r = call(

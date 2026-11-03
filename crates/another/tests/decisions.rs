@@ -116,6 +116,22 @@ async fn agent_asks_manager_answers_over_http() {
     let r = call(&c, "decision_ask", ask.clone()).await;
     assert_eq!(code(&r), None, "{}", body(&r));
     let shop_id = body(&r)["decision_id"].as_str().unwrap().to_string();
+    // The asker can't answer its own decision, even claiming to relay for owner.
+    let own = call(
+        &c,
+        "decision_answer",
+        json!({ "decision": shop_id, "value": "ship", "answered_by": "owner" }),
+    )
+    .await;
+    assert_eq!(code(&own).as_deref(), Some("forbidden"));
+    let own_http = reqwest::Client::new()
+        .post(format!("{base}/decisions/{shop_id}/answer"))
+        .bearer_auth(&claude)
+        .json(&json!({ "value": "ship", "answered_by": "owner" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(own_http.status(), 403);
     // Acting as someone else is refused.
     let mut spoof = ask.clone();
     spoof["agent"] = json!("codex@vault");

@@ -327,7 +327,11 @@ pub fn resources(rs: &[Resource]) -> String {
                 r.purpose
                     .as_deref()
                     .map(|p| format!("  ({p})"))
-                    .unwrap_or_default(),
+                    .unwrap_or_default()
+                    + &r.spend_account
+                        .as_deref()
+                        .map(|a| format!("  spend:{a}"))
+                        .unwrap_or_default(),
                 r.resource_id
             )
         })
@@ -340,8 +344,13 @@ pub fn lease_outcome(o: &LeaseOutcome) -> String {
         .as_ref()
         .map(|l| format!(" as {} until {}", l.role, l.expires_at))
         .unwrap_or_default();
+    let decision = o
+        .decision_id
+        .as_ref()
+        .map(|d| format!(" (waiting for decision {d})"))
+        .unwrap_or_default();
     format!(
-        "{} {} {}{lease}\n{}",
+        "{} {} {}{lease}{decision}\n{}",
         o.outcome,
         o.resource.kind.as_str(),
         o.resource.name,
