@@ -17,7 +17,12 @@ fn store() -> (Store, Handle) {
     ] {
         s.register_agent(RegisterAgent {
             name: name.into(),
-            program: Program::Claude,
+            // The manager relays answers, which only manager bots (and people) may do.
+            program: if name == "manager" {
+                Program::GrokBot
+            } else {
+                Program::Claude
+            },
             project: project.map(Into::into),
             model: None,
             description: None,
@@ -400,7 +405,11 @@ fn token_scope_hides_other_projects_decisions() {
         },
         Some(&scope),
     );
-    assert_eq!(r.unwrap_err().code(), "forbidden");
+    assert_eq!(
+        r.unwrap_err().code(),
+        "not_found",
+        "out of scope looks like missing"
+    );
 
     // Events: the vault decision never shows in the scoped feed.
     let feed = s
@@ -487,4 +496,215 @@ fn upgrades_a_database_created_before_decisions() {
     let reqs = s.requests(RequestFilter::default()).unwrap();
     assert_eq!(reqs[0].kind, "task");
     ask(&s, "a@shop", |_| {}).unwrap();
+}
+
+#[test]
+fn the_asker_cannot_answer_its_own_decision() {
+    let (s, _) = store();
+    let d = ask(&s, "claude@shop", |_| {}).unwrap();
+    // The asker relaying an answer "from owner": refused.
+    let own = s.answer_decision(
+        AnswerDecision {
+            decision: d.decision_id.clone(),
+            value: Some("ship".into()),
+            answered_by: Some("owner".into()),
+            relayed_by: Some("claude@shop".into()),
+            ..Default::default()
+        },
+        None,
+    );
+    let e = own.unwrap_err();
+    assert_eq!(e.code(), "forbidden");
+    assert!(e.to_string().contains("its own decision"), "{e}");
+    // Another coding agent can't relay either; only a manager bot or a person.
+    let other = s.answer_decision(
+        AnswerDecision {
+            decision: d.decision_id.clone(),
+            value: Some("ship".into()),
+            relayed_by: Some("codex@vault".into()),
+            ..Default::default()
+        },
+        None,
+    );
+    assert_eq!(other.unwrap_err().code(), "forbidden");
+    assert_eq!(
+        s.decision(&d.decision_id, None).unwrap().status,
+        DecisionStatus::Open
+    );
+    answer(&s, &d.decision_id, Some("ship"), None).unwrap();
+}
+
+#[test]
+fn lanes_and_projects_resolve_within_the_callers_scope() {
+    let (s, _) = store();
+    for (lane, project, lead) in [
+        ("shop-lane", "shop", "claude@shop"),
+        ("vault-lane", "vault", "codex@vault"),
+    ] {
+        s.create_lane(
+            NewLane {
+                agent: "manager".into(),
+                name: lane.into(),
+                project: project.into(),
+                lead: lead.into(),
+                charter: String::new(),
+                status: None,
+            },
+            None,
+        )
+        .unwrap();
+    }
+    // Locally, a lane is looked up in the decision's project only.
+    let cross = ask(&s, "claude@shop", |d| d.lane = Some("vault-lane".into())).unwrap_err();
+    let missing = ask(&s, "claude@shop", |d| d.lane = Some("nope".into())).unwrap_err();
+    assert_eq!(cross.code(), "not_found");
+    assert_eq!(
+        cross.to_string().replace("vault-lane", "X"),
+        missing.to_string().replace("nope", "X")
+    );
+    let vault_lane_id = s.lane("vault-lane", None).unwrap().lane.lane_id;
+    assert_eq!(
+        ask(&s, "claude@shop", |d| d.lane = Some(vault_lane_id.clone()))
+            .unwrap_err()
+            .code(),
+        "not_found",
+        "by id too"
+    );
+    ask(&s, "claude@shop", |d| d.lane = Some("shop-lane".into())).unwrap();
+
+    // A token: the project is scope-checked first, and hidden looks like missing.
+    let t = s
+        .create_token("manager", &["/work/shop".into()], None, None)
+        .unwrap();
+    let scope = s.verify_token(&t.secret).unwrap();
+    let scoped_ask = |project: &str, lane: Option<&str>| {
+        s.ask_decision(
+            NewDecision {
+                agent: "manager".into(),
+                question: "q?".into(),
+                options: opts(&[("a", "A"), ("b", "B")]),
+                project: Some(project.into()),
+                lane: lane.map(Into::into),
+                ..Default::default()
+            },
+            Some(&scope),
+        )
+        .unwrap_err()
+    };
+    let hidden = scoped_ask("vault", Some("vault-lane"));
+    let nowhere = scoped_ask("nowhere", Some("vault-lane"));
+    assert_eq!(hidden.code(), "not_found");
+    assert_eq!(
+        hidden.to_string().replace("vault", "X"),
+        nowhere.to_string().replace("nowhere", "X"),
+        "the project check comes first"
+    );
+    let lane_hidden = scoped_ask("shop", Some("vault-lane"));
+    let lane_missing = scoped_ask("shop", Some("nope"));
+    assert_eq!(
+        lane_hidden.to_string().replace("vault-lane", "X"),
+        lane_missing.to_string().replace("nope", "X")
+    );
+
+    // decision_list filters: the same rules.
+    let list = |project: Option<&str>, lane: Option<&str>| {
+        s.decisions(
+            DecisionFilter {
+                project: project.map(Into::into),
+                lane: lane.map(Into::into),
+                ..Default::default()
+            },
+            Some(&scope),
+        )
+    };
+    let p_hidden = list(Some("vault"), None).unwrap_err();
+    let p_missing = list(Some("nowhere"), None).unwrap_err();
+    assert_eq!(
+        p_hidden.to_string().replace("vault", "X"),
+        p_missing.to_string().replace("nowhere", "X")
+    );
+    let l_hidden = list(None, Some("vault-lane")).unwrap_err();
+    let l_missing = list(None, Some("nope")).unwrap_err();
+    assert_eq!(
+        l_hidden.to_string().replace("vault-lane", "X"),
+        l_missing.to_string().replace("nope", "X")
+    );
+    assert_eq!(list(Some("shop"), Some("shop-lane")).unwrap().len(), 1);
+}
+
+#[test]
+fn decider_setting_system_agent_and_option_notes() {
+    let (s, clock) = store();
+    // The default decider is a stored node setting.
+    assert_eq!(s.default_decider().unwrap(), DEFAULT_DECIDER);
+    s.set_setting("decider", "sam").unwrap();
+    assert_eq!(s.setting("decider").unwrap().value, "sam");
+    let d = ask(&s, "claude@shop", |d| {
+        d.deadline_at = Some(s.now() + 60_000);
+        d.on_timeout = DecisionTimeout::Cancel;
+    })
+    .unwrap();
+    assert_eq!(d.human, "sam");
+    assert_eq!(
+        s.set_setting("decider", "not ok!").unwrap_err().code(),
+        "invalid"
+    );
+    assert_eq!(
+        s.set_setting("colour", "blue").unwrap_err().code(),
+        "invalid"
+    );
+
+    // Timeout and overdue mail comes from the reserved system agent, not the person.
+    let keep = ask(&s, "claude@shop", |d| {
+        d.deadline_at = Some(s.now() + 60_000)
+    })
+    .unwrap();
+    advance(&clock, 61_000);
+    s.sweep().unwrap();
+    let inbox = s.inbox("claude@shop", InboxQuery::default()).unwrap();
+    let expired = inbox
+        .messages
+        .iter()
+        .find(|m| m.message.subject.starts_with("[decision] cancelled:"))
+        .unwrap();
+    assert_eq!(expired.message.from, SYSTEM_AGENT);
+    assert_eq!(expired.message.thread_id, d.thread_id);
+    let sam = s.inbox("sam", InboxQuery::default()).unwrap();
+    let overdue = sam
+        .messages
+        .iter()
+        .find(|m| m.message.subject.starts_with("[decision] overdue:"))
+        .unwrap();
+    assert_eq!(overdue.message.from, SYSTEM_AGENT);
+    assert_eq!(overdue.message.thread_id, keep.thread_id);
+    // The name is reserved.
+    let r = s.register_agent(RegisterAgent {
+        name: SYSTEM_AGENT.into(),
+        program: Program::Other,
+        project: None,
+        model: None,
+        description: None,
+    });
+    assert_eq!(r.unwrap_err().code(), "invalid");
+
+    // A short note may go with an option even when free text is off; not alone, not long.
+    let n = ask(&s, "claude@shop", |_| {}).unwrap();
+    assert_eq!(
+        answer(&s, &n.decision_id, None, Some("just text"))
+            .unwrap_err()
+            .code(),
+        "invalid"
+    );
+    let long = "x".repeat(MAX_OPTION_NOTE + 1);
+    assert_eq!(
+        answer(&s, &n.decision_id, Some("ship"), Some(&long))
+            .unwrap_err()
+            .code(),
+        "invalid"
+    );
+    let done = answer(&s, &n.decision_id, Some("ship"), Some("ship it, ping QA")).unwrap();
+    assert_eq!(
+        done.answer.unwrap().text.as_deref(),
+        Some("ship it, ping QA")
+    );
 }

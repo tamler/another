@@ -147,7 +147,7 @@ pub(crate) fn agent_from_row(r: &Row<'_>) -> rusqlite::Result<Agent> {
     })
 }
 
-fn validate_name(name: &str) -> Result<()> {
+pub(crate) fn validate_name(name: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name.len() <= 64
         && name
@@ -286,11 +286,74 @@ pub(crate) fn find_project(conn: &Connection, node_id: &str, key: &str) -> Resul
         project_from_row,
     )
     .optional()?
-    .ok_or_else(|| {
-        Error::NotFound(format!(
-            "unknown project {key:?}; call ensure_project with its absolute path first"
-        ))
-    })
+    .ok_or_else(|| unknown_project(key))
+}
+
+/// The error for a project that doesn't exist **or** is outside the caller's scope.
+pub(crate) fn unknown_project(key: &str) -> Error {
+    Error::NotFound(format!(
+        "unknown project {key:?}; call ensure_project with its absolute path first"
+    ))
+}
+
+/// [`find_project`] as a scope sees it: out-of-scope projects are reported exactly like
+/// missing ones.
+pub(crate) fn find_project_in(
+    conn: &Connection,
+    node_id: &str,
+    key: &str,
+    scope: Option<&crate::tokens::TokenScope>,
+) -> Result<Project> {
+    let p = find_project(conn, node_id, key)?;
+    match scope {
+        Some(s) if !crate::tokens::scope_allows_project(conn, s, &p.project_id)? => {
+            Err(unknown_project(key))
+        }
+        _ => Ok(p),
+    }
+}
+
+/// Name of the reserved system agent that sends automatic mail (timeouts, reminders).
+pub const SYSTEM_AGENT: &str = "another";
+
+/// The system agent, registered on first use (project-less, program `other`).
+pub(crate) fn system_agent_tx(tx: &Tx<'_>) -> Result<AgentRef> {
+    let existing: Option<String> = tx
+        .query_row(
+            "SELECT agent_id FROM agents WHERE node_id = ?1 AND name = ?2 AND project_id IS NULL",
+            params![tx.node_id, SYSTEM_AGENT],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let id = match existing {
+        Some(id) => id,
+        None => {
+            register_tx(
+                tx,
+                &RegisterAgent {
+                    name: SYSTEM_AGENT.into(),
+                    program: Program::Other,
+                    project: None,
+                    model: None,
+                    description: Some(
+                        "Another itself: automatic mail (timeouts, reminders)".into(),
+                    ),
+                },
+            )?
+            .agent_id
+        }
+    };
+    Ok(tx.query_row(
+        "SELECT agent_id, address, node_id FROM agents WHERE agent_id = ?1",
+        [&id],
+        |r| {
+            Ok(AgentRef {
+                id: r.get(0)?,
+                address: r.get(1)?,
+                node_id: r.get(2)?,
+            })
+        },
+    )?)
 }
 
 /// Resolve an acting agent (must live on this node). Addresses: `name` or `name@project` on this node, or
@@ -430,6 +493,11 @@ impl Store {
     /// Register a new agent or update an existing one's details; touches `last_seen_at`.
     pub fn register_agent(&self, input: RegisterAgent) -> Result<Agent> {
         validate_name(&input.name)?;
+        if input.name == SYSTEM_AGENT {
+            return Err(Error::Invalid(format!(
+                "the name {SYSTEM_AGENT:?} is reserved for Another's own automatic mail"
+            )));
+        }
         self.write(|tx| register_tx(tx, &input))
     }
 }

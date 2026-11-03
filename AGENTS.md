@@ -50,6 +50,13 @@ Every way events leave the node applies the same visibility rule (D38). When add
 - **Node-local events:** `hold.conflict` and `resource.lease_expiring` are never federated. Classify new purely local signals as `Share::Never`.
 - **`resource_find` stays node-wide** (decision recorded in D38).
 
+## Decisions (phase 3)
+
+- **Who is asked:** the person is an agent with program `human`. The default is the `decider` node setting (`another config decider NAME`); never add an environment variable for it.
+- **Who may answer:** only a manager bot (`grok_bot`) or a person (`human`) may relay an answer, and never the agent that asked. That covers spend approvals too. MCP `decision_answer` must name its relaying agent.
+- **Automatic mail** (timeouts, reminders) comes from the reserved system agent `another` (`SYSTEM_AGENT`), never in a person's name.
+- **Lookups:** projects are resolved and scope-checked first; lanes are then looked up within that project only. Hidden and missing objects get the same error.
+
 ## Review routing rule
 
 Every PR gets a review from a **different model family** than the one that wrote it:
