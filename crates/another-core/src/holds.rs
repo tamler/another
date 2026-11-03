@@ -449,6 +449,7 @@ pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
     crate::resources::warn_expiring_leases_tx(tx)?;
     crate::decisions::expire_decisions_tx(tx)?;
     crate::spend::expire_spend_leases_tx(tx)?;
+    crate::remote_agents::expire_remote_agents_tx(tx)?;
     Ok(SweepReport {
         expired_holds: expired.len(),
         stale_requests,
@@ -456,7 +457,12 @@ pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
     })
 }
 
-fn release_tx(tx: &Tx<'_>, actor: &str, hold_ids: &[String], reason: &str) -> Result<()> {
+pub(crate) fn release_tx(
+    tx: &Tx<'_>,
+    actor: &str,
+    hold_ids: &[String],
+    reason: &str,
+) -> Result<()> {
     if hold_ids.is_empty() {
         return Ok(());
     }
@@ -490,7 +496,11 @@ fn renew_tx(tx: &Tx<'_>, actor: &str, holds: &[(String, i64)]) -> Result<()> {
 }
 
 /// Live holds owned by `agent_id`, optionally limited to `only` ids (error on unknown ids).
-fn owned_holds(tx: &Tx<'_>, agent_id: &str, only: &[String]) -> Result<Vec<(String, i64)>> {
+pub(crate) fn owned_holds(
+    tx: &Tx<'_>,
+    agent_id: &str,
+    only: &[String],
+) -> Result<Vec<(String, i64)>> {
     let mut stmt = tx.prepare(
         "SELECT hold_id, ttl_seconds FROM holds
          WHERE agent_id = ?1 AND released_at IS NULL ORDER BY created_at",
@@ -866,6 +876,8 @@ impl Store {
                     "UPDATE agents SET status = 'offline', last_seen_at = ?2 WHERE agent_id = ?1",
                     params![me.id, tx.now],
                 )?;
+                // An ephemeral remote agent whose session ended leaves now.
+                crate::remote_agents::expire_remote_agents_tx(tx)?;
                 (Vec::new(), ids, "offline")
             } else {
                 if phase == SessionPhase::Start {

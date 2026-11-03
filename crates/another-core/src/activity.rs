@@ -435,6 +435,33 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             ),
             json!({ "account_id": s("account_id") }),
         ),
+        "agent.joined" => (
+            format!("{actor} joined from an invite ({})", s("program")),
+            json!({ "agent_id": s("agent_id"), "lane_id": p.get("lane_id") }),
+        ),
+        "agent.gone" | "agent.kicked" => {
+            let who = agent_address(conn, &s("agent_id"))?;
+            let verb = if row.kind == "agent.kicked" {
+                "was kicked"
+            } else {
+                "left"
+            };
+            (
+                format!("{who} {verb} ({})", s("reason")),
+                json!({ "agent_id": s("agent_id") }),
+            )
+        }
+        "lane.agent_joined" => (
+            format!("{actor} joined lane {}", s("name")),
+            json!({ "lane_id": s("lane_id"), "agent_id": s("agent_id") }),
+        ),
+        "lane.agent_left" => {
+            let who = agent_address(conn, &s("agent_id"))?;
+            (
+                format!("{who} left lane {} ({})", s("name"), s("reason")),
+                json!({ "lane_id": s("lane_id"), "agent_id": s("agent_id") }),
+            )
+        }
         "lane.hold_conflict" => {
             let lane_name = |id: &str| -> Result<String> {
                 Ok(conn

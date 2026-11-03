@@ -4,6 +4,7 @@ pub mod cli;
 pub mod fed;
 pub mod hooks;
 mod http_decisions;
+pub mod join;
 pub mod mcp;
 mod mcp_decisions;
 mod mcp_lanes;

@@ -147,7 +147,7 @@ pub(crate) fn agent_from_row(r: &Row<'_>) -> rusqlite::Result<Agent> {
     })
 }
 
-fn validate_name(name: &str) -> Result<()> {
+pub(crate) fn validate_name(name: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name.len() <= 64
         && name

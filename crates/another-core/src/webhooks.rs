@@ -69,7 +69,14 @@ impl WebhookFilter {
         let field = |k: &str| payload.get(k).and_then(Value::as_str);
         match self {
             WebhookFilter::LaneStatus => {
-                matches!(kind, "lane.created" | "lane.status_changed" | "lane.closed")
+                matches!(
+                    kind,
+                    "lane.created"
+                        | "lane.status_changed"
+                        | "lane.closed"
+                        | "lane.agent_joined"
+                        | "lane.agent_left"
+                )
             }
             WebhookFilter::LaneReport => kind == "lane.reported",
             WebhookFilter::NeedsDecision => match kind {

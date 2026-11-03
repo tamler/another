@@ -156,7 +156,10 @@ pub(crate) fn event_visible(
     kind: &str,
     payload: &str,
 ) -> Result<bool> {
-    if matches!(kind.split('.').next(), Some("token" | "peer" | "node")) {
+    if matches!(
+        kind.split('.').next(),
+        Some("token" | "peer" | "node" | "invite")
+    ) {
         return Ok(false);
     }
     let p: Value = serde_json::from_str(payload).unwrap_or(Value::Null);

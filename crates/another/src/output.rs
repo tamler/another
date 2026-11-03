@@ -3,10 +3,10 @@
 use std::fmt::Write;
 
 use another_core::{
-    ActivityFeed, Agent, AuditEntry, Decision, Event, HeartbeatReport, Hold, HoldConflict,
-    HoldReport, Inbox, Lane, LaneDetail, LaneHolds, LaneReport, LeaseOutcome, Message, NodeInfo,
-    Peer, Project, Request, Resource, SpendAccount, SpendLease, Thread, ThreadSummary, Token,
-    WakeTarget, Webhook, WebhookCreated, WebhookDelivery,
+    ActivityFeed, Agent, AgentInvite, AuditEntry, Decision, Departure, Event, HeartbeatReport,
+    Hold, HoldConflict, HoldReport, Inbox, Lane, LaneDetail, LaneHolds, LaneReport, LeaseOutcome,
+    Message, NodeInfo, Peer, Project, RemoteAgent, Request, Resource, SpendAccount, SpendLease,
+    Thread, ThreadSummary, Token, WakeTarget, Webhook, WebhookCreated, WebhookDelivery,
 };
 use serde::Serialize;
 
@@ -789,6 +789,126 @@ pub fn spend_leases(ls: &[SpendLease]) -> String {
                 .map(|e| format!(", until {e}"))
                 .unwrap_or_default()
         );
+    }
+    out
+}
+
+pub fn invites(list: &[AgentInvite]) -> String {
+    if list.is_empty() {
+        return "no invites".to_string();
+    }
+    let mut out = String::new();
+    for i in list {
+        let _ = writeln!(
+            out,
+            "{} {:<8} {} ({}) projects {}{} · {}/{} uses · {} · expires {}",
+            i.invite_id,
+            i.status,
+            i.agent,
+            i.program,
+            i.project_globs.join(", "),
+            i.lane
+                .as_ref()
+                .map(|l| format!(" lane {l}"))
+                .unwrap_or_default(),
+            i.uses,
+            i.max_uses,
+            if i.ephemeral {
+                format!("ephemeral, idle {}h", i.idle_hours)
+            } else {
+                "persistent".into()
+            },
+            i.expires_at
+        );
+    }
+    out
+}
+
+pub fn remote_agents(list: &[RemoteAgent]) -> String {
+    if list.is_empty() {
+        return "no remote agents".to_string();
+    }
+    let mut out = String::new();
+    for r in list {
+        let presence = match r.presence {
+            another_core::Presence::Online => "online",
+            another_core::Presence::Idle => "idle",
+            another_core::Presence::Gone => "gone",
+        };
+        let _ = writeln!(
+            out,
+            "{:<24} {:<6} {}{}{} · joined {}{}",
+            r.agent,
+            presence,
+            r.program,
+            r.lane
+                .as_ref()
+                .map(|l| format!(" · lane {l}"))
+                .unwrap_or_default(),
+            r.client_hostname
+                .as_ref()
+                .map(|h| format!(" · from {h}"))
+                .unwrap_or_default(),
+            r.joined_at,
+            r.left_reason
+                .as_ref()
+                .map(|x| format!(" · left: {x}"))
+                .unwrap_or_default()
+        );
+    }
+    out
+}
+
+pub fn departure(d: &Departure) -> String {
+    format!(
+        "{} removed ({}): {} token(s) revoked, {} hold(s) released, {} lease(s) closed{}",
+        d.agent,
+        d.reason,
+        d.tokens_revoked,
+        d.holds_released,
+        d.leases_closed,
+        if d.lanes.is_empty() {
+            String::new()
+        } else {
+            format!("; lanes told: {}", d.lanes.join(", "))
+        }
+    )
+}
+
+pub fn joined(v: &serde_json::Value) -> String {
+    let mut out = format!(
+        "joined {} as {}{}\nprofile: {}\nenv: {} (source it before starting your agent)\n",
+        v["hub"].as_str().unwrap_or_default(),
+        v["agent"].as_str().unwrap_or_default(),
+        v["lane"]
+            .as_str()
+            .map(|l| format!(" (lane {l})"))
+            .unwrap_or_default(),
+        v["profile"].as_str().unwrap_or_default(),
+        v["env_file"].as_str().unwrap_or_default()
+    );
+    let wrote = v["mcp_written"].as_array().cloned().unwrap_or_default();
+    if wrote.is_empty() {
+        out.push_str("MCP config (not written; pass --write-mcp auto to write it):\n");
+        out.push_str(&format!(
+            "  Claude Code: claude mcp add --scope user --transport http another {}/mcp --header \"Authorization: Bearer $ANOTHER_TOKEN\"\n",
+            v["hub"].as_str().unwrap_or_default()
+        ));
+        out.push_str("  Codex (~/.codex/config.toml):\n");
+        for line in v["mcp"]["codex"]["config_toml"]
+            .as_str()
+            .unwrap_or_default()
+            .lines()
+        {
+            out.push_str(&format!("    {line}\n"));
+        }
+    } else {
+        for w in wrote {
+            out.push_str(&format!("wrote {}\n", w.as_str().unwrap_or_default()));
+        }
+    }
+    if v["hello"].as_bool() == Some(true) {
+        out.push_str("said hello to the hub\n");
     }
     out
 }
