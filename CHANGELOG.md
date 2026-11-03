@@ -11,7 +11,10 @@ All notable changes to Another. Unreleased work is listed under the next version
   - Reports are mailed to the lane's counterpart in the lane thread.
   - `lane export` writes the old `.lanes`-style STATUS and DONE markdown.
   - Opt-in Stop hook (`another hook install --lane-reports`) for automatic reports from Claude Code, Codex, Grok and Cursor.
-  - Remote callers only see and change lanes in their token's project globs.
+  - Remote callers only see and change lanes in their token's project globs. Lanes outside them look like unknown lanes (`not_found`), and their events are left out of the remote activity feed.
+  - Lane names are unique per project; address lanes as `name` or `name@project`.
+  - Lane events carry ids, names, project and status only (no charter, report text, progress or links). Links must belong to the lane's project.
+  - The Stop hook redacts likely secrets (`ano_`, `sk-`, `ghp_`, long hex/base64, …) from the agent's last message before storing it.
 - **Push** ([design](docs/design/02-push.md), [guide](docs/PUSH.md)):
   - `GET /events/stream` (Server-Sent Events, resumable with `Last-Event-ID`), `GET /events/poll` (long-poll JSON) and the MCP tool `events_poll`.
   - Outbound webhooks with HMAC-SHA256 signatures, retries with backoff and a dead-letter list.
