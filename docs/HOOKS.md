@@ -43,6 +43,8 @@ Uninstall removes only entries that reference `another-hook.sh`, and deletes the
 
 `another hook install --client <c> --lane-reports` also installs a **Stop** hook (`stop` for Cursor). It posts an automatic report into the agent's lane: `$ANOTHER_LANE`, or the single open lane the agent leads in that project. Reports are debounced to one every 15 minutes. Installing again without the flag removes the Stop hook. See [LANES.md](LANES.md).
 
+> **Warning: the Stop hook stores what your agent last said.** The report summary is the client's last reply, truncated to 300 characters, and it is stored in the lane and mailed to the lane's counterpart (who may be a remote manager bot). Before storing, the hook redacts likely secrets: `ano_`, `sk-`, `ghp_`/`github_pat_`, `glpat-`, Slack `xox*-`, `hf_`, AWS `AKIA…`, `whsec_` tokens, and long hex or base64 runs. This is a best-effort filter, not a guarantee. Don't enable `--lane-reports` for agents that routinely print credentials, and keep secrets out of agent transcripts.
+
 ## Optional: hold files before they are edited
 
 `another hook install --client claude,codex --pre-edit` adds a **PreToolUse** hook:
