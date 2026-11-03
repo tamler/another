@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use globset::{Glob, GlobBuilder, GlobMatcher};
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use serde_json::json;
 
@@ -376,7 +376,23 @@ fn acquire_lane(
     lane: Option<&str>,
 ) -> Result<Option<String>> {
     if let Some(key) = lane.map(str::trim).filter(|l| !l.is_empty()) {
-        let (l, lane_project) = crate::lanes::resolve_lane(tx, tx.node_id, key)?;
+        // Holds always have a project, so a bare lane name is looked up in that project only
+        // (never ambiguous across, or revealing, other projects).
+        let slug: String = tx.query_row(
+            "SELECT slug FROM projects WHERE project_id = ?1",
+            [project_id],
+            |r| r.get(0),
+        )?;
+        let by_id = tx
+            .query_row("SELECT 1 FROM lanes WHERE lane_id = ?1", [key], |_| Ok(()))
+            .optional()?
+            .is_some();
+        let key = if by_id || key.contains('@') {
+            key.to_string()
+        } else {
+            format!("{key}@{slug}")
+        };
+        let (l, lane_project) = crate::lanes::resolve_lane(tx, tx.node_id, &key)?;
         if lane_project != project_id {
             return Err(Error::Invalid(format!(
                 "lane {} belongs to another project",

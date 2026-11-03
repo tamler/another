@@ -12,7 +12,7 @@ use crate::decisions::{
 };
 use crate::error::{Error, Result};
 use crate::identity::{find_project, resolve_agent, AgentRef};
-use crate::lanes::resolve_lane;
+use crate::lanes::resolve_lane_in;
 use crate::store::{new_id, Store, Tx};
 use crate::time::fmt_ts;
 use crate::tokens::{scope_allows_project, TokenScope};
@@ -510,13 +510,14 @@ fn attribute(
     agent: Option<&str>,
     lane: Option<&str>,
     project: Option<&str>,
+    scope: Option<&TokenScope>,
 ) -> Result<Attribution> {
     let agent = match agent {
         Some(a) => Some(resolve_agent(tx, node_id, a)?),
         None => None,
     };
     let lane = match lane {
-        Some(l) => Some(resolve_lane(tx, node_id, l)?),
+        Some(l) => Some(resolve_lane_in(tx, node_id, l, scope)?),
         None => None,
     };
     let explicit = match project {
@@ -1080,6 +1081,7 @@ impl Store {
                 input.agent.as_deref(),
                 input.lane.as_deref(),
                 input.project.as_deref(),
+                scope,
             )?;
             if scope.is_some() {
                 match &who.project_id {
@@ -1134,7 +1136,7 @@ impl Store {
                 .or(a.cost_per_hour)
                 .ok_or_else(|| Error::Invalid(format!("{} has no cost_per_hour; give one", a.name)))?;
             check_amount("cost_per_hour", cph)?;
-            let who = attribute(tx, tx.node_id, account_project.as_deref(), Some(&input.agent), input.lane.as_deref(), None)?;
+            let who = attribute(tx, tx.node_id, account_project.as_deref(), Some(&input.agent), input.lane.as_deref(), None, scope)?;
             let me = who.agent.clone().expect("agent given");
             if scope.is_some() && !matches!(&who.project_id, Some(p) if attributed_visible(tx, scope, Some(p), None)?) {
                 return Err(Error::Forbidden(
@@ -1276,7 +1278,7 @@ impl Store {
         let now = self.now();
         self.read(|conn| {
             let lane_id = match &q.lane {
-                Some(l) => Some(resolve_lane(conn, self.node_id(), l)?.0.lane_id),
+                Some(l) => Some(resolve_lane_in(conn, self.node_id(), l, scope)?.0.lane_id),
                 None => None,
             };
             let agent_id = match &q.agent {
