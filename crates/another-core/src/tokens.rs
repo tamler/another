@@ -83,7 +83,7 @@ fn hash(secret: &str) -> String {
         .collect()
 }
 
-fn random_hex(bytes: usize) -> Result<String> {
+pub(crate) fn random_hex(bytes: usize) -> Result<String> {
     let mut buf = vec![0u8; bytes];
     getrandom::fill(&mut buf)
         .map_err(|e| Error::Invalid(format!("no system randomness available: {e}")))?;

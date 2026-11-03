@@ -344,6 +344,7 @@ pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
     }
     let stale_requests = stale_overdue_tx(tx)?;
     let expired_leases = crate::resources::expire_leases_tx(tx)?;
+    crate::resources::warn_expiring_leases_tx(tx)?;
     Ok(SweepReport {
         expired_holds: expired.len(),
         stale_requests,
@@ -449,6 +450,29 @@ impl Store {
                 conflicts_for(tx, &project.project_id, &me.id, &patterns, input.exclusive)?;
             let warnings = remote_clashes(tx, &project, &patterns)?;
             if !conflicts.is_empty() {
+                let mut hold_ids: Vec<&str> = Vec::new();
+                let mut holders: Vec<&str> = Vec::new();
+                for c in &conflicts {
+                    if !hold_ids.contains(&c.held.hold_id.as_str()) {
+                        hold_ids.push(&c.held.hold_id);
+                    }
+                    if !holders.contains(&c.held.agent.as_str()) {
+                        holders.push(&c.held.agent);
+                    }
+                }
+                let paths: Vec<&str> = patterns.iter().map(|(_, p)| p.as_str()).collect();
+                tx.emit(
+                    &me.address,
+                    "hold.conflict",
+                    json!({
+                        "agent_id": me.id,
+                        "project_id": project.project_id,
+                        "paths": paths,
+                        "exclusive": input.exclusive,
+                        "hold_ids": hold_ids,
+                        "holders": holders,
+                    }),
+                )?;
                 touch(tx, &me.id)?;
                 return Ok(HoldReport {
                     granted: Vec::new(),

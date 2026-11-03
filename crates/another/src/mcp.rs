@@ -31,7 +31,7 @@ impl AnotherMcp {
     pub fn new(store: Store) -> Self {
         Self {
             store,
-            tool_router: Self::tool_router() + Self::lane_router(),
+            tool_router: Self::tool_router() + Self::lane_router() + Self::push_router(),
         }
     }
 
@@ -690,13 +690,17 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<ActivityFeedArgs>,
     ) -> ToolResult<ActivityFeed> {
+        let scope = crate::remote::current_scope();
         self.run(move |s| {
             let since = a.since.map(|v| Since::parse(&v, s.now())).transpose()?;
-            s.activity(ActivityQuery {
-                since,
-                limit: a.limit.unwrap_or(50),
-                kinds: a.kinds,
-            })
+            s.activity_scoped(
+                ActivityQuery {
+                    since,
+                    limit: a.limit.unwrap_or(50),
+                    kinds: a.kinds,
+                },
+                scope.as_ref(),
+            )
         })
         .await
     }
@@ -709,9 +713,10 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<ActivitySummarizeArgs>,
     ) -> ToolResult<ActivitySummary> {
+        let scope = crate::remote::current_scope();
         self.run(move |s| {
             let since = a.since.map(|v| Since::parse(&v, s.now())).transpose()?;
-            s.activity_summary(since)
+            s.activity_summary_scoped(since, scope.as_ref())
         })
         .await
     }

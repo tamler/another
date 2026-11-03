@@ -22,7 +22,13 @@ An event's projects are derived from its payload and the tables it points at:
 | `session.*`, `agent.registered` | the agent's project |
 | `token.*`, `peer.*`, `node.*` | none: never visible to scoped callers |
 
-An event is visible to a scope if any of its projects matches the globs, **or** it concerns the token's own agent: the agent is the actor, or the payload's `agent_id` is the token's agent. Anything that can't be attributed is hidden. Local callers (CLI, stdio, loopback without `--auth`) see everything, as before. The activity summary's agent, request and hold counts are filtered the same way.
+An event with projects is visible to a scope only if one of its projects matches the globs. **Project scope wins over agent identity**: a token acting as `manager` does not see `manager`'s actions in a project outside its globs.
+
+An event with no project (mail between agents without projects, their sessions) is visible only if it concerns the token's own agent: the agent is the actor, or it appears in the payload or among the message's parties. Local callers (CLI, stdio, loopback without `--auth`) see everything, as before. The activity summary's agent, request and hold counts are filtered the same way.
+
+(An earlier draft of this note also showed events that concerned the token's agent in other projects. The phase 2 integration test caught that this leaks another project's lane to a manager token scoped to one project, so the rule above replaced it.)
+
+Reading forward, `next_since` advances past events the scope can't see, so a cursor never re-scans them. The cursor is an event id, which reveals only that some event happened at that time.
 
 ## 2. Stream and long-poll (pull, without polling files)
 
@@ -33,6 +39,7 @@ Both endpoints sit behind `--auth` when it is on, are filtered by scope, and are
   - Each SSE message has `id: <event_id>`, `event: <kind>`, and `data: <ActivityItem JSON>`.
   - Browsers and SSE clients resume with `Last-Event-ID`.
   - A keep-alive comment is sent every 15 seconds.
+- Without `since`, both endpoints start from now.
 - `GET /events/poll?since=&kinds=&timeout=30` is **long-poll JSON**. It returns `{items, next_since}` as soon as at least one event is available, or when `timeout` (≤ 60 s) runs out.
 - MCP `events_poll` does the same long-poll for MCP-only clients, capped at 30 s.
 
@@ -52,7 +59,7 @@ Items are `ActivityItem`s: one-line summaries plus ids. Message bodies are never
 | `request_created` | `request.created`, `decision.created` |
 | `request_answered` | `request.completed`, `request.cancelled`, `decision.answered`, `decision.expired` |
 | `hold_conflict` | `hold.conflict` (new event when an acquire is refused) |
-| `lease_expiring` | `resource.lease_expiring` (new event, emitted once when a lease has under 5 minutes left; renewing re-arms it) |
+| `lease_expiring` | `resource.lease_expiring` (new event, emitted once by the sweeper when a lease has under 5 minutes left, or under half its TTL for short leases; renewing re-arms it) |
 | `all` | everything the scope can see, except mail and delivery events |
 
 **Scope.**
@@ -64,7 +71,9 @@ Items are `ActivityItem`s: one-line summaries plus ids. Message bodies are never
 **Delivery.**
 - `another serve` (HTTP or stdio) runs a delivery worker every 2 seconds:
   - It turns new events into `webhook_deliveries` rows; a cursor per webhook means each event is considered once.
-  - It POSTs due deliveries with `ureq`.
+  - It POSTs due deliveries with `ureq` (10 s timeout, no redirects).
+  - A due delivery is claimed for a minute before it is sent, so two `serve` processes never send it twice.
+  - When no webhooks exist it only reads, so the many stdio servers agents run take no write lock.
 - **Body:** `{ "delivery_id", "webhook_id", "filter", "event": ActivityItem, "data": <event payload> }`. `data` is included because these event kinds carry no message bodies; mail events can't match any filter.
 - **Headers:**
   - `X-Another-Event: <kind>`
@@ -74,6 +83,8 @@ Items are `ActivityItem`s: one-line summaries plus ids. Message bodies are never
 - **Retries:** non-2xx responses and network errors back off after 10 s, 30 s, 2 min, 10 min, 1 h and 6 h. After 7 attempts the delivery is **dead**: `another webhook dead` lists it with its last error, and `another webhook retry <id>` re-queues it.
 - **URLs** must be `https://`, except loopback (`http://127.0.0.1`, `localhost`, `[::1]`) for local relays and tests.
 - **Secrets** are stored in the node database (0700 directory), because they are needed for signing. `list` never shows them.
+
+`another webhook test` sends a synthetic `webhook.test` delivery synchronously; it is not an event in the log.
 
 ## Migration
 
