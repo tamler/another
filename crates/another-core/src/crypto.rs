@@ -124,6 +124,15 @@ pub fn verify(public_b64: &str, message: &[u8], signature_b64: &str) -> bool {
     key.verify(message, &sig).is_ok()
 }
 
+/// Compare two secrets (or their digests) in time that depends only on their lengths.
+pub(crate) fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -279,12 +279,17 @@ impl Store {
                 return Err(denied());
             };
             let expired = expires_at.is_some_and(|e| e <= tx.now);
-            if stored != digest || revoked_at.is_some() || expired {
+            if !crate::crypto::ct_eq(&stored, &digest) || revoked_at.is_some() || expired {
                 return Err(denied());
             }
             tx.execute(
                 "UPDATE tokens SET last_used_at = ?2 WHERE token_id = ?1",
                 params![token_id, tx.now],
+            )?;
+            // Any authenticated call, reads included, counts as being seen (presence).
+            tx.execute(
+                "UPDATE agents SET last_seen_at = ?2 WHERE agent_id = ?1",
+                params![agent_id, tx.now],
             )?;
             let agent = crate::identity::get_agent(tx, &agent_id)?;
             Ok(TokenScope {

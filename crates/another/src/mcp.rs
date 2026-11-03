@@ -216,6 +216,16 @@ pub struct HeartbeatArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct AgentKickArgs {
+    /// The acting manager agent (program grok_bot; remote callers: the token's agent).
+    pub agent: String,
+    /// The agent to remove (name or name@project).
+    pub target: String,
+    /// Why (kept on the agent's membership record, not in events).
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ActivityFeedArgs {
     /// Start point: duration (30m, 2h, 1d), RFC 3339 time, or an event id cursor.
     /// Omit for the most recent items.
@@ -535,6 +545,7 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<HeartbeatArgs>,
     ) -> ToolResult<HeartbeatReport> {
+        let scope = crate::remote::current_scope();
         self.run(move |s| {
             let phase = if a.end {
                 SessionPhase::End
@@ -543,16 +554,32 @@ impl AnotherMcp {
             } else {
                 SessionPhase::Beat
             };
-            s.session(
+            // Remote callers: only holds and leases inside the token's projects.
+            s.session_scoped(
                 &a.agent,
                 phase,
                 SessionInfo {
                     keep_resources: a.keep_resources,
                     ..Default::default()
                 },
+                scope.as_ref(),
             )
         })
         .await
+    }
+
+    #[tool(
+        description = "Remove an agent now (manager agents only): revoke all its tokens, release \
+        its holds and leases, and tell its lanes (a lane it led gets a new lead). Remote \
+        managers can only kick agents in their token's projects; people can't be kicked."
+    )]
+    async fn agent_kick(
+        &self,
+        Parameters(a): Parameters<AgentKickArgs>,
+    ) -> ToolResult<another_core::Departure> {
+        let scope = crate::remote::current_scope();
+        self.run(move |s| s.kick_agent_as(&a.agent, &a.target, a.reason.as_deref(), scope.as_ref()))
+            .await
     }
 
     #[tool(

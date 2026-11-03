@@ -1,4 +1,4 @@
-//! Remote agents (docs/design/remote-agents.md): the hub side (`POST /join`, `/agent/*`,
+//! Remote agents (docs/design/07-remote-agents.md): the hub side (`POST /join`, `/agent/*`,
 //! `/lanes`) and the client side (`another join`, `another remote …`, the join snippet).
 
 use std::path::{Path, PathBuf};
@@ -52,13 +52,20 @@ pub fn client_config(hub: &str, token: &str, agent: &str, lane: Option<&str>) ->
 }
 
 /// A POSIX shell block a cloud session runs to install `another` and join. Contains only
-/// the hub URL and the single-use code.
+/// the hub URL and the single-use code. The install is pinned to the hub's own version: the
+/// release archive must match its published SHA-256 (a mismatch stops the script), and the
+/// source fallback builds that same tag.
 pub fn snippet(hub: &str, code: &str, expires_at: &str) -> String {
+    snippet_for_version(hub, code, expires_at, env!("CARGO_PKG_VERSION"))
+}
+
+fn snippet_for_version(hub: &str, code: &str, expires_at: &str, version: &str) -> String {
     format!(
         r#"# Join Another as a remote agent. The code is single-use and expires {expires_at}.
 set -eu
 HUB='{hub}'
 CODE='{code}'
+VERSION='{version}'
 if ! command -v another >/dev/null 2>&1; then
   BIN="$HOME/.local/bin"; mkdir -p "$BIN"; export PATH="$BIN:$HOME/.cargo/bin:$PATH"
   case "$(uname -s)-$(uname -m)" in
@@ -68,16 +75,18 @@ if ! command -v another >/dev/null 2>&1; then
     Darwin-x86_64) T=x86_64-apple-darwin ;;
     *) T= ;;
   esac
-  TAG=$(curl -fsSL https://api.github.com/repos/tamler/another/releases/latest 2>/dev/null \
-        | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1 || true)
   TMP=$(mktemp -d)
-  if [ -n "$T" ] && [ -n "$TAG" ] && A="another-${{TAG#v}}-$T.tar.gz" \
-     && curl -fsSL -o "$TMP/$A" "https://github.com/tamler/another/releases/download/$TAG/$A" \
-     && curl -fsSL -o "$TMP/$A.sha256" "https://github.com/tamler/another/releases/download/$TAG/$A.sha256" \
-     && (cd "$TMP" && (sha256sum -c "$A.sha256" 2>/dev/null || shasum -a 256 -c "$A.sha256")); then
-    tar -xzf "$TMP/$A" -C "$TMP" && cp "$TMP/another-${{TAG#v}}-$T/another" "$BIN/another"
+  A="another-$VERSION-$T.tar.gz"
+  URL="https://github.com/tamler/another/releases/download/v$VERSION"
+  if [ -n "$T" ] && curl -fsSL -o "$TMP/$A" "$URL/$A" && curl -fsSL -o "$TMP/$A.sha256" "$URL/$A.sha256"; then
+    # The archive must match the release's published checksum; never install it otherwise.
+    if ! (cd "$TMP" && (sha256sum -c "$A.sha256" 2>/dev/null || shasum -a 256 -c "$A.sha256")); then
+      echo "another $VERSION: checksum mismatch, not installing" >&2; rm -rf "$TMP"; exit 1
+    fi
+    tar -xzf "$TMP/$A" -C "$TMP" && cp "$TMP/another-$VERSION-$T/another" "$BIN/another"
   else
-    cargo install --locked --git https://github.com/tamler/another another
+    # No prebuilt archive for this platform or version: build the same tag from source.
+    cargo install --locked --git https://github.com/tamler/another --tag "v$VERSION" another
   fi
   rm -rf "$TMP"
 fi
@@ -122,11 +131,66 @@ fn hub_url(headers: &HeaderMap) -> String {
     format!("{scheme}://{host}")
 }
 
+/// Join attempts allowed per client address per window.
+pub const JOIN_ATTEMPTS: usize = 10;
+const JOIN_WINDOW: Duration = Duration::from_secs(60);
+
+/// Sliding-window limit on `/join` attempts, per node and client address.
+fn join_allowed(node: &str, client: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+    static SEEN: OnceLock<Mutex<HashMap<String, Vec<Instant>>>> = OnceLock::new();
+    let mut seen = SEEN
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    seen.retain(|_, v| {
+        v.retain(|t| now.duration_since(*t) < JOIN_WINDOW);
+        !v.is_empty()
+    });
+    let hits = seen.entry(format!("{node}|{client}")).or_default();
+    if hits.len() >= JOIN_ATTEMPTS {
+        return false;
+    }
+    hits.push(now);
+    true
+}
+
 /// `POST /join` — redeem an invite code. Unauthenticated (the code is the credential), only
-/// served with `--auth`, and every attempt is audited.
+/// served with `--auth`, rate-limited per client address, and every attempt is audited.
 pub async fn join_handler(State(store): State<Store>, req: axum::extract::Request) -> Response {
     let headers = req.headers().clone();
     let remote = crate::remote::remote_addr(&headers, &req);
+    // The client address without the port, so reconnecting doesn't reset the limit.
+    let client = remote
+        .as_deref()
+        .map(|r| match r.rsplit_once(':') {
+            Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) => host.to_string(),
+            _ => r.to_string(),
+        })
+        .unwrap_or_else(|| "unknown".into());
+    if !join_allowed(store.node_id(), &client) {
+        audit(
+            &store,
+            AuditRecord {
+                token_id: None,
+                agent: None,
+                operation: "POST /join".into(),
+                outcome: "denied".into(),
+                detail: Some("rate limited".into()),
+                remote,
+            },
+        )
+        .await;
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(axum::http::header::RETRY_AFTER, "60")],
+            axum::Json(json!({ "error": { "code": "rate_limited", "message": format!("too many join attempts (at most {JOIN_ATTEMPTS} a minute); wait a minute") } })),
+        )
+            .into_response();
+    }
     let body: JoinBody = match axum::body::to_bytes(req.into_body(), 64 * 1024)
         .await
         .ok()
@@ -222,6 +286,7 @@ pub async fn heartbeat(
         .and_then(|b| b.0.phase)
         .unwrap_or_else(|| "beat".into());
     let agent = peer.scope.agent.clone();
+    let scope = peer.scope.clone();
     let s = store.clone();
     let detail = format!("phase={phase}");
     let result = tokio::task::spawn_blocking(move || {
@@ -235,13 +300,15 @@ pub async fn heartbeat(
                 )))
             }
         };
-        let r: HeartbeatReport = s.session(
+        // Only holds and leases inside the token's projects are renewed or released.
+        let r: HeartbeatReport = s.session_scoped(
             &agent,
             phase,
             SessionInfo {
                 client: Some("remote".into()),
                 ..Default::default()
             },
+            Some(&scope),
         )?;
         Ok(json!(r))
     })
@@ -265,8 +332,10 @@ pub async fn leave(
         return unauthorized();
     };
     let agent = peer.scope.agent.clone();
+    let scope = peer.scope.clone();
     let s = store.clone();
-    let result = tokio::task::spawn_blocking(move || Ok(json!(s.leave(&agent)?))).await;
+    let result =
+        tokio::task::spawn_blocking(move || Ok(json!(s.leave_scoped(&agent, Some(&scope))?))).await;
     finish(
         &store,
         Some(peer),
@@ -597,4 +666,26 @@ pub fn forget(home: &Path) -> Result<()> {
         let _ = std::fs::remove_file(home.join(f));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_snippet_pins_the_hubs_version_and_checksum() {
+        let s = super::snippet("https://hub.example", "anj_X_y", "tomorrow");
+        let v = env!("CARGO_PKG_VERSION");
+        assert!(s.contains(&format!("VERSION='{v}'")), "{s}");
+        assert!(!s.contains("releases/latest"), "never an unpinned release");
+        assert!(s.contains("releases/download/v$VERSION"));
+        assert!(
+            s.contains("--tag \"v$VERSION\""),
+            "source fallback is pinned too"
+        );
+        assert!(s.contains("checksum mismatch, not installing"));
+        // A checksum failure stops the script instead of falling back.
+        let check = s.find("sha256sum -c").unwrap();
+        let exit = s[check..].find("exit 1").unwrap();
+        let fallback = s[check..].find("cargo install").unwrap();
+        assert!(exit < fallback);
+    }
 }

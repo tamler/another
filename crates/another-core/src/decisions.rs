@@ -512,6 +512,10 @@ fn release_lane(tx: &Tx<'_>, actor: &AgentRef, lane_id: Option<&str>) -> Result<
         return Ok(());
     }
     let (lane, project_id): (Lane, String) = resolve_lane(tx, tx.node_id, lane_id)?;
+    if lane.node.is_some() {
+        // Never write to another node's lane mirror.
+        return Ok(());
+    }
     if lane.status == LaneStatus::NeedsDecision {
         set_status(tx, actor, &lane, &project_id, LaneStatus::Working)?;
     }
@@ -759,6 +763,16 @@ pub(crate) fn ask_tx(
         )?),
         None => None,
     };
+    // A mirrored lane belongs to another node: asking here would flip only the mirror to
+    // `needs_decision`. The owner node is checked before anything else about the lane.
+    if let Some((l, _)) = &lane {
+        if let Some(node) = &l.node {
+            return Err(Error::Conflict(format!(
+                "lane {} is owned by node {node}: ask the decision there (its MCP / HTTP API)",
+                l.name
+            )));
+        }
+    }
     let project_id = match (home, &lane) {
         (Some(p), _) => p,
         (None, Some((_, lane_project))) => lane_project.clone(),
@@ -1028,7 +1042,7 @@ pub(crate) fn answer_tx(
 }
 
 // ---------------------------------------------------------------------------
-// Federation: mirrors of other nodes' decisions, relayed answers (remote-agents.md §5)
+// Federation: mirrors of other nodes' decisions, relayed answers (07-remote-agents.md §5)
 
 const MIRROR_SELECT: &str =
     "SELECT m.decision_id, m.status, m.question, m.options, m.allow_free_text,
@@ -1244,16 +1258,62 @@ fn relay_answer_tx(
         ),
         None => None,
     };
-    if text.is_some() && !d.allow_free_text {
-        return Err(Error::Invalid(
-            "this decision does not accept free text; choose an option".into(),
-        ));
+    // Same rules as a local answer, checked before anything is marked or sent.
+    if let Some(t) = &text {
+        if d.allow_free_text {
+            check_text("answer text", t, MAX_ANSWER_TEXT)?;
+        } else if option.is_some() {
+            check_text("note", t, MAX_OPTION_NOTE)?;
+        } else {
+            return Err(Error::Invalid(
+                "this decision does not accept free text; choose an option (a short note may go with it)".into(),
+            ));
+        }
     }
     if option.is_none() && text.is_none() {
         return Err(Error::Invalid("give an option value".into()));
     }
     let relayed_ref = match &input.relayed_by {
         Some(r) => Some(resolve_agent(tx, tx.node_id, r)?),
+        None => None,
+    };
+    if let Some(answered_by) = &input.answered_by {
+        check_text("answered_by", answered_by.trim(), 64)?;
+    }
+    // Free text never goes in an event: it travels as mail to the asking agent on the
+    // decision's node (mail is routed only to its recipients' nodes), and the relay event
+    // names that message.
+    let text_message_id = match &text {
+        Some(t) => {
+            let (name, slug): (String, Option<String>) = tx
+                .query_row(
+                    "SELECT a.name, p.slug FROM remote_decisions r
+                     JOIN agents a ON a.agent_id = r.asker_id
+                     LEFT JOIN projects p ON p.project_id = a.project_id
+                     WHERE r.decision_id = ?1",
+                    [&d.decision_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?
+                .ok_or_else(|| {
+                    Error::Conflict("the asking agent isn't known here yet; sync first".into())
+                })?;
+            let from = match &relayed_ref {
+                Some(r) => r.address.clone(),
+                None => crate::identity::system_agent_tx(tx)?.address,
+            };
+            let msg = send_tx(
+                tx,
+                &SendMessage {
+                    from,
+                    to: vec![format!("{name}@{}@{origin}", slug.unwrap_or_default())],
+                    subject: format!("[decision] answer note ({})", d.decision_id),
+                    body: t.clone(),
+                    ..Default::default()
+                },
+            )?;
+            Some(msg.message_id)
+        }
         None => None,
     };
     let relayed = relayed_ref.as_ref().map(|r| r.address.clone());
@@ -1270,7 +1330,8 @@ fn relay_answer_tx(
             "decision_node": origin,
             "project_id": project_id,
             "value": option.as_ref().map(|o| o.value.clone()),
-            "text": text,
+            "has_text": text.is_some(),
+            "text_message_id": text_message_id,
             "answered_by": answered_by,
             "relayed_by": relayed,
             // Agents sync as directory events, so the id resolves on the decision's node.
@@ -1322,19 +1383,51 @@ pub(crate) fn apply_relayed_tx(
         )?;
         return Ok(());
     }
-    answer_tx(
+    // The answer's text, if any, came as mail from the relaying node (never in the event).
+    let text = match s("text_message_id") {
+        Some(mid) => {
+            let body: Option<String> = tx
+                .query_row(
+                    "SELECT body FROM messages WHERE message_id = ?1 AND node_id = ?2",
+                    params![mid, ev.node_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            // It only carried the text: the asker gets the answer mail itself.
+            tx.execute(
+                "UPDATE deliveries SET read_at = COALESCE(read_at, ?2) WHERE message_id = ?1",
+                params![mid, tx.now],
+            )?;
+            body
+        }
+        None => None,
+    };
+    let applied = answer_tx(
         tx,
         &AnswerDecision {
-            decision: id,
+            decision: id.clone(),
             value: s("value"),
-            text: s("text"),
+            text,
             answered_by: s("answered_by"),
             relayed_by: None,
         },
         relayed,
         None,
-    )?;
-    Ok(())
+    );
+    match applied {
+        Ok(_) => Ok(()),
+        // A relayed answer that breaks the rules here (self-approval, bad option) is
+        // recorded and dropped, not retried forever.
+        Err(Error::Forbidden(_) | Error::Invalid(_) | Error::Conflict(_)) => {
+            tx.emit(
+                "system",
+                "decision.answer_ignored",
+                json!({ "decision_id": id, "project_id": row.project_id, "relayed_from": ev.node_id, "status": "refused" }),
+            )?;
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 impl Store {

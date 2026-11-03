@@ -59,19 +59,21 @@ All notable changes to Another. Unreleased work is listed under the next version
   - Contents: what needs a person, lanes moved, stuck and closed, decisions, requests, holds and conflicts, spend, active agents, and active people (listed separately). Scoped for remote callers, including an event-id `since`. `truncated` flags a section that hit the pager's cap.
   - Opt-in daily rollup: `another summary schedule --daily HH:MM --to webhook|mail:NAME`, sent by `another serve` from the `another` system agent. A new `daily_summary` webhook filter (local all-project webhooks only).
 - [Manager bot guide](docs/MANAGER-BOT.md): token, webhooks to subscribe, and which MCP tools to call.
-- **Remote agents** ([design](docs/design/remote-agents.md), [guide](docs/REMOTE-AGENTS.md)):
+- **Remote agents** ([design](docs/design/07-remote-agents.md), [guide](docs/REMOTE-AGENTS.md)):
   - Invites:
     - `another invite create|list|revoke`: single-use, expiring codes that fix the agent's name, program, project globs and lane.
     - Redeem with `another join <hub> <code>` or `POST /join`. That registers the agent, issues a scoped token, and returns Claude Code / Codex MCP config and env vars.
-    - `--print-snippet` prints a shell block for cloud sessions.
+    - `--print-snippet` prints a shell block for cloud sessions, pinned to the hub's version and the release checksum.
+    - Invites never take over a registered agent's name; `POST /join` is rate-limited per client address.
   - Lifecycle:
     - Presence (`another agent remotes`).
-    - Ephemeral agents leave when their session ends or when idle: token revoked, holds and leases released, `lane.agent_left` emitted.
-    - `another agent kick` removes any agent at once.
+    - Ephemeral agents leave when their session ends or when idle (`--idle-hours`, else the `remote_idle_hours` node setting, default 4): token revoked, holds and leases in the token's projects released, `lane.agent_left` emitted. Remote heartbeats and leave touch only the token's projects too.
+    - When a lane's lead leaves, the longest-active member takes over; with nobody left, the lane is flagged leaderless (never blocked automatically).
+    - `another agent kick` removes any agent at once; manager agents can kick over MCP (`agent_kick`) within their projects.
   - Remote-agent HTTP routes (`/agent/heartbeat`, `/agent/leave`, `/lanes`, `/lanes/{lane}/report`) and a client CLI (`another remote …`).
   - Federation:
-    - Lanes are mirrored read-only on other nodes; only the owner writes.
-    - Decisions asked on another node can be answered here, and the answer is relayed only to that node.
+    - Lanes are mirrored read-only on other nodes; only the owner writes. Reports into a mirror are proposals, which the owner applies when they sync.
+    - Decisions asked on another node can be answered here, and the answer is relayed only to that node. Free text travels as mail, never in events.
     - Synced holds keep their lane.
 - CI also runs on pull requests that target non-`main` branches, so stacked PRs are checked.
 
@@ -82,7 +84,7 @@ All notable changes to Another. Unreleased work is listed under the next version
 
 ### Database
 - Migration 6 adds the `lanes`, `lane_links` and `lane_reports` tables. It is additive; existing databases upgrade in place.
-- Migration 11 adds the `agent_invites`, `remote_agents` and `remote_decisions` tables. It is additive.
+- Migration 11 adds the `agent_invites`, `remote_agents` and `remote_decisions` tables, and a nullable `lanes.leaderless_at`. It is additive.
 - Migration 10 adds the `spend_accounts`, `spend_entries` and `spend_leases` tables, and a nullable `resources.spend_account_id`. It is additive.
 - Migration 9 adds `holds.lane_id` (nullable). It is additive.
 - Migration 8 adds the `decisions` table and `requests.kind` (default `task`). It is additive.

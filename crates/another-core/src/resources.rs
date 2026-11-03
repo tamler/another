@@ -650,20 +650,40 @@ pub(crate) fn expire_leases_tx(tx: &Tx<'_>) -> Result<usize> {
 }
 
 /// Renew (or release, at session end) every live lease an agent holds.
-pub(crate) fn session_leases_tx(tx: &Tx<'_>, agent: &AgentRef, release: bool) -> Result<u32> {
+///
+/// With `scope` (a remote caller), only leases on resources in the token's projects, or on
+/// project-less resources, are touched.
+pub(crate) fn session_leases_tx(
+    tx: &Tx<'_>,
+    agent: &AgentRef,
+    release: bool,
+    scope: Option<&crate::tokens::TokenScope>,
+) -> Result<u32> {
     let mut stmt = tx.prepare(
-        "SELECT lease_id, resource_id, ttl_seconds FROM resource_leases
-         WHERE agent_id = ?1 AND released_at IS NULL",
+        "SELECT l.lease_id, l.resource_id, l.ttl_seconds, r.project_id
+         FROM resource_leases l JOIN resources r ON r.resource_id = l.resource_id
+         WHERE l.agent_id = ?1 AND l.released_at IS NULL",
     )?;
-    let leases = stmt
+    let all = stmt
         .query_map([&agent.id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, i64>(2)?,
+                r.get::<_, Option<String>>(3)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut leases = Vec::new();
+    for (lease_id, rid, ttl, project) in all {
+        let ok = match (scope, &project) {
+            (Some(s), Some(p)) => crate::tokens::scope_allows_project(tx, s, p)?,
+            _ => true,
+        };
+        if ok {
+            leases.push((lease_id, rid, ttl));
+        }
+    }
     if leases.is_empty() {
         return Ok(0);
     }

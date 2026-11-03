@@ -1,4 +1,4 @@
-//! Federation tie-in for lanes, decisions and lane-aware holds (remote-agents.md §5): a hub
+//! Federation tie-in for lanes, decisions and lane-aware holds (07-remote-agents.md §5): a hub
 //! and a spoke, each with its own ANOTHER_HOME and its own HTTP server on a different port,
 //! plus a third node to prove relayed answers reach only the decision's node.
 
@@ -144,25 +144,80 @@ fn lanes_decisions_and_holds_across_nodes() {
     assert_eq!(mirror.status, LaneStatus::Working);
     assert_eq!(mirror.charter, "", "events never carry the charter");
 
-    // 2. Only the owner writes: the spoke can't report into or close the hub's lane.
-    let r = spoke.store.report_lane(
-        LaneReportInput {
+    // 2. Only the owner writes. A report into the hub's lane from the spoke is a proposal,
+    //    applied by the hub when it arrives; closing it from the spoke is refused.
+    let proposed = spoke
+        .store
+        .report_lane(
+            LaneReportInput {
+                agent: "codex@shop".into(),
+                lane: mirror.lane_id.clone(),
+                kind: ReportKind::Status,
+                summary: "from the laptop".into(),
+                progress: Some(30),
+                status: None,
+                links: vec![],
+                artifacts: vec![],
+                outcome: None,
+                pr_url: None,
+            },
+            None,
+        )
+        .unwrap();
+    assert_eq!(proposed.proposed_to.as_deref(), Some("hub"));
+    let e = spoke
+        .store
+        .close_lane("codex@shop", &mirror.lane_id, false, None, None)
+        .unwrap_err();
+    assert_eq!(e.code(), "conflict");
+    assert!(e.to_string().contains("owned by node hub"), "{e}");
+    sync(&spoke);
+    let applied = hub.store.lane("api", None).unwrap();
+    let r = applied
+        .reports
+        .iter()
+        .find(|r| r.summary == "from the laptop")
+        .expect("the hub applied the proposal");
+    assert!(r.agent.starts_with("codex@shop"), "{}", r.agent);
+    assert_eq!(r.progress, Some(30));
+    // The proposal event carries ids and status only, and never reaches the third node.
+    let ev = spoke
+        .store
+        .events(10_000)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "lane.report_proposed")
+        .unwrap();
+    assert!(!ev.payload.to_string().contains("from the laptop"));
+    // Decisions can't flip a mirror to needs_decision either: ask on the owner node.
+    let asked = spoke.store.ask_decision(
+        NewDecision {
             agent: "codex@shop".into(),
-            lane: mirror.lane_id.clone(),
-            kind: ReportKind::Status,
-            summary: "from the laptop".into(),
-            progress: None,
-            status: Some(LaneStatus::Blocked),
-            links: vec![],
-            artifacts: vec![],
-            outcome: None,
-            pr_url: None,
+            question: "Ship it?".into(),
+            options: vec![
+                DecisionOption {
+                    value: "yes".into(),
+                    label: "Yes".into(),
+                    description: None,
+                },
+                DecisionOption {
+                    value: "no".into(),
+                    label: "No".into(),
+                    description: None,
+                },
+            ],
+            lane: Some(mirror.lane_id.clone()),
+            ..Default::default()
         },
         None,
     );
-    let e = r.unwrap_err();
+    let e = asked.unwrap_err();
     assert_eq!(e.code(), "conflict");
     assert!(e.to_string().contains("owned by node hub"), "{e}");
+    assert_eq!(
+        spoke.store.lane(&mirror.lane_id, None).unwrap().lane.status,
+        LaneStatus::Working
+    );
     // The owner's changes replay onto the mirror in order.
     for to in [
         LaneStatus::Blocked,
@@ -293,6 +348,27 @@ fn lanes_decisions_and_holds_across_nodes() {
     let mail = &inbox.messages[0].message;
     assert!(mail.subject.starts_with("[decision] Yes"));
     assert!(mail.body.contains("private note for the laptop"));
+    // The text crossed as mail, already marked read: the answer mail is what the agent reads.
+    let carrier = inbox
+        .messages
+        .iter()
+        .find(|m| m.message.subject.starts_with("[decision] answer note"))
+        .expect("carrier mail");
+    assert!(carrier.read_at.is_some());
+    // The relay event itself carries ids and status only.
+    let relay = hub
+        .store
+        .events(10_000)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "decision.answer_relayed")
+        .unwrap();
+    assert_eq!(relay.payload["has_text"], true);
+    assert!(
+        !relay.payload.to_string().contains("private note"),
+        "{}",
+        relay.payload
+    );
     sync(&spoke); // push: the hub's mirror settles
     let settled = hub.store.decision(&d.decision_id, None).unwrap();
     assert_eq!(settled.status, DecisionStatus::Answered);
@@ -302,7 +378,7 @@ fn lanes_decisions_and_holds_across_nodes() {
     let third_events = third.store.events(10_000).unwrap();
     assert!(third_events
         .iter()
-        .all(|e| e.kind != "decision.answer_relayed"));
+        .all(|e| e.kind != "decision.answer_relayed" && e.kind != "lane.report_proposed"));
     assert!(!serde_json::to_string(&third_events)
         .unwrap()
         .contains("private note"));

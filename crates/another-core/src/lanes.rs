@@ -145,6 +145,10 @@ pub struct Lane {
     /// (`None` for this node's lanes).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
+    /// Set when the lead left and no lane member could take over: the lane stays open (never
+    /// blocked automatically) until someone is made lead (`lane update --lead`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leaderless_since: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -170,6 +174,10 @@ pub struct LaneReport {
     /// The mail copy of this report, if one was sent.
     pub message_id: Option<String>,
     pub created_at: String,
+    /// Set on a report into another node's lane: it was sent there as a proposal (named by
+    /// node), and that node applies it as a report when it arrives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -265,7 +273,7 @@ const LANE_SELECT: &str = "SELECT l.lane_id, l.name, p.slug, p.abs_path, l.chart
        l.closed_at, l.project_id,
        (SELECT count(*) FROM lane_reports r WHERE r.lane_id = l.lane_id),
        (SELECT max(r.created_at) FROM lane_reports r WHERE r.lane_id = l.lane_id),
-       onode.display_name
+       onode.display_name, l.leaderless_at
      FROM lanes l
      JOIN projects p ON p.project_id = l.project_id
      JOIN agents la ON la.agent_id = l.lead_id
@@ -293,6 +301,7 @@ fn lane_from_row(r: &Row<'_>) -> rusqlite::Result<(Lane, String)> {
             reports: r.get(15)?,
             last_report: fmt_opt(r.get(16)?),
             node: r.get(17)?,
+            leaderless_since: fmt_opt(r.get(18)?),
         },
         r.get(14)?,
     ))
@@ -450,6 +459,7 @@ fn report_from_row(r: &Row<'_>) -> rusqlite::Result<LaneReport> {
         pr_url: r.get(10)?,
         message_id: r.get(11)?,
         created_at: fmt_ts(r.get(12)?),
+        proposed_to: None,
     })
 }
 
@@ -623,6 +633,345 @@ fn render_report_body(input: &LaneReportInput, report_id: &str) -> String {
 
 fn reload(tx: &Tx<'_>, lane_id: &str) -> Result<Lane> {
     Ok(resolve_lane(tx, tx.node_id, lane_id)?.0)
+}
+
+/// Store a report on a local lane (see [`Store::report_lane`]). Also used to apply another
+/// node's proposal, so `me` may be an agent of that node.
+pub(crate) fn report_tx(
+    tx: &Tx<'_>,
+    me: &AgentRef,
+    lane: &Lane,
+    project_id: &str,
+    input: &LaneReportInput,
+) -> Result<LaneReport> {
+    let lane = lane.clone();
+    let project_id = project_id.to_string();
+    if lane.status.is_closed() {
+        return Err(Error::Conflict(format!(
+            "lane {} is already {}",
+            lane.name,
+            lane.status.as_str()
+        )));
+    }
+    let report_id = new_id();
+    let new_status = match input.kind {
+        ReportKind::Done => Some(LaneStatus::Done),
+        _ => input.status,
+    };
+
+    // Mail copy to the counterpart, in the lane thread.
+    let (lead_id, creator_id): (String, String) = tx.query_row(
+        "SELECT lead_id, created_by FROM lanes WHERE lane_id = ?1",
+        [&lane.lane_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let counterpart = if me.id == lead_id {
+        creator_id
+    } else {
+        lead_id
+    };
+    let message = if counterpart != me.id {
+        let to = get_agent(tx, &counterpart)?.address;
+        let label = new_status.unwrap_or(lane.status).as_str();
+        // Subjects show up in the activity feed (and on federated peers), so they carry
+        // the lane, status and author only; the summary is in the body.
+        let subject: String = format!(
+            "[lane {}] {label}: {} report by {}",
+            lane.name,
+            input.kind.as_str(),
+            me.address
+        )
+        .chars()
+        .take(200)
+        .collect();
+        let thread_ok = lane.thread_id.as_ref().is_some_and(|t| {
+            tx.query_row(
+                "SELECT 1 FROM messages WHERE thread_id = ?1 LIMIT 1",
+                [t],
+                |_| Ok(()),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .is_some()
+        });
+        let importance = match (input.kind, new_status) {
+            (_, Some(LaneStatus::NeedsDecision)) | (_, Some(LaneStatus::Blocked)) => {
+                Importance::High
+            }
+            _ => Importance::Normal,
+        };
+        Some(send_tx(
+            tx,
+            &SendMessage {
+                // A proposal applied here comes from another node's agent, which can't send
+                // mail from this node: the system agent carries it.
+                from: if me.node_id == tx.node_id {
+                    me.address.clone()
+                } else {
+                    crate::identity::system_agent_tx(tx)?.address
+                },
+                to: vec![to],
+                subject,
+                body: render_report_body(input, &report_id),
+                importance,
+                thread_id: if thread_ok {
+                    lane.thread_id.clone()
+                } else {
+                    None
+                },
+                ..Default::default()
+            },
+        )?)
+    } else {
+        None
+    };
+    if let Some(m) = &message {
+        if lane.thread_id.is_none() {
+            tx.execute(
+                "UPDATE lanes SET thread_id = ?2 WHERE lane_id = ?1",
+                params![lane.lane_id, m.thread_id],
+            )?;
+        }
+    }
+
+    let event_id = tx.emit(
+        &me.address,
+        "lane.reported",
+        json!({
+            "lane_id": lane.lane_id,
+            "project_id": project_id,
+            "name": lane.name,
+            "report_id": report_id,
+            "kind": input.kind.as_str(),
+            "status": new_status.map(|s| s.as_str()),
+        }),
+    )?;
+    tx.execute(
+        "INSERT INTO lane_reports (report_id, lane_id, node_id, agent_id, kind, summary,
+           progress, status, links, artifacts, outcome, pr_url, message_id, created_at, event_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![
+            report_id,
+            lane.lane_id,
+            tx.node_id,
+            me.id,
+            input.kind.as_str(),
+            input.summary,
+            input.progress,
+            new_status.map(|s| s.as_str()),
+            serde_json::to_string(&input.links)?,
+            serde_json::to_string(&input.artifacts)?,
+            input.outcome,
+            input.pr_url,
+            message.as_ref().map(|m| m.message_id.clone()),
+            tx.now,
+            event_id
+        ],
+    )?;
+    tx.execute(
+        "UPDATE lanes SET updated_at = ?2 WHERE lane_id = ?1",
+        params![lane.lane_id, tx.now],
+    )?;
+    if let Some(to) = new_status {
+        set_status(tx, me, &lane, &project_id, to)?;
+    }
+    if input.kind == ReportKind::Done {
+        tx.execute(
+            "UPDATE lanes SET outcome = ?2, pr_url = ?3 WHERE lane_id = ?1",
+            params![lane.lane_id, input.outcome, input.pr_url],
+        )?;
+        tx.emit(
+            &me.address,
+            "lane.closed",
+            json!({ "lane_id": lane.lane_id, "project_id": project_id, "name": lane.name, "status": "done" }),
+        )?;
+    }
+    touch(tx, &me.id)?;
+    Ok(tx.query_row(
+        &format!("{REPORT_SELECT} WHERE r.report_id = ?1"),
+        [&report_id],
+        report_from_row,
+    )?)
+}
+
+/// A report into another node's lane: its summary goes as mail to an agent of that node (the
+/// lead, else the creator), and `lane.report_proposed` (ids and status only) is routed to
+/// that node alone, which applies it as a report from `me`.
+fn propose_report_tx(
+    tx: &Tx<'_>,
+    me: &AgentRef,
+    lane: &Lane,
+    project_id: &str,
+    node: &str,
+    input: &LaneReportInput,
+) -> Result<LaneReport> {
+    if input.kind == ReportKind::Done {
+        return Err(Error::Conflict(format!(
+            "lane {} is owned by node {node}: finish it there (a done report can't be proposed)",
+            lane.name
+        )));
+    }
+    let (owner_node, lead_id, creator_id): (String, String, String) = tx.query_row(
+        "SELECT node_id, lead_id, created_by FROM lanes WHERE lane_id = ?1",
+        [&lane.lane_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let mut to = None;
+    for id in [lead_id, creator_id] {
+        let a = get_agent(tx, &id)?;
+        let a_node: String = tx.query_row(
+            "SELECT node_id FROM agents WHERE agent_id = ?1",
+            [&id],
+            |r| r.get(0),
+        )?;
+        if a_node == owner_node && id != me.id {
+            to = Some(a);
+            break;
+        }
+    }
+    let Some(to) = to else {
+        return Err(Error::Conflict(format!(
+            "lane {} is owned by node {node}, and nobody there can receive the proposal: report it there",
+            lane.name
+        )));
+    };
+    let carrier = send_tx(
+        tx,
+        &SendMessage {
+            from: me.address.clone(),
+            to: vec![format!(
+                "{}@{}@{owner_node}",
+                to.name,
+                to.project.clone().unwrap_or_default()
+            )],
+            subject: format!("[lane {}] proposed report by {}", lane.name, me.address),
+            body: input.summary.clone(),
+            ..Default::default()
+        },
+    )?;
+    let proposal_id = new_id();
+    tx.emit(
+        &me.address,
+        "lane.report_proposed",
+        json!({
+            "proposal_id": proposal_id,
+            "lane_id": lane.lane_id,
+            "lane_node": owner_node,
+            "project_id": project_id,
+            "name": lane.name,
+            "agent_id": me.id,
+            "status": input.status.map(|s| s.as_str()),
+            "progress": input.progress,
+            "summary_message_id": carrier.message_id,
+        }),
+    )?;
+    touch(tx, &me.id)?;
+    Ok(LaneReport {
+        report_id: proposal_id,
+        lane_id: lane.lane_id.clone(),
+        agent: me.address.clone(),
+        kind: input.kind,
+        summary: input.summary.clone(),
+        progress: input.progress,
+        status: input.status,
+        links: input.links.clone(),
+        artifacts: input.artifacts.clone(),
+        outcome: None,
+        pr_url: None,
+        message_id: Some(carrier.message_id),
+        created_at: fmt_ts(tx.now),
+        proposed_to: Some(node.to_string()),
+    })
+}
+
+/// At the lane's owner node: apply another node's proposed report as a report from its
+/// author (lane rules apply as usual); a proposal that can't apply is recorded and dropped.
+pub(crate) fn apply_proposal_tx(
+    tx: &Tx<'_>,
+    ev: &crate::federation::WireEvent,
+    p: &serde_json::Value,
+) -> Result<()> {
+    let s = |k: &str| {
+        p.get(k)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    let (Some(lane_id), Some(agent_id), Some(mid)) =
+        (s("lane_id"), s("agent_id"), s("summary_message_id"))
+    else {
+        return Ok(());
+    };
+    let summary: Option<String> = tx
+        .query_row(
+            "SELECT body FROM messages WHERE message_id = ?1 AND node_id = ?2 AND sender_id = ?3",
+            params![mid, ev.node_id, agent_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    // The carrier only brought the summary: the report mail is what people read.
+    tx.execute(
+        "UPDATE deliveries SET read_at = COALESCE(read_at, ?2) WHERE message_id = ?1",
+        params![mid, tx.now],
+    )?;
+    let ignored = |reason: &str| -> Result<()> {
+        tx.emit(
+            "system",
+            "lane.proposal_ignored",
+            json!({ "proposal_id": s("proposal_id"), "lane_id": lane_id, "agent_id": agent_id, "from_node": ev.node_id, "reason": reason }),
+        )?;
+        Ok(())
+    };
+    let Some(summary) = summary else {
+        return ignored("summary_missing");
+    };
+    let Ok((lane, project_id)) = resolve_lane(tx, tx.node_id, &lane_id) else {
+        return ignored("unknown_lane");
+    };
+    if lane.node.is_some() {
+        return ignored("not_owner");
+    }
+    let me = match tx
+        .query_row(
+            "SELECT agent_id, address, node_id FROM agents WHERE agent_id = ?1",
+            [&agent_id],
+            |r| {
+                Ok(AgentRef {
+                    id: r.get(0)?,
+                    address: r.get(1)?,
+                    node_id: r.get(2)?,
+                })
+            },
+        )
+        .optional()?
+    {
+        Some(a) => a,
+        None => return ignored("unknown_agent"),
+    };
+    let input = LaneReportInput {
+        agent: me.address.clone(),
+        lane: lane_id.clone(),
+        kind: ReportKind::Status,
+        summary,
+        progress: p
+            .get("progress")
+            .and_then(serde_json::Value::as_u64)
+            .map(|x| x.min(100) as u8),
+        status: s("status")
+            .and_then(|x| x.parse().ok())
+            .filter(|st: &LaneStatus| !st.is_closed()),
+        links: vec![],
+        artifacts: vec![],
+        outcome: None,
+        pr_url: None,
+    };
+    match report_tx(tx, &me, &lane, &project_id, &input) {
+        Ok(_) => Ok(()),
+        Err(Error::Conflict(_) | Error::Invalid(_) | Error::Forbidden(_) | Error::NotFound(_)) => {
+            ignored("refused")
+        }
+        Err(e) => Err(e),
+    }
 }
 
 impl Store {
@@ -802,7 +1151,8 @@ impl Store {
                 let lead = resolve_agent(tx, tx.node_id, l)?;
                 changed.insert("lead_id".into(), json!(lead.id));
                 tx.execute(
-                    "UPDATE lanes SET lead_id = ?2, updated_at = ?3 WHERE lane_id = ?1",
+                    "UPDATE lanes SET lead_id = ?2, updated_at = ?3, leaderless_at = NULL
+                     WHERE lane_id = ?1",
                     params![lane.lane_id, lead.id, tx.now],
                 )?;
             }
@@ -868,144 +1218,12 @@ impl Store {
         self.write(|tx| {
             let me = resolve_agent(tx, tx.node_id, &input.agent)?;
             let (lane, project_id) = resolve_lane_in(tx, tx.node_id, &input.lane, scope)?;
-            if let Some(node) = &lane.node {
-                return Err(Error::Conflict(format!(
-                    "lane {} is owned by node {node}: change it there (its MCP / HTTP API) or mail its lead",
-                    lane.name
-                )));
-            }
             check_scope(tx, scope, &project_id)?;
-            if lane.status.is_closed() {
-                return Err(Error::Conflict(format!(
-                    "lane {} is already {}",
-                    lane.name,
-                    lane.status.as_str()
-                )));
+            if let Some(node) = &lane.node {
+                // Another node owns the lane: queue the report there as a proposal.
+                return propose_report_tx(tx, &me, &lane, &project_id, node, &input);
             }
-            let report_id = new_id();
-            let new_status = match input.kind {
-                ReportKind::Done => Some(LaneStatus::Done),
-                _ => input.status,
-            };
-
-            // Mail copy to the counterpart, in the lane thread.
-            let (lead_id, creator_id): (String, String) = tx.query_row(
-                "SELECT lead_id, created_by FROM lanes WHERE lane_id = ?1",
-                [&lane.lane_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            let counterpart = if me.id == lead_id { creator_id } else { lead_id };
-            let message = if counterpart != me.id {
-                let to = get_agent(tx, &counterpart)?.address;
-                let label = new_status.unwrap_or(lane.status).as_str();
-                // Subjects show up in the activity feed (and on federated peers), so they carry
-                // the lane, status and author only; the summary is in the body.
-                let subject: String = format!(
-                    "[lane {}] {label}: {} report by {}",
-                    lane.name,
-                    input.kind.as_str(),
-                    me.address
-                )
-                    .chars()
-                    .take(200)
-                    .collect();
-                let thread_ok = lane.thread_id.as_ref().is_some_and(|t| {
-                    tx.query_row("SELECT 1 FROM messages WHERE thread_id = ?1 LIMIT 1", [t], |_| {
-                        Ok(())
-                    })
-                    .optional()
-                    .ok()
-                    .flatten()
-                    .is_some()
-                });
-                let importance = match (input.kind, new_status) {
-                    (_, Some(LaneStatus::NeedsDecision)) | (_, Some(LaneStatus::Blocked)) => {
-                        Importance::High
-                    }
-                    _ => Importance::Normal,
-                };
-                Some(send_tx(
-                    tx,
-                    &SendMessage {
-                        from: me.address.clone(),
-                        to: vec![to],
-                        subject,
-                        body: render_report_body(&input, &report_id),
-                        importance,
-                        thread_id: if thread_ok { lane.thread_id.clone() } else { None },
-                        ..Default::default()
-                    },
-                )?)
-            } else {
-                None
-            };
-            if let Some(m) = &message {
-                if lane.thread_id.is_none() {
-                    tx.execute(
-                        "UPDATE lanes SET thread_id = ?2 WHERE lane_id = ?1",
-                        params![lane.lane_id, m.thread_id],
-                    )?;
-                }
-            }
-
-            let event_id = tx.emit(
-                &me.address,
-                "lane.reported",
-                json!({
-                    "lane_id": lane.lane_id,
-                    "project_id": project_id,
-                    "name": lane.name,
-                    "report_id": report_id,
-                    "kind": input.kind.as_str(),
-                    "status": new_status.map(|s| s.as_str()),
-                }),
-            )?;
-            tx.execute(
-                "INSERT INTO lane_reports (report_id, lane_id, node_id, agent_id, kind, summary,
-                   progress, status, links, artifacts, outcome, pr_url, message_id, created_at, event_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-                params![
-                    report_id,
-                    lane.lane_id,
-                    tx.node_id,
-                    me.id,
-                    input.kind.as_str(),
-                    input.summary,
-                    input.progress,
-                    new_status.map(|s| s.as_str()),
-                    serde_json::to_string(&input.links)?,
-                    serde_json::to_string(&input.artifacts)?,
-                    input.outcome,
-                    input.pr_url,
-                    message.as_ref().map(|m| m.message_id.clone()),
-                    tx.now,
-                    event_id
-                ],
-            )?;
-            tx.execute(
-                "UPDATE lanes SET updated_at = ?2 WHERE lane_id = ?1",
-                params![lane.lane_id, tx.now],
-            )?;
-            if let Some(to) = new_status {
-                set_status(tx, &me, &lane, &project_id, to)?;
-            }
-            if input.kind == ReportKind::Done {
-                tx.execute(
-                    "UPDATE lanes SET outcome = ?2, pr_url = ?3 WHERE lane_id = ?1",
-                    params![lane.lane_id, input.outcome, input.pr_url],
-                )?;
-                tx.emit(
-                    &me.address,
-                    "lane.closed",
-                    json!({ "lane_id": lane.lane_id, "project_id": project_id, "name": lane.name, "status": "done" }),
-                )?;
-            }
-            touch(tx, &me.id)?;
-            Ok(tx.query_row(
-                &format!("{REPORT_SELECT} WHERE r.report_id = ?1"),
-                [&report_id],
-                report_from_row,
-            )?)
+            report_tx(tx, &me, &lane, &project_id, &input)
         })
     }
 

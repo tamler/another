@@ -82,6 +82,7 @@ impl WebhookFilter {
                         | "lane.closed"
                         | "lane.agent_joined"
                         | "lane.agent_left"
+                        | "lane.leaderless"
                 )
             }
             WebhookFilter::LaneReport => kind == "lane.reported",

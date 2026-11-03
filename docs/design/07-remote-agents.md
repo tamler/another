@@ -33,14 +33,16 @@ another invite revoke <invite-id>
   - the expiry (default 24 h, at most 30 days);
   - how many uses it allows (default 1);
   - whether the agent is ephemeral (the default) or persistent;
-  - for ephemeral agents, how long it may go without a heartbeat (`--idle-hours`, default 4).
+  - for ephemeral agents, how long it may go without being seen (`--idle-hours`; without it, the node setting `remote_idle_hours`, default 4, read when checked so changing it applies to existing agents).
+- **No takeovers.** An invite can't be made for a name an agent on the hub already has, and a redemption fails (same `invalid or expired invite`) if someone registered the name after the invite was made. The exceptions: later uses of the same invite refresh its own agent, and a remote agent that has gone (no live token) can be invited again.
 - **Single use and non-widening.** Redeeming takes only the code, plus optional client info (hostname, client version) that is recorded but never trusted. The resulting token's globs and lane are copied from the invite; a redeemer can't ask for anything else.
 - **Each use mints a separate token.** An invite with `--uses 3` admits three sessions, each with its own token. The agent is registered once: later redemptions refresh it.
 - **Status:** `list` shows uses, expiry and `active` / `used` / `expired` / `revoked`. `revoke` stops future redemptions; tokens already issued are kicked separately (`agent kick`).
 
 **Redeeming:** `POST /join` with `{ "code": "anj_…", "client": { "hostname": "…", "version": "…" } }`, or the CLI `another join <hub-url> <code>`.
 
-- `POST /join` is the only unauthenticated route besides `/health`: the code itself is the credential. It is only served when the hub runs with `--auth`, since a token is useless without it.
+- `POST /join` is the only unauthenticated route besides `/health`: the code itself is the credential. It is only served when the hub runs with `--auth`, since a token is useless without it. It is **rate-limited**: 10 attempts a minute per client address, then `429 rate_limited` (audited as denied, `rate limited`).
+- Codes and token digests are compared in constant time.
 - **On success** the hub, in one transaction:
   1. registers the agent;
   2. creates a token (`ano_…`, label `invite <id>`; expiry = the invite's `--token-ttl` if given, otherwise none, because ephemeral agents are cleaned up by presence);
@@ -63,7 +65,7 @@ another invite revoke <invite-id>
 
 `invite create --print-snippet --hub-url URL` prints a POSIX `sh` block for a cloud session:
 
-1. **Get the binary.** Uses `another` if it is on `PATH`. Otherwise it downloads the latest GitHub release archive for the platform (`another-<version>-<target>.tar.gz`), verifies its `.sha256`, and installs it to `~/.local/bin`. If that fails (no release, or an unknown platform), it runs `cargo install --locked --git https://github.com/tamler/another another`.
+1. **Get the binary.** Uses `another` if it is on `PATH`. Otherwise it downloads the release archive of **the hub's own version** (`v<version>`, pinned in the snippet; never "latest") for the platform, and installs it to `~/.local/bin` only if it matches the release's published `.sha256`. A checksum mismatch stops the script. With no archive for the platform, it builds that same tag: `cargo install --locked --git … --tag v<version> another`.
 2. **Join:** `another join "$HUB" "$CODE" --write-mcp auto --hello`.
    - The token is saved to `$ANOTHER_HOME/remote.json` (`0600`), and the env exports go to `$ANOTHER_HOME/remote.env` (`0600`).
    - The MCP config is written: `claude mcp add --scope user …` when `claude` is on `PATH`, and the Codex table when `~/.codex` exists. For Codex, `ANOTHER_TOKEN` must be in its environment: source `remote.env`.
@@ -75,7 +77,7 @@ The snippet contains only the hub URL and the single-use code: no token, no hub 
 
 The `remote_agents` table records, per invite redemption: the agent, invite and token, whether it is ephemeral, the idle limit, the join time, and the state (`active` / `gone`) with a reason.
 
-**Presence** is computed from the agent's `last_seen_at`, which any call, heartbeat or hook updates:
+**Presence** is computed from the agent's `last_seen_at`, which any authenticated call (reads included), heartbeat or hook updates:
 
 | Presence | When |
 |---|---|
@@ -90,9 +92,19 @@ The `remote_agents` table records, per invite redemption: the agent, invite and 
 4. marks it offline;
 5. emits `agent.gone {agent_id, reason}`.
 
-It goes away after `heartbeat --end` / `POST /agent/leave` ends its session, or after `idle_hours` without being seen. Each lane it was in (the invite's lane, and any open lane it leads) gets **`lane.agent_left {lane_id, project_id, name, agent_id, reason}`**. That is a lane status event, so it shows in the lane feed and is delivered by the `lane_status` webhook filter.
+It goes away after `heartbeat --end` / `POST /agent/leave` ends its session, or after its idle limit without being seen. Each lane it was in (the invite's lane, and any open lane it leads) gets **`lane.agent_left {lane_id, project_id, name, agent_id, reason}`**. That is a lane status event, so it shows in the lane feed and is delivered by the `lane_status` webhook filter.
 
-**Kicking:** `another agent kick NAME [--reason]` (local only) does the same at once, for **any** agent, ephemeral or not. It revokes **all** of the agent's tokens, so its next request gets 401, and emits `agent.kicked` plus `lane.agent_left`.
+**Only the token's projects.** A heartbeat or leave through the agent's token (HTTP or MCP), and its departure, renew or release only holds and leases in the token's projects. Anything the same agent holds elsewhere on the hub is left alone.
+
+**When the lead leaves:**
+- The lane member active longest takes over as lead, and the new lead and the lane's creator are mailed by the system agent `another`. Members are remote agents joined to the lane and agents holding files for it.
+- With nobody left, the lane stays open with `leaderless_since` set. `lane.leaderless` is emitted, the creator is mailed, and the daily summary lists it.
+- It is **never** blocked automatically. `lane update --lead` clears the flag.
+
+**Kicking:**
+- `another agent kick NAME [--reason]` (local) does the same at once, for **any** agent, ephemeral or not. It revokes **all** of the agent's tokens, so its next request gets 401, and emits `agent.kicked` plus `lane.agent_left`.
+- Over MCP, `agent_kick {agent, target, reason?}` is for **manager agents** (program `grok_bot`) only. A remote manager acts as its token's agent and can only kick agents in its projects; others are `not_found`. People and the system agent can't be kicked.
+- The reason is kept on the membership row, never in an event.
 
 **Views:**
 - `another agent remotes` lists joined agents with their presence.
@@ -127,7 +139,12 @@ Today, lane events federate as feed events but aren't projected, and decisions d
 **Lanes have one writer: their owner node.**
 - **Mirrors:** other nodes keep a read-only mirror, projected from `lane.created`, `lane.updated`, `lane.status_changed` and `lane.closed`. It holds the name, project (the origin's), lead, creator and status. There is no charter or reports, since events never carry them.
 - **Owner:** `Lane.node` names the owner node (null when local).
-- **Writes on a mirror:** `lane_update`, `lane_report` and `lane_close` are refused with `conflict` ("lane api is owned by node hub: use the hub's MCP, or mail its lead"). Concurrent changes therefore never race: the owner serialises them in its log, and mirrors converge by replaying the owner's events in order.
+- **Writes on a mirror:** `lane_update` and `lane_close` are refused with `conflict` ("lane api is owned by node hub: …"), and so is asking a decision with a mirrored lane (the owner node is checked first). Concurrent changes therefore never race: the owner serialises them in its log, and mirrors converge by replaying the owner's events in order.
+- **Reports on a mirror are proposals.** `lane_report` on a mirror (for example on a spoke that is offline) returns the report with `proposed_to: <node>`.
+  - The summary travels as mail to an agent of the owner node (the lead, else the creator).
+  - `lane.report_proposed` carries ids, status and progress only, and is routed to the owner node alone.
+  - When it arrives, the owner applies it as a status report from its author, under the usual lane rules, and marks the carrier mail read. A proposal it can't apply emits `lane.proposal_ignored`.
+  - Done reports can't be proposed.
 - **Same name on two nodes:** two nodes may each have an open lane with the same name in the same project. On each node, a bare name or `name@project` means the **local** lane first; the other one is reachable by id.
 - **Holds:** a mirrored `hold.acquired` keeps its `lane_id` when that lane exists locally (as a mirror or a local lane). Cross-node overlaps stay warnings (D26), now flagged `same_lane` when both holds are for the same lane.
 
@@ -136,15 +153,17 @@ Today, lane events federate as feed events but aren't projected, and decisions d
 - **Answering a mirror** (`decision_answer`, CLI or HTTP):
   1. The answer is validated against the mirrored options.
   2. The mirror is marked `answer_sent`.
-  3. The node emits **`decision.answer_relayed`** `{decision_id, decision_node, value, text?, answered_by, relayed_by}`. This is routed like mail, **only to the decision's node**, so free text never reaches other peers.
-- **The origin** applies the first relayed answer through the normal answer path: mail to the agent, wake, lane release, spend approvals. Later answers are ignored, and the origin emits `decision.answer_ignored`. Its own `decision.answered` / `expired` / `cancelled` then syncs back and settles the mirror.
+  3. The node emits **`decision.answer_relayed`** `{decision_id, decision_node, value, has_text, text_message_id?, answered_by, relayed_by}`, routed like mail **only to the decision's node**.
+  - **No free text in events:** any answer text or note goes as mail to the asking agent, and the event only names that message. At the origin, the text is read from that mail, and the carrier is marked read: the answer mail is what the agent reads.
+  - Text length and the note rule (note 03) are checked before the mirror is marked `answer_sent`.
+- **The origin** applies the first relayed answer through the normal answer path: mail to the agent, wake, lane release, spend approvals. The self-approval rule still applies: the relaying agent must be a manager or a person, and not the asker. Later or refused answers are dropped, and the origin emits `decision.answer_ignored`. Its own `decision.answered` / `expired` / `cancelled` then syncs back and settles the mirror.
 - **Conflict rule:** the first answer applied at the origin wins. Concurrent answers from two nodes can't both apply.
 
 Spend stays node-local: accounts are local, and so are their entries.
 
 ## Migration
 
-Migration 11, additive: the `agent_invites`, `remote_agents` and `remote_decisions` tables. Lane mirrors reuse `lanes`, with `node_id` set to the origin.
+Migration 11, additive: the `agent_invites`, `remote_agents` and `remote_decisions` tables (with a nullable `idle_hours`: null follows the node setting), and a nullable `lanes.leaderless_at`. Lane mirrors reuse `lanes`, with `node_id` set to the origin.
 
 ## Security
 
@@ -152,10 +171,10 @@ Migration 11, additive: the `agent_invites`, `remote_agents` and `remote_decisio
 - **Tokens:** tied to the invite's globs, so everything from phases 1–6 is scoped as before: lanes, events, stream/poll, decisions, holds, spend, summary and webhooks.
 - **Kick and gone:** revocation is immediate, because every request verifies the token; open SSE streams close within 30 s (note 02).
 - **Snippet:** contains no secret except the single-use code. `remote.json` and `remote.env` are `0600`, and the hub's `0700` home is never touched.
-- **Federation:** decision answer text goes only to the decision's node. Lane mirrors carry no content.
+- **Federation:** decision answer text and proposed report summaries travel only as mail to the owner node; the events carry ids and status. Lane mirrors carry no content.
+- **Snippet:** pinned to the hub's version and the release's checksum.
 
 ## Out of scope
 
-- Proposals from mirrors: offline lane reports applied by the owner later.
-- Multi-hub agents; per-invite rate limits.
+- Multi-hub agents; per-invite rate limits (the `/join` limit is per client address).
 - Shipping or configuring Tailscale.
