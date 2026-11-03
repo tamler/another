@@ -344,6 +344,7 @@ fn remote_clashes(
     tx: &Tx<'_>,
     project: &Project,
     patterns: &[(String, String)],
+    lane_id: Option<&str>,
 ) -> Result<Vec<HoldConflict>> {
     let mut stmt = tx.prepare(&format!(
         "{HOLD_SELECT} WHERE h.released_at IS NULL AND h.expires_at > ?1 AND h.node_id != ?2
@@ -359,7 +360,8 @@ fn remote_clashes(
                 out.push(HoldConflict {
                     path: requested.clone(),
                     held: held.clone(),
-                    same_lane: false,
+                    // Both nodes working in the same (mirrored) lane.
+                    same_lane: lane_id.is_some() && held.lane_id.as_deref() == lane_id,
                 });
             }
         }
@@ -392,12 +394,20 @@ fn acquire_lane(
         } else {
             format!("{key}@{slug}")
         };
-        let (l, lane_project) = crate::lanes::resolve_lane(tx, tx.node_id, &key)?;
-        if lane_project != project_id {
-            return Err(Error::Invalid(format!(
-                "lane {} belongs to another project",
-                l.name
-            )));
+        let (l, lane_project) = crate::lanes::resolve_lane(tx, tx.node_id, &key).or_else(|e| {
+            match key.split_once('@') {
+                // A mirrored lane of another node lives in that node's project with the same
+                // slug (the same repository on another machine, D26).
+                Some((name, _)) if !by_id => {
+                    crate::lanes::resolve_lane(tx, tx.node_id, name).map_err(|_| e)
+                }
+                _ => Err(e),
+            }
+        })?;
+        let mirrored_same_repo = l.node.is_some() && l.project == slug;
+        if lane_project != project_id && !mirrored_same_repo {
+            // Same error as an unknown lane: holds can't be used to probe other projects.
+            return Err(Error::NotFound(format!("unknown lane {key:?}")));
         }
         if l.status.is_closed() {
             return Err(Error::Conflict(format!("lane {} is closed", l.name)));
@@ -569,7 +579,7 @@ impl Store {
                 input.exclusive,
                 lane_id.as_deref(),
             )?;
-            let mut warnings = remote_clashes(tx, &project, &patterns)?;
+            let mut warnings = remote_clashes(tx, &project, &patterns, lane_id.as_deref())?;
             warnings.extend(same_lane);
             if !conflicts.is_empty() {
                 let mut hold_ids: Vec<&str> = Vec::new();

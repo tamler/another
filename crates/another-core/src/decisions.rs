@@ -89,6 +89,8 @@ pub enum DecisionStatus {
     Answered,
     Expired,
     Cancelled,
+    /// Another node's decision: an answer was relayed to its node, which has not confirmed yet.
+    AnswerSent,
 }
 
 impl DecisionStatus {
@@ -98,6 +100,7 @@ impl DecisionStatus {
             DecisionStatus::Answered => "answered",
             DecisionStatus::Expired => "expired",
             DecisionStatus::Cancelled => "cancelled",
+            DecisionStatus::AnswerSent => "answer_sent",
         }
     }
 }
@@ -110,6 +113,7 @@ impl std::str::FromStr for DecisionStatus {
             "answered" => Ok(DecisionStatus::Answered),
             "expired" => Ok(DecisionStatus::Expired),
             "cancelled" => Ok(DecisionStatus::Cancelled),
+            "answer_sent" => Ok(DecisionStatus::AnswerSent),
             other => Err(Error::Invalid(format!(
                 "unknown decision status {other:?}; expected open, answered, expired or cancelled"
             ))),
@@ -152,6 +156,10 @@ pub struct Decision {
     pub thread_id: String,
     pub created_at: String,
     pub updated_at: String,
+    /// The node the decision was asked on, when it is a mirror of another node's decision
+    /// (answers are relayed there). `None` for this node's decisions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
 }
 
 /// Input for [`Store::ask_decision`].
@@ -398,6 +406,7 @@ fn decision_from_row(r: &Row<'_>) -> rusqlite::Result<Row0> {
             thread_id: r.get(19)?,
             created_at: fmt_ts(r.get(20)?),
             updated_at: fmt_ts(r.get(21)?),
+            node: None,
         },
         project_id: r.get(22)?,
         lane_id: r.get(23)?,
@@ -745,6 +754,480 @@ pub(crate) fn ask_tx(
     Ok(decision_id)
 }
 
+/// Answer a local decision inside a write transaction. `relayed` is the agent that relayed
+/// the answer (local API caller, or another node's agent for a relayed answer).
+pub(crate) fn answer_tx(
+    tx: &Tx<'_>,
+    input: &AnswerDecision,
+    relayed: Option<AgentRef>,
+    scope: Option<&TokenScope>,
+) -> Result<Decision> {
+    let row = load(tx, tx.node_id, &input.decision)?;
+    check_scope(tx, scope, &row.project_id)?;
+    let d = &row.d;
+    if d.status != DecisionStatus::Open {
+        return Err(Error::Conflict(format!(
+            "decision {} is already {}",
+            d.decision_id,
+            d.status.as_str()
+        )));
+    }
+    let value = input
+        .value
+        .as_ref()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let text = input
+        .text
+        .as_ref()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    let option = match &value {
+        Some(v) => Some(
+            d.options
+                .iter()
+                .find(|o| o.value == *v || o.value.eq_ignore_ascii_case(v))
+                .or_else(|| {
+                    // Accept the option number shown on the phone (1-based).
+                    v.parse::<usize>()
+                        .ok()
+                        .and_then(|i| i.checked_sub(1))
+                        .and_then(|i| d.options.get(i))
+                })
+                .ok_or_else(|| {
+                    Error::Invalid(format!(
+                        "{v:?} is not an option; choose one of {}",
+                        d.options
+                            .iter()
+                            .map(|o| o.value.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                })?
+                .clone(),
+        ),
+        None => None,
+    };
+    if let Some(t) = &text {
+        if !d.allow_free_text {
+            return Err(Error::Invalid(
+                "this decision does not accept free text; choose an option".into(),
+            ));
+        }
+        check_text("answer text", t, MAX_ANSWER_TEXT)?;
+    }
+    if option.is_none() && text.is_none() {
+        return Err(Error::Invalid(if d.allow_free_text {
+            "give an option value or free text".into()
+        } else {
+            "give an option value".into()
+        }));
+    }
+    let answered_by = input
+        .answered_by
+        .as_ref()
+        .map(|a| a.trim().to_string())
+        .filter(|a| !a.is_empty())
+        .unwrap_or_else(|| d.human.clone());
+    check_text("answered_by", &answered_by, 64)?;
+    let human = agent_by_id(tx, &row.human_id)?;
+    let asker = agent_by_id(tx, &row.asker_id)?;
+    tx.emit(
+        relayed
+            .as_ref()
+            .map_or(answered_by.as_str(), |r| r.address.as_str()),
+        "decision.answered",
+        json!({
+            "decision_id": d.decision_id,
+            "project_id": row.project_id,
+            "lane_id": row.lane_id,
+            "asker_id": row.asker_id,
+            "value": option.as_ref().map(|o| o.value.clone()),
+            "has_text": text.is_some(),
+            "answered_by": answered_by,
+            "relayed_by": relayed.as_ref().map(|r| r.address.clone()),
+        }),
+    )?;
+    let mut body = String::new();
+    if let Some(o) = &option {
+        body.push_str(&format!("Value: {}\nLabel: {}\n", o.value, o.label));
+    }
+    if let Some(t) = &text {
+        body.push_str(&format!("\n{t}\n"));
+    }
+    body.push_str(&format!("\nAnswered by {answered_by}"));
+    if let Some(r) = &relayed {
+        body.push_str(&format!(" (relayed by {})", r.address));
+    }
+    body.push_str(&format!(
+        " at {}.\n(decision {})",
+        fmt_ts(tx.now),
+        d.decision_id
+    ));
+    let subject = match &option {
+        Some(o) => format!("[decision] {}: {}", o.label, short(&d.question, 60)),
+        None => format!("[decision] answered: {}", short(&d.question, 80)),
+    };
+    let msg = send_tx(
+        tx,
+        &SendMessage {
+            from: human.address.clone(),
+            to: vec![asker.address.clone()],
+            subject,
+            body,
+            importance: Importance::High,
+            reply_to: Some(row.message_id.clone()),
+            ..Default::default()
+        },
+    )?;
+    tx.execute(
+        "UPDATE decisions SET status = 'answered', answer_value = ?2, answer_text = ?3,
+           answered_by = ?4, relayed_by = ?5, answered_at = ?6, updated_at = ?6,
+           answer_message_id = ?7
+         WHERE decision_id = ?1",
+        params![
+            d.decision_id,
+            option.as_ref().map(|o| o.value.clone()),
+            text,
+            answered_by,
+            relayed.as_ref().map(|r| r.address.clone()),
+            tx.now,
+            msg.message_id
+        ],
+    )?;
+    close_request(
+        tx,
+        &d.request_id,
+        "done",
+        Some(&human.id),
+        &format!(
+            "answered by {answered_by}: {}",
+            option.as_ref().map_or("free text", |o| o.value.as_str())
+        ),
+    )?;
+    crate::spend::decision_closed_tx(
+        tx,
+        &d.decision_id,
+        option.as_ref().is_some_and(|o| o.value == "approve"),
+    )?;
+    release_lane(
+        tx,
+        relayed.as_ref().unwrap_or(&human),
+        row.lane_id.as_deref(),
+    )?;
+    Ok(load(tx, tx.node_id, &d.decision_id)?.d)
+}
+
+// ---------------------------------------------------------------------------
+// Federation: mirrors of other nodes' decisions, relayed answers (remote-agents.md §5)
+
+const MIRROR_SELECT: &str =
+    "SELECT m.decision_id, m.status, m.question, m.options, m.allow_free_text,
+       m.deadline_at, m.human, a.address, p.slug, l.name, m.answer_value, m.answered_by,
+       m.relayed_by, m.answered_at, m.created_at, m.updated_at, n.display_name, m.project_id,
+       m.node_id
+     FROM remote_decisions m
+     LEFT JOIN agents a ON a.agent_id = m.asker_id
+     LEFT JOIN projects p ON p.project_id = m.project_id
+     LEFT JOIN lanes l ON l.lane_id = m.lane_id
+     LEFT JOIN nodes n ON n.node_id = m.node_id";
+
+/// A mirrored decision, with its project id and origin node id.
+fn mirror_from_row(r: &Row<'_>) -> rusqlite::Result<(Decision, Option<String>, String)> {
+    let options: Vec<DecisionOption> =
+        serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default();
+    let value: Option<String> = r.get(10)?;
+    let answered_at: Option<i64> = r.get(13)?;
+    let answer = answered_at.map(|at| DecisionAnswer {
+        label: value
+            .as_ref()
+            .and_then(|v| options.iter().find(|o| &o.value == v))
+            .map(|o| o.label.clone()),
+        value: value.clone(),
+        text: None,
+        answered_by: r
+            .get::<_, Option<String>>(11)
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        relayed_by: r.get(12).ok().flatten(),
+        answered_at: fmt_ts(at),
+    });
+    Ok((
+        Decision {
+            decision_id: r.get(0)?,
+            status: r
+                .get::<_, String>(1)?
+                .parse()
+                .unwrap_or(DecisionStatus::Open),
+            question: r.get(2)?,
+            options,
+            allow_free_text: r.get(4)?,
+            context_links: vec![],
+            deadline_at: r.get::<_, Option<i64>>(5)?.map(fmt_ts),
+            on_timeout: DecisionTimeout::KeepOpen,
+            default_value: None,
+            human: r.get(6)?,
+            asker: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
+            project: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+            lane: r.get(9)?,
+            answer,
+            request_id: String::new(),
+            thread_id: String::new(),
+            created_at: fmt_ts(r.get(14)?),
+            updated_at: fmt_ts(r.get(15)?),
+            node: Some(
+                r.get::<_, Option<String>>(16)?
+                    .unwrap_or_else(|| r.get(18).unwrap_or_default()),
+            ),
+        },
+        r.get(17)?,
+        r.get(18)?,
+    ))
+}
+
+fn load_mirror(conn: &Connection, key: &str) -> Result<Option<(Decision, Option<String>, String)>> {
+    Ok(conn
+        .query_row(
+            &format!("{MIRROR_SELECT} WHERE m.decision_id = ?1"),
+            [key.trim().to_ascii_uppercase()],
+            mirror_from_row,
+        )
+        .optional()?)
+}
+
+/// Store another node's `decision.created` as a mirror.
+pub(crate) fn mirror_created_tx(
+    tx: &Tx<'_>,
+    ev: &crate::federation::WireEvent,
+    p: &serde_json::Value,
+) -> Result<()> {
+    let s = |k: &str| {
+        p.get(k)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    let (Some(id), Some(question)) = (s("decision_id"), s("question")) else {
+        return Ok(());
+    };
+    let known = |table: &str, col: &str, v: &Option<String>| -> Result<Option<String>> {
+        match v {
+            Some(v) => Ok(tx
+                .query_row(
+                    &format!("SELECT 1 FROM {table} WHERE {col} = ?1"),
+                    [v],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .map(|_| v.clone())),
+            None => Ok(None),
+        }
+    };
+    let project = known("projects", "project_id", &s("project_id"))?;
+    let lane = known("lanes", "lane_id", &s("lane_id"))?;
+    let asker = known("agents", "agent_id", &s("asker_id"))?;
+    tx.execute(
+        "INSERT OR IGNORE INTO remote_decisions (decision_id, node_id, project_id, lane_id,
+           asker_id, human, question, options, allow_free_text, deadline_at, status, created_at,
+           updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'open', ?11, ?11)",
+        params![
+            id,
+            ev.node_id,
+            project,
+            lane,
+            asker,
+            s("human").unwrap_or_default(),
+            question,
+            p.get("options")
+                .map(|o| o.to_string())
+                .unwrap_or_else(|| "[]".into()),
+            p.get("allow_free_text")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            p.get("deadline_at").and_then(serde_json::Value::as_i64),
+            ev.ts
+        ],
+    )?;
+    Ok(())
+}
+
+/// The origin closed a mirrored decision (answered, expired, cancelled).
+pub(crate) fn mirror_closed_tx(
+    tx: &Tx<'_>,
+    ev: &crate::federation::WireEvent,
+    p: &serde_json::Value,
+) -> Result<()> {
+    let s = |k: &str| {
+        p.get(k)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    let status = ev.kind.trim_start_matches("decision.");
+    tx.execute(
+        "UPDATE remote_decisions SET status = ?2, answer_value = ?3, answered_by = ?4,
+           relayed_by = ?5, answered_at = CASE WHEN ?3 IS NULL THEN answered_at ELSE ?6 END,
+           updated_at = ?6
+         WHERE decision_id = ?1 AND node_id = ?7",
+        params![
+            s("decision_id"),
+            status,
+            s("value"),
+            s("answered_by"),
+            s("relayed_by"),
+            ev.ts,
+            ev.node_id
+        ],
+    )?;
+    Ok(())
+}
+
+/// Answering another node's decision: validate against the mirror, mark it, and relay the
+/// answer to the decision's node only. Returns `None` for local decisions.
+fn relay_answer_tx(
+    tx: &Tx<'_>,
+    input: &AnswerDecision,
+    scope: Option<&TokenScope>,
+) -> Result<Option<Decision>> {
+    if load(tx, tx.node_id, &input.decision).is_ok() {
+        return Ok(None);
+    }
+    let Some((d, project_id, origin)) = load_mirror(tx, &input.decision)? else {
+        return Ok(None);
+    };
+    match (&project_id, scope) {
+        (Some(p), _) => check_scope(tx, scope, p)?,
+        (None, Some(_)) => {
+            return Err(Error::NotFound(format!("no decision {:?}", input.decision)))
+        }
+        (None, None) => {}
+    }
+    if d.status != DecisionStatus::Open {
+        return Err(Error::Conflict(format!(
+            "decision {} is already {}",
+            d.decision_id,
+            d.status.as_str()
+        )));
+    }
+    let value = input
+        .value
+        .as_ref()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let text = input
+        .text
+        .as_ref()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    let option = match &value {
+        Some(v) => Some(
+            d.options
+                .iter()
+                .find(|o| o.value.eq_ignore_ascii_case(v))
+                .or_else(|| {
+                    v.parse::<usize>()
+                        .ok()
+                        .and_then(|i| i.checked_sub(1))
+                        .and_then(|i| d.options.get(i))
+                })
+                .ok_or_else(|| Error::Invalid(format!("{v:?} is not an option")))?
+                .clone(),
+        ),
+        None => None,
+    };
+    if text.is_some() && !d.allow_free_text {
+        return Err(Error::Invalid(
+            "this decision does not accept free text; choose an option".into(),
+        ));
+    }
+    if option.is_none() && text.is_none() {
+        return Err(Error::Invalid("give an option value".into()));
+    }
+    let relayed_ref = match &input.relayed_by {
+        Some(r) => Some(resolve_agent(tx, tx.node_id, r)?),
+        None => None,
+    };
+    let relayed = relayed_ref.as_ref().map(|r| r.address.clone());
+    let answered_by = input
+        .answered_by
+        .clone()
+        .filter(|a| !a.trim().is_empty())
+        .unwrap_or_else(|| d.human.clone());
+    tx.emit(
+        relayed.as_deref().unwrap_or(answered_by.as_str()),
+        "decision.answer_relayed",
+        json!({
+            "decision_id": d.decision_id,
+            "decision_node": origin,
+            "project_id": project_id,
+            "value": option.as_ref().map(|o| o.value.clone()),
+            "text": text,
+            "answered_by": answered_by,
+            "relayed_by": relayed,
+            // Agents sync as directory events, so the id resolves on the decision's node.
+            "relayed_by_id": relayed_ref.as_ref().map(|r| r.id.clone()),
+        }),
+    )?;
+    tx.execute(
+        "UPDATE remote_decisions SET status = 'answer_sent', answer_value = ?2, answered_by = ?3,
+           relayed_by = ?4, answered_at = ?5, updated_at = ?5 WHERE decision_id = ?1",
+        params![
+            d.decision_id,
+            option.as_ref().map(|o| o.value.clone()),
+            answered_by,
+            relayed,
+            tx.now
+        ],
+    )?;
+    Ok(load_mirror(tx, &d.decision_id)?.map(|(d, _, _)| d))
+}
+
+/// At the decision's node: apply the first relayed answer through the normal path (mail,
+/// wake, lane, spend approvals); later ones are ignored and recorded.
+pub(crate) fn apply_relayed_tx(
+    tx: &Tx<'_>,
+    ev: &crate::federation::WireEvent,
+    p: &serde_json::Value,
+) -> Result<()> {
+    let s = |k: &str| {
+        p.get(k)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    let Some(id) = s("decision_id") else {
+        return Ok(());
+    };
+    let Ok(row) = load(tx, tx.node_id, &id) else {
+        return Ok(());
+    };
+    let relayed = s("relayed_by_id")
+        .and_then(|id| agent_by_id(tx, &id).ok())
+        .or_else(|| {
+            s("relayed_by").and_then(|r| crate::identity::resolve_any(tx, tx.node_id, &r).ok())
+        });
+    if row.d.status != DecisionStatus::Open {
+        tx.emit(
+            "system",
+            "decision.answer_ignored",
+            json!({ "decision_id": id, "project_id": row.project_id, "relayed_from": ev.node_id, "status": row.d.status.as_str() }),
+        )?;
+        return Ok(());
+    }
+    answer_tx(
+        tx,
+        &AnswerDecision {
+            decision: id,
+            value: s("value"),
+            text: s("text"),
+            answered_by: s("answered_by"),
+            relayed_by: None,
+        },
+        relayed,
+        None,
+    )?;
+    Ok(())
+}
+
 impl Store {
     /// Ask a person a structured question. Mails them in a new thread and opens a request of
     /// kind `decision`.
@@ -812,6 +1295,30 @@ impl Store {
                     break;
                 }
             }
+            // Mirrors of other nodes' decisions (answers are relayed to their node).
+            if lane_id.is_none() && filter.human.is_none() && (out.len() as u32) < limit {
+                let mut stmt = conn.prepare(&format!(
+                    "{MIRROR_SELECT} WHERE (?1 IS NULL OR m.status = ?1)
+                       AND (?2 IS NULL OR m.project_id = ?2)
+                     ORDER BY m.created_at DESC"
+                ))?;
+                let mirrors = stmt
+                    .query_map(params![status, project_id], mirror_from_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                for (d, project, _) in mirrors {
+                    let visible = match (scope, &project) {
+                        (None, _) => true,
+                        (Some(s), Some(p)) => scope_allows_project(conn, s, p)?,
+                        (Some(_), None) => false,
+                    };
+                    if visible {
+                        out.push(d);
+                        if out.len() as u32 >= limit {
+                            break;
+                        }
+                    }
+                }
+            }
             Ok(out)
         })
     }
@@ -819,10 +1326,19 @@ impl Store {
     /// One decision, by decision id or its request id.
     pub fn decision(&self, key: &str, scope: Option<&TokenScope>) -> Result<Decision> {
         self.sweep()?;
-        self.read(|conn| {
-            let r = load(conn, self.node_id(), key)?;
-            check_scope(conn, scope, &r.project_id)?;
-            Ok(r.d)
+        self.read(|conn| match load(conn, self.node_id(), key) {
+            Ok(r) => {
+                check_scope(conn, scope, &r.project_id)?;
+                Ok(r.d)
+            }
+            Err(e) => match load_mirror(conn, key)? {
+                Some((d, Some(project), _)) => {
+                    check_scope(conn, scope, &project)?;
+                    Ok(d)
+                }
+                Some((d, None, _)) if scope.is_none() => Ok(d),
+                _ => Err(e),
+            },
         })
     }
 
@@ -834,164 +1350,14 @@ impl Store {
     ) -> Result<Decision> {
         self.write(|tx| {
             crate::holds::sweep_tx(tx)?;
-            let row = load(tx, tx.node_id, &input.decision)?;
-            check_scope(tx, scope, &row.project_id)?;
-            let d = &row.d;
-            if d.status != DecisionStatus::Open {
-                return Err(Error::Conflict(format!(
-                    "decision {} is already {}",
-                    d.decision_id,
-                    d.status.as_str()
-                )));
+            if let Some(d) = relay_answer_tx(tx, &input, scope)? {
+                return Ok(d);
             }
-            let value = input
-                .value
-                .as_ref()
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty());
-            let text = input
-                .text
-                .as_ref()
-                .map(|t| t.trim().to_string())
-                .filter(|t| !t.is_empty());
-            let option = match &value {
-                Some(v) => Some(
-                    d.options
-                        .iter()
-                        .find(|o| o.value == *v || o.value.eq_ignore_ascii_case(v))
-                        .or_else(|| {
-                            // Accept the option number shown on the phone (1-based).
-                            v.parse::<usize>()
-                                .ok()
-                                .and_then(|i| i.checked_sub(1))
-                                .and_then(|i| d.options.get(i))
-                        })
-                        .ok_or_else(|| {
-                            Error::Invalid(format!(
-                                "{v:?} is not an option; choose one of {}",
-                                d.options
-                                    .iter()
-                                    .map(|o| o.value.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            ))
-                        })?
-                        .clone(),
-                ),
-                None => None,
-            };
-            if let Some(t) = &text {
-                if !d.allow_free_text {
-                    return Err(Error::Invalid(
-                        "this decision does not accept free text; choose an option".into(),
-                    ));
-                }
-                check_text("answer text", t, MAX_ANSWER_TEXT)?;
-            }
-            if option.is_none() && text.is_none() {
-                return Err(Error::Invalid(if d.allow_free_text {
-                    "give an option value or free text".into()
-                } else {
-                    "give an option value".into()
-                }));
-            }
-            let answered_by = input
-                .answered_by
-                .as_ref()
-                .map(|a| a.trim().to_string())
-                .filter(|a| !a.is_empty())
-                .unwrap_or_else(|| d.human.clone());
-            check_text("answered_by", &answered_by, 64)?;
             let relayed = match &input.relayed_by {
                 Some(r) => Some(resolve_agent(tx, tx.node_id, r)?),
                 None => None,
             };
-            let human = agent_by_id(tx, &row.human_id)?;
-            let asker = agent_by_id(tx, &row.asker_id)?;
-            tx.emit(
-                relayed
-                    .as_ref()
-                    .map_or(answered_by.as_str(), |r| r.address.as_str()),
-                "decision.answered",
-                json!({
-                    "decision_id": d.decision_id,
-                    "project_id": row.project_id,
-                    "lane_id": row.lane_id,
-                    "asker_id": row.asker_id,
-                    "value": option.as_ref().map(|o| o.value.clone()),
-                    "has_text": text.is_some(),
-                    "answered_by": answered_by,
-                    "relayed_by": relayed.as_ref().map(|r| r.address.clone()),
-                }),
-            )?;
-            let mut body = String::new();
-            if let Some(o) = &option {
-                body.push_str(&format!("Value: {}\nLabel: {}\n", o.value, o.label));
-            }
-            if let Some(t) = &text {
-                body.push_str(&format!("\n{t}\n"));
-            }
-            body.push_str(&format!("\nAnswered by {answered_by}"));
-            if let Some(r) = &relayed {
-                body.push_str(&format!(" (relayed by {})", r.address));
-            }
-            body.push_str(&format!(
-                " at {}.\n(decision {})",
-                fmt_ts(tx.now),
-                d.decision_id
-            ));
-            let subject = match &option {
-                Some(o) => format!("[decision] {}: {}", o.label, short(&d.question, 60)),
-                None => format!("[decision] answered: {}", short(&d.question, 80)),
-            };
-            let msg = send_tx(
-                tx,
-                &SendMessage {
-                    from: human.address.clone(),
-                    to: vec![asker.address.clone()],
-                    subject,
-                    body,
-                    importance: Importance::High,
-                    reply_to: Some(row.message_id.clone()),
-                    ..Default::default()
-                },
-            )?;
-            tx.execute(
-                "UPDATE decisions SET status = 'answered', answer_value = ?2, answer_text = ?3,
-                   answered_by = ?4, relayed_by = ?5, answered_at = ?6, updated_at = ?6,
-                   answer_message_id = ?7
-                 WHERE decision_id = ?1",
-                params![
-                    d.decision_id,
-                    option.as_ref().map(|o| o.value.clone()),
-                    text,
-                    answered_by,
-                    relayed.as_ref().map(|r| r.address.clone()),
-                    tx.now,
-                    msg.message_id
-                ],
-            )?;
-            close_request(
-                tx,
-                &d.request_id,
-                "done",
-                Some(&human.id),
-                &format!(
-                    "answered by {answered_by}: {}",
-                    option.as_ref().map_or("free text", |o| o.value.as_str())
-                ),
-            )?;
-            crate::spend::decision_closed_tx(
-                tx,
-                &d.decision_id,
-                option.as_ref().is_some_and(|o| o.value == "approve"),
-            )?;
-            release_lane(
-                tx,
-                relayed.as_ref().unwrap_or(&human),
-                row.lane_id.as_deref(),
-            )?;
-            Ok(load(tx, tx.node_id, &d.decision_id)?.d)
+            answer_tx(tx, &input, relayed, scope)
         })
     }
 

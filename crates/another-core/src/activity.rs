@@ -358,6 +358,22 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             },
             json!({ "decision_id": s("decision_id"), "lane_id": p.get("lane_id") }),
         ),
+        // The relayed answer's free text stays out of the feed.
+        "decision.answer_relayed" => (
+            format!(
+                "{actor} relayed an answer to decision {} on another node",
+                s("decision_id")
+            ),
+            json!({ "decision_id": s("decision_id"), "decision_node": s("decision_node") }),
+        ),
+        "decision.answer_ignored" => (
+            format!(
+                "a relayed answer to decision {} was ignored (already {})",
+                s("decision_id"),
+                s("status")
+            ),
+            json!({ "decision_id": s("decision_id") }),
+        ),
         "decision.overdue" => (
             format!(
                 "decision {} is past its deadline, still waiting",

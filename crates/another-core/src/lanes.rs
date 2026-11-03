@@ -141,6 +141,10 @@ pub struct Lane {
     pub closed_at: Option<String>,
     pub reports: u32,
     pub last_report: Option<String>,
+    /// The node that owns the lane, when it is a read-only mirror of another node's lane
+    /// (`None` for this node's lanes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -260,11 +264,13 @@ const LANE_SELECT: &str = "SELECT l.lane_id, l.name, p.slug, p.abs_path, l.chart
        ca.address, l.status, l.thread_id, l.outcome, l.pr_url, l.created_at, l.updated_at,
        l.closed_at, l.project_id,
        (SELECT count(*) FROM lane_reports r WHERE r.lane_id = l.lane_id),
-       (SELECT max(r.created_at) FROM lane_reports r WHERE r.lane_id = l.lane_id)
+       (SELECT max(r.created_at) FROM lane_reports r WHERE r.lane_id = l.lane_id),
+       onode.display_name
      FROM lanes l
      JOIN projects p ON p.project_id = l.project_id
      JOIN agents la ON la.agent_id = l.lead_id
-     JOIN agents ca ON ca.agent_id = l.created_by";
+     JOIN agents ca ON ca.agent_id = l.created_by
+     LEFT JOIN nodes onode ON onode.node_id = l.node_id AND onode.is_local = 0";
 
 fn lane_from_row(r: &Row<'_>) -> rusqlite::Result<(Lane, String)> {
     let status: String = r.get(7)?;
@@ -286,6 +292,7 @@ fn lane_from_row(r: &Row<'_>) -> rusqlite::Result<(Lane, String)> {
             closed_at: fmt_opt(r.get(13)?),
             reports: r.get(15)?,
             last_report: fmt_opt(r.get(16)?),
+            node: r.get(17)?,
         },
         r.get(14)?,
     ))
@@ -334,19 +341,23 @@ pub(crate) fn resolve_lane_in(
         None => (lowered, None),
     };
     let mut stmt = conn.prepare(&format!(
-        "{LANE_SELECT} WHERE l.node_id = ?1 AND l.name = ?2 AND (?3 IS NULL OR p.slug = ?3)
+        "{LANE_SELECT} WHERE ?1 IS NOT NULL AND l.name = ?2 AND (?3 IS NULL OR p.slug = ?3)
          ORDER BY (l.closed_at IS NULL) DESC, l.created_at DESC"
     ))?;
     let rows = stmt
         .query_map(params![node_id, name, project], lane_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    // The best match per project: open first, then newest.
+    // The best match per project: open first, then newest. A name means this node's lane
+    // when there is one; mirrors of other nodes' lanes are reached by id otherwise.
     let mut best: Vec<(Lane, String)> = Vec::new();
     for (lane, project_id) in rows {
         if !visible(&project_id)? || best.iter().any(|(_, p)| *p == project_id) {
             continue;
         }
         best.push((lane, project_id));
+    }
+    if best.iter().any(|(l, _)| l.node.is_none()) {
+        best.retain(|(l, _)| l.node.is_none());
     }
     match best.len() {
         0 => Err(not_found()),
@@ -611,6 +622,7 @@ impl Store {
                     "project_id": project.project_id,
                     "name": name,
                     "lead_id": lead.id,
+                    "created_by": me.id,
                     "status": status.as_str(),
                 }),
             )?;
@@ -649,7 +661,7 @@ impl Store {
                 None => None,
             };
             let mut stmt = conn.prepare(&format!(
-                "{LANE_SELECT} WHERE l.node_id = ?1 AND (?2 IS NULL OR l.status = ?2)
+                "{LANE_SELECT} WHERE ?1 IS NOT NULL AND (?2 IS NULL OR l.status = ?2)
                    AND (?3 IS NULL OR l.project_id = ?3) AND (?4 IS NULL OR l.lead_id = ?4)
                    AND (?5 OR l.closed_at IS NULL OR ?2 IS NOT NULL)
                  ORDER BY l.updated_at DESC, l.lane_id DESC"
@@ -696,6 +708,12 @@ impl Store {
         self.write(|tx| {
             let me = resolve_agent(tx, tx.node_id, &input.agent)?;
             let (lane, project_id) = resolve_lane_in(tx, tx.node_id, &input.lane, scope)?;
+            if let Some(node) = &lane.node {
+                return Err(Error::Conflict(format!(
+                    "lane {} is owned by node {node}: change it there (its MCP / HTTP API) or mail its lead",
+                    lane.name
+                )));
+            }
             check_scope(tx, scope, &project_id)?;
             if lane.status.is_closed()
                 && (input.charter.is_some() || input.lead.is_some() || input.status.is_some())
@@ -787,6 +805,12 @@ impl Store {
         self.write(|tx| {
             let me = resolve_agent(tx, tx.node_id, &input.agent)?;
             let (lane, project_id) = resolve_lane_in(tx, tx.node_id, &input.lane, scope)?;
+            if let Some(node) = &lane.node {
+                return Err(Error::Conflict(format!(
+                    "lane {} is owned by node {node}: change it there (its MCP / HTTP API) or mail its lead",
+                    lane.name
+                )));
+            }
             check_scope(tx, scope, &project_id)?;
             if lane.status.is_closed() {
                 return Err(Error::Conflict(format!(
@@ -934,6 +958,12 @@ impl Store {
         self.write(|tx| {
             let me = resolve_agent(tx, tx.node_id, agent)?;
             let (lane, project_id) = resolve_lane_in(tx, tx.node_id, lane, scope)?;
+            if let Some(node) = &lane.node {
+                return Err(Error::Conflict(format!(
+                    "lane {} is owned by node {node}: change it there (its MCP / HTTP API) or mail its lead",
+                    lane.name
+                )));
+            }
             check_scope(tx, scope, &project_id)?;
             let to = if abandon {
                 LaneStatus::Abandoned
