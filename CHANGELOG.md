@@ -47,7 +47,10 @@ All notable changes to Another. Unreleased work is listed under the next version
 - **Spend ledger** ([design](docs/design/05-spend.md), [guide](docs/SPEND.md)):
   - Accounts: `gpu_pod`, `api_credits`, `plan_reset`, `server` and `domain`, each with a unit, budget, and monthly period with a reset day (or lifetime).
   - Spend entries; hourly leases with an owner and a cost per hour, renewed by heartbeat.
-  - Approval gate: `requires_approval` makes borrowing ask a decision first.
+  - Approval gate: `requires_approval` makes borrowing ask a decision first, of the account's approver or the node's decider. The borrower can't relay its own approval. Withdrawing a pending lease withdraws its decision (`spend.lease_withdrawn`).
+  - Ending a session closes the agent's spend leases.
+  - `another spend link ACCOUNT RESOURCE`: borrowing a linked resource goes through the account's approval gate and accrues cost while the resource lease lives.
+  - Scoped tokens see the remaining budget of shared accounts (read-only), but only their own projects' spend.
   - `another spend`: a report by period, lane and agent with a phone-sized burn-down. Also MCP `spend_report` and `GET /spend`.
   - `spend.*` events, a new `spend` activity category and a `budget` webhook filter.
   - No real accounts are built in; the examples live in [docs/SPEND.md](docs/SPEND.md).
@@ -59,7 +62,7 @@ All notable changes to Another. Unreleased work is listed under the next version
 
 ### Database
 - Migration 6 adds the `lanes`, `lane_links` and `lane_reports` tables. It is additive; existing databases upgrade in place.
-- Migration 10 adds the `spend_accounts`, `spend_entries` and `spend_leases` tables. It is additive.
+- Migration 10 adds the `spend_accounts`, `spend_entries` and `spend_leases` tables, and a nullable `resources.spend_account_id`. It is additive.
 - Migration 9 adds `holds.lane_id` (nullable). It is additive.
 - Migration 8 adds the `decisions` table and `requests.kind` (default `task`). It is additive.
 - Migration 7 adds the `webhooks` and `webhook_deliveries` tables and a nullable `resource_leases.expiry_warned_at` column. It is additive.

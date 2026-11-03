@@ -717,9 +717,12 @@ CREATE TABLE spend_leases (
     ended_at      INTEGER,
     decision_id   TEXT,
     note          TEXT,
-    entry_id      TEXT
+    entry_id      TEXT,
+    resource_id   TEXT REFERENCES resources(resource_id)
 );
 CREATE INDEX spend_leases_live ON spend_leases(status, expires_at);
+CREATE INDEX spend_leases_by_resource ON spend_leases(resource_id, agent_id, status);
+ALTER TABLE resources ADD COLUMN spend_account_id TEXT REFERENCES spend_accounts(account_id);
 "#,
 ];
 

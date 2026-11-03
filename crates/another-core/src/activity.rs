@@ -408,6 +408,25 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             format!("borrowing request {} was denied", s("lease_id")),
             json!({ "lease_id": s("lease_id"), "decision_id": s("decision_id") }),
         ),
+        "spend.resource_linked" => (
+            if p.get("account_id").is_some_and(|v| !v.is_null()) {
+                format!("resource {} linked to a spend account", s("resource_id"))
+            } else {
+                format!(
+                    "resource {} unlinked from its spend account",
+                    s("resource_id")
+                )
+            },
+            json!({ "resource_id": s("resource_id"), "account_id": p.get("account_id") }),
+        ),
+        "spend.lease_withdrawn" => (
+            format!(
+                "{actor} withdrew borrowing request {} on {}",
+                s("lease_id"),
+                s("account")
+            ),
+            json!({ "lease_id": s("lease_id"), "decision_id": s("decision_id") }),
+        ),
         "spend.approval_requested" => (
             format!("{actor} asked to borrow {} (approval needed)", s("account")),
             json!({ "lease_id": s("lease_id"), "decision_id": s("decision_id") }),
