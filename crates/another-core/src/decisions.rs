@@ -231,7 +231,7 @@ fn check_text(what: &str, s: &str, max: usize) -> Result<()> {
     Ok(())
 }
 
-fn validate(input: &NewDecision) -> Result<()> {
+pub(crate) fn validate(input: &NewDecision) -> Result<()> {
     check_text("question", &input.question, MAX_QUESTION)?;
     if !(2..=6).contains(&input.options.len()) {
         return Err(Error::Invalid(format!(
@@ -606,9 +606,143 @@ pub(crate) fn expire_decisions_tx(tx: &Tx<'_>) -> Result<usize> {
             None,
             "deadline passed",
         )?;
+        crate::spend::decision_closed_tx(
+            tx,
+            &d.decision_id,
+            applied.as_deref() == Some("approve"),
+        )?;
         release_lane(tx, &asker, row.lane_id.as_deref())?;
     }
     Ok(due.len())
+}
+
+/// Ask a decision inside a write transaction (validated input). Returns the decision id.
+pub(crate) fn ask_tx(
+    tx: &Tx<'_>,
+    input: &NewDecision,
+    human_name: &str,
+    scope: Option<&TokenScope>,
+) -> Result<String> {
+    let asker = resolve_agent(tx, tx.node_id, &input.agent)?;
+    let human = ensure_human(tx, human_name)?;
+    if human.id == asker.id {
+        return Err(Error::Invalid(
+            "an agent cannot ask itself for a decision".into(),
+        ));
+    }
+    let lane = match &input.lane {
+        Some(l) => Some(resolve_lane(tx, tx.node_id, l)?),
+        None => None,
+    };
+    let project_id = match (&input.project, &lane) {
+        (Some(p), lane) => {
+            let p = find_project(tx, tx.node_id, p)?;
+            if let Some((_, lane_project)) = lane {
+                if *lane_project != p.project_id {
+                    return Err(Error::Invalid(
+                        "the lane belongs to a different project".into(),
+                    ));
+                }
+            }
+            p.project_id
+        }
+        (None, Some((_, lane_project))) => lane_project.clone(),
+        (None, None) => tx
+            .query_row(
+                "SELECT project_id FROM agents WHERE agent_id = ?1",
+                [&asker.id],
+                |r| r.get::<_, Option<String>>(0),
+            )?
+            .ok_or_else(|| {
+                Error::Invalid("name a project (or a lane): decisions belong to a project".into())
+            })?,
+    };
+    check_scope(tx, scope, &project_id)?;
+    if let Some((l, _)) = &lane {
+        if l.status.is_closed() {
+            return Err(Error::Conflict(format!("lane {} is closed", l.name)));
+        }
+    }
+    let decision_id = new_id();
+    let msg = send_tx(
+        tx,
+        &SendMessage {
+            from: asker.address.clone(),
+            to: vec![human.address.clone()],
+            subject: format!("[decision] {}", short(&input.question, 120)),
+            body: render_question(input, &decision_id, &human.address),
+            importance: Importance::High,
+            ..Default::default()
+        },
+    )?;
+    let request_id = new_id();
+    tx.execute(
+        "INSERT INTO requests (request_id, node_id, message_id, thread_id, title,
+           created_by, status, created_at, updated_at, kind)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?7, 'decision')",
+        params![
+            request_id,
+            tx.node_id,
+            msg.message_id,
+            msg.thread_id,
+            short(&input.question, 200),
+            asker.id,
+            tx.now
+        ],
+    )?;
+    let lane_id = lane.as_ref().map(|(l, _)| l.lane_id.clone());
+    let event_id = tx.emit(
+        &asker.address,
+        "decision.created",
+        json!({
+            "decision_id": decision_id,
+            "request_id": request_id,
+            "project_id": project_id,
+            "lane_id": lane_id,
+            "asker_id": asker.id,
+            "human": human.address,
+            "question": input.question,
+            "options": input.options,
+            "allow_free_text": input.allow_free_text,
+            "deadline_at": input.deadline_at,
+            "on_timeout": input.on_timeout.as_str(),
+        }),
+    )?;
+    tx.execute(
+        "INSERT INTO decisions (decision_id, node_id, project_id, lane_id, asker_id,
+           human_id, question, options, allow_free_text, context_links, deadline_at,
+           on_timeout, default_value, status, request_id, message_id, thread_id,
+           created_at, updated_at, event_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'open', ?14, ?15,
+           ?16, ?17, ?17, ?18)",
+        params![
+            decision_id,
+            tx.node_id,
+            project_id,
+            lane_id,
+            asker.id,
+            human.id,
+            input.question,
+            serde_json::to_string(&input.options)?,
+            input.allow_free_text,
+            serde_json::to_string(&input.context_links)?,
+            input.deadline_at,
+            input.on_timeout.as_str(),
+            input.default_value,
+            request_id,
+            msg.message_id,
+            msg.thread_id,
+            tx.now,
+            event_id
+        ],
+    )?;
+    if let Some((l, lp)) = &lane {
+        if l.status != LaneStatus::NeedsDecision {
+            set_status(tx, &asker, l, lp, LaneStatus::NeedsDecision)?;
+        }
+    }
+    touch(tx, &asker.id)?;
+    Ok(decision_id)
 }
 
 impl Store {
@@ -624,128 +758,8 @@ impl Store {
             .unwrap_or_else(default_decider);
         self.write(|tx| {
             crate::holds::sweep_tx(tx)?;
-            let asker = resolve_agent(tx, tx.node_id, &input.agent)?;
-            let human = ensure_human(tx, &human_name)?;
-            if human.id == asker.id {
-                return Err(Error::Invalid(
-                    "an agent cannot ask itself for a decision".into(),
-                ));
-            }
-            let lane = match &input.lane {
-                Some(l) => Some(resolve_lane(tx, tx.node_id, l)?),
-                None => None,
-            };
-            let project_id = match (&input.project, &lane) {
-                (Some(p), lane) => {
-                    let p = find_project(tx, tx.node_id, p)?;
-                    if let Some((_, lane_project)) = lane {
-                        if *lane_project != p.project_id {
-                            return Err(Error::Invalid(
-                                "the lane belongs to a different project".into(),
-                            ));
-                        }
-                    }
-                    p.project_id
-                }
-                (None, Some((_, lane_project))) => lane_project.clone(),
-                (None, None) => tx
-                    .query_row(
-                        "SELECT project_id FROM agents WHERE agent_id = ?1",
-                        [&asker.id],
-                        |r| r.get::<_, Option<String>>(0),
-                    )?
-                    .ok_or_else(|| {
-                        Error::Invalid(
-                            "name a project (or a lane): decisions belong to a project".into(),
-                        )
-                    })?,
-            };
-            check_scope(tx, scope, &project_id)?;
-            if let Some((l, _)) = &lane {
-                if l.status.is_closed() {
-                    return Err(Error::Conflict(format!("lane {} is closed", l.name)));
-                }
-            }
-            let decision_id = new_id();
-            let msg = send_tx(
-                tx,
-                &SendMessage {
-                    from: asker.address.clone(),
-                    to: vec![human.address.clone()],
-                    subject: format!("[decision] {}", short(&input.question, 120)),
-                    body: render_question(&input, &decision_id, &human.address),
-                    importance: Importance::High,
-                    ..Default::default()
-                },
-            )?;
-            let request_id = new_id();
-            tx.execute(
-                "INSERT INTO requests (request_id, node_id, message_id, thread_id, title,
-                   created_by, status, created_at, updated_at, kind)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?7, 'decision')",
-                params![
-                    request_id,
-                    tx.node_id,
-                    msg.message_id,
-                    msg.thread_id,
-                    short(&input.question, 200),
-                    asker.id,
-                    tx.now
-                ],
-            )?;
-            let lane_id = lane.as_ref().map(|(l, _)| l.lane_id.clone());
-            let event_id = tx.emit(
-                &asker.address,
-                "decision.created",
-                json!({
-                    "decision_id": decision_id,
-                    "request_id": request_id,
-                    "project_id": project_id,
-                    "lane_id": lane_id,
-                    "asker_id": asker.id,
-                    "human": human.address,
-                    "question": input.question,
-                    "options": input.options,
-                    "allow_free_text": input.allow_free_text,
-                    "deadline_at": input.deadline_at,
-                    "on_timeout": input.on_timeout.as_str(),
-                }),
-            )?;
-            tx.execute(
-                "INSERT INTO decisions (decision_id, node_id, project_id, lane_id, asker_id,
-                   human_id, question, options, allow_free_text, context_links, deadline_at,
-                   on_timeout, default_value, status, request_id, message_id, thread_id,
-                   created_at, updated_at, event_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'open', ?14, ?15,
-                   ?16, ?17, ?17, ?18)",
-                params![
-                    decision_id,
-                    tx.node_id,
-                    project_id,
-                    lane_id,
-                    asker.id,
-                    human.id,
-                    input.question,
-                    serde_json::to_string(&input.options)?,
-                    input.allow_free_text,
-                    serde_json::to_string(&input.context_links)?,
-                    input.deadline_at,
-                    input.on_timeout.as_str(),
-                    input.default_value,
-                    request_id,
-                    msg.message_id,
-                    msg.thread_id,
-                    tx.now,
-                    event_id
-                ],
-            )?;
-            if let Some((l, lp)) = &lane {
-                if l.status != LaneStatus::NeedsDecision {
-                    set_status(tx, &asker, l, lp, LaneStatus::NeedsDecision)?;
-                }
-            }
-            touch(tx, &asker.id)?;
-            Ok(load(tx, tx.node_id, &decision_id)?.d)
+            let id = ask_tx(tx, &input, &human_name, scope)?;
+            Ok(load(tx, tx.node_id, &id)?.d)
         })
     }
 
@@ -967,6 +981,11 @@ impl Store {
                     option.as_ref().map_or("free text", |o| o.value.as_str())
                 ),
             )?;
+            crate::spend::decision_closed_tx(
+                tx,
+                &d.decision_id,
+                option.as_ref().is_some_and(|o| o.value == "approve"),
+            )?;
             release_lane(
                 tx,
                 relayed.as_ref().unwrap_or(&human),
@@ -1027,6 +1046,7 @@ impl Store {
                 },
             )?;
             close_request(tx, &row.d.request_id, "cancelled", None, reason.as_deref().unwrap_or("withdrawn"))?;
+            crate::spend::decision_closed_tx(tx, &row.d.decision_id, false)?;
             release_lane(tx, &me, row.lane_id.as_deref())?;
             Ok(load(tx, tx.node_id, &row.d.decision_id)?.d)
         })

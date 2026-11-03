@@ -104,6 +104,7 @@ Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green
 | [docs/FEDERATION.md](docs/FEDERATION.md) | Several machines: node keys, pairing, sync, permissions |
 | [docs/LANES.md](docs/LANES.md) | Lanes: units of work for a manager bot and coding agents; reports, export, hooks |
 | [docs/HUMAN-DECISIONS.md](docs/HUMAN-DECISIONS.md) | Structured questions from agents to a person, answered by phone (via the manager), HTTP or CLI |
+| [docs/SPEND.md](docs/SPEND.md) | Spend ledger: budgets, monthly resets, hourly leases with approval, burn-down by lane and agent |
 | [docs/PUSH.md](docs/PUSH.md) | Push: SSE stream, long-poll and signed webhooks, all filtered by token scope |
 | [docs/WAKE.md](docs/WAKE.md) | `another wake` adapters (tmux, cmux, Herdr) and the Herdr plugin |
 | [docs/SPEC.md](docs/SPEC.md) | Research and product spec |
@@ -121,6 +122,7 @@ Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green
 | Lanes | `lane_create`, `lane_list`, `lane_show`, `lane_update`, `lane_report` (`status` / `done`), `lane_close` |
 | Path holds | `hold_paths` (`acquire` / `check` / `renew` / `release` / `list`; optional `lane`), `holds_by_lane` |
 | Awareness | `activity_feed`, `activity_summarize` (summaries and ids, never message bodies) |
+| Spend | `spend_report`, `spend_accounts`, `spend_record`, `spend_borrow`, `spend_release`, `spend_leases`, `spend_account_upsert` (local only) |
 | Push | `events_poll` (long-poll), `webhook_subscribe`, `webhook_list`, `webhook_remove` |
 | Resources | `resource_find`, `resource_register`, `resource_borrow`, `resource_release`, `resource_heartbeat`, `orphans_list`, `resource_reap` (plan and request only) |
 
@@ -142,6 +144,7 @@ Every command takes `--json`. `--agent` and `--from` default to `$ANOTHER_AGENT`
 | Sessions and feed | `another heartbeat [--start\|--end [--keep]]`, `another activity [--since 1h] [--kinds mail,request] [--summary]` |
 | Hooks | `another hook install\|uninstall --client <c>\|all [--dry-run] [--lane-reports] [--pre-edit]`, `another hook status` |
 | Resources | `another resources`, `another resource register`, `another borrow`, `another release`, `another orphans`, `another reap <target> [--confirm]` |
+| Spend | `another spend [--period previous\|YYYY-MM] [--lane L] [--agent A]`, `another spend account add\|list\|update\|archive`, `another spend record\|borrow\|release\|leases` |
 | Webhooks | `another webhook add --url URL --events lane_status,needs_decision --project GLOB`, `another webhook list\|remove\|test\|dead\|deliveries\|retry` |
 | Remote peers | `another serve --auth`, `another token create\|list\|revoke`, `another audit` |
 | Federation | `another pair invite\|join\|revoke`, `another peers`, `another sync [--watch]`, `another serve --federation` |

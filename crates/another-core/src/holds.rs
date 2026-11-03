@@ -432,6 +432,7 @@ pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
     let expired_leases = crate::resources::expire_leases_tx(tx)?;
     crate::resources::warn_expiring_leases_tx(tx)?;
     crate::decisions::expire_decisions_tx(tx)?;
+    crate::spend::expire_spend_leases_tx(tx)?;
     Ok(SweepReport {
         expired_holds: expired.len(),
         stale_requests,
@@ -855,6 +856,7 @@ impl Store {
                     tx.emit(&me.address, "session.started", session_payload())?;
                 }
                 renew_tx(tx, &me.address, &owned)?;
+                crate::spend::renew_spend_leases_tx(tx, &me.id)?;
                 touch(tx, &me.id)?;
                 let ids: Vec<String> = owned.into_iter().map(|(id, _)| id).collect();
                 (holds_by_id(tx, &ids)?, Vec::new(), "active")

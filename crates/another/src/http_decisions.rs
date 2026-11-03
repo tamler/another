@@ -20,7 +20,7 @@ fn status_of(e: &another_core::Error) -> StatusCode {
     }
 }
 
-async fn finish(
+pub(crate) async fn finish(
     store: &Store,
     peer: Option<RemotePeer>,
     op: String,
@@ -173,4 +173,40 @@ pub async fn answer(
         result,
     )
     .await
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SpendParams {
+    pub period: Option<String>,
+    pub account: Option<String>,
+    pub lane: Option<String>,
+}
+
+/// `GET /spend?period=current` — the spend report (scoped for remote callers).
+pub async fn spend(
+    State(store): State<Store>,
+    peer: Option<axum::Extension<RemotePeer>>,
+    Query(p): Query<SpendParams>,
+) -> Response {
+    let peer = peer.map(|p| p.0);
+    let scope = peer.as_ref().map(|p| p.scope.clone());
+    let detail = format!(
+        "period={:?} account={:?} lane={:?}",
+        p.period, p.account, p.lane
+    );
+    let s = store.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let r = s.spend_report(
+            another_core::SpendQuery {
+                period: p.period.as_deref().unwrap_or("current").parse()?,
+                account: p.account,
+                lane: p.lane,
+                agent: None,
+            },
+            scope.as_ref(),
+        )?;
+        Ok(json!(r))
+    })
+    .await;
+    finish(&store, peer, "GET /spend".into(), detail, result).await
 }

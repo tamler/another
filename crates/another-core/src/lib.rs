@@ -16,6 +16,7 @@ mod lanes;
 mod mail;
 mod requests;
 mod resources;
+mod spend;
 mod store;
 mod time;
 mod tokens;
@@ -55,6 +56,12 @@ pub use resources::{
     derive_port, Lease, LeaseMode, LeaseOutcome, RegisterResource, Resource, ResourceFilter,
     ResourceKind, ResourceRef, DEFAULT_LEASE_TTL_SECONDS, LEASE_EXPIRING_WINDOW_MS,
     MAX_LEASE_TTL_SECONDS, MIN_LEASE_TTL_SECONDS,
+};
+pub use spend::{
+    period_bounds, spend_markdown, AccountSpend, BorrowSpend, BudgetStatus, NewSpendAccount,
+    PeriodSel, RecordSpend, SpendAccount, SpendAccountUpdate, SpendEntry, SpendGroup, SpendKind,
+    SpendLease, SpendLeaseOutcome, SpendLeaseStatus, SpendPeriod, SpendQuery, SpendReport,
+    DEFAULT_SPEND_LEASE_TTL_SECONDS,
 };
 pub use store::{default_home, Clock, Event, NodeInfo, Store, DB_FILE};
 pub use time::fmt_ts;
