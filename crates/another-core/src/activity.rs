@@ -365,6 +365,26 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             format!("{actor} withdrew decision {}", s("decision_id")),
             json!({ "decision_id": s("decision_id"), "lane_id": p.get("lane_id") }),
         ),
+        "lane.hold_conflict" => {
+            let lane_name = |id: &str| -> Result<String> {
+                Ok(conn
+                    .query_row("SELECT name FROM lanes WHERE lane_id = ?1", [id], |r| {
+                        r.get(0)
+                    })
+                    .optional()?
+                    .unwrap_or_else(|| id.to_string()))
+            };
+            (
+                format!(
+                    "lane {} ran into lane {} on {} (held by {})",
+                    lane_name(&s("lane_id"))?,
+                    lane_name(&s("other_lane_id"))?,
+                    list("paths"),
+                    list("holders")
+                ),
+                json!({ "lane_id": s("lane_id"), "other_lane_id": s("other_lane_id"), "project_id": s("project_id") }),
+            )
+        }
         "hold.conflict" => {
             let project = project_slug(conn, &s("project_id"))?;
             (

@@ -174,6 +174,9 @@ pub struct LaneDetail {
     pub links: Vec<LaneLink>,
     /// Most recent first (up to 20).
     pub reports: Vec<LaneReport>,
+    /// Live path holds taken for this lane.
+    #[serde(default)]
+    pub holds: Vec<crate::holds::Hold>,
 }
 
 #[derive(Debug, Clone)]
@@ -377,7 +380,15 @@ fn detail(conn: &Connection, lane: Lane) -> Result<LaneDetail> {
     let reports = stmt
         .query_map([&lane.lane_id], report_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut stmt = conn.prepare(&format!(
+        "{} WHERE h.lane_id = ?1 AND h.released_at IS NULL ORDER BY h.created_at, h.hold_id",
+        crate::holds::HOLD_SELECT
+    ))?;
+    let holds = stmt
+        .query_map([&lane.lane_id], crate::holds::hold_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(LaneDetail {
+        holds,
         lane,
         links,
         reports,

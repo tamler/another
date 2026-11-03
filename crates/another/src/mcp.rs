@@ -184,6 +184,9 @@ pub struct HoldPathsArgs {
     /// Exclusive holds (default) conflict with any overlapping hold; shared ones only with exclusive.
     pub exclusive: Option<bool>,
     pub reason: Option<String>,
+    /// Lane id or name the holds are for (acquire). Default: the one open lane you lead in
+    /// this project. Overlaps with holds in the same lane do not block (they are warnings).
+    pub lane: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, JsonSchema)]
@@ -495,6 +498,7 @@ impl AnotherMcp {
                         ttl_seconds: a.ttl_seconds,
                         exclusive: a.exclusive.unwrap_or(true),
                         reason: a.reason.clone(),
+                        lane: a.lane.clone(),
                     })?;
                     out.granted = report.granted;
                     out.conflicts = report.conflicts;

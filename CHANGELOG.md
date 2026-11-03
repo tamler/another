@@ -30,6 +30,11 @@ All notable changes to Another. Unreleased work is listed under the next version
     - CLI: `another decision ask|list|show|answer|cancel`.
   - Events: `decision.created|answered|expired|overdue|cancelled`.
   - Requests gain a `kind` field (`task` or `decision`).
+- **Lane-aware holds** ([design](docs/design/04-lane-holds.md)):
+  - Holds carry a lane (explicit `lane`, else `$ANOTHER_LANE`, else the lane the agent leads). Overlaps inside one lane are warnings, not conflicts.
+  - Cross-lane conflicts emit `lane.hold_conflict`, which the `hold_conflict` webhook filter delivers.
+  - `another holds --by-lane`, MCP `holds_by_lane`, and live holds in `lane show`.
+  - Opt-in pre-edit hook for Claude Code and Codex: `another hook install --pre-edit`. It holds files before each edit and denies the edit when another lane or agent holds them.
 - CI also runs on pull requests that target non-`main` branches, so stacked PRs are checked.
 
 ### Changed
@@ -38,5 +43,6 @@ All notable changes to Another. Unreleased work is listed under the next version
 
 ### Database
 - Migration 6 adds the `lanes`, `lane_links` and `lane_reports` tables. It is additive; existing databases upgrade in place.
+- Migration 9 adds `holds.lane_id` (nullable). It is additive.
 - Migration 8 adds the `decisions` table and `requests.kind` (default `task`). It is additive.
 - Migration 7 adds the `webhooks` and `webhook_deliveries` tables and a nullable `resource_leases.expiry_warned_at` column. It is additive.

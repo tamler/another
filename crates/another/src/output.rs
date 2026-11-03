@@ -4,9 +4,9 @@ use std::fmt::Write;
 
 use another_core::{
     ActivityFeed, Agent, AuditEntry, Decision, Event, HeartbeatReport, Hold, HoldConflict,
-    HoldReport, Inbox, Lane, LaneDetail, LaneReport, LeaseOutcome, Message, NodeInfo, Peer,
-    Project, Request, Resource, Thread, ThreadSummary, Token, WakeTarget, Webhook, WebhookCreated,
-    WebhookDelivery,
+    HoldReport, Inbox, Lane, LaneDetail, LaneHolds, LaneReport, LeaseOutcome, Message, NodeInfo,
+    Peer, Project, Request, Resource, Thread, ThreadSummary, Token, WakeTarget, Webhook,
+    WebhookCreated, WebhookDelivery,
 };
 use serde::Serialize;
 
@@ -167,12 +167,16 @@ pub fn holds(hs: &[Hold]) -> String {
     hs.iter()
         .map(|h| {
             format!(
-                "{:<9} {:<16} {}:{}  until {}{}  [{}]\n",
+                "{:<9} {:<16} {}:{}  until {}{}{}  [{}]\n",
                 if h.exclusive { "exclusive" } else { "shared" },
                 h.agent,
                 h.project,
                 h.pattern,
                 h.expires_at,
+                h.lane
+                    .as_deref()
+                    .map(|l| format!("  lane {l}"))
+                    .unwrap_or_default(),
                 h.reason
                     .as_deref()
                     .map(|r| format!("  ({r})"))
@@ -187,9 +191,14 @@ pub fn conflicts(cs: &[HoldConflict]) -> String {
     cs.iter()
         .map(|c| {
             format!(
-                "conflict: {} is held by {} ({}, {} until {})\n",
+                "conflict: {} is held by {}{} ({}, {} until {})\n",
                 c.path,
                 c.held.agent,
+                c.held
+                    .lane
+                    .as_deref()
+                    .map(|l| format!(" in lane {l}"))
+                    .unwrap_or_default(),
                 c.held.pattern,
                 if c.held.exclusive {
                     "exclusive"
@@ -675,6 +684,34 @@ pub fn decisions(ds: &[Decision]) -> String {
             values.join(" | "),
             answer
         );
+    }
+    out
+}
+
+pub fn lane_holds(gs: &[LaneHolds]) -> String {
+    if gs.is_empty() {
+        return "no live holds".to_string();
+    }
+    let mut out = String::new();
+    for g in gs {
+        match &g.lane {
+            Some(l) => {
+                let _ = writeln!(
+                    out,
+                    "lane {l} [{}] in {} (lead {}): {} hold(s)",
+                    g.status.map(|s| s.as_str()).unwrap_or("?"),
+                    g.project,
+                    g.lead.as_deref().unwrap_or("?"),
+                    g.holds.len()
+                );
+            }
+            None => {
+                let _ = writeln!(out, "no lane, in {}: {} hold(s)", g.project, g.holds.len());
+            }
+        }
+        for line in holds(&g.holds).lines() {
+            let _ = writeln!(out, "  {line}");
+        }
     }
     out
 }

@@ -193,7 +193,7 @@ pub fn authorize(
         // or removed, inside the store.
         "webhook_subscribe" | "webhook_list" | "webhook_remove" => Ok(()),
         // Lane reads are filtered / checked against the token scope inside the tool.
-        "lane_list" | "lane_show" => Ok(()),
+        "lane_list" | "lane_show" | "holds_by_lane" => Ok(()),
         "lane_create" => {
             acting(args, "agent")?;
             project(s(args, "project"), true)

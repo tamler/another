@@ -64,6 +64,7 @@ fn hold(s: &Store, agent: &str, project: &str, path: &str) -> HoldReport {
         paths: vec![path.into()],
         exclusive: true,
         reason: None,
+        lane: None,
         ttl_seconds: None,
     })
     .unwrap()

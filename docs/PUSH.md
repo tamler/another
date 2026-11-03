@@ -83,7 +83,7 @@ another webhook remove <webhook-id>
 | `needs_decision` | a lane moving to `needs_decision` (by update or report); `decision.created`; `decision.overdue` ([human decisions](HUMAN-DECISIONS.md)) |
 | `request_created` | `request.created`, `decision.created` |
 | `request_answered` | `request.completed`, `request.cancelled`, `decision.answered`, `decision.expired` |
-| `hold_conflict` | `hold.conflict`: an agent was refused a hold because another agent holds an overlapping path |
+| `hold_conflict` | `hold.conflict`: an agent was refused a hold because another agent holds an overlapping path; `lane.hold_conflict`: the same, between two lanes |
 | `lease_expiring` | `resource.lease_expiring`: a resource lease has under 5 minutes (or half its TTL) left. Sent once; renewing re-arms it |
 | `all` | every visible event except mail and delivery events |
 
