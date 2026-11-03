@@ -110,7 +110,7 @@ pub(crate) fn scope_allows_project(
 }
 
 /// Whether `candidate` matches any of the token's project globs.
-fn glob_allows(globs: &[String], candidates: &[String]) -> bool {
+pub(crate) fn glob_allows(globs: &[String], candidates: &[String]) -> bool {
     globs.iter().any(|g| {
         let Ok(glob) = GlobBuilder::new(g).literal_separator(true).build() else {
             return false;
@@ -152,6 +152,61 @@ fn get_token(conn: &Connection, id: &str) -> Result<Token> {
     .ok_or_else(|| Error::NotFound(format!("unknown token {id:?}")))
 }
 
+/// Create a token inside a write transaction (`actor` is recorded on `token.created`).
+pub(crate) fn create_token_tx(
+    tx: &crate::store::Tx<'_>,
+    agent: &str,
+    project_globs: &[String],
+    label: Option<String>,
+    expires_in_seconds: Option<i64>,
+    actor: &str,
+) -> Result<NewToken> {
+    for g in project_globs {
+        GlobBuilder::new(g)
+            .literal_separator(true)
+            .build()
+            .map_err(|e| Error::Invalid(format!("invalid project glob {g:?}: {e}")))?;
+    }
+    if expires_in_seconds.is_some_and(|s| s <= 0) {
+        return Err(Error::Invalid("expiry must be positive".into()));
+    }
+    let secret_part = random_hex(32)?;
+    let me = resolve_agent(tx, tx.node_id, agent)?;
+    let token_id = new_id();
+    let expires_at = expires_in_seconds.map(|s| tx.now + s * 1000);
+    let secret = format!("{TOKEN_PREFIX}{token_id}_{secret_part}");
+    tx.emit(
+        actor,
+        "token.created",
+        json!({
+            "token_id": token_id,
+            "agent_id": me.id,
+            "project_globs": project_globs,
+            "label": label,
+            "expires_at": expires_at,
+        }),
+    )?;
+    tx.execute(
+        "INSERT INTO tokens (token_id, node_id, agent_id, label, project_globs, secret_hash,
+           created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            token_id,
+            tx.node_id,
+            me.id,
+            label,
+            serde_json::to_string(project_globs)?,
+            hash(&secret),
+            tx.now,
+            expires_at
+        ],
+    )?;
+    Ok(NewToken {
+        token: get_token(tx, &token_id)?,
+        secret,
+    })
+}
+
 impl Store {
     /// Create a bearer token that acts as `agent` within `project_globs`.
     pub fn create_token(
@@ -161,51 +216,15 @@ impl Store {
         label: Option<String>,
         expires_in_seconds: Option<i64>,
     ) -> Result<NewToken> {
-        for g in project_globs {
-            GlobBuilder::new(g)
-                .literal_separator(true)
-                .build()
-                .map_err(|e| Error::Invalid(format!("invalid project glob {g:?}: {e}")))?;
-        }
-        if expires_in_seconds.is_some_and(|s| s <= 0) {
-            return Err(Error::Invalid("expiry must be positive".into()));
-        }
-        let secret_part = random_hex(32)?;
         self.write(|tx| {
-            let me = resolve_agent(tx, tx.node_id, agent)?;
-            let token_id = new_id();
-            let expires_at = expires_in_seconds.map(|s| tx.now + s * 1000);
-            let secret = format!("{TOKEN_PREFIX}{token_id}_{secret_part}");
-            tx.emit(
+            create_token_tx(
+                tx,
+                agent,
+                project_globs,
+                label.clone(),
+                expires_in_seconds,
                 "human (another token create)",
-                "token.created",
-                json!({
-                    "token_id": token_id,
-                    "agent_id": me.id,
-                    "project_globs": project_globs,
-                    "label": label,
-                    "expires_at": expires_at,
-                }),
-            )?;
-            tx.execute(
-                "INSERT INTO tokens (token_id, node_id, agent_id, label, project_globs, secret_hash,
-                   created_at, expires_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    token_id,
-                    tx.node_id,
-                    me.id,
-                    label,
-                    serde_json::to_string(project_globs)?,
-                    hash(&secret),
-                    tx.now,
-                    expires_at
-                ],
-            )?;
-            Ok(NewToken {
-                token: get_token(tx, &token_id)?,
-                secret,
-            })
+            )
         })
     }
 

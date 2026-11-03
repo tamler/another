@@ -14,6 +14,7 @@ mod holds;
 mod identity;
 mod lanes;
 mod mail;
+mod remote_agents;
 mod requests;
 mod resources;
 mod spend;
@@ -51,6 +52,10 @@ pub use lanes::{
 pub use mail::{
     AckOutcome, Importance, Inbox, InboxItem, InboxQuery, Message, NewRequest, Reply, SendMessage,
     Thread, ThreadSummary,
+};
+pub use remote_agents::{
+    invite_id_of, AgentInvite, CreatedInvite, Departure, JoinClient, Joined, NewAgentInvite,
+    Presence, RemoteAgent, DEFAULT_IDLE_HOURS, ONLINE_WINDOW_MS,
 };
 pub use requests::{Request, RequestAction, RequestFilter, RequestStatus, RequestUpdate};
 pub use resources::{

@@ -844,6 +844,28 @@ pub(crate) fn expire_spend_leases_tx(tx: &Tx<'_>) -> Result<usize> {
     Ok(due.len())
 }
 
+/// End an agent's active spend leases (recording their cost) and withdraw pending ones.
+/// Returns how many leases were closed.
+pub(crate) fn end_agent_leases_tx(tx: &Tx<'_>, agent_id: &str, reason: &str) -> Result<usize> {
+    let mut stmt = tx.prepare(&format!(
+        "{LEASE_SELECT} WHERE l.agent_id = ?1 AND l.status IN ('active', 'pending_approval')"
+    ))?;
+    let rows = stmt
+        .query_map([agent_id], lease_from_row(tx.now))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for row in &rows {
+        if row.lease.status == SpendLeaseStatus::Active {
+            end_lease_tx(tx, row, tx.now, "system", reason)?;
+        } else {
+            tx.execute(
+                "UPDATE spend_leases SET status = 'denied', ended_at = ?2 WHERE lease_id = ?1",
+                params![row.lease.lease_id, tx.now],
+            )?;
+        }
+    }
+    Ok(rows.len())
+}
+
 /// Renew an agent's active spend leases by their TTL (session heartbeat).
 pub(crate) fn renew_spend_leases_tx(tx: &Tx<'_>, agent_id: &str) -> Result<usize> {
     Ok(tx.execute(
