@@ -65,6 +65,13 @@ Every way events leave the node applies the same visibility rule (D38). When add
 - **Hooks fail open, visibly:** a problem with the agent's lane degrades to an unlaned hold plus a warning, never to no hold and never to a blocked edit.
 - **Not yet verified:** the pre-edit hook against a real Codex build (`apply_patch` payload). Fleshapron runs that check after these fixes.
 
+## Spend (phase 5)
+
+- **Record, never act:** the ledger never fetches usage, stops or reaps anything.
+- **Approval:** the approver is the account's, else the `decider` node setting. The borrower can never relay its own approval (`check_relayer`).
+- **Lease lifecycle:** withdrawing a pending lease withdraws its decision and emits `spend.lease_withdrawn`. Ending a session closes the agent's spend leases. Spend leases tied to a resource (`resource_id`) end with that resource lease (`reconcile_resource_spend_tx`).
+- **Shared accounts seen by tokens:** the budget figures are for the whole account (read-only), but spent, accrued and the groupings count only the token's projects. Never put other projects' names or amounts in their lines.
+
 ## Review routing rule
 
 Every PR gets a review from a **different model family** than the one that wrote it:

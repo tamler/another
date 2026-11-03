@@ -35,6 +35,8 @@ another resource register model_server ollama@11434 --agent claude@shop --endpoi
 - **Session end**: `another heartbeat --end` (and the session-end hook) releases the agent's holds and resource leases. Add `--keep` to keep resource leases for a server meant to outlive the session.
 - **Lapse**: when the last lease expires or is released, the resource becomes `lapsed`. It stays listed, and registering or borrowing it again **adopts** it.
 
+- **Paid resources**: a resource linked to a spend account (`another spend link ACCOUNT RESOURCE`) charges borrowers by the hour. If the account requires approval, `borrow` returns `pending_approval` and a `decision_id`, and the lease is taken once the decision is approved. See [SPEND.md](SPEND.md#paying-for-registered-resources).
+
 ## Orphans
 
 ```bash

@@ -58,16 +58,33 @@ MCP: `spend_borrow`, `spend_release`, `spend_leases`.
 
 - **Cost:** a lease costs `cost_per_hour` × hours. The rate is the account's unless you pass `--cost-per-hour`.
 - **Renewal and expiry:** the agent's heartbeat (its prompt hook) renews the lease, and it expires after its TTL (default 1 h) if not renewed.
+- **Session end** (the SessionEnd hook, or `another session end`) closes the agent's spend leases: active ones are charged up to then, and pending ones are withdrawn. `--keep-resources` keeps them.
 - **When it ends**, its cost is written as one entry. While it runs, the cost so far shows as **accrued** in reports.
 - **Nothing is stopped or reaped** when a lease ends or a budget runs out. That always needs a person.
 
 **Approval:** if the account has `--requires-approval`, borrowing does not start the lease.
-1. It asks a **[decision](HUMAN-DECISIONS.md)** of the approver: "Approve codex@ml borrowing gpu-a100 at 2.1 USD/h for 4 h (about 8.4 USD)? Purpose: LoRA run", with options **approve** and **deny**.
+1. It asks a **[decision](HUMAN-DECISIONS.md)** of the approver (the account's `--approver`, else the node's decider: `another config decider owner`): "Approve codex@ml borrowing gpu-a100 at 2.1 USD/h for 4 h (about 8.4 USD)? Purpose: LoRA run", with options **approve** and **deny**.
 2. The manager bot hears about it through the `needs_decision` and `budget` webhooks.
 3. When the person answers, the manager relays it, for example `POST /decisions/{id}/answer {"value":"approve"}`.
 4. If approved, the lease starts then; its clock starts at approval, not at the request.
 5. `deny`, or withdrawing the decision, marks the lease denied.
 6. Either way, the answer reaches the agent's inbox.
+7. **Withdrawing:** `another spend release <lease-id>` on a pending lease withdraws its decision too. The approver is told no answer is needed, the lane leaves `needs_decision`, and `spend.lease_withdrawn` is emitted.
+8. **No self-approval:** the agent that borrowed can't relay the answer, even if it is a manager bot. Another manager bot or the person must.
+
+## Paying for registered resources
+
+A [registered resource](RESOURCES.md), such as a rented GPU pod, can be charged to an account with a `cost_per_hour`:
+
+```bash
+another spend link gpu-a100 gpu:pod-a100
+another spend unlink gpu:pod-a100
+```
+
+- Borrowing a linked resource (`another borrow`, MCP `resource_borrow`) opens a spend lease for the borrower.
+- If the account requires approval, the borrow comes back as `pending_approval` with a `decision_id`, and no resource lease yet. Once approved, the resource lease is taken and the spend lease starts.
+- The spend lease is renewed along with the resource lease. It ends when the resource lease ends (release, expiry, stop or session end), and is charged up to that moment.
+- Linking is local only, and only resources registered on this node can be linked.
 
 ## Reports and burn-down
 
@@ -106,7 +123,7 @@ Top agents: claude@shop 120 USD (claude-api), codex@ml 8.40 USD (gpu-a100)
 With `another serve --auth`:
 
 - **Project accounts** are visible only when their project matches the token's globs.
-- **Shared accounts** are visible, but only with the token's own projects' entries and leases. They are marked `partial`, and **budget, remaining and projection are withheld**, because those figures would reveal what other projects spent.
+- **Shared accounts** are visible and marked `partial`. `spent`, `accrued` and the lane and agent totals count only the token's own projects. `budget`, `remaining`, `used_pct`, `projected` and `status` are for the whole account, read-only, so a bot can tell how much is left without seeing who spent it.
 - **Writes:**
   - `spend_record`, `spend_borrow` and `spend_release` must act as the token's agent and be attributed to a project in its globs (name a lane or a project).
   - `spend_account_upsert` is refused.

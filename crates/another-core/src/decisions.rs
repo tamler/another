@@ -509,6 +509,61 @@ fn release_lane(tx: &Tx<'_>, actor: &AgentRef, lane_id: Option<&str>) -> Result<
     Ok(())
 }
 
+/// Withdraw an open decision: event, status, mail to the person, request, waiting spend lease,
+/// lane status.
+fn cancel_row_tx(tx: &Tx<'_>, me: &AgentRef, row: &Row0, reason: Option<&str>) -> Result<()> {
+    tx.emit(
+        &me.address,
+        "decision.cancelled",
+        json!({ "decision_id": row.d.decision_id, "project_id": row.project_id, "asker_id": row.asker_id, "lane_id": row.lane_id, "reason": reason }),
+    )?;
+    tx.execute(
+        "UPDATE decisions SET status = 'cancelled', updated_at = ?2 WHERE decision_id = ?1",
+        params![row.d.decision_id, tx.now],
+    )?;
+    let human = agent_by_id(tx, &row.human_id)?;
+    send_tx(
+        tx,
+        &SendMessage {
+            from: me.address.clone(),
+            to: vec![human.address.clone()],
+            subject: format!("[decision] withdrawn: {}", short(&row.d.question, 80)),
+            body: format!(
+                "No answer needed any more.{}\n(decision {})",
+                reason.map(|r| format!(" Reason: {r}")).unwrap_or_default(),
+                row.d.decision_id
+            ),
+            reply_to: Some(row.message_id.clone()),
+            ..Default::default()
+        },
+    )?;
+    close_request(
+        tx,
+        &row.d.request_id,
+        "cancelled",
+        None,
+        reason.unwrap_or("withdrawn"),
+    )?;
+    crate::spend::decision_closed_tx(tx, &row.d.decision_id, false)?;
+    release_lane(tx, me, row.lane_id.as_deref())?;
+    Ok(())
+}
+
+/// Withdraw a decision if it is still open (used when its spend lease is withdrawn).
+pub(crate) fn withdraw_tx(
+    tx: &Tx<'_>,
+    me: &AgentRef,
+    decision_id: &str,
+    reason: &str,
+) -> Result<bool> {
+    let row = load(tx, tx.node_id, decision_id)?;
+    if row.d.status != DecisionStatus::Open {
+        return Ok(false);
+    }
+    cancel_row_tx(tx, me, &row, Some(reason))?;
+    Ok(true)
+}
+
 fn close_request(
     tx: &Tx<'_>,
     request_id: &str,
@@ -686,7 +741,13 @@ pub(crate) fn ask_tx(
         check_scope(tx, scope, p)?;
     }
     let lane = match &input.lane {
-        Some(l) => Some(resolve_lane_in_project(tx, tx.node_id, l, home.as_deref(), scope)?),
+        Some(l) => Some(resolve_lane_in_project(
+            tx,
+            tx.node_id,
+            l,
+            home.as_deref(),
+            scope,
+        )?),
         None => None,
     };
     let project_id = match (home, &lane) {
@@ -1077,34 +1138,7 @@ impl Store {
                     row.d.status.as_str()
                 )));
             }
-            tx.emit(
-                &me.address,
-                "decision.cancelled",
-                json!({ "decision_id": row.d.decision_id, "project_id": row.project_id, "asker_id": row.asker_id, "lane_id": row.lane_id, "reason": reason }),
-            )?;
-            tx.execute(
-                "UPDATE decisions SET status = 'cancelled', updated_at = ?2 WHERE decision_id = ?1",
-                params![row.d.decision_id, tx.now],
-            )?;
-            let human = agent_by_id(tx, &row.human_id)?;
-            send_tx(
-                tx,
-                &SendMessage {
-                    from: me.address.clone(),
-                    to: vec![human.address.clone()],
-                    subject: format!("[decision] withdrawn: {}", short(&row.d.question, 80)),
-                    body: format!(
-                        "No answer needed any more.{}\n(decision {})",
-                        reason.as_deref().map(|r| format!(" Reason: {r}")).unwrap_or_default(),
-                        row.d.decision_id
-                    ),
-                    reply_to: Some(row.message_id.clone()),
-                    ..Default::default()
-                },
-            )?;
-            close_request(tx, &row.d.request_id, "cancelled", None, reason.as_deref().unwrap_or("withdrawn"))?;
-            crate::spend::decision_closed_tx(tx, &row.d.decision_id, false)?;
-            release_lane(tx, &me, row.lane_id.as_deref())?;
+            cancel_row_tx(tx, &me, &row, reason.as_deref())?;
             Ok(load(tx, tx.node_id, &row.d.decision_id)?.d)
         })
     }

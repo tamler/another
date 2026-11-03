@@ -531,6 +531,19 @@ pub enum SpendCmd {
         #[arg(long)]
         all: bool,
     },
+    /// Charge borrowing a registered resource to an account, e.g.
+    /// `another spend link runpod gpu_pod:a100`. Borrowers then get a spend lease (behind
+    /// the account's approval gate) that accrues while their resource lease lives.
+    Link {
+        account: String,
+        /// Resource id or kind:name.
+        resource: String,
+    },
+    /// Stop charging a resource to its account (open spend leases run to their end).
+    Unlink {
+        /// Resource id or kind:name.
+        resource: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -558,7 +571,7 @@ pub enum SpendAccountCmd {
         /// Borrowing asks a person first (a decision).
         #[arg(long)]
         requires_approval: bool,
-        /// Who approves (default: $ANOTHER_DECIDER, else owner).
+        /// Who approves (default: the node's decider, `another config decider NAME`).
         #[arg(long)]
         approver: Option<String>,
         /// Owning project; omit for a shared account.
@@ -1946,6 +1959,15 @@ fn spend_command(
         Some(SpendCmd::Leases { all }) => {
             let list = store.spend_leases(all, None)?;
             emit(json, &list, |l| output::spend_leases(l))
+        }
+        Some(SpendCmd::Link { account, resource }) => {
+            let r =
+                store.link_resource_spend(&ResourceRef::parse(&resource)?, Some(&account), None)?;
+            emit(json, &r, |r| output::resources(std::slice::from_ref(r)))
+        }
+        Some(SpendCmd::Unlink { resource }) => {
+            let r = store.link_resource_spend(&ResourceRef::parse(&resource)?, None, None)?;
+            emit(json, &r, |r| output::resources(std::slice::from_ref(r)))
         }
     })
 }

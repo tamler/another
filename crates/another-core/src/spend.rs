@@ -228,6 +228,9 @@ pub struct SpendLease {
     pub cost: f64,
     pub decision_id: Option<String>,
     pub note: Option<String>,
+    /// The registered resource this lease pays for (borrowing a linked resource).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
 }
 
 /// Input for [`Store::borrow_spend`].
@@ -322,8 +325,9 @@ pub struct AccountSpend {
     pub daily_left: Option<f64>,
     pub status: BudgetStatus,
     pub active_leases: u32,
-    /// Only the caller's projects are counted (shared account, scoped token); budget
-    /// figures are withheld.
+    /// Shared account seen by a scoped token: `spent`, `accrued` and the groupings count only
+    /// the caller's projects, while `budget`, `remaining`, `used_pct`, `projected` and
+    /// `status` are for the whole account (read-only).
     pub partial: bool,
 }
 
@@ -661,7 +665,8 @@ fn insert_entry(
 
 const LEASE_SELECT: &str = "SELECT l.lease_id, a.name, a.unit, ag.address, ln.name, p.slug,
        l.cost_per_hour, l.ttl_seconds, l.status, l.requested_at, l.started_at, l.expires_at,
-       l.ended_at, l.decision_id, l.note, l.account_id, l.project_id, l.agent_id, l.lane_id
+       l.ended_at, l.decision_id, l.note, l.account_id, l.project_id, l.agent_id, l.lane_id,
+       l.resource_id
      FROM spend_leases l
      JOIN spend_accounts a ON a.account_id = l.account_id
      JOIN agents ag ON ag.agent_id = l.agent_id
@@ -674,6 +679,7 @@ struct LeaseRow {
     project_id: Option<String>,
     agent_id: String,
     lane_id: Option<String>,
+    resource_id: Option<String>,
     started: Option<i64>,
     expires: Option<i64>,
 }
@@ -715,11 +721,13 @@ fn lease_from_row(now: i64) -> impl Fn(&Row<'_>) -> rusqlite::Result<LeaseRow> {
                 cost,
                 decision_id: r.get(13)?,
                 note: r.get(14)?,
+                resource_id: r.get(19)?,
             },
             account_id: r.get(15)?,
             project_id: r.get(16)?,
             agent_id: r.get(17)?,
             lane_id: r.get(18)?,
+            resource_id: r.get(19)?,
             started,
             expires,
         })
@@ -801,6 +809,33 @@ fn end_lease_tx(tx: &Tx<'_>, row: &LeaseRow, at: i64, actor: &str, reason: &str)
     Ok(())
 }
 
+/// Withdraw a pending lease: deny it, withdraw its approval decision (which mails the
+/// approver and puts the lane back to `working`), and emit `spend.lease_withdrawn`.
+fn withdraw_lease_tx(tx: &Tx<'_>, me: &AgentRef, row: &LeaseRow, reason: &str) -> Result<()> {
+    tx.execute(
+        "UPDATE spend_leases SET status = 'denied', ended_at = ?2 WHERE lease_id = ?1",
+        params![row.lease.lease_id, tx.now],
+    )?;
+    if let Some(d) = &row.lease.decision_id {
+        crate::decisions::withdraw_tx(tx, me, d, &format!("spend lease {reason}"))?;
+    }
+    tx.emit(
+        &me.address,
+        "spend.lease_withdrawn",
+        json!({
+            "lease_id": row.lease.lease_id,
+            "account_id": row.account_id,
+            "account": row.lease.account,
+            "project_id": row.project_id,
+            "agent_id": row.agent_id,
+            "lane_id": row.lane_id,
+            "decision_id": row.lease.decision_id,
+            "reason": reason,
+        }),
+    )?;
+    Ok(())
+}
+
 fn start_lease_tx(
     tx: &Tx<'_>,
     lease_id: &str,
@@ -844,6 +879,135 @@ pub(crate) fn expire_spend_leases_tx(tx: &Tx<'_>) -> Result<usize> {
     Ok(due.len())
 }
 
+/// Ends an agent's spend leases at session end: active ones are charged up to now, pending
+/// ones are withdrawn along with their approval decision. Returns how many were closed.
+pub(crate) fn end_agent_leases_tx(tx: &Tx<'_>, agent_id: &str, reason: &str) -> Result<usize> {
+    let mut stmt = tx.prepare(&format!(
+        "{LEASE_SELECT} WHERE l.agent_id = ?1 AND l.status IN ('active', 'pending_approval')"
+    ))?;
+    let rows = stmt
+        .query_map([agent_id], lease_from_row(tx.now))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let me = agent_by_id(tx, agent_id)?;
+    for row in &rows {
+        if row.lease.status == SpendLeaseStatus::Active {
+            end_lease_tx(tx, row, tx.now, &me.address, reason)?;
+        } else {
+            withdraw_lease_tx(tx, &me, row, reason)?;
+        }
+    }
+    Ok(rows.len())
+}
+
+/// What borrowing a resource needs from its linked spend account.
+pub(crate) enum ResourceGate {
+    /// Not linked (or the account is archived): borrow as usual.
+    Free,
+    /// A spend lease is running for this agent and resource: borrow as usual.
+    Covered,
+    /// Waiting for approval: don't take the resource lease yet.
+    Pending(String),
+}
+
+/// Before an agent takes a new lease on a local resource: if the resource is linked to a
+/// spend account, open (or reuse) the agent's spend lease for it. Accounts that require
+/// approval leave it pending on a decision.
+pub(crate) fn resource_gate_tx(
+    tx: &Tx<'_>,
+    resource_id: &str,
+    me: &AgentRef,
+    ttl: i64,
+) -> Result<ResourceGate> {
+    let linked: Option<(String, String, String)> = tx
+        .query_row(
+            "SELECT a.account_id, r.kind, r.name FROM resources r
+             JOIN spend_accounts a ON a.account_id = r.spend_account_id
+             WHERE r.resource_id = ?1 AND a.archived_at IS NULL",
+            [resource_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((account_id, kind, name)) = linked else {
+        return Ok(ResourceGate::Free);
+    };
+    let open: Option<(String, Option<String>)> = tx
+        .query_row(
+            "SELECT status, decision_id FROM spend_leases
+             WHERE resource_id = ?1 AND agent_id = ?2 AND status IN ('active', 'pending_approval')
+             ORDER BY requested_at DESC LIMIT 1",
+            params![resource_id, me.id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match open {
+        Some((status, _)) if status == "active" => return Ok(ResourceGate::Covered),
+        Some((_, Some(d))) => return Ok(ResourceGate::Pending(d)),
+        _ => {}
+    }
+    let input = BorrowSpend {
+        agent: me.address.clone(),
+        account: account_id,
+        note: Some(format!("resource {kind}:{name}")),
+        ..Default::default()
+    };
+    let ttl = ttl.clamp(MIN_LEASE_TTL, MAX_LEASE_TTL);
+    let out = borrow_spend_tx(tx, &input, ttl, Some(resource_id), None)?;
+    Ok(match out.decision_id {
+        Some(d) => ResourceGate::Pending(d),
+        None => ResourceGate::Covered,
+    })
+}
+
+/// Renew the spend lease paying for an agent's lease on a resource.
+pub(crate) fn renew_resource_spend_tx(
+    tx: &Tx<'_>,
+    resource_id: &str,
+    agent_id: &str,
+    ttl: i64,
+) -> Result<()> {
+    tx.execute(
+        "UPDATE spend_leases SET renewed_at = ?3, expires_at = ?3 + ?4 * 1000, ttl_seconds = ?4
+         WHERE resource_id = ?1 AND agent_id = ?2 AND status = 'active'",
+        params![
+            resource_id,
+            agent_id,
+            tx.now,
+            ttl.clamp(MIN_LEASE_TTL, MAX_LEASE_TTL)
+        ],
+    )?;
+    Ok(())
+}
+
+/// End spend leases whose resource lease is gone (released, expired, stopped, session end),
+/// charging up to when the resource lease ended.
+pub(crate) fn reconcile_resource_spend_tx(tx: &Tx<'_>) -> Result<usize> {
+    let mut stmt = tx.prepare(&format!(
+        "{LEASE_SELECT} WHERE l.node_id = ?1 AND l.status = 'active' AND l.resource_id IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM resource_leases rl
+                           WHERE rl.resource_id = l.resource_id AND rl.agent_id = l.agent_id
+                             AND rl.released_at IS NULL)"
+    ))?;
+    let rows = stmt
+        .query_map([tx.node_id], lease_from_row(tx.now))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for row in &rows {
+        let released: Option<i64> = tx.query_row(
+            "SELECT MAX(released_at) FROM resource_leases WHERE resource_id = ?1 AND agent_id = ?2",
+            params![row.resource_id, row.agent_id],
+            |r| r.get(0),
+        )?;
+        let at = released
+            .unwrap_or(tx.now)
+            .max(row.started.unwrap_or(tx.now))
+            .min(tx.now);
+        end_lease_tx(tx, row, at, "system", "resource_released")?;
+    }
+    Ok(rows.len())
+}
+
 /// Renew an agent's active spend leases by their TTL (session heartbeat).
 pub(crate) fn renew_spend_leases_tx(tx: &Tx<'_>, agent_id: &str) -> Result<usize> {
     Ok(tx.execute(
@@ -868,6 +1032,19 @@ pub(crate) fn decision_closed_tx(tx: &Tx<'_>, decision_id: &str, approved: bool)
     let row = load_lease(tx, tx.now, &lease_id)?;
     if approved {
         start_lease_tx(tx, &lease_id, row.lease.ttl_seconds, "system", &row)?;
+        if let Some(rid) = &row.resource_id {
+            // Borrowing a linked resource: take the resource lease the approval was for. If
+            // the resource can't be leased any more, the spend lease ends at once (no cost).
+            let me = agent_by_id(tx, &row.agent_id)?;
+            match crate::resources::grant_after_approval_tx(tx, rid, &me, row.lease.ttl_seconds) {
+                Ok(()) => {}
+                Err(Error::Conflict(_) | Error::NotFound(_)) => {
+                    let row = load_lease(tx, tx.now, &lease_id)?;
+                    end_lease_tx(tx, &row, tx.now, "system", "resource_unavailable")?;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     } else {
         tx.execute(
             "UPDATE spend_leases SET status = 'denied', ended_at = ?2 WHERE lease_id = ?1",
@@ -880,6 +1057,141 @@ pub(crate) fn decision_closed_tx(tx: &Tx<'_>, decision_id: &str, approved: bool)
         )?;
     }
     Ok(())
+}
+
+/// Open a spend lease (shared by `spend_borrow` and borrowing a linked resource). With
+/// `requires_approval` it stays pending on a decision; otherwise it starts now.
+fn borrow_spend_tx(
+    tx: &Tx<'_>,
+    input: &BorrowSpend,
+    ttl: i64,
+    resource_id: Option<&str>,
+    scope: Option<&TokenScope>,
+) -> Result<SpendLeaseOutcome> {
+    let (a, account_project) = account(tx, tx.node_id, &input.account)?;
+    if !account_visible(tx, scope, account_project.as_deref())? {
+        return Err(Error::Forbidden(format!(
+            "account {} is outside this token's projects",
+            a.name
+        )));
+    }
+    let cph = input
+        .cost_per_hour
+        .or(a.cost_per_hour)
+        .ok_or_else(|| Error::Invalid(format!("{} has no cost_per_hour; give one", a.name)))?;
+    check_amount("cost_per_hour", cph)?;
+    let who = attribute(
+        tx,
+        tx.node_id,
+        account_project.as_deref(),
+        Some(&input.agent),
+        input.lane.as_deref(),
+        None,
+        scope,
+    )?;
+    let me = who.agent.clone().expect("agent given");
+    if scope.is_some()
+        && !matches!(&who.project_id, Some(p) if attributed_visible(tx, scope, Some(p), None)?)
+    {
+        return Err(Error::Forbidden(
+            "remote borrowing must be for a project in this token's globs (name a lane)".into(),
+        ));
+    }
+    let lease_id = new_id();
+    tx.execute(
+        "INSERT INTO spend_leases (lease_id, node_id, account_id, agent_id, lane_id,
+           project_id, cost_per_hour, ttl_seconds, status, requested_at, note, resource_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending_approval', ?9, ?10, ?11)",
+        params![
+            lease_id,
+            tx.node_id,
+            a.account_id,
+            me.id,
+            who.lane_id,
+            who.project_id,
+            cph,
+            ttl,
+            tx.now,
+            input.note,
+            resource_id
+        ],
+    )?;
+    let row = load_lease(tx, tx.now, &lease_id)?;
+    let mut decision_id = None;
+    if a.requires_approval {
+        let estimate = input
+            .hours
+            .map(|h| format!(" for {h} h (about {} {})", round(h * cph), a.unit))
+            .unwrap_or_default();
+        let decision = NewDecision {
+            agent: me.address.clone(),
+            question: format!(
+                "Approve {} borrowing {} at {} {}/h{estimate}?{}",
+                me.address,
+                a.name,
+                cph,
+                a.unit,
+                input
+                    .note
+                    .as_deref()
+                    .map(|n| format!(" Purpose: {n}"))
+                    .unwrap_or_default()
+            ),
+            options: vec![
+                DecisionOption {
+                    value: "approve".into(),
+                    label: "Approve".into(),
+                    description: None,
+                },
+                DecisionOption {
+                    value: "deny".into(),
+                    label: "Deny".into(),
+                    description: None,
+                },
+            ],
+            on_timeout: DecisionTimeout::KeepOpen,
+            human: a.approver.clone(),
+            project: match &who.project_id {
+                Some(id) => Some(tx.query_row(
+                    "SELECT slug FROM projects WHERE project_id = ?1",
+                    [id],
+                    |r| r.get::<_, String>(0),
+                )?),
+                None => None,
+            },
+            lane: who.lane_id.clone(),
+            ..Default::default()
+        };
+        validate(&decision)?;
+        // The account's approver, else the node's `decider` setting.
+        let approver = match a.approver.clone() {
+            Some(x) => x,
+            None => decider_tx(tx)?,
+        };
+        if who.project_id.is_none() {
+            return Err(Error::Invalid(
+                "approval needs a project: name a lane, or give the account or agent a project"
+                    .into(),
+            ));
+        }
+        let id = ask_tx(tx, &decision, &approver, scope)?;
+        tx.execute(
+            "UPDATE spend_leases SET decision_id = ?2 WHERE lease_id = ?1",
+            params![lease_id, id],
+        )?;
+        tx.emit(
+            &me.address,
+            "spend.approval_requested",
+            json!({ "lease_id": lease_id, "account_id": a.account_id, "account": a.name, "project_id": who.project_id, "agent_id": me.id, "decision_id": id, "cost_per_hour": cph, "unit": a.unit }),
+        )?;
+        decision_id = Some(id);
+    } else {
+        start_lease_tx(tx, &lease_id, ttl, &me.address, &row)?;
+    }
+    Ok(SpendLeaseOutcome {
+        lease: load_lease(tx, tx.now, &lease_id)?.lease,
+        decision_id,
+    })
 }
 
 impl Store {
@@ -1127,93 +1439,59 @@ impl Store {
         }
         self.write(|tx| {
             crate::holds::sweep_tx(tx)?;
-            let (a, account_project) = account(tx, tx.node_id, &input.account)?;
-            if !account_visible(tx, scope, account_project.as_deref())? {
-                return Err(Error::Forbidden(format!("account {} is outside this token's projects", a.name)));
-            }
-            let cph = input
-                .cost_per_hour
-                .or(a.cost_per_hour)
-                .ok_or_else(|| Error::Invalid(format!("{} has no cost_per_hour; give one", a.name)))?;
-            check_amount("cost_per_hour", cph)?;
-            let who = attribute(tx, tx.node_id, account_project.as_deref(), Some(&input.agent), input.lane.as_deref(), None, scope)?;
-            let me = who.agent.clone().expect("agent given");
-            if scope.is_some() && !matches!(&who.project_id, Some(p) if attributed_visible(tx, scope, Some(p), None)?) {
+            let out = borrow_spend_tx(tx, &input, ttl, None, scope)?;
+            let me = resolve_agent(tx, tx.node_id, &input.agent)?;
+            crate::mail::touch(tx, &me.id)?;
+            Ok(out)
+        })
+    }
+
+    /// Link a registered resource to a spend account, or unlink it with `None` (local callers
+    /// only). Borrowing a linked resource opens a spend lease for the borrower, behind the
+    /// account's approval gate, and its cost accrues while the resource lease lives.
+    pub fn link_resource_spend(
+        &self,
+        target: &crate::resources::ResourceRef,
+        account_key: Option<&str>,
+        scope: Option<&TokenScope>,
+    ) -> Result<crate::resources::Resource> {
+        local_only(scope)?;
+        self.write(|tx| {
+            let rid = crate::resources::resolve(tx, tx.node_id, target)?;
+            let (res_node, project_id): (String, Option<String>) = tx.query_row(
+                "SELECT node_id, project_id FROM resources WHERE resource_id = ?1",
+                [&rid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            if res_node != tx.node_id {
                 return Err(Error::Forbidden(
-                    "remote borrowing must be for a project in this token's globs (name a lane)".into(),
+                    "only resources registered on this node can be linked to a spend account"
+                        .into(),
                 ));
             }
-            let lease_id = new_id();
-            tx.execute(
-                "INSERT INTO spend_leases (lease_id, node_id, account_id, agent_id, lane_id,
-                   project_id, cost_per_hour, ttl_seconds, status, requested_at, note)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending_approval', ?9, ?10)",
-                params![lease_id, tx.node_id, a.account_id, me.id, who.lane_id, who.project_id, cph, ttl, tx.now, input.note],
-            )?;
-            let row = load_lease(tx, tx.now, &lease_id)?;
-            let mut decision_id = None;
-            if a.requires_approval {
-                let estimate = input
-                    .hours
-                    .map(|h| format!(" for {h} h (about {} {})", round(h * cph), a.unit))
-                    .unwrap_or_default();
-                let decision = NewDecision {
-                    agent: me.address.clone(),
-                    question: format!(
-                        "Approve {} borrowing {} at {} {}/h{estimate}?{}",
-                        me.address,
-                        a.name,
-                        cph,
-                        a.unit,
-                        input.note.as_deref().map(|n| format!(" Purpose: {n}")).unwrap_or_default()
-                    ),
-                    options: vec![
-                        DecisionOption { value: "approve".into(), label: "Approve".into(), description: None },
-                        DecisionOption { value: "deny".into(), label: "Deny".into(), description: None },
-                    ],
-                    on_timeout: DecisionTimeout::KeepOpen,
-                    human: a.approver.clone(),
-                    project: match &who.project_id {
-                        Some(id) => Some(tx.query_row(
-                            "SELECT slug FROM projects WHERE project_id = ?1",
-                            [id],
-                            |r| r.get::<_, String>(0),
-                        )?),
-                        None => None,
-                    },
-                    lane: who.lane_id.clone(),
-                    ..Default::default()
-                };
-                validate(&decision)?;
-                // The account's approver, else the node's `decider` setting.
-                let approver = match a.approver.clone() {
-                    Some(x) => x,
-                    None => decider_tx(tx)?,
-                };
-                if who.project_id.is_none() {
-                    return Err(Error::Invalid(
-                        "approval needs a project: name a lane, or give the account or agent a project".into(),
-                    ));
+            let account_id = match account_key {
+                Some(k) => {
+                    let (a, _) = account(tx, tx.node_id, k)?;
+                    if a.cost_per_hour.is_none() {
+                        return Err(Error::Invalid(format!(
+                            "{} has no cost_per_hour; set one before linking a resource",
+                            a.name
+                        )));
+                    }
+                    Some(a.account_id)
                 }
-                let id = ask_tx(tx, &decision, &approver, scope)?;
-                tx.execute(
-                    "UPDATE spend_leases SET decision_id = ?2 WHERE lease_id = ?1",
-                    params![lease_id, id],
-                )?;
-                tx.emit(
-                    &me.address,
-                    "spend.approval_requested",
-                    json!({ "lease_id": lease_id, "account_id": a.account_id, "account": a.name, "project_id": who.project_id, "agent_id": me.id, "decision_id": id, "cost_per_hour": cph, "unit": a.unit }),
-                )?;
-                decision_id = Some(id);
-            } else {
-                start_lease_tx(tx, &lease_id, ttl, &me.address, &row)?;
-            }
-            crate::mail::touch(tx, &me.id)?;
-            Ok(SpendLeaseOutcome {
-                lease: load_lease(tx, tx.now, &lease_id)?.lease,
-                decision_id,
-            })
+                None => None,
+            };
+            tx.execute(
+                "UPDATE resources SET spend_account_id = ?2 WHERE resource_id = ?1",
+                params![rid, account_id],
+            )?;
+            tx.emit(
+                "local",
+                "spend.resource_linked",
+                json!({ "resource_id": rid, "account_id": account_id, "project_id": project_id }),
+            )?;
+            crate::resources::get_resource(tx, &rid, tx.now)
         })
     }
 
@@ -1229,19 +1507,21 @@ impl Store {
             let me = resolve_agent(tx, tx.node_id, agent)?;
             let row = load_lease(tx, tx.now, lease_id)?;
             if !attributed_visible(tx, scope, row.project_id.as_deref(), Some(&row.agent_id))? {
-                return Err(Error::Forbidden("lease is outside this token's projects".into()));
+                return Err(Error::Forbidden(
+                    "lease is outside this token's projects".into(),
+                ));
             }
             if row.agent_id != me.id {
-                return Err(Error::Forbidden(format!("lease {} belongs to {}", row.lease.lease_id, row.lease.owner)));
+                return Err(Error::Forbidden(format!(
+                    "lease {} belongs to {}",
+                    row.lease.lease_id, row.lease.owner
+                )));
             }
             match row.lease.status {
-                SpendLeaseStatus::Active => end_lease_tx(tx, &row, tx.now, &me.address, "released")?,
-                SpendLeaseStatus::PendingApproval => {
-                    tx.execute(
-                        "UPDATE spend_leases SET status = 'denied', ended_at = ?2 WHERE lease_id = ?1",
-                        params![row.lease.lease_id, tx.now],
-                    )?;
+                SpendLeaseStatus::Active => {
+                    end_lease_tx(tx, &row, tx.now, &me.address, "released")?
                 }
+                SpendLeaseStatus::PendingApproval => withdraw_lease_tx(tx, &me, &row, "withdrawn")?,
                 s => {
                     return Err(Error::Conflict(format!(
                         "lease {} is already {}",
@@ -1350,7 +1630,11 @@ impl Store {
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 let mut spent = 0.0;
+                // Everyone's use, for a shared account's budget figures (scoped callers see
+                // the remaining budget, not who used it).
+                let mut total = 0.0;
                 for (amount, project, agent, address, lane) in entries {
+                    total += amount;
                     if !attributed_visible(conn, scope, project.as_deref(), agent.as_deref())? {
                         continue;
                     }
@@ -1382,6 +1666,10 @@ impl Store {
                 let mut active = 0;
                 let in_window = q.period == PeriodSel::Current || a.period == SpendPeriod::None;
                 for l in leases {
+                    if in_window {
+                        total +=
+                            lease_cost(l.lease.cost_per_hour, l.started.map(|s| s.max(from)), now);
+                    }
                     if !in_window
                         || !attributed_visible(
                             conn,
@@ -1404,8 +1692,10 @@ impl Store {
                     );
                     add(&mut by_agent, l.lease.owner.clone(), &a, cost);
                 }
-                let used = spent + accrued;
-                let budget = if partial || filtered { None } else { a.budget };
+                let mine = spent + accrued;
+                // Budget figures are for the whole account; a lane or agent filter hides them.
+                let used = if partial { total } else { mine };
+                let budget = if filtered { None } else { a.budget };
                 let monthly = a.period == SpendPeriod::Monthly;
                 let days_total = monthly.then(|| (to - from) as f64 / DAY_MS);
                 let days_elapsed = monthly.then(|| ((now.min(to) - from) as f64 / DAY_MS).max(0.0));
@@ -1443,7 +1733,7 @@ impl Store {
                     remaining,
                     days_elapsed: days_elapsed.map(round),
                     days_total: days_total.map(round),
-                    projected: if partial { None } else { projected },
+                    projected,
                     daily_left,
                     status,
                     active_leases: active,
@@ -1518,15 +1808,29 @@ pub fn spend_markdown(r: &SpendReport) -> String {
         let used = s.spent + s.accrued;
         let line = match (s.budget, s.used_pct) {
             (Some(b), Some(p)) => {
-                let mut l = format!(
-                    "`{}` {} / {} {}  {}%  {}",
-                    a.name,
-                    num(used),
-                    num(b),
-                    a.unit,
-                    p.round(),
-                    bar(p)
-                );
+                let mut l = if s.partial {
+                    // Shared account, scoped caller: whole-account budget, own use.
+                    format!(
+                        "`{}` {} of {} {} left  {}% used  {}  (your projects: {})",
+                        a.name,
+                        num(s.remaining.unwrap_or_default().max(0.0)),
+                        num(b),
+                        a.unit,
+                        p.round(),
+                        bar(p),
+                        num(used)
+                    )
+                } else {
+                    format!(
+                        "`{}` {} / {} {}  {}%  {}",
+                        a.name,
+                        num(used),
+                        num(b),
+                        a.unit,
+                        p.round(),
+                        bar(p)
+                    )
+                };
                 if let (Some(e), Some(t)) = (s.days_elapsed, s.days_total) {
                     l.push_str(&format!("  day {}/{}", e.ceil() as i64, t.round() as i64));
                 }
