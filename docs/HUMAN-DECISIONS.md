@@ -38,11 +38,12 @@ another decision ask --agent claude@shop -q "Ship behind a flag, or wait for rev
 
 **Fields:**
 - `options`: 2 to 6. `value` is a single word that comes back as the answer; `label` is what the person sees.
-- `human`: who is asked. Defaults to `$ANOTHER_DECIDER`, else `jacob`. The person is registered on demand as an agent with program `human`, so they have an inbox: `another inbox --agent jacob`.
-- `project`: required for scoping. It is taken from the argument, else the lane, else the asking agent's project.
+- `human`: who is asked. Defaults to the node setting `another config decider NAME`, else `jacob`. The person is registered on demand as an agent with program `human`, so they have an inbox: `another inbox --agent jacob`.
+- `project`: required for scoping. It is taken from the argument, else the asking agent's project, else the lane's.
+- `lane`: looked up within the decision's project only; a lane in another project is `unknown lane`.
 - `lane`: the lane shows `needs_decision` until the decision is answered, then returns to `working`.
 
-**When the deadline passes:**
+**When the deadline passes** (the automatic mail comes from the system agent `another`, not from the person):
 
 | `on_timeout` | What happens |
 |---|---|
@@ -73,13 +74,14 @@ Reply with a number or value. CLI: `another decision answer 01JD… <value>`
 
 The manager then relays the answer. Any of these works:
 
+- **Notes:** a short note (up to 280 characters) can go with a chosen option even when free text is off.
 - **MCP:** `decision_answer` with `{"decision": "01JD…", "value": "1", "answered_by": "jacob"}`. The value can be the option's value or its number.
 - **HTTP:** `POST /decisions/{id}/answer` with `{"value": "ship", "text": "…", "answered_by": "jacob"}`.
 - **CLI**, on the machine itself: `another decision answer 01JD… ship [--text "…"] [--as jacob]`.
 
 **What gets recorded:**
 - `answered_by`: the person (default: the person asked).
-- `relayed_by`: the agent that called the API. Remote callers are always recorded as their token's agent and cannot set it to anyone else.
+- `relayed_by`: the agent that called the API. Remote callers are always recorded as their token's agent and cannot set it to anyone else. **Only a manager bot (`grok_bot`) or a person (`human`) may relay, and never the agent that asked**: an agent can't approve its own question, whoever it claims answered.
 - `answered_at`
 
 The asking agent receives a high-importance reply, `[decision] Ship behind a flag: …`, with the value, the label, any text, and who answered and relayed it. The request closes, and the lane is released.

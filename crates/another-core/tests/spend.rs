@@ -23,7 +23,7 @@ fn store() -> (Store, Handle) {
     ] {
         s.register_agent(RegisterAgent {
             name: name.into(),
-            program: Program::Claude,
+            program: if name == "manager" { Program::GrokBot } else { Program::Claude },
             project: project.map(Into::into),
             model: None,
             description: None,

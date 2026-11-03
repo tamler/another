@@ -791,7 +791,14 @@ fn read_events(
             payload: r.get(5)?,
         };
         if let Some(scope) = scope {
-            if !event_visible(conn, scope, &row.actor, &row.kind, &row.payload)? {
+            if !event_visible(
+                conn,
+                scope,
+                &row.node_id,
+                &row.actor,
+                &row.kind,
+                &row.payload,
+            )? {
                 continue;
             }
         }

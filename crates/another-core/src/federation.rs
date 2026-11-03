@@ -184,6 +184,14 @@ fn classify(kind: &str, payload: &Value, origin: &str) -> Share {
         "token" | "peer" => return Share::Never,
         _ => {}
     }
+    // Node-local signals (D38): a refused hold and an expiring lease are about this node's
+    // holds and leases; other nodes see the holds and leases themselves.
+    if matches!(
+        kind,
+        "hold.conflict" | "lane.hold_conflict" | "resource.lease_expiring"
+    ) {
+        return Share::Never;
+    }
     match kind {
         "node.created" | "node.renamed" | "project.ensured" | "agent.registered" => {
             Share::Directory
@@ -1373,6 +1381,12 @@ mod tests {
         assert_eq!(
             classify("resource.borrowed", &json!({ "resource_node": "B" }), o),
             Share::Feed(vec!["B".into()])
+        );
+        // Node-local signals never leave their node (D38).
+        assert_eq!(classify("hold.conflict", &json!({}), o), Share::Never);
+        assert_eq!(
+            classify("resource.lease_expiring", &json!({}), o),
+            Share::Never
         );
     }
 
