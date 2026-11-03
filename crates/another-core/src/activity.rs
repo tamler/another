@@ -544,35 +544,26 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             ),
             json!({ "lane_id": s("lane_id"), "ref_id": s("ref_id") }),
         ),
+        // Report summaries, charters and links stay in the lane tables (`lane_show`); the
+        // feed carries names, statuses and ids only.
         "lane.reported" => {
-            let first: String = s("summary")
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .chars()
-                .take(120)
-                .collect();
-            let progress = p
-                .get("progress")
-                .and_then(Value::as_u64)
-                .map(|x| format!(" ({x}%)"))
+            let status = p
+                .get("status")
+                .and_then(Value::as_str)
+                .map(|x| format!(", {x}"))
                 .unwrap_or_default();
             (
-                format!("{actor} reported on lane {}{progress}: {first}", s("name")),
+                format!(
+                    "{actor} reported on lane {} ({}{status})",
+                    s("name"),
+                    s("kind")
+                ),
                 json!({ "lane_id": s("lane_id"), "report_id": s("report_id") }),
             )
         }
         "lane.closed" => (
-            format!(
-                "lane {} closed as {}{}",
-                s("name"),
-                s("status"),
-                p.get("pr_url")
-                    .and_then(Value::as_str)
-                    .map(|u| format!(" ({u})"))
-                    .unwrap_or_default()
-            ),
-            json!({ "lane_id": s("lane_id"), "pr_url": p.get("pr_url") }),
+            format!("lane {} closed as {}", s("name"), s("status")),
+            json!({ "lane_id": s("lane_id") }),
         ),
         other => (format!("{actor}: {other}"), p.clone()),
     };
