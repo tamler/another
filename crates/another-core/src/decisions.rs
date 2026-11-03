@@ -9,7 +9,7 @@ use serde_json::json;
 
 use crate::error::{Error, Result};
 use crate::identity::{find_project, register_tx, resolve_agent, AgentRef, Program, RegisterAgent};
-use crate::lanes::{check_scope, resolve_lane, set_status, Lane, LaneStatus};
+use crate::lanes::{check_scope, resolve_lane, resolve_lane_in, set_status, Lane, LaneStatus};
 use crate::mail::{send_tx, touch, Importance, SendMessage};
 use crate::store::{new_id, Store, Tx};
 use crate::time::fmt_ts;
@@ -631,7 +631,7 @@ pub(crate) fn ask_tx(
         ));
     }
     let lane = match &input.lane {
-        Some(l) => Some(resolve_lane(tx, tx.node_id, l)?),
+        Some(l) => Some(resolve_lane_in(tx, tx.node_id, l, scope)?),
         None => None,
     };
     let project_id = match (&input.project, &lane) {
@@ -776,7 +776,7 @@ impl Store {
                 None => None,
             };
             let lane_id = match &filter.lane {
-                Some(l) => Some(resolve_lane(conn, self.node_id(), l)?.0.lane_id),
+                Some(l) => Some(resolve_lane_in(conn, self.node_id(), l, scope)?.0.lane_id),
                 None => None,
             };
             let status = if filter.all {

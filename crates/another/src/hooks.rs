@@ -1069,6 +1069,73 @@ fn pre_edit(
     .to_string())
 }
 
+/// Token prefixes that mark a secret (Another, OpenAI/Anthropic style, GitHub, GitLab,
+/// Slack, Hugging Face, AWS access keys).
+const SECRET_PREFIXES: &[&str] = &[
+    "ano_",
+    "sk-",
+    "sk_",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "github_pat_",
+    "glpat-",
+    "xoxb-",
+    "xoxp-",
+    "xoxa-",
+    "xoxs-",
+    "hf_",
+    "AKIA",
+    "ASIA",
+    "whsec_",
+];
+
+fn looks_secret(word: &str) -> bool {
+    if word.len() >= 12 && SECRET_PREFIXES.iter().any(|p| word.starts_with(p)) {
+        return true;
+    }
+    // Long hex (keys, hashes used as secrets).
+    if word.len() >= 32 && word.chars().all(|c| c.is_ascii_hexdigit()) {
+        return true;
+    }
+    // Long base64 / base64url with mixed case and digits.
+    word.len() >= 40
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '-' | '_'))
+        && word.chars().any(|c| c.is_ascii_digit())
+        && word.chars().any(|c| c.is_ascii_lowercase())
+        && word.chars().any(|c| c.is_ascii_uppercase())
+}
+
+/// Replace likely secrets (token prefixes like `ano_`, `sk-`, `ghp_`; long hex or base64
+/// runs) with `[redacted]`. Used on text the Stop hook stores from an agent's last message.
+pub fn redact_secrets(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        if looks_secret(word) {
+            out.push_str("[redacted]");
+        } else {
+            out.push_str(word);
+        }
+        word.clear();
+    };
+    for c in text.chars() {
+        // `=` separates (KEY=value) and only trails base64, so it is not part of a word.
+        if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '/' | '.') {
+            word.push(c);
+        } else {
+            flush(&mut word, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}
+
 /// Minimum time between automatic lane reports from one agent to one lane.
 pub const AUTO_REPORT_INTERVAL_MS: i64 = 15 * 60 * 1000;
 
@@ -1120,7 +1187,7 @@ pub fn lane_auto_report(
     let summary = last_message
         .map(|m| m.trim())
         .filter(|m| !m.is_empty())
-        .map(|m| truncate(m.to_string(), 300))
+        .map(|m| truncate(redact_secrets(m), 300))
         .unwrap_or_else(|| "Turn finished (no summary from the client).".to_string());
     let report = store.report_lane(
         another_core::LaneReportInput {
@@ -1184,6 +1251,30 @@ mod tests {
         assert_eq!(cursor.session_id.as_deref(), Some("c"));
         let junk = HookInput::parse("not json");
         assert!(junk.cwd.is_none() && junk.session_id.is_none());
+    }
+
+    #[test]
+    fn redacts_likely_secrets() {
+        let text = "Set ANOTHER_TOKEN=ano_01J9ABC_d3adb33fcafe0123 and OPENAI_API_KEY=sk-proj-AbCdEf123456789 \
+                    then pushed with ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ012345 (sha 0123456789abcdef0123456789abcdef). \
+                    Blob: QWxhZGRpbjpvcGVuIHNlc2FtZQ9xYz3RkMzQ1Njc4OTBhYmNkZWY=. Fixed src/api/routes.rs in 3 tests.";
+        let r = redact_secrets(text);
+        for leak in [
+            "ano_01J9",
+            "sk-proj",
+            "ghp_aBc",
+            "0123456789abcdef0123",
+            "QWxhZGRpbjpv",
+        ] {
+            assert!(!r.contains(leak), "{leak} in {r}");
+        }
+        assert_eq!(r.matches("[redacted]").count(), 5, "{r}");
+        assert!(r.contains("ANOTHER_TOKEN=[redacted]"));
+        assert!(r.contains("Fixed src/api/routes.rs in 3 tests."));
+        assert_eq!(
+            redact_secrets("sk-learn is fine; task-runner too"),
+            "sk-learn is fine; task-runner too"
+        );
     }
 
     #[test]

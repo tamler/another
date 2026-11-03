@@ -125,8 +125,9 @@ fn lifecycle_reports_and_mail() {
     assert_eq!(m.message_id, msg);
     assert_eq!(
         m.subject,
-        "[lane api-refactor] blocked: Routes split into modules"
+        "[lane api-refactor] blocked: status report by claude"
     );
+    assert!(m.body.starts_with("Routes split into modules"));
     assert!(m.body.contains("Progress: 40%"));
     assert!(m.body.contains("Artifact: docs/api.md"));
     assert_eq!(m.importance, Importance::High);
@@ -313,7 +314,8 @@ fn token_scope_hides_other_projects_lanes() {
     assert_eq!(visible, vec!["shop-work"]);
     assert_eq!(
         s.lane("vault-work", Some(&scope)).unwrap_err().code(),
-        "forbidden"
+        "not_found",
+        "out of scope looks like unknown"
     );
     assert!(s.lane("shop-work", Some(&scope)).is_ok());
     let r = s.report_lane(
@@ -331,7 +333,7 @@ fn token_scope_hides_other_projects_lanes() {
         },
         Some(&scope),
     );
-    assert_eq!(r.unwrap_err().code(), "forbidden");
+    assert_eq!(r.unwrap_err().code(), "not_found");
     let create = s.create_lane(
         NewLane {
             agent: "manager".into(),
@@ -348,7 +350,7 @@ fn token_scope_hides_other_projects_lanes() {
         s.close_lane("manager", "vault-work", true, None, Some(&scope))
             .unwrap_err()
             .code(),
-        "forbidden"
+        "not_found"
     );
 }
 
@@ -383,4 +385,160 @@ fn upgrades_a_database_created_before_lanes() {
     let d = lane(&s, "after", "shop");
     assert_eq!(d.lane.status, LaneStatus::Planned);
     assert!(Store::schema_version() >= 6);
+}
+
+#[test]
+fn names_are_unique_per_project() {
+    let s = store();
+    lane(&s, "api", "shop");
+    lane(&s, "api", "vault");
+    let dup = s.create_lane(
+        NewLane {
+            agent: "manager".into(),
+            name: "api".into(),
+            project: "shop".into(),
+            lead: "codex".into(),
+            charter: String::new(),
+            status: None,
+        },
+        None,
+    );
+    let err = dup.unwrap_err();
+    assert_eq!(err.code(), "conflict");
+    assert!(err.to_string().contains("in shop"), "{err}");
+    assert_eq!(s.lane("api", None).unwrap_err().code(), "ambiguous");
+    assert_eq!(s.lane("api@shop", None).unwrap().lane.project, "shop");
+    assert_eq!(s.lane("API@Vault", None).unwrap().lane.project, "vault");
+    // A scoped caller only ever sees its own project's `api`, never an ambiguity.
+    let t = s
+        .create_token("manager", &["/work/vault".into()], None, None)
+        .unwrap();
+    let scope = s.verify_token(&t.secret).unwrap();
+    assert_eq!(s.lane("api", Some(&scope)).unwrap().lane.project, "vault");
+    assert_eq!(
+        s.lane("api@shop", Some(&scope)).unwrap_err().code(),
+        "not_found"
+    );
+}
+
+#[test]
+fn events_carry_ids_not_content() {
+    let s = store();
+    lane(&s, "billing", "shop");
+    s.report_lane(
+        LaneReportInput {
+            agent: "claude".into(),
+            lane: "billing".into(),
+            kind: ReportKind::Done,
+            summary: "secret summary".into(),
+            progress: Some(100),
+            status: None,
+            links: vec!["https://example.test/link".into()],
+            artifacts: vec!["artifact.md".into()],
+            outcome: Some("secret outcome".into()),
+            pr_url: Some("https://example.test/pr/1".into()),
+        },
+        None,
+    )
+    .unwrap();
+    for e in s.events(500).unwrap() {
+        if !e.kind.starts_with("lane.") {
+            continue;
+        }
+        let text = e.payload.to_string();
+        for leak in [
+            "Ship the API refactor",
+            "secret",
+            "progress",
+            "example.test",
+            "artifact",
+            "summary",
+            "charter\"",
+        ] {
+            assert!(
+                !text.contains(leak),
+                "{} payload has {leak}: {text}",
+                e.kind
+            );
+        }
+    }
+    // The content is still there for those allowed to read the lane.
+    let d = s.lane("billing", None).unwrap();
+    assert_eq!(d.lane.outcome.as_deref(), Some("secret outcome"));
+    assert_eq!(d.reports[0].summary, "secret summary");
+}
+
+#[test]
+fn links_must_belong_to_the_lanes_project() {
+    let s = store();
+    lane(&s, "shop-lane", "shop");
+    s.register_agent(RegisterAgent {
+        name: "vaulter".into(),
+        program: Program::Codex,
+        project: Some("/work/vault".into()),
+        model: None,
+        description: None,
+    })
+    .unwrap();
+    let vault_mail = s
+        .send_message(SendMessage {
+            from: "vaulter@vault".into(),
+            to: vec!["vaulter@vault".into()],
+            subject: "vault only".into(),
+            body: String::new(),
+            request: Some(NewRequest::default()),
+            ..Default::default()
+        })
+        .unwrap();
+    let link = |kind: LaneLinkKind, id: &str| {
+        s.update_lane(
+            LaneUpdate {
+                agent: "manager".into(),
+                lane: "shop-lane".into(),
+                links: vec![(kind, id.to_string())],
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap_err()
+    };
+    for (kind, id) in [
+        (LaneLinkKind::Thread, vault_mail.thread_id.clone()),
+        (LaneLinkKind::Message, vault_mail.message_id.clone()),
+        (
+            LaneLinkKind::Request,
+            vault_mail.request_id.clone().unwrap(),
+        ),
+    ] {
+        let out_of_scope = link(kind, &id);
+        let missing = link(kind, "01JDOESNOTEXIST000000000000");
+        assert_eq!(out_of_scope.code(), "not_found");
+        assert_eq!(
+            out_of_scope.to_string().replace(&id, "X"),
+            missing
+                .to_string()
+                .replace("01JDOESNOTEXIST000000000000", "X"),
+            "same error for missing and out of scope"
+        );
+    }
+    // Mail between the lane's creator and lead links fine (both project-less here).
+    let shop_mail = s
+        .send_message(SendMessage {
+            from: "manager".into(),
+            to: vec!["claude".into()],
+            subject: "shop".into(),
+            body: String::new(),
+            ..Default::default()
+        })
+        .unwrap();
+    s.update_lane(
+        LaneUpdate {
+            agent: "manager".into(),
+            lane: "shop-lane".into(),
+            links: vec![(LaneLinkKind::Thread, shop_mail.thread_id)],
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
 }

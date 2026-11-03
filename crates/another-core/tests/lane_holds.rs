@@ -128,7 +128,11 @@ fn lanes_decide_what_conflicts() {
         reason: None,
         lane: Some("keys".into()),
     });
-    assert_eq!(wrong.unwrap_err().code(), "invalid");
+    assert_eq!(
+        wrong.unwrap_err().code(),
+        "not_found",
+        "another project's lane is looked up in this project only"
+    );
     s.close_lane("manager", "billing", true, None, None)
         .unwrap();
     let closed = s.acquire_holds(AcquireHolds {
