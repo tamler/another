@@ -25,12 +25,52 @@ Keep the [README.md](README.md) status and [CHANGELOG.md](CHANGELOG.md) (Unrelea
 3. **Don't break existing CLI/MCP behaviour**: deprecate rather than remove; new behaviour is opt-in or additive.
 4. **Every remote surface** (MCP tool, HTTP route) sits behind `--auth`, respects token project globs via `remote::current_scope()` / store `scope` arguments, and is audited.
 5. **Scoping rules**:
-   - Out-of-scope objects look exactly like missing ones (same `not_found` error, same message shape).
+   - Out-of-scope objects look exactly like missing ones (same `not_found` error, same message shape). Filters on list tools are matched against what the caller may see; they never resolve names node-wide (no `ambiguous` errors naming hidden objects).
    - Events carry ids, names and statuses, never bodies (charters, summaries, report text, links).
    - A security test proves a token scoped to project A can't read project B's data through every new surface.
 6. **Checks**: `cargo test --workspace`, `cargo +stable clippy --all-targets --all-features -- -D warnings`, `cargo fmt --check`, `cargo +1.88 check --workspace --all-targets --locked`.
 7. **Testing never touches live data**: use a temporary `ANOTHER_HOME` and ephemeral or non-default ports. Never `~/.another`, never `127.0.0.1:7466`.
 8. **Open the PR and stop**: no merges, no tags, no DNS, domain or deploy changes.
+
+## Push surfaces (phase 2)
+
+Every way events leave the node applies the same visibility rule (D38). When adding an event kind or a push surface, keep these true:
+
+| Surface | Auth | Rule |
+|---|---|---|
+| `activity_feed`, `activity_summarize`, `GET /activity` | bearer token with `--auth` | scoped |
+| `GET /events/stream` (SSE), `GET /events/poll`, MCP `events_poll` | bearer token with `--auth`, audited once per request | scoped; the stream re-checks its token every 30 s |
+| Webhooks (`webhook_subscribe`, `another webhook add`) | token or local CLI | the webhook's globs (a token's subset), plus the creating token's own-agent rule; disabled when that token is revoked or expires |
+
+- **Visibility:**
+  - An event with projects is visible when one of them matches the globs.
+  - A project-less event is visible when it concerns the token's agent, **matched by agent id**, never by name.
+  - `token.*`, `peer.*`, `node.*` and `invite.*` events are never visible to tokens.
+- **Payloads** carry ids, names and statuses, never bodies. A new event kind needs an activity summary that doesn't echo its payload.
+- **Node-local events:** `hold.conflict` and `resource.lease_expiring` are never federated. Classify new purely local signals as `Share::Never`.
+- **`resource_find` stays node-wide** (decision recorded in D38).
+
+## Decisions (phase 3)
+
+- **Who is asked:** the person is an agent with program `human`. The default is the `decider` node setting (`another config decider NAME`); never add an environment variable for it.
+- **Who may answer:** only a manager bot (`grok_bot`) or a person (`human`) may relay an answer, and never the agent that asked. That covers spend approvals too. MCP `decision_answer` must name its relaying agent.
+- **Automatic mail** (timeouts, reminders) comes from the reserved system agent `another` (`SYSTEM_AGENT`), never in a person's name.
+- **Lookups:** projects are resolved and scope-checked first; lanes are then looked up within that project only. Hidden and missing objects get the same error.
+
+## Lane-aware holds (phase 4)
+
+- **Lane lookup:** a hold's lane is looked up in the hold's project only (`lanes::resolve_lane_in_project`). Never resolve a user-supplied lane name node-wide.
+- **Same lane:** exclusive vs exclusive blocks even inside a lane; otherwise same-lane overlaps are warnings.
+- **Cross-lane conflicts:** emit `lane.hold_conflict` (node-local) and mail the holding lane's lead from the system agent, debounced.
+- **Hooks fail open, visibly:** a problem with the agent's lane degrades to an unlaned hold plus a warning, never to no hold and never to a blocked edit.
+- **Not yet verified:** the pre-edit hook against a real Codex build (`apply_patch` payload). Fleshapron runs that check after these fixes.
+
+## Spend (phase 5)
+
+- **Record, never act:** the ledger never fetches usage, stops or reaps anything.
+- **Approval:** the approver is the account's, else the `decider` node setting. The borrower can never relay its own approval (`check_relayer`).
+- **Lease lifecycle:** withdrawing a pending lease withdraws its decision and emits `spend.lease_withdrawn`. Ending a session closes the agent's spend leases. Spend leases tied to a resource (`resource_id`) end with that resource lease (`reconcile_resource_spend_tx`).
+- **Shared accounts seen by tokens:** the budget figures are for the whole account (read-only), but spent, accrued and the groupings count only the token's projects. Never put other projects' names or amounts in their lines.
 
 ## Review routing rule
 

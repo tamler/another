@@ -8,15 +8,22 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::error::{Error, Result};
-use crate::identity::{find_project, register_tx, resolve_agent, AgentRef, Program, RegisterAgent};
-use crate::lanes::{check_scope, resolve_lane, resolve_lane_in, set_status, Lane, LaneStatus};
+use crate::identity::{
+    find_project_in, register_tx, resolve_agent, AgentRef, Program, RegisterAgent,
+};
+use crate::lanes::{
+    check_scope, resolve_lane, resolve_lane_in_project, set_status, Lane, LaneStatus,
+};
 use crate::mail::{send_tx, touch, Importance, SendMessage};
 use crate::store::{new_id, Store, Tx};
 use crate::time::fmt_ts;
 use crate::tokens::{scope_allows_project, TokenScope};
 
-/// Who is asked when a decision names nobody: `$ANOTHER_DECIDER`, else this.
+/// Who is asked when a decision names nobody and no `decider` is configured
+/// (`another config decider NAME`).
 pub const DEFAULT_DECIDER: &str = "jacob";
+/// Longest note allowed next to a chosen option when free text is off.
+pub const MAX_OPTION_NOTE: usize = 280;
 
 const MAX_QUESTION: usize = 2000;
 const MAX_OPTION_VALUE: usize = 64;
@@ -25,12 +32,16 @@ const MAX_ANSWER_TEXT: usize = 4000;
 const MAX_LINKS: usize = 20;
 
 /// The person asked by default.
-pub fn default_decider() -> String {
-    std::env::var("ANOTHER_DECIDER")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| DEFAULT_DECIDER.to_string())
+pub(crate) fn decider_tx(conn: &Connection) -> Result<String> {
+    crate::settings::get(conn, "decider")
+}
+
+impl Store {
+    /// The person asked when a decision names nobody: the `decider` node setting, else
+    /// [`DEFAULT_DECIDER`].
+    pub fn default_decider(&self) -> Result<String> {
+        self.read(decider_tx)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -168,7 +179,7 @@ pub struct NewDecision {
     pub on_timeout: DecisionTimeout,
     /// Required with `choose_default`: one of the option values.
     pub default_value: Option<String>,
-    /// Who to ask (default [`default_decider`]).
+    /// Who to ask (default: the `decider` node setting, else `jacob`).
     pub human: Option<String>,
     /// Project path or slug (default: the lane's, else the asking agent's).
     pub project: Option<String>,
@@ -418,6 +429,28 @@ fn load(conn: &Connection, node_id: &str, key: &str) -> Result<Row0> {
     found.ok_or_else(|| Error::NotFound(format!("no decision {key:?}")))
 }
 
+/// Only a manager bot (`grok_bot`) or a person (`human`) may relay an answer, and never
+/// the agent that asked: an agent can't approve its own request (decisions, spend).
+pub(crate) fn check_relayer(conn: &Connection, relayer: &AgentRef, asker_id: &str) -> Result<()> {
+    if relayer.id == asker_id {
+        return Err(Error::Forbidden(
+            "the asking agent cannot answer its own decision".into(),
+        ));
+    }
+    let program: String = conn.query_row(
+        "SELECT program FROM agents WHERE agent_id = ?1",
+        [&relayer.id],
+        |r| r.get(0),
+    )?;
+    if !matches!(program.as_str(), "grok_bot" | "human") {
+        return Err(Error::Forbidden(format!(
+            "{} ({program}) cannot relay answers: only a manager (grok_bot) or a person (human) can",
+            relayer.address
+        )));
+    }
+    Ok(())
+}
+
 fn render_question(input: &NewDecision, decision_id: &str, human: &str) -> String {
     let mut out = format!("{}\n", input.question.trim());
     out.push_str("\nOptions:\n");
@@ -476,6 +509,61 @@ fn release_lane(tx: &Tx<'_>, actor: &AgentRef, lane_id: Option<&str>) -> Result<
     Ok(())
 }
 
+/// Withdraw an open decision: event, status, mail to the person, request, waiting spend lease,
+/// lane status.
+fn cancel_row_tx(tx: &Tx<'_>, me: &AgentRef, row: &Row0, reason: Option<&str>) -> Result<()> {
+    tx.emit(
+        &me.address,
+        "decision.cancelled",
+        json!({ "decision_id": row.d.decision_id, "project_id": row.project_id, "asker_id": row.asker_id, "lane_id": row.lane_id, "reason": reason }),
+    )?;
+    tx.execute(
+        "UPDATE decisions SET status = 'cancelled', updated_at = ?2 WHERE decision_id = ?1",
+        params![row.d.decision_id, tx.now],
+    )?;
+    let human = agent_by_id(tx, &row.human_id)?;
+    send_tx(
+        tx,
+        &SendMessage {
+            from: me.address.clone(),
+            to: vec![human.address.clone()],
+            subject: format!("[decision] withdrawn: {}", short(&row.d.question, 80)),
+            body: format!(
+                "No answer needed any more.{}\n(decision {})",
+                reason.map(|r| format!(" Reason: {r}")).unwrap_or_default(),
+                row.d.decision_id
+            ),
+            reply_to: Some(row.message_id.clone()),
+            ..Default::default()
+        },
+    )?;
+    close_request(
+        tx,
+        &row.d.request_id,
+        "cancelled",
+        None,
+        reason.unwrap_or("withdrawn"),
+    )?;
+    crate::spend::decision_closed_tx(tx, &row.d.decision_id, false)?;
+    release_lane(tx, me, row.lane_id.as_deref())?;
+    Ok(())
+}
+
+/// Withdraw a decision if it is still open (used when its spend lease is withdrawn).
+pub(crate) fn withdraw_tx(
+    tx: &Tx<'_>,
+    me: &AgentRef,
+    decision_id: &str,
+    reason: &str,
+) -> Result<bool> {
+    let row = load(tx, tx.node_id, decision_id)?;
+    if row.d.status != DecisionStatus::Open {
+        return Ok(false);
+    }
+    cancel_row_tx(tx, me, &row, Some(reason))?;
+    Ok(true)
+}
+
 fn close_request(
     tx: &Tx<'_>,
     request_id: &str,
@@ -515,10 +603,11 @@ pub(crate) fn expire_decisions_tx(tx: &Tx<'_>) -> Result<usize> {
                 "UPDATE decisions SET overdue_at = ?2, updated_at = ?2 WHERE decision_id = ?1",
                 params![d.decision_id, tx.now],
             )?;
+            let system = crate::identity::system_agent_tx(tx)?;
             send_tx(
                 tx,
                 &SendMessage {
-                    from: asker.address.clone(),
+                    from: system.address.clone(),
                     to: vec![human.address.clone()],
                     subject: format!("[decision] overdue: {}", short(&d.question, 80)),
                     body: format!(
@@ -527,7 +616,7 @@ pub(crate) fn expire_decisions_tx(tx: &Tx<'_>) -> Result<usize> {
                         d.decision_id
                     ),
                     importance: Importance::High,
-                    reply_to: Some(row.message_id.clone()),
+                    thread_id: Some(d.thread_id.clone()),
                     ..Default::default()
                 },
             )?;
@@ -579,15 +668,17 @@ pub(crate) fn expire_decisions_tx(tx: &Tx<'_>) -> Result<usize> {
                 ),
             ),
         };
+        // Automatic mail comes from the system agent, never in the person's name.
+        let system = crate::identity::system_agent_tx(tx)?;
         let msg = send_tx(
             tx,
             &SendMessage {
-                from: human.address.clone(),
+                from: system.address.clone(),
                 to: vec![asker.address.clone()],
                 subject,
                 body,
                 importance: Importance::High,
-                reply_to: Some(row.message_id.clone()),
+                thread_id: Some(d.thread_id.clone()),
                 ..Default::default()
             },
         )?;
@@ -624,38 +715,49 @@ pub(crate) fn ask_tx(
     scope: Option<&TokenScope>,
 ) -> Result<String> {
     let asker = resolve_agent(tx, tx.node_id, &input.agent)?;
+    if human_name == crate::identity::SYSTEM_AGENT {
+        return Err(Error::Invalid(
+            "decisions are for people, not the system agent".into(),
+        ));
+    }
     let human = ensure_human(tx, human_name)?;
     if human.id == asker.id {
         return Err(Error::Invalid(
             "an agent cannot ask itself for a decision".into(),
         ));
     }
+    // The project comes first (explicit, else the asker's) and is scope-checked before any
+    // lane lookup; the lane is then resolved inside that project only, so a lane elsewhere,
+    // out of scope or missing is the same "unknown lane".
+    let home: Option<String> = match &input.project {
+        Some(p) => Some(find_project_in(tx, tx.node_id, p, scope)?.project_id),
+        None => tx.query_row(
+            "SELECT project_id FROM agents WHERE agent_id = ?1",
+            [&asker.id],
+            |r| r.get::<_, Option<String>>(0),
+        )?,
+    };
+    if let Some(p) = &home {
+        check_scope(tx, scope, p)?;
+    }
     let lane = match &input.lane {
-        Some(l) => Some(resolve_lane_in(tx, tx.node_id, l, scope)?),
+        Some(l) => Some(resolve_lane_in_project(
+            tx,
+            tx.node_id,
+            l,
+            home.as_deref(),
+            scope,
+        )?),
         None => None,
     };
-    let project_id = match (&input.project, &lane) {
-        (Some(p), lane) => {
-            let p = find_project(tx, tx.node_id, p)?;
-            if let Some((_, lane_project)) = lane {
-                if *lane_project != p.project_id {
-                    return Err(Error::Invalid(
-                        "the lane belongs to a different project".into(),
-                    ));
-                }
-            }
-            p.project_id
-        }
+    let project_id = match (home, &lane) {
+        (Some(p), _) => p,
         (None, Some((_, lane_project))) => lane_project.clone(),
-        (None, None) => tx
-            .query_row(
-                "SELECT project_id FROM agents WHERE agent_id = ?1",
-                [&asker.id],
-                |r| r.get::<_, Option<String>>(0),
-            )?
-            .ok_or_else(|| {
-                Error::Invalid("name a project (or a lane): decisions belong to a project".into())
-            })?,
+        (None, None) => {
+            return Err(Error::Invalid(
+                "name a project (or a lane): decisions belong to a project".into(),
+            ))
+        }
     };
     check_scope(tx, scope, &project_id)?;
     if let Some((l, _)) = &lane {
@@ -750,14 +852,17 @@ impl Store {
     /// kind `decision`.
     pub fn ask_decision(&self, input: NewDecision, scope: Option<&TokenScope>) -> Result<Decision> {
         validate(&input)?;
-        let human_name = input
-            .human
-            .clone()
-            .map(|h| h.trim().to_string())
-            .filter(|h| !h.is_empty())
-            .unwrap_or_else(default_decider);
         self.write(|tx| {
             crate::holds::sweep_tx(tx)?;
+            let human_name = match input
+                .human
+                .as_ref()
+                .map(|h| h.trim().to_string())
+                .filter(|h| !h.is_empty())
+            {
+                Some(h) => h,
+                None => decider_tx(tx)?,
+            };
             let id = ask_tx(tx, &input, &human_name, scope)?;
             Ok(load(tx, tx.node_id, &id)?.d)
         })
@@ -771,12 +876,18 @@ impl Store {
     ) -> Result<Vec<Decision>> {
         self.sweep()?;
         self.read(|conn| {
+            // Filters resolve within the caller's scope: hidden and missing projects or lanes
+            // give the same "unknown project" / "unknown lane" error.
             let project_id = match &filter.project {
-                Some(p) => Some(find_project(conn, self.node_id(), p)?.project_id),
+                Some(p) => Some(find_project_in(conn, self.node_id(), p, scope)?.project_id),
                 None => None,
             };
             let lane_id = match &filter.lane {
-                Some(l) => Some(resolve_lane_in(conn, self.node_id(), l, scope)?.0.lane_id),
+                Some(l) => Some(
+                    resolve_lane_in_project(conn, self.node_id(), l, project_id.as_deref(), scope)?
+                        .0
+                        .lane_id,
+                ),
                 None => None,
             };
             let status = if filter.all {
@@ -881,12 +992,16 @@ impl Store {
                 None => None,
             };
             if let Some(t) = &text {
-                if !d.allow_free_text {
+                if d.allow_free_text {
+                    check_text("answer text", t, MAX_ANSWER_TEXT)?;
+                } else if option.is_some() {
+                    // A short note next to the chosen option is always allowed.
+                    check_text("note", t, MAX_OPTION_NOTE)?;
+                } else {
                     return Err(Error::Invalid(
-                        "this decision does not accept free text; choose an option".into(),
+                        "this decision does not accept free text; choose an option (a short note may go with it)".into(),
                     ));
                 }
-                check_text("answer text", t, MAX_ANSWER_TEXT)?;
             }
             if option.is_none() && text.is_none() {
                 return Err(Error::Invalid(if d.allow_free_text {
@@ -906,6 +1021,9 @@ impl Store {
                 Some(r) => Some(resolve_agent(tx, tx.node_id, r)?),
                 None => None,
             };
+            if let Some(r) = &relayed {
+                check_relayer(tx, r, &row.asker_id)?;
+            }
             let human = agent_by_id(tx, &row.human_id)?;
             let asker = agent_by_id(tx, &row.asker_id)?;
             tx.emit(
@@ -1020,34 +1138,7 @@ impl Store {
                     row.d.status.as_str()
                 )));
             }
-            tx.emit(
-                &me.address,
-                "decision.cancelled",
-                json!({ "decision_id": row.d.decision_id, "project_id": row.project_id, "asker_id": row.asker_id, "lane_id": row.lane_id, "reason": reason }),
-            )?;
-            tx.execute(
-                "UPDATE decisions SET status = 'cancelled', updated_at = ?2 WHERE decision_id = ?1",
-                params![row.d.decision_id, tx.now],
-            )?;
-            let human = agent_by_id(tx, &row.human_id)?;
-            send_tx(
-                tx,
-                &SendMessage {
-                    from: me.address.clone(),
-                    to: vec![human.address.clone()],
-                    subject: format!("[decision] withdrawn: {}", short(&row.d.question, 80)),
-                    body: format!(
-                        "No answer needed any more.{}\n(decision {})",
-                        reason.as_deref().map(|r| format!(" Reason: {r}")).unwrap_or_default(),
-                        row.d.decision_id
-                    ),
-                    reply_to: Some(row.message_id.clone()),
-                    ..Default::default()
-                },
-            )?;
-            close_request(tx, &row.d.request_id, "cancelled", None, reason.as_deref().unwrap_or("withdrawn"))?;
-            crate::spend::decision_closed_tx(tx, &row.d.decision_id, false)?;
-            release_lane(tx, &me, row.lane_id.as_deref())?;
+            cancel_row_tx(tx, &me, &row, reason.as_deref())?;
             Ok(load(tx, tx.node_id, &row.d.decision_id)?.d)
         })
     }

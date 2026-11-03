@@ -49,14 +49,15 @@ Every report is stored on the lane and also **mailed** to the lane's counterpart
 
 ## Path holds and lanes
 
-**Which lane a hold is for:** the `lane` argument of `hold_paths`, or `another hold acquire --lane` (defaults to `$ANOTHER_LANE`). Without one, it is the single open lane the agent leads in that project. Holds without a lane behave as before.
+**Which lane a hold is for:** the `lane` argument of `hold_paths`, or `another hold acquire --lane` (defaults to `$ANOTHER_LANE`), looked up in the hold's project only; another project's lane is an unknown lane. Without one, it is the single open lane the agent leads in that project. Holds without a lane behave as before.
 
 **Conflicts between lanes:**
 
 | You (lane) | Overlapping hold by another agent | Result |
 |---|---|---|
-| lane A | lane A | Not a conflict: listed under `warnings` with `same_lane: true` |
-| lane A | lane B, or no lane | Conflict. You get `hold.conflict`, plus `lane.hold_conflict` when both sides have a lane, which the `hold_conflict` webhook filter delivers to the manager |
+| lane A | lane A, one of the two holds shared | Not a conflict: listed under `warnings` with `same_lane: true` |
+| lane A, exclusive | lane A, exclusive | Conflict: lane-mates can't both hold the same file exclusively |
+| lane A | lane B, or no lane | Conflict. You get `hold.conflict`, plus `lane.hold_conflict` when both sides have a lane (the `hold_conflict` webhook filter delivers it), and lane B's lead is mailed by `another` (at most once per lane pair every 10 minutes) |
 | no lane | anything | Conflict, as before (when either hold is exclusive) |
 
 **Seeing who holds what for which lane:**

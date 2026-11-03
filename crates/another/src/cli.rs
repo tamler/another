@@ -299,6 +299,12 @@ pub enum Command {
     /// Lanes: named units of work with a charter, lead, status and structured reports.
     #[command(subcommand)]
     Lane(LaneCmd),
+    /// Node settings: `another config` lists them, `another config KEY` shows one,
+    /// `another config KEY VALUE` sets it (e.g. `another config decider jacob`).
+    Config {
+        key: Option<String>,
+        value: Option<String>,
+    },
     /// Decisions: structured questions from agents to a person, answered here or by the
     /// manager bot.
     #[command(subcommand)]
@@ -394,7 +400,7 @@ pub enum WakeCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum DecisionCmd {
-    /// Ask a person (default $ANOTHER_DECIDER, else jacob) a question with 2-6 options.
+    /// Ask a person (default: `another config decider`, else jacob) a question with 2-6 options.
     Ask {
         #[command(flatten)]
         agent: AgentArg,
@@ -531,6 +537,19 @@ pub enum SpendCmd {
         #[arg(long)]
         all: bool,
     },
+    /// Charge borrowing a registered resource to an account, e.g.
+    /// `another spend link runpod gpu_pod:a100`. Borrowers then get a spend lease (behind
+    /// the account's approval gate) that accrues while their resource lease lives.
+    Link {
+        account: String,
+        /// Resource id or kind:name.
+        resource: String,
+    },
+    /// Stop charging a resource to its account (open spend leases run to their end).
+    Unlink {
+        /// Resource id or kind:name.
+        resource: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -558,7 +577,7 @@ pub enum SpendAccountCmd {
         /// Borrowing asks a person first (a decision).
         #[arg(long)]
         requires_approval: bool,
-        /// Who approves (default: $ANOTHER_DECIDER, else jacob).
+        /// Who approves (default: the node's decider, `another config decider NAME`).
         #[arg(long)]
         approver: Option<String>,
         /// Owning project; omit for a shared account.
@@ -1664,6 +1683,26 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let s = store.daily_summary(Some(since), None)?;
             emit(json, &s, |s| s.markdown.trim_end().to_string())
         }
+        Command::Config { key, value } => {
+            let list = match (key, value) {
+                (None, _) => store.settings()?,
+                (Some(k), None) => vec![store.setting(&k)?],
+                (Some(k), Some(v)) => vec![store.set_setting(&k, &v)?],
+            };
+            emit(json, &list, |l| {
+                l.iter()
+                    .map(|s| {
+                        format!(
+                            "{} = {}{}  # {}\n",
+                            s.key,
+                            s.value,
+                            if s.default { " (default)" } else { "" },
+                            s.help
+                        )
+                    })
+                    .collect()
+            })
+        }
         Command::Audit { limit } => {
             let entries = store.audit_log(limit)?;
             emit(json, &entries, |e| output::audit(e))
@@ -1931,6 +1970,15 @@ fn spend_command(
         Some(SpendCmd::Leases { all }) => {
             let list = store.spend_leases(all, None)?;
             emit(json, &list, |l| output::spend_leases(l))
+        }
+        Some(SpendCmd::Link { account, resource }) => {
+            let r =
+                store.link_resource_spend(&ResourceRef::parse(&resource)?, Some(&account), None)?;
+            emit(json, &r, |r| output::resources(std::slice::from_ref(r)))
+        }
+        Some(SpendCmd::Unlink { resource }) => {
+            let r = store.link_resource_spend(&ResourceRef::parse(&resource)?, None, None)?;
+            emit(json, &r, |r| output::resources(std::slice::from_ref(r)))
         }
     })
 }
