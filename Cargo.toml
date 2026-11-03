@@ -1,16 +1,16 @@
 [workspace]
 resolver = "2"
-members = ["crates/wyres-core", "crates/wyres"]
+members = ["crates/another-core", "crates/another"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/tamler/wyres"
+repository = "https://github.com/tamler/another"
 rust-version = "1.88"
 
 [workspace.dependencies]
-wyres-core = { path = "crates/wyres-core" }
+another-core = { path = "crates/another-core" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

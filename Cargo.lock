@@ -27,6 +27,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "another"
+version = "0.1.0"
+dependencies = [
+ "another-core",
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "clap",
+ "reqwest",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+]
+
+[[package]]
+name = "another-core"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "ed25519-dalek",
+ "getrandom 0.3.4",
+ "globset",
+ "rusqlite",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "ulid",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2427,48 +2469,6 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
-
-[[package]]
-name = "wyres"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64 0.22.1",
- "clap",
- "reqwest",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "ureq",
- "wyres-core",
-]
-
-[[package]]
-name = "wyres-core"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "chrono",
- "ed25519-dalek",
- "getrandom 0.3.4",
- "globset",
- "rusqlite",
- "schemars",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "tracing",
- "ulid",
-]
 
 [[package]]
 name = "yoke"

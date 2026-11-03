@@ -5,21 +5,21 @@ A remote agent, such as Grok Bot running off your machine, joins as a first-clas
 ## 1. Register the remote agent and create a token
 
 ```bash
-wyres agent register grok-bot --program grok_bot
+another agent register grok-bot --program grok_bot
 ```
 
 ```bash
-wyres token create --agent grok-bot --project '/path/to/work/*' --label "grok bot" --expires 30d
+another token create --agent grok-bot --project '/path/to/work/*' --label "grok bot" --expires 30d
 ```
 
-The token (`wyr_…`) is printed **once**; Wyres stores only its SHA-256 hash. Other commands:
+The token (`ano_…`) is printed **once**; Another stores only its SHA-256 hash. Other commands:
 
 ```bash
-wyres token list
+another token list
 ```
 
 ```bash
-wyres token revoke <token-id>
+another token revoke <token-id>
 ```
 
 Project globs are matched against a project's absolute path and its slug (`*` stays within one path segment, `**` crosses segments). With no `--project`, the token can still use its own mailbox, heartbeat and the activity feed, but every project-scoped call is denied.
@@ -29,12 +29,12 @@ Project globs are matched against a project's absolute path and its slug (`*` st
 Keep your local agents on the plain loopback server (or stdio), and run a second, authenticated server for the tunnel:
 
 ```bash
-wyres serve --auth --bind 127.0.0.1:7467
+another serve --auth --bind 127.0.0.1:7467
 ```
 
 With `--auth`, `/mcp` and `GET /activity` require `Authorization: Bearer <token>`; `GET /health` stays open. Because tunnels deliver traffic from loopback, the authenticated server checks the token on **every** request, local or not.
 
-Tunnels usually forward the public hostname in the `Host` header. Wyres rejects unknown hosts (DNS-rebinding protection), so name each tunnel hostname with `--allowed-host`.
+Tunnels usually forward the public hostname in the `Host` header. Another rejects unknown hosts (DNS-rebinding protection), so name each tunnel hostname with `--allowed-host`.
 
 ## 3. Expose it through a tunnel (pick one)
 
@@ -45,7 +45,7 @@ tailscale serve --bg 7467
 ```
 
 ```bash
-wyres serve --auth --bind 127.0.0.1:7467 --allowed-host my-laptop.my-tailnet.ts.net
+another serve --auth --bind 127.0.0.1:7467 --allowed-host my-laptop.my-tailnet.ts.net
 ```
 
 The peer connects to `https://my-laptop.my-tailnet.ts.net/mcp`. Use Serve (tailnet-only), not Funnel (public), unless you specifically need public reachability.
@@ -57,7 +57,7 @@ cloudflared tunnel --url http://127.0.0.1:7467
 ```
 
 ```bash
-wyres serve --auth --bind 127.0.0.1:7467 --allowed-host wyres.example.com
+another serve --auth --bind 127.0.0.1:7467 --allowed-host another.example.com
 ```
 
 For a named tunnel, route your hostname to `http://127.0.0.1:7467` in its ingress rules and pass that hostname to `--allowed-host`. Put Cloudflare Access in front of it for a second layer if you like.
@@ -75,17 +75,17 @@ On the relay host the server is reachable at `http://127.0.0.1:7467/mcp` (relay 
 A non-loopback bind is refused unless **both** `--auth` and `--allow-remote-bind` are given:
 
 ```bash
-wyres serve --auth --allow-remote-bind --bind 0.0.0.0:7467
+another serve --auth --allow-remote-bind --bind 0.0.0.0:7467
 ```
 
 This serves plain HTTP, so put TLS in front of it or keep it on a private network.
 
 ## 4. Point the remote agent at it
 
-Configure the remote agent's MCP client with the server URL (`https://…/mcp`) and an `Authorization: Bearer wyr_…` header. A client without MCP can poll the feed instead:
+Configure the remote agent's MCP client with the server URL (`https://…/mcp`) and an `Authorization: Bearer ano_…` header. A client without MCP can poll the feed instead:
 
 ```bash
-curl -H "Authorization: Bearer $WYRES_TOKEN" "https://my-laptop.my-tailnet.ts.net/activity?since=1h&kinds=mail,request"
+curl -H "Authorization: Bearer $ANOTHER_TOKEN" "https://my-laptop.my-tailnet.ts.net/activity?since=1h&kinds=mail,request"
 ```
 
 `GET /activity` takes `since` (a duration like `30m`, an RFC 3339 time, or an event-id cursor), `limit` and `kinds`, and returns the same JSON as the `activity_feed` tool. It never includes message bodies.
@@ -108,5 +108,5 @@ curl -H "Authorization: Bearer $WYRES_TOKEN" "https://my-laptop.my-tailnet.ts.ne
 Every authenticated or rejected remote request is recorded with time, token, agent, operation, outcome (`ok`, `error`, `denied`), redacted arguments (message bodies and notes are replaced by their size) and the forwarding header or peer address:
 
 ```bash
-wyres audit --limit 50
+another audit --limit 50
 ```

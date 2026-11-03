@@ -1,6 +1,6 @@
-# Wyres: cross-agent inbox + resource registry — research + v1 spec
+# Another: cross-agent inbox + resource registry — research + v1 spec
 
-Clean-room research and v1 specification for **Wyres** — a free, local, open sibling under the [WyreUp](https://wyreup.com/) brand. Cross-agent inbox, activity feed, path holds, resource registry, and a designed-for-v2 federation model so a laptop and a remote agent box stay aware of each other. Hooks-first; Herdr/cmux/tmux optional.
+Clean-room research and v1 specification for **Another** ("From one agent to another"; home [toanother.one](https://toanother.one)) — a free, local, open, standalone product. Cross-agent inbox, activity feed, path holds, resource registry, and a designed-for-v2 federation model so a laptop and a remote agent box stay aware of each other. Hooks-first; Herdr/cmux/tmux optional.
 
 Living design Page (optional): <https://cursor.com/canvas/store-f97c4d9c-6914-4d0e-b170-0d5f5d7e2a98/f9b88a9b-d8f5-4fb6-b818-fe86475343c7>
 
@@ -9,7 +9,7 @@ Locked product defaults live in [DECISIONS.md](DECISIONS.md). Milestone build br
 ## Decisions locked
 
 - Skip MCP Agent Mail (MIT + OpenAI/Anthropic license rider).
-- Build Wyres clean-room under Apache-2.0 as a WyreUp sibling: free, local, open.
+- Build Another clean-room under Apache-2.0 as its own product: free, local, open.
 - Hooks first (Claude Code, Grok, Codex; Cursor best-effort). Herdr = optional plugin.
 - Stack = Rust + official [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk).
 - Grok Bot is a first-class peer via activity feed + authenticated remote access.
@@ -36,11 +36,11 @@ Adjacent coding agents still coordinate through stale markdown files. Off-the-sh
 
 | | |
 |---|---|
-| **Name** | Wyres — cross-agent inbox + resource registry |
-| **Brand** | Sibling agent-tools product under WyreUp (wyreup.com) |
-| **WyreUp today** | Free browser image/PDF/file tools + tool chains; MIT; local-first |
-| **Wyres fit** | Free and open source always (every feature in the open repo) |
-| **CLI** | `wyres` — `serve`, `inbox`, `resources`, `activity`, … |
+| **Name** | Another — cross-agent inbox + resource registry |
+| **Tagline** | From one agent to another. |
+| **Home** | [toanother.one](https://toanother.one) |
+| **Positioning** | Standalone product; free and open source always (every feature in the open repo) |
+| **CLI** | `another` — `serve`, `inbox`, `resources`, `activity`, … |
 
 ## Design principles
 
@@ -88,7 +88,7 @@ Single SQLite database (WAL) per node. **v1 ships federation-ready columns** eve
 
 ## Resource registry (used / owned)
 
-> Major component (after milestone 1 core mail). Before starting a model server, dev server, or GPU job, an agent asks Wyres whether one is already running and **borrows** it (shared-use leases + reference counts) instead of spawning a duplicate.
+> Major component (after milestone 1 core mail). Before starting a model server, dev server, or GPU job, an agent asks Another whether one is already running and **borrows** it (shared-use leases + reference counts) instead of spawning a duplicate.
 
 Register running model servers, dev servers, listening ports, GPU/VRAM allocations, containers, and long jobs with an owner agent/project, a purpose, a lease/TTL, and a heartbeat. Common on Apple Silicon Macs: Ollama, llama.cpp, and MLX servers (unified memory — VRAM is not a separate pool; track process RSS / Metal footprint in metadata).
 
@@ -124,18 +124,18 @@ All systems must understand activity underway. The activity feed is a machine-re
 | Surface | API |
 |---|---|
 | MCP | `activity_feed(since?, limit?, kinds?)` + `activity_summarize` |
-| CLI | `wyres activity [--since] [--json]` |
+| CLI | `another activity [--since] [--json]` |
 | HTTP | `GET /activity` (same auth as remote MCP) |
 
 ### How Grok Bot connects
 
 1. **Preferred (post-M1 remote path):** authenticated MCP over HTTPS — Streamable HTTP on loopback by default; for remote peers, terminate TLS at a tunnel (Cloudflare Tunnel, Tailscale Serve, or `ssh -R`) with a bearer token or mTLS. Register as `program=grok_bot`.
-2. **Alternative:** periodic pull of `wyres activity --json` and inbox via short-lived token (outbound-only).
+2. **Alternative:** periodic pull of `another activity --json` and inbox via short-lived token (outbound-only).
 3. **Security:** Never bind `0.0.0.0` without auth. Token scoped to agent name + project globs. Audit log every remote tool call. No automatic `resource_reap` from remote by default. Prefer Tailscale/private network over public internet.
 
 ## Federation (designed now, ship as v2)
 
-Each machine runs a Wyres **node** that is authoritative for its own agents, holds, and resources. Nodes exchange an append-only event log so a home laptop and a remote runner stay aware of each other’s activity. Design in v1 schema; implement sync after v1.
+Each machine runs an Another **node** that is authoritative for its own agents, holds, and resources. Nodes exchange an append-only event log so a home laptop and a remote runner stay aware of each other’s activity. Design in v1 schema; implement sync after v1.
 
 ### Authority + event log
 
@@ -179,7 +179,7 @@ Address agents as `agent@project@node`. Cross-node mail is **store-and-forward**
 
 ### Self-hostable hub / community relay
 
-The hub in hub-and-spoke is just another free Wyres node (always-on box or the laptop). Anyone can self-host a hub; community-run relays are optional and likewise free/open. No paid hosted relay and no open-core upsell — federation ships in the same open repo as local mail and the resource registry.
+The hub in hub-and-spoke is simply one more Another node, free like the rest (always-on box or the laptop). Anyone can self-host a hub; community-run relays are optional and likewise free/open. No paid hosted relay and no open-core upsell — federation ships in the same open repo as local mail and the resource registry.
 
 ## MCP tools + CLI (full vision)
 
@@ -212,16 +212,16 @@ The hub in hub-and-spoke is just another free Wyres node (always-on box or the l
 | `orphans_list` | Lapsed leases + unregistered listeners |
 | `resource_reap` | Kill/cleanup after grace; human approval by default |
 
-### CLI (`wyres`)
+### CLI (`another`)
 
-- `wyres serve` — daemon (stdio MCP and/or authenticated HTTP)
-- `wyres inbox | send | ack | requests | holds`
-- `wyres resources | borrow | release | orphans | reap`
-- `wyres activity`
-- `wyres doctor`
-- `wyres wake --agent NAME --via herdr|tmux|cmux` (optional adapters)
-- `wyres hook install --client claude|grok|codex|cursor`
-- `wyres pair` / `wyres sync` — v2 federation (stub/docs in v1)
+- `another serve` — daemon (stdio MCP and/or authenticated HTTP)
+- `another inbox | send | ack | requests | holds`
+- `another resources | borrow | release | orphans | reap`
+- `another activity`
+- `another doctor`
+- `another wake --agent NAME --via herdr|tmux|cmux` (optional adapters)
+- `another hook install --client claude|grok|codex|cursor`
+- `another pair` / `another sync` — v2 federation (stub/docs in v1)
 
 ## Mail-checking strategy per client
 
@@ -230,7 +230,7 @@ The hub in hub-and-spoke is just another free Wyres node (always-on box or the l
 | Client | Mechanism | Verified? | Recipe |
 |---|---|---|---|
 | Claude Code | SessionStart + UserPromptSubmit (+ Stop/SessionEnd) | Verified | Shell hook → digest; SessionEnd → `heartbeat --end` |
-| Codex CLI | hooks.json + AGENTS.md | Verified | Same digest; AGENTS.md: check wyres before new work |
+| Codex CLI | hooks.json + AGENTS.md | Verified | Same digest; AGENTS.md: check another before new work |
 | Grok CLI | `~/.grok/hooks` + MCP config | Verified | Mirror Claude hook pack |
 | Cursor | sessionStart / beforeSubmitPrompt | Verified (IDE) | Best-effort; cloud sessionStart unreliable |
 | Grok Bot | Remote MCP / periodic pull | Design | Authenticated tunnel; no local hooks |
@@ -240,10 +240,10 @@ The hub in hub-and-spoke is just another free Wyres node (always-on box or the l
 
 ### Hook flow
 
-1. **Session start** — `wyres inbox --json --urgent` + short `wyres activity --since 1h`.
+1. **Session start** — `another inbox --json --urgent` + short `another activity --since 1h`.
 2. **Each user prompt** — optional light check (~500 tokens).
 3. **Before spawn** — AGENTS.md: `resource_find` before starting servers (when registry ships).
-4. **Session end** — `wyres heartbeat --end` → release holds/exclusive resources unless `--keep`.
+4. **Session end** — `another heartbeat --end` → release holds/exclusive resources unless `--keep`.
 
 ## Stale-hold design
 
@@ -299,7 +299,7 @@ Path holds are advisory leases on globs. They signal intent; they do not replace
 
 **Recommend Rust + official `rmcp` + SQLite.**
 
-[`rmcp`](https://crates.io/crates/rmcp) is the official Tier-1 Rust MCP SDK ([modelcontextprotocol/rust-sdk](https://github.com/modelcontextprotocol/rust-sdk), Apache-2.0). Use `rusqlite` or `sqlx` for SQLite WAL. Hooks stay tiny shell scripts calling `wyres … --json`.
+[`rmcp`](https://crates.io/crates/rmcp) is the official Tier-1 Rust MCP SDK ([modelcontextprotocol/rust-sdk](https://github.com/modelcontextprotocol/rust-sdk), Apache-2.0). Use `rusqlite` or `sqlx` for SQLite WAL. Hooks stay tiny shell scripts calling `another … --json`.
 
 TS/Bun prototype tradeoff: faster to sketch tool shapes, weaker as a long-lived process/port/GPU monitor. Prefer Rust for ship; do not dual-maintain.
 
@@ -308,7 +308,7 @@ TS/Bun prototype tradeoff: faster to sketch tool shapes, weaker as a long-lived 
 | License | Apache-2.0 |
 | Language | Rust (edition 2021+); MSRV per rmcp |
 | MCP | `rmcp` + `rmcp-macros` (`cargo add rmcp --features server`) |
-| Store | SQLite WAL under `~/.wyres/` or `$WYRES_HOME` |
+| Store | SQLite WAL under `~/.another/` or `$ANOTHER_HOME` |
 | Hooks | POSIX/macOS shell only |
 | Remote | Streamable HTTP MCP behind Tailscale/CF Tunnel + bearer/mTLS (after M1) |
 
@@ -319,7 +319,7 @@ TS/Bun prototype tradeoff: faster to sketch tool shapes, weaker as a long-lived 
 - Remote exposure: default loopback-only; require explicit enable for remote.
 - False orphan kills: never auto-kill without approval in early versions; allowlist system daemons.
 - Apple Silicon accounting: unified memory makes GPU leases approximate.
-- cmux GPL: optional external CLI only, never link into wyres.
+- cmux GPL: optional external CLI only, never link into another.
 - Agents ignore digests — keep them tiny.
 - Hold/resource false confidence: leases are social until commit/process guards exist.
 - Federation split-brain: owning `node_id` is law; never CRDT-merge ownership.
@@ -329,7 +329,7 @@ TS/Bun prototype tradeoff: faster to sketch tool shapes, weaker as a long-lived 
 
 ## Sources
 
-1. [WyreUp](https://wyreup.com/)
+1. [Another](https://toanother.one)
 2. [Official MCP SDKs (Rust Tier 1)](https://modelcontextprotocol.io/docs/2026-07-28/sdk)
 3. [rmcp — official Rust MCP SDK](https://github.com/modelcontextprotocol/rust-sdk)
 4. [rmcp on crates.io](https://crates.io/crates/rmcp)
