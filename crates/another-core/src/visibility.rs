@@ -152,6 +152,7 @@ pub(crate) fn event_projects(conn: &Connection, kind: &str, p: &Value) -> Result
 pub(crate) fn event_visible(
     conn: &Connection,
     scope: &TokenScope,
+    event_node: &str,
     actor: &str,
     kind: &str,
     payload: &str,
@@ -163,8 +164,20 @@ pub(crate) fn event_visible(
     let projects = event_projects(conn, kind, &p)?;
     if projects.is_empty() {
         // Project-less events (mail between project-less agents, their sessions): only the
-        // token's own.
-        return Ok(actor == scope.agent || event_agents(conn, kind, &p)?.contains(&scope.agent_id));
+        // token's own, matched by agent id. Names are not unique across nodes (another
+        // node's `manager` is not this token's `manager`), so the actor counts only when its
+        // address resolves, on the event's own node, to the token's agent.
+        if event_agents(conn, kind, &p)?.contains(&scope.agent_id) {
+            return Ok(true);
+        }
+        let actor_id: Option<String> = conn
+            .query_row(
+                "SELECT agent_id FROM agents WHERE address = ?1 AND node_id = ?2",
+                [actor, event_node],
+                |r| r.get(0),
+            )
+            .optional()?;
+        return Ok(actor_id.as_deref() == Some(scope.agent_id.as_str()));
     }
     // Project scope wins over agent identity: acting in another project through another
     // channel does not make those events visible to this token.

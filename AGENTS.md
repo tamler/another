@@ -32,6 +32,24 @@ Keep the [README.md](README.md) status and [CHANGELOG.md](CHANGELOG.md) (Unrelea
 7. **Testing never touches live data**: use a temporary `ANOTHER_HOME` and ephemeral or non-default ports. Never `~/.another`, never `127.0.0.1:7466`.
 8. **Open the PR and stop**: no merges, no tags, no DNS, domain or deploy changes.
 
+## Push surfaces (phase 2)
+
+Every way events leave the node applies the same visibility rule (D38). When adding an event kind or a push surface, keep these true:
+
+| Surface | Auth | Rule |
+|---|---|---|
+| `activity_feed`, `activity_summarize`, `GET /activity` | bearer token with `--auth` | scoped |
+| `GET /events/stream` (SSE), `GET /events/poll`, MCP `events_poll` | bearer token with `--auth`, audited once per request | scoped; the stream re-checks its token every 30 s |
+| Webhooks (`webhook_subscribe`, `another webhook add`) | token or local CLI | the webhook's globs (a token's subset), plus the creating token's own-agent rule; disabled when that token is revoked or expires |
+
+- **Visibility:**
+  - An event with projects is visible when one of them matches the globs.
+  - A project-less event is visible when it concerns the token's agent, **matched by agent id**, never by name.
+  - `token.*`, `peer.*`, `node.*` and `invite.*` events are never visible to tokens.
+- **Payloads** carry ids, names and statuses, never bodies. A new event kind needs an activity summary that doesn't echo its payload.
+- **Node-local events:** `hold.conflict` and `resource.lease_expiring` are never federated. Classify new purely local signals as `Share::Never`.
+- **`resource_find` stays node-wide** (decision recorded in D38).
+
 ## Review routing rule
 
 Every PR gets a review from a **different model family** than the one that wrote it:
