@@ -124,7 +124,7 @@ Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green
 
 | Area | Tools |
 |---|---|
-| Identity | `ensure_project`, `register_agent`, `heartbeat` (`start` / `end` record sessions) |
+| Identity | `ensure_project`, `register_agent`, `heartbeat` (`start` / `end` record sessions), `agent_kick` (manager agents only) |
 | Mail | `send_message` (with `reply_to`, `create_request`), `fetch_inbox`, `threads`, `acknowledge` |
 | Requests | `claim_request` (`claim` / `release` / `complete` / `cancel`) |
 | Decisions | `decision_ask`, `decision_list`, `decision_show`, `decision_answer`, `decision_cancel` |

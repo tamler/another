@@ -725,6 +725,7 @@ CREATE INDEX spend_leases_by_resource ON spend_leases(resource_id, agent_id, sta
 ALTER TABLE resources ADD COLUMN spend_account_id TEXT REFERENCES spend_accounts(account_id);
 "#,
     r#"
+ALTER TABLE lanes ADD COLUMN leaderless_at INTEGER;
 CREATE TABLE agent_invites (
     invite_id      TEXT PRIMARY KEY,
     node_id        TEXT NOT NULL REFERENCES nodes(node_id),
@@ -736,7 +737,7 @@ CREATE TABLE agent_invites (
     max_uses       INTEGER NOT NULL,
     uses           INTEGER NOT NULL DEFAULT 0,
     ephemeral      INTEGER NOT NULL DEFAULT 1,
-    idle_hours     INTEGER NOT NULL,
+    idle_hours     INTEGER,
     token_ttl      INTEGER,
     created_at     INTEGER NOT NULL,
     expires_at     INTEGER NOT NULL,
@@ -751,7 +752,7 @@ CREATE TABLE remote_agents (
     token_id        TEXT NOT NULL REFERENCES tokens(token_id),
     lane_id         TEXT REFERENCES lanes(lane_id),
     ephemeral       INTEGER NOT NULL,
-    idle_hours      INTEGER NOT NULL,
+    idle_hours      INTEGER,
     client_hostname TEXT,
     client_version  TEXT,
     joined_at       INTEGER NOT NULL,

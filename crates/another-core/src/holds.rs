@@ -17,6 +17,7 @@ use crate::mail::touch;
 use crate::requests::stale_overdue_tx;
 use crate::store::{new_id, Store, Tx};
 use crate::time::fmt_ts;
+use crate::tokens::TokenScope;
 
 pub const DEFAULT_HOLD_TTL_SECONDS: i64 = 30 * 60;
 pub const MIN_HOLD_TTL_SECONDS: i64 = 60;
@@ -570,6 +571,30 @@ pub(crate) fn owned_holds(
         .collect()
 }
 
+/// [`owned_holds`] limited to holds in projects `scope` may see (all of them locally).
+pub(crate) fn owned_holds_in(
+    tx: &Tx<'_>,
+    agent_id: &str,
+    scope: Option<&TokenScope>,
+) -> Result<Vec<(String, i64)>> {
+    let owned = owned_holds(tx, agent_id, &[])?;
+    let Some(scope) = scope else {
+        return Ok(owned);
+    };
+    let mut out = Vec::new();
+    for (id, ttl) in owned {
+        let project: String = tx.query_row(
+            "SELECT project_id FROM holds WHERE hold_id = ?1",
+            [&id],
+            |r| r.get(0),
+        )?;
+        if crate::tokens::scope_allows_project(tx, scope, &project)? {
+            out.push((id, ttl));
+        }
+    }
+    Ok(out)
+}
+
 fn holds_by_id(conn: &Connection, ids: &[String]) -> Result<Vec<Hold>> {
     ids.iter()
         .map(|id| {
@@ -949,10 +974,22 @@ impl Store {
         phase: SessionPhase,
         info: SessionInfo,
     ) -> Result<HeartbeatReport> {
+        self.session_scoped(agent, phase, info, None)
+    }
+
+    /// [`Store::session`] for a remote caller: only holds and leases in projects the token
+    /// may see are renewed or released (the agent may hold others locally).
+    pub fn session_scoped(
+        &self,
+        agent: &str,
+        phase: SessionPhase,
+        info: SessionInfo,
+        scope: Option<&TokenScope>,
+    ) -> Result<HeartbeatReport> {
         self.write(|tx| {
             sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, agent)?;
-            let owned = owned_holds(tx, &me.id, &[])?;
+            let owned = owned_holds_in(tx, &me.id, scope)?;
             let session_payload = || {
                 json!({
                     "agent_id": me.id,
@@ -961,14 +998,15 @@ impl Store {
                 })
             };
             let release_leases = phase == SessionPhase::End && !info.keep_resources;
-            let resource_leases = crate::resources::session_leases_tx(tx, &me, release_leases)?;
+            let resource_leases =
+                crate::resources::session_leases_tx(tx, &me, release_leases, scope)?;
             let (renewed, released, status) = if phase == SessionPhase::End {
                 let ids: Vec<String> = owned.into_iter().map(|(id, _)| id).collect();
                 release_tx(tx, &me.address, &ids, "session_end")?;
                 if release_leases {
                     // Spend leases close with the session (kept with --keep-resources, like
                     // the resource leases they pay for).
-                    crate::spend::end_agent_leases_tx(tx, &me.id, "session_end")?;
+                    crate::spend::end_agent_leases_tx(tx, &me.id, "session_end", scope)?;
                 }
                 tx.emit(&me.address, "session.ended", session_payload())?;
                 tx.execute(
@@ -983,7 +1021,7 @@ impl Store {
                     tx.emit(&me.address, "session.started", session_payload())?;
                 }
                 renew_tx(tx, &me.address, &owned)?;
-                crate::spend::renew_spend_leases_tx(tx, &me.id)?;
+                crate::spend::renew_spend_leases_tx(tx, &me.id, scope)?;
                 touch(tx, &me.id)?;
                 let ids: Vec<String> = owned.into_iter().map(|(id, _)| id).collect();
                 (holds_by_id(tx, &ids)?, Vec::new(), "active")

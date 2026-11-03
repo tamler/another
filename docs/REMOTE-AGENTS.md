@@ -1,18 +1,18 @@
 # Remote agents
 
-Let an agent running somewhere else join your Another hub in one step: a cloud Claude Code or Codex session, another machine, a manager bot. It gets exactly the access you choose, takes part in lanes, and leaves cleanly. Design: [design/remote-agents.md](design/remote-agents.md).
+Let an agent running somewhere else join your Another hub in one step: a cloud Claude Code or Codex session, another machine, a manager bot. It gets exactly the access you choose, takes part in lanes, and leaves cleanly. Design: [design/07-remote-agents.md](design/07-remote-agents.md).
 
 ## In 10 lines: let a cloud agent into Another
 
 1. Run the hub with auth on loopback: `another serve --auth --bind 127.0.0.1:7466`.
 2. Make it reachable over your tailnet: `tailscale serve --bg 7466` (see [Reaching the hub](#reaching-the-hub)).
 3. Mint an invite: `another invite create --agent cloud-claude --program claude --project ~/Projects/shop --lane api --expires 2h --print-snippet --hub-url https://hub.your-tailnet.ts.net`
-4. Paste the printed snippet into the cloud session. It installs `another`, joins, writes the MCP config and says hello in the lane.
+4. Paste the printed snippet into the cloud session. It installs `another` (the hub's own version, checked against the release's SHA-256), joins, writes the MCP config and says hello in the lane.
 5. The code works once and expires. The snippet contains no other secret.
 6. Restart the cloud agent with `. ~/.another/remote.env` so `ANOTHER_TOKEN` is set. It now has Another's MCP tools, limited to `shop`.
 7. Watch it: `another agent remotes` (online / idle / gone), `another lane show api`, `another summary`.
 8. It reports with `lane_report` (or `another remote report`), asks with `decision_ask`, and holds files before editing.
-9. When the session ends, or it is unseen for 4 h (`--idle-hours`), it leaves on its own: token revoked, holds released, lane told.
+9. When the session ends, or it is unseen for 4 h (`--idle-hours`, or the node setting `another config remote_idle_hours N`), it leaves on its own: token revoked, holds released, lane told.
 10. To end it now: `another agent kick cloud-claude@shop`. Its token fails on the next request.
 
 ## Invites
@@ -29,6 +29,8 @@ another invite revoke <invite-id>
 - **Fixed by you:** the invite fixes the agent's name, program, project globs and lane. The joining side can't change or widen any of them.
 - **Ephemeral or persistent:** joined agents are ephemeral unless you pass `--persistent`.
 - **Revoking** an invite stops new redemptions. Agents that already joined are removed with `another agent kick`.
+- **No takeovers:** an invite can't use the name of an agent already registered on the hub (pick a new one). The exceptions are later uses of the same invite, and a remote agent that has gone.
+- **Guessing is throttled:** `POST /join` allows 10 attempts a minute per client address, then answers `429`.
 
 ## Joining
 
@@ -80,11 +82,16 @@ Everything is limited to the invite's project globs: lanes, events, stream, webh
 
 **When it goes:**
 - its invite token is revoked;
-- its holds are released;
-- its resource and spend leases are closed (with their cost recorded);
+- its holds are released, and its resource and spend leases are closed (with their cost recorded). Only those in the invite's projects are touched, and the same applies to heartbeats and `leave` through its token; anything the agent holds elsewhere is left alone.
 - `agent.gone` is emitted, plus `lane.agent_left` in its lanes (the `lane_status` webhook filter delivers it).
+- **If it led a lane**, the lane member active longest becomes the lead; the new lead and the lane's creator are mailed. With nobody left, the lane stays open and is flagged `leaderless_since` (and listed in the summary) until you pick a lead with `another lane update NAME --lead …`. Lanes are never blocked automatically.
 
-`another agent kick NAME [--reason …]` does all of that immediately, for any agent, and revokes all of its tokens.
+**Kicking:**
+- `another agent kick NAME [--reason …]` does all of that immediately, for any agent, and revokes all of its tokens.
+- A manager bot (program `grok_bot`) can do the same over MCP with `agent_kick`, but only for agents in its token's projects, and never for people.
+- The reason is kept with the agent's membership record, not in events.
+
+**Presence:** any authenticated call through the agent's token, reads included, counts as being seen.
 
 ## Reaching the hub
 

@@ -442,7 +442,8 @@ pub enum InviteCmd {
         /// Lane the agent joins (id, name or name@project).
         #[arg(long)]
         lane: Option<String>,
-        /// Ephemeral agents leave after this many hours unseen (default 4).
+        /// Ephemeral agents leave after this many hours unseen (default: the node's
+        /// `remote_idle_hours` setting, 4 unless changed with `another config`).
         #[arg(long)]
         idle_hours: Option<u32>,
         /// Keep the agent after its session ends or it goes idle.

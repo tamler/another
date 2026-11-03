@@ -435,3 +435,304 @@ fn upgrades_a_database_created_before_remote_agents() {
         "a@shop"
     );
 }
+
+#[test]
+fn heartbeats_and_leaving_only_touch_the_tokens_projects() {
+    let (s, _) = hub();
+    // A persistent remote agent for shop, which (locally) also holds a vault file.
+    let j = join(
+        &s,
+        &invite(&s, |i| {
+            i.agent = "both".into();
+            i.ephemeral = false;
+        })
+        .code,
+    )
+    .unwrap();
+    let scope = s.verify_token(&j.token).unwrap();
+    let hold = |project: &str, path: &str| {
+        s.acquire_holds(AcquireHolds {
+            agent: "both@shop".into(),
+            project: project.into(),
+            paths: vec![path.into()],
+            ttl_seconds: Some(3600),
+            exclusive: true,
+            reason: None,
+            lane: None,
+        })
+        .unwrap()
+    };
+    hold("shop", "src/a.rs");
+    hold("vault", "keys/b.txt");
+    let held = |project: &str| {
+        s.holds(HoldFilter::default())
+            .unwrap()
+            .into_iter()
+            .filter(|h| h.project == project)
+            .count()
+    };
+
+    // A heartbeat through the token renews only shop's hold.
+    let beat = s
+        .session_scoped(
+            "both@shop",
+            SessionPhase::Beat,
+            SessionInfo::default(),
+            Some(&scope),
+        )
+        .unwrap();
+    assert_eq!(beat.renewed_holds.len(), 1);
+    assert_eq!(beat.renewed_holds[0].project, "shop");
+    // Ending the session through the token releases shop's hold and keeps vault's.
+    let end = s
+        .session_scoped(
+            "both@shop",
+            SessionPhase::End,
+            SessionInfo::default(),
+            Some(&scope),
+        )
+        .unwrap();
+    assert_eq!(end.released_holds.len(), 1);
+    assert_eq!((held("shop"), held("vault")), (0, 1));
+
+    // Leaving (ephemeral) and idle expiry are limited to the invite's projects too.
+    let e = join(&s, &invite(&s, |i| i.agent = "eph".into()).code).unwrap();
+    let escope = s.verify_token(&e.token).unwrap();
+    for (project, path) in [("shop", "src/c.rs"), ("vault", "keys/d.txt")] {
+        s.acquire_holds(AcquireHolds {
+            agent: "eph@shop".into(),
+            project: project.into(),
+            paths: vec![path.into()],
+            ttl_seconds: Some(3600),
+            exclusive: true,
+            reason: None,
+            lane: None,
+        })
+        .unwrap();
+    }
+    let d = s.leave_scoped("eph@shop", Some(&escope)).unwrap();
+    assert_eq!(d.holds_released, 1);
+    let vault_holders: Vec<String> = s
+        .holds(HoldFilter::default())
+        .unwrap()
+        .into_iter()
+        .filter(|h| h.project == "vault")
+        .map(|h| h.agent)
+        .collect();
+    assert!(
+        vault_holders.contains(&"eph@shop".to_string()),
+        "{vault_holders:?}"
+    );
+}
+
+#[test]
+fn invites_never_take_over_a_registered_name() {
+    let (s, _) = hub();
+    // claude@shop is a local agent: no invite may be made for that name.
+    let e = s
+        .create_agent_invite(NewAgentInvite {
+            agent: "claude".into(),
+            program: Program::Claude,
+            project_globs: vec!["/work/shop".into()],
+            lane: None,
+            expires_in_seconds: None,
+            max_uses: None,
+            ephemeral: true,
+            idle_hours: None,
+            token_ttl_seconds: None,
+        })
+        .unwrap_err();
+    assert_eq!(e.code(), "conflict");
+    // A name registered after the invite was made: redeeming it fails like any bad code,
+    // and the local agent gets no new token.
+    let inv = invite(&s, |i| i.agent = "late".into());
+    s.register_agent(RegisterAgent {
+        name: "late".into(),
+        program: Program::Codex,
+        project: Some("/work/shop".into()),
+        model: None,
+        description: None,
+    })
+    .unwrap();
+    let e = join(&s, &inv.code).unwrap_err();
+    assert_eq!(e.code(), "forbidden");
+    assert_eq!(e.to_string(), "invalid or expired invite");
+    assert!(s.tokens().unwrap().iter().all(|t| t.agent != "late@shop"));
+    // A multi-use invite's later uses refresh its own agent.
+    let multi = invite(&s, |i| {
+        i.agent = "pool".into();
+        i.max_uses = Some(2);
+    });
+    join(&s, &multi.code).unwrap();
+    join(&s, &multi.code).unwrap();
+    // A remote agent that has gone (token revoked) can be invited again.
+    s.leave("pool@shop").unwrap();
+    invite(&s, |i| i.agent = "pool".into());
+}
+
+#[test]
+fn a_departing_lead_hands_the_lane_to_the_longest_active_member() {
+    let (s, clock) = hub();
+    join(&s, &invite(&s, |i| i.agent = "first".into()).code).unwrap();
+    advance(&clock, 60_000);
+    join(&s, &invite(&s, |i| i.agent = "second".into()).code).unwrap();
+    s.update_lane(
+        LaneUpdate {
+            agent: "manager".into(),
+            lane: "api@shop".into(),
+            lead: Some("first@shop".into()),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+
+    // The lead leaves: the member who joined next takes over, and is told.
+    s.leave("first@shop").unwrap();
+    let lane = s.lane("api@shop", None).unwrap().lane;
+    assert_eq!(lane.lead, "second@shop");
+    assert_eq!(lane.status, LaneStatus::Working);
+    assert!(lane.leaderless_since.is_none());
+    let inbox = s.inbox("second@shop", InboxQuery::default()).unwrap();
+    let m = &inbox.messages[0].message;
+    assert!(
+        m.subject.contains("second@shop is now the lead"),
+        "{}",
+        m.subject
+    );
+    assert_eq!(m.from, "another");
+    let creator = s.inbox("manager", InboxQuery::default()).unwrap();
+    assert!(creator
+        .messages
+        .iter()
+        .any(|m| m.message.subject.contains("is now the lead")));
+
+    // The last member leaves: the lane stays open (never blocked), flagged, and the
+    // creator is told; the summary lists it.
+    s.leave("second@shop").unwrap();
+    let lane = s.lane("api@shop", None).unwrap().lane;
+    assert_eq!(lane.status, LaneStatus::Working, "never auto-blocked");
+    assert!(lane.leaderless_since.is_some());
+    assert!(s
+        .events(500)
+        .unwrap()
+        .iter()
+        .any(|e| e.kind == "lane.leaderless"));
+    let creator = s.inbox("manager", InboxQuery::default()).unwrap();
+    assert!(creator
+        .messages
+        .iter()
+        .any(|m| m.message.subject == "[lane api] has no lead"));
+    let sum = s.daily_summary(None, None).unwrap();
+    assert!(
+        sum.attention.iter().any(|a| a.contains("api (no lead")),
+        "{:?}",
+        sum.attention
+    );
+    // Naming a lead clears the flag.
+    s.update_lane(
+        LaneUpdate {
+            agent: "manager".into(),
+            lane: "api@shop".into(),
+            lead: Some("claude@shop".into()),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    assert!(s
+        .lane("api@shop", None)
+        .unwrap()
+        .lane
+        .leaderless_since
+        .is_none());
+}
+
+#[test]
+fn idle_expiry_follows_the_node_setting() {
+    let (s, clock) = hub();
+    assert_eq!(s.setting("remote_idle_hours").unwrap().value, "4");
+    assert_eq!(
+        s.set_setting("remote_idle_hours", "0").unwrap_err().code(),
+        "invalid"
+    );
+    let fixed = join(&s, &invite(&s, |i| i.agent = "fixed".into()).code).unwrap(); // 2 h
+    let j = join(
+        &s,
+        &invite(&s, |i| {
+            i.agent = "follows".into();
+            i.idle_hours = None;
+        })
+        .code,
+    )
+    .unwrap();
+    assert_eq!(
+        s.remote_agents()
+            .unwrap()
+            .iter()
+            .find(|r| r.agent == "follows@shop")
+            .unwrap()
+            .idle_hours,
+        4
+    );
+    // Lowered to 1 h: existing agents without their own limit follow it.
+    s.set_setting("remote_idle_hours", "1").unwrap();
+    advance(&clock, 70 * 60_000);
+    s.sweep().unwrap();
+    assert!(s.verify_token(&j.token).is_err(), "gone after 1 h idle");
+    assert!(s.verify_token(&fixed.token).is_ok(), "its invite said 2 h");
+}
+
+#[test]
+fn managers_can_kick_over_mcp_within_their_projects() {
+    let (s, _) = hub();
+    for (name, program) in [("boss", Program::GrokBot), ("jacob", Program::Human)] {
+        s.register_agent(RegisterAgent {
+            name: name.into(),
+            program,
+            project: Some("/work/shop".into()),
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    }
+    let j = join(&s, &invite(&s, |_| {}).code).unwrap();
+    // Not a manager: refused.
+    let e = s
+        .kick_agent_as("claude@shop", "cloud@shop", None, None)
+        .unwrap_err();
+    assert_eq!(e.code(), "forbidden");
+    // A remote manager scoped to shop: vault agents don't exist for it, people can't go.
+    let t = s
+        .create_token("boss@shop", &["/work/shop".into()], None, None)
+        .unwrap();
+    let scope = s.verify_token(&t.secret).unwrap();
+    let e = s
+        .kick_agent_as("boss@shop", "vaulter@vault", None, Some(&scope))
+        .unwrap_err();
+    assert_eq!(e.code(), "not_found");
+    let e = s
+        .kick_agent_as("boss@shop", "jacob@shop", None, Some(&scope))
+        .unwrap_err();
+    assert_eq!(e.code(), "forbidden");
+    // ...and it can't act as another agent.
+    let e = s
+        .kick_agent_as("claude@shop", "cloud@shop", None, Some(&scope))
+        .unwrap_err();
+    assert_eq!(e.code(), "forbidden");
+    let d = s
+        .kick_agent_as(
+            "boss@shop",
+            "cloud@shop",
+            Some("done for today"),
+            Some(&scope),
+        )
+        .unwrap();
+    assert_eq!(d.reason, "kicked: done for today");
+    assert!(s.verify_token(&j.token).is_err());
+    assert!(s
+        .events(500)
+        .unwrap()
+        .iter()
+        .all(|e| !e.payload.to_string().contains("done for today")));
+}

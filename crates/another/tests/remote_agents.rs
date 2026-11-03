@@ -448,6 +448,23 @@ fn leaving_and_bad_codes() {
 
     ok(&b_home, &b_user, &["join", &h.url, &code]);
     assert!(b_home.join("remote.json").exists());
+    // Guessing is rate-limited per client address: 429 well before many tries.
+    let mut statuses = Vec::new();
+    for _ in 0..12 {
+        let r = agent
+            .post(&format!("{}/join", h.url))
+            .send_json(json!({ "code": "anj_guess" }))
+            .unwrap();
+        statuses.push(r.status().as_u16());
+    }
+    assert!(statuses.contains(&429), "{statuses:?}");
+    assert_eq!(*statuses.last().unwrap(), 429);
+    assert!(h
+        .store
+        .audit_log(200)
+        .unwrap()
+        .iter()
+        .any(|a| a.operation == "POST /join" && a.detail.as_deref() == Some("rate limited")));
     let left = ok(&b_home, &b_user, &["remote", "leave"]);
     assert_eq!(left["reason"], "left");
     assert!(!b_home.join("remote.json").exists(), "profile forgotten");

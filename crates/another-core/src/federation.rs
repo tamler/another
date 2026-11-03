@@ -211,6 +211,11 @@ fn classify(kind: &str, payload: &Value, origin: &str) -> Share {
             Some(n) if n != origin => Share::Mail(vec![n.to_string()]),
             _ => Share::Never,
         },
+        // A report proposed for another node's lane goes to that node only.
+        "lane.report_proposed" => match payload.get("lane_node").and_then(Value::as_str) {
+            Some(n) if n != origin => Share::Mail(vec![n.to_string()]),
+            _ => Share::Never,
+        },
         "delivery.read" | "delivery.acked" => {
             match payload.get("message_node").and_then(Value::as_str) {
                 Some(n) if n != origin => Share::Mail(vec![n.to_string()]),
@@ -685,7 +690,7 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
             )?;
         }
         // Lanes are written only by their owner node; others keep a read-only mirror (no
-        // charter or reports: events never carry them). docs/design/remote-agents.md §5.
+        // charter or reports: events never carry them). docs/design/07-remote-agents.md §5.
         "lane.created" => {
             let (Some(lane_id), Some(project), Some(lead), Some(name)) =
                 (s("lane_id"), s("project_id"), s("lead_id"), s("name"))
@@ -762,6 +767,11 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
         "decision.answer_relayed" => {
             if s("decision_node").as_deref() == Some(tx.node_id) {
                 crate::decisions::apply_relayed_tx(tx, ev, p)?;
+            }
+        }
+        "lane.report_proposed" => {
+            if s("lane_node").as_deref() == Some(tx.node_id) {
+                crate::lanes::apply_proposal_tx(tx, ev, p)?;
             }
         }
         "resource.registered" => {

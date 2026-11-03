@@ -22,6 +22,11 @@ pub const SETTINGS: &[SettingSpec] = &[
         help: "who is asked when a decision (or a spend approval) names nobody",
     },
     SettingSpec {
+        key: "remote_idle_hours",
+        default: "4",
+        help: "hours an ephemeral remote agent may go unseen before it is removed (1-720)",
+    },
+    SettingSpec {
         key: "summary_daily",
         default: "",
         help: "local time (HH:MM) `another serve` sends the daily summary; empty = off",
@@ -70,6 +75,12 @@ pub(crate) fn get(conn: &Connection, key: &str) -> Result<String> {
 fn validate(key: &str, value: &str) -> Result<()> {
     match key {
         "decider" => crate::identity::validate_name(value),
+        "remote_idle_hours" => match value.parse::<u32>() {
+            Ok(h) if (1..=720).contains(&h) => Ok(()),
+            _ => Err(Error::Invalid(
+                "remote_idle_hours must be a whole number of hours, 1-720".into(),
+            )),
+        },
         "summary_daily" => {
             if value.is_empty() {
                 Ok(())

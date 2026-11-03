@@ -663,6 +663,25 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             format!("{actor} created lane {} ({})", s("name"), s("status")),
             json!({ "lane_id": s("lane_id") }),
         ),
+        "lane.report_proposed" => (
+            format!(
+                "{actor} proposed a report for lane {} (applied by its node)",
+                s("name")
+            ),
+            json!({ "lane_id": s("lane_id"), "proposal_id": s("proposal_id") }),
+        ),
+        "lane.proposal_ignored" => (
+            format!(
+                "a proposed report for lane {} was not applied ({})",
+                s("lane_id"),
+                s("reason")
+            ),
+            json!({ "lane_id": s("lane_id"), "proposal_id": s("proposal_id") }),
+        ),
+        "lane.leaderless" => (
+            format!("lane {} has no lead (its lead left)", s("name")),
+            json!({ "lane_id": s("lane_id") }),
+        ),
         "lane.updated" => (
             format!("{actor} updated lane {}", s("name")),
             json!({ "lane_id": s("lane_id") }),
