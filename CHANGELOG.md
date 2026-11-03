@@ -22,7 +22,8 @@ All notable changes to Another. Unreleased work is listed under the next version
     - CLI: `another webhook add|list|remove|test|dead|deliveries|retry`.
     - MCP tools: `webhook_subscribe`, `webhook_list`, `webhook_remove`.
     - `another serve` delivers them.
-  - New events: `hold.conflict`, emitted when an acquire is refused, and `resource.lease_expiring`, emitted once when a lease nears its end.
+  - New events: `hold.conflict`, emitted when an acquire is refused, and `resource.lease_expiring`, emitted once when a lease nears its end. Both are node-local and are not federated.
+  - A webhook is disabled once the token that created it is revoked or expires. Webhooks a token created follow its own-agent rule for project-less events, like the stream.
 - **Human decisions** ([design](docs/design/03-decisions.md), [guide](docs/HUMAN-DECISIONS.md)):
   - Structured questions from agents to a person: 2–6 options, optional free text, context links, a deadline and what happens at it (`keep_open`, `choose_default`, `cancel`), and an optional lane, which shows `needs_decision` until answered.
   - The person (default `$ANOTHER_DECIDER`, else `jacob`) is an agent with the new program `human`.

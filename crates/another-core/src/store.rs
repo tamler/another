@@ -591,7 +591,9 @@ CREATE TABLE webhooks (
     created_by    TEXT,
     created_at    INTEGER NOT NULL,
     cursor_seq    INTEGER NOT NULL,
-    removed_at    INTEGER
+    removed_at    INTEGER,
+    disabled_at   INTEGER,
+    disabled_reason TEXT
 );
 
 CREATE TABLE webhook_deliveries (

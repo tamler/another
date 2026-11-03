@@ -124,6 +124,12 @@ pub struct Webhook {
     pub pending: u32,
     pub delivered: u32,
     pub dead: u32,
+    /// Set when the webhook stopped firing because its creating token was revoked or
+    /// expired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_reason: Option<String>,
 }
 
 /// Returned once, at creation: the subscription plus its signing secret.
@@ -266,14 +272,49 @@ pub fn validate_webhook_url(url: &str) -> Result<()> {
 }
 
 /// A scope that only knows project globs: what a webhook may see.
-fn glob_scope(globs: &[String]) -> TokenScope {
+/// The scope a webhook delivers within: its project globs, plus (for webhooks a token
+/// created) that token's agent, so project-less events follow the same own-agent rule as
+/// the stream and long-poll (D38).
+fn hook_scope(globs: &[String], agent_id: Option<&str>) -> TokenScope {
     TokenScope {
         token_id: String::new(),
-        // Never equal to a real agent id or address, so only the globs decide.
-        agent_id: "\u{0}".into(),
+        // "\0" never equals a real agent id, so local webhooks get project events only.
+        agent_id: agent_id.unwrap_or("\u{0}").to_string(),
         agent: "\u{0}".into(),
         project_globs: globs.to_vec(),
     }
+}
+
+/// Disable webhooks whose creating token was revoked or has expired: they stop firing
+/// and their pending deliveries die. Returns how many were disabled.
+fn disable_orphaned_tx(tx: &crate::store::Tx<'_>) -> Result<usize> {
+    let mut stmt = tx.prepare(
+        "SELECT w.webhook_id,
+                CASE WHEN t.token_id IS NULL OR t.revoked_at IS NOT NULL THEN 'token revoked'
+                     ELSE 'token expired' END
+         FROM webhooks w LEFT JOIN tokens t ON t.token_id = w.token_id
+         WHERE w.node_id = ?1 AND w.removed_at IS NULL AND w.disabled_at IS NULL
+           AND w.token_id IS NOT NULL
+           AND (t.token_id IS NULL OR t.revoked_at IS NOT NULL
+                OR (t.expires_at IS NOT NULL AND t.expires_at <= ?2))",
+    )?;
+    let dead = stmt
+        .query_map(params![tx.node_id, tx.now], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, reason) in &dead {
+        tx.execute(
+            "UPDATE webhooks SET disabled_at = ?2, disabled_reason = ?3 WHERE webhook_id = ?1",
+            params![id, tx.now, reason],
+        )?;
+        tx.execute(
+            "UPDATE webhook_deliveries SET status = 'dead', last_error = ?2
+             WHERE webhook_id = ?1 AND status = 'pending'",
+            params![id, format!("webhook disabled: {reason}")],
+        )?;
+    }
+    Ok(dead.len())
 }
 
 struct HookRow {
@@ -286,10 +327,15 @@ struct HookRow {
     created_by: Option<String>,
     created_at: i64,
     cursor_seq: i64,
+    disabled_at: Option<i64>,
+    disabled_reason: Option<String>,
+    /// The creating token's agent (own-agent rule for project-less events).
+    token_agent_id: Option<String>,
 }
 
 const HOOK_COLS: &str = "webhook_id, url, filters, project_globs, description, token_id,
-    created_by, created_at, cursor_seq";
+    created_by, created_at, cursor_seq, disabled_at, disabled_reason,
+    (SELECT t.agent_id FROM tokens t WHERE t.token_id = webhooks.token_id)";
 
 fn hook_row(r: &Row<'_>) -> rusqlite::Result<HookRow> {
     let filters: String = r.get(2)?;
@@ -304,6 +350,9 @@ fn hook_row(r: &Row<'_>) -> rusqlite::Result<HookRow> {
         created_by: r.get(6)?,
         created_at: r.get(7)?,
         cursor_seq: r.get(8)?,
+        disabled_at: r.get(9)?,
+        disabled_reason: r.get(10)?,
+        token_agent_id: r.get(11)?,
     })
 }
 
@@ -326,6 +375,8 @@ fn hydrate(conn: &Connection, h: HookRow) -> Result<Webhook> {
         description: h.description,
         created_by: h.created_by,
         created_at: fmt_ts(h.created_at),
+        disabled_at: h.disabled_at.map(fmt_ts),
+        disabled_reason: h.disabled_reason,
     })
 }
 
@@ -547,8 +598,10 @@ impl Store {
     /// once per webhook (a cursor per webhook). Returns how many deliveries were queued.
     pub fn queue_webhook_deliveries(&self) -> Result<usize> {
         self.write(|tx| {
+            disable_orphaned_tx(tx)?;
             let mut stmt = tx.prepare(&format!(
-                "SELECT {HOOK_COLS} FROM webhooks WHERE node_id = ?1 AND removed_at IS NULL"
+                "SELECT {HOOK_COLS} FROM webhooks WHERE node_id = ?1 AND removed_at IS NULL
+                   AND disabled_at IS NULL"
             ))?;
             let hooks = stmt
                 .query_map([tx.node_id], hook_row)?
@@ -577,7 +630,10 @@ impl Store {
                 let Some(last) = rows.last().map(|(seq, _)| *seq) else {
                     continue;
                 };
-                let scope = h.globs.as_deref().map(glob_scope);
+                let scope = h
+                    .globs
+                    .as_deref()
+                    .map(|g| hook_scope(g, h.token_agent_id.as_deref()));
                 for (_, row) in rows {
                     let payload: Value = serde_json::from_str(&row.payload).unwrap_or(Value::Null);
                     let Some(filter) = h.filters.iter().find(|f| f.matches(&row.kind, &payload))
@@ -585,7 +641,14 @@ impl Store {
                         continue;
                     };
                     if let Some(scope) = &scope {
-                        if !event_visible(tx, scope, &row.actor, &row.kind, &row.payload)? {
+                        if !event_visible(
+                            tx,
+                            scope,
+                            &row.node_id,
+                            &row.actor,
+                            &row.kind,
+                            &row.payload,
+                        )? {
                             continue;
                         }
                     }
@@ -630,6 +693,12 @@ impl Store {
         let delivery_id = new_id();
         self.write(|tx| {
             let h = live_hook(tx, webhook_id)?;
+            if let Some(reason) = &h.disabled_reason {
+                return Err(Error::Conflict(format!(
+                    "webhook {} is disabled ({reason}); create a new one",
+                    h.webhook_id
+                )));
+            }
             let body = json!({
                 "delivery_id": delivery_id,
                 "webhook_id": h.webhook_id,
@@ -676,6 +745,7 @@ impl Store {
                 "SELECT d.delivery_id, d.webhook_id, w.url, w.secret, d.kind, d.body, d.attempts
                  FROM webhook_deliveries d JOIN webhooks w ON w.webhook_id = d.webhook_id
                  WHERE d.status = 'pending' AND d.next_attempt_at <= ?1 AND w.removed_at IS NULL
+                   AND w.disabled_at IS NULL
                  ORDER BY d.next_attempt_at, d.delivery_id LIMIT ?2",
             )?;
             let due = stmt
