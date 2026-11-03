@@ -161,6 +161,19 @@ pub fn wake(store: &Store, agent: &str, opts: &WakeOptions) -> Result<WakePlan> 
     Ok(plan)
 }
 
+/// Wake an agent only if it has a stored wake target; errors are logged, not returned (used
+/// after a decision is answered, where the answer is already safely in the inbox).
+pub fn wake_if_targeted(store: &Store, agent: &str) -> Option<WakePlan> {
+    store.wake_target(agent).ok().flatten()?;
+    match wake(store, agent, &WakeOptions::default()) {
+        Ok(plan) => Some(plan),
+        Err(e) => {
+            tracing::warn!(agent, error = %e, "wake after decision failed");
+            None
+        }
+    }
+}
+
 /// Wake every agent with a stored target that has something waiting.
 pub fn wake_all(store: &Store, opts: &WakeOptions) -> Result<Vec<WakePlan>> {
     store

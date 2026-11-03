@@ -1,0 +1,113 @@
+# Human decisions
+
+Agents sometimes need a person to choose: ship or wait, Postgres or SQLite, spend the money or not. A **decision** is a structured question with 2 to 6 options. The person answers with one tap on their phone (through the manager bot), over HTTP, or from the CLI. The answer lands in the asking agent's inbox as a reply in the same thread, and the agent is woken if it has a wake target.
+
+Design: [design/03-decisions.md](design/03-decisions.md).
+
+## Asking (agents)
+
+MCP:
+
+```json
+{
+  "tool": "decision_ask",
+  "arguments": {
+    "agent": "claude@shop",
+    "question": "Ship the refactor behind a flag, or wait for review?",
+    "options": [
+      {"value": "ship", "label": "Ship behind a flag"},
+      {"value": "wait", "label": "Wait for review", "description": "Reviewer is back Monday"}
+    ],
+    "allow_free_text": true,
+    "context_links": ["https://github.com/example/shop/pull/7"],
+    "deadline": "4h",
+    "on_timeout": "choose_default",
+    "default": "wait",
+    "lane": "api-refactor"
+  }
+}
+```
+
+CLI:
+
+```bash
+another decision ask --agent claude@shop -q "Ship behind a flag, or wait for review?" \
+  --option ship="Ship behind a flag" --option wait="Wait for review" \
+  --link https://github.com/example/shop/pull/7 --deadline 4h --on-timeout choose_default --default wait
+```
+
+**Fields:**
+- `options`: 2 to 6. `value` is a single word that comes back as the answer; `label` is what the person sees.
+- `human`: who is asked. Defaults to `$ANOTHER_DECIDER`, else `jacob`. The person is registered on demand as an agent with program `human`, so they have an inbox: `another inbox --agent jacob`.
+- `project`: required for scoping. It is taken from the argument, else the lane, else the asking agent's project.
+- `lane`: the lane shows `needs_decision` until the decision is answered, then returns to `working`.
+
+**When the deadline passes:**
+
+| `on_timeout` | What happens |
+|---|---|
+| `keep_open` (default) | One `decision.overdue` event and a reminder to the person; it keeps waiting |
+| `choose_default` | The `default` option applies (`answered_by: timeout`); the agent is mailed |
+| `cancel` | The decision is cancelled; the agent is mailed to proceed without it |
+
+To withdraw a question, the asking agent calls `decision_cancel` or `another decision cancel <id> --agent …`.
+
+## Answering (the person, through the manager)
+
+The manager bot hears about new decisions through the `needs_decision` webhook (or `events_poll`) and shows the markdown on the phone:
+
+```
+**Decision for jacob** (open) from claude@shop · shop · lane api-refactor
+
+Ship the refactor behind a flag, or wait for review?
+
+1. Ship behind a flag (`ship`)
+2. Wait for review (`wait`) — Reviewer is back Monday
+Free text is OK too.
+- https://github.com/example/shop/pull/7
+
+Deadline 2026-11-03T18:00:00.000Z, then default wait.
+
+Reply with a number or value. CLI: `another decision answer 01JD… <value>`
+```
+
+The manager then relays the answer. Any of these works:
+
+- **MCP:** `decision_answer` with `{"decision": "01JD…", "value": "1", "answered_by": "jacob"}`. The value can be the option's value or its number.
+- **HTTP:** `POST /decisions/{id}/answer` with `{"value": "ship", "text": "…", "answered_by": "jacob"}`.
+- **CLI**, on the machine itself: `another decision answer 01JD… ship [--text "…"] [--as jacob]`.
+
+**What gets recorded:**
+- `answered_by`: the person (default: the person asked).
+- `relayed_by`: the agent that called the API. Remote callers are always recorded as their token's agent and cannot set it to anyone else.
+- `answered_at`
+
+The asking agent receives a high-importance reply, `[decision] Ship behind a flag: …`, with the value, the label, any text, and who answered and relayed it. The request closes, and the lane is released.
+
+## Reading
+
+| Surface | Read |
+|---|---|
+| MCP | `decision_list` (open by default; `status`, `all`, `project`, `lane`, `human`), `decision_show` (with `markdown`) |
+| HTTP | `GET /decisions?status=open`, `GET /decisions/{id}` |
+| CLI | `another decision list [--all] [--for jacob]`, `another decision show <id> [--markdown]` |
+
+Decisions also appear in `another requests` as requests of kind `decision`. `another request claim|complete|cancel` refuses them, so use the decision commands.
+
+## Remote access
+
+With `another serve --auth`:
+- A token only sees and answers decisions in projects matching its globs.
+- `decision_ask` must act as the token's agent.
+- `decision_cancel` is limited to the asking agent.
+- Every call is written to the audit log.
+
+## Events and webhooks
+
+| Event | Webhook filters |
+|---|---|
+| `decision.created` | `needs_decision`, `request_created` |
+| `decision.overdue` | `needs_decision` |
+| `decision.answered` | `request_answered` |
+| `decision.expired` | `request_answered` |
+| `decision.cancelled` | `all` |

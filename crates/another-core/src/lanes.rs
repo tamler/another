@@ -289,7 +289,7 @@ fn lane_from_row(r: &Row<'_>) -> rusqlite::Result<(Lane, String)> {
 }
 
 /// Resolve a lane by id or name (an open lane with that name, else the newest closed one).
-fn resolve_lane(conn: &Connection, node_id: &str, key: &str) -> Result<(Lane, String)> {
+pub(crate) fn resolve_lane(conn: &Connection, node_id: &str, key: &str) -> Result<(Lane, String)> {
     let key = key.trim();
     let by_id = conn
         .query_row(
@@ -314,7 +314,11 @@ fn resolve_lane(conn: &Connection, node_id: &str, key: &str) -> Result<(Lane, St
     .ok_or_else(|| Error::NotFound(format!("unknown lane {key:?}")))
 }
 
-fn check_scope(conn: &Connection, scope: Option<&TokenScope>, project_id: &str) -> Result<()> {
+pub(crate) fn check_scope(
+    conn: &Connection,
+    scope: Option<&TokenScope>,
+    project_id: &str,
+) -> Result<()> {
     match scope {
         Some(s) if !scope_allows_project(conn, s, project_id)? => Err(Error::Forbidden(
             "this lane is outside the token's project globs".into(),
@@ -380,7 +384,7 @@ fn detail(conn: &Connection, lane: Lane) -> Result<LaneDetail> {
     })
 }
 
-fn set_status(
+pub(crate) fn set_status(
     tx: &Tx<'_>,
     actor: &AgentRef,
     lane: &Lane,

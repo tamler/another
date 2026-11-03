@@ -21,7 +21,7 @@ pub enum WebhookFilter {
     LaneStatus,
     /// `lane.reported`.
     LaneReport,
-    /// A lane moving to `needs_decision`; `decision.created`.
+    /// A lane moving to `needs_decision`; `decision.created`, `decision.overdue`.
     NeedsDecision,
     /// `request.created`, `decision.created`.
     RequestCreated,
@@ -72,7 +72,7 @@ impl WebhookFilter {
                 "lane.status_changed" => field("to") == Some("needs_decision"),
                 "lane.reported" => field("status") == Some("needs_decision"),
                 "lane.created" => field("status") == Some("needs_decision"),
-                "decision.created" => true,
+                "decision.created" | "decision.overdue" => true,
                 _ => false,
             },
             WebhookFilter::RequestCreated => matches!(kind, "request.created" | "decision.created"),

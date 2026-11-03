@@ -116,6 +116,18 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
         .route("/activity", axum::routing::get(crate::remote::activity))
         .route("/events/poll", axum::routing::get(crate::push::poll))
         .route("/events/stream", axum::routing::get(crate::push::stream))
+        .route(
+            "/decisions",
+            axum::routing::get(crate::http_decisions::list),
+        )
+        .route(
+            "/decisions/{id}",
+            axum::routing::get(crate::http_decisions::show),
+        )
+        .route(
+            "/decisions/{id}/answer",
+            axum::routing::post(crate::http_decisions::answer),
+        )
         .with_state(store.clone());
     let protected = if opts.auth {
         protected.layer(axum::middleware::from_fn_with_state(

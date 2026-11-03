@@ -199,6 +199,11 @@ pub fn authorize(
             project(s(args, "project"), true)
         }
         "lane_update" | "lane_report" | "lane_close" => acting(args, "agent"),
+        // Decisions: the store checks the decision's project against the token scope.
+        "decision_list" | "decision_show" => Ok(()),
+        "decision_ask" | "decision_cancel" => acting(args, "agent"),
+        // The token's agent is always recorded as the relaying agent.
+        "decision_answer" => acting(args, "relayed_by"),
         "orphans_list" => {
             // Remote peers see lapsed registrations only, never a process scan.
             args.insert("scan".into(), Value::Bool(false));

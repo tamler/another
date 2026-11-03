@@ -7,6 +7,7 @@
 
 mod activity;
 pub mod crypto;
+mod decisions;
 mod error;
 mod federation;
 mod holds;
@@ -25,6 +26,10 @@ mod webhooks;
 pub use activity::{
     ActivityFeed, ActivityItem, ActivityKind, ActivityQuery, ActivitySummary, AgentPresence,
     RequestCounts, Since,
+};
+pub use decisions::{
+    decision_markdown, default_decider, parse_deadline, AnswerDecision, Decision, DecisionAnswer,
+    DecisionFilter, DecisionOption, DecisionStatus, DecisionTimeout, NewDecision, DEFAULT_DECIDER,
 };
 pub use error::{Error, ErrorBody, Result};
 pub use federation::{

@@ -80,7 +80,7 @@ another webhook remove <webhook-id>
 |---|---|
 | `lane_status` | `lane.created`, `lane.status_changed`, `lane.closed` |
 | `lane_report` | `lane.reported` |
-| `needs_decision` | a lane moving to `needs_decision` (by update or report); `decision.created` (once human decisions exist) |
+| `needs_decision` | a lane moving to `needs_decision` (by update or report); `decision.created`; `decision.overdue` ([human decisions](HUMAN-DECISIONS.md)) |
 | `request_created` | `request.created`, `decision.created` |
 | `request_answered` | `request.completed`, `request.cancelled`, `decision.answered`, `decision.expired` |
 | `hold_conflict` | `hold.conflict`: an agent was refused a hold because another agent holds an overlapping path |
