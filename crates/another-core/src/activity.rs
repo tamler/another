@@ -419,6 +419,15 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             },
             json!({ "resource_id": s("resource_id"), "account_id": p.get("account_id") }),
         ),
+        "summary.daily" => (
+            format!(
+                "daily summary: {} item(s) need attention",
+                p.get("attention_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default()
+            ),
+            json!({ "since": s("since"), "until": s("until") }),
+        ),
         "spend.lease_withdrawn" => (
             format!(
                 "{actor} withdrew borrowing request {} on {}",

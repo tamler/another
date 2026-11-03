@@ -33,12 +33,16 @@ pub enum WebhookFilter {
     LeaseExpiring,
     /// `spend.budget_threshold` (80% / 100% crossed) and `spend.approval_requested`.
     Budget,
+    /// `summary.daily`: the scheduled rollup (`another summary schedule --to webhook`).
+    /// Delivered only to local webhooks without project globs, because it covers the
+    /// whole node.
+    DailySummary,
     /// Everything visible except mail and delivery events.
     All,
 }
 
 impl WebhookFilter {
-    pub const ALL: [WebhookFilter; 9] = [
+    pub const ALL: [WebhookFilter; 10] = [
         WebhookFilter::LaneStatus,
         WebhookFilter::LaneReport,
         WebhookFilter::NeedsDecision,
@@ -47,6 +51,7 @@ impl WebhookFilter {
         WebhookFilter::HoldConflict,
         WebhookFilter::LeaseExpiring,
         WebhookFilter::Budget,
+        WebhookFilter::DailySummary,
         WebhookFilter::All,
     ];
 
@@ -60,6 +65,7 @@ impl WebhookFilter {
             WebhookFilter::HoldConflict => "hold_conflict",
             WebhookFilter::LeaseExpiring => "lease_expiring",
             WebhookFilter::Budget => "budget",
+            WebhookFilter::DailySummary => "daily_summary",
             WebhookFilter::All => "all",
         }
     }
@@ -92,9 +98,10 @@ impl WebhookFilter {
             WebhookFilter::Budget => {
                 matches!(kind, "spend.budget_threshold" | "spend.approval_requested")
             }
+            WebhookFilter::DailySummary => kind == "summary.daily",
             WebhookFilter::All => !matches!(
                 kind.split('.').next(),
-                Some("message" | "delivery" | "token" | "peer" | "node")
+                Some("message" | "delivery" | "token" | "peer" | "node" | "summary")
             ),
         }
     }

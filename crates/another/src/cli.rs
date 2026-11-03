@@ -310,7 +310,10 @@ pub enum Command {
     #[command(subcommand)]
     Decision(DecisionCmd),
     /// Daily summary: what needs you, lanes, decisions, requests, holds, spend, agents.
+    #[command(args_conflicts_with_subcommands = true)]
     Summary {
+        #[command(subcommand)]
+        cmd: Option<SummaryCmd>,
         /// Duration (24h), RFC 3339 time, or event id.
         #[arg(long, default_value = "24h")]
         since: String,
@@ -553,6 +556,23 @@ pub enum SpendCmd {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum SummaryCmd {
+    /// Opt-in daily rollup sent by `another serve`, e.g.
+    /// `another summary schedule --daily 08:30 --to mail:owner`. Without flags, shows it.
+    Schedule {
+        /// Local time, HH:MM (24-hour).
+        #[arg(long, conflicts_with = "off")]
+        daily: Option<String>,
+        /// `webhook` (local webhooks with the daily_summary filter) or `mail:NAME`.
+        #[arg(long, conflicts_with = "off")]
+        to: Option<String>,
+        /// Turn the rollup off.
+        #[arg(long)]
+        off: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum SpendAccountCmd {
     /// Add an account, e.g. `another spend account add claude-api --kind api_credits --unit USD --budget 200`.
     Add {
@@ -618,7 +638,8 @@ pub enum WebhookCmd {
         #[arg(long)]
         url: String,
         /// Comma-separated filters: lane_status, lane_report, needs_decision,
-        /// request_created, request_answered, hold_conflict, lease_expiring, all.
+        /// request_created, request_answered, hold_conflict, lease_expiring, budget,
+        /// daily_summary (with --all-projects only), all.
         #[arg(long, value_delimiter = ',', required = true)]
         events: Vec<String>,
         /// Project path or slug glob (repeatable). Required unless --all-projects.
@@ -1678,7 +1699,36 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Webhook(cmd) => webhook_command(&store, json, cmd)?,
         Command::Decision(cmd) => decision_command(&store, json, cmd)?,
         Command::Spend { cmd, report } => spend_command(&store, json, cmd, report)?,
-        Command::Summary { since } => {
+        Command::Summary {
+            cmd: Some(SummaryCmd::Schedule { daily, to, off }),
+            ..
+        } => {
+            let s = if off {
+                store.set_summary_schedule(None, None)?
+            } else if daily.is_some() || to.is_some() {
+                let at = match daily {
+                    Some(d) => Some(d),
+                    None => store.summary_schedule()?.daily_at,
+                };
+                if at.is_none() {
+                    anyhow::bail!("give --daily HH:MM to turn the daily summary on");
+                }
+                store.set_summary_schedule(at.as_deref(), to.as_deref())?
+            } else {
+                store.summary_schedule()?
+            };
+            emit(json, &s, |s| {
+                match &s.daily_at {
+                Some(at) => format!(
+                    "daily summary at {at} (local time) to {}; last sent {}\nSent while `another serve` runs.",
+                    s.to,
+                    s.last_sent_at.as_deref().unwrap_or("never")
+                ),
+                None => "daily summary: off (pull it with `another summary`)".to_string(),
+            }
+            })
+        }
+        Command::Summary { since, cmd: None } => {
             let since = another_core::Since::parse(&since, store.now())?;
             let s = store.daily_summary(Some(since), None)?;
             emit(json, &s, |s| s.markdown.trim_end().to_string())

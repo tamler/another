@@ -56,7 +56,8 @@ All notable changes to Another. Unreleased work is listed under the next version
   - No real accounts are built in; the examples live in [docs/SPEND.md](docs/SPEND.md).
 - **Daily summary** ([design](docs/design/06-summary.md)):
   - `another summary [--since 24h]`, MCP `daily_summary`, and `GET /summary` (JSON, or markdown with `format=markdown`).
-  - Contents: what needs a person, lanes moved, stuck and closed, decisions, requests, holds and conflicts, spend, and active agents. Scoped for remote callers.
+  - Contents: what needs a person, lanes moved, stuck and closed, decisions, requests, holds and conflicts, spend, active agents, and active people (listed separately). Scoped for remote callers, including an event-id `since`. `truncated` flags a section that hit the pager's cap.
+  - Opt-in daily rollup: `another summary schedule --daily HH:MM --to webhook|mail:NAME`, sent by `another serve` from the `another` system agent. A new `daily_summary` webhook filter (local all-project webhooks only).
 - [Manager bot guide](docs/MANAGER-BOT.md): token, webhooks to subscribe, and which MCP tools to call.
 - CI also runs on pull requests that target non-`main` branches, so stacked PRs are checked.
 
