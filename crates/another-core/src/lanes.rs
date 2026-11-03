@@ -361,6 +361,44 @@ pub(crate) fn resolve_lane_in(
     }
 }
 
+/// Resolve a lane **within one project** (or, without one, within the scope): an id or a
+/// name in that project. Lanes elsewhere, outside the scope, or missing all give the same
+/// "unknown lane" error, so a lookup can never reveal another project's lane.
+pub(crate) fn resolve_lane_in_project(
+    conn: &Connection,
+    node_id: &str,
+    key: &str,
+    project_id: Option<&str>,
+    scope: Option<&TokenScope>,
+) -> Result<(Lane, String)> {
+    let unknown = || Error::NotFound(format!("unknown lane {:?}", key.trim()));
+    let Some(project_id) = project_id else {
+        return resolve_lane_in(conn, node_id, key, scope).map_err(|_| unknown());
+    };
+    let slug: String = conn
+        .query_row(
+            "SELECT slug FROM projects WHERE project_id = ?1",
+            [project_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or_else(unknown)?;
+    let k = key.trim();
+    let by_id = conn
+        .query_row("SELECT 1 FROM lanes WHERE lane_id = ?1", [k], |_| Ok(()))
+        .optional()?
+        .is_some();
+    let qualified = if by_id || k.contains('@') {
+        k.to_string()
+    } else {
+        format!("{k}@{slug}")
+    };
+    match resolve_lane_in(conn, node_id, &qualified, scope) {
+        Ok((lane, p)) if p == project_id => Ok((lane, p)),
+        _ => Err(unknown()),
+    }
+}
+
 pub(crate) fn check_scope(
     conn: &Connection,
     scope: Option<&TokenScope>,
@@ -640,13 +678,21 @@ impl Store {
     /// matches the token's globs are returned.
     pub fn lanes(&self, filter: LaneFilter, scope: Option<&TokenScope>) -> Result<Vec<Lane>> {
         self.read(|conn| {
-            let project_id = match &filter.project {
-                Some(p) => Some(find_project(conn, self.node_id(), p)?.project_id),
-                None => None,
-            };
-            let lead_id = match &filter.lead {
-                Some(a) => Some(resolve_agent(conn, self.node_id(), a)?.id),
-                None => None,
+            // A scoped caller's filters never resolve anything node-wide: they are matched
+            // against the lanes it may see, so a hidden project or agent behaves exactly like
+            // a missing one (an empty list) and no error can name it.
+            let (project_id, lead_id) = match scope {
+                Some(_) => (None, None),
+                None => (
+                    match &filter.project {
+                        Some(p) => Some(find_project(conn, self.node_id(), p)?.project_id),
+                        None => None,
+                    },
+                    match &filter.lead {
+                        Some(a) => Some(resolve_agent(conn, self.node_id(), a)?.id),
+                        None => None,
+                    },
+                ),
             };
             let mut stmt = conn.prepare(&format!(
                 "{LANE_SELECT} WHERE l.node_id = ?1 AND (?2 IS NULL OR l.status = ?2)
@@ -671,6 +717,19 @@ impl Store {
                 if let Some(s) = scope {
                     if !scope_allows_project(conn, s, &project_id)? {
                         continue;
+                    }
+                    if let Some(p) = &filter.project {
+                        let p = p.trim().trim_end_matches('/');
+                        if lane.project != p && lane.project_path != p {
+                            continue;
+                        }
+                    }
+                    if let Some(a) = &filter.lead {
+                        let a = a.trim();
+                        let bare = lane.lead.split('@').next().unwrap_or_default();
+                        if lane.lead != a && bare != a {
+                            continue;
+                        }
                     }
                 }
                 out.push(lane);

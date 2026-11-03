@@ -16,6 +16,7 @@ mod lanes;
 mod mail;
 mod requests;
 mod resources;
+mod settings;
 mod store;
 mod time;
 mod tokens;
@@ -28,8 +29,8 @@ pub use activity::{
     RequestCounts, Since,
 };
 pub use decisions::{
-    decision_markdown, default_decider, parse_deadline, AnswerDecision, Decision, DecisionAnswer,
-    DecisionFilter, DecisionOption, DecisionStatus, DecisionTimeout, NewDecision, DEFAULT_DECIDER,
+    decision_markdown, parse_deadline, AnswerDecision, Decision, DecisionAnswer, DecisionFilter,
+    DecisionOption, DecisionStatus, DecisionTimeout, NewDecision, DEFAULT_DECIDER, MAX_OPTION_NOTE,
 };
 pub use error::{Error, ErrorBody, Result};
 pub use federation::{
@@ -41,7 +42,7 @@ pub use holds::{
     LaneHolds, SessionInfo, SessionPhase, SweepReport, DEFAULT_HOLD_TTL_SECONDS,
     MAX_HOLD_TTL_SECONDS, MIN_HOLD_TTL_SECONDS,
 };
-pub use identity::{Agent, Program, Project, RegisterAgent};
+pub use identity::{Agent, Program, Project, RegisterAgent, SYSTEM_AGENT};
 pub use lanes::{
     lane_markdown, Lane, LaneDetail, LaneFilter, LaneLink, LaneLinkKind, LaneReport,
     LaneReportInput, LaneStatus, LaneUpdate, NewLane, ReportKind,
@@ -56,6 +57,7 @@ pub use resources::{
     ResourceKind, ResourceRef, DEFAULT_LEASE_TTL_SECONDS, LEASE_EXPIRING_WINDOW_MS,
     MAX_LEASE_TTL_SECONDS, MIN_LEASE_TTL_SECONDS,
 };
+pub use settings::{Setting, SETTINGS};
 pub use store::{default_home, Clock, Event, NodeInfo, Store, DB_FILE};
 pub use time::fmt_ts;
 pub use tokens::{AuditEntry, AuditRecord, NewToken, Token, TokenScope};

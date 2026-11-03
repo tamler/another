@@ -100,7 +100,7 @@ curl -H "Authorization: Bearer $ANOTHER_TOKEN" "https://my-laptop.my-tailnet.ts.
 | `register_agent` | Only the token's own identity |
 | `threads` | Only threads the token's agent sent or received in |
 | `activity_feed`, `activity_summarize`, `events_poll` | Only events from the token's projects (or, for project-less events, its own agent's); no message bodies |
-| `resource_find` | Node-wide, read-only awareness |
+| `resource_find` | Node-wide, read-only awareness (kept by decision, D38) |
 | `webhook_subscribe` | Project globs default to the token's and may only be narrowed; `all_projects` is refused |
 | `webhook_list`, `webhook_remove` | Only webhooks this token created |
 | `orphans_list` | Lapsed registrations only; the process scan is never run for remote peers |
