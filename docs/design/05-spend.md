@@ -41,6 +41,20 @@ Accounts are created and changed locally only, through the CLI or local MCP. Rem
 2. Answering `approve` starts the lease. Its clock starts then, not at the request.
 3. `deny`, expiry or cancelling marks it `denied`.
 4. Either way, the decision's answer mail tells the agent the outcome.
+5. **Withdrawing** a pending lease (`spend_release`) also withdraws its decision: the approver is mailed that no answer is needed, the lane leaves `needs_decision`, and `spend.lease_withdrawn` is emitted.
+6. **No self-approval:** the borrower (or the agent a token acts as) can't relay the answer to its own approval; only a manager bot or a person can (note 03).
+
+**Approver:** the account's `approver`, else the node's `decider` setting (`another config decider NAME`).
+
+**Sessions:** ending a session (`session_end`, the SessionEnd hook) closes the agent's spend leases, like its resource leases: active ones are charged up to then and pending ones are withdrawn. `--keep-resources` keeps both.
+
+## Linked resources
+
+`another spend link ACCOUNT RESOURCE` (local only) charges borrowing a registered resource, such as a rented GPU pod, to an account with a `cost_per_hour`. `another spend unlink RESOURCE` undoes it.
+- `resource_borrow` on a linked resource opens a spend lease for the borrower, tied to the resource.
+- If the account requires approval, the borrow returns `outcome: pending_approval` with a `decision_id` and no resource lease. Borrowing again while it is pending returns the same decision. Approval takes the resource lease and starts the spend lease. If the resource can no longer be leased by then, the spend lease ends at once, at no cost.
+- The spend lease is renewed with the resource lease (heartbeat or borrowing again), and ends when the resource lease ends (release, expiry, stop or session end), charged up to that moment.
+- Only resources registered on this node can be linked. Borrowing another node's resource is not charged here.
 
 ## Reports
 
@@ -71,6 +85,7 @@ Accounts are created and changed locally only, through the CLI or local MCP. Rem
 - `another spend account add|list|update|archive`
 - `another spend record`
 - `another spend borrow` / `release` / `leases`
+- `another spend link ACCOUNT RESOURCE` / `unlink RESOURCE`
 
 **MCP:**
 - `spend_report`, `spend_accounts`, `spend_record`, `spend_borrow`, `spend_release`
@@ -78,21 +93,20 @@ Accounts are created and changed locally only, through the CLI or local MCP. Rem
 
 **HTTP:** `GET /spend?period=current` (behind `--auth`, audited).
 
-**Events:** `spend.account_created`, `account_updated`, `recorded`, `lease_started`, `lease_ended`, `lease_denied`, `approval_requested` and `budget_threshold`.
+**Events:** `spend.account_created`, `account_updated`, `resource_linked`, `recorded`, `lease_started`, `lease_ended`, `lease_denied`, `lease_withdrawn`, `approval_requested` and `budget_threshold`.
 
 ## Scope
 
 Accounts with a project are visible to a token only if the project matches its globs. Shared accounts (no project) are visible, but only for **entries and leases attributed to the token's projects**. Their figures are then marked `partial: true`, and they never include other projects' spend.
 
-Scoped tokens get **no budget figures** for shared accounts, only what their own projects spent: `remaining` and `projected` would reveal how much everyone else spent. A token's `spend_record` and `spend_borrow` must act as its own agent, and the entry's project must be within its globs.
+For shared accounts, scoped tokens see the **whole account's budget figures**, read-only: `budget`, `remaining`, `used_pct`, `projected`, `daily_left` and `status`. `spent`, `accrued` and the lane and agent totals still count only their own projects, so they never learn who else spent it. (Decided in review: knowing what is left of a shared budget matters more than hiding its total.) A token's `spend_record` and `spend_borrow` must act as its own agent, and the entry's project must be within its globs.
 
 ## Migration
 
-Migration 10, additive: the `spend_accounts`, `spend_entries` and `spend_leases` tables.
+Migration 10, additive: the `spend_accounts`, `spend_entries` and `spend_leases` tables (with `resource_id`), and a nullable `resources.spend_account_id`.
 
 ## Out of scope
 
 - Pulling real usage from provider APIs. Agents or the person record entries; nothing calls a provider. This project has no hosted dependencies and hard-codes no real accounts.
 - Currency conversion: each account has one unit.
-- Linking leases to the resource registry (`resource_borrow`). See NEEDS DECISION in the PR.
 - Stopping or reaping anything when a budget runs out. Reaping always needs a person.

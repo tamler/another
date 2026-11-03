@@ -457,3 +457,125 @@ fn upgrades_a_database_created_before_webhooks() {
     )
     .unwrap();
 }
+
+fn shop_hook(s: &Store, scope: &TokenScope, filters: Vec<WebhookFilter>) -> WebhookCreated {
+    s.create_webhook(
+        NewWebhook {
+            url: "https://hooks.example.test/x".into(),
+            filters,
+            project_globs: None,
+            description: None,
+        },
+        Some(scope),
+    )
+    .unwrap()
+}
+
+#[test]
+fn webhooks_stop_when_their_token_is_revoked_or_expires() {
+    let (s, clock) = store_with_clock();
+    let t = s
+        .create_token("manager", &["/work/shop".into()], None, None)
+        .unwrap();
+    let scope = s.verify_token(&t.secret).unwrap();
+    let hook = shop_hook(&s, &scope, vec![WebhookFilter::LaneStatus]);
+    new_lane(&s, "before", "shop", "shopper");
+    assert_eq!(s.queue_webhook_deliveries().unwrap(), 1);
+
+    // Revoke, then emit: nothing new is queued and the pending delivery dies.
+    s.revoke_token(&t.token.token_id).unwrap();
+    new_lane(&s, "after", "shop", "shopper");
+    assert_eq!(s.queue_webhook_deliveries().unwrap(), 0);
+    assert!(s.claim_due_deliveries(10).unwrap().is_empty());
+    let h = &s.webhooks(None).unwrap()[0];
+    assert_eq!(h.webhook_id, hook.webhook.webhook_id);
+    assert_eq!(h.disabled_reason.as_deref(), Some("token revoked"));
+    assert_eq!((h.pending, h.dead), (0, 1));
+    assert_eq!(
+        s.queue_test_delivery(&h.webhook_id).unwrap_err().code(),
+        "conflict"
+    );
+
+    // An expiring token: fine until it lapses, then disabled.
+    let t2 = s
+        .create_token("manager", &["/work/shop".into()], None, Some(3600))
+        .unwrap();
+    let scope2 = s.verify_token(&t2.secret).unwrap();
+    shop_hook(&s, &scope2, vec![WebhookFilter::LaneStatus]);
+    new_lane(&s, "soon", "shop", "shopper");
+    assert_eq!(s.queue_webhook_deliveries().unwrap(), 1);
+    advance(&clock, 3_600_001);
+    new_lane(&s, "later", "shop", "shopper");
+    assert_eq!(s.queue_webhook_deliveries().unwrap(), 0);
+    assert!(s
+        .webhooks(None)
+        .unwrap()
+        .iter()
+        .any(|h| h.disabled_reason.as_deref() == Some("token expired")));
+    // Local webhooks (no token) are unaffected.
+    s.create_webhook(
+        NewWebhook {
+            url: "https://hooks.example.test/local".into(),
+            filters: vec![WebhookFilter::LaneStatus],
+            project_globs: Some(vec!["shop".into()]),
+            description: None,
+        },
+        None,
+    )
+    .unwrap();
+    new_lane(&s, "local", "shop", "shopper");
+    assert_eq!(s.queue_webhook_deliveries().unwrap(), 1);
+}
+
+#[test]
+fn webhooks_follow_the_own_agent_rule_for_project_less_events() {
+    let (s, _) = store_with_clock();
+    s.register_agent(RegisterAgent {
+        name: "other".into(),
+        program: Program::Other,
+        project: None,
+        model: None,
+        description: None,
+    })
+    .unwrap();
+    let t = s
+        .create_token("manager", &["/work/shop".into()], None, None)
+        .unwrap();
+    let scope = s.verify_token(&t.secret).unwrap();
+    let hook = shop_hook(&s, &scope, vec![WebhookFilter::All]);
+    // Project-less: the token's own agent's session (delivered, as SSE would show it) and
+    // another project-less agent's (not delivered).
+    s.heartbeat("manager", false).unwrap();
+    s.session("manager", SessionPhase::Start, SessionInfo::default())
+        .unwrap();
+    s.session("other", SessionPhase::Start, SessionInfo::default())
+        .unwrap();
+    s.queue_webhook_deliveries().unwrap();
+    let kinds: Vec<(String, String)> = s
+        .claim_due_deliveries(50)
+        .unwrap()
+        .into_iter()
+        .filter(|d| d.webhook_id == hook.webhook.webhook_id)
+        .map(|d| (d.kind, d.body))
+        .collect();
+    assert_eq!(kinds.len(), 1, "{kinds:?}");
+    assert_eq!(kinds[0].0, "session.started");
+    let manager_id = s.agent("manager").unwrap().agent_id;
+    assert!(kinds[0].1.contains(&manager_id));
+    // The SSE / poll feed agrees.
+    let feed = s
+        .activity_scoped(
+            ActivityQuery {
+                since: Some(Since::Time(0)),
+                limit: 500,
+                kinds: vec![ActivityKind::Session],
+            },
+            Some(&scope),
+        )
+        .unwrap();
+    assert!(feed.items.iter().all(|i| i.actor != "other"));
+    assert!(feed
+        .items
+        .iter()
+        .any(|i| i.kind == "session.started" && i.actor == "manager"));
+}
