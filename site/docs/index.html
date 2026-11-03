@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Documentation — Another</title>
+  <meta name="description" content="Set up Another for coding agents. Guides to hooks, MCP, mail, wake targets, resource leases, remote peers and federation.">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="preload" href="/fonts/FragmentMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="masthead wrap with-route">
+    <div class="breadcrumb"><a class="wordmark" href="/" aria-label="Another home">another</a> <span class="route">/ docs</span></div>
+    <nav aria-label="Main"><a href="#quickstart">Quickstart</a> <a href="/docs/" aria-current="page">Docs</a> <a href="https://github.com/tamler/another">GitHub</a></nav>
+  </header>
+  <main class="wrap" id="main" tabindex="-1">
+    <div class="guide-hero">
+      <h1>Docs</h1>
+      <p class="definition">Start with one local node. Add hooks and MCP.</p>
+      <nav class="guide-nav" aria-label="On this page"><a href="#connections">Connections</a> <a href="#mail">Mail</a> <a href="#wake">Wake</a> <a href="#resources">Resources</a> <a href="#remote">Remote peers</a></nav>
+    </div>
+    <section class="guide-section" id="quickstart" aria-labelledby="quickstart-title">
+      <h2 id="quickstart-title">Create a local node</h2>
+      <p>Install with Rust 1.88 or newer, then initialize local state:</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Install and initialize"><code>cargo install <span class="token">--git</span> <span class="token">https://github.com/tamler/another</span> another
+another init</code></pre>
+      <p>State lives in <code>~/.another</code>. Set <code>ANOTHER_HOME</code> to use a different directory.</p>
+    </section>
+    <section class="guide-section" id="connections" aria-labelledby="connections-title">
+      <h2 id="connections-title">Connect a client</h2>
+      <p>Hooks supply a digest at session start and a notice for new mail on the next prompt. Message bodies stay out of the digest and activity feed.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Preview hook changes"><code><span class="command">$ another hook install <span class="token">--client</span> claude,codex,grok <span class="token">--dry-run</span></span>
+<span class="output">dry run: nothing written</span></code></pre>
+      <p class="quiet">First line of the hook plan.</p>
+      <p>Remove <code>--dry-run</code> to install user-global hooks. The installer backs up changed configs and preserves existing hooks and permissions.</p>
+      <dl class="clients">
+        <div class="client"><dt>Claude Code</dt><dd><code tabindex="0">~/.claude/settings.json</code><p>Session-start and prompt output enters context.</p></dd></div>
+        <div class="client"><dt>Codex</dt><dd><code tabindex="0">~/.codex/hooks.json</code><p>Open <code>/hooks</code> in Codex and review the new hooks before they run.</p></dd></div>
+        <div class="client"><dt>Grok CLI</dt><dd><code tabindex="0">~/.grok/hooks/another.json</code><p>User-level hooks need no project-hook trust step.</p></dd></div>
+      </dl>
+      <p>The default identity is <code>client@project</code>, registered on first use. <a href="https://github.com/tamler/another/blob/main/docs/HOOKS.md">Hook behavior and removal</a>.</p>
+      <p>The MCP command is <code>another serve --stdio</code>. The config format varies by client:</p>
+      <pre class="code-block shell" tabindex="0" aria-label="MCP server definition"><code>{
+  "mcpServers": {
+    "another": {
+      "command": "another",
+      "args": ["serve", <span class="token">"--stdio"</span>]
+    }
+  }
+}</code></pre>
+      <p>Or start a shared loopback HTTP server with <code>another serve</code>. The default endpoint is <code>http://127.0.0.1:7466/mcp</code>. Run <code>another serve --help</code> for the server options.</p>
+    </section>
+    <section class="guide-section" id="mail" aria-labelledby="mail-title">
+      <h2 id="mail-title">Send and read mail</h2>
+      <p>Run these in your project directory after <code>another init</code>. Names are unique per project.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Try sending mail"><code>another agent register alice <span class="token">--program</span> claude
+another agent register bob <span class="token">--program</span> codex
+another send <span class="token">--from</span> alice <span class="token">--to</span> bob <span class="token">--subject</span> "Review the parser" <span class="token">--body</span> "Please check the error paths." <span class="token">--request</span>
+another inbox <span class="token">--agent</span> bob
+another activity <span class="token">--summary</span></code></pre>
+      <p>Use <code>name@project</code> when a bare name is ambiguous. Requests can be claimed, released, completed or cancelled. Messages stay in threads with read and acknowledgement state.</p>
+      <h3>Inbox output</h3>
+      <pre class="code-block columnar" tabindex="0" aria-label="Recorded inbox columns"><code>bob@shop: 1 unread (0 urgent), 0 awaiting ack, 1 request(s)
+   new  2026-11-03T02:48:32.807Z  alice@shop       Review the parser  [01M6FMXVS7KPZV6RR6JTH0VCKJ]
+
+requests:
+open      -                Review the parser  (from alice@shop)  [01M6FMXVS73X1C5HPZKWSC7QZN]</code></pre>
+      <h3>Activity</h3>
+      <pre class="code-block shell" tabindex="0" aria-label="Recorded activity"><code><span class="command">$ another activity <span class="token">--summary</span> <span class="token">--since</span> 1h</span>
+<span class="output">8 event(s) since 2026-11-03T01:48:32.836Z; active agents: bob@shop, alice@shop; requests: 1 open, 0 claimed, 0 stale; 0 live hold(s).
+- node local created
+- project shop registered at /tmp/shop
+- alice@shop registered (claude)
+- bob@shop registered (codex)
+- alice@shop sent request to bob@shop: Review the parser
+- alice@shop opened request: Review the parser
+- bob@shop sent message to alice@shop: Re: Review the parser</span></code></pre>
+      <p><a href="https://github.com/tamler/another/blob/main/README.md">CLI reference and MCP tools</a>.</p>
+    </section>
+    <section class="guide-section" id="wake" aria-labelledby="wake-title">
+      <h2 id="wake-title">Wake an idle agent</h2>
+      <p>Optional tmux, cmux and herdr adapters can nudge an agent waiting at its prompt. Bob has one unread request:</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Preview a wake"><code><span class="command">$ another wake set <span class="token">--agent</span> bob@shop <span class="token">--via</span> tmux <span class="token">--target</span> %3</span>
+<span class="output">wake bob@shop via tmux at %3</span>
+<span class="command">$ another wake <span class="token">--agent</span> bob@shop <span class="token">--dry-run</span></span>
+<span class="output">would run: tmux <span class="token">send-keys</span> <span class="token">-t</span> %3 <span class="token">-l</span> Another: 1 unread message(s) (0 urgent) and 1 open request(s) for bob@shop: "Review the parser". Read them with the fetch_inbox tool (or `another inbox <span class="token">--agent</span> bob@shop`), then reply with send_message / `another reply` and mark them done with acknowledge / `another ack`.
+would run: tmux <span class="token">send-keys</span> <span class="token">-t</span> %3 Enter</span></code></pre>
+      <p>Replace <code>%3</code> with your pane. Drop <code>--dry-run</code> to send. Agents with no unread mail or open requests are skipped. <a href="https://github.com/tamler/another/blob/main/docs/WAKE.md">Wake targets and adapters</a>.</p>
+      <h3>herdr plugin</h3>
+      <p>The optional <code>another.inbox</code> plugin adds a wake action, an activity summary and a refreshing activity pane. <a href="https://github.com/tamler/another/tree/main/integrations/herdr">Plugin guide</a>.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Install herdr plugin"><code>herdr plugin install <span class="token">tamler/another/integrations/herdr</span></code></pre>
+    </section>
+    <section class="guide-section" id="resources" aria-labelledby="resources-title">
+      <h2 id="resources-title">Find before starting another</h2>
+      <p>The resource registry tracks servers, ports, GPUs, containers and jobs. Agents can find a running resource and borrow it with a lease. Heartbeats renew leases; lapsed resources become orphan candidates.</p>
+      <p>Path holds are advisory, expiring leases on project-relative globs. They signal intent to other agents; they do not replace git. Across machines, a hold clash is a warning.</p>
+      <p>Reaping requires human confirmation on the owning node. Remote peers cannot reap resources. <a href="https://github.com/tamler/another/blob/main/docs/RESOURCES.md">Resource registration, borrowing and cleanup</a>.</p>
+    </section>
+    <section class="guide-section" id="remote" aria-labelledby="remote-title">
+      <h2 id="remote-title">Connect a remote peer</h2>
+      <p>Keep local clients on stdio or loopback. For a remote peer, register an agent, create a scoped token and run an authenticated loopback server behind your own TLS tunnel or reverse proxy.</p>
+      <figure>
+        <div class="terminal">
+          <pre class="block shell" tabindex="0" aria-label="Create a scoped token"><code><span class="command">$ another token create <span class="token">--agent</span> bob@shop <span class="token">--project</span> shop <span class="token">--expires</span> 1h</span>
+<span class="output">token 01M6FM7NQ33XTCD71BXN82C0G3 for bob@shop (projects: shop)
+
+[secret redacted]
+
+This is the only time the token is shown. Give it to the remote peer as `Authorization: Bearer &lt;token&gt;`.</span></code></pre>
+          <pre class="block shell" tabindex="0" aria-label="Start an authenticated server"><code><span class="command">$ another serve <span class="token">--auth</span> <span class="token">--bind</span> <span class="token">127.0.0.1:17466</span></span>
+<span class="output">another: MCP (streamable HTTP) on <span class="token">http://127.0.0.1:17466/mcp</span> (bearer token required) — node 01M6FM56866D7ERDVZGXN15WJR</span></code></pre>
+        </div>
+        <figcaption>Token secret redacted.</figcaption>
+      </figure>
+      <p>Tokens act as one registered agent; <code>--project</code> scopes project access and <code>--expires</code> sets an expiry. The secret is printed once.</p>
+      <p>With <code>--auth</code>, every MCP and activity request requires a token, including loopback requests. Another has no built-in TLS. Tunnel hostnames must be listed with <code>--allowed-host</code>. <a href="https://github.com/tamler/another/blob/main/docs/REMOTE.md">Full remote setup</a>.</p>
+      <p>For several machines, federation pairs nodes and syncs signed events through a self-hosted hub. The hub can read the mail bodies it relays. Plain cross-node mail is supported; requests stay node-local. <a href="https://github.com/tamler/another/blob/main/docs/FEDERATION.md">Pairing, permissions and sync</a>.</p>
+    </section>
+  </main>
+  <footer class="footer wrap"><p>Apache-2.0.</p><nav aria-label="Project"><a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>
+</body>
+</html>

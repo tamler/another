@@ -94,6 +94,8 @@ another activity --summary
 
 Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88.
 
+The marketing and documentation website lives in [site/](site/README.md), with static output for Cloudflare Pages. Build it with `sh site/build.sh`; visual review captures are in `site/review/`. Domain attachment is a separate step.
+
 ## Guides
 
 | Doc | What it covers |
