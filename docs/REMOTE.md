@@ -32,6 +32,8 @@ Keep your local agents on the plain loopback server (or stdio), and run a second
 another serve --auth --bind 127.0.0.1:7467
 ```
 
+To keep this server running across logins and reboots, install it as an opt-in background service with the same flags: `another service install --auth --bind 127.0.0.1:7467 --allowed-host <tunnel hostname>` (see the README section "Run it in the background").
+
 With `--auth`, `/mcp` and `GET /activity` require `Authorization: Bearer <token>`; `GET /health` stays open. Because tunnels deliver traffic from loopback, the authenticated server checks the token on **every** request, local or not.
 
 Tunnels usually forward the public hostname in the `Host` header. Another rejects unknown hosts (DNS-rebinding protection), so name each tunnel hostname with `--allowed-host`.
