@@ -424,6 +424,34 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             format!("borrowing request {} was denied", s("lease_id")),
             json!({ "lease_id": s("lease_id"), "decision_id": s("decision_id") }),
         ),
+        "spend.resource_linked" => (
+            if p.get("account_id").is_some_and(|v| !v.is_null()) {
+                format!("resource {} linked to a spend account", s("resource_id"))
+            } else {
+                format!(
+                    "resource {} unlinked from its spend account",
+                    s("resource_id")
+                )
+            },
+            json!({ "resource_id": s("resource_id"), "account_id": p.get("account_id") }),
+        ),
+        "summary.daily" => (
+            format!(
+                "daily summary: {} item(s) need attention",
+                p.get("attention_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default()
+            ),
+            json!({ "since": s("since"), "until": s("until") }),
+        ),
+        "spend.lease_withdrawn" => (
+            format!(
+                "{actor} withdrew borrowing request {} on {}",
+                s("lease_id"),
+                s("account")
+            ),
+            json!({ "lease_id": s("lease_id"), "decision_id": s("decision_id") }),
+        ),
         "spend.approval_requested" => (
             format!("{actor} asked to borrow {} (approval needed)", s("account")),
             json!({ "lease_id": s("lease_id"), "decision_id": s("decision_id") }),
@@ -834,7 +862,14 @@ fn read_events(
             payload: r.get(5)?,
         };
         if let Some(scope) = scope {
-            if !event_visible(conn, scope, &row.actor, &row.kind, &row.payload)? {
+            if !event_visible(
+                conn,
+                scope,
+                &row.node_id,
+                &row.actor,
+                &row.kind,
+                &row.payload,
+            )? {
                 continue;
             }
         }

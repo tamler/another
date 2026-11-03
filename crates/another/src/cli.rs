@@ -299,6 +299,12 @@ pub enum Command {
     /// Lanes: named units of work with a charter, lead, status and structured reports.
     #[command(subcommand)]
     Lane(LaneCmd),
+    /// Node settings: `another config` lists them, `another config KEY` shows one,
+    /// `another config KEY VALUE` sets it (e.g. `another config decider jacob`).
+    Config {
+        key: Option<String>,
+        value: Option<String>,
+    },
     /// Decisions: structured questions from agents to a person, answered here or by the
     /// manager bot.
     #[command(subcommand)]
@@ -323,7 +329,10 @@ pub enum Command {
     #[command(subcommand)]
     Remote(RemoteCmd),
     /// Daily summary: what needs you, lanes, decisions, requests, holds, spend, agents.
+    #[command(args_conflicts_with_subcommands = true)]
     Summary {
+        #[command(subcommand)]
+        cmd: Option<SummaryCmd>,
         /// Duration (24h), RFC 3339 time, or event id.
         #[arg(long, default_value = "24h")]
         since: String,
@@ -495,7 +504,7 @@ pub enum RemoteCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum DecisionCmd {
-    /// Ask a person (default $ANOTHER_DECIDER, else jacob) a question with 2-6 options.
+    /// Ask a person (default: `another config decider`, else jacob) a question with 2-6 options.
     Ask {
         #[command(flatten)]
         agent: AgentArg,
@@ -632,6 +641,36 @@ pub enum SpendCmd {
         #[arg(long)]
         all: bool,
     },
+    /// Charge borrowing a registered resource to an account, e.g.
+    /// `another spend link runpod gpu_pod:a100`. Borrowers then get a spend lease (behind
+    /// the account's approval gate) that accrues while their resource lease lives.
+    Link {
+        account: String,
+        /// Resource id or kind:name.
+        resource: String,
+    },
+    /// Stop charging a resource to its account (open spend leases run to their end).
+    Unlink {
+        /// Resource id or kind:name.
+        resource: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SummaryCmd {
+    /// Opt-in daily rollup sent by `another serve`, e.g.
+    /// `another summary schedule --daily 08:30 --to mail:jacob`. Without flags, shows it.
+    Schedule {
+        /// Local time, HH:MM (24-hour).
+        #[arg(long, conflicts_with = "off")]
+        daily: Option<String>,
+        /// `webhook` (local webhooks with the daily_summary filter) or `mail:NAME`.
+        #[arg(long, conflicts_with = "off")]
+        to: Option<String>,
+        /// Turn the rollup off.
+        #[arg(long)]
+        off: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -659,7 +698,7 @@ pub enum SpendAccountCmd {
         /// Borrowing asks a person first (a decision).
         #[arg(long)]
         requires_approval: bool,
-        /// Who approves (default: $ANOTHER_DECIDER, else jacob).
+        /// Who approves (default: the node's decider, `another config decider NAME`).
         #[arg(long)]
         approver: Option<String>,
         /// Owning project; omit for a shared account.
@@ -700,7 +739,8 @@ pub enum WebhookCmd {
         #[arg(long)]
         url: String,
         /// Comma-separated filters: lane_status, lane_report, needs_decision,
-        /// request_created, request_answered, hold_conflict, lease_expiring, all.
+        /// request_created, request_answered, hold_conflict, lease_expiring, budget,
+        /// daily_summary (with --all-projects only), all.
         #[arg(long, value_delimiter = ',', required = true)]
         events: Vec<String>,
         /// Project path or slug glob (repeatable). Required unless --all-projects.
@@ -1796,10 +1836,59 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Webhook(cmd) => webhook_command(&store, json, cmd)?,
         Command::Decision(cmd) => decision_command(&store, json, cmd)?,
         Command::Spend { cmd, report } => spend_command(&store, json, cmd, report)?,
-        Command::Summary { since } => {
+        Command::Summary {
+            cmd: Some(SummaryCmd::Schedule { daily, to, off }),
+            ..
+        } => {
+            let s = if off {
+                store.set_summary_schedule(None, None)?
+            } else if daily.is_some() || to.is_some() {
+                let at = match daily {
+                    Some(d) => Some(d),
+                    None => store.summary_schedule()?.daily_at,
+                };
+                if at.is_none() {
+                    anyhow::bail!("give --daily HH:MM to turn the daily summary on");
+                }
+                store.set_summary_schedule(at.as_deref(), to.as_deref())?
+            } else {
+                store.summary_schedule()?
+            };
+            emit(json, &s, |s| {
+                match &s.daily_at {
+                Some(at) => format!(
+                    "daily summary at {at} (local time) to {}; last sent {}\nSent while `another serve` runs.",
+                    s.to,
+                    s.last_sent_at.as_deref().unwrap_or("never")
+                ),
+                None => "daily summary: off (pull it with `another summary`)".to_string(),
+            }
+            })
+        }
+        Command::Summary { since, cmd: None } => {
             let since = another_core::Since::parse(&since, store.now())?;
             let s = store.daily_summary(Some(since), None)?;
             emit(json, &s, |s| s.markdown.trim_end().to_string())
+        }
+        Command::Config { key, value } => {
+            let list = match (key, value) {
+                (None, _) => store.settings()?,
+                (Some(k), None) => vec![store.setting(&k)?],
+                (Some(k), Some(v)) => vec![store.set_setting(&k, &v)?],
+            };
+            emit(json, &list, |l| {
+                l.iter()
+                    .map(|s| {
+                        format!(
+                            "{} = {}{}  # {}\n",
+                            s.key,
+                            s.value,
+                            if s.default { " (default)" } else { "" },
+                            s.help
+                        )
+                    })
+                    .collect()
+            })
         }
         Command::Audit { limit } => {
             let entries = store.audit_log(limit)?;
@@ -2068,6 +2157,15 @@ fn spend_command(
         Some(SpendCmd::Leases { all }) => {
             let list = store.spend_leases(all, None)?;
             emit(json, &list, |l| output::spend_leases(l))
+        }
+        Some(SpendCmd::Link { account, resource }) => {
+            let r =
+                store.link_resource_spend(&ResourceRef::parse(&resource)?, Some(&account), None)?;
+            emit(json, &r, |r| output::resources(std::slice::from_ref(r)))
+        }
+        Some(SpendCmd::Unlink { resource }) => {
+            let r = store.link_resource_spend(&ResourceRef::parse(&resource)?, None, None)?;
+            emit(json, &r, |r| output::resources(std::slice::from_ref(r)))
         }
     })
 }

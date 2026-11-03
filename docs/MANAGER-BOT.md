@@ -16,7 +16,7 @@ another token create --agent manager --project ~/Projects/shop --project ~/Proje
 another serve --auth --bind 127.0.0.1:7467
 ```
 
-**The token's globs bound everything the bot sees:** lanes, events, decisions, holds, spend and the daily summary. Events from other projects never reach it. For shared spend accounts, it sees only its projects' share, and budget figures are withheld ([SPEND.md](SPEND.md#remote-access)).
+**The token's globs bound everything the bot sees:** lanes, events, decisions, holds, spend and the daily summary. Events from other projects never reach it. For shared spend accounts, it sees only its projects' share of the spending, plus the whole account's remaining budget, read-only ([SPEND.md](SPEND.md#remote-access)).
 
 ## 2. Subscribe once
 
@@ -84,6 +84,10 @@ Post the `markdown` field as-is; it is written to fit a phone screen. For a plai
 - pending approvals;
 - stale requests;
 - dead webhooks.
+
+If `truncated` is true, a section hit the 20,000-event cap and its counts may be low. People (program `human`) are listed under `people_active`, apart from `agents_active`.
+
+**Or let the node send it.** The person can turn on a daily rollup on the machine: `another summary schedule --daily 08:30 --to mail:jacob` (mail from the `another` system agent), or `--to webhook`. The webhook form goes only to webhooks created locally for all projects with the `daily_summary` filter, because it covers the whole node; a token's webhooks never receive it. It is sent while `another serve` runs. Pulling `daily_summary` keeps working either way.
 
 ## 6. Spend
 

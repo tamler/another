@@ -43,6 +43,32 @@ fn summary_cli() {
         .unwrap()
         .starts_with("**Another: last 2h**"));
     assert!(j["attention"].as_array().unwrap().is_empty());
+
+    // The opt-in rollup: off, on, shown, off.
+    assert!(run(&["summary", "schedule"]).contains("off"));
+    let on = run(&[
+        "summary",
+        "schedule",
+        "--daily",
+        "08:30",
+        "--to",
+        "mail:jacob",
+    ]);
+    assert!(
+        on.contains("daily summary at 08:30") && on.contains("mail:jacob"),
+        "{on}"
+    );
+    let j: Value = serde_json::from_str(&run(&["--json", "summary", "schedule"])).unwrap();
+    assert_eq!(j["daily_at"], "08:30");
+    assert!(run(&["summary", "schedule", "--off"]).contains("off"));
+    let bad = Command::new(env!("CARGO_BIN_EXE_another"))
+        .args(["summary", "schedule", "--daily", "8am"])
+        .env("ANOTHER_HOME", dir.path())
+        .env("HOME", dir.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!bad.status.success());
 }
 
 #[tokio::test(flavor = "multi_thread")]

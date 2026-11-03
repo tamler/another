@@ -480,3 +480,117 @@ async fn webhook_cli() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("dead"));
     ct.cancel();
 }
+
+/// Project-less events are matched by agent id, not name: another node's `manager` is not
+/// this token's `manager`.
+#[test]
+fn same_name_on_another_node_is_not_the_token_agent() {
+    use another::fed;
+    use another_core::{ActivityQuery, Perm, SessionInfo, SessionPhase, Since};
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let hub_dir = tempfile::tempdir().unwrap();
+    let hub = Store::open(hub_dir.path()).unwrap();
+    hub.set_node_name("hub").unwrap();
+    hub.ensure_project("t", "/work/shop").unwrap();
+    hub.register_agent(RegisterAgent {
+        name: "manager".into(),
+        program: Program::GrokBot,
+        project: None,
+        model: None,
+        description: None,
+    })
+    .unwrap();
+    let ct = CancellationToken::new();
+    let app = http_router(
+        hub.clone(),
+        ct.clone(),
+        &HttpOptions {
+            federation: true,
+            ..Default::default()
+        },
+    );
+    let addr = rt.block_on(async {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let stop = ct.clone();
+        tokio::spawn(async move {
+            axum::serve(l, app.into_make_service_with_connect_info::<SocketAddr>())
+                .with_graceful_shutdown(async move { stop.cancelled_owned().await })
+                .await
+                .unwrap();
+        });
+        addr
+    });
+    let url = format!("http://{addr}");
+    let spoke_dir = tempfile::tempdir().unwrap();
+    let spoke = Store::open(spoke_dir.path()).unwrap();
+    spoke.set_node_name("laptop").unwrap();
+    spoke
+        .register_agent(RegisterAgent {
+            name: "manager".into(),
+            program: Program::GrokBot,
+            project: None,
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    let code = hub.create_invite(&url, &[Perm::ReadFeed], 3600).unwrap();
+    fed::join(&spoke, &code).unwrap();
+    spoke
+        .session("manager", SessionPhase::Start, SessionInfo::default())
+        .unwrap();
+    let r = fed::sync(&spoke).unwrap();
+    assert!(r.push_rejected.is_empty(), "{:?}", r.push_rejected);
+
+    // The hub stored the laptop's `manager` session event (actor "manager")…
+    let all = hub
+        .activity(ActivityQuery {
+            limit: 500,
+            ..Default::default()
+        })
+        .unwrap();
+    let spoke_node = spoke.node_id().to_string();
+    assert!(all
+        .items
+        .iter()
+        .any(|i| i.kind == "session.started" && i.node_id == spoke_node));
+    // …but the hub manager's token does not see it as its own.
+    let t = hub
+        .create_token("manager", &["/work/shop".into()], None, None)
+        .unwrap();
+    let scope = hub.verify_token(&t.secret).unwrap();
+    let mine = hub
+        .activity_scoped(
+            ActivityQuery {
+                since: Some(Since::Time(0)),
+                limit: 500,
+                kinds: vec![],
+            },
+            Some(&scope),
+        )
+        .unwrap();
+    assert!(
+        mine.items.iter().all(|i| i.node_id != spoke_node),
+        "{:?}",
+        mine.items
+    );
+    // A local session of the hub's own manager still is.
+    hub.session("manager", SessionPhase::Start, SessionInfo::default())
+        .unwrap();
+    let mine = hub
+        .activity_scoped(
+            ActivityQuery {
+                since: Some(Since::Time(0)),
+                limit: 500,
+                kinds: vec![],
+            },
+            Some(&scope),
+        )
+        .unwrap();
+    assert!(mine.items.iter().any(|i| i.kind == "session.started"));
+    ct.cancel();
+}

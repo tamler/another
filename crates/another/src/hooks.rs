@@ -977,6 +977,7 @@ pub fn edited_files(input: &HookInput, root: &Path, cwd: &Path) -> Vec<String> {
         }
     }
     let mut out: Vec<String> = Vec::new();
+    let real_root = canonical(root);
     for p in raw {
         let path = Path::new(&p);
         let abs = if path.is_absolute() {
@@ -995,7 +996,14 @@ pub fn edited_files(input: &HookInput, root: &Path, cwd: &Path) -> Vec<String> {
                 other => norm.push(other),
             }
         }
-        if let Ok(rel) = norm.strip_prefix(root) {
+        // Compare real paths (symlinks resolved: /var vs /private/var on macOS); fall back to
+        // the lexical path for files that don't exist yet or outside a real tree.
+        let real = canonical(&norm);
+        let rel = real
+            .strip_prefix(&real_root)
+            .or_else(|_| norm.strip_prefix(root))
+            .map(Path::to_path_buf);
+        if let Ok(rel) = rel {
             let rel = rel.to_string_lossy().replace('\\', "/");
             if !rel.is_empty() && !out.contains(&rel) {
                 out.push(rel);
@@ -1003,6 +1011,20 @@ pub fn edited_files(input: &HookInput, root: &Path, cwd: &Path) -> Vec<String> {
         }
     }
     out
+}
+
+/// `path` with symlinks resolved: the file itself if it exists, else its parent directory
+/// (a file about to be created), else the path unchanged.
+fn canonical(path: &Path) -> PathBuf {
+    if let Ok(p) = std::fs::canonicalize(path) {
+        return p;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(dir), Some(name)) => std::fs::canonicalize(dir)
+            .map(|d| d.join(name))
+            .unwrap_or_else(|_| path.to_path_buf()),
+        _ => path.to_path_buf(),
+    }
 }
 
 /// Pre-edit hook: hold the files about to be edited (exclusive, for the agent's lane); on a
@@ -1021,17 +1043,37 @@ fn pre_edit(
     let lane = std::env::var("ANOTHER_LANE")
         .ok()
         .filter(|l| !l.trim().is_empty());
-    let report = store.acquire_holds(another_core::AcquireHolds {
-        agent: agent.to_string(),
-        project: root.to_string_lossy().to_string(),
-        paths: files,
-        ttl_seconds: None,
-        exclusive: true,
-        reason: Some("pre-edit".into()),
-        lane,
-    })?;
+    let acquire = |lane: Option<String>| {
+        store.acquire_holds(another_core::AcquireHolds {
+            agent: agent.to_string(),
+            project: root.to_string_lossy().to_string(),
+            paths: files.clone(),
+            ttl_seconds: None,
+            exclusive: true,
+            reason: Some("pre-edit".into()),
+            lane,
+        })
+    };
+    // Fail open, visibly: a lane that is closed or not in this project still gets the files
+    // held (without a lane), and the person is told why.
+    let mut warning: Option<String> = None;
+    let report = match acquire(lane.clone()) {
+        Ok(r) => r,
+        Err(e) if lane.is_some() && matches!(e.code(), "not_found" | "conflict") => {
+            let w = format!(
+                "Another: $ANOTHER_LANE={} can't be used in this project ({e}); the files were held without a lane.",
+                lane.as_deref().unwrap_or_default()
+            );
+            eprintln!("{w}");
+            warning = Some(w);
+            acquire(None)?
+        }
+        Err(e) => return Err(e.into()),
+    };
     let Some(first) = report.conflicts.first() else {
-        return Ok(String::new());
+        return Ok(warning
+            .map(|w| json!({ "systemMessage": w }).to_string())
+            .unwrap_or_default());
     };
     let held = &first.held;
     let mut reason = format!(
@@ -1059,14 +1101,17 @@ fn pre_edit(
          `another holds --by-lane` shows who holds what.",
         held.agent
     ));
-    Ok(json!({
+    let mut out = json!({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
             "permissionDecisionReason": truncate(reason, 600),
         }
-    })
-    .to_string())
+    });
+    if let Some(w) = warning {
+        out["systemMessage"] = json!(w);
+    }
+    Ok(out.to_string())
 }
 
 /// Token prefixes that mark a secret (Another, OpenAI/Anthropic style, GitHub, GitLab,
@@ -1115,11 +1160,18 @@ fn looks_secret(word: &str) -> bool {
 pub fn redact_secrets(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut word = String::new();
+    // Each `.`-separated part is checked on its own, so a secret that ends a sentence
+    // ("…cdef.") or sits in a dotted token is still caught; the dots are kept.
     let flush = |word: &mut String, out: &mut String| {
-        if looks_secret(word) {
-            out.push_str("[redacted]");
-        } else {
-            out.push_str(word);
+        for (i, part) in word.split('.').enumerate() {
+            if i > 0 {
+                out.push('.');
+            }
+            if looks_secret(part) {
+                out.push_str("[redacted]");
+            } else {
+                out.push_str(part);
+            }
         }
         word.clear();
     };
@@ -1274,6 +1326,29 @@ mod tests {
         assert_eq!(
             redact_secrets("sk-learn is fine; task-runner too"),
             "sk-learn is fine; task-runner too"
+        );
+        // Secrets next to sentence punctuation (Codex review of tamler/another#10).
+        assert_eq!(
+            redact_secrets("Key: 0123456789abcdef0123456789abcdef."),
+            "Key: [redacted]."
+        );
+        assert_eq!(
+            redact_secrets("Token ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ012345. Done"),
+            "Token [redacted]. Done"
+        );
+        assert_eq!(
+            redact_secrets("blob QWxhZGRpbjpvcGVuIHNlc2FtZQ9xYz3RkMzQ1Njc4OTBhYmNkZWY.\nnext"),
+            "blob [redacted].\nnext"
+        );
+        assert_eq!(
+            redact_secrets(
+                "(see ano_01J9ABCDEFGH_d3adb33fcafe0123); also sk-proj-AbCdEf123456789!"
+            ),
+            "(see [redacted]); also [redacted]!"
+        );
+        assert_eq!(
+            redact_secrets("Edited src/api/routes.rs."),
+            "Edited src/api/routes.rs."
         );
     }
 
