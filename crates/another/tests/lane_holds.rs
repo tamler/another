@@ -195,31 +195,62 @@ fn pre_edit_holds_files_and_denies_other_lanes() {
         "{reason}"
     );
 
-    // A lane-mate (ANOTHER_LANE=api) may edit it.
-    let mut child = env
-        .cmd(&["hook", "run", "pre-edit", "--client", "claude"])
-        .env("ANOTHER_AGENT", "helper@shop")
-        .env("ANOTHER_LANE", "api")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(
-            json!({ "cwd": env.repo, "tool_name": "Write", "tool_input": { "file_path": file, "content": "x" } })
-                .to_string()
-                .as_bytes(),
-        )
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
+    // A lane-mate (ANOTHER_LANE=api) is blocked too: both holds are exclusive.
+    let run_as = |agent: &str, lane: &str, file: &std::path::Path| {
+        let mut child = env
+            .cmd(&["hook", "run", "pre-edit", "--client", "claude"])
+            .env("ANOTHER_AGENT", agent)
+            .env("ANOTHER_LANE", lane)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                json!({ "cwd": env.repo, "tool_name": "Write", "tool_input": { "file_path": file, "content": "x" } })
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let out = run_as("helper@shop", "api", &file);
+    let v: Value = serde_json::from_slice(&out.stdout).expect("deny JSON");
+    assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+
+    // A closed or foreign lane in $ANOTHER_LANE: still held (no lane), with a visible warning.
+    env.ok(&[
+        "lane",
+        "close",
+        "billing",
+        "--agent",
+        "manager",
+        "--abandon",
+    ]);
+    let other = env.repo.join("src/billing.rs");
+    let out = run_as("codex@shop", "billing", &other);
+    assert!(out.status.success());
+    let v: Value = serde_json::from_slice(&out.stdout).expect("warning JSON");
+    let w = v["systemMessage"].as_str().unwrap();
     assert!(
-        out.stdout.is_empty(),
-        "{}",
-        String::from_utf8_lossy(&out.stdout)
+        w.contains("$ANOTHER_LANE=billing") && w.contains("held without a lane"),
+        "{w}"
     );
+    assert!(v.get("hookSpecificOutput").is_none(), "not a denial");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("held without a lane"));
+    let holds: Value =
+        serde_json::from_str(&env.ok(&["--json", "holds", "--agent", "codex@shop"])).unwrap();
+    let h = holds
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["pattern"] == "src/billing.rs")
+        .expect("held");
+    assert!(h["lane"].is_null());
 
     // Files outside the project are ignored; a non-edit payload is a no-op.
     let out = env.pre_edit(
@@ -232,7 +263,7 @@ fn pre_edit_holds_files_and_denies_other_lanes() {
     // By-lane view.
     let view = env.ok(&["holds", "--by-lane"]);
     assert!(view.starts_with("lane api [planned]"), "{view}");
-    assert!(view.contains("claude@shop") && view.contains("helper@shop"));
+    assert!(view.contains("claude@shop"), "{view}");
     let events = env.ok(&["--json", "events"]);
     assert!(events.contains("lane.hold_conflict"));
 }
@@ -268,4 +299,35 @@ fn parses_edit_payloads() {
     let escape = input(json!({ "tool_input": { "patch": "*** Update File: ../../etc/passwd" } }));
     assert!(edited_files(&escape, root, root).is_empty());
     assert!(edited_files(&input(json!({ "tool_name": "Bash" })), root, root).is_empty());
+}
+
+/// /var vs /private/var: the project root and the edited file may be spelled through
+/// different symlinks; both resolve to the same real path.
+#[cfg(unix)]
+#[test]
+fn edited_files_follow_symlinks() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real-shop");
+    std::fs::create_dir_all(real.join("src")).unwrap();
+    std::fs::write(real.join("src/a.rs"), "x").unwrap();
+    let link = dir.path().join("shop");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let input =
+        |p: &Path| HookInput::parse(&json!({ "tool_input": { "file_path": p } }).to_string());
+    // Root through the symlink, file through the real path (and the other way round).
+    assert_eq!(
+        edited_files(&input(&real.join("src/a.rs")), &link, &link),
+        vec!["src/a.rs"]
+    );
+    assert_eq!(
+        edited_files(&input(&link.join("src/a.rs")), &real, &real),
+        vec!["src/a.rs"]
+    );
+    // A file about to be created resolves through its existing parent directory.
+    assert_eq!(
+        edited_files(&input(&real.join("src/new.rs")), &link, &link),
+        vec!["src/new.rs"]
+    );
+    // Outside the project stays outside.
+    assert!(edited_files(&input(&dir.path().join("elsewhere.rs")), &link, &link).is_empty());
 }

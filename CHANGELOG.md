@@ -38,7 +38,9 @@ All notable changes to Another. Unreleased work is listed under the next version
   - Events: `decision.created|answered|expired|overdue|cancelled`.
   - Requests gain a `kind` field (`task` or `decision`).
 - **Lane-aware holds** ([design](docs/design/04-lane-holds.md)):
-  - Holds carry a lane (explicit `lane`, else `$ANOTHER_LANE`, else the lane the agent leads). Overlaps inside one lane are warnings, not conflicts.
+  - Holds carry a lane (explicit `lane`, else `$ANOTHER_LANE`, else the lane the agent leads), looked up in the hold's project only. Overlaps inside one lane are warnings, except two exclusive holds, which still block.
+  - A cross-lane conflict also mails the holding lane's lead (from the system agent, debounced).
+  - The pre-edit hook compares symlink-resolved paths, and warns (but still holds) when `$ANOTHER_LANE` is closed or belongs to another project.
   - Cross-lane conflicts emit `lane.hold_conflict`, which the `hold_conflict` webhook filter delivers.
   - `another holds --by-lane`, MCP `holds_by_lane`, and live holds in `lane show`.
   - Opt-in pre-edit hook for Claude Code and Codex: `another hook install --pre-edit`. It holds files before each edit and denies the edit when another lane or agent holds them.

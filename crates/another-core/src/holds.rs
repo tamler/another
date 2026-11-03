@@ -299,7 +299,10 @@ fn lane_conflicts_for(
     let mut blocking = Vec::new();
     let mut same_lane = Vec::new();
     for mut c in conflicts_for(tx, project_id, agent_id, patterns, exclusive)? {
-        if lane_id.is_some() && c.held.lane_id.as_deref() == lane_id {
+        // Lane-mates' overlaps are warnings, except two exclusive holds, which block each
+        // other even inside a lane (maintainer's decision).
+        let both_exclusive = exclusive && c.held.exclusive;
+        if lane_id.is_some() && c.held.lane_id.as_deref() == lane_id && !both_exclusive {
             c.same_lane = true;
             same_lane.push(c);
         } else {
@@ -367,6 +370,65 @@ fn remote_clashes(
     Ok(out)
 }
 
+/// Mail the lead of the lane holding the paths about a cross-lane conflict (maintainer's
+/// decision), from the system agent. At most one mail per lane pair every 10 minutes, so a
+/// retrying pre-edit hook doesn't flood the inbox.
+fn notify_holding_lead(
+    tx: &Tx<'_>,
+    requester_lane: &str,
+    holding_lane: &str,
+    requester: &str,
+    theirs: &[&HoldConflict],
+) -> Result<()> {
+    let recent: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM events WHERE kind = 'lane.hold_conflict' AND node_id = ?1
+           AND ts >= ?2 - 600000
+           AND json_extract(payload, '$.lane_id') = ?3
+           AND json_extract(payload, '$.other_lane_id') = ?4",
+        params![tx.node_id, tx.now, requester_lane, holding_lane],
+        |r| r.get(0),
+    )?;
+    if recent > 1 {
+        return Ok(());
+    }
+    let row: Option<(String, String, String)> = tx
+        .query_row(
+            "SELECT a.address, h.name, r.name FROM lanes h
+             JOIN agents a ON a.agent_id = h.lead_id
+             JOIN lanes r ON r.lane_id = ?2
+             WHERE h.lane_id = ?1",
+            params![holding_lane, requester_lane],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((lead, holding_name, requester_name)) = row else {
+        return Ok(());
+    };
+    let system = crate::identity::system_agent_tx(tx)?;
+    let mut body = format!(
+        "{requester} (lane {requester_name}) was refused holds that overlap lane {holding_name}'s:\n"
+    );
+    for c in theirs.iter().take(10) {
+        body.push_str(&format!(
+            "- {} (held by {} as {})\n",
+            c.path, c.held.agent, c.held.pattern
+        ));
+    }
+    body.push_str("\nDecide who goes first, or release the holds you no longer need (`another holds --by-lane`).");
+    crate::mail::send_tx(
+        tx,
+        &crate::mail::SendMessage {
+            from: system.address,
+            to: vec![lead],
+            subject: format!("[lane {holding_name}] hold conflict with lane {requester_name}"),
+            body,
+            importance: crate::mail::Importance::High,
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+
 /// The lane a hold is for: the named one (open, same project), else the single open lane
 /// the agent leads in the project, else none.
 fn acquire_lane(
@@ -376,29 +438,10 @@ fn acquire_lane(
     lane: Option<&str>,
 ) -> Result<Option<String>> {
     if let Some(key) = lane.map(str::trim).filter(|l| !l.is_empty()) {
-        // Holds always have a project, so a bare lane name is looked up in that project only
-        // (never ambiguous across, or revealing, other projects).
-        let slug: String = tx.query_row(
-            "SELECT slug FROM projects WHERE project_id = ?1",
-            [project_id],
-            |r| r.get(0),
-        )?;
-        let by_id = tx
-            .query_row("SELECT 1 FROM lanes WHERE lane_id = ?1", [key], |_| Ok(()))
-            .optional()?
-            .is_some();
-        let key = if by_id || key.contains('@') {
-            key.to_string()
-        } else {
-            format!("{key}@{slug}")
-        };
-        let (l, lane_project) = crate::lanes::resolve_lane(tx, tx.node_id, &key)?;
-        if lane_project != project_id {
-            return Err(Error::Invalid(format!(
-                "lane {} belongs to another project",
-                l.name
-            )));
-        }
+        // Lane names are per project (maintainer's rule): a hold's lane is looked up in the hold's
+        // project only, and a lane elsewhere is the same "unknown lane" as a missing one.
+        let (l, _) =
+            crate::lanes::resolve_lane_in_project(tx, tx.node_id, key, Some(project_id), None)?;
         if l.status.is_closed() {
             return Err(Error::Conflict(format!("lane {} is closed", l.name)));
         }
@@ -596,6 +639,10 @@ impl Store {
                 )?;
                 if let Some(mine) = &lane_id {
                     for other in &held_lanes {
+                        if *other == mine.as_str() {
+                            // Same lane (two exclusive holds): not a conflict between lanes.
+                            continue;
+                        }
                         let theirs: Vec<&HoldConflict> = conflicts
                             .iter()
                             .filter(|c| c.held.lane_id.as_deref() == Some(*other))
@@ -613,6 +660,7 @@ impl Store {
                                 "holders": theirs.iter().map(|c| c.held.agent.as_str()).collect::<Vec<_>>(),
                             }),
                         )?;
+                        notify_holding_lead(tx, mine, other, &me.address, &theirs)?;
                     }
                 }
                 touch(tx, &me.id)?;
@@ -779,15 +827,61 @@ impl Store {
     ) -> Result<Vec<LaneHolds>> {
         let holds = self.holds(filter)?;
         self.read(|conn| {
+            // Two queries in all: the holds' projects, and the lanes involved.
+            let mut project_of: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            let mut stmt = conn.prepare(
+                "SELECT hold_id, project_id FROM holds WHERE node_id = ?1 AND released_at IS NULL",
+            )?;
+            for r in stmt.query_map([self.node_id()], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })? {
+                let (h, p) = r?;
+                project_of.insert(h, p);
+            }
+            let mut lane_info: std::collections::HashMap<
+                String,
+                (String, crate::lanes::LaneStatus),
+            > = std::collections::HashMap::new();
+            let mut stmt = conn.prepare(
+                "SELECT l.lane_id, a.address, l.status FROM lanes l
+                 JOIN agents a ON a.agent_id = l.lead_id
+                 WHERE l.lane_id IN (SELECT DISTINCT lane_id FROM holds
+                                     WHERE released_at IS NULL AND lane_id IS NOT NULL)",
+            )?;
+            for r in stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })? {
+                let (id, lead, status) = r?;
+                lane_info.insert(
+                    id,
+                    (
+                        lead,
+                        status.parse().unwrap_or(crate::lanes::LaneStatus::Planned),
+                    ),
+                );
+            }
+            let mut allowed: std::collections::HashMap<String, bool> =
+                std::collections::HashMap::new();
             let mut groups: Vec<LaneHolds> = Vec::new();
             for h in holds {
-                let project_id: String = conn.query_row(
-                    "SELECT project_id FROM holds WHERE hold_id = ?1",
-                    [&h.hold_id],
-                    |r| r.get(0),
-                )?;
+                let Some(project_id) = project_of.get(&h.hold_id) else {
+                    continue;
+                };
                 if let Some(s) = scope {
-                    if !crate::tokens::scope_allows_project(conn, s, &project_id)? {
+                    let ok = match allowed.get(project_id) {
+                        Some(ok) => *ok,
+                        None => {
+                            let ok = crate::tokens::scope_allows_project(conn, s, project_id)?;
+                            allowed.insert(project_id.clone(), ok);
+                            ok
+                        }
+                    };
+                    if !ok {
                         continue;
                     }
                 }
@@ -798,11 +892,8 @@ impl Store {
                     g.holds.push(h);
                     continue;
                 }
-                let (lead, status) = match &h.lane_id {
-                    Some(id) => {
-                        let (l, _) = crate::lanes::resolve_lane(conn, self.node_id(), id)?;
-                        (Some(l.lead), Some(l.status))
-                    }
+                let (lead, status) = match h.lane_id.as_ref().and_then(|id| lane_info.get(id)) {
+                    Some((lead, status)) => (Some(lead.clone()), Some(*status)),
                     None => (None, None),
                 };
                 groups.push(LaneHolds {

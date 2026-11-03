@@ -186,7 +186,10 @@ fn classify(kind: &str, payload: &Value, origin: &str) -> Share {
     }
     // Node-local signals (D38): a refused hold and an expiring lease are about this node's
     // holds and leases; other nodes see the holds and leases themselves.
-    if matches!(kind, "hold.conflict" | "resource.lease_expiring") {
+    if matches!(
+        kind,
+        "hold.conflict" | "lane.hold_conflict" | "resource.lease_expiring"
+    ) {
         return Share::Never;
     }
     match kind {
