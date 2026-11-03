@@ -69,6 +69,14 @@ impl Client {
         }
     }
 
+    /// The Stop hook (opt-in with `--lane-reports`): (client event key, event, timeout).
+    fn stop_event(self) -> (&'static str, HookEvent, u32) {
+        match self {
+            Client::Cursor => ("stop", HookEvent::Stop, 10),
+            _ => ("Stop", HookEvent::Stop, 10),
+        }
+    }
+
     /// (client event key, another hook event, timeout seconds)
     fn events(self) -> [(&'static str, HookEvent, u32); 3] {
         match self {
@@ -91,6 +99,15 @@ pub enum HookEvent {
     SessionStart,
     Prompt,
     SessionEnd,
+    /// End of an agent turn: posts an automatic lane report (opt-in).
+    Stop,
+}
+
+/// Optional hooks beyond the default three.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HookOptions {
+    /// Also install the Stop hook that reports into the agent's lane.
+    pub lane_reports: bool,
 }
 
 impl HookEvent {
@@ -99,6 +116,7 @@ impl HookEvent {
             HookEvent::SessionStart => "session-start",
             HookEvent::Prompt => "prompt",
             HookEvent::SessionEnd => "session-end",
+            HookEvent::Stop => "stop",
         }
     }
 }
@@ -239,12 +257,24 @@ fn array_entry<'a>(map: &'a mut Map<String, Value>, key: &str) -> Result<&'a mut
 }
 
 /// Add or refresh our entries in a config, leaving every other key and hook alone.
-fn install_into(client: Client, env: &HookEnv, root: &mut Map<String, Value>) -> Result<()> {
+fn install_into(
+    client: Client,
+    env: &HookEnv,
+    root: &mut Map<String, Value>,
+    opts: HookOptions,
+) -> Result<()> {
     if client == Client::Cursor && !root.contains_key("version") {
         root.insert("version".into(), json!(1));
     }
     let hooks = object_entry(root, "hooks")?;
-    for (key, event, timeout) in client.events() {
+    let mut wanted: Vec<(&str, HookEvent, u32)> = client.events().to_vec();
+    if opts.lane_reports {
+        wanted.push(client.stop_event());
+    } else {
+        // Declarative: installing without --lane-reports drops a Stop hook added earlier.
+        remove_ours(client, hooks, client.stop_event().0);
+    }
+    for (key, event, timeout) in wanted {
         let command = command_for(env, client, event);
         let groups = array_entry(hooks, key)?;
         let ours = json!({ "type": "command", "command": command, "timeout": timeout });
@@ -289,25 +319,31 @@ fn uninstall_from(client: Client, root: &mut Map<String, Value>) {
         return;
     };
     for (key, _, _) in client.events() {
-        let Some(groups) = hooks.get_mut(key).and_then(Value::as_array_mut) else {
-            continue;
-        };
-        let before = groups.len();
-        if client == Client::Cursor {
-            groups.retain(|h| !is_ours(h));
-        } else {
-            groups.retain_mut(|g| {
-                let Some(hs) = g.get_mut("hooks").and_then(Value::as_array_mut) else {
-                    return true;
-                };
-                let n = hs.len();
-                hs.retain(|h| !is_ours(h));
-                !(hs.is_empty() && n > 0)
-            });
-        }
-        if groups.is_empty() && before > 0 {
-            hooks.remove(key);
-        }
+        remove_ours(client, hooks, key);
+    }
+    remove_ours(client, hooks, client.stop_event().0);
+}
+
+/// Remove our entries under one event key.
+fn remove_ours(client: Client, hooks: &mut Map<String, Value>, key: &str) {
+    let Some(groups) = hooks.get_mut(key).and_then(Value::as_array_mut) else {
+        return;
+    };
+    let before = groups.len();
+    if client == Client::Cursor {
+        groups.retain(|h| !is_ours(h));
+    } else {
+        groups.retain_mut(|g| {
+            let Some(hs) = g.get_mut("hooks").and_then(Value::as_array_mut) else {
+                return true;
+            };
+            let n = hs.len();
+            hs.retain(|h| !is_ours(h));
+            !(hs.is_empty() && n > 0)
+        });
+    }
+    if groups.is_empty() && before > 0 {
+        hooks.remove(key);
     }
 }
 
@@ -319,7 +355,12 @@ fn render(root: &Map<String, Value>) -> Result<String> {
     Ok(serde_json::to_string_pretty(root)? + "\n")
 }
 
-fn plan_config(client: Client, env: &HookEnv, install: bool) -> Result<FileChange> {
+fn plan_config(
+    client: Client,
+    env: &HookEnv,
+    install: bool,
+    opts: HookOptions,
+) -> Result<FileChange> {
     let path = client.config_path(&env.home);
     let existing = read_json(&path)?;
     let (before, mut root) = match existing {
@@ -333,7 +374,7 @@ fn plan_config(client: Client, env: &HookEnv, install: bool) -> Result<FileChang
         );
     }
     let (change, after) = if install {
-        install_into(client, env, &mut root)?;
+        install_into(client, env, &mut root, opts)?;
         let after = render(&root)?;
         let change = match &before {
             None => ChangeKind::Create,
@@ -476,11 +517,12 @@ pub fn install(
     clients: &[Client],
     install: bool,
     dry_run: bool,
+    opts: HookOptions,
 ) -> Result<HookReport> {
     // Plan everything first so a bad config aborts before anything is written.
     let mut changes = clients
         .iter()
-        .map(|c| plan_config(*c, env, install))
+        .map(|c| plan_config(*c, env, install, opts))
         .collect::<Result<Vec<_>>>()?;
     let still_used = !install
         && Client::ALL
@@ -560,6 +602,8 @@ pub fn install(
 pub struct HookInput {
     pub cwd: Option<PathBuf>,
     pub session_id: Option<String>,
+    /// The agent's last reply, when the client sends it (Codex and Claude Code Stop hooks).
+    pub last_message: Option<String>,
 }
 
 impl HookInput {
@@ -579,7 +623,12 @@ impl HookInput {
         let session_id = s("session_id")
             .or_else(|| s("sessionId"))
             .or_else(|| s("conversation_id"));
-        HookInput { cwd, session_id }
+        let last_message = s("last_assistant_message").or_else(|| s("lastAssistantMessage"));
+        HookInput {
+            cwd,
+            session_id,
+            last_message,
+        }
     }
 
     fn read_stdin() -> HookInput {
@@ -821,8 +870,88 @@ pub fn run(
             store.session(&agent, SessionPhase::End, info)?;
             String::new()
         }
+        HookEvent::Stop => {
+            store.session(&agent, SessionPhase::Beat, info)?;
+            lane_auto_report(store, env, &agent, &root, input.last_message.as_deref())?;
+            String::new()
+        }
     };
     Ok(text)
+}
+
+/// Minimum time between automatic lane reports from one agent to one lane.
+pub const AUTO_REPORT_INTERVAL_MS: i64 = 15 * 60 * 1000;
+
+/// Stop hook: post an `auto` report into the agent's lane ($ANOTHER_LANE, else the single
+/// open lane it leads in this project), at most once per [`AUTO_REPORT_INTERVAL_MS`].
+pub fn lane_auto_report(
+    store: &Store,
+    env: &HookEnv,
+    agent: &str,
+    root: &Path,
+    last_message: Option<&str>,
+) -> Result<Option<another_core::LaneReport>> {
+    let lane = match std::env::var("ANOTHER_LANE")
+        .ok()
+        .filter(|l| !l.trim().is_empty())
+    {
+        Some(name) => Some(store.lane(&name, None)?.lane),
+        None => store.lead_lane(agent, Some(&root.to_string_lossy()))?,
+    };
+    let Some(lane) = lane else {
+        return Ok(None);
+    };
+    if lane.status.is_closed() {
+        return Ok(None);
+    }
+    let safe: String = format!("{}-{agent}", lane.lane_id)
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let state = env
+        .another_home
+        .join("hooks")
+        .join("state")
+        .join(format!("lane-{safe}.last"));
+    let now = store.now();
+    let last: i64 = std::fs::read_to_string(&state)
+        .ok()
+        .and_then(|t| t.trim().parse().ok())
+        .unwrap_or(0);
+    if now - last < AUTO_REPORT_INTERVAL_MS {
+        return Ok(None);
+    }
+    let summary = last_message
+        .map(|m| m.trim())
+        .filter(|m| !m.is_empty())
+        .map(|m| truncate(m.to_string(), 300))
+        .unwrap_or_else(|| "Turn finished (no summary from the client).".to_string());
+    let report = store.report_lane(
+        another_core::LaneReportInput {
+            agent: agent.to_string(),
+            lane: lane.lane_id.clone(),
+            kind: another_core::ReportKind::Auto,
+            summary,
+            progress: None,
+            status: None,
+            links: vec![],
+            artifacts: vec![],
+            outcome: None,
+            pr_url: None,
+        },
+        None,
+    )?;
+    if let Some(dir) = state.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&state, now.to_string())?;
+    Ok(Some(report))
 }
 
 /// Entry point used by the CLI: never fails, so hooks always fail open.

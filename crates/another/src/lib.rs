@@ -4,6 +4,7 @@ pub mod cli;
 pub mod fed;
 pub mod hooks;
 pub mod mcp;
+mod mcp_lanes;
 mod output;
 pub mod reap;
 pub mod remote;

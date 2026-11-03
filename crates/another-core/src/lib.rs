@@ -11,6 +11,7 @@ mod error;
 mod federation;
 mod holds;
 mod identity;
+mod lanes;
 mod mail;
 mod requests;
 mod resources;
@@ -34,6 +35,10 @@ pub use holds::{
     MIN_HOLD_TTL_SECONDS,
 };
 pub use identity::{Agent, Program, Project, RegisterAgent};
+pub use lanes::{
+    lane_markdown, Lane, LaneDetail, LaneFilter, LaneLink, LaneLinkKind, LaneReport,
+    LaneReportInput, LaneStatus, LaneUpdate, NewLane, ReportKind,
+};
 pub use mail::{
     AckOutcome, Importance, Inbox, InboxItem, InboxQuery, Message, NewRequest, Reply, SendMessage,
     Thread, ThreadSummary,

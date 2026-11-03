@@ -39,6 +39,10 @@ another hook uninstall --client all
 
 Uninstall removes only entries that reference `another-hook.sh`, and deletes the wrapper once no client uses it. Both install and uninstall also clean up entries left by development builds from before the project was renamed (they referenced `wyres-hook.sh`, and Grok's file was `~/.grok/hooks/wyres.json`): install replaces them with current entries, and uninstall removes them.
 
+## Optional: lane reports at the end of each turn
+
+`another hook install --client <c> --lane-reports` also installs a **Stop** hook (`stop` for Cursor). It posts an automatic report into the agent's lane: `$ANOTHER_LANE`, or the single open lane the agent leads in that project. Reports are debounced to one every 15 minutes. Installing again without the flag removes the Stop hook. See [LANES.md](LANES.md).
+
 ## Per client
 
 | Client | Config written | Events | Notes |

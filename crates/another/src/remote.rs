@@ -13,6 +13,22 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+tokio::task_local! {
+    /// The verified token scope of the remote caller whose tool call is running.
+    static SCOPE: Option<TokenScope>;
+}
+
+/// The scope of the remote caller for the tool call in progress (`None` for local callers).
+/// Read it before moving work to a blocking thread: task-locals do not follow.
+pub fn current_scope() -> Option<TokenScope> {
+    SCOPE.try_with(|s| s.clone()).ok().flatten()
+}
+
+/// Run `fut` with `scope` visible to [`current_scope`].
+pub async fn with_scope<F: std::future::Future>(scope: Option<TokenScope>, fut: F) -> F::Output {
+    SCOPE.scope(scope, fut).await
+}
+
 /// The authenticated caller, attached to the request by [`require_token`].
 #[derive(Debug, Clone)]
 pub struct RemotePeer {
@@ -172,6 +188,13 @@ pub fn authorize(
     match tool {
         "resource_reap" => Err("reaping is never available to remote peers".into()),
         "activity_feed" | "activity_summarize" | "resource_find" => Ok(()),
+        // Lane reads are filtered / checked against the token scope inside the tool.
+        "lane_list" | "lane_show" => Ok(()),
+        "lane_create" => {
+            acting(args, "agent")?;
+            project(s(args, "project"), true)
+        }
+        "lane_update" | "lane_report" | "lane_close" => acting(args, "agent"),
         "orphans_list" => {
             // Remote peers see lapsed registrations only, never a process scan.
             args.insert("scan".into(), Value::Bool(false));
