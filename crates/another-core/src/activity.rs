@@ -25,10 +25,11 @@ pub enum ActivityKind {
     Session,
     System,
     Federation,
+    Lane,
 }
 
 impl ActivityKind {
-    pub const ALL: [ActivityKind; 7] = [
+    pub const ALL: [ActivityKind; 8] = [
         ActivityKind::Mail,
         ActivityKind::Request,
         ActivityKind::Hold,
@@ -36,6 +37,7 @@ impl ActivityKind {
         ActivityKind::Session,
         ActivityKind::System,
         ActivityKind::Federation,
+        ActivityKind::Lane,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -47,6 +49,7 @@ impl ActivityKind {
             ActivityKind::Session => "session",
             ActivityKind::System => "system",
             ActivityKind::Federation => "federation",
+            ActivityKind::Lane => "lane",
         }
     }
 
@@ -58,6 +61,7 @@ impl ActivityKind {
             "hold" => ActivityKind::Hold,
             "resource" | "orphan" => ActivityKind::Resource,
             "session" | "agent" => ActivityKind::Session,
+            "lane" => ActivityKind::Lane,
             "peer" | "sync" | "pair" | "federation" => ActivityKind::Federation,
             _ => ActivityKind::System,
         }
@@ -72,7 +76,7 @@ impl std::str::FromStr for ActivityKind {
             .find(|k| k.as_str() == s)
             .ok_or_else(|| {
                 Error::Invalid(format!(
-                    "unknown activity kind {s:?}; expected mail, request, hold, resource, session, system or federation"
+                    "unknown activity kind {s:?}; expected mail, request, hold, resource, session, system, federation or lane"
                 ))
             })
     }
@@ -421,6 +425,62 @@ fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
         "peer.revoked" => (
             format!("unpaired node {}", s("node_id")),
             json!({ "node_id": s("node_id") }),
+        ),
+        "lane.created" => (
+            format!("{actor} created lane {} ({})", s("name"), s("status")),
+            json!({ "lane_id": s("lane_id") }),
+        ),
+        "lane.updated" => (
+            format!("{actor} updated lane {}", s("name")),
+            json!({ "lane_id": s("lane_id") }),
+        ),
+        "lane.status_changed" => (
+            format!(
+                "lane {}: {} -> {} (by {actor})",
+                s("name"),
+                s("from"),
+                s("to")
+            ),
+            json!({ "lane_id": s("lane_id") }),
+        ),
+        "lane.linked" => (
+            format!(
+                "{actor} linked {} {} to lane {}",
+                s("kind"),
+                s("ref_id"),
+                s("name")
+            ),
+            json!({ "lane_id": s("lane_id"), "ref_id": s("ref_id") }),
+        ),
+        "lane.reported" => {
+            let first: String = s("summary")
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(120)
+                .collect();
+            let progress = p
+                .get("progress")
+                .and_then(Value::as_u64)
+                .map(|x| format!(" ({x}%)"))
+                .unwrap_or_default();
+            (
+                format!("{actor} reported on lane {}{progress}: {first}", s("name")),
+                json!({ "lane_id": s("lane_id"), "report_id": s("report_id") }),
+            )
+        }
+        "lane.closed" => (
+            format!(
+                "lane {} closed as {}{}",
+                s("name"),
+                s("status"),
+                p.get("pr_url")
+                    .and_then(Value::as_str)
+                    .map(|u| format!(" ({u})"))
+                    .unwrap_or_default()
+            ),
+            json!({ "lane_id": s("lane_id"), "pr_url": p.get("pr_url") }),
         ),
         other => (format!("{actor}: {other}"), p.clone()),
     };

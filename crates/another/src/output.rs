@@ -4,8 +4,8 @@ use std::fmt::Write;
 
 use another_core::{
     ActivityFeed, Agent, AuditEntry, Event, HeartbeatReport, Hold, HoldConflict, HoldReport, Inbox,
-    LeaseOutcome, Message, NodeInfo, Peer, Project, Request, Resource, Thread, ThreadSummary,
-    Token, WakeTarget,
+    Lane, LaneDetail, LaneReport, LeaseOutcome, Message, NodeInfo, Peer, Project, Request,
+    Resource, Thread, ThreadSummary, Token, WakeTarget,
 };
 use serde::Serialize;
 
@@ -503,4 +503,71 @@ pub fn wake_plans(ps: &[crate::wake::WakePlan]) -> String {
             (None, false) => format!("skipped {}\n", p.agent),
         })
         .collect()
+}
+
+pub fn lanes(ls: &[Lane]) -> String {
+    if ls.is_empty() {
+        return "no lanes".to_string();
+    }
+    ls.iter()
+        .map(|l| {
+            format!(
+                "{:<15} {:<24} {:<10} lead {:<18} {} report(s), updated {}\n",
+                l.status.as_str(),
+                l.name,
+                l.project,
+                l.lead,
+                l.reports,
+                l.updated_at
+            )
+        })
+        .collect()
+}
+
+pub fn lane_detail(d: &LaneDetail) -> String {
+    let l = &d.lane;
+    let mut out = format!(
+        "lane {} [{}] in {} (lead {}, created by {})\n",
+        l.name,
+        l.status.as_str(),
+        l.project,
+        l.lead,
+        l.created_by
+    );
+    if !l.charter.trim().is_empty() {
+        let _ = writeln!(
+            out,
+            "charter: {}",
+            l.charter.lines().next().unwrap_or_default()
+        );
+    }
+    if let Some(pr) = &l.pr_url {
+        let _ = writeln!(out, "pr: {pr}");
+    }
+    for r in d.reports.iter().take(5) {
+        let _ = writeln!(
+            out,
+            "  {} {:<6} {}{}: {}",
+            r.created_at,
+            r.kind.as_str(),
+            r.agent,
+            r.progress.map(|p| format!(" {p}%")).unwrap_or_default(),
+            r.summary.lines().next().unwrap_or_default()
+        );
+    }
+    for k in &d.links {
+        let _ = writeln!(out, "  linked {} {}", k.kind.as_str(), k.ref_id);
+    }
+    out
+}
+
+pub fn lane_report(r: &LaneReport) -> String {
+    format!(
+        "reported on lane ({}){}: {}",
+        r.kind.as_str(),
+        r.status
+            .map(|s| format!(" -> {}", s.as_str()))
+            .unwrap_or_default(),
+        r.summary.lines().next().unwrap_or_default()
+    )
 }

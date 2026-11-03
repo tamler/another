@@ -3,8 +3,8 @@ name: ci
 on:
   push:
     branches: [main]
+  # Every pull request, including stacked ones that target another branch.
   pull_request:
-    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always

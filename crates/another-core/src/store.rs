@@ -106,18 +106,44 @@ impl Store {
         let conn = Connection::open(&path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        Self::init(conn, clock, Some(path))
+        Self::init(conn, clock, Some(path), MIGRATIONS.len())
+    }
+
+    /// Open a database migrated only up to schema `version` (for upgrade tests: seed data
+    /// the way an older build would have, then reopen with [`Store::open`]).
+    #[doc(hidden)]
+    pub fn open_at_schema(home: &Path, version: usize) -> Result<Store> {
+        std::fs::create_dir_all(home)?;
+        let path = home.join(DB_FILE);
+        let conn = Connection::open(&path)?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        Self::init(
+            conn,
+            Clock::System,
+            Some(path),
+            version.min(MIGRATIONS.len()),
+        )
+    }
+
+    /// Number of schema migrations this build knows.
+    pub fn schema_version() -> usize {
+        MIGRATIONS.len()
     }
 
     /// An in-memory store (tests and experiments).
     pub fn open_in_memory(clock: Clock) -> Result<Store> {
-        Self::init(Connection::open_in_memory()?, clock, None)
+        Self::init(Connection::open_in_memory()?, clock, None, MIGRATIONS.len())
     }
 
-    fn init(mut conn: Connection, clock: Clock, path: Option<PathBuf>) -> Result<Store> {
+    fn init(
+        mut conn: Connection,
+        clock: Clock,
+        path: Option<PathBuf>,
+        schema: usize,
+    ) -> Result<Store> {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        migrate(&mut conn)?;
+        migrate_to(&mut conn, schema)?;
         let (node_id, key) = ensure_local_node(&mut conn, clock.now())?;
         Ok(Store {
             inner: Arc::new(Inner {
@@ -491,9 +517,57 @@ CREATE TABLE wake_targets (
     updated_at INTEGER NOT NULL
 );
 "#,
+    r#"
+CREATE TABLE lanes (
+    lane_id    TEXT PRIMARY KEY,
+    node_id    TEXT NOT NULL REFERENCES nodes(node_id),
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    name       TEXT NOT NULL,
+    charter    TEXT NOT NULL,
+    lead_id    TEXT NOT NULL REFERENCES agents(agent_id),
+    created_by TEXT NOT NULL REFERENCES agents(agent_id),
+    status     TEXT NOT NULL,
+    thread_id  TEXT,
+    outcome    TEXT,
+    pr_url     TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    closed_at  INTEGER,
+    event_id   TEXT NOT NULL
+);
+CREATE UNIQUE INDEX lanes_open_name ON lanes(node_id, name) WHERE closed_at IS NULL;
+CREATE INDEX lanes_by_project ON lanes(project_id, status);
+
+CREATE TABLE lane_links (
+    lane_id    TEXT NOT NULL REFERENCES lanes(lane_id),
+    kind       TEXT NOT NULL,
+    ref_id     TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (lane_id, kind, ref_id)
+);
+
+CREATE TABLE lane_reports (
+    report_id  TEXT PRIMARY KEY,
+    lane_id    TEXT NOT NULL REFERENCES lanes(lane_id),
+    node_id    TEXT NOT NULL REFERENCES nodes(node_id),
+    agent_id   TEXT NOT NULL REFERENCES agents(agent_id),
+    kind       TEXT NOT NULL,
+    summary    TEXT NOT NULL,
+    progress   INTEGER,
+    status     TEXT,
+    links      TEXT NOT NULL DEFAULT '[]',
+    artifacts  TEXT NOT NULL DEFAULT '[]',
+    outcome    TEXT,
+    pr_url     TEXT,
+    message_id TEXT,
+    created_at INTEGER NOT NULL,
+    event_id   TEXT NOT NULL
+);
+CREATE INDEX lane_reports_by_lane ON lane_reports(lane_id, created_at);
+"#,
 ];
 
-fn migrate(conn: &mut Connection) -> Result<()> {
+fn migrate_to(conn: &mut Connection, limit: usize) -> Result<()> {
     let current: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     let current = usize::try_from(current).unwrap_or(0);
     if current > MIGRATIONS.len() {
@@ -502,7 +576,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             MIGRATIONS.len()
         )));
     }
-    for (i, sql) in MIGRATIONS.iter().enumerate().skip(current) {
+    for (i, sql) in MIGRATIONS.iter().enumerate().take(limit).skip(current) {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(sql)?;
         tx.pragma_update(None, "user_version", (i + 1) as i64)?;
