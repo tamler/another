@@ -63,8 +63,8 @@ pub fn spawn_sweeper(store: Store, every: Duration, ct: CancellationToken) {
             tokio::select! {
                 _ = ct.cancelled() => break,
                 _ = tick.tick() => {
-                    let store = store.clone();
-                    match tokio::task::spawn_blocking(move || store.sweep()).await {
+                    let st = store.clone();
+                    match tokio::task::spawn_blocking(move || st.sweep()).await {
                         Ok(Ok(r)) if r.expired_holds + r.stale_requests > 0 => tracing::info!(
                             expired_holds = r.expired_holds,
                             stale_requests = r.stale_requests,
@@ -73,6 +73,14 @@ pub fn spawn_sweeper(store: Store, every: Duration, ct: CancellationToken) {
                         Ok(Ok(_)) => {}
                         Ok(Err(e)) => tracing::warn!(error = %e, "sweep failed"),
                         Err(e) => tracing::warn!(error = %e, "sweep task failed"),
+                    }
+                    // The opt-in daily rollup (`another summary schedule`).
+                    let st = store.clone();
+                    match tokio::task::spawn_blocking(move || st.send_scheduled_summary()).await {
+                        Ok(Ok(Some(to))) => tracing::info!(to = %to, "daily summary sent"),
+                        Ok(Ok(None)) => {}
+                        Ok(Err(e)) => tracing::warn!(error = %e, "daily summary failed"),
+                        Err(e) => tracing::warn!(error = %e, "daily summary task failed"),
                     }
                 }
             }

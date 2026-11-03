@@ -96,6 +96,7 @@ another activity --summary
 | Coordination 3 | Human decisions: structured questions answered by phone, HTTP or CLI | 🔄 tamler/another#12 |
 | Coordination 4 | Lane-aware holds and the pre-edit hook | 🔄 tamler/another#13 |
 | Coordination 5 | Spend ledger: budgets, hourly leases, approval gate, linked resources | 🔄 tamler/another#14 |
+| Coordination 6 | Daily summary: pull (CLI, MCP, HTTP) or an opt-in daily rollup by mail or webhook | 🔄 tamler/another#15 |
 
 Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88.
 
@@ -147,7 +148,7 @@ Every command takes `--json`. `--agent` and `--from` default to `$ANOTHER_AGENT`
 | Lanes | `another lane create\|list\|show\|update\|report\|done\|close\|export` |
 | Decisions | `another decision ask\|list\|show\|answer\|cancel` |
 | Holds | `another hold acquire\|check\|renew\|release [--lane L]`, `another holds [--by-lane]` (conflicts exit with status 3) |
-| Sessions and feed | `another heartbeat [--start\|--end [--keep]]`, `another activity [--since 1h] [--kinds mail,request] [--summary]`, `another summary [--since 24h]` |
+| Sessions and feed | `another heartbeat [--start\|--end [--keep]]`, `another activity [--since 1h] [--kinds mail,request] [--summary]`, `another summary [--since 24h]`, `another summary schedule --daily 08:30 --to mail:NAME` |
 | Hooks | `another hook install\|uninstall --client <c>\|all [--dry-run] [--lane-reports] [--pre-edit]`, `another hook status` |
 | Resources | `another resources`, `another resource register`, `another borrow`, `another release`, `another orphans`, `another reap <target> [--confirm]` |
 | Spend | `another spend [--period previous\|YYYY-MM] [--lane L] [--agent A]`, `another spend account add\|list\|update\|archive`, `another spend record\|borrow\|release\|leases` |

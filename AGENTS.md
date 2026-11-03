@@ -72,6 +72,12 @@ Every way events leave the node applies the same visibility rule (D38). When add
 - **Lease lifecycle:** withdrawing a pending lease withdraws its decision and emits `spend.lease_withdrawn`. Ending a session closes the agent's spend leases. Spend leases tied to a resource (`resource_id`) end with that resource lease (`reconcile_resource_spend_tx`).
 - **Shared accounts seen by tokens:** the budget figures are for the whole account (read-only), but spent, accrued and the groupings count only the token's projects. Never put other projects' names or amounts in their lines.
 
+## Daily summary (phase 6)
+
+- **Built from scoped reads only.** Never query tables directly for a remote caller; a cursor (`since` event id) resolves through the scoped feed.
+- **The scheduled rollup is node-wide:** `summary.daily` is node-local and invisible to tokens, so only local all-project webhooks (filter `daily_summary`) or mail from the system agent carry it.
+- **People are not agents:** list program `human` separately, and never count the system agent as active.
+
 ## Review routing rule
 
 Every PR gets a review from a **different model family** than the one that wrote it:
