@@ -52,6 +52,12 @@ pub struct WebhookRemoveArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WebhookListArgs {}
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DailySummaryArgs {
+    /// Duration like `24h` (default), an RFC 3339 time, or an event id.
+    pub since: Option<String>,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct WebhooksOut {
     pub webhooks: Vec<Webhook>,
@@ -134,6 +140,28 @@ impl AnotherMcp {
             Ok(WebhooksOut {
                 webhooks: s.webhooks(scope.as_ref())?,
             })
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Daily summary (default: last 24h): what needs a person (open \
+        decisions, stuck lanes, budgets, approvals, stale requests, dead webhooks), lanes moved \
+        and closed, decisions, requests, holds and conflicts, spend, active agents. JSON plus a \
+        short phone-readable `markdown`."
+    )]
+    async fn daily_summary(
+        &self,
+        Parameters(a): Parameters<DailySummaryArgs>,
+    ) -> ToolResult<another_core::DailySummary> {
+        let scope = remote::current_scope();
+        self.run(move |s| {
+            let since = a
+                .since
+                .as_deref()
+                .map(|v| another_core::Since::parse(v, s.now()))
+                .transpose()?;
+            s.daily_summary(since, scope.as_ref())
         })
         .await
     }

@@ -933,7 +933,7 @@ impl Store {
             };
             let mut stmt = conn.prepare(
                 "SELECT request_id, status FROM requests
-                 WHERE node_id = ?1 AND status IN ('open', 'claimed', 'stale')",
+                 WHERE node_id = ?1 AND status IN ('open', 'claimed', 'stale') AND kind = 'task'",
             )?;
             let open_requests = stmt
                 .query_map([self.node_id()], |r| {

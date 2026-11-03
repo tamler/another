@@ -18,6 +18,7 @@ mod requests;
 mod resources;
 mod spend;
 mod store;
+mod summary;
 mod time;
 mod tokens;
 mod visibility;
@@ -64,6 +65,10 @@ pub use spend::{
     DEFAULT_SPEND_LEASE_TTL_SECONDS,
 };
 pub use store::{default_home, Clock, Event, NodeInfo, Store, DB_FILE};
+pub use summary::{
+    summary_markdown, ClosedLane, DailySummary, DecisionSummary, HoldSummary, LaneSummary,
+    OpenDecision, RequestSummary, SpendLine,
+};
 pub use time::fmt_ts;
 pub use tokens::{AuditEntry, AuditRecord, NewToken, Token, TokenScope};
 pub use wake::{WakeTarget, WakeVia};
