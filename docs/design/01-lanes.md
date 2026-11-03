@@ -13,7 +13,7 @@ A **lane** is a named unit of work on one node.
 | Field | Notes |
 |---|---|
 | `lane_id` | ULID |
-| `name` | 1–64 chars from `[a-z0-9._-]`, case-folded; unique among the open lanes **of its project**. Address a lane by id, `name`, or `name@project` (`api@shop`). A bare name used in several projects is `ambiguous` for local callers. For a scoped token, lanes outside its projects don't exist: lookups return the same `not_found` as an unknown name, and "already named" only considers the project being created in. A closed lane's name can be reused. |
+| `name` | 1–64 chars from `[a-z0-9._-]`, case-folded; unique among the open lanes **of its project**. Address a lane by id, `name`, or `name@project` (`api@shop`). A bare name used in several projects is `ambiguous` for local callers. For a scoped token, lanes outside its projects don't exist: lookups return the same `not_found` as an unknown name, "already named" only considers the project being created in, and `lane_list` filters (`project`, `lead`) are matched against the lanes the token may see, so a hidden project or agent gives the same empty list as a missing one. A closed lane's name can be reused. |
 | `project` | **Required.** It is what remote token scopes are checked against. |
 | `charter` | Free text, up to 16 KiB: the brief. |
 | `lead` | Local agent that owns the work. |

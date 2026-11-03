@@ -925,11 +925,18 @@ fn looks_secret(word: &str) -> bool {
 pub fn redact_secrets(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut word = String::new();
+    // Each `.`-separated part is checked on its own, so a secret that ends a sentence
+    // ("…cdef.") or sits in a dotted token is still caught; the dots are kept.
     let flush = |word: &mut String, out: &mut String| {
-        if looks_secret(word) {
-            out.push_str("[redacted]");
-        } else {
-            out.push_str(word);
+        for (i, part) in word.split('.').enumerate() {
+            if i > 0 {
+                out.push('.');
+            }
+            if looks_secret(part) {
+                out.push_str("[redacted]");
+            } else {
+                out.push_str(part);
+            }
         }
         word.clear();
     };
@@ -1084,6 +1091,29 @@ mod tests {
         assert_eq!(
             redact_secrets("sk-learn is fine; task-runner too"),
             "sk-learn is fine; task-runner too"
+        );
+        // Secrets next to sentence punctuation (Codex review of tamler/another#10).
+        assert_eq!(
+            redact_secrets("Key: 0123456789abcdef0123456789abcdef."),
+            "Key: [redacted]."
+        );
+        assert_eq!(
+            redact_secrets("Token ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ012345. Done"),
+            "Token [redacted]. Done"
+        );
+        assert_eq!(
+            redact_secrets("blob QWxhZGRpbjpvcGVuIHNlc2FtZQ9xYz3RkMzQ1Njc4OTBhYmNkZWY.\nnext"),
+            "blob [redacted].\nnext"
+        );
+        assert_eq!(
+            redact_secrets(
+                "(see ano_01J9ABCDEFGH_d3adb33fcafe0123); also sk-proj-AbCdEf123456789!"
+            ),
+            "(see [redacted]); also [redacted]!"
+        );
+        assert_eq!(
+            redact_secrets("Edited src/api/routes.rs."),
+            "Edited src/api/routes.rs."
         );
     }
 
