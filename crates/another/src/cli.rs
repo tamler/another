@@ -293,6 +293,10 @@ pub enum Command {
         #[command(flatten)]
         run: WakeRun,
     },
+    /// Opt-in background service running `another serve` (launchd on macOS, systemd on
+    /// Linux). Nothing is installed unless you run `another service install`.
+    #[command(subcommand)]
+    Service(ServiceCmd),
     /// Show the activity feed (who is doing what), or a summary of it.
     Activity {
         /// Start point: a duration (30m, 2h, 1d), an RFC 3339 time, or an event id cursor.
@@ -363,6 +367,45 @@ pub enum WakeCmd {
     },
     /// List stored wake targets.
     List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ServiceCmd {
+    /// Install (or update in place) and start the service; it restarts at login and reboot.
+    /// Takes the same flags as `serve`; `--home` selects the data directory it uses.
+    Install {
+        /// HTTP bind address. Loopback unless --auth and --allow-remote-bind are both given.
+        #[arg(long, default_value = crate::serve::DEFAULT_BIND)]
+        bind: String,
+        /// Require bearer tokens on /mcp and /activity (needed for remote access).
+        #[arg(long)]
+        auth: bool,
+        /// Allow a non-loopback --bind (requires --auth). Prefer a tunnel instead.
+        #[arg(long, requires = "auth")]
+        allow_remote_bind: bool,
+        /// Extra Host header to accept, e.g. a tunnel hostname (repeatable; requires --auth).
+        #[arg(long = "allowed-host", requires = "auth")]
+        allowed_hosts: Vec<String>,
+        /// Also act as a federation hub.
+        #[arg(long)]
+        federation: bool,
+    },
+    /// Stop the service and remove it (safe when it is not installed).
+    Uninstall,
+    /// Show whether it is installed and loaded, its pid, bind address and recent log lines.
+    Status {
+        #[arg(long, default_value_t = 10)]
+        lines: usize,
+    },
+    /// Start the installed service.
+    Start,
+    /// Stop the installed service (it starts again at next login; uninstall to remove it).
+    Stop,
+    /// Print the service's recent log lines.
+    Logs {
+        #[arg(long, short = 'n', default_value_t = 50)]
+        lines: usize,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -751,10 +794,15 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     if let Command::Hook(cmd) = &cli.command {
         return hook_command(cmd, json, another_home);
     }
+    if let Command::Service(cmd) = &cli.command {
+        return service_command(cmd, json, another_home()?);
+    }
 
     let store = open(home)?;
     let code = match cli.command {
-        Command::Serve { .. } | Command::Hook(_) => unreachable!("handled above"),
+        Command::Serve { .. } | Command::Hook(_) | Command::Service(_) => {
+            unreachable!("handled above")
+        }
         Command::Init | Command::Status => {
             let status = output::Status {
                 node: store.node()?,
@@ -1334,6 +1382,107 @@ fn hook_command(
                 })
                 .collect();
             Ok(emit(json, &rows, |r| output::hook_status(r)))
+        }
+    }
+}
+
+fn service_command(cmd: &ServiceCmd, json: bool, home: PathBuf) -> anyhow::Result<ExitCode> {
+    use crate::service;
+    let user_home = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
+    let home = if home.is_absolute() {
+        home
+    } else {
+        std::env::current_dir()?.join(home)
+    };
+    match cmd {
+        ServiceCmd::Install {
+            bind,
+            auth,
+            allow_remote_bind,
+            allowed_hosts,
+            federation,
+        } => {
+            // Make sure the data directory exists and is initialised before the service runs.
+            Store::open(&home)?;
+            let spec = service::ServiceSpec {
+                exe: std::env::current_exe()?.canonicalize()?,
+                home,
+                bind: bind.clone(),
+                auth: *auth,
+                allow_remote_bind: *allow_remote_bind,
+                allowed_hosts: allowed_hosts.clone(),
+                federation: *federation,
+            };
+            let opts = crate::serve::HttpOptions {
+                auth: *auth,
+                allow_remote_bind: *allow_remote_bind,
+                allowed_hosts: allowed_hosts.clone(),
+                federation: *federation,
+            };
+            let r = service::install(&spec, &user_home, &opts)?;
+            Ok(emit(json, &r, |r| {
+                let mut out = format!(
+                    "{} the background service ({:?}) at {}\nlogs: {}",
+                    r.action, r.platform, r.definition, r.logs
+                );
+                for h in &r.hints {
+                    out.push_str(&format!("\nhint: {h}"));
+                }
+                out
+            }))
+        }
+        ServiceCmd::Uninstall => {
+            let r = service::uninstall(&user_home)?;
+            Ok(emit(json, &r, |r| {
+                if r.removed {
+                    format!("removed the background service ({})", r.definition)
+                } else {
+                    "the background service is not installed".to_string()
+                }
+            }))
+        }
+        ServiceCmd::Status { lines } => {
+            let r = service::status(&user_home, &home, *lines)?;
+            Ok(emit(json, &r, |r| {
+                if !r.installed {
+                    return "not installed (opt in with `another service install`)".to_string();
+                }
+                let mut out = format!(
+                    "installed: {}\nloaded: {}\npid: {}\nbind: {}",
+                    r.definition,
+                    if r.loaded { "yes" } else { "no" },
+                    r.pid.map_or("-".to_string(), |p| p.to_string()),
+                    r.bind.as_deref().unwrap_or("-")
+                );
+                if !r.log_lines.is_empty() {
+                    out.push_str("\nrecent log lines:");
+                    for l in &r.log_lines {
+                        out.push_str("\n  ");
+                        out.push_str(l);
+                    }
+                }
+                out
+            }))
+        }
+        ServiceCmd::Start | ServiceCmd::Stop => {
+            let start = matches!(cmd, ServiceCmd::Start);
+            service::start_stop(&user_home, start)?;
+            let what = if start { "started" } else { "stopped" };
+            Ok(emit(
+                json,
+                &serde_json::json!({ "ok": true, "action": what }),
+                |_| format!("{what} the background service"),
+            ))
+        }
+        ServiceCmd::Logs { lines } => {
+            let status = service::status(&user_home, &home, *lines)?;
+            if !status.installed {
+                anyhow::bail!("the background service is not installed");
+            }
+            Ok(emit(json, &status.log_lines, |l| l.join("\n")))
         }
     }
 }
