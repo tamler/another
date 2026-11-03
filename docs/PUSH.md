@@ -17,7 +17,7 @@ With `another serve --auth`, every event read is filtered by the token's project
 - An event that belongs to projects is visible only if one of its projects matches the token's globs.
   - That includes lanes, holds, resources, requests and mail between agents with projects.
   - The token's agent having acted in another project does not make that event visible.
-- An event with no project, such as mail between agents that have no project or their sessions, is visible only if it concerns the token's own agent.
+- An event with no project, such as mail between agents that have no project or their sessions, is visible only if it concerns the token's own agent. The match is by agent id, never by name, so another node's agent with the same name doesn't count. Webhooks a token created follow the same rule.
 - Token, peer and node events are never visible to tokens.
 - Local callers (CLI, stdio MCP, loopback HTTP without `--auth`) see everything.
 
@@ -83,13 +83,14 @@ another webhook remove <webhook-id>
 | `needs_decision` | a lane moving to `needs_decision` (by update or report); `decision.created`; `decision.overdue` ([human decisions](HUMAN-DECISIONS.md)) |
 | `request_created` | `request.created`, `decision.created` |
 | `request_answered` | `request.completed`, `request.cancelled`, `decision.answered`, `decision.expired` |
-| `hold_conflict` | `hold.conflict`: an agent was refused a hold because another agent holds an overlapping path; `lane.hold_conflict`: the same, between two lanes |
-| `lease_expiring` | `resource.lease_expiring`: a resource lease has under 5 minutes (or half its TTL) left. Sent once; renewing re-arms it |
+| `hold_conflict` | `hold.conflict`: an agent was refused a hold because another agent holds an overlapping path (node-local: it is not federated, so subscribe on the node where the holds are); `lane.hold_conflict`: the same, between two lanes |
+| `lease_expiring` | `resource.lease_expiring`: a resource lease has under 5 minutes (or half its TTL) left. Sent once; renewing re-arms it. Node-local, not federated |
 | `all` | every visible event except mail and delivery events |
 
 **Remote (MCP) subscriptions:**
 - `webhook_subscribe` defaults to the token's project globs. It can narrow them to a subset (compared as strings) but never widen them.
 - `all_projects` is refused for tokens.
+- **A webhook stops when its token does.** If the token that created it is revoked or expires, the webhook is disabled: it never fires again, its pending deliveries become dead, and `another webhook list` shows `disabled: token revoked` (or `token expired`). Create a new one with a new token.
 - A token can only list and remove the webhooks it created.
 
 ### Delivery
