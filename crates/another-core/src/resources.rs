@@ -489,6 +489,51 @@ fn outcome(tx: &Tx<'_>, resource_id: &str, agent_id: &str, what: &str) -> Result
     })
 }
 
+/// How long before a lease lapses `resource.lease_expiring` is emitted (or half the lease's
+/// TTL, if that is shorter, so short leases do not warn right after every renewal).
+pub const LEASE_EXPIRING_WINDOW_MS: i64 = 5 * 60 * 1000;
+
+/// Emit `resource.lease_expiring` once for each live lease about to lapse. Renewing a lease
+/// re-arms the warning.
+pub(crate) fn warn_expiring_leases_tx(tx: &Tx<'_>) -> Result<usize> {
+    let mut stmt = tx.prepare(
+        "SELECT l.lease_id, l.resource_id, l.agent_id, l.expires_at, r.project_id
+         FROM resource_leases l JOIN resources r ON r.resource_id = l.resource_id
+         WHERE l.node_id = ?1 AND l.released_at IS NULL
+           AND l.expires_at > ?2 AND l.expires_at <= ?2 + MIN(?3, l.ttl_seconds * 500)
+           AND (l.expiry_warned_at IS NULL OR l.expiry_warned_at < l.renewed_at)",
+    )?;
+    let due = stmt
+        .query_map(params![tx.node_id, tx.now, LEASE_EXPIRING_WINDOW_MS], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, Option<String>>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (lease_id, resource_id, agent_id, expires_at, project_id) in &due {
+        tx.emit(
+            "system",
+            "resource.lease_expiring",
+            json!({
+                "lease_id": lease_id,
+                "resource_id": resource_id,
+                "agent_id": agent_id,
+                "project_id": project_id,
+                "expires_at": expires_at,
+            }),
+        )?;
+        tx.execute(
+            "UPDATE resource_leases SET expiry_warned_at = ?2 WHERE lease_id = ?1",
+            params![lease_id, tx.now],
+        )?;
+    }
+    Ok(due.len())
+}
+
 /// Expire lapsed leases. Returns how many expired.
 pub(crate) fn expire_leases_tx(tx: &Tx<'_>) -> Result<usize> {
     let mut stmt = tx.prepare(

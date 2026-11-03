@@ -103,6 +103,7 @@ Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green
 | [docs/REMOTE.md](docs/REMOTE.md) | Remote peers (Grok Bot): tokens, `--auth`, tunnels, audit log |
 | [docs/FEDERATION.md](docs/FEDERATION.md) | Several machines: node keys, pairing, sync, permissions |
 | [docs/LANES.md](docs/LANES.md) | Lanes: units of work for a manager bot and coding agents; reports, export, hooks |
+| [docs/PUSH.md](docs/PUSH.md) | Push: SSE stream, long-poll and signed webhooks, all filtered by token scope |
 | [docs/WAKE.md](docs/WAKE.md) | `another wake` adapters (tmux, cmux, Herdr) and the Herdr plugin |
 | [docs/SPEC.md](docs/SPEC.md) | Research and product spec |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | Locked defaults and every design decision made while building |
@@ -118,6 +119,7 @@ Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green
 | Lanes | `lane_create`, `lane_list`, `lane_show`, `lane_update`, `lane_report` (`status` / `done`), `lane_close` |
 | Path holds | `hold_paths` (`acquire` / `check` / `renew` / `release` / `list`) |
 | Awareness | `activity_feed`, `activity_summarize` (summaries and ids, never message bodies) |
+| Push | `events_poll` (long-poll), `webhook_subscribe`, `webhook_list`, `webhook_remove` |
 | Resources | `resource_find`, `resource_register`, `resource_borrow`, `resource_release`, `resource_heartbeat`, `orphans_list`, `resource_reap` (plan and request only) |
 
 Tool errors are `{"error": {"code", "message"}}` with codes `not_found`, `invalid`, `conflict`, `ambiguous`, `forbidden`.
@@ -137,6 +139,7 @@ Every command takes `--json`. `--agent` and `--from` default to `$ANOTHER_AGENT`
 | Sessions and feed | `another heartbeat [--start\|--end [--keep]]`, `another activity [--since 1h] [--kinds mail,request] [--summary]` |
 | Hooks | `another hook install\|uninstall --client <c>\|all [--dry-run] [--lane-reports]`, `another hook status` |
 | Resources | `another resources`, `another resource register`, `another borrow`, `another release`, `another orphans`, `another reap <target> [--confirm]` |
+| Webhooks | `another webhook add --url URL --events lane_status,needs_decision --project GLOB`, `another webhook list\|remove\|test\|dead\|deliveries\|retry` |
 | Remote peers | `another serve --auth`, `another token create\|list\|revoke`, `another audit` |
 | Federation | `another pair invite\|join\|revoke`, `another peers`, `another sync [--watch]`, `another serve --federation` |
 | Wake | `another wake [--agent X\|--all]`, `another wake set\|clear\|list` |

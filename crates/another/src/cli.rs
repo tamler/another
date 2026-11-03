@@ -296,6 +296,9 @@ pub enum Command {
     /// Lanes: named units of work with a charter, lead, status and structured reports.
     #[command(subcommand)]
     Lane(LaneCmd),
+    /// Webhooks: signed HTTP POSTs for lane, request, hold and lease events.
+    #[command(subcommand)]
+    Webhook(WebhookCmd),
     /// Show the activity feed (who is doing what), or a summary of it.
     Activity {
         /// Start point: a duration (30m, 2h, 1d), an RFC 3339 time, or an event id cursor.
@@ -366,6 +369,50 @@ pub enum WakeCmd {
     },
     /// List stored wake targets.
     List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WebhookCmd {
+    /// Subscribe a URL. Prints the signing secret once.
+    Add {
+        /// `https://` URL (plain http only to 127.0.0.1, localhost or [::1]).
+        #[arg(long)]
+        url: String,
+        /// Comma-separated filters: lane_status, lane_report, needs_decision,
+        /// request_created, request_answered, hold_conflict, lease_expiring, all.
+        #[arg(long, value_delimiter = ',', required = true)]
+        events: Vec<String>,
+        /// Project path or slug glob (repeatable). Required unless --all-projects.
+        #[arg(long = "project", short = 'p')]
+        projects: Vec<String>,
+        /// Every project on this node.
+        #[arg(long, conflicts_with = "projects")]
+        all_projects: bool,
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// List subscriptions with delivery counts (secrets are never shown).
+    List,
+    /// Remove a subscription; pending deliveries are dropped.
+    Remove { webhook_id: String },
+    /// Send a signed test delivery now and show the result.
+    Test { webhook_id: String },
+    /// Show dead deliveries (gave up after 7 attempts), newest first.
+    Dead {
+        #[arg(long)]
+        webhook: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
+    /// Show recent deliveries of any status.
+    Deliveries {
+        #[arg(long)]
+        webhook: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
+    /// Re-queue a dead delivery.
+    Retry { delivery_id: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1371,6 +1418,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             emit(json, &plans, |p| output::wake_plans(p))
         }
         Command::Lane(cmd) => lane_command(&store, json, cmd)?,
+        Command::Webhook(cmd) => webhook_command(&store, json, cmd)?,
         Command::Audit { limit } => {
             let entries = store.audit_log(limit)?;
             emit(json, &entries, |e| output::audit(e))
@@ -1470,6 +1518,78 @@ fn hook_command(
             Ok(emit(json, &rows, |r| output::hook_status(r)))
         }
     }
+}
+
+fn webhook_command(store: &Store, json: bool, cmd: WebhookCmd) -> anyhow::Result<ExitCode> {
+    use another_core::{DeliveryStatus, NewWebhook, WebhookFilter};
+    Ok(match cmd {
+        WebhookCmd::Add {
+            url,
+            events,
+            projects,
+            all_projects,
+            description,
+        } => {
+            if projects.is_empty() && !all_projects {
+                anyhow::bail!("give --project GLOB (repeatable) or --all-projects");
+            }
+            let filters = events
+                .iter()
+                .map(|e| e.parse::<WebhookFilter>())
+                .collect::<another_core::Result<Vec<_>>>()?;
+            let created = store.create_webhook(
+                NewWebhook {
+                    url,
+                    filters,
+                    project_globs: (!all_projects).then_some(projects),
+                    description,
+                },
+                None,
+            )?;
+            emit(json, &created, output::webhook_created)
+        }
+        WebhookCmd::List => {
+            let hooks = store.webhooks(None)?;
+            emit(json, &hooks, |h| output::webhooks(h))
+        }
+        WebhookCmd::Remove { webhook_id } => {
+            let h = store.remove_webhook(&webhook_id, None)?;
+            emit(json, &h, |h| {
+                format!("removed webhook {} ({})", h.webhook_id, h.url)
+            })
+        }
+        WebhookCmd::Test { webhook_id } => {
+            let d = store.queue_test_delivery(&webhook_id)?;
+            let result = crate::push::deliver(store, &d)?;
+            let ok = result.status == DeliveryStatus::Delivered;
+            let code = emit(json, &result, |r| {
+                output::deliveries(std::slice::from_ref(r))
+            });
+            if ok {
+                code
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        WebhookCmd::Dead { webhook, limit } => {
+            let list =
+                store.webhook_deliveries(webhook.as_deref(), Some(DeliveryStatus::Dead), limit)?;
+            emit(json, &list, |l| output::deliveries(l))
+        }
+        WebhookCmd::Deliveries { webhook, limit } => {
+            let list = store.webhook_deliveries(webhook.as_deref(), None, limit)?;
+            emit(json, &list, |l| output::deliveries(l))
+        }
+        WebhookCmd::Retry { delivery_id } => {
+            let d = store.retry_delivery(&delivery_id)?;
+            emit(json, &d, |d| {
+                format!(
+                    "re-queued delivery {}; the next `another serve` delivery pass sends it",
+                    d.delivery_id
+                )
+            })
+        }
+    })
 }
 
 fn lane_command(store: &Store, json: bool, cmd: LaneCmd) -> anyhow::Result<ExitCode> {

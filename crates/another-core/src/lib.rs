@@ -18,7 +18,9 @@ mod resources;
 mod store;
 mod time;
 mod tokens;
+mod visibility;
 mod wake;
+mod webhooks;
 
 pub use activity::{
     ActivityFeed, ActivityItem, ActivityKind, ActivityQuery, ActivitySummary, AgentPresence,
@@ -46,10 +48,15 @@ pub use mail::{
 pub use requests::{Request, RequestAction, RequestFilter, RequestStatus, RequestUpdate};
 pub use resources::{
     derive_port, Lease, LeaseMode, LeaseOutcome, RegisterResource, Resource, ResourceFilter,
-    ResourceKind, ResourceRef, DEFAULT_LEASE_TTL_SECONDS, MAX_LEASE_TTL_SECONDS,
-    MIN_LEASE_TTL_SECONDS,
+    ResourceKind, ResourceRef, DEFAULT_LEASE_TTL_SECONDS, LEASE_EXPIRING_WINDOW_MS,
+    MAX_LEASE_TTL_SECONDS, MIN_LEASE_TTL_SECONDS,
 };
 pub use store::{default_home, Clock, Event, NodeInfo, Store, DB_FILE};
 pub use time::fmt_ts;
 pub use tokens::{AuditEntry, AuditRecord, NewToken, Token, TokenScope};
 pub use wake::{WakeTarget, WakeVia};
+pub use webhooks::{
+    signature as webhook_signature, validate_webhook_url, DeliveryStatus, NewWebhook,
+    OutboundDelivery, Webhook, WebhookCreated, WebhookDelivery, WebhookFilter,
+    MAX_DELIVERY_ATTEMPTS,
+};
