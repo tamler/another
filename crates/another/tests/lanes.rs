@@ -96,7 +96,7 @@ fn lane_cli_flow_and_markdown_export() {
     let inbox = json_of(&home, &["inbox", "--agent", "manager"]);
     assert_eq!(
         inbox["messages"][0]["subject"],
-        "[lane billing] working: Schema done"
+        "[lane billing] working: status report by claude"
     );
 
     json_of(
@@ -324,6 +324,17 @@ async fn call(
         .unwrap()
 }
 
+fn message(r: &CallToolResult) -> String {
+    let text = serde_json::to_value(&r.content).unwrap()[0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    serde_json::from_str::<Value>(&text).unwrap()["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
 fn code(r: &CallToolResult) -> Option<String> {
     if r.is_error != Some(true) {
         return None;
@@ -340,7 +351,12 @@ fn code(r: &CallToolResult) -> Option<String> {
 #[test]
 fn remote_token_sees_only_its_projects_lanes() {
     let r = remote();
-    for (name, project) in [("shop-lane", "shop"), ("vault-lane", "vault")] {
+    for (name, project) in [
+        ("shop-lane", "shop"),
+        ("vault-lane", "vault"),
+        ("api", "shop"),
+        ("api", "vault"),
+    ] {
         r.store
             .create_lane(
                 another_core::NewLane {
@@ -355,6 +371,30 @@ fn remote_token_sees_only_its_projects_lanes() {
             )
             .unwrap();
     }
+    // Vault activity with content the shop token must never read.
+    r.store
+        .report_lane(
+            another_core::LaneReportInput {
+                agent: "claude".into(),
+                lane: "vault-lane".into(),
+                kind: another_core::ReportKind::Status,
+                summary: "vault report summary: rotating keys".into(),
+                progress: Some(42),
+                status: Some(another_core::LaneStatus::Blocked),
+                links: vec!["https://example.test/vault-ci".into()],
+                artifacts: vec![],
+                outcome: None,
+                pr_url: None,
+            },
+            None,
+        )
+        .unwrap();
+    // Locally, a bare name used in two projects is ambiguous; name@project picks one.
+    assert_eq!(r.store.lane("api", None).unwrap_err().code(), "ambiguous");
+    assert_eq!(
+        r.store.lane("api@vault", None).unwrap().lane.project,
+        "vault"
+    );
     let token = r
         .store
         .create_token("manager", &["/work/shop".into()], None, None)
@@ -374,13 +414,44 @@ fn remote_token_sees_only_its_projects_lanes() {
             .iter()
             .map(|l| l["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, vec!["shop-lane"]);
+        assert_eq!(names, vec!["api", "shop-lane"]);
         assert!(!lanes.to_string().contains("vault"));
 
+        // Out-of-scope lanes look exactly like lanes that don't exist.
+        let hidden = call(&client, "lane_show", json!({ "lane": "vault-lane" })).await;
+        let missing = call(&client, "lane_show", json!({ "lane": "nope-lane" })).await;
+        assert_eq!(code(&hidden).as_deref(), Some("not_found"));
         assert_eq!(
-            code(&call(&client, "lane_show", json!({ "lane": "vault-lane" })).await).as_deref(),
-            Some("forbidden")
+            message(&hidden).replace("vault-lane", "X"),
+            message(&missing).replace("nope-lane", "X")
         );
+        // The bare name `api` resolves to the shop lane for this token (vault's is invisible).
+        let api = call(&client, "lane_show", json!({ "lane": "api" })).await;
+        assert_eq!(api.structured_content.unwrap()["lane"]["project"], "shop");
+        assert_eq!(
+            code(&call(&client, "lane_show", json!({ "lane": "api@vault" })).await).as_deref(),
+            Some("not_found")
+        );
+
+        // No lane content anywhere in the feed or summary, and no vault lane events. (The
+        // node-wide parts of the feed, D16, are scoped by the push phase.)
+        for tool in ["activity_feed", "activity_summarize"] {
+            let feed = call(&client, tool, json!({ "since": "1h" })).await;
+            let text = serde_json::to_string(&feed.content).unwrap();
+            for leak in ["secret charter", "rotating keys", "vault-ci", "42%", "(42"] {
+                assert!(!text.contains(leak), "{tool} leaked {leak}: {text}");
+            }
+            assert!(text.contains("shop-lane"), "{tool}: {text}");
+        }
+        let feed = call(
+            &client,
+            "activity_feed",
+            json!({ "since": "1h", "kinds": ["lane"] }),
+        )
+        .await;
+        let items = feed.structured_content.unwrap()["items"].clone();
+        assert!(!items.as_array().unwrap().is_empty());
+        assert!(!items.to_string().contains("vault"), "{items}");
         assert_eq!(
             code(&call(&client, "lane_show", json!({ "lane": "shop-lane" })).await),
             None
@@ -398,7 +469,7 @@ fn remote_token_sees_only_its_projects_lanes() {
             json!({ "lane": "vault-lane", "summary": "peek" }),
         )
         .await;
-        assert_eq!(code(&report).as_deref(), Some("forbidden"));
+        assert_eq!(code(&report).as_deref(), Some("not_found"));
         let ok = call(
             &client,
             "lane_report",
