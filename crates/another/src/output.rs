@@ -912,3 +912,111 @@ pub fn joined(v: &serde_json::Value) -> String {
     }
     out
 }
+
+/// Human output for `another remote …` (the hub's JSON, shortened).
+pub fn remote(cmd: &str, v: &serde_json::Value) -> String {
+    let st = |x: &serde_json::Value| x.as_str().unwrap_or_default().to_string();
+    match cmd {
+        "status" => format!(
+            "{} on {}{} · projects {} · {} unread, {} open request(s)",
+            st(&v["agent"]),
+            st(&v["hub"]),
+            v["lane"]
+                .as_str()
+                .map(|l| format!(" · lane {l}"))
+                .unwrap_or_default(),
+            v["project_globs"]
+                .as_array()
+                .map(|a| a
+                    .iter()
+                    .filter_map(|x| x.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "))
+                .unwrap_or_default(),
+            v["heartbeat"]["unread"],
+            v["heartbeat"]["open_requests"]
+        ),
+        "heartbeat" => format!(
+            "{} is {} · {} hold(s) renewed, {} released",
+            st(&v["agent"]),
+            st(&v["status"]),
+            v["renewed_holds"].as_array().map_or(0, Vec::len),
+            v["released_holds"].as_array().map_or(0, Vec::len)
+        ),
+        "lanes" => {
+            let lanes = v["lanes"].as_array().cloned().unwrap_or_default();
+            if lanes.is_empty() {
+                return "no lanes in your scope".into();
+            }
+            lanes
+                .iter()
+                .map(|l| {
+                    format!(
+                        "{:<15} {:<20} {:<10} lead {}\n",
+                        st(&l["status"]),
+                        st(&l["name"]),
+                        st(&l["project"]),
+                        st(&l["lead"])
+                    )
+                })
+                .collect()
+        }
+        "report" => format!(
+            "reported to lane as {}{} (report {})",
+            st(&v["agent"]),
+            v["status"]
+                .as_str()
+                .map(|s| format!(", status {s}"))
+                .unwrap_or_default(),
+            st(&v["report_id"])
+        ),
+        "decisions" => {
+            let ds = v["decisions"].as_array().cloned().unwrap_or_default();
+            if ds.is_empty() {
+                return "no open decisions in your scope".into();
+            }
+            ds.iter()
+                .map(|d| {
+                    let opts: Vec<String> = d["options"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .enumerate()
+                                .map(|(i, o)| {
+                                    format!("{}. {} ({})", i + 1, st(&o["label"]), st(&o["value"]))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    format!(
+                        "{} for {} from {}: {}\n  {}\n",
+                        st(&d["decision_id"]),
+                        st(&d["human"]),
+                        st(&d["asker"]),
+                        st(&d["question"]),
+                        opts.join("   ")
+                    )
+                })
+                .collect()
+        }
+        "answer" => format!(
+            "answered decision {}: {} (by {}, relayed by {}); mailed to {}",
+            st(&v["decision_id"]),
+            v["answer"]["label"]
+                .as_str()
+                .or(v["answer"]["value"].as_str())
+                .unwrap_or("text"),
+            st(&v["answer"]["answered_by"]),
+            st(&v["answer"]["relayed_by"]),
+            st(&v["asker"])
+        ),
+        "leave" => format!(
+            "left the hub as {} ({}): {} token(s) revoked, {} hold(s) released; profile forgotten",
+            st(&v["agent"]),
+            st(&v["reason"]),
+            v["tokens_revoked"],
+            v["holds_released"]
+        ),
+        _ => serde_json::to_string_pretty(v).unwrap_or_default(),
+    }
+}

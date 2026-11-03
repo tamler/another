@@ -49,6 +49,20 @@ All notable changes to Another. Unreleased work is listed under the next version
   - `another summary [--since 24h]`, MCP `daily_summary`, and `GET /summary` (JSON, or markdown with `format=markdown`).
   - Contents: what needs a person, lanes moved, stuck and closed, decisions, requests, holds and conflicts, spend, and active agents. Scoped for remote callers.
 - [Manager bot guide](docs/MANAGER-BOT.md): token, webhooks to subscribe, and which MCP tools to call.
+- **Remote agents** ([design](docs/design/remote-agents.md), [guide](docs/REMOTE-AGENTS.md)):
+  - Invites:
+    - `another invite create|list|revoke`: single-use, expiring codes that fix the agent's name, program, project globs and lane.
+    - Redeem with `another join <hub> <code>` or `POST /join`. That registers the agent, issues a scoped token, and returns Claude Code / Codex MCP config and env vars.
+    - `--print-snippet` prints a shell block for cloud sessions.
+  - Lifecycle:
+    - Presence (`another agent remotes`).
+    - Ephemeral agents leave when their session ends or when idle: token revoked, holds and leases released, `lane.agent_left` emitted.
+    - `another agent kick` removes any agent at once.
+  - Remote-agent HTTP routes (`/agent/heartbeat`, `/agent/leave`, `/lanes`, `/lanes/{lane}/report`) and a client CLI (`another remote …`).
+  - Federation:
+    - Lanes are mirrored read-only on other nodes; only the owner writes.
+    - Decisions asked on another node can be answered here, and the answer is relayed only to that node.
+    - Synced holds keep their lane.
 - CI also runs on pull requests that target non-`main` branches, so stacked PRs are checked.
 
 ### Changed
@@ -58,6 +72,7 @@ All notable changes to Another. Unreleased work is listed under the next version
 
 ### Database
 - Migration 6 adds the `lanes`, `lane_links` and `lane_reports` tables. It is additive; existing databases upgrade in place.
+- Migration 11 adds the `agent_invites`, `remote_agents` and `remote_decisions` tables. It is additive.
 - Migration 10 adds the `spend_accounts`, `spend_entries` and `spend_leases` tables. It is additive.
 - Migration 9 adds `holds.lane_id` (nullable). It is additive.
 - Migration 8 adds the `decisions` table and `requests.kind` (default `task`). It is additive.

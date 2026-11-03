@@ -2192,9 +2192,19 @@ fn remote_command(home: &Path, json: bool, cmd: &RemoteCmd) -> anyhow::Result<Ex
             v
         }
     };
-    Ok(emit(json, &out, |v| {
-        serde_json::to_string_pretty(v).unwrap_or_default()
-    }))
+    Ok(emit(json, &out, |v| output::remote(cmd_name(cmd), v)))
+}
+
+fn cmd_name(cmd: &RemoteCmd) -> &'static str {
+    match cmd {
+        RemoteCmd::Status => "status",
+        RemoteCmd::Heartbeat { .. } => "heartbeat",
+        RemoteCmd::Lanes => "lanes",
+        RemoteCmd::Report { .. } => "report",
+        RemoteCmd::Decisions => "decisions",
+        RemoteCmd::Answer { .. } => "answer",
+        RemoteCmd::Leave => "leave",
+    }
 }
 
 fn decision_command(store: &Store, json: bool, cmd: DecisionCmd) -> anyhow::Result<ExitCode> {

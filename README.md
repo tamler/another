@@ -92,6 +92,8 @@ another activity --summary
 | 5 | Federation (v2): signed event logs, pairing, hub-and-spoke sync, cross-node mail | ✅ tamler/another#5 |
 | 6 | Polish: `another wake` (tmux, cmux, Herdr), Herdr plugin, release builds, quickstart, CONTRIBUTING | ✅ complete |
 | Coordination 1 | Lanes: charters, leads, statuses, structured reports, lane-scoped remote access | 🔄 tamler/another#10 |
+| Coordination 2–6 | Push, human decisions, lane-aware holds, spend ledger, daily summary | 🔄 tamler/another#11–#15 |
+| Coordination 7 | First-class remote agents: invites, join, presence, kick, federation tie-in | 🔄 open PR |
 
 Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88.
 
@@ -105,6 +107,7 @@ Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green
 | [docs/FEDERATION.md](docs/FEDERATION.md) | Several machines: node keys, pairing, sync, permissions |
 | [docs/LANES.md](docs/LANES.md) | Lanes: units of work for a manager bot and coding agents; reports, export, hooks |
 | [docs/HUMAN-DECISIONS.md](docs/HUMAN-DECISIONS.md) | Structured questions from agents to a person, answered by phone (via the manager), HTTP or CLI |
+| [docs/REMOTE-AGENTS.md](docs/REMOTE-AGENTS.md) | Remote agents: invites, one-step join, presence and kick, how a cloud agent reaches the hub |
 | [docs/MANAGER-BOT.md](docs/MANAGER-BOT.md) | Running a manager bot: token, webhooks to subscribe, which MCP tools to call, the daily summary |
 | [docs/SPEND.md](docs/SPEND.md) | Spend ledger: budgets, monthly resets, hourly leases with approval, burn-down by lane and agent |
 | [docs/PUSH.md](docs/PUSH.md) | Push: SSE stream, long-poll and signed webhooks, all filtered by token scope |
@@ -148,6 +151,7 @@ Every command takes `--json`. `--agent` and `--from` default to `$ANOTHER_AGENT`
 | Resources | `another resources`, `another resource register`, `another borrow`, `another release`, `another orphans`, `another reap <target> [--confirm]` |
 | Spend | `another spend [--period previous\|YYYY-MM] [--lane L] [--agent A]`, `another spend account add\|list\|update\|archive`, `another spend record\|borrow\|release\|leases` |
 | Webhooks | `another webhook add --url URL --events lane_status,needs_decision --project GLOB`, `another webhook list\|remove\|test\|dead\|deliveries\|retry` |
+| Remote agents | `another invite create\|list\|revoke`, `another join <hub> <code>`, `another remote status\|lanes\|report\|decisions\|answer\|leave`, `another agent remotes`, `another agent kick NAME` |
 | Remote peers | `another serve --auth`, `another token create\|list\|revoke`, `another audit` |
 | Federation | `another pair invite\|join\|revoke`, `another peers`, `another sync [--watch]`, `another serve --federation` |
 | Wake | `another wake [--agent X\|--all]`, `another wake set\|clear\|list` |

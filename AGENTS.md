@@ -14,7 +14,7 @@ Milestones 1–6 are complete (tamler/another#1–#8). The coordination series i
 | 4 | Lane-aware holds, pre-edit hook | [04-lane-holds](docs/design/04-lane-holds.md) | tamler/another#13 |
 | 5 | Spend ledger, approval gate | [05-spend](docs/design/05-spend.md) | tamler/another#14 |
 | 6 | Daily summary | [06-summary](docs/design/06-summary.md) | tamler/another#15 |
-| 7 | First-class remote agents: invites, join, lifecycle, federation tie-in | remote-agents | (planned) |
+| 7 | First-class remote agents: invites, join, lifecycle, federation tie-in | [remote-agents](docs/design/remote-agents.md) | (open) |
 
 Keep the [README.md](README.md) status and [CHANGELOG.md](CHANGELOG.md) (Unreleased) current in every PR.
 
