@@ -455,6 +455,28 @@ fn check_hooks(opts: &DoctorOptions) -> Vec<Check> {
             }
             continue;
         }
+        // The config naming the wrapper is not enough: every hook runs the wrapper by its
+        // absolute path, so it must exist and be executable.
+        let broken: Vec<PathBuf> = wrapper_paths(&text)
+            .into_iter()
+            .filter(|w| !is_executable(w))
+            .collect();
+        if let Some(w) = broken.first() {
+            out.push(check(
+                &area,
+                Level::Fail,
+                format!(
+                    "{} hooks point to {}, which is missing or not executable",
+                    client_name(c),
+                    w.display()
+                ),
+                Some(format!(
+                    "reinstall them (this rewrites the wrapper for the current Another home): `another hook install --client {}`",
+                    c.as_str()
+                )),
+            ));
+            continue;
+        }
         out.push(check(
             &area,
             Level::Pass,
@@ -468,32 +490,104 @@ fn check_hooks(opts: &DoctorOptions) -> Vec<Check> {
     out
 }
 
-/// Another's hook commands in a Codex `hooks.json`.
-fn our_codex_hooks(text: &str) -> usize {
+/// Every `command` string in a client config that runs Another's wrapper.
+fn our_commands(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::Object(m) => {
+            for (k, x) in m {
+                match x {
+                    Value::String(c) if k == "command" && c.contains(MARKER) => out.push(c.clone()),
+                    _ => our_commands(x, out),
+                }
+            }
+        }
+        Value::Array(a) => a.iter().for_each(|x| our_commands(x, out)),
+        _ => {}
+    }
+}
+
+/// The wrapper paths Another's hook commands run: the first shell word of each command
+/// (`'…/another-hook.sh' session-start --client codex`).
+fn wrapper_paths(text: &str) -> Vec<PathBuf> {
     let Ok(v) = serde_json::from_str::<Value>(text) else {
-        return 0;
+        return Vec::new();
     };
-    let mut n = 0;
+    let mut cmds = Vec::new();
+    our_commands(&v, &mut cmds);
+    let mut out: Vec<PathBuf> = Vec::new();
+    for c in cmds {
+        let c = c.trim_start();
+        let word = match c.strip_prefix('\'') {
+            Some(rest) => rest.split('\'').next().unwrap_or_default().to_string(),
+            None => c.split_whitespace().next().unwrap_or_default().to_string(),
+        };
+        let p = PathBuf::from(word);
+        if p.ends_with(MARKER) && !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+fn is_executable(p: &Path) -> bool {
+    match std::fs::metadata(p) {
+        #[cfg(unix)]
+        Ok(m) => {
+            use std::os::unix::fs::PermissionsExt;
+            m.is_file() && m.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        Ok(m) => m.is_file(),
+        Err(_) => false,
+    }
+}
+
+/// `SessionStart` -> `session_start` (how Codex names events in trust keys).
+fn snake(event: &str) -> String {
+    let mut out = String::new();
+    for (i, ch) in event.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// The trust keys Codex would use for Another's own hooks in `hooks.json`:
+/// `<hooks.json path>:<event>:<group index>:<hook index>`, one per Another hook entry.
+fn our_codex_hook_keys(text: &str, hooks_json: &Path) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<Value>(text) else {
+        return Vec::new();
+    };
+    let path = hooks_json.display().to_string();
+    let mut keys = Vec::new();
     if let Some(events) = v.get("hooks").and_then(Value::as_object) {
-        for groups in events.values() {
-            for g in groups.as_array().into_iter().flatten() {
-                for h in g
+        for (event, groups) in events {
+            for (g, group) in groups.as_array().into_iter().flatten().enumerate() {
+                for (h, hook) in group
                     .get("hooks")
                     .and_then(Value::as_array)
                     .into_iter()
                     .flatten()
+                    .enumerate()
                 {
-                    if h.get("command")
+                    if hook
+                        .get("command")
                         .and_then(Value::as_str)
                         .is_some_and(|c| c.contains(MARKER))
                     {
-                        n += 1;
+                        keys.push(format!("{path}:{}:{g}:{h}", snake(event)));
                     }
                 }
             }
         }
     }
-    n
+    keys
 }
 
 /// Whether Codex has recorded trust for the hooks in `hooks.json`. Codex keeps trust in
@@ -501,48 +595,71 @@ fn our_codex_hooks(text: &str) -> usize {
 /// `trusted_hash`. That layout isn't formally documented, so this only reads it and never
 /// writes it; the hash itself can't be checked here.
 fn codex_trust(home: &Path, hooks_json: &Path, hooks_text: &str) -> Check {
-    let ours = our_codex_hooks(hooks_text);
+    let ours = our_codex_hook_keys(hooks_text, hooks_json);
     let config =
         std::fs::read_to_string(home.join(".codex").join("config.toml")).unwrap_or_default();
-    let path = hooks_json.display().to_string();
-    let mut trusted = 0;
-    let mut in_state = false;
+    // Trusted keys: `[hooks.state."<key>"]` tables that hold a `trusted_hash`.
+    let mut trusted: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
     for line in config.lines() {
         let l = line.trim();
         if l.starts_with('[') {
-            in_state = l.starts_with("[hooks.state.") && l.contains(&path);
+            current = l
+                .strip_prefix("[hooks.state.\"")
+                .and_then(|r| r.strip_suffix("\"]"))
+                .map(str::to_string);
             continue;
         }
-        if in_state && l.starts_with("trusted_hash") {
-            trusted += 1;
+        if l.starts_with("trusted_hash") {
+            if let Some(k) = &current {
+                trusted.push(k.clone());
+            }
         }
     }
+    // Only records for Another's own entries count: other hooks in the same file don't.
+    let missing: Vec<&String> = ours.iter().filter(|k| !trusted.contains(k)).collect();
     let fix = Some(
         "open Codex interactively and trust them under `/hooks` (needed again after each `another hook install`); `codex exec` skips untrusted hooks, so until then holds are not enforced there (or run `codex exec --dangerously-bypass-hook-trust`)"
             .to_string(),
     );
-    if trusted == 0 {
+    let path = hooks_json.display();
+    if missing.is_empty() {
         check(
             "hooks:codex-trust",
-            Level::Warn,
-            format!("no Codex trust recorded for {path}: Codex will skip Another's {ours} hook(s)"),
-            fix,
+            Level::Pass,
+            format!(
+                "Codex trust recorded for all {} of Another's hooks in {path} (the hash itself isn't checked; reinstalling resets it)",
+                ours.len()
+            ),
+            None,
         )
-    } else if trusted < ours {
+    } else if missing.len() == ours.len() {
         check(
             "hooks:codex-trust",
             Level::Warn,
-            format!("Codex trust recorded for {trusted} of {ours} hook(s) in {path}"),
+            format!(
+                "no Codex trust recorded for Another's {} hook(s) in {path}: Codex will skip them",
+                ours.len()
+            ),
             fix,
         )
     } else {
         check(
             "hooks:codex-trust",
-            Level::Pass,
+            Level::Warn,
             format!(
-                "Codex trust recorded for {trusted} hook entr(y/ies) in {path} (reinstalling the hooks resets it)"
+                "Codex trust recorded for {} of Another's {} hook(s) in {path}; untrusted: {}",
+                ours.len() - missing.len(),
+                ours.len(),
+                missing
+                    .iter()
+                    .map(|k| k
+                        .rsplit_once(&format!("{path}:"))
+                        .map_or(k.as_str(), |(_, e)| e))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
-            None,
+            fix,
         )
     }
 }
