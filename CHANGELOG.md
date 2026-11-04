@@ -29,17 +29,17 @@ The first release. It contains the local core built in milestones 1–6 and the 
   - `lane export` writes the old `.lanes`-style STATUS and DONE markdown.
   - Opt-in Stop hook (`another hook install --lane-reports`) for automatic reports from Claude Code, Codex, Grok and Cursor.
   - Remote callers only see and change lanes in their token's project globs. Lanes outside them look like unknown lanes (`not_found`), and their events are left out of the remote activity feed.
-  - Lane names are unique per project; address lanes as `name` or `name@project`.
+  - Open lane names are unique per project (a closed lane's name can be reused); address lanes as `name` or `name@project`.
   - Lane events carry ids, names, project and status only (no charter, report text, progress or links). Links must belong to the lane's project.
-  - The Stop hook redacts likely secrets (`ano_`, `sk-`, `ghp_`, long hex/base64, …) from the agent's last message before storing it.
+  - The Stop hook redacts likely secrets (`ano_`, `sk-`, `ghp_`, long hex/base64, …) from the agent's last message (Claude Code and Codex; Grok and Cursor send none) before storing it. Summaries are cut to 300 characters, at most one report per 15 minutes.
 - **Push** ([design](docs/design/02-push.md), [guide](docs/PUSH.md)):
   - `GET /events/stream` (Server-Sent Events, resumable with `Last-Event-ID`), `GET /events/poll` (long-poll JSON) and the MCP tool `events_poll`.
   - Outbound webhooks with HMAC-SHA256 signatures, retries with backoff and a dead-letter list.
-    - Filters: `lane_status`, `lane_report`, `needs_decision`, `request_created`, `request_answered`, `hold_conflict`, `lease_expiring`, `all`.
+    - Filters: `lane_status`, `lane_report`, `needs_decision`, `request_created`, `request_answered`, `hold_conflict`, `lease_expiring`, `all` (every event except mail and delivery receipts and token, peer, node and summary events). Phases 5 and 6 add `budget` and `daily_summary`.
     - CLI: `another webhook add|list|remove|test|dead|deliveries|retry`.
     - MCP tools: `webhook_subscribe`, `webhook_list`, `webhook_remove`.
     - `another serve` delivers them.
-  - New events: `hold.conflict`, emitted when an acquire is refused, and `resource.lease_expiring`, emitted once when a lease nears its end. Both are node-local and are not federated.
+  - New events: `hold.conflict`, emitted when an acquire is refused, and `resource.lease_expiring`, emitted once per lease term within 5 minutes of expiry (or half the TTL); renewing re-arms it. Both, and `lane.hold_conflict`, are node-local and are not federated.
   - A webhook is disabled once the token that created it is revoked or expires. Webhooks a token created follow its own-agent rule for project-less events, like the stream.
 - **Human decisions** ([design](docs/design/03-decisions.md), [guide](docs/HUMAN-DECISIONS.md)):
   - Structured questions from agents to a person: 2–6 options, optional free text, context links, a deadline and what happens at it (`keep_open`, `choose_default`, `cancel`), and an optional lane, which shows `needs_decision` until answered.
@@ -55,10 +55,10 @@ The first release. It contains the local core built in milestones 1–6 and the 
   - Events: `decision.created|answered|expired|overdue|cancelled`.
   - Requests gain a `kind` field (`task` or `decision`).
 - **Lane-aware holds** ([design](docs/design/04-lane-holds.md)):
-  - Holds carry a lane (explicit `lane`, else `$ANOTHER_LANE`, else the lane the agent leads), looked up in the hold's project only. Overlaps inside one lane are warnings, except two exclusive holds, which still block.
-  - A cross-lane conflict also mails the holding lane's lead (from the system agent, debounced).
+  - Holds carry a lane (explicit `lane`, else `$ANOTHER_LANE`, else the single open lane the agent leads in that project), looked up in the hold's project only. Overlaps inside one lane are warnings, except two exclusive holds, which still block.
+  - When the requesting hold has a lane, a cross-lane conflict also mails the holding lane's lead (from the system agent, at most once per lane pair every 10 minutes).
   - Under `codex exec`, Codex skips hooks that haven't been trusted under `/hooks`; HOOKS.md and the installer say so (hold enforcement there isn't guaranteed without trust).
-  - The pre-edit hook compares symlink-resolved paths, and warns (but still holds) when `$ANOTHER_LANE` is closed or belongs to another project.
+  - The pre-edit hook compares symlink-resolved paths, and warns (but still holds) when `$ANOTHER_LANE` is closed, unknown or in another project.
   - Cross-lane conflicts emit `lane.hold_conflict`, which the `hold_conflict` webhook filter delivers.
   - `another holds --by-lane`, MCP `holds_by_lane`, and live holds in `lane show`.
   - Opt-in pre-edit hook for Claude Code and Codex: `another hook install --pre-edit`. It holds files before each edit and denies the edit when another lane or agent holds them.
@@ -101,18 +101,18 @@ The first release. It contains the local core built in milestones 1–6 and the 
   - `another service install|status|logs|stop|start|uninstall`. It is never installed unless you run `another service install`.
   - macOS: a launchd user agent (`one.toanother.another`, `RunAtLoad`, `KeepAlive`, logs in `$ANOTHER_HOME/logs/`). Linux: a systemd user unit (`another.service`, `Restart=on-failure`, journal logs).
   - `install` takes `serve`'s flags (`--bind`, `--auth`, `--allowed-host`, `--allow-remote-bind`, `--federation`) and the global `--home`. Re-running it updates the service in place. It refuses when another process already listens on the port.
-- **`another doctor`**: checks the store (writable, schema), the local server (reachable, Another, same home), tokens (expired, expiring, matching no project), client hooks for Claude Code, Codex and Grok (and whether Codex has recorded trust for them), and port and resource conflicts. PASS / WARN / FAIL / SKIP with a fix per problem; `--json`; exit 1 on any FAIL.
+- **`another doctor`**: checks the store (writable, schema), the local server (reachable, Another, same home), tokens (expired, expiring, matching no project), client hooks for Claude Code, Codex and Grok (and whether Codex has recorded trust for them), and port and resource conflicts. PASS / WARN / FAIL / SKIP with a fix per problem; machine-readable with the global `--json`; exit 1 on any FAIL.
 - **Release installs:** tagged releases also publish one `SHA256SUMS` and `install.sh`. One-line install: `curl -fsSL https://github.com/tamler/another/releases/latest/download/install.sh | sh`. It verifies the archive before installing (`ANOTHER_VERSION`, `ANOTHER_INSTALL_DIR` to pin or relocate).
 - README quickstart rewritten as a 90-second demo script (install, start, two agents, a hold, a port claim, doctor).
 
 ### Changed
-- **Remote event reads are now filtered by token scope** (D38, supersedes D16). `activity_feed`, `activity_summarize` and `GET /activity` used to show every project's events to any token. They now show only events from the token's projects (and project-less events concerning its own agent). Token, peer and node events are hidden from tokens. Local callers are unaffected.
-- `activity_summarize` request counts exclude decision requests (they are reported as decisions).
-- When reading forward, the feed's `next_since` now advances past events filtered out by `kinds` or scope.
+- **Remote event reads are now filtered by token scope** (D38, supersedes D16). `activity_feed`, `activity_summarize` and `GET /activity` used to show every project's events to any token. They now show only events from the token's projects (and project-less events concerning its own agent). Token, peer, node, invite and summary events are hidden from tokens. Local callers are unaffected.
+- `activity_summarize` open, claimed and stale request counts exclude decision requests (`kind = 'decision'`).
+- When reading forward, the feed's `next_since` now advances past events filtered out by `kinds` or scope. For a scoped caller whose last scanned event is hidden, the cursor is an opaque `@<seq>` value instead of an event id; pass it back unchanged.
 - **Database schema:** migrations 6–11, all additive; existing databases upgrade in place on first open.
   - Migration 6 adds the `lanes`, `lane_links` and `lane_reports` tables.
   - Migration 7 adds the `webhooks` and `webhook_deliveries` tables and a nullable `resource_leases.expiry_warned_at` column.
-  - Migration 8 adds the `decisions` table and `requests.kind` (default `task`).
+  - Migration 8 adds the `decisions` and `node_settings` tables and `requests.kind` (default `task`).
   - Migration 9 adds `holds.lane_id` (nullable).
   - Migration 10 adds the `spend_accounts`, `spend_entries` and `spend_leases` tables, and a nullable `resources.spend_account_id`.
   - Migration 11 adds the `agent_invites`, `remote_agents` and `remote_decisions` tables, and a nullable `lanes.leaderless_at`.

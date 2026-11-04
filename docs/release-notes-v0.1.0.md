@@ -66,7 +66,7 @@ This is the first release, so there is no earlier release to break. Two changes 
   - start with a fresh `another init`;
   - issue new tokens (`another token create`);
   - pair federated nodes again.
-- **Remote event reads follow token scope** (D38, which supersedes D16 for events). Tokens used to see every project's events in `activity_feed`, `activity_summarize` and `GET /activity`. Now they see only events from their own projects, plus project-less events about their own agent. Token, peer and node events are hidden from tokens. Local callers are unaffected. A remote integration that relied on node-wide events needs a token with broader project globs.
+- **Remote event reads follow token scope** (D38, which supersedes D16 for events). Tokens used to see every project's events in `activity_feed`, `activity_summarize` and `GET /activity`. Now they see only events from their own projects, plus project-less events about their own agent. Token, peer, node, invite and summary events are hidden from tokens. Local callers are unaffected. A remote integration that relied on node-wide events needs a token with broader project globs.
 
 ## Known limitations
 
