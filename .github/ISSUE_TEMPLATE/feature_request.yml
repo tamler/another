@@ -1,0 +1,26 @@
+name: Feature request
+description: Describe a coordination problem Another could solve.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: Search existing requests and read the product scope in docs/SPEC.md. Keep examples free of secrets and personal data.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and workflow
+      description: Which agents or resources are involved, and what prevents the workflow today?
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Proposed behavior
+      description: Describe an observable outcome, including safe defaults and relevant failure cases.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Existing commands, integrations or a smaller change that could solve this.

@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a reproducible problem with Another.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Search existing issues first. Remove tokens, mail bodies, personal paths and client config secrets from every example.
+  - type: input
+    id: version
+    attributes:
+      label: Another version
+      description: Include another --version and whether you installed from a tag or Git commit.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system and client
+      description: OS/architecture, client and version, and transport (CLI, stdio MCP or HTTP).
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Use a fresh temporary Another home where possible. Include exact commands and relevant flags; do not change your normal node to reproduce a bug.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and redacted output
+      description: Include exit status and errors. State what you actually ran and what remains untested.
+    validations:
+      required: true

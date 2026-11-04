@@ -106,6 +106,14 @@ figure { margin: 0; }
 .guide-hero { padding-block: 56px; max-width: 780px; }
 .guide-hero h1 { font-size: 3rem; margin-bottom: 24px; }
 .guide-hero .definition { max-width: 55ch; }
+.guide-hero .definition + p { margin-top: 20px; }
+.table-scroll { max-width: 100%; overflow-x: auto; margin-block: 24px; }
+.table-scroll:focus-visible { outline: 3px solid var(--blue); outline-offset: 5px; }
+table { width: 100%; border-collapse: collapse; text-align: left; }
+caption { text-align: left; margin-bottom: 16px; color: var(--muted); }
+th, td { padding: 16px; border-bottom: 1px solid var(--rule); vertical-align: top; min-width: 170px; }
+th { font-weight: 600; }
+thead th { font-family: var(--mono); font-weight: 400; }
 .guide-section { padding-block: 40px; border-top: 1px solid var(--rule); }
 .guide-section h2 { margin-bottom: 24px; }
 .guide-section > p { margin-bottom: 20px; }
@@ -118,6 +126,8 @@ figure { margin: 0; }
   .masthead { padding-block: 22px; gap: 16px; }
   nav { gap: 20px; }
   .hero { padding-block: 48px 64px; }
+  .masthead:not(.with-route) { flex-wrap: wrap; }
+  .guide-hero h1 { font-size: clamp(1.8rem, 8vw, 3rem); overflow-wrap: anywhere; }
   .hero h1 { font-size: clamp(1.8rem, 8.75vw, 2rem); }
   .hero-bottom { grid-template-columns: 1fr; gap: 20px; }
   .hero-bottom { margin-top: 32px; gap: 30px; }
