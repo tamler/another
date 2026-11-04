@@ -734,6 +734,17 @@ fn serve_on(env: &Env, port: u16) -> Server {
 }
 
 #[test]
+fn doctor_reaches_a_wildcard_bind_through_loopback() {
+    use another::doctor::bind_url;
+    assert_eq!(bind_url("127.0.0.1:7467"), "http://127.0.0.1:7467");
+    assert_eq!(bind_url("0.0.0.0:7467"), "http://127.0.0.1:7467");
+    assert_eq!(bind_url("[::]:7467"), "http://[::1]:7467");
+    assert_eq!(bind_url("[::1]:7467"), "http://[::1]:7467");
+    assert_eq!(bind_url("192.168.1.5:7467"), "http://192.168.1.5:7467");
+    assert_eq!(bind_url("localhost:7467"), "http://localhost:7467");
+}
+
+#[test]
 fn doctor_checks_the_installed_service_instead_of_the_default_port() {
     for platform in ["systemd", "launchd"] {
         let env = Env::new(platform);

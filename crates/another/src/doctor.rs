@@ -289,7 +289,7 @@ fn same_path(a: Option<&Path>, b: &Path) -> bool {
 }
 
 /// The address to reach a `--bind` value from this machine. A wildcard listens on loopback too.
-fn bind_url(bind: &str) -> String {
+pub fn bind_url(bind: &str) -> String {
     let Ok(addr) = bind.parse::<SocketAddr>() else {
         return format!("http://{bind}");
     };
@@ -859,19 +859,4 @@ pub fn render(r: &Report) -> String {
         format!("{} failed, {} warning(s).", r.failed, r.warnings)
     });
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::bind_url;
-
-    #[test]
-    fn bind_url_reaches_a_wildcard_through_loopback() {
-        assert_eq!(bind_url("127.0.0.1:7467"), "http://127.0.0.1:7467");
-        assert_eq!(bind_url("0.0.0.0:7467"), "http://127.0.0.1:7467");
-        assert_eq!(bind_url("[::]:7467"), "http://[::1]:7467");
-        assert_eq!(bind_url("[::1]:7467"), "http://[::1]:7467");
-        assert_eq!(bind_url("192.168.1.5:7467"), "http://192.168.1.5:7467");
-        assert_eq!(bind_url("localhost:7467"), "http://localhost:7467");
-    }
 }
