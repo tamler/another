@@ -344,7 +344,7 @@ fn second_home_joins_reports_answers_and_is_kicked() {
     assert!(inbox
         .messages
         .iter()
-        .any(|m| m.message.subject.starts_with("[decision] Ship")));
+        .any(|m| m.message.subject.starts_with("[decision] answered: ")));
 
     // Other surfaces with the same token stay inside shop.
     let token = serde_json::from_str::<Value>(

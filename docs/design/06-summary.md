@@ -54,6 +54,7 @@ So the summary can't show what any one of those reads would hide.
 
 `another summary schedule --daily HH:MM --to webhook|mail:NAME` (local only; `--off` turns it off, no flags shows it). Stored as the node settings `summary_daily` and `summary_to`.
 - **Runs in the server:** `another serve` checks on every sweep. Once a day, after `HH:MM` local time, it sends the local (unscoped) summary covering the time since the last one (24 h the first time, at most 48 h).
+- **Once, even with several servers:** the send rechecks the "sent today" marker inside its write transaction (writes are serialized), so several sweepers sharing one home (an HTTP server plus stdio MCP servers) send it once.
 - **`mail:NAME`:** mail from the reserved system agent `another`.
 - **`webhook`:** emits `summary.daily` (from `another`), delivered through the new `daily_summary` webhook filter. The event is node-local (never federated) and never visible to tokens. So only local webhooks without project globs receive it; token-created webhooks and `all` never do. Its payload is the summary itself: it is the delivery.
 - Pulling with `another summary`, MCP `daily_summary` or `GET /summary` is unchanged.

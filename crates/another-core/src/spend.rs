@@ -280,7 +280,7 @@ impl std::str::FromStr for PeriodSel {
         };
         let (y, m) = s.split_once('-').ok_or_else(bad)?;
         let (y, m): (i32, u32) = (y.parse().map_err(|_| bad())?, m.parse().map_err(|_| bad())?);
-        if !(1..=12).contains(&m) {
+        if !(1..=12).contains(&m) || !(1970..=9999).contains(&y) {
             return Err(bad());
         }
         Ok(PeriodSel::Month(y, m))
@@ -472,6 +472,21 @@ fn account(conn: &Connection, node_id: &str, key: &str) -> Result<(SpendAccount,
     )
     .optional()?
     .ok_or_else(|| Error::NotFound(format!("no spend account {key:?}")))
+}
+
+/// [`account`] as `scope` sees it: another project's account is the same `not_found` (and
+/// message) as one that doesn't exist.
+fn account_in(
+    conn: &Connection,
+    node_id: &str,
+    key: &str,
+    scope: Option<&TokenScope>,
+) -> Result<(SpendAccount, Option<String>)> {
+    let found = account(conn, node_id, key)?;
+    if !account_visible(conn, scope, found.1.as_deref())? {
+        return Err(Error::NotFound(format!("no spend account {key:?}")));
+    }
+    Ok(found)
 }
 
 /// Accounts a scope may see: its projects' accounts, plus shared ones.
@@ -1109,13 +1124,7 @@ fn borrow_spend_tx(
     resource_id: Option<&str>,
     scope: Option<&TokenScope>,
 ) -> Result<SpendLeaseOutcome> {
-    let (a, account_project) = account(tx, tx.node_id, &input.account)?;
-    if !account_visible(tx, scope, account_project.as_deref())? {
-        return Err(Error::Forbidden(format!(
-            "account {} is outside this token's projects",
-            a.name
-        )));
-    }
+    let (a, account_project) = account_in(tx, tx.node_id, &input.account, scope)?;
     let cph = input
         .cost_per_hour
         .or(a.cost_per_hour)
@@ -1423,10 +1432,7 @@ impl Store {
         }
         self.write(|tx| {
             crate::holds::sweep_tx(tx)?;
-            let (a, account_project) = account(tx, tx.node_id, &input.account)?;
-            if !account_visible(tx, scope, account_project.as_deref())? {
-                return Err(Error::Forbidden(format!("account {} is outside this token's projects", a.name)));
-            }
+            let (a, account_project) = account_in(tx, tx.node_id, &input.account, scope)?;
             let who = attribute(
                 tx,
                 tx.node_id,
@@ -1548,15 +1554,35 @@ impl Store {
             let me = resolve_agent(tx, tx.node_id, agent)?;
             let row = load_lease(tx, tx.now, lease_id)?;
             if !attributed_visible(tx, scope, row.project_id.as_deref(), Some(&row.agent_id))? {
-                return Err(Error::Forbidden(
-                    "lease is outside this token's projects".into(),
-                ));
+                // A hidden lease is a missing one (same error and message).
+                return Err(Error::NotFound(format!("no spend lease {lease_id:?}")));
             }
             if row.agent_id != me.id {
                 return Err(Error::Forbidden(format!(
                     "lease {} belongs to {}",
                     row.lease.lease_id, row.lease.owner
                 )));
+            }
+            if row.lease.status == SpendLeaseStatus::Active {
+                if let Some(rid) = &row.resource_id {
+                    let live: bool = tx
+                        .query_row(
+                            "SELECT 1 FROM resource_leases
+                             WHERE resource_id = ?1 AND agent_id = ?2 AND released_at IS NULL",
+                            params![rid, row.agent_id],
+                            |_| Ok(()),
+                        )
+                        .optional()?
+                        .is_some();
+                    if live {
+                        // It pays for a resource lease that is still held: ending it alone
+                        // would stop charging while the resource stays in use.
+                        return Err(Error::Conflict(format!(
+                            "lease {} pays for a resource you still hold: release the resource (`another release {rid}`) and it ends with it",
+                            row.lease.lease_id
+                        )));
+                    }
+                }
             }
             match row.lease.status {
                 SpendLeaseStatus::Active => {
@@ -1705,7 +1731,9 @@ impl Store {
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 let mut accrued = 0.0;
                 let mut active = 0;
-                let in_window = q.period == PeriodSel::Current || a.period == SpendPeriod::None;
+                // Open leases count when the selected period is the one running now, however
+                // it was named (`current` or its month).
+                let in_window = a.period == SpendPeriod::None || (from <= now && now < to);
                 for l in leases {
                     if in_window {
                         total +=

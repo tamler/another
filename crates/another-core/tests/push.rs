@@ -200,10 +200,12 @@ fn webhooks_carry_only_matching_in_scope_events() {
 
     let due = s.claim_due_deliveries(10).unwrap();
     assert_eq!(due.len(), 2);
-    let bodies: Vec<serde_json::Value> = due
+    let mut bodies: Vec<serde_json::Value> = due
         .iter()
         .map(|d| serde_json::from_str(&d.body).unwrap())
         .collect();
+    // Queued in the same millisecond, the two can be claimed in either order.
+    bodies.sort_by_key(|b| b["filter"] != "lane_status");
     assert_eq!(bodies[0]["filter"], "lane_status");
     assert_eq!(bodies[0]["data"]["to"], "working");
     assert_eq!(bodies[1]["filter"], "needs_decision");
@@ -341,9 +343,13 @@ fn remote_webhooks_stay_inside_the_token_scope() {
     let theirs = s.webhooks(Some(&other_scope)).unwrap()[0]
         .webhook_id
         .clone();
+    // Someone else's webhook is indistinguishable from a missing one.
+    let e = s.remove_webhook(&theirs, Some(&scope)).unwrap_err();
+    let missing = s.remove_webhook("NOPE", Some(&scope)).unwrap_err();
+    assert_eq!((e.code(), missing.code()), ("not_found", "not_found"));
     assert_eq!(
-        s.remove_webhook(&theirs, Some(&scope)).unwrap_err().code(),
-        "forbidden"
+        e.to_string().replace(&theirs, "X"),
+        missing.to_string().replace("NOPE", "X")
     );
 
     // A vault event never reaches the shop webhook, even with filter `all`.
@@ -578,4 +584,75 @@ fn webhooks_follow_the_own_agent_rule_for_project_less_events() {
         .items
         .iter()
         .any(|i| i.kind == "session.started" && i.actor == "manager"));
+}
+
+#[test]
+fn object_events_follow_the_objects_project_only() {
+    let (s, _) = store_with_clock();
+    // A vault lane led by a shop agent stays a vault event.
+    new_lane(&s, "vault-work", "vault", "shopper@shop");
+    let t = s
+        .create_token("manager", &["/work/shop".into()], None, None)
+        .unwrap();
+    let shop = s.verify_token(&t.secret).unwrap();
+    let items = all_items(&s, Some(&shop));
+    assert!(
+        items.iter().all(|i| !i.summary.contains("vault-work")),
+        "{items:?}"
+    );
+    // A shop hold by a vault agent is a shop event.
+    hold(&s, "vaulter@vault", "shop", "src/x.rs");
+    assert!(all_items(&s, Some(&shop))
+        .iter()
+        .any(|i| i.kind == "hold.acquired"));
+}
+
+#[test]
+fn webhook_payloads_carry_ids_and_statuses_only() {
+    let (s, _) = store_with_clock();
+    let hook = s
+        .create_webhook(
+            NewWebhook {
+                url: "https://example.test/h".into(),
+                filters: vec![WebhookFilter::RequestAnswered, WebhookFilter::All],
+                project_globs: None,
+                description: None,
+            },
+            None,
+        )
+        .unwrap();
+    let m = s
+        .send_message(SendMessage {
+            from: "manager".into(),
+            to: vec!["shopper@shop".into()],
+            subject: "please".into(),
+            body: "do it".into(),
+            request: Some(NewRequest::default()),
+            ..Default::default()
+        })
+        .unwrap();
+    let rid = m.request_id.clone().unwrap();
+    s.update_request(RequestUpdate {
+        agent: "shopper@shop".into(),
+        request_id: rid,
+        action: RequestAction::Complete,
+        note: Some("the private completion note".into()),
+        due_in_seconds: None,
+    })
+    .unwrap();
+    s.queue_webhook_deliveries().unwrap();
+    let bodies: Vec<String> = s
+        .claim_due_deliveries(200)
+        .unwrap()
+        .into_iter()
+        .filter(|d| d.webhook_id == hook.webhook.webhook_id)
+        .map(|d| d.body)
+        .collect();
+    assert!(
+        bodies.iter().any(|b| b.contains("request.completed")),
+        "{bodies:?}"
+    );
+    for b in &bodies {
+        assert!(!b.contains("private completion note"), "{b}");
+    }
 }
