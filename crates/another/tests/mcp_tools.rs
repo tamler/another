@@ -324,7 +324,7 @@ async fn a_spend_approval_goes_through_a_decision() {
     ok(
         &c,
         "spend_account_upsert",
-        json!({ "name": "gpu", "kind": "gpu_pod", "unit": "USD", "cost_per_hour": 2.0, "requires_approval": true, "approver": "jacob", "project": "shop" }),
+        json!({ "name": "gpu", "kind": "gpu_pod", "unit": "USD", "cost_per_hour": 2.0, "requires_approval": true, "approver": "pat", "project": "shop" }),
     )
     .await;
     let lease = ok(
@@ -758,7 +758,7 @@ async fn the_decision_tools_cover_a_questions_life() {
     let answered = ok(
         &c,
         "decision_answer",
-        json!({ "decision": id, "value": "yes", "text": "go on", "answered_by": "jacob", "relayed_by": "manager" }),
+        json!({ "decision": id, "value": "yes", "text": "go on", "answered_by": "pat", "relayed_by": "manager" }),
     )
     .await;
     assert_eq!(answered["status"], "answered");
