@@ -58,8 +58,8 @@ h2 { font-family: var(--mono); font-weight: 400; font-size: clamp(1.35rem, 2.4vw
 h3 { font-size: 1.2rem; font-weight: 500; letter-spacing: 0; }
 p { max-width: 66ch; }
 p + p { margin-top: 16px; }
-.hero { padding-block: 64px 76px; }
-.handoff { display: block; margin-left: 20%; }
+.hero { padding-block: 96px 104px; }
+.hero h1 { font-size: clamp(2rem, 5vw, 4.1rem); text-wrap: balance; }
 .hero-bottom { display: grid; grid-template-columns: .7fr 1.3fr; gap: 64px; margin-top: 48px; align-items: start; }
 .definition { font-size: 1.3rem; line-height: 1.45; letter-spacing: -.01em; }
 .quiet { color: var(--muted); font-size: .9rem; }
@@ -82,7 +82,7 @@ pre code { font-size: inherit; font-size-adjust: inherit; white-space: inherit; 
 .objections > div { display: grid; grid-template-columns: 160px 1fr; gap: 32px; padding-block: 20px; }
 .objections dt { font-weight: 500; }
 .objections dd { margin: 0; }
-.section { padding-block: 64px; border-top: 1px solid var(--rule); }
+.section { padding-block: 96px; border-top: 1px solid var(--rule); }
 .section > h2 { margin-bottom: 28px; }
 .section > p { margin-bottom: 24px; }
 .terminal { background: var(--terminal); color: var(--terminal-ink); padding: 32px 36px; }
@@ -117,12 +117,12 @@ figure { margin: 0; }
   .wrap { width: calc(100% - 40px); }
   .masthead { padding-block: 22px; gap: 16px; }
   nav { gap: 20px; }
-  .hero { padding-block: 36px 48px; }
-  .handoff { margin-left: 16%; }
+  .hero { padding-block: 48px 64px; }
+  .hero h1 { font-size: clamp(1.8rem, 8.75vw, 2rem); }
   .hero-bottom { grid-template-columns: 1fr; gap: 20px; }
   .hero-bottom { margin-top: 32px; gap: 30px; }
   .definition { font-size: 1.15rem; }
-  .section { padding-block: 40px; }
+  .section { padding-block: 64px; }
   .terminal { padding: 24px 18px; }
   .code-block { padding: 18px 16px; }
   .client { grid-template-columns: 1fr; gap: 8px; }

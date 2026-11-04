@@ -42,9 +42,10 @@ Fragment Mono gives the headline, wordmark and commands the same terminal voice;
 prose uses Helvetica Neue/Helvetica/Arial with a generic sans-serif fallback.
 The unmodified font and its OFL license are included locally; provenance and
 hashes are in [fonts/README.md](fonts/README.md). Both themes use neutral paper/ink
-and an ochre signal color. The indented handoff and actual commands supply the
-identity; docs and 404 show their route beside the wordmark. Review generic
-fallback rendering in both themes as well as native rendering.
+and an ochre signal color. The single-line desktop title, balanced mobile title
+and actual commands supply the identity; docs and 404 show their route beside
+the wordmark. Review generic fallback rendering in both themes as well as native
+rendering.
 
 `review/` holds full-page screenshots of all pages at desktop and mobile widths,
 with deliberate light and dark themes and fallback fonts, plus full-size detail
