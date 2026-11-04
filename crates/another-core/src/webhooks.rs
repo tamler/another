@@ -276,8 +276,11 @@ const METADATA_NAMES: [&str; 3] = [
 ];
 /// Metadata addresses outside link-local: Alibaba Cloud, Azure's wire server.
 const METADATA_V4: [[u8; 4]; 2] = [[100, 100, 100, 200], [168, 63, 129, 16]];
-/// AWS's IPv6 metadata address, `fd00:ec2::254`.
-const METADATA_V6: [u16; 8] = [0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254];
+/// IPv6 metadata addresses: AWS's `fd00:ec2::254`, Google's `fd20:ce::254`.
+const METADATA_V6: [[u16; 8]; 2] = [
+    [0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254],
+    [0xfd20, 0xce, 0, 0, 0, 0, 0, 0x254],
+];
 
 /// Check a webhook URL: `https://`, or `http://` to loopback only.
 pub fn validate_webhook_url(url: &str) -> Result<()> {
@@ -421,7 +424,7 @@ pub fn is_refused_webhook_ip(ip: IpAddr) -> bool {
             v6.is_loopback()
                 || v6.is_unspecified()
                 || (s[0] & 0xffc0) == 0xfe80
-                || s == METADATA_V6
+                || METADATA_V6.contains(&s)
                 || embedded.is_some_and(v4_refused)
         }
     }

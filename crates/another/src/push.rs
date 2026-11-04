@@ -466,6 +466,25 @@ mod tests {
             .map_err(|e| e.to_string())
     }
 
+    /// Calls the lookup directly, so no run of this test can open a connection to the address.
+    #[test]
+    fn a_name_resolving_to_an_ipv6_metadata_address_is_refused_by_the_lookup() {
+        let uri: ureq::http::Uri = "https://rebind.example.test/hook".parse().unwrap();
+        let config = ureq::config::Config::default();
+        let timeout = NextTimeout::default();
+        let public: SocketAddr = "[2606:2800:220:1::1]:443".parse().unwrap();
+        for ip in ["[fd00:ec2::254]:443", "[fd20:ce::254]:443"] {
+            let metadata: SocketAddr = ip.parse().unwrap();
+            for answer in [vec![metadata], vec![public, metadata]] {
+                let guarded = RefuseHubAddresses(FixedDns(answer));
+                let err = guarded.resolve(&uri, &config, timeout).unwrap_err();
+                assert!(err.to_string().contains("not allowed"), "{ip}: {err}");
+            }
+        }
+        let guarded = RefuseHubAddresses(FixedDns(vec![public]));
+        assert!(guarded.resolve(&uri, &config, timeout).is_ok());
+    }
+
     /// Finding 3: a harmless-looking name that resolves to this machine reaches nothing.
     #[test]
     fn a_name_resolving_to_a_hub_address_is_not_connected_to() {
