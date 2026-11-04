@@ -88,10 +88,12 @@ Everything is limited to the invite's project globs: lanes, events, stream, webh
 
 **Kicking:**
 - `another agent kick NAME [--reason …]` does all of that immediately, for any agent, and revokes all of its tokens.
-- A manager bot (program `grok_bot`) can do the same over MCP with `agent_kick`, but only for agents in its token's projects, and never for people.
+- A manager bot (program `grok_bot`) can do the same over MCP with `agent_kick`, but only for agents in its token's projects, and never for people. Its kick revokes all of the agent's tokens, but releases only holds and leases in the manager's projects, and only tells those lanes.
 - The reason is kept with the agent's membership record, not in events.
 
 **Presence:** any authenticated call through the agent's token, reads included, counts as being seen.
+
+**A persistent agent's leave** ends its session like a session end: holds, resource leases and spend leases in its token's projects are released (spend charged up to then), and it keeps its token.
 
 ## Reaching the hub
 

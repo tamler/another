@@ -318,6 +318,12 @@ pub(crate) fn depart_tx(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (lane_id, project_id, name) in lanes {
+        if let Some(s) = scope {
+            // Lanes outside the caller's projects are not its business.
+            if !crate::tokens::scope_allows_project(tx, s, &project_id)? {
+                continue;
+            }
+        }
         tx.emit(
             "system",
             "lane.agent_left",
@@ -912,7 +918,9 @@ impl Store {
                     "people and the system agent can't be kicked".into(),
                 ));
             }
-            let mut d = depart_tx(tx, &a, "kicked", true, None)?;
+            // A remote manager's kick reaches only into its own projects: the target's holds
+            // and leases elsewhere stay (all its tokens are still revoked).
+            let mut d = depart_tx(tx, &a, "kicked", true, scope)?;
             record_kick_reason(tx, &a, reason, &mut d)?;
             Ok(d)
         })
@@ -945,12 +953,17 @@ impl Store {
                 .map(|(id, _)| id)
                 .collect();
             crate::holds::release_tx(tx, &a.address, &holds, "session_end")?;
+            // Like any session end: resource leases are released and spend leases close
+            // (in the token's projects); the persistent agent keeps its token.
+            let leases_closed = crate::resources::session_leases_tx(tx, &a, true, scope)?
+                + crate::spend::end_agent_leases_tx(tx, &a.id, "session_end", scope)? as u32;
             tx.emit(&a.address, "session.ended", json!({ "agent_id": a.id, "client": "remote" }))?;
             tx.execute("UPDATE agents SET status = 'offline' WHERE agent_id = ?1", [&a.id])?;
             Ok(Departure {
                 agent: a.address,
                 reason: "session ended".into(),
                 holds_released: holds.len() as u32,
+                leases_closed,
                 ..Default::default()
             })
         })

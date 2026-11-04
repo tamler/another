@@ -94,7 +94,7 @@ The `remote_agents` table records, per invite redemption: the agent, invite and 
 
 It goes away after `heartbeat --end` / `POST /agent/leave` ends its session, or after its idle limit without being seen. Each lane it was in (the invite's lane, and any open lane it leads) gets **`lane.agent_left {lane_id, project_id, name, agent_id, reason}`**. That is a lane status event, so it shows in the lane feed and is delivered by the `lane_status` webhook filter.
 
-**Only the token's projects.** A heartbeat or leave through the agent's token (HTTP or MCP), and its departure, renew or release only holds and leases in the token's projects. Anything the same agent holds elsewhere on the hub is left alone.
+**Only the token's projects.** A heartbeat or leave through the agent's token (HTTP or MCP), and its departure, renew or release only holds and leases in the token's projects. A persistent agent's leave also releases its resource leases and closes its spend leases there, like a session end. Anything the same agent holds elsewhere on the hub is left alone.
 
 **When the lead leaves:**
 - The lane member active longest takes over as lead, and the new lead and the lane's creator are mailed by the system agent `another`. Members are remote agents joined to the lane and agents holding files for it.
@@ -103,7 +103,7 @@ It goes away after `heartbeat --end` / `POST /agent/leave` ends its session, or 
 
 **Kicking:**
 - `another agent kick NAME [--reason]` (local) does the same at once, for **any** agent, ephemeral or not. It revokes **all** of the agent's tokens, so its next request gets 401, and emits `agent.kicked` plus `lane.agent_left`.
-- Over MCP, `agent_kick {agent, target, reason?}` is for **manager agents** (program `grok_bot`) only. A remote manager acts as its token's agent and can only kick agents in its projects; others are `not_found`. People and the system agent can't be kicked.
+- Over MCP, `agent_kick {agent, target, reason?}` is for **manager agents** (program `grok_bot`) only. A remote manager acts as its token's agent and can only kick agents in its projects; others are `not_found`. Its kick revokes all of the target's tokens but releases holds and leases, and tells lanes, only in the manager's projects. People and the system agent can't be kicked.
 - The reason is kept on the membership row, never in an event.
 
 **Views:**
@@ -149,13 +149,16 @@ Today, lane events federate as feed events but aren't projected, and decisions d
 - **Holds:** a mirrored `hold.acquired` keeps its `lane_id` when that lane exists locally (as a mirror or a local lane). Cross-node overlaps stay warnings (D26), now flagged `same_lane` when both holds are for the same lane.
 
 **Decisions are answered where they were asked; answers flow back to the asker's node.**
-- **Mirror:** a `decision.created` from another node is stored in `remote_decisions`, with the question, options, project, asker, deadline and status. Its question and options already travel in the event, because the person must see them. `decision_list` / `decision_show` include these mirrors, with `node` set.
+- **Mirror:** a `decision.created` from another node is stored in `remote_decisions`, with the project, asker, person, deadline and status. `decision_list` / `decision_show` include these mirrors, with `node` set.
+  - The event carries no question text or labels (note 03), only the option **values**: single-word identifiers, enough to validate an answer.
+  - The mirror's question is the question mail when that reached this node (the person lives here). Otherwise it points at the decision's node.
 - **Answering a mirror** (`decision_answer`, CLI or HTTP):
   1. The answer is validated against the mirrored options.
   2. The mirror is marked `answer_sent`.
   3. The node emits **`decision.answer_relayed`** `{decision_id, decision_node, value, has_text, text_message_id?, answered_by, relayed_by}`, routed like mail **only to the decision's node**.
   - **No free text in events:** any answer text or note goes as mail to the asking agent, and the event only names that message. At the origin, the text is read from that mail, and the carrier is marked read: the answer mail is what the agent reads.
   - Text length and the note rule (note 03) are checked before the mirror is marked `answer_sent`.
+  - So is the relayer rule (a manager or a person, not the asker), so a refused relayer can't leave the mirror stuck in `answer_sent`.
 - **The origin** applies the first relayed answer through the normal answer path: mail to the agent, wake, lane release, spend approvals. The self-approval rule still applies: the relaying agent must be a manager or a person, and not the asker. Later or refused answers are dropped, and the origin emits `decision.answer_ignored`. Its own `decision.answered` / `expired` / `cancelled` then syncs back and settles the mirror.
 - **Conflict rule:** the first answer applied at the origin wins. Concurrent answers from two nodes can't both apply.
 
