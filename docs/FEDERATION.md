@@ -44,8 +44,10 @@ another node name studio
 On the hub (keep it on loopback and expose it through a tunnel; see [REMOTE.md](REMOTE.md)):
 
 ```bash
-another serve --federation --bind 127.0.0.1:7468
+another serve --federation --auth --bind 127.0.0.1:7468 --allowed-host studio.my-tailnet.ts.net
 ```
+
+`/fed/*` is authenticated by node signatures either way. `--auth` protects the rest of this server's API (MCP, the feed, decisions, spend), which a tunnel would otherwise expose: without it the server answers as this machine's person. An unauthenticated server refuses requests whose `Host` isn't `localhost`, `127.0.0.1` or `[::1]` (D45), but a tunnel that delivers as `localhost`, such as `ssh -R`, gets past that check. Run local agents over stdio or on a separate loopback server.
 
 ```bash
 another pair invite --url https://studio.my-tailnet.ts.net --perms read_feed,send_mail,borrow_resource --expires 1h
