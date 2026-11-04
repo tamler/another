@@ -52,3 +52,26 @@ jobs:
 
       - name: cargo check
         run: cargo check --workspace --all-targets --locked
+
+  examples:
+    name: examples (headless)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build another
+        run: cargo build --locked -p another
+
+      - name: Run the four examples
+        env:
+          ANOTHER_BIN: ${{ github.workspace }}/target/debug/another
+        run: |
+          for s in examples/lib.sh examples/run-all.sh examples/*/run.sh; do sh -n "$s"; done
+          shellcheck -S warning -x examples/run-all.sh examples/*/run.sh
+          sh examples/run-all.sh
