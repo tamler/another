@@ -159,6 +159,7 @@ Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green
 
 | Doc | What it covers |
 |---|---|
+| [examples/](examples/) | Four runnable, peer-only scenarios: lanes and holds, a decision answered over HTTP, spend approval, a remote invite across two nodes |
 | [docs/HOOKS.md](docs/HOOKS.md) | Hook packs for each client; trust steps; the digest |
 | [docs/RESOURCES.md](docs/RESOURCES.md) | Resource registry, orphans, human-approved reaping |
 | [docs/REMOTE.md](docs/REMOTE.md) | Remote peers (Grok Bot): tokens, `--auth`, tunnels, audit log |
