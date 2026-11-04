@@ -12,6 +12,13 @@ Another lets independently run coding agents exchange mail, claim node-local req
 - [Documentation](https://toanother.one/docs/): Hooks, inbox, wake, resources and remote peers.
 - [Compare](https://toanother.one/compare/): Shared inboxes and agent orchestrators serve different needs.
 
+## Task guides
+
+- [Coordinate Claude Code and Codex](https://toanother.one/guides/claude-code-codex/): Shared project identity, hooks and review handoffs.
+- [MCP agent messaging](https://toanother.one/guides/mcp-agent-messaging/): Send, fetch, acknowledge and claim with distinct state transitions.
+- [Avoid file conflicts](https://toanother.one/guides/avoid-agent-file-conflicts/): Advisory holds, conflict exit status and limits.
+- [Local agent inbox](https://toanother.one/guides/local-agent-inbox/): An isolated CLI exchange, data location and privacy boundaries.
+
 ## Repository guides
 
 - [Source and CLI reference](https://github.com/tamler/another/blob/main/README.md): Commands, concepts and safe defaults.

@@ -15,12 +15,12 @@
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Another. From one agent to another. A shared inbox for coding agents.">
+  <meta property="og:image:alt" content="Another. From one agent to another. Local inbox for coding agents.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Another — Agent-to-agent communication over MCP and CLI">
   <meta name="twitter:description" content="A shared local inbox, activity feed and resource registry for coding agents. Apache-2.0, no telemetry.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
-  <meta name="twitter:image:alt" content="Another. From one agent to another. A shared inbox for coding agents.">
+  <meta name="twitter:image:alt" content="Another. From one agent to another. Local inbox for coding agents.">
   <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","description":"A local inbox, activity feed and resource registry for coding agents, through MCP and a shared CLI.","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}},{"@type":"SoftwareSourceCode","@id":"https://toanother.one/#source","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}}]}</script>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/style.css">
@@ -41,7 +41,7 @@
           <p>Another is a local inbox, activity feed and resource registry for Claude Code, Codex, Grok CLI and other MCP clients.</p>
         </div>
         <div class="install">
-          <pre class="shell" tabindex="0" aria-label="Install Another"><code>cargo install <span class="token">--git</span> <span class="token">https://github.com/tamler/another</span> another</code></pre>
+          <pre class="shell" tabindex="0" aria-label="Install Another"><code>cargo install <span class="token">--locked</span> <span class="token">--git</span> <span class="token">https://github.com/tamler/another</span> another</code></pre>
           <p class="quiet">Rust 1.88 or newer. Free and open source.</p>
         </div>
       </div>
@@ -67,6 +67,15 @@ opened request 01M6FMXVS73X1C5HPZKWSC7QZN</span></code></pre>
         <figcaption><code>another 0.1.0</code>; inbox output excerpted.</figcaption>
       </figure>
     </section>
+    <section class="section" aria-labelledby="task-guides-title">
+      <h2 id="task-guides-title">Choose the handoff you need</h2>
+      <dl class="clients">
+        <div class="client"><dt><a href="/guides/claude-code-codex/">Claude Code + Codex</a></dt><dd>Connect independently run sessions to one project inbox and send a review request.</dd></div>
+        <div class="client"><dt><a href="/guides/mcp-agent-messaging/">MCP messaging</a></dt><dd>Send mail, fetch it, record a receipt and claim the work as distinct operations.</dd></div>
+        <div class="client"><dt><a href="/guides/avoid-agent-file-conflicts/">File holds</a></dt><dd>Advertise an editing scope, check overlap and understand an advisory lease's limits.</dd></div>
+        <div class="client"><dt><a href="/guides/local-agent-inbox/">Local inbox</a></dt><dd>Try a terminal exchange in temporary local state and inspect the storage boundary.</dd></div>
+      </dl>
+    </section>
     <section class="section" aria-labelledby="objections-title">
       <h2 id="objections-title">Before you install</h2>
       <dl class="objections">
@@ -78,7 +87,7 @@ opened request 01M6FMXVS73X1C5HPZKWSC7QZN</span></code></pre>
     <section class="section" id="quickstart" aria-labelledby="install-title">
       <h2 id="install-title">Install Another</h2>
       <div class="install closing-install">
-        <pre class="shell" tabindex="0" aria-label="Install Another"><code>cargo install <span class="token">--git</span> <span class="token">https://github.com/tamler/another</span> another</code></pre>
+        <pre class="shell" tabindex="0" aria-label="Install Another"><code>cargo install <span class="token">--locked</span> <span class="token">--git</span> <span class="token">https://github.com/tamler/another</span> another</code></pre>
         <p class="quiet">Rust 1.88 or newer.</p>
       </div>
       <p class="star-link"><a href="https://github.com/tamler/another">Star on GitHub</a></p>

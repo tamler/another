@@ -9,12 +9,18 @@ import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).parent / "dist"
 ORIGIN = "https://toanother.one"
-ROUTES = {"/", "/docs/", "/docs/getting-started/", "/docs/install/", "/compare/"}
+ROUTES = {
+    "/", "/docs/", "/docs/getting-started/", "/docs/install/", "/compare/",
+    "/guides/claude-code-codex/", "/guides/mcp-agent-messaging/",
+    "/guides/avoid-agent-file-conflicts/", "/guides/local-agent-inbox/",
+}
 EXPECTED = {
     "index.html", "docs/index.html", "docs/getting-started/index.html",
     "docs/install/index.html", "compare/index.html", "404.html", "style.css",
     "_headers", "fonts/FragmentMono-Regular.woff2", "fonts/OFL.txt", "og.png",
     "twitter.png", "sitemap.xml", "robots.txt", "llms.txt", "favicon.svg",
+    "guides/claude-code-codex/index.html", "guides/mcp-agent-messaging/index.html",
+    "guides/avoid-agent-file-conflicts/index.html", "guides/local-agent-inbox/index.html",
 }
 actual = {str(p.relative_to(ROOT)) for p in ROOT.rglob("*") if p.is_file()}
 assert actual == EXPECTED, f"public allowlist mismatch: {actual ^ EXPECTED}"
@@ -27,6 +33,7 @@ class Page(HTMLParser):
         self.path, self.ids, self.links = path, set(), []
         self.meta, self.canonicals, self.structured = {}, [], []
         self.title, self.in_title, self.in_script, self.script_data = "", False, False, ""
+        self.text = ""
         self.headings = self.mains = 0
         self.feed(path.read_text())
         self.close()
@@ -72,6 +79,8 @@ class Page(HTMLParser):
             self.in_script = False
 
     def handle_data(self, data):
+        if not self.in_script:
+            self.text += data
         if self.in_title:
             self.title += data
         if self.in_script:
@@ -80,6 +89,9 @@ class Page(HTMLParser):
 
 pages = {p: Page(p) for p in ROOT.rglob("*.html")}
 for path, page in pages.items():
+    for command in re.findall(r"cargo install[^\n]*", page.text):
+        if "--git" in command:
+            assert "--locked" in command, f"{path}: Git install must use the tested lockfile"
     for href in page.links:
         url = urlsplit(href)
         if url.scheme or url.netloc:
@@ -131,8 +143,9 @@ for path, page in pages.items():
     assert all(item["license"] == "https://www.apache.org/licenses/LICENSE-2.0" for item in graph.values())
     canonical_urls.add(canonical)
 
+assert canonical_urls == {ORIGIN + route for route in ROUTES}, "every public route needs metadata"
 locations = [e.text for e in ET.parse(ROOT / "sitemap.xml").iter("{http://www.sitemaps.org/schemas/sitemap/0.9}loc")]
-assert len(locations) == len(set(locations)) == 5 and set(locations) == canonical_urls
+assert len(locations) == len(set(locations)) == len(ROUTES) and set(locations) == canonical_urls
 robots = (ROOT / "robots.txt").read_text()
 assert robots == "User-agent: *\nAllow: /\n\nSitemap: https://toanother.one/sitemap.xml\n"
 llms = (ROOT / "llms.txt").read_text()
@@ -151,4 +164,4 @@ for asset in re.findall(r"url\([\"']?([^\"')]+)", css):
     assert asset.startswith("/") and not asset.startswith("//") and (ROOT / asset.lstrip("/")).is_file()
 headers = (ROOT / "_headers").read_text()
 assert "default-src 'none'" in headers and "script-src" not in headers, "executable scripts must stay blocked"
-print(f"PASS: {len(EXPECTED)} allowed public files; 6 HTML pages; 5 unique canonical/metadata/JSON-LD records; links/anchors; sitemap/robots/llms; 1200x630 PNGs; no executable scripts or external assets.")
+print(f"PASS: {len(EXPECTED)} allowed public files; {len(pages)} HTML pages; {len(ROUTES)} unique canonical/metadata/JSON-LD records; links/anchors; sitemap/robots/llms; 1200x630 PNGs; no executable scripts or external assets.")

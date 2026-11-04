@@ -5,9 +5,11 @@ Do not open external PRs. Review each repository's current contribution rules, d
 | Candidate | Fit | Next check |
 |---|---|---|
 | [punkpeye/awesome-mcp-servers](https://github.com/punkpeye/awesome-mcp-servers) | MCP server for agent coordination | [Contribution rules](https://github.com/punkpeye/awesome-mcp-servers/blob/main/CONTRIBUTING.md), category, language/platform notation, current duplicates |
-| [wong2/awesome-mcp-servers](https://github.com/wong2/awesome-mcp-servers) | Another MCP-server index | Current submission mechanism and contribution policy; do not assume it accepts PRs |
-| [rust-unofficial/awesome-rust](https://github.com/rust-unofficial/awesome-rust) | Rust developer CLI/tooling | Quality/maturity expectations and appropriate category; defer if too early |
+| [wong2/awesome-mcp-servers](https://github.com/wong2/awesome-mcp-servers) | MCP-server index; no PR submissions | Its README directs submissions to [mcpservers.org/submit](https://mcpservers.org/submit). Do not open a PR to this list |
+| [rust-unofficial/awesome-rust](https://github.com/rust-unofficial/awesome-rust) | Not eligible on currently documented evidence | Its [guide](https://github.com/rust-unofficial/awesome-rust/blob/main/CONTRIBUTING.md) requires at least 50 stars, 2,000 crate downloads or documented equivalent popularity. Another had 0 stars when checked 2026-11-05; no qualifying crate-download or equivalent popularity evidence is established |
 | [sindresorhus/awesome](https://github.com/sindresorhus/awesome) | Discovery of specialist lists only | This is a list of lists: do not propose Another itself here |
+
+Rules above were checked 2026-11-05; recheck before a human-authorized submission. The PR text below is only for a list that actually accepts PRs and for which the project is eligible.
 
 Proposed entry, adapted to the target's actual format:
 
