@@ -26,7 +26,8 @@ case "$*" in
   *"enable --now"*) [ -n "$FAIL_ENABLE" ] && { echo "Unit another.service has a bad setting" >&2; exit 1; }; echo active > "$STATE" ;;
   *restart*) [ -n "$FAIL_RESTART" ] && { echo "Job for another.service failed" >&2; exit 1; }; echo active > "$STATE" ;;
   *" start "*) echo active > "$STATE" ;;
-  *"disable --now"*|*" stop "*) echo inactive > "$STATE" ;;
+  *"disable --now"*) [ -n "$FAIL_DISABLE" ] && { echo "Failed to stop another.service: access denied" >&2; exit 1; }; echo inactive > "$STATE" ;;
+  *" stop "*) echo inactive > "$STATE" ;;
   *is-active*) s=$(cat "$STATE" 2>/dev/null || echo inactive); echo "$s"; [ "$s" = active ] || exit 3 ;;
   *MainPID*) if [ "$(cat "$STATE" 2>/dev/null)" = active ]; then echo 4242; else echo 0; fi ;;
 esac
@@ -1058,4 +1059,72 @@ fn no_user_bus_is_refused_before_writing() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("enable-linger"));
     assert!(!unit_path(&env).exists());
+}
+
+/// Asserts the fail-closed result: non-zero exit, the unit kept, nothing reloaded.
+fn assert_uninstall_kept_the_unit(env: &Env, out: &Output, message: &str) {
+    assert!(!out.status.success(), "{message}");
+    assert!(message.contains("may still be running"), "{message}");
+    assert!(
+        message.contains(&unit_path(env).display().to_string()),
+        "{message}"
+    );
+    assert!(unit_path(env).exists(), "definition kept for recovery");
+    assert!(
+        !env.calls().iter().any(|c| c.contains("daemon-reload")),
+        "{:?}",
+        env.calls()
+    );
+}
+
+#[test]
+fn systemd_uninstall_keeps_the_unit_when_the_stop_fails() {
+    let env = Env::new("systemd");
+    let bind = format!("127.0.0.1:{}", free_port());
+    env.json(&["service", "install", "--bind", &bind]);
+    env.clear_calls();
+
+    let out = env
+        .cmd(&["service", "uninstall"])
+        .env("FAIL_DISABLE", "1")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_uninstall_kept_the_unit(&env, &out, &err);
+    assert!(err.contains("access denied"), "{err}");
+    assert!(out.stdout.is_empty(), "no success message");
+
+    let out = env
+        .cmd(&["--json", "service", "uninstall"])
+        .env("FAIL_DISABLE", "1")
+        .output()
+        .unwrap();
+    let body: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let message = body["error"]["message"].as_str().unwrap();
+    assert_uninstall_kept_the_unit(&env, &out, message);
+    assert!(message.contains("access denied"), "{message}");
+
+    // Still installed and running, and a retry finishes the job once the cause is fixed.
+    let st = env.json(&["service", "status"]);
+    assert_eq!(st["installed"], true);
+    assert_eq!(st["loaded"], true);
+    assert_eq!(env.json(&["service", "uninstall"])["removed"], true);
+    assert!(!unit_path(&env).exists());
+}
+
+#[test]
+fn systemd_uninstall_without_a_user_bus_keeps_the_unit() {
+    let env = Env::new("systemd");
+    let bind = format!("127.0.0.1:{}", free_port());
+    env.json(&["service", "install", "--bind", &bind]);
+    env.clear_calls();
+
+    let out = env
+        .cmd(&["service", "uninstall"])
+        .env("NO_BUS", "1")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_uninstall_kept_the_unit(&env, &out, &err);
+    assert!(err.contains("enable-linger"), "{err}");
 }
