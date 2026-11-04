@@ -1095,10 +1095,10 @@ fn codex_trust_is_counted_per_hook_and_needs_a_hash() {
     assert!(detail(&r, "hooks:codex-trust", "warn").starts_with("no Codex trust recorded"));
 }
 
-/// BUGS-FOUND.md #4: `sh_quote` writes an apostrophe as `'\''`, and the wrapper check stops
-/// at the first `'`, so it gets a path that isn't the wrapper and checks nothing.
+/// BUGS-FOUND.md #4, fixed: `sh_quote` writes an apostrophe as `'\''`, and the wrapper check
+/// reads that form back, so a config Another wrote itself gets a real check.
 #[test]
-fn bug_a_missing_wrapper_passes_when_the_path_has_an_apostrophe() {
+fn a_missing_wrapper_under_a_path_with_an_apostrophe_fails() {
     let dir = tempfile::tempdir().unwrap();
     let (ah, home) = (dir.path().join("o'brien"), dir.path().join("home"));
     std::fs::create_dir_all(home.join(".codex")).unwrap();
@@ -1112,16 +1112,17 @@ fn bug_a_missing_wrapper_passes_when_the_path_has_an_apostrophe() {
     install_hooks(&h, "codex");
     std::fs::remove_file(h.ah.join("hooks").join("another-hook.sh")).unwrap();
     let (_, r) = doctor(&h.ah, &h.home, DEAD);
-    assert_eq!(
-        levels(&r, "hooks:codex"),
-        ["pass"],
-        "today's behaviour; should be fail: {r}"
+    assert_eq!(levels(&r, "hooks:codex"), ["fail"], "{r}");
+    assert!(
+        detail(&r, "hooks:codex", "fail").contains("missing or not executable"),
+        "{r}"
     );
 }
 
-/// BUGS-FOUND.md #4 again: a command that doesn't start with the wrapper isn't checked.
+/// BUGS-FOUND.md #4 again, fixed: only a command that runs the wrapper as its first word counts
+/// as installed, so this one can't hide a wrapper that is gone.
 #[test]
-fn bug_a_missing_wrapper_passes_when_it_is_not_the_first_word() {
+fn a_wrapper_that_is_not_the_first_word_fails() {
     let h = homes();
     let missing = h.home.join("gone/another-hook.sh");
     hooks_with_command(
@@ -1129,17 +1130,13 @@ fn bug_a_missing_wrapper_passes_when_it_is_not_the_first_word() {
         &format!("/bin/sh '{}' session-start", missing.display()),
     );
     let (_, r) = doctor(&h.ah, &h.home, DEAD);
-    assert_eq!(
-        levels(&r, "hooks:codex"),
-        ["pass"],
-        "today's behaviour; should be fail: {r}"
-    );
+    assert_eq!(levels(&r, "hooks:codex"), ["fail"], "{r}");
 }
 
-/// BUGS-FOUND.md #5: a command outside `hooks.<event>[].hooks[]` satisfies "a command runs the
-/// wrapper", but the trust check only reads that shape, and finding no hooks is "all trusted".
+/// BUGS-FOUND.md #5, fixed: a command outside `hooks.<event>[].hooks[]` no longer counts as
+/// installed, so the trust check never gets to say "all 0 hooks are trusted".
 #[test]
-fn bug_codex_trust_passes_for_all_zero_hooks() {
+fn a_hook_outside_a_group_fails_and_gets_no_trust_verdict() {
     let h = homes();
     std::fs::create_dir_all(h.home.join(".codex")).unwrap();
     install_hooks(&h, "codex");
@@ -1150,12 +1147,9 @@ fn bug_codex_trust_passes_for_all_zero_hooks() {
     ] } });
     std::fs::write(h.home.join(".codex/hooks.json"), v.to_string()).unwrap();
     let (ok, r) = doctor(&h.ah, &h.home, DEAD);
-    assert!(!ok, "only because of the dead server: {r}");
-    assert_eq!(levels(&r, "hooks:codex"), ["pass"], "{r}");
-    assert!(
-        detail(&r, "hooks:codex-trust", "pass").contains("for all 0 of Another's hooks"),
-        "today's behaviour; should be a failure or warning: {r}"
-    );
+    assert!(!ok, "{r}");
+    assert_eq!(levels(&r, "hooks:codex"), ["fail"], "{r}");
+    assert!(levels(&r, "hooks:codex-trust").is_empty(), "{r}");
 }
 
 /// BUGS-FOUND.md #6: a hook config that isn't UTF-8 reads as empty, so doctor says "not
