@@ -478,13 +478,22 @@ pub struct InstallReport {
     pub action: String,
     pub args: Vec<String>,
     pub logs: String,
+    /// What this update changed that was previously configured.
+    pub warnings: Vec<String>,
     pub hints: Vec<String>,
 }
 
 /// Write (or update) the service definition and (re)start it.
-pub fn install(spec: &ServiceSpec, user_home: &Path, opts: &HttpOptions) -> Result<InstallReport> {
+pub fn install(spec: &ServiceSpec, user_home: &Path) -> Result<InstallReport> {
     let platform = Platform::current()?;
-    let addr = check_bind(&spec.bind, opts)?;
+    let addr = check_bind(
+        &spec.bind,
+        &HttpOptions {
+            auth: spec.auth,
+            allow_remote_bind: spec.allow_remote_bind,
+            ..HttpOptions::default()
+        },
+    )?;
     if platform == Platform::Systemd {
         systemd_reachable()?;
     }
@@ -550,21 +559,13 @@ pub fn install(spec: &ServiceSpec, user_home: &Path, opts: &HttpOptions) -> Resu
         }
     };
     if let Err(e) = activate() {
-        // Leave things as they were: restore the old definition, or remove a new one.
-        match &previous {
-            Some(old) => {
-                let _ = std::fs::write(&path, old);
-            }
-            None => {
-                let _ = std::fs::remove_file(&path);
-            }
-        }
-        if platform == Platform::Systemd {
-            let _ = run("systemctl", &["--user", "daemon-reload"]);
-        }
-        return Err(e.context("the service could not be started; nothing was left installed"));
+        return Err(e.context(roll_back(platform, &path, previous.as_deref(), loaded)));
     }
 
+    let warnings = previous
+        .as_deref()
+        .map(|t| update_warnings(&installed_args(platform, t), spec))
+        .unwrap_or_default();
     let mut hints = Vec::new();
     if platform == Platform::Systemd {
         hints.push(
@@ -574,8 +575,8 @@ pub fn install(spec: &ServiceSpec, user_home: &Path, opts: &HttpOptions) -> Resu
         );
     }
     hints.push(
-        "The service runs this binary by path; re-run `another service install` after moving \
-         or upgrading it."
+        "The service runs this binary by path; after moving or upgrading it, re-run \
+         `another service install` with the same flags."
             .into(),
     );
     if !spec.auth {
@@ -599,8 +600,97 @@ pub fn install(spec: &ServiceSpec, user_home: &Path, opts: &HttpOptions) -> Resu
             Platform::Launchd => spec.log_dir().to_string_lossy().into_owned(),
             Platform::Systemd => format!("journalctl --user -u {SYSTEMD_UNIT}"),
         },
+        warnings,
         hints,
     })
+}
+
+/// Undo a failed activation: remove a new definition, or restore the previous one and get
+/// the service that was running back up. Returns what happened, for the error message.
+fn roll_back(platform: Platform, path: &Path, previous: Option<&str>, was_loaded: bool) -> String {
+    let systemd = platform == Platform::Systemd;
+    let Some(old) = previous else {
+        if systemd {
+            // `enable --now` creates the enable link before it starts the unit.
+            let _ = run("systemctl", &["--user", "disable", SYSTEMD_UNIT]);
+        }
+        let _ = std::fs::remove_file(path);
+        if systemd {
+            let _ = run("systemctl", &["--user", "daemon-reload"]);
+        }
+        return "the service could not be started; nothing was left installed".into();
+    };
+    if let Err(e) = std::fs::write(path, old) {
+        return format!(
+            "the update failed, and the previous definition could not be restored at {}: {e}",
+            path.display()
+        );
+    }
+    if systemd {
+        let _ = run("systemctl", &["--user", "daemon-reload"]);
+    }
+    if !was_loaded {
+        return "the update failed; the previous definition was restored".into();
+    }
+    let restarted = match platform {
+        Platform::Launchd => match manager_state(platform) {
+            // A failed unload leaves the old job running.
+            Ok((true, _)) => Ok(()),
+            _ => launchd_bootstrap(path),
+        },
+        Platform::Systemd => must("systemctl", &["--user", "restart", SYSTEMD_UNIT]).map(|_| ()),
+    };
+    match restarted {
+        Ok(()) => "the update failed; the previous service was restored and is running".into(),
+        Err(e) => format!(
+            "the update failed; the previous service was restored but did not restart ({e}); \
+             try `another service start`"
+        ),
+    }
+}
+
+/// What this update takes away from the installed service. Re-installing replaces every flag,
+/// so an update run without the original flags would otherwise drop them silently.
+fn update_warnings(old: &[String], new: &ServiceSpec) -> Vec<String> {
+    let value = |flag: &str| {
+        old.iter()
+            .position(|a| a == flag)
+            .and_then(|i| old.get(i + 1))
+    };
+    let has = |flag: &str| old.iter().any(|a| a == flag);
+    let mut out = Vec::new();
+    if has("--auth") && !new.auth {
+        out.push(
+            "the service no longer requires bearer tokens; the previous install used --auth"
+                .to_string(),
+        );
+    }
+    for host in old
+        .windows(2)
+        .filter(|w| w[0] == "--allowed-host")
+        .map(|w| &w[1])
+    {
+        if !new.allowed_hosts.contains(host) {
+            out.push(format!("--allowed-host {host} was dropped"));
+        }
+    }
+    if has("--federation") && !new.federation {
+        out.push("--federation was dropped; this node is no longer a federation hub".into());
+    }
+    if let Some(bind) = value("--bind").filter(|b| **b != new.bind) {
+        out.push(format!(
+            "the service moved from {bind} to {}; anything pointing at the old address, \
+             such as a tunnel, needs updating",
+            new.bind
+        ));
+    }
+    let home = new.home.to_string_lossy();
+    if let Some(old_home) = value("--home").filter(|h| **h != home) {
+        out.push(format!(
+            "the service now uses the data directory {home} instead of {old_home}"
+        ));
+    }
+    out
 }
 
 #[derive(Debug, Serialize)]

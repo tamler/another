@@ -39,7 +39,11 @@ exit 0"#,
         "launchctl",
         r#"case "$1" in
   print) [ -f "$STATE" ] || exit 113; echo "state = running"; echo "	pid = 4343" ;;
-  bootstrap) touch "$STATE" ;;
+  bootstrap)
+    if [ -n "$FAIL_BOOTSTRAP_ONCE" ] && [ ! -f "$FAIL_BOOTSTRAP_ONCE" ]; then
+      touch "$FAIL_BOOTSTRAP_ONCE"; echo "Bootstrap failed: 1: Operation not permitted" >&2; exit 1
+    fi
+    touch "$STATE" ;;
   bootout) [ -f "$STATE" ] || exit 3; rm -f "$STATE" ;;
 esac
 exit 0"#,
@@ -406,6 +410,156 @@ fn failed_activation_leaves_nothing_installed() {
         .unwrap();
     assert!(!out.status.success());
     assert_eq!(std::fs::read_to_string(unit_path(&env)).unwrap(), before);
+}
+
+#[test]
+fn failed_new_unit_does_not_leave_an_enable_link() {
+    let env = Env::new("systemd");
+    let bind = format!("127.0.0.1:{}", free_port());
+    let out = env
+        .cmd(&["service", "install", "--bind", &bind])
+        .env("FAIL_ENABLE", "1")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let calls = env.calls();
+    let disable = calls
+        .iter()
+        .position(|c| c == "systemctl --user disable another.service");
+    let reload = calls
+        .iter()
+        .rposition(|c| c == "systemctl --user daemon-reload");
+    assert!(disable.is_some(), "{calls:?}");
+    assert!(disable < reload, "{calls:?}");
+}
+
+#[test]
+fn failed_systemd_update_restarts_the_previous_service() {
+    let env = Env::new("systemd");
+    let bind = format!("127.0.0.1:{}", free_port());
+    env.json(&["service", "install", "--bind", &bind]);
+    env.clear_calls();
+    let out = env
+        .cmd(&["service", "install", "--bind", &bind, "--federation"])
+        .env("FAIL_ENABLE", "1")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("nothing was left installed"), "{err}");
+    assert!(err.contains("previous service was restored"), "{err}");
+    let calls = env.calls();
+    assert_eq!(
+        calls.last().map(String::as_str),
+        Some("systemctl --user restart another.service"),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn failed_launchd_update_reloads_the_previous_service() {
+    let env = Env::new("launchd");
+    let bind = format!("127.0.0.1:{}", free_port());
+    env.json(&["service", "install", "--bind", &bind]);
+    let before = std::fs::read_to_string(plist_path(&env)).unwrap();
+    env.clear_calls();
+    let out = env
+        .cmd(&["service", "install", "--bind", &bind, "--federation"])
+        .env("FAIL_BOOTSTRAP_ONCE", env.user_home.join(".failed-once"))
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("nothing was left installed"), "{err}");
+    assert!(err.contains("previous service was restored"), "{err}");
+    assert_eq!(std::fs::read_to_string(plist_path(&env)).unwrap(), before);
+    let bootstraps = env
+        .calls()
+        .iter()
+        .filter(|c| c.starts_with("launchctl bootstrap "))
+        .count();
+    assert_eq!(bootstraps, 2, "the old definition is loaded again");
+    assert_eq!(env.json(&["service", "status"])["loaded"], true);
+}
+
+#[test]
+fn update_warns_about_what_it_drops() {
+    let env = Env::new("systemd");
+    let bind = format!("127.0.0.1:{}", free_port());
+    env.json(&[
+        "service",
+        "install",
+        "--bind",
+        &bind,
+        "--auth",
+        "--allowed-host",
+        "box.example.ts.net",
+    ]);
+
+    let same = env.json(&[
+        "service",
+        "install",
+        "--bind",
+        &bind,
+        "--auth",
+        "--allowed-host",
+        "box.example.ts.net",
+    ]);
+    let warnings = |r: &Value| r["warnings"].as_array().unwrap().clone();
+    assert!(warnings(&same).is_empty(), "{same}");
+
+    let other_home = env.user_home.join("other data");
+    let other_home = other_home.to_str().unwrap();
+    let changed = env.json(&["--home", other_home, "service", "install", "--bind", &bind]);
+    let text = warnings(&changed)
+        .iter()
+        .map(|w| w.as_str().unwrap().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("no longer requires bearer tokens"), "{text}");
+    assert!(text.contains("box.example.ts.net"), "{text}");
+    assert!(text.contains(other_home), "{text}");
+
+    let human = env.run(&["service", "install", "--bind", &bind, "--auth"]);
+    assert!(
+        String::from_utf8_lossy(&human.stdout).contains("warning: "),
+        "the data directory moved back, and text output shows it"
+    );
+}
+
+#[test]
+fn serve_shuts_down_gracefully_on_sigterm() {
+    let env = Env::new("launchd");
+    let port = free_port();
+    let bind = format!("127.0.0.1:{port}");
+    let mut child = env
+        .cmd(&["serve", "--bind", &bind])
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(std::time::Instant::now() < deadline, "serve never listened");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let killed = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("serve ignored SIGTERM");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert_eq!(status.code(), Some(0), "a clean exit, not death by signal");
 }
 
 #[test]
