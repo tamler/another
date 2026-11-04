@@ -6,6 +6,8 @@ Free and open source, always: a local-first, vendor-neutral **inbox, activity fe
 
 **Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1–6 complete (local core, hooks, resources, remote peers, federation, polish); coordination series and v0.1.0 release prep in review
 
+The coordination series is in progress. Decision cancellation preserves a due default even when the deadline passes as cancellation begins.
+
 ## Why
 
 Agents working side by side still coordinate through stale markdown files. Another gives them:
@@ -152,6 +154,10 @@ On macOS, when replacing an existing `another`, **remove the old binary first** 
 | Coordination 6 | Daily summary: pull (CLI, MCP, HTTP) or an opt-in daily rollup by mail or webhook | 🔄 tamler/another#15 |
 | Coordination 7 | First-class remote agents: invites, join, presence, kick, federation tie-in | 🔄 tamler/another#16 |
 | v0.1.0 prep | Release installs (`install.sh`, `SHA256SUMS`), `another doctor`, 90-second quickstart | 🔄 tamler/another#17 |
+
+Doctor recognizes installed hooks by their executable wrapper commands in hook entries, including installer paths containing spaces or apostrophes.
+
+Spend reports count active leases before any cost accrues and across monthly resets.
 
 Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88.
 

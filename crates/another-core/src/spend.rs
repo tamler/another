@@ -1785,7 +1785,10 @@ impl Store {
                     } else {
                         (started.max(from), now.min(to))
                     };
-                    (end > start).then(|| lease_cost(l.lease.cost_per_hour, Some(start), end))
+                    let active_now = end == start
+                        && (a.period == SpendPeriod::None || (from <= now && now < to));
+                    (end > start || active_now)
+                        .then(|| lease_cost(l.lease.cost_per_hour, Some(start), end))
                 };
                 for l in leases {
                     let Some(cost) = overlap(&l) else {
