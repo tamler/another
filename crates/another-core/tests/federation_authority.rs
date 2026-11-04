@@ -1207,3 +1207,181 @@ fn reachable_reads_hosts_and_ports_without_panicking() {
     let _ = reachable(Some("[::1]"), Some(port));
     drop(listener);
 }
+
+// ---------------------------------------------------------------------------------------
+// Relayed answers and proposed reports the hub must drop, with a record of why.
+
+fn hub_decision(s: &Store) -> Decision {
+    s.ask_decision(
+        NewDecision {
+            agent: "alice@shop".into(),
+            question: "Ship it?".into(),
+            options: ["yes", "no"]
+                .map(|v| DecisionOption {
+                    value: v.into(),
+                    label: v.into(),
+                    description: None,
+                })
+                .to_vec(),
+            human: Some("pat".into()),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap()
+}
+
+fn relayed(s: &Store, d: &Decision, relayer: &str, value: &str) -> Value {
+    json!({
+        "decision_id": d.decision_id,
+        "decision_node": s.node_id(),
+        "relayed_by_id": relayer,
+        "value": value,
+    })
+}
+
+fn ignored_reasons(s: &Store, kind: &str, key: &str) -> Vec<String> {
+    s.events(10_000)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == kind)
+        .map(|e| e.payload[key].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+#[test]
+fn a_spoke_cannot_answer_a_hub_decision_by_claiming_to_be_a_manager() {
+    let (s, _) = hub();
+    let spoke = Spoke::paired_with(&s, &Perm::ALL);
+    let d = hub_decision(&s);
+    spoke.accepted(
+        &s,
+        "project.ensured",
+        json!({ "project_id": "EVIL-PROJECT", "abs_path": "/src/lab", "slug": "lab" }),
+    );
+    for (id, program) in [("EVIL-BOT", "grok_bot"), ("EVIL-HUMAN", "human")] {
+        spoke.accepted(
+            &s,
+            "agent.registered",
+            json!({ "agent_id": id, "name": id.to_lowercase(), "project_id": "EVIL-PROJECT", "program": program }),
+        );
+        spoke.accepted(&s, "decision.answer_relayed", relayed(&s, &d, id, "yes"));
+    }
+    assert_eq!(
+        s.decision(&d.decision_id, None).unwrap().status,
+        DecisionStatus::Open,
+        "a role a node gave its own agent is not a role confirmed here"
+    );
+    assert_eq!(
+        ignored_reasons(&s, "decision.answer_ignored", "status"),
+        vec!["refused", "refused"]
+    );
+}
+
+#[test]
+fn relayed_answers_from_the_wrong_relayer_or_too_late_change_nothing() {
+    let (s, _) = hub();
+    let spoke = Spoke::paired_with(&s, &Perm::ALL);
+    let d = hub_decision(&s);
+    let alice = agent_id(&s, "alice@shop");
+
+    spoke.accepted(
+        &s,
+        "decision.answer_relayed",
+        relayed(&s, &d, "NO-SUCH-AGENT", "yes"),
+    );
+    // A hub agent's id, sent by the spoke: the signer doesn't speak for it.
+    spoke.accepted(
+        &s,
+        "decision.answer_relayed",
+        relayed(&s, &d, &alice, "yes"),
+    );
+    assert_eq!(
+        s.decision(&d.decision_id, None).unwrap().status,
+        DecisionStatus::Open
+    );
+    assert_eq!(
+        ignored_reasons(&s, "decision.answer_ignored", "status"),
+        vec!["relayer_unknown", "relayer_not_of_sender"]
+    );
+
+    // A real answer closes it; a late relay from the spoke's own agent loses.
+    let eve = spoke_agent(&s, &spoke);
+    s.answer_decision(
+        AnswerDecision {
+            decision: d.decision_id.clone(),
+            value: Some("no".into()),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    spoke.accepted(&s, "decision.answer_relayed", relayed(&s, &d, &eve, "yes"));
+    let done = s.decision(&d.decision_id, None).unwrap();
+    assert_eq!(done.answer.unwrap().value.as_deref(), Some("no"));
+    assert_eq!(
+        ignored_reasons(&s, "decision.answer_ignored", "status").last(),
+        Some(&"answered".to_string())
+    );
+
+    // Not this node's decision: not this node's to apply or record.
+    let before = ignored_reasons(&s, "decision.answer_ignored", "status").len();
+    let mut elsewhere = relayed(&s, &d, &eve, "yes");
+    elsewhere["decision_node"] = json!("ANOTHER-NODE");
+    spoke.accepted(&s, "decision.answer_relayed", elsewhere);
+    assert_eq!(
+        ignored_reasons(&s, "decision.answer_ignored", "status").len(),
+        before
+    );
+}
+
+#[test]
+fn a_proposed_report_with_no_carrier_mail_is_dropped_and_explained() {
+    let (s, _) = hub();
+    let spoke = Spoke::paired_with(&s, &Perm::ALL);
+    let eve = spoke_agent(&s, &spoke);
+    let lane = s
+        .create_lane(
+            NewLane {
+                agent: "alice@shop".into(),
+                name: "train".into(),
+                project: "shop".into(),
+                lead: "alice@shop".into(),
+                charter: String::new(),
+                status: Some(LaneStatus::Working),
+            },
+            None,
+        )
+        .unwrap();
+    spoke.accepted(
+        &s,
+        "lane.report_proposed",
+        json!({
+            "proposal_id": "P1",
+            "lane_id": lane.lane.lane_id,
+            "lane_node": s.node_id(),
+            "agent_id": eve,
+            "summary_message_id": "NO-SUCH-MESSAGE",
+            "kind": "status",
+        }),
+    );
+    assert!(s.lane("train", None).unwrap().reports.is_empty());
+    assert_eq!(
+        ignored_reasons(&s, "lane.proposal_ignored", "reason"),
+        vec!["summary_missing"]
+    );
+    let feed = s
+        .activity(ActivityQuery {
+            since: Some(Since::Time(0)),
+            limit: 500,
+            kinds: vec![],
+        })
+        .unwrap();
+    assert!(
+        feed.items
+            .iter()
+            .any(|i| i.summary.contains("was not applied (summary_missing)")),
+        "{:?}",
+        feed.items.iter().map(|i| &i.summary).collect::<Vec<_>>()
+    );
+}

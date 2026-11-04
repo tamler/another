@@ -1446,12 +1446,21 @@ const RACERS: usize = 8;
 
 /// Run `f` on `RACERS` threads, each with its own connection, all released together.
 fn race<T: Send>(home: &std::path::Path, f: impl Fn(&Store) -> T + Sync) -> Vec<T> {
+    race_on(home, Clock::System, f)
+}
+
+/// [`race`], with every thread's connection reading `clock`.
+fn race_on<T: Send>(
+    home: &std::path::Path,
+    clock: Clock,
+    f: impl Fn(&Store) -> T + Sync,
+) -> Vec<T> {
     let gate = std::sync::Barrier::new(RACERS);
     std::thread::scope(|t| {
         let runs: Vec<_> = (0..RACERS)
             .map(|_| {
                 t.spawn(|| {
-                    let s = Store::open(home).unwrap();
+                    let s = Store::open_with_clock(home, clock.clone()).unwrap();
                     gate.wait();
                     f(&s)
                 })
@@ -1486,7 +1495,10 @@ fn racing_sweeps_send_the_daily_summary_once() {
     let (dir, s) = home_with_agents();
     s.set_summary_schedule(Some("00:00"), Some("mail:owner"))
         .unwrap();
-    let sent = race(dir.path(), |s| s.send_scheduled_summary().unwrap());
+    // A frozen clock: on the real one, a race spanning local midnight sends once per day,
+    // correctly, and would fail this test.
+    let (clock, _) = Clock::manual(NOV_21);
+    let sent = race_on(dir.path(), clock, |s| s.send_scheduled_summary().unwrap());
     assert_eq!(sent.iter().filter(|x| x.is_some()).count(), 1, "{sent:?}");
     let inbox = s
         .inbox(
