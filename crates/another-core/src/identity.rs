@@ -596,6 +596,16 @@ impl Store {
                     )
                     .optional()?;
                 let privileged = |p: &str| p == Program::GrokBot.as_str() || p == Program::Human.as_str();
+                if current.is_none() && privileged(input.program.as_str()) {
+                    // Not even a brand-new name: otherwise any MCP caller could mint a
+                    // manager (or person) to relay answers to its own questions.
+                    return Err(Error::Forbidden(format!(
+                        "{} is a role the person sets on this machine (`another agent register {} --program {}`)",
+                        input.program.as_str(),
+                        input.name,
+                        input.program.as_str()
+                    )));
+                }
                 if let Some(cur) = current {
                     if cur != input.program.as_str() {
                         if privileged(input.program.as_str()) {

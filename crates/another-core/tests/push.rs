@@ -13,7 +13,7 @@ fn store_with_clock() -> (Store, std::sync::Arc<std::sync::atomic::AtomicI64>) {
         ("shopper", Some("/work/shop")),
         ("vaulter", Some("/work/vault")),
     ] {
-        s.register_agent(RegisterAgent {
+        s.register_agent_trusted(RegisterAgent {
             name: name.into(),
             program: Program::Claude,
             project: project.map(Into::into),
@@ -437,7 +437,7 @@ fn upgrades_a_database_created_before_webhooks() {
     {
         let old = Store::open_at_schema(dir.path(), 6).unwrap();
         old.ensure_project("t", "/work/shop").unwrap();
-        old.register_agent(RegisterAgent {
+        old.register_agent_trusted(RegisterAgent {
             name: "a".into(),
             program: Program::Other,
             project: Some("/work/shop".into()),
@@ -535,7 +535,7 @@ fn webhooks_stop_when_their_token_is_revoked_or_expires() {
 #[test]
 fn webhooks_follow_the_own_agent_rule_for_project_less_events() {
     let (s, _) = store_with_clock();
-    s.register_agent(RegisterAgent {
+    s.register_agent_trusted(RegisterAgent {
         name: "other".into(),
         program: Program::Other,
         project: None,

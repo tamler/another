@@ -12,7 +12,7 @@ fn store() -> Store {
         ("claude", Program::Claude),
         ("codex", Program::Codex),
     ] {
-        s.register_agent(RegisterAgent {
+        s.register_agent_trusted(RegisterAgent {
             name: name.into(),
             program,
             project: None,
@@ -361,7 +361,7 @@ fn upgrades_a_database_created_before_lanes() {
         let old = Store::open_at_schema(dir.path(), 5).unwrap();
         old.ensure_project("t", "/work/shop").unwrap();
         for n in ["manager", "claude"] {
-            old.register_agent(RegisterAgent {
+            old.register_agent_trusted(RegisterAgent {
                 name: n.into(),
                 program: Program::Other,
                 project: None,
@@ -472,7 +472,7 @@ fn events_carry_ids_not_content() {
 fn links_must_belong_to_the_lanes_project() {
     let s = store();
     lane(&s, "shop-lane", "shop");
-    s.register_agent(RegisterAgent {
+    s.register_agent_trusted(RegisterAgent {
         name: "vaulter".into(),
         program: Program::Codex,
         project: Some("/work/vault".into()),
@@ -547,7 +547,7 @@ fn links_must_belong_to_the_lanes_project() {
 fn scoped_list_filters_never_reveal_hidden_projects_or_agents() {
     let s = store();
     for p in ["/work/shop", "/work/vault"] {
-        s.register_agent(RegisterAgent {
+        s.register_agent_trusted(RegisterAgent {
             name: "dup".into(),
             program: Program::Codex,
             project: Some(p.into()),
@@ -615,7 +615,7 @@ fn scoped_list_filters_never_reveal_hidden_projects_or_agents() {
 fn scoped_lead_lookups_never_reveal_hidden_agents() {
     let s = store();
     for p in ["/work/shop", "/work/vault"] {
-        s.register_agent(RegisterAgent {
+        s.register_agent_trusted(RegisterAgent {
             name: "dup".into(),
             program: Program::Claude,
             project: Some(p.into()),
