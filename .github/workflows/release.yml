@@ -1,14 +1,16 @@
 name: release
 
 # Builds another for macOS (arm64, x86_64) and Linux (static musl: x86_64, arm64).
-# - Tag `vX.Y.Z` pushes build and publish a GitHub Release with archives + SHA-256 sums.
+# - Tag `vX.Y.Z` pushes build and publish a GitHub Release with archives, per-archive .sha256
+#   files, one SHA256SUMS and install.sh (one-line install:
+#   curl -fsSL https://github.com/tamler/another/releases/latest/download/install.sh | sh).
 # - Pull requests that touch this workflow, and manual runs, build only (artifacts kept 7 days).
 
 on:
   push:
     tags: ["v*"]
   pull_request:
-    paths: [".github/workflows/release.yml"]
+    paths: [".github/workflows/release.yml", "scripts/install.sh"]
   workflow_dispatch:
 
 permissions:
@@ -97,6 +99,19 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - uses: actions/checkout@v4
+        with:
+          path: src
+          sparse-checkout: scripts
+
+      - name: Checksums and install script
+        run: |
+          # One SHA256SUMS for every archive (what install.sh verifies against), plus the
+          # per-archive .sha256 files and the install script itself.
+          (cd dist && cat *.tar.gz.sha256 | sort -k2 > SHA256SUMS && sha256sum -c SHA256SUMS)
+          cp src/scripts/install.sh dist/install.sh
+          ls -l dist
 
       - name: Create release
         env:

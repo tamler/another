@@ -47,6 +47,13 @@ pub enum Command {
     Init,
     /// Show the local node, database location and registered agents.
     Status,
+    /// Check the setup: store, server, tokens, client hooks (and Codex hook trust), ports
+    /// and resources. Prints PASS / WARN / FAIL with a fix for each problem; exits 1 on FAIL.
+    Doctor {
+        /// The `another serve` HTTP address to check.
+        #[arg(long, default_value = "http://127.0.0.1:7466", env = "ANOTHER_SERVER")]
+        server: String,
+    },
     /// Run the daemon: MCP over loopback streamable HTTP (default) or stdio.
     Serve {
         /// Serve MCP on stdin/stdout instead of HTTP (for MCP client configs).
@@ -1292,6 +1299,23 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     if let Command::Hook(cmd) = &cli.command {
         return hook_command(cmd, json, another_home);
     }
+    if let Command::Doctor { server } = &cli.command {
+        // Before opening the store, so a broken store is reported, not fatal.
+        let report = crate::doctor::run(&crate::doctor::DoctorOptions {
+            another_home: another_home()?,
+            user_home: std::env::var_os("HOME")
+                .filter(|h| !h.is_empty())
+                .map(PathBuf::from),
+            server: server.clone(),
+        });
+        let failed = report.failed > 0;
+        emit(json, &report, crate::doctor::render);
+        return Ok(if failed {
+            ExitCode::from(1)
+        } else {
+            ExitCode::SUCCESS
+        });
+    }
     if let Command::Join {
         hub,
         code,
@@ -1312,7 +1336,11 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
 
     let store = open(home)?;
     let code = match cli.command {
-        Command::Serve { .. } | Command::Hook(_) | Command::Join { .. } | Command::Remote(_) => {
+        Command::Serve { .. }
+        | Command::Hook(_)
+        | Command::Join { .. }
+        | Command::Remote(_)
+        | Command::Doctor { .. } => {
             unreachable!("handled above")
         }
         Command::Invite(cmd) => invite_command(&store, json, cmd)?,
