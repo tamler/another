@@ -1152,6 +1152,29 @@ fn a_hook_outside_a_group_fails_and_gets_no_trust_verdict() {
     assert!(levels(&r, "hooks:codex-trust").is_empty(), "{r}");
 }
 
+/// BUGS-FOUND.md #8: `hook install` writes the wrapper path as given, so a relative Another
+/// home gives a relative hook command, which won't resolve from a client's working directory.
+#[test]
+fn bug_hook_install_writes_a_relative_wrapper_for_a_relative_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_another"))
+        .args(["hook", "install", "--client", "codex"])
+        .current_dir(dir.path())
+        .env("ANOTHER_HOME", "relative-home")
+        .env("HOME", &home)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let config = std::fs::read_to_string(home.join(".codex/hooks.json")).unwrap();
+    assert!(
+        config.contains("'relative-home/hooks/another-hook.sh' session-start"),
+        "today's behaviour; should be an absolute path: {config}"
+    );
+}
+
 /// BUGS-FOUND.md #6: a hook config that isn't UTF-8 reads as empty, so doctor says "not
 /// installed" and offers a fix that refuses to run on that file.
 #[test]

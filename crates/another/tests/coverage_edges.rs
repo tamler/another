@@ -421,10 +421,8 @@ fn the_session_digest_flags_importance_and_caps_requests_at_five() {
     assert!(digest.contains(", owner claude@shop)"), "{digest}");
     let listed = digest.matches("\n- from ").count() + digest.matches("\n- [").count();
     assert_eq!(listed, 5, "five messages listed: {digest}");
-    // BUGS-FOUND.md #2: the five listed are the newest, whatever their importance, so the
-    // urgent message drops out of the digest once five newer normal ones arrive (the header
-    // still says "1 urgent").
-    assert!(!digest.contains("Prod is down"), "{digest}");
+    // Which five is BUGS-FOUND.md #2, fixed with its own tests in PR #25, so it isn't asserted
+    // here either way.
     // An unknown agent is an error (the hook then fails open), not an empty digest.
     assert!(another::hooks::session_digest(&store, "nobody").is_err());
 }
