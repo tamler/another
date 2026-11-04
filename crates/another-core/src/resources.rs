@@ -740,6 +740,19 @@ impl Store {
                         current.owner.as_deref().unwrap_or("none")
                     )));
                 }
+                // Re-registering a lapsed resource adopts it: the same spend gate as borrowing
+                // applies, or a linked paid resource could be taken without approval or charge.
+                if let crate::spend::ResourceGate::Pending(decision_id) =
+                    crate::spend::resource_gate_tx(tx, &existing, &me, ttl)?
+                {
+                    touch(tx, &me.id)?;
+                    return Ok(LeaseOutcome {
+                        resource: get_resource(tx, &existing, tx.now)?,
+                        lease: None,
+                        outcome: "pending_approval".into(),
+                        decision_id: Some(decision_id),
+                    });
+                }
                 tx.emit(
                     &me.address,
                     "resource.adopted",
