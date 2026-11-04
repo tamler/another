@@ -947,11 +947,10 @@ pub enum TokenCmd {
         #[arg(long)]
         expires: Option<String>,
     },
+    /// List tokens: id, agent, project globs, status and last use (never the secret).
     List,
     /// Revoke a token by id (takes effect on the next request).
-    Revoke {
-        token_id: String,
-    },
+    Revoke { token_id: String },
 }
 
 fn parse_secs(raw: &str) -> anyhow::Result<i64> {
@@ -1079,9 +1078,8 @@ pub enum HookCmd {
 #[derive(Debug, Subcommand)]
 pub enum ProjectCmd {
     /// Register a project by path (default: current directory).
-    Ensure {
-        path: Option<PathBuf>,
-    },
+    Ensure { path: Option<PathBuf> },
+    /// List registered projects.
     List,
 }
 
@@ -1101,10 +1099,10 @@ pub enum AgentCmd {
         #[arg(long)]
         description: Option<String>,
     },
+    /// List registered agents.
     List,
-    Show {
-        name: String,
-    },
+    /// Show one agent: its program, status and when it was last seen.
+    Show { name: String },
     /// Remove an agent now: revoke all its tokens, release its holds and leases, tell its lanes.
     Kick {
         name: String,

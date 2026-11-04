@@ -57,6 +57,18 @@ cargo test
 cargo +1.88 check --workspace --all-targets --locked
 ```
 
+The docs job checks that every subcommand, MCP tool and HTTP route is documented, and runs the README quickstart and [docs/PEER-WALKTHROUGH.md](docs/PEER-WALKTHROUGH.md) verbatim. After changing a command, a tool or a route, regenerate the references (a doc comment on a new subcommand becomes its description; a new route also needs a row in [docs/HTTP.md](docs/HTTP.md)):
+
+```bash
+cargo build && python3 scripts/gen-docs.py
+```
+
+To run the quickstart as a new user would, in a throwaway `HOME`:
+
+```bash
+ANOTHER_BIN=target/debug/another sh scripts/quickstart-ci.sh
+```
+
 - Add tests for new behaviour. Core logic gets tests in `crates/another-core/tests`; CLI, MCP, hooks and HTTP get tests in `crates/another/tests`, which run the real binary, with a temporary `HOME` / `ANOTHER_HOME` where relevant.
 - Keep the **Status** section of [README.md](README.md) and the current [AGENTS.md](AGENTS.md) brief accurate when milestone progress changes.
 - Dependency updates must keep building on Rust 1.88. `.cargo/config.toml` makes `cargo update` prefer compatible versions.
