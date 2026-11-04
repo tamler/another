@@ -6,7 +6,7 @@ Free and open source, always: a local-first, vendor-neutral **inbox, activity fe
 
 **Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1–6 complete (local core, hooks, resources, remote peers, federation, polish)
 
-The coordination series is in progress: lanes, push and human decisions. Overdue decision defaults are applied before cancellation is refused.
+The coordination series is in progress. Decision cancellation preserves a due default even when the deadline passes as cancellation begins.
 
 ## Why
 
