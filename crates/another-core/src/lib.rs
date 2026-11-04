@@ -80,7 +80,7 @@ pub use time::fmt_ts;
 pub use tokens::{AuditEntry, AuditRecord, NewToken, Token, TokenScope};
 pub use wake::{WakeTarget, WakeVia};
 pub use webhooks::{
-    signature as webhook_signature, validate_webhook_url, DeliveryStatus, NewWebhook,
-    OutboundDelivery, Webhook, WebhookCreated, WebhookDelivery, WebhookFilter,
-    MAX_DELIVERY_ATTEMPTS,
+    is_refused_webhook_ip, signature as webhook_signature, validate_remote_webhook_host,
+    validate_webhook_url, DeliveryStatus, NewWebhook, OutboundDelivery, Webhook, WebhookCreated,
+    WebhookDelivery, WebhookFilter, MAX_DELIVERY_ATTEMPTS,
 };

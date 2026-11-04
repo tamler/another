@@ -26,6 +26,8 @@ Project globs are matched against a project's absolute path and its slug (`*` st
 
 ## 2. Run an authenticated server on loopback
 
+To keep the server below running across logins and reboots, install it as an opt-in background service instead: `another service install --auth --bind 127.0.0.1:7467 --allowed-host <tunnel hostname>` (see the README section "Run it in the background"). It takes `--trusted-proxy-header`, described below, as well.
+
 Keep your local agents on the plain loopback server (or stdio), and run a second, authenticated server for the tunnel:
 
 ```bash
@@ -35,6 +37,16 @@ another serve --auth --bind 127.0.0.1:7467
 With `--auth`, `/mcp`, `GET /activity` the push endpoints `GET /events/stream` and `GET /events/poll` ([PUSH.md](PUSH.md)), `GET /decisions`, `GET /decisions/{id}` and `POST /decisions/{id}/answer` ([HUMAN-DECISIONS.md](HUMAN-DECISIONS.md)), `GET /spend` ([SPEND.md](SPEND.md)), the remote-agent routes `POST /agent/heartbeat`, `POST /agent/leave`, `GET /lanes` and `POST /lanes/{lane}/report` ([REMOTE-AGENTS.md](REMOTE-AGENTS.md)), and `GET /summary` ([MANAGER-BOT.md](MANAGER-BOT.md#5-daily-digest)) require `Authorization: Bearer <token>`; `GET /health` stays open, and so does `POST /join` (served only with `--auth`), where an invite code is the credential ([REMOTE-AGENTS.md](REMOTE-AGENTS.md)). Because tunnels deliver traffic from loopback, the authenticated server checks the token on **every** request, local or not.
 
 Tunnels usually forward the public hostname in the `Host` header. Another rejects unknown hosts (DNS-rebinding protection), so name each tunnel hostname with `--allowed-host`.
+
+**Client addresses behind a tunnel.** Everything a tunnel delivers comes from loopback, and forwarding headers can be written by the client, so by default Another ignores them. The `/join` rate limit (10 attempts a minute) then applies to all tunnel clients together, and the audit log records `127.0.0.1:PORT`. To give each client its own limit and record its address, name the one header your tunnel sets:
+
+```bash
+another serve --auth --bind 127.0.0.1:7467 --allowed-host another.example.com --trusted-proxy-header cf-connecting-ip
+```
+
+- The values are `cf-connecting-ip` (Cloudflare), `x-forwarded-for` and `x-real-ip`. Check what your tunnel sends before choosing: name a header only if the tunnel overwrites it or appends to it, otherwise clients can still choose their address. Confirm with `another audit`, which shows the address in brackets, that the real client address appears.
+- Only the last value counts (the one the tunnel added), only from a peer on this machine, and only if it parses as an IP address. Anything else falls back to the TCP peer.
+- Don't use it with `ssh -R`: it adds no header, so anything in one came from the client.
 
 ## 3. Expose it through a tunnel (pick one)
 
@@ -101,7 +113,8 @@ curl -H "Authorization: Bearer $ANOTHER_TOKEN" "https://my-laptop.my-tailnet.ts.
 | `threads` | Only threads the token's agent sent or received in |
 | `activity_feed`, `activity_summarize`, `events_poll` | Only events from the token's projects (or, for project-less events, its own agent's); no message bodies |
 | `resource_find` | Node-wide, read-only awareness (kept by decision, D38) |
-| `webhook_subscribe` | Project globs default to the token's and may only be narrowed; `all_projects` is refused |
+| `webhook_subscribe` | Project globs default to the token's and may only be narrowed; `all_projects` is refused; loopback, link-local and metadata addresses are refused unless the person allows them ([PUSH.md](PUSH.md#remote-mcp-subscriptions)) |
+| `agent_kick` | Refused for every token; local only |
 | `webhook_list`, `webhook_remove` | Only webhooks this token created |
 | `orphans_list` | Lapsed registrations only; the process scan is never run for remote peers |
 | `holds_by_lane` | Only holds in the token's projects |

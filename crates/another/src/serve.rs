@@ -24,6 +24,8 @@ pub struct HttpOptions {
     pub allow_remote_bind: bool,
     /// Extra `Host` header values to accept (tunnel hostnames). Only with `auth`.
     pub allowed_hosts: Vec<String>,
+    /// The header a local tunnel sets with the client address. Only with `auth`.
+    pub trusted_proxy_header: Option<crate::remote::ForwardedHeader>,
     /// Serve the federation hub endpoints (`/fed/*`), authenticated by node signatures.
     pub federation: bool,
 }
@@ -158,7 +160,10 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
             crate::remote::require_token,
         ))
     } else {
-        protected
+        // Without --auth the local API answers as this machine's person, so only loopback
+        // `Host` names may reach it (rmcp applies the same rule to /mcp). The federation
+        // routes merged below are signature-authenticated and stay reachable through a tunnel.
+        protected.layer(axum::middleware::from_fn(require_loopback_host))
     };
     let protected = if opts.federation {
         protected.merge(crate::fed::router(store.clone()))
@@ -177,7 +182,7 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
     };
     let node_id = store.node_id().to_string();
     let auth = opts.auth;
-    protected.route(
+    let router = protected.route(
         "/health",
         axum::routing::get(move || {
             let node_id = node_id.clone();
@@ -185,7 +190,63 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
                 axum::Json(serde_json::json!({ "ok": true, "node_id": node_id, "auth": auth }))
             }
         }),
-    )
+    );
+    match opts.trusted_proxy_header {
+        Some(header) => router.layer(axum::Extension(header)),
+        None => router,
+    }
+}
+
+/// Refuse requests whose `Host` is not a loopback name. On an unauthenticated server this
+/// stops a web page that rebinds its own name to 127.0.0.1 (DNS rebinding), and a tunnel that
+/// forwards its public hostname, from reading the feed or answering decisions as the person.
+/// A request without a `Host` header is not from a browser and passes.
+async fn require_loopback_host(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let host = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| req.uri().authority().map(|a| a.to_string()));
+    match host {
+        Some(h) if !is_loopback_host(&h) => (
+            axum::http::StatusCode::FORBIDDEN,
+            axum::Json(
+                serde_json::json!({ "error": { "code": "forbidden", "message":
+                "Host header is not allowed: this server only answers loopback requests \
+                 (for remote access run it with --auth, and --allowed-host for a tunnel)" } }),
+            ),
+        )
+            .into_response(),
+        _ => next.run(req).await,
+    }
+}
+
+/// `localhost`, `127.0.0.1` or `[::1]`, with or without a port: the names rmcp accepts.
+fn is_loopback_host(authority: &str) -> bool {
+    let a = authority.trim().to_ascii_lowercase();
+    let host = match a.strip_prefix('[') {
+        Some(v6) => match v6.split_once(']') {
+            Some((h, rest))
+                if rest.is_empty()
+                    || rest.strip_prefix(':').is_some_and(|p| {
+                        !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())
+                    }) =>
+            {
+                h
+            }
+            _ => return false,
+        },
+        None => match a.rsplit_once(':') {
+            Some((h, port)) if port.chars().all(|c| c.is_ascii_digit()) => h,
+            _ => a.as_str(),
+        },
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 pub async fn serve_http(
@@ -217,16 +278,47 @@ pub async fn serve_http(
         store.node_id()
     );
     let app = http_router(store, ct.clone(), &opts);
-    axum::serve(
+    let graceful = ct.clone();
+    let server = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        ct.cancel();
-    })
-    .await?;
+        shutdown_signal().await;
+        graceful.cancel();
+    });
+    tokio::select! {
+        result = async { server.await } => result?,
+        _ = async {
+            ct.cancelled().await;
+            tokio::time::sleep(SHUTDOWN_GRACE).await;
+        } => tracing::warn!("open connections outlasted the shutdown grace period"),
+    }
     Ok(())
+}
+
+/// How long open connections get to finish after a shutdown signal. Shorter than the 5 s
+/// `another service` waits for launchd to unload the job, so a client holding a stream open
+/// can't make `stop` or an update fail.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+
+/// Ctrl-C, or SIGTERM: what launchd and systemd send to stop a service.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+                return;
+            }
+            Err(e) => tracing::warn!(error = %e, "cannot listen for SIGTERM"),
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 #[cfg(test)]
@@ -242,6 +334,30 @@ mod tests {
         assert!(local_bind("[::]:7466").is_err());
         assert!(local_bind("192.168.1.10:7466").is_err());
         assert!(local_bind("not an address").is_err());
+    }
+
+    #[test]
+    fn loopback_host_names() {
+        for ok in [
+            "127.0.0.1:7466",
+            "localhost:7466",
+            "LOCALHOST",
+            "[::1]:7466",
+            "127.0.0.1",
+        ] {
+            assert!(is_loopback_host(ok), "{ok}");
+        }
+        for bad in [
+            "evil.example",
+            "evil.example:7466",
+            "127.0.0.1.evil.example",
+            "localhost.evil.example:7466",
+            "studio.my-tailnet.ts.net",
+            "[::1].evil",
+            "",
+        ] {
+            assert!(!is_loopback_host(bad), "{bad}");
+        }
     }
 
     #[test]
