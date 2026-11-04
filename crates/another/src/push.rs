@@ -17,6 +17,9 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
+// ureq's `unversioned` API may change between minor releases; Cargo.lock pins the version.
+use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
+use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 
 use crate::remote::{audit, RemotePeer};
 
@@ -36,24 +39,70 @@ pub const MAX_MCP_POLL_SECONDS: u64 = 30;
 // ---------------------------------------------------------------------------
 // Webhook delivery
 
+fn agent_config() -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        // A redirect could point an https hook at a plain-http or internal address.
+        .max_redirects(0)
+        .timeout_global(Some(Duration::from_secs(10)))
+}
+
 fn http_agent(url: &str) -> ureq::Agent {
     let loopback = ["http://127.0.0.1", "http://localhost", "http://[::1]"]
         .iter()
         .any(|p| url.starts_with(p));
-    let mut config = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        // A redirect could point an https hook at a plain-http or internal address.
-        .max_redirects(0)
-        .timeout_global(Some(Duration::from_secs(10)));
+    let mut config = agent_config();
     if loopback {
         config = config.proxy(None);
     }
     ureq::Agent::new_with_config(config.build())
 }
 
+/// Checks every address a name resolves to, inside the connection's own lookup: a separate
+/// check beforehand could be answered differently by DNS (rebinding). One refused address
+/// refuses them all, so a mixed answer can't fall through to it.
+#[derive(Debug)]
+struct RefuseHubAddresses<R>(R);
+
+impl<R: Resolver> Resolver for RefuseHubAddresses<R> {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: NextTimeout,
+    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        let addrs = self.0.resolve(uri, config, timeout)?;
+        if addrs
+            .iter()
+            .any(|a| another_core::is_refused_webhook_ip(a.ip()))
+        {
+            return Err(ureq::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "webhook host resolves to an address that is not allowed for a token's webhook",
+            )));
+        }
+        Ok(addrs)
+    }
+}
+
+/// The agent for a token's webhook. It goes direct: through a proxy, the proxy would resolve
+/// the name and this check would see only the proxy's address.
+fn restricted_agent(resolver: impl Resolver) -> ureq::Agent {
+    ureq::Agent::with_parts(
+        agent_config().proxy(None).build(),
+        DefaultConnector::default(),
+        RefuseHubAddresses(resolver),
+    )
+}
+
 /// POST one delivery, signed now. Returns the HTTP status, or a network error.
 pub fn send(d: &OutboundDelivery) -> Result<u16, String> {
-    let agent = http_agent(&d.url);
+    let agent = if d.restricted {
+        another_core::validate_remote_webhook_host(&d.url).map_err(|e| e.to_string())?;
+        restricted_agent(DefaultResolver::default())
+    } else {
+        http_agent(&d.url)
+    };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|t| t.as_millis() as i64)
@@ -381,4 +430,72 @@ pub async fn stream(
     Sse::new(events)
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener};
+
+    use super::*;
+
+    /// DNS that answers every name with fixed addresses, as a rebinding name would.
+    #[derive(Debug)]
+    struct FixedDns(Vec<SocketAddr>);
+
+    impl Resolver for FixedDns {
+        fn resolve(
+            &self,
+            _uri: &ureq::http::Uri,
+            _config: &ureq::config::Config,
+            _timeout: NextTimeout,
+        ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+            let mut out = self.empty();
+            for a in &self.0 {
+                out.push(*a);
+            }
+            Ok(out)
+        }
+    }
+
+    fn post(agent: &ureq::Agent, port: u16) -> Result<u16, String> {
+        agent
+            .post(format!("http://rebind.example.test:{port}/hook"))
+            .send("{}")
+            .map(|r| r.status().as_u16())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Finding 3: a harmless-looking name that resolves to this machine reaches nothing.
+    #[test]
+    fn a_name_resolving_to_a_hub_address_is_not_connected_to() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let local = listener.local_addr().unwrap();
+        let public: SocketAddr = "93.184.216.34:443".parse().unwrap();
+
+        for answer in [vec![local], vec![public, local]] {
+            let agent = restricted_agent(FixedDns(answer));
+            let err = post(&agent, local.port()).unwrap_err();
+            assert!(err.contains("not allowed"), "{err}");
+        }
+        listener.set_nonblocking(true).unwrap();
+        assert!(listener.accept().is_err(), "nothing connected");
+        listener.set_nonblocking(false).unwrap();
+
+        // The same answer without the guard does connect, so the check above means something.
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = conn.read(&mut buf).unwrap();
+            conn.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .unwrap();
+        });
+        let open = ureq::Agent::with_parts(
+            agent_config().proxy(None).build(),
+            DefaultConnector::default(),
+            FixedDns(vec![local]),
+        );
+        assert_eq!(post(&open, local.port()), Ok(204));
+        server.join().unwrap();
+    }
 }

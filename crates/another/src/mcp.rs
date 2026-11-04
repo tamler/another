@@ -570,8 +570,8 @@ impl AnotherMcp {
 
     #[tool(
         description = "Remove an agent now (manager agents only): revoke all its tokens, release \
-        its holds and leases, and tell its lanes (a lane it led gets a new lead). Remote \
-        managers can only kick agents in their token's projects; people can't be kicked."
+        its holds and leases, and tell its lanes (a lane it led gets a new lead). Local only: \
+        every token is refused. People can't be kicked."
     )]
     async fn agent_kick(
         &self,
