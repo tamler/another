@@ -244,21 +244,26 @@ fn gpu(s: &Store, agent: &str, project: &str, name: &str) -> LeaseOutcome {
     .unwrap()
 }
 
-/// Everything a token scoped to `glob` sees in the feed.
-fn seen(s: &Store, scope: &TokenScope) -> String {
-    let feed = s
-        .activity_scoped(
-            ActivityQuery {
-                since: Some(Since::Time(0)),
-                limit: 500,
-                kinds: vec![],
-            },
-            Some(scope),
-        )
-        .unwrap();
-    serde_json::to_string(&feed.items).unwrap()
+/// The resource events a token sees in the feed, as (kind, refs).
+fn resource_events(s: &Store, scope: &TokenScope) -> Vec<(String, String)> {
+    s.activity_scoped(
+        ActivityQuery {
+            since: Some(Since::Time(0)),
+            limit: 500,
+            kinds: vec![],
+        },
+        Some(scope),
+    )
+    .unwrap()
+    .items
+    .into_iter()
+    .filter(|i| i.kind.starts_with("resource."))
+    .map(|i| (i.kind, i.refs.to_string()))
+    .collect()
 }
 
+/// `resource.renewed` and `resource.released` carry no `project_id`: only the lookup through
+/// the resource or its leases can place them.
 #[test]
 fn resource_events_reach_only_tokens_for_the_resources_project() {
     let (s, _) = store();
@@ -266,6 +271,8 @@ fn resource_events_reach_only_tokens_for_the_resources_project() {
     let vault = scope(&s, "/work/vault");
     let in_shop = gpu(&s, "shopper@shop", "shop", "shop-gpu");
     let in_vault = gpu(&s, "vaulter@vault", "vault", "vault-gpu");
+    s.heartbeat_resources("shopper@shop", &[]).unwrap();
+    s.heartbeat_resources("vaulter@vault", &[]).unwrap();
     s.release_resource(
         "shopper@shop",
         &ResourceRef::Id(in_shop.resource.resource_id.clone()),
@@ -279,15 +286,24 @@ fn resource_events_reach_only_tokens_for_the_resources_project() {
     )
     .unwrap();
 
-    let for_shop = seen(&s, &shop);
-    assert!(for_shop.contains("shop-gpu"), "{for_shop}");
-    assert!(!for_shop.contains("vault-gpu"), "{for_shop}");
-    assert!(!for_shop.contains(&in_vault.resource.resource_id));
-
-    let for_vault = seen(&s, &vault);
-    assert!(for_vault.contains("vault-gpu"), "{for_vault}");
-    assert!(!for_vault.contains("shop-gpu"), "{for_vault}");
-    assert!(!for_vault.contains(&in_shop.resource.resource_id));
+    for (token, mine, theirs) in [(&shop, &in_shop, &in_vault), (&vault, &in_vault, &in_shop)] {
+        let seen = resource_events(&s, token);
+        let kinds: Vec<&str> = seen.iter().map(|(k, _)| k.as_str()).collect();
+        for kind in [
+            "resource.registered",
+            "resource.renewed",
+            "resource.released",
+        ] {
+            assert_eq!(
+                kinds.iter().filter(|k| **k == kind).count(),
+                1,
+                "{kind}: {seen:?}"
+            );
+        }
+        let refs: String = seen.iter().map(|(_, r)| r.as_str()).collect();
+        assert!(refs.contains(&mine.resource.resource_id), "{seen:?}");
+        assert!(!refs.contains(&theirs.resource.resource_id), "{seen:?}");
+    }
 }
 
 #[test]
