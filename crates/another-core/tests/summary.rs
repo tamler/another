@@ -507,6 +507,17 @@ fn scheduled_summary_by_mail_and_webhook() {
     };
     let d = got(&local.webhook.webhook_id);
     assert_eq!(d.len(), 1);
+    let body = s
+        .claim_due_deliveries(50)
+        .unwrap()
+        .into_iter()
+        .find(|o| o.kind == "summary.daily")
+        .unwrap()
+        .body;
+    assert!(
+        body.contains("**Another: last"),
+        "the rollup carries the digest: {body}"
+    );
     assert_eq!(d[0].filter, "daily_summary");
     assert!(
         got(&everything.webhook.webhook_id).is_empty(),
@@ -532,4 +543,52 @@ fn scheduled_summary_by_mail_and_webhook() {
     s.set_summary_schedule(None, None).unwrap();
     step(24 * HOUR);
     assert_eq!(s.send_scheduled_summary_at(plus2).unwrap(), None);
+}
+
+#[test]
+fn sweepers_sharing_a_home_send_the_rollup_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (clock, _h) = Clock::manual(NOV_21 + 10 * HOUR);
+    let first = Store::open_with_clock(dir.path(), clock.clone()).unwrap();
+    first
+        .register_agent(RegisterAgent {
+            name: "owner".into(),
+            program: Program::Human,
+            project: None,
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    first
+        .set_summary_schedule(Some("09:00"), Some("mail:owner"))
+        .unwrap();
+    // Several servers on one home, all due at once.
+    let utc = chrono::FixedOffset::east_opt(0).unwrap();
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let s = Store::open_with_clock(dir.path(), clock.clone()).unwrap();
+            std::thread::spawn(move || s.send_scheduled_summary_at(utc).unwrap())
+        })
+        .collect();
+    let sent = handles
+        .into_iter()
+        .map(|h| h.join().unwrap())
+        .filter(Option::is_some)
+        .count();
+    assert_eq!(sent, 1);
+    let inbox = first
+        .inbox(
+            "owner",
+            InboxQuery {
+                limit: 50,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let rollups = inbox
+        .messages
+        .iter()
+        .filter(|m| m.message.subject.starts_with("[summary]"))
+        .count();
+    assert_eq!(rollups, 1);
 }

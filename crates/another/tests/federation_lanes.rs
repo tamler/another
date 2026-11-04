@@ -346,7 +346,11 @@ fn lanes_decisions_and_holds_across_nodes() {
         .inbox("codex@shop", InboxQuery::default())
         .unwrap();
     let mail = &inbox.messages[0].message;
-    assert!(mail.subject.starts_with("[decision] Yes"));
+    assert!(
+        mail.subject.starts_with("[decision] answered: yes"),
+        "{}",
+        mail.subject
+    );
     assert!(mail.body.contains("private note for the laptop"));
     // The text crossed as mail, already marked read: the answer mail is what the agent reads.
     let carrier = inbox

@@ -412,14 +412,65 @@ fn live_hook(conn: &Connection, id: &str) -> Result<HookRow> {
     .ok_or_else(|| Error::NotFound(format!("no webhook {id:?}")))
 }
 
-/// Remote callers may only manage webhooks their own token created.
+/// Remote callers may only manage webhooks their own token created. Anyone else's webhook
+/// looks exactly like a missing one (same error and message as [`live_hook`]).
 fn check_owner(h: &HookRow, scope: Option<&TokenScope>) -> Result<()> {
     match scope {
-        Some(s) if h.token_id.as_deref() != Some(s.token_id.as_str()) => Err(Error::Forbidden(
-            format!("webhook {} was not created by this token", h.webhook_id),
-        )),
+        Some(s) if h.token_id.as_deref() != Some(s.token_id.as_str()) => {
+            Err(Error::NotFound(format!("no webhook {:?}", h.webhook_id)))
+        }
         _ => Ok(()),
     }
+}
+
+/// String fields a webhook payload may carry: names and enumerated values, never text a
+/// person or agent wrote (notes, subjects, summaries, questions, reasons).
+const PAYLOAD_STRINGS: &[&str] = &[
+    "status",
+    "from",
+    "to",
+    "kind",
+    "name",
+    "unit",
+    "mode",
+    "program",
+    "source",
+    "importance",
+    "value",
+    "period",
+    "account",
+    "filter",
+    "role",
+    "phase",
+    "lane",
+    "outcome_kind",
+];
+
+/// The `data` of a webhook delivery: the event payload reduced to ids, statuses, numbers
+/// and flags (D38). Anything else in the event stays in the node's own tables.
+pub(crate) fn webhook_data(payload: &Value) -> Value {
+    let Some(map) = payload.as_object() else {
+        return Value::Object(Default::default());
+    };
+    let keep = |k: &str, v: &Value| -> bool {
+        let id_like = k.ends_with("_id")
+            || k.ends_with("_ids")
+            || k.ends_with("_node")
+            || k.ends_with("_nodes")
+            || k.ends_with("_at");
+        match v {
+            Value::Null | Value::Bool(_) | Value::Number(_) => true,
+            Value::String(_) => id_like || PAYLOAD_STRINGS.contains(&k),
+            Value::Array(items) => id_like && items.iter().all(|i| i.is_string() || i.is_number()),
+            Value::Object(_) => false,
+        }
+    };
+    Value::Object(
+        map.iter()
+            .filter(|(k, v)| keep(k, v))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    )
 }
 
 fn delivery_row(r: &Row<'_>) -> rusqlite::Result<WebhookDelivery> {
@@ -683,7 +734,9 @@ impl Store {
                         "webhook_id": h.webhook_id,
                         "filter": filter.as_str(),
                         "event": event,
-                        "data": payload,
+                        // The scheduled rollup is the one delivery whose content is the
+                        // point; it only reaches local all-project webhooks (D42).
+                        "data": if kind == "summary.daily" { payload.clone() } else { webhook_data(&payload) },
                     })
                     .to_string();
                     queued += tx.execute(
