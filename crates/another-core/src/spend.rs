@@ -405,7 +405,9 @@ fn add_month(y: i32, m: u32, by: i32) -> (i32, u32) {
 }
 
 /// `[start, end)` of the selected monthly period for an account resetting on `reset_day`.
+/// `reset_day` is clamped to 1..=28 (what writes accept), so a bad stored value can't panic.
 pub fn period_bounds(sel: PeriodSel, now_ms: i64, reset_day: u32) -> (i64, i64) {
+    let reset_day = reset_day.clamp(1, 28);
     let today = chrono::DateTime::from_timestamp_millis(now_ms)
         .unwrap_or_default()
         .date_naive();
@@ -425,9 +427,9 @@ pub fn period_bounds(sel: PeriodSel, now_ms: i64, reset_day: u32) -> (i64, i64) 
             }
         }
     };
-    let start = NaiveDate::from_ymd_opt(y, m, reset_day).expect("reset_day <= 28");
+    let start = NaiveDate::from_ymd_opt(y, m, reset_day).expect("reset_day is clamped to 1..=28");
     let (ny, nm) = add_month(y, m, 1);
-    let end = NaiveDate::from_ymd_opt(ny, nm, reset_day).expect("reset_day <= 28");
+    let end = NaiveDate::from_ymd_opt(ny, nm, reset_day).expect("reset_day is clamped to 1..=28");
     (ms_of(start), ms_of(end))
 }
 
@@ -2063,6 +2065,21 @@ mod tests {
 
     fn ms(y: i32, m: u32, d: u32) -> i64 {
         ms_of(NaiveDate::from_ymd_opt(y, m, d).unwrap())
+    }
+
+    #[test]
+    fn out_of_range_reset_days_are_clamped_instead_of_panicking() {
+        // Writes validate reset_day (1..=28), but period_bounds reads it back from the
+        // store, so a hand-edited or older row must not panic a report.
+        let now = ms(2026, 2, 20);
+        assert_eq!(
+            period_bounds(PeriodSel::Current, now, 31),
+            period_bounds(PeriodSel::Current, now, 28)
+        );
+        assert_eq!(
+            period_bounds(PeriodSel::Previous, now, 0),
+            period_bounds(PeriodSel::Previous, now, 1)
+        );
     }
 
     #[test]
