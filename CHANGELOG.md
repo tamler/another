@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 The first release. It contains the local core built in milestones 1–6 and the coordination series (Phases 1–7: lanes, push, decisions, lane holds, spend, summary, remote agents), plus the opt-in background service, `another doctor` and verified release installs. The date is set when `v0.1.0` is tagged. Release notes: [docs/release-notes-v0.1.0.md](docs/release-notes-v0.1.0.md).
 
+### Fixed
+- Cancelling an overdue decision commits its timeout result, request closure and automatic mail before returning a conflict, even without a running server or when the deadline passes as cancellation begins.
+
 ### Added
 - **Local core** (milestones 1–6):
   - One SQLite store per node (`~/.another`, or `$ANOTHER_HOME`; `another init`), an append-only event log, and agents and projects (`another agent`, `another project`).
@@ -100,12 +103,15 @@ The first release. It contains the local core built in milestones 1–6 and the 
 - **Background service** (opt-in; tamler/another#9). *Pending: #9 is not merged into this branch yet. This entry describes the #9 branch, and it ships in 0.1.0 only if #9 is merged before the tag; otherwise remove it.*
   - `another service install|status|logs|stop|start|uninstall`. It is never installed unless you run `another service install`.
   - macOS: a launchd user agent (`one.toanother.another`, `RunAtLoad`, `KeepAlive`, logs in `$ANOTHER_HOME/logs/`). Linux: a systemd user unit (`another.service`, `Restart=on-failure`, journal logs).
-  - `install` takes `serve`'s flags (`--bind`, `--auth`, `--allowed-host`, `--allow-remote-bind`, `--federation`) and the global `--home`. Re-running it updates the service in place. It refuses when another process already listens on the port.
-- **`another doctor`**: checks the store (writable, schema), the local server (reachable, Another, same home), tokens (expired, expiring, matching no project), client hooks for Claude Code, Codex and Grok (and whether Codex has recorded trust for them), and port and resource conflicts. PASS / WARN / FAIL / SKIP with a fix per problem; machine-readable with the global `--json`; exit 1 on any FAIL.
+  - `install` takes `serve`'s flags (`--bind`, `--auth`, `--allowed-host`, `--allow-remote-bind`, `--federation`) and the global `--home`. Re-running it updates the service in place and replaces every flag, so repeat the ones you want to keep. It refuses when another process already listens on the port.
+  - `stop` leaves the service installed: it starts again at the next login (launchd) or boot (systemd). `uninstall` removes it.
+- **`another doctor`**: checks the store (writable, schema), the local server (reachable, Another, same home), tokens (expired, expiring, matching no project), client hooks for Claude Code, Codex and Grok (and whether Codex has recorded trust for them), and port and resource conflicts. PASS / WARN / FAIL / SKIP with a fix per problem; machine-readable with the global `--json`; exit 1 on any FAIL. A hook config it can't read is a FAIL.
 - **Release installs:** tagged releases also publish one `SHA256SUMS` and `install.sh`. One-line install: `curl -fsSL https://github.com/tamler/another/releases/latest/download/install.sh | sh`. It verifies the archive before installing (`ANOTHER_VERSION`, `ANOTHER_INSTALL_DIR` to pin or relocate).
 - README quickstart rewritten as a 90-second demo script (install, start, two agents, a hold, a port claim, doctor).
 
 ### Changed
+- Doctor rejects wrapper mentions outside executable hook commands and preserves recognition of installer paths containing spaces or apostrophes.
+- Spend reports keep active leases in the count before cost accrues, including at monthly resets, while retaining their overlap with historical periods.
 - **Remote event reads are now filtered by token scope** (D38, supersedes D16). `activity_feed`, `activity_summarize` and `GET /activity` used to show every project's events to any token. They now show only events from the token's projects (and project-less events concerning its own agent). Token, peer, node, invite and summary events are hidden from tokens. Local callers are unaffected.
 - `activity_summarize` open, claimed and stale request counts exclude decision requests (`kind = 'decision'`).
 - When reading forward, the feed's `next_since` now advances past events filtered out by `kinds` or scope. For a scoped caller whose last scanned event is hidden, the cursor is an opaque `@<seq>` value instead of an event id; pass it back unchanged.
