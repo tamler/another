@@ -79,7 +79,7 @@ This writes `billing-STATUS.md`, and `DONE-billing.md` as well once the lane is 
 
 `lane_create`, `lane_list`, `lane_show`, `lane_update` (status, charter, lead, links), `lane_report` (`kind`: `status` or `done`), and `lane_close`.
 
-Over remote MCP (`serve --auth`), a token only sees and changes lanes whose project matches its globs, and acts as its own agent. Out-of-scope lanes return `forbidden`, and `lane_list` leaves them out.
+Over remote MCP (`serve --auth`), a token only sees and changes lanes whose project matches its globs, and acts as its own agent. A lead it names is looked up among the agents it may see (its projects, plus project-less agents), so a hidden agent is the same `not_found` as a missing one. Out-of-scope lanes return `forbidden`, and `lane_list` leaves them out.
 
 ## Reporting automatically from Claude Code and Codex
 

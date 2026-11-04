@@ -297,7 +297,7 @@ async fn remote_spend_is_scoped_and_audited() {
         ("vaulter", Some("/work/vault")),
     ] {
         store
-            .register_agent(RegisterAgent {
+            .register_agent_trusted(RegisterAgent {
                 name: name.into(),
                 program: Program::Codex,
                 project: project.map(Into::into),

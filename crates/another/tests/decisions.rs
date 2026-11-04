@@ -61,7 +61,7 @@ async fn agent_asks_manager_answers_over_http() {
         ("codex", Program::Codex, Some("/work/vault")),
     ] {
         store
-            .register_agent(RegisterAgent {
+            .register_agent_trusted(RegisterAgent {
                 name: name.into(),
                 program,
                 project: project.map(Into::into),

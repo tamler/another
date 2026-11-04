@@ -13,7 +13,7 @@ fn store_with_clock() -> (Store, std::sync::Arc<std::sync::atomic::AtomicI64>) {
         ("shopper", Some("/work/shop")),
         ("vaulter", Some("/work/vault")),
     ] {
-        s.register_agent(RegisterAgent {
+        s.register_agent_trusted(RegisterAgent {
             name: name.into(),
             program: Program::Claude,
             project: project.map(Into::into),
@@ -438,7 +438,7 @@ fn upgrades_a_database_created_before_webhooks() {
     {
         let old = Store::open_at_schema(dir.path(), 6).unwrap();
         old.ensure_project("t", "/work/shop").unwrap();
-        old.register_agent(RegisterAgent {
+        old.register_agent_trusted(RegisterAgent {
             name: "a".into(),
             program: Program::Other,
             project: Some("/work/shop".into()),
@@ -536,7 +536,7 @@ fn webhooks_stop_when_their_token_is_revoked_or_expires() {
 #[test]
 fn webhooks_follow_the_own_agent_rule_for_project_less_events() {
     let (s, _) = store_with_clock();
-    s.register_agent(RegisterAgent {
+    s.register_agent_trusted(RegisterAgent {
         name: "other".into(),
         program: Program::Other,
         project: None,
@@ -625,7 +625,7 @@ fn webhook_payloads_carry_ids_and_statuses_only() {
         .send_message(SendMessage {
             from: "manager".into(),
             to: vec!["shopper@shop".into()],
-            subject: "please".into(),
+            subject: "please rotate the staging keys".into(),
             body: "do it".into(),
             request: Some(NewRequest::default()),
             ..Default::default()
@@ -640,6 +640,18 @@ fn webhook_payloads_carry_ids_and_statuses_only() {
         due_in_seconds: None,
     })
     .unwrap();
+    // Free text in resource and reap events: purpose and reason.
+    s.register_resource(RegisterResource {
+        purpose: Some("the private purpose".into()),
+        ..dev_server("shopper@shop", None)
+    })
+    .unwrap();
+    s.note_reap_request(
+        "shopper@shop",
+        "dev_server:vite@5173",
+        "the private reap reason",
+    )
+    .unwrap();
     s.queue_webhook_deliveries().unwrap();
     let bodies: Vec<String> = s
         .claim_due_deliveries(200)
@@ -652,7 +664,22 @@ fn webhook_payloads_carry_ids_and_statuses_only() {
         bodies.iter().any(|b| b.contains("request.completed")),
         "{bodies:?}"
     );
+    assert!(
+        bodies.iter().any(|b| b.contains("resource.reap_requested")),
+        "{bodies:?}"
+    );
+    // The whole serialized delivery, summary included, carries no free text.
     for b in &bodies {
-        assert!(!b.contains("private completion note"), "{b}");
+        for leak in [
+            "private completion note",
+            "private purpose",
+            "private reap reason",
+            "staging keys",
+        ] {
+            assert!(!b.contains(leak), "{leak} in {b}");
+        }
     }
+    // Nor does the feed a token reads, for resource purposes and reap reasons.
+    let feed = serde_json::to_string(&all_items(&s, None)).unwrap();
+    assert!(!feed.contains("private purpose") && !feed.contains("private reap reason"));
 }

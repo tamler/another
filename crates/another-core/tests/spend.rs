@@ -21,7 +21,7 @@ fn store() -> (Store, Handle) {
         ("codex", Some("/work/shop")),
         ("vaulter", Some("/work/vault")),
     ] {
-        s.register_agent(RegisterAgent {
+        s.register_agent_trusted(RegisterAgent {
             name: name.into(),
             program: if name == "manager" {
                 Program::GrokBot
@@ -532,7 +532,11 @@ fn token_scope_hides_other_projects_spend() {
         },
         Some(&shop),
     );
-    assert_eq!(r.unwrap_err().code(), "forbidden");
+    assert_eq!(
+        r.unwrap_err().code(),
+        "not_found",
+        "a hidden project is a missing one"
+    );
     s.record_spend(
         RecordSpend {
             agent: Some("manager".into()),
@@ -666,7 +670,7 @@ fn the_borrower_cannot_approve_its_own_spend() {
     let leases = s.spend_leases(false, None).unwrap();
     assert_eq!(leases[0].status, SpendLeaseStatus::PendingApproval);
     // The person (or another manager) can.
-    s.register_agent(RegisterAgent {
+    s.register_agent_trusted(RegisterAgent {
         name: "bot2".into(),
         program: Program::GrokBot,
         project: None,
@@ -898,4 +902,96 @@ fn round3_linked_release_explicit_month_and_period_checks() {
         .release_spend("codex@shop", &vl.lease.lease_id, Some(&shop))
         .unwrap_err();
     assert_eq!(e.code(), "not_found");
+}
+
+#[test]
+fn round4_reset_split_kept_resources_and_scoped_projects() {
+    let (s, clock) = store();
+    // A lease from Nov 30 23:00 to Dec 1 01:00 is charged one hour to each month.
+    account(&s, "cpu", SpendKind::Server, "USD", Some(100.0), |a| {
+        a.cost_per_hour = Some(3.0)
+    });
+    advance(&clock, 9 * 24 * HOUR + 23 * HOUR);
+    let l = s
+        .borrow_spend(
+            BorrowSpend {
+                agent: "codex@shop".into(),
+                account: "cpu".into(),
+                ttl_seconds: Some(4 * 3600),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    advance(&clock, 2 * HOUR);
+    s.release_spend("codex@shop", &l.lease.lease_id, None)
+        .unwrap();
+    let month = |m: &str| {
+        let r = s
+            .spend_report(
+                SpendQuery {
+                    period: m.parse().unwrap(),
+                    account: Some("cpu".into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        find(&r, "cpu").spent
+    };
+    assert_eq!((month("2026-11"), month("2026-12")), (3.0, 3.0));
+
+    // --keep-resources keeps the linked spend lease charging with the resource lease.
+    account(&s, "pods", SpendKind::GpuPod, "USD", None, |a| {
+        a.cost_per_hour = Some(2.0)
+    });
+    gpu_resource(&s, 86_400);
+    let target = ResourceRef::parse("gpu:pod:a100").unwrap();
+    s.link_resource_spend(&target, Some("pods"), None).unwrap();
+    s.borrow_resource("codex@shop", &target, Some(3600))
+        .unwrap();
+    advance(&clock, 30 * 60_000);
+    s.session(
+        "codex@shop",
+        SessionPhase::End,
+        SessionInfo {
+            keep_resources: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    advance(&clock, 45 * 60_000);
+    s.sweep().unwrap();
+    let open = s.spend_leases(false, None).unwrap();
+    assert!(
+        open.iter()
+            .any(|l| l.account == "pods" && l.status == SpendLeaseStatus::Active),
+        "renewed with the kept resource lease: {open:?}"
+    );
+
+    // An explicit project in spend_record is looked up in the token's scope.
+    account(&s, "shared", SpendKind::ApiCredits, "USD", None, |_| {});
+    let t = s
+        .create_token("codex@shop", &["/work/shop".into()], None, None)
+        .unwrap();
+    let shop = s.verify_token(&t.secret).unwrap();
+    let rec = |project: &str| {
+        s.record_spend(
+            RecordSpend {
+                agent: Some("codex@shop".into()),
+                account: "shared".into(),
+                amount: 1.0,
+                project: Some(project.into()),
+                ..Default::default()
+            },
+            Some(&shop),
+        )
+        .unwrap_err()
+    };
+    let (hidden, missing) = (rec("vault"), rec("nowhere"));
+    assert_eq!((hidden.code(), missing.code()), ("not_found", "not_found"));
+    assert_eq!(
+        hidden.to_string().replace("vault", "X"),
+        missing.to_string().replace("nowhere", "X")
+    );
 }
