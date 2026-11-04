@@ -53,7 +53,7 @@ Accounts are created and changed locally only, through the CLI or local MCP. Rem
 `another spend link ACCOUNT RESOURCE` (local only) charges borrowing a registered resource, such as a rented GPU pod, to an account with a `cost_per_hour`. `another spend unlink RESOURCE` undoes it.
 - `resource_borrow` on a linked resource opens a spend lease for the borrower, tied to the resource.
 - If the account requires approval, the borrow returns `outcome: pending_approval` with a `decision_id` and no resource lease. Borrowing again while it is pending returns the same decision. Approval takes the resource lease and starts the spend lease. If the resource can no longer be leased by then, the spend lease ends at once, at no cost.
-- The spend lease is renewed with the resource lease (heartbeat or borrowing again), and ends when the resource lease ends (release, expiry, stop or session end), charged up to that moment.
+- The spend lease is renewed with the resource lease (heartbeat or borrowing again), and ends when the resource lease ends (release, expiry, stop or session end), charged up to that moment. Releasing that spend lease on its own is a `conflict` while the resource lease is held.
 - Only resources registered on this node can be linked. Borrowing another node's resource is not charged here.
 
 ## Reports
@@ -74,7 +74,7 @@ Accounts are created and changed locally only, through the CLI or local MCP. Rem
 **Periods:**
 - `current` (the default) is each account's own current period, since accounts can reset on different days.
 - `previous` is the period before that.
-- `YYYY-MM` is the period starting on the account's reset day in that month.
+- `YYYY-MM` is the period starting on the account's reset day in that month (years 1970–9999). When it names the period running now, open leases count as accrued, the same as `current`.
 
 **Thresholds:** when an entry pushes an account across 80% or 100% of its budget in the current period, `spend.budget_threshold` is emitted. The webhook filter `budget` covers it, along with `spend.approval_requested`.
 
