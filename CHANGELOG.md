@@ -9,7 +9,7 @@ All notable changes to Another. Unreleased work is listed under the next version
 - The session-start digest lists urgent and high-importance mail first, so newer ordinary mail can't push it out of the five messages shown.
 - `another doctor` fails a hook config it can't read (not UTF-8, a directory at the path) instead of calling it not installed and offering a fix that refuses the file.
 - `another doctor` warns about commands that mention the hook wrapper but that it can't check, instead of dropping them when a healthy hook sits beside them, and never reports Codex trust for zero hooks as a pass.
-- Summary times must be `HH:MM` with exactly two digits each. `+9:00`, `09:+5` and `001:5` are refused.
+- Summary times must be `HH:MM` with exactly two digits each. `+9:00`, `09:+5` and `001:5` are refused. A refused time no longer leaves a new `--to` recipient saved.
 - Cancelling an overdue decision commits its timeout result, request closure and automatic mail before returning a conflict, even without a running server or when the deadline passes as cancellation begins.
 
 ### Added

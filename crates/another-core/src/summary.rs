@@ -569,10 +569,13 @@ impl Store {
         daily_at: Option<&str>,
         to: Option<&str>,
     ) -> Result<SummarySchedule> {
+        // Checked first: a refused time must not leave the new recipient behind.
+        let daily_at = daily_at.unwrap_or("").trim();
+        crate::settings::validate("summary_daily", daily_at)?;
         if let Some(to) = to {
             self.set_setting("summary_to", to)?;
         }
-        self.set_setting("summary_daily", daily_at.unwrap_or(""))?;
+        self.set_setting("summary_daily", daily_at)?;
         self.summary_schedule()
     }
 

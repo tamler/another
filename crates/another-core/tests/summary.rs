@@ -868,3 +868,40 @@ fn summary_times_are_exactly_two_digits_each() {
         "09:05"
     );
 }
+
+#[test]
+fn a_refused_summary_schedule_changes_nothing() {
+    let (clock, _) = Clock::manual(NOV_21);
+    let s = Store::open_in_memory(clock).unwrap();
+    let utc = chrono::FixedOffset::east_opt(0).unwrap();
+    person(&s, "owner");
+    person(&s, "sam");
+    s.set_summary_schedule(Some("00:00"), Some("mail:owner"))
+        .unwrap();
+    // A second owner makes the send fail, which marks today as failed.
+    s.ensure_project("t", "/work/shop").unwrap();
+    s.register_agent_trusted(RegisterAgent {
+        name: "owner".into(),
+        program: Program::Claude,
+        project: Some("/work/shop".into()),
+        model: None,
+        description: None,
+    })
+    .unwrap();
+    assert!(s.send_scheduled_summary_at(utc).is_err());
+
+    assert_eq!(
+        s.set_summary_schedule(Some("+9:00"), Some("mail:sam"))
+            .unwrap_err()
+            .code(),
+        "invalid"
+    );
+    let sched = s.summary_schedule().unwrap();
+    assert_eq!(sched.to, "mail:owner", "the recipient is unchanged");
+    assert_eq!(sched.daily_at.as_deref(), Some("00:00"));
+    assert_eq!(
+        s.send_scheduled_summary_at(utc).unwrap(),
+        None,
+        "today's failure marker is still in place"
+    );
+}
