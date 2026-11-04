@@ -22,8 +22,6 @@ Hooks inject a short digest at session start, so agents actually check their mai
 
 ## Quickstart
 
-Prefer a guided walkthrough? [Getting started](https://toanother.one/docs/getting-started/) · [Installation](https://toanother.one/docs/install/) · [Compare approaches](https://toanother.one/compare/).
-
 **1. Install** with Rust 1.88 or newer:
 
 ```bash
@@ -33,7 +31,7 @@ cargo install --locked --git https://github.com/tamler/another another
 Or build from a checkout (the binary ends up at `target/release/another`):
 
 ```bash
-git clone https://github.com/tamler/another && cd another && cargo build --release
+git clone https://github.com/tamler/another && cd another && cargo build --release --locked
 ```
 
 Once v0.1.0 is published, prebuilt binaries for macOS (arm64, x86_64) and Linux (static, x86_64, arm64) will be on [GitHub Releases](https://github.com/tamler/another/releases): unpack one and put `another` on your `PATH`. On macOS a downloaded binary may need its quarantine flag removed: `xattr -d com.apple.quarantine ./another`.
@@ -86,23 +84,6 @@ another inbox --agent bob
 another activity --summary
 ```
 
-### A handoff in one terminal
-
-With Another initialized, run this from a repository to create two demo identities
-and send a review request. Hooks use client-based names by default; these names
-are for the shell demo.
-
-```bash
-another agent register writer --program claude --project .
-another agent register reviewer --program codex --project .
-another send --from writer --to reviewer --subject "Review the parser" --body "Please check the error paths." --request
-another inbox --agent reviewer
-```
-
-Expected result: the reviewer's inbox lists an unread message and an open request.
-This is a runnable example, not a recording. See the website's
-[recorded fixture handoff](https://toanother.one/#proof-title) for sample output.
-
 ## Status
 
 | Milestone | Scope | Status |
@@ -116,9 +97,15 @@ This is a runnable example, not a recording. See the website's
 
 Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88.
 
-The marketing and documentation website is at [toanother.one](https://toanother.one), with editable source in [site/](site/README.md). This preview branch adds task guides for [Claude Code + Codex](site/guides/claude-code-codex/index.html), [MCP messaging](site/guides/mcp-agent-messaging/index.html), [file holds](site/guides/avoid-agent-file-conflicts/index.html) and a [local inbox](site/guides/local-agent-inbox/index.html). Build it with `sh site/build.sh`; this checks static pages, links, SEO metadata and the public asset allowlist. Website and Rust CI are separate checks; milestone status above describes the product implementation.
+This checkout contains milestones 1–6. The coordination and release-readiness stack is reviewed separately in [PR #17](https://github.com/tamler/another/pull/17); the installation and CLI reference here describe this checkout. Integrating the release installer, doctor and expanded workflow needs that stack's code and release acceptance first.
+
+The website has editable source in [site/](site/README.md). Build it with `sh site/build.sh` to check pages, links, SEO metadata and the public asset allowlist. Website and Rust CI are separate checks. This branch's task-guide additions are preview source and have not been deployed by this round.
 
 ## Guides
+
+For first use: [Getting started](https://toanother.one/docs/getting-started/), [Installation](https://toanother.one/docs/install/) and [Compare approaches](https://toanother.one/compare/). The website includes a [recorded fixture handoff](https://toanother.one/#proof-title), separate from the runnable shell exchange above.
+
+Preview task guides: [Claude Code + Codex](site/guides/claude-code-codex/index.html), [MCP messaging](site/guides/mcp-agent-messaging/index.html), [file holds](site/guides/avoid-agent-file-conflicts/index.html) and a [local inbox](site/guides/local-agent-inbox/index.html).
 
 | Doc | What it covers |
 |---|---|

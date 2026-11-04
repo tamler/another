@@ -1,6 +1,6 @@
 # Show HN — human-authored submission preparation only
 
-Do not paste or AI-edit a submission from this packet. The [HN general guidelines](https://news.ycombinator.com/newsguidelines.html), verified 2026-11-05, prohibit generated submission text and AI-edited comments. The earlier generated first comment has been removed.
+Do not paste or AI-edit a submission from this packet. The [HN general guidelines](https://news.ycombinator.com/newsguidelines.html), re-read 2026-11-05, prohibit generated submission text and generated or AI-edited comments. A human-written draft must not be passed to an AI for rewriting into the final submission or comment. The earlier generated first comment has been removed.
 
 The [Show HN rules](https://news.ycombinator.com/showhn.html) also require work the submitter personally worked on and can discuss. A human maker must write the title and comment themselves, using an existing eligible identity and describing their real involvement. Start the human-written title with the required Show HN prefix. No real name needs to be added to this repository.
 
