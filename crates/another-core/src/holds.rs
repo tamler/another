@@ -222,6 +222,24 @@ pub(crate) fn normalize_pattern(project: &Project, raw: &str) -> Result<String> 
     Ok(pattern)
 }
 
+/// A literal path as a hold pattern: glob metacharacters become one-character classes
+/// (`notes[.md` -> `notes[[].md`), so a real filename is held as itself, never parsed (or
+/// rejected) as a glob.
+pub fn glob_escape(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        match c {
+            '*' | '?' | '[' | ']' | '{' | '}' => {
+                out.push('[');
+                out.push(c);
+                out.push(']');
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn compile(pattern: &str) -> Result<GlobMatcher> {
     let glob: Glob = GlobBuilder::new(pattern)
         .literal_separator(true)

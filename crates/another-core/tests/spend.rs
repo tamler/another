@@ -21,7 +21,7 @@ fn store() -> (Store, Handle) {
         ("codex", Some("/work/shop")),
         ("vaulter", Some("/work/vault")),
     ] {
-        s.register_agent(RegisterAgent {
+        s.register_agent_trusted(RegisterAgent {
             name: name.into(),
             program: if name == "manager" {
                 Program::GrokBot
@@ -666,7 +666,7 @@ fn the_borrower_cannot_approve_its_own_spend() {
     let leases = s.spend_leases(false, None).unwrap();
     assert_eq!(leases[0].status, SpendLeaseStatus::PendingApproval);
     // The person (or another manager) can.
-    s.register_agent(RegisterAgent {
+    s.register_agent_trusted(RegisterAgent {
         name: "bot2".into(),
         program: Program::GrokBot,
         project: None,

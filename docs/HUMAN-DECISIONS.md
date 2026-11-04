@@ -81,7 +81,7 @@ The manager then relays the answer. Any of these works:
 
 **What gets recorded:**
 - `answered_by`: the person (default: the person asked).
-- `relayed_by`: the agent that called the API. Remote callers are always recorded as their token's agent and cannot set it to anyone else. **Only a manager bot (`grok_bot`) or a person (`human`) may relay, and never the agent that asked**: an agent can't approve its own question, whoever it claims answered. These roles are set by the person on the machine (`another agent register NAME --program grok_bot`); `register_agent` over MCP or a hook can't give an agent one, and a refresh keeps the role it has.
+- `relayed_by`: the agent that called the API. Remote callers are always recorded as their token's agent and cannot set it to anyone else. **Only a manager bot (`grok_bot`) or a person (`human`) may relay, and never the agent that asked**: an agent can't approve its own question, whoever it claims answered. These roles are set by the person on the machine (`another agent register NAME --program grok_bot`); `register_agent` over MCP or a hook can't give an agent one, even under a brand-new name, and a refresh keeps the role it has.
 - `answered_at`
 
 The asking agent receives a high-importance reply, `[decision] answered: ship (<id>)`, with the value, the label, any text, and who answered and relayed it in the body. Decision mail subjects carry ids, names and values only (they show in the activity feed); the question, labels and text are in the bodies. The request closes, and the lane is released.
@@ -105,6 +105,10 @@ With `another serve --auth`:
 - `decision_ask` must act as the token's agent.
 - `decision_cancel` is limited to the asking agent.
 - Every call is written to the audit log.
+
+**The person** a decision is sent to (`human`, else the `decider` setting) must be a person: a name that belongs to a coding agent is refused (`invalid`), so a decision never lands in an agent's inbox. Register people with `another agent register NAME --program human`, or let the first decision register them.
+
+**Answer values** match exactly first, then ignoring case, then by option number.
 
 ## Events and webhooks
 
