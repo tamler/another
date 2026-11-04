@@ -2,11 +2,11 @@
 
 No servers joined and no messages sent. Use an existing membership only. Channel rules are server-local and were not inspected behind login; none of these destinations is cleared for posting. A human must inspect an actual showcase/self-promotion channel and its current rules first. Do not DM maintainers.
 
-Candidate communities: the official MCP community if its current community page lists a Discord; Rust community servers that have an explicit project-showcase channel; an existing coding-agent community with a dedicated tools/showcase channel. Discover invitations through official project sites, not guessed invite codes. No specific Discord or invite is claimed verified here.
+The [official MCP communication page](https://modelcontextprotocol.io/community/communication) links a contributor Discord, intended for protocol/tooling collaboration rather than general support. That link does not establish permission to promote Another there. Other candidates are existing Rust or coding-agent memberships with explicit project-showcase channels. Discover invitations through official sites; authenticated channel rules remain unverified and no server was joined.
 
 MCP-channel blurb draft:
 
-Disclosure: sharing Another's own project. It is an Apache-2.0 local inbox and resource registry for coding agents, exposed through MCP and a Rust CLI. Hooks announce waiting mail; your existing clients keep running independently. First handoff: https://toanother.one/docs/getting-started/ — source: https://github.com/tamler/another
+Affiliation: this is an announcement from the Another project. It is an Apache-2.0 local inbox and resource registry for coding agents, exposed through MCP and a Rust CLI. Hooks announce waiting mail; your existing clients keep running independently. First handoff: https://toanother.one/docs/getting-started/ — source: https://github.com/tamler/another
 
 Rust-showcase blurb draft:
 

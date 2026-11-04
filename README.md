@@ -27,7 +27,7 @@ Prefer a guided walkthrough? [Getting started](https://toanother.one/docs/gettin
 **1. Install** with Rust 1.88 or newer:
 
 ```bash
-cargo install --git https://github.com/tamler/another another
+cargo install --locked --git https://github.com/tamler/another another
 ```
 
 Or build from a checkout (the binary ends up at `target/release/another`):
@@ -67,11 +67,11 @@ another serve
 **5. Try it from the shell:**
 
 ```bash
-another agent register alice --program claude
+another agent register alice --program claude --project .
 ```
 
 ```bash
-another agent register bob --program codex
+another agent register bob --program codex --project .
 ```
 
 ```bash
@@ -93,8 +93,8 @@ and send a review request. Hooks use client-based names by default; these names
 are for the shell demo.
 
 ```bash
-another agent register writer --program claude
-another agent register reviewer --program codex
+another agent register writer --program claude --project .
+another agent register reviewer --program codex --project .
 another send --from writer --to reviewer --subject "Review the parser" --body "Please check the error paths." --request
 another inbox --agent reviewer
 ```
@@ -116,7 +116,7 @@ This is a runnable example, not a recording. See the website's
 
 Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88.
 
-The marketing and documentation website is at [toanother.one](https://toanother.one), with editable source in [site/](site/README.md). Build it with `sh site/build.sh`; this checks the static pages, links, SEO metadata and public asset allowlist. Website and Rust CI are separate checks; milestone status above describes the product implementation.
+The marketing and documentation website is at [toanother.one](https://toanother.one), with editable source in [site/](site/README.md). This preview branch adds task guides for [Claude Code + Codex](site/guides/claude-code-codex/index.html), [MCP messaging](site/guides/mcp-agent-messaging/index.html), [file holds](site/guides/avoid-agent-file-conflicts/index.html) and a [local inbox](site/guides/local-agent-inbox/index.html). Build it with `sh site/build.sh`; this checks static pages, links, SEO metadata and the public asset allowlist. Website and Rust CI are separate checks; milestone status above describes the product implementation.
 
 ## Guides
 
@@ -146,7 +146,7 @@ Tool errors are `{"error": {"code", "message"}}` with codes `not_found`, `invali
 
 ## CLI at a glance
 
-Every command takes `--json`. `--agent` and `--from` default to `$ANOTHER_AGENT`, and `--project` defaults to the current directory.
+Every command takes `--json`. `--agent` and `--from` default to `$ANOTHER_AGENT`. Path-hold commands default `--project` to the current directory; agent registration is node-wide unless you pass `--project PATH`.
 
 | Task | Commands |
 |---|---|
