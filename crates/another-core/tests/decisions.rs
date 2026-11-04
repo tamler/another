@@ -916,3 +916,67 @@ fn round4_roles_people_and_exact_options() {
         .unwrap();
     assert_eq!(answered.answer.unwrap().value.as_deref(), Some("a"));
 }
+
+#[test]
+fn on_demand_people_cannot_relay_until_confirmed() {
+    let s = Store::open_in_memory(Clock::System).unwrap();
+    s.ensure_project("t", "/work/shop").unwrap();
+    s.register_agent_trusted(RegisterAgent {
+        name: "claude".into(),
+        program: Program::Claude,
+        project: Some("/work/shop".into()),
+        model: None,
+        description: None,
+    })
+    .unwrap();
+    // A first-time untrusted registration can't pick the role either.
+    let e = s
+        .register_agent_trusted(RegisterAgent {
+            name: "minted".into(),
+            program: Program::Human,
+            project: None,
+            model: None,
+            description: None,
+        })
+        .unwrap_err();
+    assert_eq!(e.code(), "forbidden");
+    // The agent asks an unused name: that person is created on demand as the addressee...
+    let d = s
+        .ask_decision(
+            NewDecision {
+                agent: "claude@shop".into(),
+                question: "Merge my own PR?".into(),
+                options: opts(&[("yes", "Yes"), ("no", "No")]),
+                human: Some("sockpuppet".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    assert_eq!(s.agent("sockpuppet").unwrap().program, "human");
+    // ...but can't be used to relay the answer to the agent's own question.
+    let answer = |by: &str| {
+        s.answer_decision(
+            AnswerDecision {
+                decision: d.decision_id.clone(),
+                value: Some("yes".into()),
+                relayed_by: Some(by.into()),
+                ..Default::default()
+            },
+            None,
+        )
+    };
+    let e = answer("sockpuppet").unwrap_err();
+    assert_eq!(e.code(), "forbidden");
+    assert!(e.to_string().contains("not a confirmed human"), "{e}");
+    // Once the person on the machine confirms the role, it can.
+    s.register_agent_trusted(RegisterAgent {
+        name: "sockpuppet".into(),
+        program: Program::Human,
+        project: None,
+        model: None,
+        description: None,
+    })
+    .unwrap();
+    answer("sockpuppet").unwrap();
+}
