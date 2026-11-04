@@ -24,10 +24,35 @@ row. Only the resource's node can stop it, adopt it or promote a borrower; a
 promotion can legitimately select a remote borrower's lease. A spoke needs
 borrow_resource for a foreign target, as determined from stored resource ownership,
 and its routing hint must identify that owner. Receivers of hub relays do not
-mistake their own pairing grants for the borrower's grants. Exclusive, released
-or lapsed foreign resources take no new borrower lease. Liveness is evaluated at
-the receiver's clock. Borrowers never clear a resource's lapse clock or resurrect
-an expired foreign borrower lease by renewal.
+mistake their own pairing grants for the borrower's grants.
+
+Whether a borrow or renewal was in time is decided once, by the fixed hub, at its
+own clock, when the borrower pushes it. The hub refuses an exclusive, released or
+leaseless target, and a renewal naming a lease already expired there, before the
+event is stored, so it is never relayed. A renewal is refused whole, so borrowers
+emit one event per lease on another node's resource. Everything the hub relays is
+replayed without a clock check, including by a resource owner that was offline:
+one history gives the same leases on every node, whatever the delivery delay.
+Ownership checks still run on relays. Stop and reap stay with the resource's node.
+
+A relayed borrow or renewal can reach the owner after it lapsed the resource,
+because the owner hadn't heard of the lease when its own one ended:
+
+- If a lease is then live at the owner's clock, the lapse no longer holds. The owner
+  clears it and promotes as usual, with its own signed `resource.transferred`.
+- If the delivered lease has already expired there, the row is recorded and nothing
+  else changes: the resource stays lapsed and its lapse clock keeps running.
+- A stopped or reaped resource stays that way. A later borrow takes no lease, and the
+  stop ends the lease everywhere once it reaches the hub.
+
+The owner decides promotion from what is live at its clock when it settles, so two
+different delivery timings can promote different borrowers. Each outcome is one
+signed event that every node then follows.
+
+This trusts the hub for timing, as D20 already does for its node directory. A
+compromised or older hub can make owners accept false leases until the owner stops
+the resource. A borrower whose renewal is refused keeps its local lease until its
+local TTL; the only signal is the rejection in the push report.
 
 Signed rename events must obey the existing node-name syntax and uniqueness rules.
 Historical node.created events do not rename a directory-known node. The paired

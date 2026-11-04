@@ -677,8 +677,15 @@ fn a_permitted_borrower_cannot_revive_a_lapsed_resource_or_reset_its_clock() {
             &ev.payload,
         ),
     );
+    let event_id = ev.event_id.clone();
     let result = s.ingest(EVIL, &[ev], &[]).unwrap();
-    assert_eq!(result.accepted, 1, "{result:?}");
+    assert_eq!(result.accepted, 0, "{result:?}");
+    assert_eq!(result.rejected.len(), 1, "{result:?}");
+    assert!(s
+        .events(20_000)
+        .unwrap()
+        .iter()
+        .all(|e| e.event_id != event_id));
     assert_eq!(
         s.resource(&ResourceRef::Id(r.resource_id.clone()))
             .unwrap()
@@ -699,7 +706,7 @@ fn an_expired_foreign_borrower_lease_cannot_be_revived_by_renewal() {
     clock.fetch_add(120_000, Ordering::SeqCst);
     s.release_resource("alice@shop", &id, false).unwrap();
     let before = s.lapsed_for_ms(&r.resource_id).unwrap();
-    spoke.accepted(
+    spoke.rejected(
         &s,
         "resource.renewed",
         json!({ "lease_ids": ["SHORT"], "ttl_seconds": 3600 }),
@@ -1051,25 +1058,55 @@ fn lease_id_collisions_cannot_reset_a_lapsed_resource() {
 }
 
 #[test]
-fn late_joiner_skips_historical_borrow_after_its_owner_lease_has_expired() {
-    let (s, _) = hub();
+fn late_joiner_replays_an_admitted_borrow_that_outlived_its_owner_lease() {
+    let (s, clock) = hub();
     let spoke = Spoke::paired_with(&s, &Perm::ALL);
     let eve = spoke_agent(&s, &spoke);
     let r = resource(&s, "alice@shop", LeaseMode::Shared);
     spoke.accepted(&s, "resource.borrowed", json!({ "resource_id": r.resource_id, "resource_node": s.node_id(), "agent_id": eve, "lease_id": "HISTORY", "ttl_seconds": 7200 }));
+    clock.store(T0 + 3_601_000, Ordering::SeqCst);
+    s.sweep().unwrap();
     let observer = receiver_at(&s, &[Perm::ReadFeed], T0 + 3_601_000);
     let page = s.pull_for(observer.node_id(), 0, 2000).unwrap();
     let result = observer
         .ingest(s.node_id(), &page.events, &page.nodes)
         .unwrap();
     assert!(result.rejected.is_empty(), "{result:?}");
-    assert_eq!(
-        observer
-            .resource(&ResourceRef::Id(r.resource_id))
-            .unwrap()
-            .refcount,
-        0
+    let id = ResourceRef::Id(r.resource_id);
+    let (at_hub, at_observer) = (s.resource(&id).unwrap(), observer.resource(&id).unwrap());
+    assert_eq!(at_hub.refcount, 1);
+    assert_eq!(at_observer.refcount, at_hub.refcount);
+    assert_eq!(at_observer.owner, at_hub.owner);
+}
+
+#[test]
+fn a_renewal_naming_an_expired_lease_is_refused_whole_and_never_reaches_a_mirror() {
+    let (s, clock) = hub();
+    let spoke = Spoke::paired_with(&s, &Perm::ALL);
+    let eve = spoke_agent(&s, &spoke);
+    let r = resource(&s, "alice@shop", LeaseMode::Shared);
+    let id = ResourceRef::Id(r.resource_id.clone());
+    spoke.accepted(&s, "resource.borrowed", json!({ "resource_id": r.resource_id, "resource_node": s.node_id(), "agent_id": eve, "lease_id": "LIVE", "ttl_seconds": 7200 }));
+    spoke.accepted(&s, "resource.borrowed", json!({ "resource_id": r.resource_id, "resource_node": s.node_id(), "agent_id": eve, "lease_id": "SHORT", "ttl_seconds": 60 }));
+    clock.fetch_add(120_000, Ordering::SeqCst);
+
+    // A renewal naming an expired lease is refused whole: stored, it would replay on mirrors.
+    let reason = spoke.rejected(
+        &s,
+        "resource.renewed",
+        json!({ "lease_ids": ["LIVE", "SHORT"], "ttl_seconds": 7200 }),
     );
+    assert!(reason.contains("expired"), "{reason}");
+
+    let observer = receiver_at(&s, &[Perm::ReadFeed], T0 + 120_000);
+    let page = s.pull_for(observer.node_id(), 0, 2000).unwrap();
+    let result = observer
+        .ingest(s.node_id(), &page.events, &page.nodes)
+        .unwrap();
+    assert!(result.rejected.is_empty(), "{result:?}");
+    let (at_hub, at_observer) = (s.resource(&id).unwrap(), observer.resource(&id).unwrap());
+    assert_eq!(at_hub.refcount, 2, "the owner and the live borrower");
+    assert_eq!(at_observer.refcount, at_hub.refcount);
 }
 
 #[test]

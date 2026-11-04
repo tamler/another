@@ -425,6 +425,56 @@ fn resource_node(tx: &Tx<'_>, resource_id: &str) -> Result<String> {
     )?)
 }
 
+/// Emit the renewal of these leases. Each lease on another node's resource gets its own event:
+/// a hub refuses a late renewal whole, and one stale lease mustn't cost the others theirs.
+fn emit_renewed(tx: &Tx<'_>, actor: &str, lease_ids: &[&String]) -> Result<()> {
+    let mut own = Vec::new();
+    for id in lease_ids {
+        let nodes = foreign_nodes_for(tx, &[*id])?;
+        if nodes.is_empty() {
+            own.push(*id);
+        } else {
+            tx.emit(
+                actor,
+                "resource.renewed",
+                json!({ "lease_ids": [id], "resource_nodes": nodes }),
+            )?;
+        }
+    }
+    if !own.is_empty() {
+        tx.emit(
+            actor,
+            "resource.renewed",
+            json!({ "lease_ids": own, "resource_nodes": Vec::<String>::new() }),
+        )?;
+    }
+    Ok(())
+}
+
+/// A borrow or renewal the hub admitted reached this resource's owner after the owner lapsed it.
+/// If that left a lease live at this node's clock, the lapse no longer holds: clear it and promote
+/// as usual. A lease already expired here changes nothing, and a stopped resource stays stopped.
+pub(crate) fn reopen_after_admission_tx(tx: &Tx<'_>, resource_id: &str) -> Result<()> {
+    let lapsed = tx
+        .query_row(
+            "SELECT 1 FROM resources WHERE resource_id = ?1 AND node_id = ?2
+               AND lapsed_at IS NOT NULL AND released_at IS NULL",
+            params![resource_id, tx.node_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !lapsed || live_leases(tx, resource_id, tx.now)?.is_empty() {
+        return Ok(());
+    }
+    tx.execute(
+        "UPDATE resources SET lapsed_at = NULL WHERE resource_id = ?1",
+        [resource_id],
+    )?;
+    settle(tx, resource_id, "system", tx.now)?;
+    Ok(())
+}
+
 /// Other nodes owning the resources behind these leases (so they hear about renewals).
 fn foreign_nodes_for(tx: &Tx<'_>, lease_ids: &[&String]) -> Result<Vec<String>> {
     let mut out = Vec::new();
@@ -711,11 +761,7 @@ pub(crate) fn session_leases_tx(
         }
         crate::spend::reconcile_resource_spend_tx(tx)?;
     } else {
-        tx.emit(
-            &agent.address,
-            "resource.renewed",
-            json!({ "lease_ids": ids, "resource_nodes": nodes }),
-        )?;
+        emit_renewed(tx, &agent.address, &ids)?;
         for (lease_id, _, ttl) in &leases {
             tx.execute(
                 "UPDATE resource_leases SET renewed_at = ?2, expiry_warned_at = NULL, expires_at = ?2 + ?3 * 1000
@@ -1121,12 +1167,7 @@ impl Store {
             }
             if !selected.is_empty() {
                 let ids: Vec<&String> = selected.iter().map(|(l, _, _)| l).collect();
-                let nodes = foreign_nodes_for(tx, &ids)?;
-                tx.emit(
-                    &me.address,
-                    "resource.renewed",
-                    json!({ "lease_ids": ids, "resource_nodes": nodes }),
-                )?;
+                emit_renewed(tx, &me.address, &ids)?;
             }
             for (lease_id, rid, ttl) in &selected {
                 tx.execute(

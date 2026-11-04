@@ -206,7 +206,8 @@ reproductions at `faf0edc`. The authority and HTTP regression tests now assert r
 and unchanged state. Incoming events are validated against their signed origin before
 entering the relay log; SQL guards supplement those checks. Borrow permission uses the
 stored resource owner, and only that owner can adopt, stop or transfer its resource.
-Foreign borrowers cannot revive lapsed resources or their expired borrower leases.
+A spoke cannot push a borrow onto a lapsed resource or renew an expired borrower lease:
+the hub refuses both before storing them, and receivers follow what the hub admitted.
 Report and answer carriers are read or marked read only for the correct origin and sender.
 Decision mirrors cannot borrow another node's asker, project, lane or question mail.
 This prevents new violations; it does not repair previously rewritten rows or remove

@@ -707,8 +707,64 @@ fn project_exists(conn: &Connection, id: &str) -> Result<bool> {
         .is_some())
 }
 
+/// The hub decides whether a borrow or renewal pushed to it is in time, at its own clock, and
+/// refuses a late one before it can be stored or relayed. Receivers of its relays replay what it
+/// admitted without a clock check, so every replay of one history gives the same leases.
+/// A renewal is refused whole, because a stored event replays whole.
+fn check_admission(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
+    let s = |key: &str| p.get(key).and_then(Value::as_str);
+    let origin = ev.node_id.as_str();
+    match ev.kind.as_str() {
+        "resource.borrowed" => {
+            let (Some(rid), Some(_), Some(_)) = (s("resource_id"), s("lease_id"), s("agent_id"))
+            else {
+                return Ok(());
+            };
+            let row: Option<(String, String, Option<i64>, bool)> = tx
+                .query_row(
+                    "SELECT mode, node_id, released_at,
+                       EXISTS (SELECT 1 FROM resource_leases l WHERE l.resource_id = resources.resource_id
+                         AND l.released_at IS NULL AND l.expires_at > ?2)
+                     FROM resources WHERE resource_id = ?1",
+                    params![rid, tx.now],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?;
+            if let Some((mode, owner, released, live)) = row {
+                if owner != origin && (mode != "shared" || released.is_some() || !live) {
+                    return Err(Error::Conflict(
+                        "this resource can't take a borrower: it needs to be shared, not stopped, and have a live lease".into(),
+                    ));
+                }
+            }
+        }
+        "resource.renewed" => {
+            for id in strings(p, "lease_ids") {
+                let stale = tx
+                    .query_row(
+                        "SELECT 1 FROM resource_leases l JOIN resources r ON r.resource_id = l.resource_id
+                         WHERE l.lease_id = ?1 AND l.released_at IS NULL AND l.expires_at <= ?2
+                           AND r.node_id != ?3",
+                        params![id, tx.now, origin],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some();
+                if stale {
+                    return Err(Error::Conflict(format!(
+                        "lease {id} had expired when this renewal arrived"
+                    )));
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Fold a foreign event into local read models. Idempotent; unknown kinds are only stored.
-fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
+/// `relayed` means the paired hub delivered it, so that hub has already admitted it.
+fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value, relayed: bool) -> Result<()> {
     let s = |k: &str| p.get(k).and_then(Value::as_str).map(str::to_string);
     let ts = ev.ts;
     let origin = ev.node_id.as_str();
@@ -1087,7 +1143,7 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
                 .optional()?;
-            if matches!(ok, Some((ref mode, ref owner, None, live)) if mode == "shared" && (owner == origin || live))
+            if matches!(ok, Some((ref mode, ref owner, None, live)) if mode == "shared" && (relayed || owner == origin || live))
             {
                 foreign_lease(
                     tx,
@@ -1099,6 +1155,9 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                     ts,
                     origin,
                 )?;
+                if relayed {
+                    crate::resources::reopen_after_admission_tx(tx, &rid)?;
+                }
             }
         }
         "resource.renewed" => {
@@ -1108,9 +1167,21 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                        ttl_seconds = coalesce(?4, ttl_seconds),
                        expires_at = ?2 + coalesce(?4, ttl_seconds) * 1000
                      WHERE lease_id = ?1 AND node_id = ?3 AND released_at IS NULL
-                       AND (expires_at > ?5 OR resource_id IN (SELECT resource_id FROM resources WHERE node_id = ?3))",
-                    params![id, ts, origin, p.get("ttl_seconds").and_then(Value::as_i64), tx.now],
+                       AND (?6 OR expires_at > ?5 OR resource_id IN (SELECT resource_id FROM resources WHERE node_id = ?3))",
+                    params![id, ts, origin, p.get("ttl_seconds").and_then(Value::as_i64), tx.now, relayed],
                 )?;
+                if relayed {
+                    let resource: Option<String> = tx
+                        .query_row(
+                            "SELECT resource_id FROM resource_leases WHERE lease_id = ?1 AND node_id = ?2",
+                            params![id, origin],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    if let Some(rid) = resource {
+                        crate::resources::reopen_after_admission_tx(tx, &rid)?;
+                    }
+                }
             }
         }
         "resource.released" => {
@@ -1704,11 +1775,20 @@ impl Store {
                     report.duplicates += 1;
                     continue;
                 }
-                let allowed = if role == "spoke" {
-                    spoke_may_publish(tx, &perms, from, ev, &payload)
-                } else {
+                let relayed = role != "spoke";
+                let allowed = if relayed {
                     Ok(())
-                }.and_then(|()| validate_foreign_authority(tx, ev, &payload));
+                } else {
+                    spoke_may_publish(tx, &perms, from, ev, &payload)
+                }
+                .and_then(|()| validate_foreign_authority(tx, ev, &payload))
+                .and_then(|()| {
+                    if relayed {
+                        Ok(())
+                    } else {
+                        check_admission(tx, ev, &payload)
+                    }
+                });
                 match allowed {
                     Ok(()) => {}
                     Err(e @ (Error::Forbidden(_) | Error::Invalid(_) | Error::Conflict(_) | Error::NotFound(_))) => {
@@ -1726,7 +1806,7 @@ impl Store {
                     report.duplicates += 1;
                     continue;
                 }
-                if let Err(e) = project_foreign(tx, ev, &payload) {
+                if let Err(e) = project_foreign(tx, ev, &payload, relayed) {
                     tracing::warn!(event = %ev.event_id, kind = %ev.kind, error = %e, "could not project foreign event");
                 }
                 report.accepted += 1;
