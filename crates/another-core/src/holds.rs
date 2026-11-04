@@ -114,7 +114,7 @@ pub struct AcquireHolds {
     pub exclusive: bool,
     pub reason: Option<String>,
     /// Lane id or name the holds are for. Default: the single open lane the agent leads in
-    /// this project, else none.
+    /// this project, else none. [`NO_LANE`] (`-`) means none, without inferring one.
     pub lane: Option<String>,
 }
 
@@ -431,12 +431,18 @@ fn notify_holding_lead(
 
 /// The lane a hold is for: the named one (open, same project), else the single open lane
 /// the agent leads in the project, else none.
+/// `lane` value meaning "no lane, and don't infer one" (the pre-edit hook's fallback).
+pub const NO_LANE: &str = "-";
+
 fn acquire_lane(
     tx: &Tx<'_>,
     me: &crate::identity::AgentRef,
     project_id: &str,
     lane: Option<&str>,
 ) -> Result<Option<String>> {
+    if lane.map(str::trim) == Some(NO_LANE) {
+        return Ok(None);
+    }
     if let Some(key) = lane.map(str::trim).filter(|l| !l.is_empty()) {
         // Lane names are per project (maintainer's rule): a hold's lane is looked up in the hold's
         // project only, and a lane elsewhere is the same "unknown lane" as a missing one.
@@ -827,8 +833,39 @@ impl Store {
         filter: HoldFilter,
         scope: Option<&crate::tokens::TokenScope>,
     ) -> Result<Vec<LaneHolds>> {
-        let holds = self.holds(filter)?;
+        // A scoped caller's filters are matched against what it may see, never resolved
+        // node-wide (that would reveal hidden projects or agent addresses).
+        let holds = if scope.is_some() {
+            self.holds(HoldFilter::default())?
+        } else {
+            self.holds(filter.clone())?
+        };
         self.read(|conn| {
+            let mut paths: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            if scope.is_some() {
+                let mut stmt = conn.prepare("SELECT slug, abs_path FROM projects")?;
+                for r in
+                    stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                {
+                    let (slug, path) = r?;
+                    paths.insert(slug, path);
+                }
+            }
+            let wanted = |h: &Hold| -> bool {
+                if scope.is_none() {
+                    return true;
+                }
+                let project_ok = filter.project.as_deref().is_none_or(|p| {
+                    let p = p.trim();
+                    h.project == p || paths.get(&h.project).is_some_and(|path| path == p)
+                });
+                let agent_ok = filter.agent.as_deref().is_none_or(|a| {
+                    let a = a.trim();
+                    h.agent == a || h.agent.split('@').next() == Some(a)
+                });
+                project_ok && agent_ok
+            };
             // Two queries in all: the holds' projects, and the lanes involved.
             let mut project_of: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
@@ -883,7 +920,7 @@ impl Store {
                             ok
                         }
                     };
-                    if !ok {
+                    if !ok || !wanted(&h) {
                         continue;
                     }
                 }

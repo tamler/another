@@ -741,6 +741,8 @@ impl Store {
 
     /// One lane with its links and most recent reports.
     pub fn lane(&self, key: &str, scope: Option<&TokenScope>) -> Result<LaneDetail> {
+        // Expire lapsed holds first, so the lane's live holds are current without a daemon.
+        self.sweep()?;
         self.read(|conn| {
             let (lane, project_id) = resolve_lane_in(conn, self.node_id(), key, scope)?;
             check_scope(conn, scope, &project_id)?;

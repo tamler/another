@@ -50,6 +50,7 @@ This is opt-in, like the Stop hook: `another hook install --client claude,codex 
 **Codex** (`~/.codex/hooks.json`):
 - A `PreToolUse` entry with matcher `apply_patch`.
 - Codex versions differ in where the patch text appears: in `tool_input.patch`, in `tool_input.command`, or as a string `tool_input`. The hook accepts all three.
+- Codex runs a hook only after it is trusted under `/hooks` (tied to the hook's hash), and `codex exec` skips untrusted hooks. Enforcement under `codex exec` therefore needs prior trust or `--dangerously-bypass-hook-trust` (checked on Codex 0.166.0; see HOOKS.md).
 - File names come from the patch's `*** Add File:`, `*** Update File:`, `*** Delete File:` and `*** Move to:` lines.
 
 **At run time**, `another hook run --event pre-edit` does this (file paths and the project root are compared **after resolving symlinks**, so `/var/…` and `/private/var/…` match):

@@ -186,9 +186,10 @@ fn classify(kind: &str, payload: &Value, origin: &str) -> Share {
     }
     // Node-local signals (D38): a refused hold and an expiring lease are about this node's
     // holds and leases; other nodes see the holds and leases themselves.
+    // Node settings (`another config`) are this node's own, never synced.
     if matches!(
         kind,
-        "hold.conflict" | "lane.hold_conflict" | "resource.lease_expiring"
+        "hold.conflict" | "lane.hold_conflict" | "resource.lease_expiring" | "node.setting_changed"
     ) {
         return Share::Never;
     }
@@ -1384,6 +1385,10 @@ mod tests {
         );
         // Node-local signals never leave their node (D38).
         assert_eq!(classify("hold.conflict", &json!({}), o), Share::Never);
+        assert_eq!(
+            classify("node.setting_changed", &json!({ "key": "decider" }), o),
+            Share::Never
+        );
         assert_eq!(
             classify("resource.lease_expiring", &json!({}), o),
             Share::Never

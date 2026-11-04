@@ -491,14 +491,63 @@ impl Store {
     }
 
     /// Register a new agent or update an existing one's details; touches `last_seen_at`.
+    /// Register or refresh an agent (MCP `register_agent`, hooks). The roles that carry
+    /// privileges, manager bot (`grok_bot`) and person (`human`), are bound to the
+    /// registration the person made on this machine: this path can't give an existing agent
+    /// one of them (`forbidden`), and a refresh that names another program keeps the role.
+    /// The CLI uses [`Store::register_agent_trusted`] to set roles.
     pub fn register_agent(&self, input: RegisterAgent) -> Result<Agent> {
+        self.register_checked(input, false)
+    }
+
+    /// [`Store::register_agent`] for the local CLI (`another agent register`), which may set
+    /// or change any program, including the privileged roles.
+    pub fn register_agent_trusted(&self, input: RegisterAgent) -> Result<Agent> {
+        self.register_checked(input, true)
+    }
+
+    fn register_checked(&self, mut input: RegisterAgent, trusted: bool) -> Result<Agent> {
         validate_name(&input.name)?;
         if input.name == SYSTEM_AGENT {
             return Err(Error::Invalid(format!(
                 "the name {SYSTEM_AGENT:?} is reserved for Another's own automatic mail"
             )));
         }
-        self.write(|tx| register_tx(tx, &input))
+        self.write(|tx| {
+            if !trusted {
+                let project_id = match &input.project {
+                    Some(p) => find_project(tx, tx.node_id, p).ok().map(|p| p.project_id),
+                    None => None,
+                };
+                let current: Option<String> = tx
+                    .query_row(
+                        "SELECT program FROM agents
+                         WHERE node_id = ?1 AND name = ?2 AND ifnull(project_id, '') = ifnull(?3, '')",
+                        params![tx.node_id, input.name, project_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let privileged = |p: &str| p == Program::GrokBot.as_str() || p == Program::Human.as_str();
+                if let Some(cur) = current {
+                    if cur != input.program.as_str() {
+                        if privileged(input.program.as_str()) {
+                            return Err(Error::Forbidden(format!(
+                                "{} is a role the person sets on this machine (`another agent register {} --program {}`)",
+                                input.program.as_str(),
+                                input.name,
+                                input.program.as_str()
+                            )));
+                        }
+                        if privileged(&cur) {
+                            // A session hook re-registering a manager or person as its
+                            // client program keeps the role.
+                            input.program = cur.parse().unwrap_or(input.program);
+                        }
+                    }
+                }
+            }
+            register_tx(tx, &input)
+        })
     }
 }
 
