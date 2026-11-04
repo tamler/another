@@ -82,6 +82,7 @@ All notable changes to Another. Unreleased work is listed under the next version
 - CI also runs on pull requests that target non-`main` branches, so stacked PRs are checked.
 
 ### Changed
+- Doctor rejects wrapper mentions outside executable hook commands and preserves recognition of installer paths containing spaces or apostrophes.
 - **Remote event reads are now filtered by token scope** (D38, supersedes D16). `activity_feed`, `activity_summarize` and `GET /activity` used to show every project's events to any token. They now show only events from the token's projects (and project-less events concerning its own agent). Token, peer and node events are hidden from tokens. Local callers are unaffected.
 - `activity_summarize` request counts exclude decision requests (they are reported as decisions).
 - When reading forward, the feed's `next_since` now advances past events filtered out by `kinds` or scope.

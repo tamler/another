@@ -153,6 +153,8 @@ On macOS, when replacing an existing `another`, **remove the old binary first** 
 | Coordination 7 | First-class remote agents: invites, join, presence, kick, federation tie-in | 🔄 tamler/another#16 |
 | v0.1.0 prep | Release installs (`install.sh`, `SHA256SUMS`), `another doctor`, 90-second quickstart | 🔄 tamler/another#17 |
 
+Doctor recognizes installed hooks by their executable wrapper commands in hook entries, including installer paths containing spaces or apostrophes.
+
 Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88.
 
 ## Guides
