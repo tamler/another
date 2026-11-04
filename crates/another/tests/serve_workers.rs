@@ -47,7 +47,9 @@ fn summaries(s: &Store, agent: &str) -> usize {
     )
     .unwrap()
     .messages
-    .len()
+    .iter()
+    .filter(|m| m.message.subject.starts_with("[summary] "))
+    .count()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -87,11 +89,12 @@ async fn the_sweeper_expires_holds_sends_the_summary_and_stops_when_cancelled() 
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(summaries(&s, "pat"), 1);
 
-    // Once cancelled, the next day's summary is never sent.
+    // Once cancelled, the next day's summary is never sent. The first wait lets a tick already
+    // in flight finish before the clock moves; the second is 50 sweep intervals.
     ct.cancel();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     now.fetch_add(2 * DAY, Ordering::SeqCst);
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(summaries(&s, "pat"), 1, "the sweeper stopped");
 }
 

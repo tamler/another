@@ -1,7 +1,6 @@
 //! Paths the r4 coverage pass found with no test: upgrading a database from before node keys,
-//! renewing holds, re-claiming a request, releasing a lease you don't hold, and which tokens can
-//! see resource events. Tests only; anything surprising is recorded in the lane's BUGS-FOUND
-//! list.
+//! renewing holds, re-claiming a request, heartbeating a resource you don't hold, which tokens
+//! can see resource events, and lane link and report rules. Tests only.
 
 use std::sync::atomic::Ordering;
 
@@ -398,12 +397,28 @@ fn linking_to_a_lane_shows_in_the_feed_and_a_closed_lane_takes_no_changes() {
     assert_eq!(e.code(), "conflict", "{e}");
     assert!(e.to_string().contains("lane api is done"), "{e}");
     // Links are still allowed: they add context to a closed lane.
-    assert!(s
-        .update_lane(
-            update(None, vec![(LaneLinkKind::Message, m.message_id)]),
-            None
-        )
-        .is_ok());
+    let later = s
+        .send_message(SendMessage {
+            from: "manager".into(),
+            to: vec!["shopper@shop".into()],
+            subject: "after the close".into(),
+            body: "body".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    s.update_lane(
+        update(
+            None,
+            vec![(LaneLinkKind::Message, later.message_id.clone())],
+        ),
+        None,
+    )
+    .unwrap();
+    let links = s.lane("api", None).unwrap().links;
+    assert!(
+        links.iter().any(|l| l.ref_id == later.message_id),
+        "{links:?}"
+    );
 }
 
 #[test]
