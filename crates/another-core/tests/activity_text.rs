@@ -85,7 +85,7 @@ fn decisions_read_plainly_and_keep_their_text_out() {
             decision: a.decision_id.clone(),
             value: Some("go".into()),
             text: Some("the secret note".into()),
-            answered_by: Some("owner".into()),
+            answered_by: Some("pat".into()),
             relayed_by: Some("manager".into()),
         },
         None,
@@ -96,7 +96,7 @@ fn decisions_read_plainly_and_keep_their_text_out() {
         AnswerDecision {
             decision: b.decision_id.clone(),
             text: Some("the secret answer".into()),
-            answered_by: Some("owner".into()),
+            answered_by: Some("pat".into()),
             relayed_by: None,
             value: None,
         },
@@ -134,13 +134,13 @@ fn decisions_read_plainly_and_keep_their_text_out() {
     has(
         &lines,
         &format!(
-            "owner answered decision {} with `go` (via manager)",
+            "pat answered decision {} with `go` (via manager)",
             a.decision_id
         ),
     );
     has(
         &lines,
-        &format!("owner answered decision {} with free text", b.decision_id),
+        &format!("pat answered decision {} with free text", b.decision_id),
     );
     has(
         &lines,
@@ -185,7 +185,7 @@ fn spend_reads_plainly_through_an_accounts_life() {
                 reset_day: 1,
                 cost_per_hour: Some(2.0),
                 requires_approval: approval,
-                approver: approval.then(|| "owner".to_string()),
+                approver: approval.then(|| "pat".to_string()),
                 project: Some("shop".into()),
                 description: None,
             },

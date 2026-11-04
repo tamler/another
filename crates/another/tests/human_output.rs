@@ -707,7 +707,7 @@ fn joining_a_hub_and_working_remotely_read_plainly() {
     let hub_home = home();
     hub_home.text(&["node", "name", "hub"]);
     hub_home.agents();
-    hub_home.text(&["agent", "register", "owner", "--program", "human"]);
+    hub_home.text(&["agent", "register", "pat", "--program", "human"]);
     let hub = serve(&hub_home.home);
     hub_home.text(&[
         "lane",
