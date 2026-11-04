@@ -94,7 +94,7 @@ The first release. It contains the local core built in milestones 1–6 and the 
     - Decisions asked on another node can be answered here, and the answer is relayed only to that node. Free text travels as mail, never in events.
     - Synced holds keep their lane.
 - CI also runs on pull requests that target non-`main` branches, so stacked PRs are checked.
-- **Background service** (opt-in; tamler/another#9):
+- **Background service** (opt-in; tamler/another#9). *Pending: #9 is not merged into this branch yet. This entry describes the #9 branch, and it ships in 0.1.0 only if #9 is merged before the tag; otherwise remove it.*
   - `another service install|status|logs|stop|start|uninstall`. It is never installed unless you run `another service install`.
   - macOS: a launchd user agent (`one.toanother.another`, `RunAtLoad`, `KeepAlive`, logs in `$ANOTHER_HOME/logs/`). Linux: a systemd user unit (`another.service`, `Restart=on-failure`, journal logs).
   - `install` takes `serve`'s flags (`--bind`, `--auth`, `--allowed-host`, `--allow-remote-bind`, `--federation`) and the global `--home`. Re-running it updates the service in place. It refuses when another process already listens on the port.
