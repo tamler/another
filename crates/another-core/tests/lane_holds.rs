@@ -402,3 +402,41 @@ fn literal_filenames_with_glob_characters_hold_as_themselves() {
         .unwrap();
     assert_eq!(other.conflicts.len(), 1);
 }
+
+#[test]
+fn distinct_files_under_a_bracketed_directory_do_not_overlap() {
+    let (s, _) = store();
+    let page = glob_escape("src/app/[id]/page.tsx");
+    let layout = glob_escape("src/app/[id]/layout.tsx");
+    assert!(!patterns_overlap(&page, &layout));
+    assert!(patterns_overlap(
+        &page,
+        &glob_escape("src/app/[id]/page.tsx")
+    ));
+    assert!(
+        patterns_overlap(&page, "src/app/**"),
+        "a real glob still covers it"
+    );
+    assert!(
+        patterns_overlap(&page, "src/app"),
+        "a parent directory still covers it"
+    );
+    // Two agents editing different files of one dynamic-route directory: both get holds.
+    assert_eq!(
+        hold(&s, "claude@shop", "shop", &page, None).granted.len(),
+        1
+    );
+    let other = s
+        .acquire_holds(AcquireHolds {
+            agent: "vaulter@vault".into(),
+            project: "shop".into(),
+            paths: vec![layout],
+            ttl_seconds: Some(600),
+            exclusive: true,
+            reason: None,
+            lane: None,
+        })
+        .unwrap();
+    assert!(other.conflicts.is_empty(), "{:?}", other.conflicts);
+    assert_eq!(other.granted.len(), 1);
+}

@@ -636,3 +636,106 @@ fn every_open_decision_counts_and_the_oldest_are_kept() {
         .markdown
         .contains(&format!("Decisions: {} open", OPEN_DECISIONS_CAP + 1)));
 }
+
+fn spend_store() -> Store {
+    let s = Store::open_in_memory(Clock::System).unwrap();
+    for p in ["/work/shop", "/work/vault"] {
+        s.ensure_project("t", p).unwrap();
+    }
+    for (n, p) in [("claude", "/work/shop"), ("vaulter", "/work/vault")] {
+        s.register_agent_trusted(RegisterAgent {
+            name: n.into(),
+            program: Program::Claude,
+            project: Some(p.into()),
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    }
+    s
+}
+
+fn spend_account(s: &Store, name: &str, unit: &str, f: impl FnOnce(&mut NewSpendAccount)) {
+    let mut a = NewSpendAccount {
+        name: name.into(),
+        kind: SpendKind::ApiCredits,
+        unit: unit.into(),
+        budget: None,
+        period: SpendPeriod::Monthly,
+        reset_day: 1,
+        cost_per_hour: None,
+        requires_approval: false,
+        approver: None,
+        project: None,
+        description: None,
+    };
+    f(&mut a);
+    s.create_spend_account(a, None).unwrap();
+}
+
+#[test]
+fn window_spend_is_per_account_not_per_name() {
+    let s = spend_store();
+    let rec = |amount: f64| {
+        s.record_spend(
+            RecordSpend {
+                agent: Some("claude@shop".into()),
+                account: "api".into(),
+                amount,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    };
+    spend_account(&s, "api", "USD", |_| {});
+    rec(5.0);
+    s.archive_spend_account("api", None).unwrap();
+    // A new account reuses the name, in another unit.
+    spend_account(&s, "api", "credits", |_| {});
+    rec(1.0);
+    let sum = s.daily_summary(None, None).unwrap();
+    let line = sum.spend.iter().find(|l| l.account == "api").unwrap();
+    assert_eq!(
+        (line.spent, line.unit.as_str()),
+        (1.0, "credits"),
+        "{:?}",
+        sum.spend
+    );
+}
+
+#[test]
+fn pending_approvals_are_counted_past_the_lease_list_limit() {
+    let s = spend_store();
+    spend_account(&s, "gpu", "USD", |a| {
+        a.cost_per_hour = Some(1.0);
+        a.requires_approval = true;
+    });
+    let ask = |agent: &str| {
+        s.borrow_spend(
+            BorrowSpend {
+                agent: agent.into(),
+                account: "gpu".into(),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    };
+    // shop's one pending approval is older than 200 of vault's.
+    ask("claude@shop");
+    for _ in 0..200 {
+        ask("vaulter@vault");
+    }
+    let t = s
+        .create_token("claude@shop", &["/work/shop".into()], None, None)
+        .unwrap();
+    let shop = s.verify_token(&t.secret).unwrap();
+    assert_eq!(
+        s.daily_summary(None, Some(&shop))
+            .unwrap()
+            .pending_approvals,
+        1
+    );
+    assert_eq!(s.daily_summary(None, None).unwrap().pending_approvals, 201);
+}

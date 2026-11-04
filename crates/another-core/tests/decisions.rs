@@ -980,3 +980,62 @@ fn on_demand_people_cannot_relay_until_confirmed() {
     .unwrap();
     answer("sockpuppet").unwrap();
 }
+
+#[test]
+fn cancelling_after_a_choose_default_deadline_keeps_the_default() {
+    let (s, clock) = store();
+    let now = s.now();
+    let d = ask(&s, "claude@shop", |d| {
+        d.deadline_at = Some(now + 3_600_000);
+        d.on_timeout = DecisionTimeout::ChooseDefault;
+        d.default_value = Some("wait".into());
+    })
+    .unwrap();
+    // The deadline passes with no sweep in between (no server running).
+    advance(&clock, 3_600_001);
+    let e = s
+        .cancel_decision("claude@shop", &d.decision_id, None, None)
+        .unwrap_err();
+    assert_eq!(e.code(), "conflict", "{e}");
+    let after = s.decision(&d.decision_id, None).unwrap();
+    assert_eq!(after.status, DecisionStatus::Expired);
+    assert_eq!(after.answer.unwrap().value.as_deref(), Some("wait"));
+}
+
+#[test]
+fn decision_requests_are_scoped_by_the_decisions_project() {
+    let (s, _) = store();
+    // A shop agent asks a decision that belongs to vault.
+    ask(&s, "claude@shop", |d| d.project = Some("vault".into())).unwrap();
+    let scope_for = |glob: &str| {
+        let t = s
+            .create_token("manager", &[glob.into()], None, None)
+            .unwrap();
+        s.verify_token(&t.secret).unwrap()
+    };
+    let open = |glob: &str| {
+        s.activity_summary_scoped(Some(Since::Time(0)), Some(&scope_for(glob)))
+            .unwrap()
+            .requests
+            .open
+    };
+    assert_eq!(
+        open("/work/shop"),
+        0,
+        "not shop's request, though a shop agent asked"
+    );
+    // From the daily summary on (D42), request counts are task requests only and decisions
+    // are reported on their own: vault's token sees this one there, shop's doesn't.
+    assert_eq!(
+        open("/work/vault"),
+        0,
+        "decisions aren't counted as requests"
+    );
+    let decisions = |glob: &str| {
+        s.daily_summary(None, Some(&scope_for(glob)))
+            .unwrap()
+            .decisions
+            .open_total
+    };
+    assert_eq!((decisions("/work/shop"), decisions("/work/vault")), (0, 1));
+}
