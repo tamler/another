@@ -133,9 +133,15 @@ impl Env {
     }
 }
 
+/// A port below the ephemeral range, unique within this test run and picked without opening a
+/// socket. A probe listener could leak into a child that a parallel test is spawning: macOS has
+/// no atomic close-on-exec for sockets, and `install`'s port check would then see that child
+/// listening on this test's port.
 fn free_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = l.local_addr().unwrap().port();
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let offset = NEXT.fetch_add(1, Ordering::Relaxed);
+    let port = 20_000 + (std::process::id() % 10_000) as u16 + offset;
     assert_ne!(port, 7466);
     port
 }
