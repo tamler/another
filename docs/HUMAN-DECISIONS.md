@@ -106,7 +106,7 @@ With `another serve --auth`:
 - `decision_cancel` is limited to the asking agent.
 - Every call is written to the audit log.
 
-**The person** a decision is sent to (`human`, else the `decider` setting) must be a person: a name that belongs to a coding agent is refused (`invalid`), so a decision never lands in an agent's inbox. Register people with `another agent register NAME --program human`, or let the first decision register them.
+**The person** a decision is sent to (`human`, else the `decider` setting) must be a person: a name that belongs to a coding agent is refused (`invalid`), so a decision never lands in an agent's inbox. Register people with `another agent register NAME --program human`, or let the first decision register them. A person registered on demand like that can receive decisions but **can't relay answers** until it is confirmed on the machine with `another agent register NAME --program human`. Otherwise an agent could invent an addressee and answer its own question through it.
 
 **Answer values** match exactly first, then ignoring case, then by option number.
 

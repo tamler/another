@@ -1673,7 +1673,11 @@ impl Store {
                 None => None,
             };
             let agent_id = match &q.agent {
-                Some(a) => Some(resolve_agent(conn, self.node_id(), a)?.id),
+                // As the caller sees agents: a hidden agent is the same not_found as a
+                // missing one, and ambiguity names only visible agents.
+                Some(a) => {
+                    Some(crate::identity::resolve_agent_in(conn, self.node_id(), a, scope)?.id)
+                }
                 None => None,
             };
             let mut stmt = conn.prepare(&format!(

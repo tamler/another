@@ -624,13 +624,40 @@ impl Store {
                     }
                 }
             }
-            register_tx(tx, &input)
+            register_with_tx(tx, &input, trusted)
         })
     }
 }
 
-/// Register (or refresh) an agent inside a write transaction.
+/// Whether a person on this machine confirmed `agent_id`'s privileged role (manager or
+/// person): a trusted registration (`register_agent_trusted`, the CLI, or an invite the
+/// person made) recorded `role_confirmed` for its current program. A person registered on
+/// demand as a decision's addressee is not confirmed, so it can't relay answers.
+pub(crate) fn role_confirmed(conn: &Connection, agent_id: &str, program: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM events WHERE kind = 'agent.registered'
+               AND json_extract(payload, '$.agent_id') = ?1
+               AND json_extract(payload, '$.program') = ?2
+               AND json_extract(payload, '$.role_confirmed') = 1
+               -- Only the agent's own node can confirm its role.
+               AND node_id = (SELECT node_id FROM agents WHERE agent_id = ?1)
+             LIMIT 1",
+            params![agent_id, program],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// Register (or refresh) an agent inside a write transaction (not a confirmed role).
 pub(crate) fn register_tx(tx: &Tx<'_>, input: &RegisterAgent) -> Result<Agent> {
+    register_with_tx(tx, input, false)
+}
+
+/// [`register_tx`]; `trusted` marks a registration the person made, which confirms a
+/// privileged program (see [`role_confirmed`]).
+pub(crate) fn register_with_tx(tx: &Tx<'_>, input: &RegisterAgent, trusted: bool) -> Result<Agent> {
     validate_name(&input.name)?;
     let project = match &input.project {
         Some(path) => Some(ensure_project_tx(tx, &input.name, path)?),
@@ -659,6 +686,8 @@ pub(crate) fn register_tx(tx: &Tx<'_>, input: &RegisterAgent) -> Result<Agent> {
             "model": input.model,
             "description": input.description,
             "new": existing.is_none(),
+            "role_confirmed": trusted
+                && matches!(input.program, Program::GrokBot | Program::Human),
         }),
     )?;
     if existing.is_some() {

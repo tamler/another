@@ -49,7 +49,7 @@ another invite revoke <invite-id>
   3. records the membership (`remote_agents`);
   4. emits `agent.joined`.
 - **The response** contains:
-  - the agent's address, the token (shown once), the scope (globs, lane) and the hub URL;
+  - the agent's address, the token (shown once), the scope (globs, and the lane as an unambiguous `name@project`) and the hub URL;
   - `mcp.claude_code`: a `claude mcp add` command line and the JSON for `.mcp.json` / `~/.claude.json`;
   - `mcp.codex`: a `~/.codex/config.toml` table with `url` and `bearer_token_env_var = "ANOTHER_TOKEN"`;
   - `env`: `ANOTHER_HUB`, `ANOTHER_TOKEN`, `ANOTHER_AGENT` and `ANOTHER_LANE`.
@@ -149,7 +149,7 @@ Today, lane events federate as feed events but aren't projected, and decisions d
 - **Holds:** a mirrored `hold.acquired` keeps its `lane_id` when that lane exists locally (as a mirror or a local lane). Cross-node overlaps stay warnings (D26), now flagged `same_lane` when both holds are for the same lane.
 
 **Decisions are answered where they were asked; answers flow back to the asker's node.**
-- **Mirror:** a `decision.created` from another node is stored in `remote_decisions`, with the project, asker, person, deadline and status. `decision_list` / `decision_show` include these mirrors, with `node` set.
+- **Mirror:** a `decision.created` from another node is stored in `remote_decisions`, with the project, asker, person, deadline and status. `decision_list` / `decision_show` include these mirrors, with `node` set. Lists merge local and mirrored decisions newest first before the limit, and the lane and person filters apply to mirrors too.
   - The event carries no question text or labels (note 03), only the option **values**: single-word identifiers, enough to validate an answer.
   - The mirror's question is the question mail when that reached this node (the person lives here). Otherwise it points at the decision's node.
 - **Answering a mirror** (`decision_answer`, CLI or HTTP):
@@ -158,7 +158,8 @@ Today, lane events federate as feed events but aren't projected, and decisions d
   3. The node emits **`decision.answer_relayed`** `{decision_id, decision_node, value, has_text, text_message_id?, answered_by, relayed_by}`, routed like mail **only to the decision's node**.
   - **No free text in events:** any answer text or note goes as mail to the asking agent, and the event only names that message. At the origin, the text is read from that mail, and the carrier is marked read: the answer mail is what the agent reads.
   - Text length and the note rule (note 03) are checked before the mirror is marked `answer_sent`.
-  - So is the relayer rule (a manager or a person, not the asker), so a refused relayer can't leave the mirror stuck in `answer_sent`.
+  - So is the relayer rule (a confirmed manager or person, not the asker), so a refused relayer can't leave the mirror stuck in `answer_sent`.
+  - **A relayer is required.** Use `--relayed-by`, or `--as` a person registered on this node. The origin applies a relayed answer only if `relayed_by_id` names an agent **of the node that signed the event**, whose role that node confirmed. A missing, unknown or foreign relayer is dropped (`decision.answer_ignored`, status `relayer_unknown` / `relayer_not_of_sender`).
 - **The origin** applies the first relayed answer through the normal answer path: mail to the agent, wake, lane release, spend approvals. The self-approval rule still applies: the relaying agent must be a manager or a person, and not the asker. Later or refused answers are dropped, and the origin emits `decision.answer_ignored`. Its own `decision.answered` / `expired` / `cancelled` then syncs back and settles the mirror.
 - **Conflict rule:** the first answer applied at the origin wins. Concurrent answers from two nodes can't both apply.
 
