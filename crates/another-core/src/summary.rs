@@ -296,7 +296,7 @@ impl Store {
         for a in &report.accounts {
             let spent = window
                 .iter()
-                .find(|(n, _, _)| *n == a.account.name)
+                .find(|(id, _, _)| *id == a.account.account_id)
                 .map_or(0.0, |x| x.2);
             if spent == 0.0 && matches!(a.status, BudgetStatus::Ok | BudgetStatus::NoBudget) {
                 continue;
@@ -309,11 +309,9 @@ impl Store {
                 status: a.status,
             });
         }
-        let pending_approvals = self
-            .spend_leases(false, scope)?
-            .iter()
-            .filter(|l| l.status == crate::spend::SpendLeaseStatus::PendingApproval)
-            .count() as u32;
+        // Counted in SQL: the lease listing is capped and would drop older approvals.
+        let pending_approvals =
+            self.read(|conn| crate::spend::pending_approvals(conn, self.node_id(), scope))?;
 
         // Webhooks (remote callers: their own).
         let mut webhooks_dead = 0;

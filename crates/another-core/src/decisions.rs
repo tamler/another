@@ -1638,15 +1638,15 @@ impl Store {
                 "{MIRROR_SELECT} WHERE (?1 IS NULL OR m.status = ?1)
                    AND (?2 IS NULL OR m.project_id = ?2) AND (?3 IS NULL OR m.lane_id = ?3)
                    AND (?4 IS NULL OR m.human = ?4 OR m.human LIKE ?4 || '@%')
-                 ORDER BY m.created_at DESC LIMIT ?5"
+                 ORDER BY m.created_at DESC"
             ))?;
-            let mirrors = stmt
-                .query_map(
-                    params![status, project_id, lane_id, filter.human, limit],
-                    mirror_from_row,
-                )?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            for (d, project, _) in mirrors {
+            let mut rows = stmt.query(params![status, project_id, lane_id, filter.human])?;
+            // Visibility before the limit: hidden mirrors must not use up the slots of
+            // visible ones (they would hide permitted decisions, and their count).
+            let mut mirrors = 0u32;
+            while mirrors < limit {
+                let Some(r) = rows.next()? else { break };
+                let (d, project, _) = mirror_from_row(r)?;
                 let visible = match (scope, &project) {
                     (None, _) => true,
                     (Some(s), Some(p)) => scope_allows_project(conn, s, p)?,
@@ -1654,6 +1654,7 @@ impl Store {
                 };
                 if visible {
                     out.push(d);
+                    mirrors += 1;
                 }
             }
             out.sort_by(|x, y| {
@@ -1737,6 +1738,9 @@ impl Store {
         scope: Option<&TokenScope>,
     ) -> Result<Decision> {
         self.write(|tx| {
+            // Deadlines first: a decision whose choose_default deadline has passed already has
+            // its outcome, and cancelling must not discard it.
+            crate::holds::sweep_tx(tx)?;
             let row = load_in(tx, tx.node_id, key, scope)?;
             let me = resolve_agent(tx, tx.node_id, agent)?;
             if me.id != row.asker_id {
@@ -1825,6 +1829,56 @@ pub fn decision_markdown(d: &Decision) -> String {
 mod tests {
     use super::*;
     use crate::{Clock, Program};
+
+    /// A newer mirror in a hidden project must not take the only slot of a visible one.
+    #[test]
+    fn hidden_mirrors_do_not_use_up_the_limit() {
+        let s = Store::open_in_memory(Clock::System).unwrap();
+        let shop = s.ensure_project("t", "/work/shop").unwrap().project_id;
+        let vault = s.ensure_project("t", "/work/vault").unwrap().project_id;
+        s.register_agent_trusted(RegisterAgent {
+            name: "manager".into(),
+            program: Program::GrokBot,
+            project: None,
+            model: None,
+            description: None,
+        })
+        .unwrap();
+        s.write(|tx| {
+            for (id, project, at) in [
+                ("MIRROR-SHOP", &shop, 1_000),
+                ("MIRROR-VAULT", &vault, 2_000),
+            ] {
+                tx.execute(
+                    "INSERT INTO remote_decisions (decision_id, node_id, project_id, human,
+                       question, options, status, created_at, updated_at)
+                     VALUES (?1, 'OTHER-NODE', ?2, 'jacob', 'q', '[]', 'open', ?3, ?3)",
+                    params![id, project, at],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let t = s
+            .create_token("manager", &["/work/shop".into()], None, None)
+            .unwrap();
+        let scope = s.verify_token(&t.secret).unwrap();
+        let got = s
+            .decisions(
+                DecisionFilter {
+                    limit: 1,
+                    ..Default::default()
+                },
+                Some(&scope),
+            )
+            .unwrap();
+        assert_eq!(
+            got.iter()
+                .map(|d| d.decision_id.as_str())
+                .collect::<Vec<_>>(),
+            ["MIRROR-SHOP"]
+        );
+    }
 
     /// A signed relay names a relayer the sender doesn't own (this node's manager), or none:
     /// both are refused at ingestion, and the decision stays open.
