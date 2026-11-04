@@ -378,3 +378,27 @@ fn scoped_holds_by_lane_filters_never_resolve_node_wide() {
     advance(&clock, 3_600_000);
     assert!(s.lane("api", None).unwrap().holds.is_empty());
 }
+
+#[test]
+fn literal_filenames_with_glob_characters_hold_as_themselves() {
+    let (s, _) = store();
+    let lit = glob_escape("docs/notes[.md");
+    assert_eq!(lit, "docs/notes[[].md");
+    assert!(patterns_overlap(&lit, &glob_escape("docs/notes[.md")));
+    assert!(patterns_overlap(&lit, "docs/*.md"));
+    assert!(!patterns_overlap(&lit, &glob_escape("docs/notesX.md")));
+    let r = hold(&s, "claude@shop", "shop", &lit, None);
+    assert_eq!(r.granted.len(), 1);
+    let other = s
+        .acquire_holds(AcquireHolds {
+            agent: "vaulter@vault".into(),
+            project: "shop".into(),
+            paths: vec![glob_escape("docs/notes[.md"), "docs/ok.md".into()],
+            ttl_seconds: Some(600),
+            exclusive: true,
+            reason: None,
+            lane: None,
+        })
+        .unwrap();
+    assert_eq!(other.conflicts.len(), 1);
+}

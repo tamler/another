@@ -264,6 +264,36 @@ fn pre_edit_holds_files_and_denies_other_lanes() {
         .expect("held");
     assert!(h["lane"].is_null(), "no lane, not codex's docs lane: {h}");
 
+    // File names with glob characters are held literally: both files of the patch are held,
+    // and another agent editing the bracketed one is denied.
+    let patch = "*** Begin Patch\n*** Add File: docs/notes[.md\n+x\n*** Update File: docs/plain.md\n@@\n-a\n+b\n*** End Patch\n";
+    let out = env.pre_edit(
+        "codex",
+        "codex@shop",
+        json!({ "cwd": env.repo, "tool_name": "apply_patch", "tool_input": { "patch": patch } }),
+    );
+    assert_eq!(out, "", "held, not failed open");
+    let holds: Value =
+        serde_json::from_str(&env.ok(&["--json", "holds", "--agent", "codex@shop"])).unwrap();
+    let pats: Vec<&str> = holds
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["pattern"].as_str().unwrap())
+        .collect();
+    assert!(
+        pats.contains(&"docs/notes[[].md") && pats.contains(&"docs/plain.md"),
+        "{pats:?}"
+    );
+    let out = env.pre_edit(
+        "claude",
+        "claude@shop",
+        json!({ "cwd": env.repo, "tool_name": "Write",
+                "tool_input": { "file_path": env.repo.join("docs/notes[.md"), "content": "y" } }),
+    );
+    let v: Value = serde_json::from_str(&out).expect("deny JSON");
+    assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+
     // Files outside the project are ignored; a non-edit payload is a no-op.
     let out = env.pre_edit(
         "claude",
