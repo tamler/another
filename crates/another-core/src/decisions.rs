@@ -481,6 +481,15 @@ pub(crate) fn check_relayer(conn: &Connection, relayer: &AgentRef, asker_id: &st
             relayer.address
         )));
     }
+    // The role must have been confirmed on this machine: a person created on demand as a
+    // decision's addressee (or any role an agent gave itself) can't relay.
+    if !crate::identity::role_confirmed(conn, &relayer.id, &program)? {
+        return Err(Error::Forbidden(format!(
+            "{} is not a confirmed {program}: confirm it on this machine with `another agent register {} --program {program}`",
+            relayer.address,
+            relayer.address.split('@').next().unwrap_or(&relayer.address)
+        )));
+    }
     Ok(())
 }
 
@@ -1355,10 +1364,19 @@ fn relay_answer_tx(
     if option.is_none() && text.is_none() {
         return Err(Error::Invalid("give an option value".into()));
     }
-    let relayed_ref = match &input.relayed_by {
-        Some(r) => Some(resolve_agent(tx, tx.node_id, r)?),
-        None => None,
+    // Another node's decision is answered by someone here: the relaying agent (or the person
+    // answering, when they are registered here). The origin only accepts a relayer of this
+    // node, so one is required.
+    let relayed_ref = match (&input.relayed_by, &input.answered_by) {
+        (Some(r), _) => Some(resolve_agent(tx, tx.node_id, r)?),
+        (None, Some(a)) => resolve_agent(tx, tx.node_id, a).ok(),
+        (None, None) => None,
     };
+    if relayed_ref.is_none() {
+        return Err(Error::Invalid(
+            "answering another node's decision needs a relaying agent on this node: --relayed-by (a confirmed manager or person), or --as a person registered here".into(),
+        ));
+    }
     // The same relayer rule the origin applies, checked before anything is marked or sent,
     // so a refused relayer can't leave the mirror stuck in `answer_sent`.
     if let Some(r) = &relayed_ref {
@@ -1465,11 +1483,24 @@ pub(crate) fn apply_relayed_tx(
     let Ok(row) = load(tx, tx.node_id, &id) else {
         return Ok(());
     };
-    let relayed = s("relayed_by_id")
-        .and_then(|id| agent_by_id(tx, &id).ok())
-        .or_else(|| {
-            s("relayed_by").and_then(|r| crate::identity::resolve_any(tx, tx.node_id, &r).ok())
-        });
+    // The relayer must be an agent of the node that signed the event. A missing, unknown or
+    // foreign identity is refused, never treated as a trusted local answer.
+    let relayed = s("relayed_by_id").and_then(|id| agent_by_id(tx, &id).ok());
+    let refuse = |why: &str| -> Result<()> {
+        tx.emit(
+            "system",
+            "decision.answer_ignored",
+            json!({ "decision_id": id, "project_id": row.project_id, "relayed_from": ev.node_id, "status": why }),
+        )?;
+        Ok(())
+    };
+    let Some(relayed) = relayed else {
+        return refuse("relayer_unknown");
+    };
+    if relayed.node_id != ev.node_id {
+        return refuse("relayer_not_of_sender");
+    }
+    let relayed = Some(relayed);
     if row.d.status != DecisionStatus::Open {
         tx.emit(
             "system",
@@ -1601,30 +1632,34 @@ impl Store {
                     break;
                 }
             }
-            // Mirrors of other nodes' decisions (answers are relayed to their node).
-            if lane_id.is_none() && filter.human.is_none() && (out.len() as u32) < limit {
-                let mut stmt = conn.prepare(&format!(
-                    "{MIRROR_SELECT} WHERE (?1 IS NULL OR m.status = ?1)
-                       AND (?2 IS NULL OR m.project_id = ?2)
-                     ORDER BY m.created_at DESC"
-                ))?;
-                let mirrors = stmt
-                    .query_map(params![status, project_id], mirror_from_row)?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                for (d, project, _) in mirrors {
-                    let visible = match (scope, &project) {
-                        (None, _) => true,
-                        (Some(s), Some(p)) => scope_allows_project(conn, s, p)?,
-                        (Some(_), None) => false,
-                    };
-                    if visible {
-                        out.push(d);
-                        if out.len() as u32 >= limit {
-                            break;
-                        }
-                    }
+            // Mirrors of other nodes' decisions (answers are relayed to their node), under the
+            // same filters, merged with the local ones before the limit so the newest win.
+            let mut stmt = conn.prepare(&format!(
+                "{MIRROR_SELECT} WHERE (?1 IS NULL OR m.status = ?1)
+                   AND (?2 IS NULL OR m.project_id = ?2) AND (?3 IS NULL OR m.lane_id = ?3)
+                   AND (?4 IS NULL OR m.human = ?4 OR m.human LIKE ?4 || '@%')
+                 ORDER BY m.created_at DESC LIMIT ?5"
+            ))?;
+            let mirrors = stmt
+                .query_map(
+                    params![status, project_id, lane_id, filter.human, limit],
+                    mirror_from_row,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (d, project, _) in mirrors {
+                let visible = match (scope, &project) {
+                    (None, _) => true,
+                    (Some(s), Some(p)) => scope_allows_project(conn, s, p)?,
+                    (Some(_), None) => false,
+                };
+                if visible {
+                    out.push(d);
                 }
             }
+            out.sort_by(|x, y| {
+                (&y.created_at, &y.decision_id).cmp(&(&x.created_at, &x.decision_id))
+            });
+            out.truncate(limit as usize);
             Ok(out)
         })
     }
@@ -1789,6 +1824,90 @@ pub fn decision_markdown(d: &Decision) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Clock, Program};
+
+    /// A signed relay names a relayer the sender doesn't own (this node's manager), or none:
+    /// both are refused at ingestion, and the decision stays open.
+    #[test]
+    fn relayed_answers_must_name_a_relayer_of_the_signing_node() {
+        let s = Store::open_in_memory(Clock::System).unwrap();
+        s.ensure_project("t", "/work/shop").unwrap();
+        for (name, program) in [("claude", Program::Claude), ("manager", Program::GrokBot)] {
+            s.register_agent_trusted(RegisterAgent {
+                name: name.into(),
+                program,
+                project: Some("/work/shop".into()),
+                model: None,
+                description: None,
+            })
+            .unwrap();
+        }
+        let d = s
+            .ask_decision(
+                NewDecision {
+                    agent: "claude@shop".into(),
+                    question: "Ship?".into(),
+                    options: vec![
+                        DecisionOption {
+                            value: "yes".into(),
+                            label: "Yes".into(),
+                            description: None,
+                        },
+                        DecisionOption {
+                            value: "no".into(),
+                            label: "No".into(),
+                            description: None,
+                        },
+                    ],
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        let manager = s.agent("manager@shop").unwrap().agent_id;
+        let relay = |relayer: Option<&str>| {
+            let payload = serde_json::json!({
+                "decision_id": d.decision_id,
+                "decision_node": s.node_id(),
+                "value": "yes",
+                "relayed_by_id": relayer,
+            });
+            let ev = crate::federation::WireEvent {
+                seq: 1,
+                event_id: crate::store::new_id(),
+                node_id: "SPOKE-NODE".into(),
+                ts: s.now(),
+                actor: "manager".into(),
+                kind: "decision.answer_relayed".into(),
+                payload: payload.to_string(),
+                prev_id: None,
+                sig: String::new(),
+            };
+            s.write(|tx| apply_relayed_tx(tx, &ev, &payload)).unwrap();
+        };
+        relay(Some(manager.as_str()));
+        relay(None);
+        relay(Some("NO-SUCH-AGENT"));
+        assert_eq!(
+            s.decision(&d.decision_id, None).unwrap().status,
+            DecisionStatus::Open
+        );
+        let why: Vec<String> = s
+            .events(100)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "decision.answer_ignored")
+            .map(|e| e.payload["status"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(
+            why,
+            [
+                "relayer_not_of_sender",
+                "relayer_unknown",
+                "relayer_unknown"
+            ]
+        );
+    }
 
     #[test]
     fn deadlines() {

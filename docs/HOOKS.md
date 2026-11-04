@@ -49,7 +49,7 @@ Uninstall removes only entries that reference `another-hook.sh`, and deletes the
 
 `another hook install --client claude,codex --pre-edit` adds a **PreToolUse** hook:
 - Claude Code: matcher `Edit|Write|MultiEdit|NotebookEdit`.
-- Codex: matcher `apply_patch`. File names come from the patch's `*** Add/Update/Delete File:` and `*** Move to:` lines, wherever Codex puts the patch (`tool_input.patch`, `tool_input.command` or a plain string).
+- Codex: matcher `apply_patch`. File names come from the patch's `*** Add/Update/Delete File:` and `*** Move to:` header lines (at the start of a line; an indented context line that only looks like one is ignored), wherever Codex puts the patch (`tool_input.patch`, `tool_input.command` or a plain string).
 
 **Before each edit**, the hook takes an exclusive hold on the files, with reason `pre-edit`:
 - The hold is for the agent's lane: `$ANOTHER_LANE`, else the one lane it leads there. See [lane-aware holds](LANES.md#path-holds-and-lanes).
