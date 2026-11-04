@@ -1734,27 +1734,28 @@ impl Store {
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 let mut accrued = 0.0;
                 let mut active = 0;
-                // Open leases count when the selected period is the one running now, however
-                // it was named (`current` or its month).
-                let in_window = a.period == SpendPeriod::None || (from <= now && now < to);
+                // An open lease counts for its overlap with the selected period: the running
+                // period gets it up to now, an earlier one (`previous`, a past month) the part
+                // before its end, so a lease kept across a reset isn't missing from either.
+                let overlap = |l: &LeaseRow| -> Option<f64> {
+                    let started = l.started?;
+                    let (start, end) = if a.period == SpendPeriod::None {
+                        (started, now)
+                    } else {
+                        (started.max(from), now.min(to))
+                    };
+                    (end > start).then(|| lease_cost(l.lease.cost_per_hour, Some(start), end))
+                };
                 for l in leases {
-                    if in_window {
-                        total +=
-                            lease_cost(l.lease.cost_per_hour, l.started.map(|s| s.max(from)), now);
-                    }
-                    if !in_window
-                        || !attributed_visible(
-                            conn,
-                            scope,
-                            l.project_id.as_deref(),
-                            Some(&l.agent_id),
-                        )?
+                    let Some(cost) = overlap(&l) else {
+                        continue;
+                    };
+                    total += cost;
+                    if !attributed_visible(conn, scope, l.project_id.as_deref(), Some(&l.agent_id))?
                     {
                         continue;
                     }
                     active += 1;
-                    let cost =
-                        lease_cost(l.lease.cost_per_hour, l.started.map(|s| s.max(from)), now);
                     accrued += cost;
                     add(
                         &mut by_lane,

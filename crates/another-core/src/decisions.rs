@@ -1189,6 +1189,9 @@ impl Store {
         scope: Option<&TokenScope>,
     ) -> Result<Decision> {
         self.write(|tx| {
+            // Deadlines first: a decision whose choose_default deadline has passed already has
+            // its outcome, and cancelling must not discard it.
+            crate::holds::sweep_tx(tx)?;
             let row = load_in(tx, tx.node_id, key, scope)?;
             let me = resolve_agent(tx, tx.node_id, agent)?;
             if me.id != row.asker_id {
