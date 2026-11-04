@@ -998,6 +998,10 @@ pub enum ServiceCmd {
         /// Extra Host header to accept, e.g. a tunnel hostname (repeatable; requires --auth).
         #[arg(long = "allowed-host", requires = "auth")]
         allowed_hosts: Vec<String>,
+        /// Header your local tunnel sets with the client address, for the /join limit and the
+        /// audit log (requires --auth). Without it, forwarding headers are ignored.
+        #[arg(long, value_enum, requires = "auth")]
+        trusted_proxy_header: Option<crate::remote::ForwardedHeader>,
         /// Also act as a federation hub.
         #[arg(long)]
         federation: bool,
@@ -1326,6 +1330,7 @@ fn service_command(cmd: &ServiceCmd, json: bool, home: PathBuf) -> anyhow::Resul
             auth,
             allow_remote_bind,
             allowed_hosts,
+            trusted_proxy_header,
             federation,
         } => {
             // Make sure the data directory exists and is initialised before the service runs.
@@ -1346,6 +1351,7 @@ fn service_command(cmd: &ServiceCmd, json: bool, home: PathBuf) -> anyhow::Resul
                 auth: *auth,
                 allow_remote_bind: *allow_remote_bind,
                 allowed_hosts: allowed_hosts.clone(),
+                trusted_proxy_header: trusted_proxy_header.map(|h| h.name().to_string()),
                 federation: *federation,
             };
             let r = service::install(&spec, &user_home)?;

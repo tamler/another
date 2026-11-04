@@ -58,6 +58,8 @@ pub struct ServiceSpec {
     pub auth: bool,
     pub allow_remote_bind: bool,
     pub allowed_hosts: Vec<String>,
+    /// The value of `serve --trusted-proxy-header`, as `serve` spells it.
+    pub trusted_proxy_header: Option<String>,
     pub federation: bool,
 }
 
@@ -80,6 +82,10 @@ impl ServiceSpec {
         for host in &self.allowed_hosts {
             args.push("--allowed-host".into());
             args.push(host.clone());
+        }
+        if let Some(header) = &self.trusted_proxy_header {
+            args.push("--trusted-proxy-header".into());
+            args.push(header.clone());
         }
         if self.federation {
             args.push("--federation".into());
@@ -676,6 +682,18 @@ fn update_warnings(old: &[String], new: &ServiceSpec) -> Vec<String> {
             out.push(format!("--allowed-host {host} was dropped"));
         }
     }
+    if let Some(header) = value("--trusted-proxy-header") {
+        match &new.trusted_proxy_header {
+            None => out.push(format!(
+                "--trusted-proxy-header {header} was dropped; clients behind the tunnel now \
+                 share one /join limit and one audit address"
+            )),
+            Some(next) if next != header => out.push(format!(
+                "the trusted proxy header changed from {header} to {next}"
+            )),
+            Some(_) => {}
+        }
+    }
     if has("--federation") && !new.federation {
         out.push("--federation was dropped; this node is no longer a federation hub".into());
     }
@@ -876,6 +894,7 @@ mod tests {
             auth: true,
             allow_remote_bind: false,
             allowed_hosts: vec!["box.tail-net.ts.net".into(), "a&b<c>\"q\"'s".into()],
+            trusted_proxy_header: None,
             federation: false,
         }
     }
