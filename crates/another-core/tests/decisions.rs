@@ -982,6 +982,27 @@ fn on_demand_people_cannot_relay_until_confirmed() {
 }
 
 #[test]
+fn cancelling_before_a_choose_default_deadline_is_allowed() {
+    let (s, _) = store();
+    let now = s.now();
+    let d = ask(&s, "claude@shop", |d| {
+        d.deadline_at = Some(now + 3_600_000);
+        d.on_timeout = DecisionTimeout::ChooseDefault;
+        d.default_value = Some("wait".into());
+    })
+    .unwrap();
+    let cancelled = s
+        .cancel_decision("claude@shop", &d.decision_id, None, None)
+        .unwrap();
+    assert_eq!(cancelled.status, DecisionStatus::Cancelled);
+    assert!(cancelled.answer.is_none());
+    assert_eq!(
+        s.request(&d.request_id).unwrap().status,
+        RequestStatus::Cancelled
+    );
+}
+
+#[test]
 fn cancelling_after_a_choose_default_deadline_keeps_the_default() {
     let (s, clock) = store();
     let now = s.now();
@@ -997,6 +1018,25 @@ fn cancelling_after_a_choose_default_deadline_keeps_the_default() {
         .cancel_decision("claude@shop", &d.decision_id, None, None)
         .unwrap_err();
     assert_eq!(e.code(), "conflict", "{e}");
+    assert!(
+        s.events(100)
+            .unwrap()
+            .iter()
+            .any(|e| { e.kind == "decision.expired" && e.payload["decision_id"] == d.decision_id }),
+        "cancellation must commit the timeout before returning, without another sweep"
+    );
+    let request = s.request(&d.request_id).unwrap();
+    assert_eq!(request.status, RequestStatus::Done);
+    assert!(request.closed_at.is_some());
+    let thread = s.thread(&d.thread_id).unwrap();
+    let automatic = thread
+        .messages
+        .iter()
+        .filter(|m| m.subject.starts_with("[decision] default applied: wait"))
+        .collect::<Vec<_>>();
+    assert_eq!(automatic.len(), 1);
+    assert_eq!(automatic[0].from, SYSTEM_AGENT);
+    assert_eq!(automatic[0].to, ["claude@shop"]);
     let after = s.decision(&d.decision_id, None).unwrap();
     assert_eq!(after.status, DecisionStatus::Expired);
     assert_eq!(after.answer.unwrap().value.as_deref(), Some("wait"));
