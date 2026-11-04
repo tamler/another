@@ -304,3 +304,154 @@ fn heartbeating_a_resource_you_do_not_hold_names_it() {
     assert_eq!(e.code(), "not_found", "{e}");
     assert!(e.to_string().contains(&other.resource.resource_id), "{e}");
 }
+
+// ---------------------------------------------------------------------------------------
+// Lanes
+
+fn lane(s: &Store) -> LaneDetail {
+    s.create_lane(
+        NewLane {
+            agent: "manager".into(),
+            name: "api".into(),
+            project: "shop".into(),
+            lead: "shopper@shop".into(),
+            charter: "charter".into(),
+            status: Some(LaneStatus::Working),
+        },
+        None,
+    )
+    .unwrap()
+}
+
+fn update(status: Option<LaneStatus>, links: Vec<(LaneLinkKind, String)>) -> LaneUpdate {
+    LaneUpdate {
+        agent: "manager".into(),
+        lane: "api".into(),
+        status,
+        links,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn linking_to_a_lane_shows_in_the_feed_and_a_closed_lane_takes_no_changes() {
+    let (s, _) = store();
+    lane(&s);
+    let m = s
+        .send_message(SendMessage {
+            from: "manager".into(),
+            to: vec!["shopper@shop".into()],
+            subject: "about the api".into(),
+            body: "body".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    s.update_lane(
+        update(None, vec![(LaneLinkKind::Message, m.message_id.clone())]),
+        None,
+    )
+    .unwrap();
+    let feed = s
+        .activity(ActivityQuery {
+            since: Some(Since::Time(0)),
+            limit: 500,
+            kinds: vec![],
+        })
+        .unwrap();
+    assert!(
+        feed.items
+            .iter()
+            .any(|i| i.summary.contains("linked message")
+                && i.summary.contains(&m.message_id)
+                && i.summary.contains("api")),
+        "{:?}",
+        feed.items.iter().map(|i| &i.summary).collect::<Vec<_>>()
+    );
+
+    // Only `lane close` or a done report finishes a lane.
+    let e = s
+        .update_lane(update(Some(LaneStatus::Done), vec![]), None)
+        .unwrap_err();
+    assert_eq!(e.code(), "invalid", "{e}");
+    s.close_lane("manager", "api", false, Some("shipped".into()), None)
+        .unwrap();
+
+    let e = s
+        .update_lane(update(Some(LaneStatus::Working), vec![]), None)
+        .unwrap_err();
+    assert_eq!(e.code(), "conflict", "{e}");
+    assert!(e.to_string().contains("lane api is done"), "{e}");
+    // Links are still allowed: they add context to a closed lane.
+    assert!(s
+        .update_lane(
+            update(None, vec![(LaneLinkKind::Message, m.message_id)]),
+            None
+        )
+        .is_ok());
+}
+
+#[test]
+fn lane_reports_keep_done_only_fields_on_done_reports() {
+    let (s, _) = store();
+    lane(&s);
+    let input = || LaneReportInput {
+        agent: "shopper@shop".into(),
+        lane: "api".into(),
+        kind: ReportKind::Status,
+        summary: "going fine".into(),
+        progress: None,
+        status: None,
+        links: vec![],
+        artifacts: vec![],
+        outcome: None,
+        pr_url: None,
+    };
+    for (bad, wanted) in [
+        (
+            LaneReportInput {
+                progress: Some(101),
+                ..input()
+            },
+            "percentage",
+        ),
+        (
+            LaneReportInput {
+                outcome: Some("shipped".into()),
+                ..input()
+            },
+            "belong on a done report",
+        ),
+        (
+            LaneReportInput {
+                status: Some(LaneStatus::Done),
+                ..input()
+            },
+            "to finish a lane",
+        ),
+        (
+            LaneReportInput {
+                kind: ReportKind::Done,
+                outcome: Some("   ".into()),
+                ..input()
+            },
+            "needs an outcome",
+        ),
+    ] {
+        let e = s.report_lane(bad, None).unwrap_err();
+        assert_eq!(e.code(), "invalid", "{e}");
+        assert!(e.to_string().contains(wanted), "{e}");
+    }
+    assert!(s.lane("api", None).unwrap().reports.is_empty());
+    assert_eq!(
+        s.lane("api", None).unwrap().lane.status,
+        LaneStatus::Working
+    );
+}
+
+#[test]
+fn unknown_request_actions_and_link_kinds_list_the_valid_ones() {
+    let e = "nonsense".parse::<RequestAction>().unwrap_err();
+    assert!(e.to_string().contains("claim, release"), "{e}");
+    let e = "nonsense".parse::<LaneLinkKind>().unwrap_err();
+    assert!(e.to_string().contains("thread, request"), "{e}");
+}
