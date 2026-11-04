@@ -24,6 +24,8 @@ pub struct HttpOptions {
     pub allow_remote_bind: bool,
     /// Extra `Host` header values to accept (tunnel hostnames). Only with `auth`.
     pub allowed_hosts: Vec<String>,
+    /// The header a local tunnel sets with the client address. Only with `auth`.
+    pub trusted_proxy_header: Option<crate::remote::ForwardedHeader>,
     /// Serve the federation hub endpoints (`/fed/*`), authenticated by node signatures.
     pub federation: bool,
 }
@@ -180,7 +182,7 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
     };
     let node_id = store.node_id().to_string();
     let auth = opts.auth;
-    protected.route(
+    let router = protected.route(
         "/health",
         axum::routing::get(move || {
             let node_id = node_id.clone();
@@ -188,7 +190,11 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
                 axum::Json(serde_json::json!({ "ok": true, "node_id": node_id, "auth": auth }))
             }
         }),
-    )
+    );
+    match opts.trusted_proxy_header {
+        Some(header) => router.layer(axum::Extension(header)),
+        None => router,
+    }
 }
 
 /// Refuse requests whose `Host` is not a loopback name. On an unauthenticated server this

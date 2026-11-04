@@ -350,3 +350,29 @@ fn token_cli_and_bind_rules() {
     let flag_only = run(&["serve", "--allow-remote-bind", "--bind", "0.0.0.0:0"]);
     assert!(!flag_only.status.success(), "clap requires --auth");
 }
+
+/// Finding 8: `agent_kick` is local only. REMOTE-AGENTS.md and the tool description say so;
+/// this pins the fail-closed behaviour they describe.
+#[tokio::test]
+async fn agent_kick_is_refused_for_every_token() {
+    let srv = start().await;
+    let token = srv
+        .store
+        .create_token("grok-bot", &["/work/shop".into()], None, None)
+        .unwrap();
+    let client = connect(&srv.base, &token.secret).await;
+    let res = call(
+        &client,
+        "agent_kick",
+        json!({ "agent": "grok-bot", "target": "alice@shop" }),
+    )
+    .await;
+    assert_eq!(error_code(&res).as_deref(), Some("forbidden"));
+    assert!(srv
+        .store
+        .agents()
+        .unwrap()
+        .iter()
+        .any(|a| a.name == "alice"));
+    srv.ct.cancel();
+}
