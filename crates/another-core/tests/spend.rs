@@ -995,3 +995,98 @@ fn round4_reset_split_kept_resources_and_scoped_projects() {
         missing.to_string().replace("nowhere", "X")
     );
 }
+
+#[test]
+fn report_agent_filters_resolve_in_scope() {
+    let (s, _) = store();
+    for p in ["/work/shop", "/work/vault"] {
+        s.register_agent_trusted(RegisterAgent {
+            name: "dup".into(),
+            program: Program::Claude,
+            project: Some(p.into()),
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    }
+    account(&s, "shared", SpendKind::ApiCredits, "USD", None, |_| {});
+    record(&s, "dup@shop", "shared", 2.0, None);
+    record(&s, "dup@vault", "shared", 5.0, None);
+    let t = s
+        .create_token("manager", &["/work/shop".into()], None, None)
+        .unwrap();
+    let shop = s.verify_token(&t.secret).unwrap();
+    let by = |agent: &str| {
+        s.spend_report(
+            SpendQuery {
+                agent: Some(agent.into()),
+                ..Default::default()
+            },
+            Some(&shop),
+        )
+    };
+    // The bare name means the visible dup@shop, without an ambiguity naming dup@vault.
+    assert_eq!(find(&by("dup").unwrap(), "shared").spent, 2.0);
+    // A hidden agent and a missing one fail the same way.
+    let (hidden, missing) = (by("dup@vault").unwrap_err(), by("ghost@vault").unwrap_err());
+    assert_eq!((hidden.code(), missing.code()), ("not_found", "not_found"));
+    assert_eq!(
+        hidden.to_string().replace("dup@vault", "X"),
+        missing.to_string().replace("ghost@vault", "X")
+    );
+}
+
+#[test]
+fn re_registering_a_linked_resource_goes_through_the_gate() {
+    let (s, _) = store();
+    gpu_with_approval(&s);
+    gpu_resource(&s, 86_400);
+    let target = ResourceRef::parse("gpu:pod:a100").unwrap();
+    s.link_resource_spend(&target, Some("gpu-h100"), None)
+        .unwrap();
+    // The owner releases: the resource lapses, still linked.
+    s.release_resource("claude@shop", &target, false).unwrap();
+    // Re-registering it to adopt asks for approval first, with no lease and no free use.
+    let out = s
+        .register_resource(RegisterResource {
+            agent: "codex@shop".into(),
+            kind: ResourceKind::Gpu,
+            name: "pod:a100".into(),
+            endpoint: None,
+            port: None,
+            pid: None,
+            project: Some("shop".into()),
+            purpose: None,
+            mode: LeaseMode::Shared,
+            ttl_seconds: Some(3600),
+            metadata: None,
+        })
+        .unwrap();
+    assert_eq!(out.outcome, "pending_approval");
+    assert!(out.lease.is_none() && out.decision_id.is_some());
+    assert_eq!(out.resource.refcount, 0);
+    let pending = s.spend_leases(false, None).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].status, SpendLeaseStatus::PendingApproval);
+    // Approved: the lease is taken and charged.
+    s.answer_decision(
+        AnswerDecision {
+            decision: out.decision_id.unwrap(),
+            value: Some("approve".into()),
+            relayed_by: Some("manager".into()),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    assert!(s
+        .resource(&target)
+        .unwrap()
+        .leases
+        .iter()
+        .any(|l| l.agent == "codex@shop"));
+    assert_eq!(
+        s.spend_leases(false, None).unwrap()[0].status,
+        SpendLeaseStatus::Active
+    );
+}

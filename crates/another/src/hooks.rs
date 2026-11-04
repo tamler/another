@@ -963,7 +963,10 @@ pub fn edited_files(input: &HookInput, root: &Path, cwd: &Path) -> Vec<String> {
     }
     for patch in patches {
         for line in patch.lines() {
-            let line = line.trim();
+            // Headers start at column 0. A context line (" *** Update File: …", e.g. in a
+            // document that shows a patch) starts with a space and must not become one, so
+            // only the end of the line is trimmed before matching.
+            let line = line.trim_end();
             for marker in [
                 "*** Add File:",
                 "*** Update File:",

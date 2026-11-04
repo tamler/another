@@ -746,7 +746,7 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
         "resource.renewed" => {
             for id in strings(p, "lease_ids") {
                 tx.execute(
-                    "UPDATE resource_leases SET renewed_at = ?2,
+                    "UPDATE resource_leases SET renewed_at = ?2, expiry_warned_at = NULL,
                        ttl_seconds = coalesce(?4, ttl_seconds),
                        expires_at = ?2 + coalesce(?4, ttl_seconds) * 1000
                      WHERE lease_id = ?1 AND node_id = ?3 AND released_at IS NULL",
