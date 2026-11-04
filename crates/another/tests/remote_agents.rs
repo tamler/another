@@ -244,7 +244,7 @@ fn second_home_joins_reports_answers_and_is_kicked() {
     let env = std::fs::read_to_string(b_home.join("remote.env")).unwrap();
     assert!(
         env.contains("export ANOTHER_AGENT='cloud-grok@shop'")
-            && env.contains("export ANOTHER_LANE='api'")
+            && env.contains("export ANOTHER_LANE='api@shop'")
     );
 
     // The hub saw the hello: a session start and a report in the lane, plus presence.

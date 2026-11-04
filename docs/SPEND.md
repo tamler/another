@@ -81,7 +81,7 @@ another spend link gpu-a100 gpu:pod-a100
 another spend unlink gpu:pod-a100
 ```
 
-- Borrowing a linked resource (`another borrow`, MCP `resource_borrow`) opens a spend lease for the borrower.
+- Borrowing a linked resource (`another borrow`, MCP `resource_borrow`), or re-registering it to adopt it once it has lapsed (`resource_register`), opens a spend lease for the agent, behind the same approval gate.
 - If the account requires approval, the borrow comes back as `pending_approval` with a `decision_id`, and no resource lease yet. Once approved, the resource lease is taken and the spend lease starts.
 - The spend lease is renewed along with the resource lease. It ends when the resource lease ends (release, expiry, stop or session end), and is charged up to that moment. `spend release` on it is refused while you still hold the resource: release the resource instead.
 - Linking is local only, and only resources registered on this node can be linked.
@@ -125,6 +125,6 @@ With `another serve --auth`:
 - **Project accounts** are visible only when their project matches the token's globs. Another project's account (or lease) gets the same `not_found` as one that doesn't exist.
 - **Shared accounts** are visible and marked `partial`. `spent`, `accrued` and the lane and agent totals count only the token's own projects. `budget`, `remaining`, `used_pct`, `projected` and `status` are for the whole account, read-only, so a bot can tell how much is left without seeing who spent it.
 - **Writes:**
-  - `spend_record`, `spend_borrow` and `spend_release` must act as the token's agent and be attributed to a project in its globs (name a lane or a project). A named project, lane or agent is looked up among what the token may see, so a hidden one is the same `not_found` as a missing one.
+  - `spend_record`, `spend_borrow` and `spend_release` must act as the token's agent and be attributed to a project in its globs (name a lane or a project). A named project, lane or agent (including the report's `--agent` / `agent` filter) is looked up among what the token may see, so a hidden one is the same `not_found` as a missing one.
   - `spend_account_upsert` is refused.
 - Every call is written to the audit log.

@@ -573,6 +573,10 @@ pub enum DecisionCmd {
         /// Who is answering (default: the person asked).
         #[arg(long = "as")]
         answered_by: Option<String>,
+        /// The manager or person on this node relaying the answer (needed for another node's
+        /// decision, unless --as names a person registered here).
+        #[arg(long)]
+        relayed_by: Option<String>,
     },
     /// Withdraw a decision you asked.
     Cancel {
@@ -2442,6 +2446,7 @@ fn decision_command(store: &Store, json: bool, cmd: DecisionCmd) -> anyhow::Resu
             value,
             text,
             answered_by,
+            relayed_by,
         } => {
             let d = store.answer_decision(
                 AnswerDecision {
@@ -2449,7 +2454,7 @@ fn decision_command(store: &Store, json: bool, cmd: DecisionCmd) -> anyhow::Resu
                     value,
                     text,
                     answered_by,
-                    relayed_by: None,
+                    relayed_by,
                 },
                 None,
             )?;
