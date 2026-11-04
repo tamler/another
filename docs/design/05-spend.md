@@ -32,7 +32,7 @@ Accounts are created and changed locally only, through the CLI or local MCP. Rem
 **Lease**: an agent using a costed account by the hour.
 - Fields: owner (agent), lane, `cost_per_hour` (from the argument, else the account), TTL (default 1 h, 1 min–24 h).
 - The lease is renewed by `spend_lease renew` or the agent's session heartbeat, like holds and resource leases.
-- Ending it (release, or lapsing at its expiry) writes one `lease` entry for `hours × cost_per_hour`.
+- Ending it (release, or lapsing at its expiry) writes one `lease` entry for `hours × cost_per_hour`, split into one entry per period when the lease crossed a monthly reset.
 - While a lease is open, its cost so far is reported as **accrued**.
 - Statuses: `pending_approval`, `active`, `ended`, `denied`.
 

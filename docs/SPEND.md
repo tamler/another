@@ -58,8 +58,8 @@ MCP: `spend_borrow`, `spend_release`, `spend_leases`.
 
 - **Cost:** a lease costs `cost_per_hour` × hours. The rate is the account's unless you pass `--cost-per-hour`.
 - **Renewal and expiry:** the agent's heartbeat (its prompt hook) renews the lease, and it expires after its TTL (default 1 h) if not renewed.
-- **Session end** (the SessionEnd hook, or `another session end`) closes the agent's spend leases: active ones are charged up to then, and pending ones are withdrawn. `--keep-resources` keeps them.
-- **When it ends**, its cost is written as one entry. While it runs, the cost so far shows as **accrued** in reports.
+- **Session end** (the SessionEnd hook, or `another session end`) closes the agent's spend leases: active ones are charged up to then, and pending ones are withdrawn. `--keep-resources` keeps them, renewed along with the resource leases.
+- **When it ends**, its cost is written as one entry, or one per period if it ran across a monthly reset (each period is charged for its overlap). While it runs, the cost so far shows as **accrued** in reports.
 - **Nothing is stopped or reaped** when a lease ends or a budget runs out. That always needs a person.
 
 **Approval:** if the account has `--requires-approval`, borrowing does not start the lease.
@@ -125,6 +125,6 @@ With `another serve --auth`:
 - **Project accounts** are visible only when their project matches the token's globs. Another project's account (or lease) gets the same `not_found` as one that doesn't exist.
 - **Shared accounts** are visible and marked `partial`. `spent`, `accrued` and the lane and agent totals count only the token's own projects. `budget`, `remaining`, `used_pct`, `projected` and `status` are for the whole account, read-only, so a bot can tell how much is left without seeing who spent it.
 - **Writes:**
-  - `spend_record`, `spend_borrow` and `spend_release` must act as the token's agent and be attributed to a project in its globs (name a lane or a project).
+  - `spend_record`, `spend_borrow` and `spend_release` must act as the token's agent and be attributed to a project in its globs (name a lane or a project). A named project, lane or agent is looked up among what the token may see, so a hidden one is the same `not_found` as a missing one.
   - `spend_account_upsert` is refused.
 - Every call is written to the audit log.

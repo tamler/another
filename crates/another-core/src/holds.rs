@@ -1012,6 +1012,10 @@ impl Store {
                     // Spend leases close with the session (kept with --keep-resources, like
                     // the resource leases they pay for).
                     crate::spend::end_agent_leases_tx(tx, &me.id, "session_end")?;
+                } else {
+                    // --keep-resources renews the resource leases; renew the spend leases
+                    // too, or charging would stop while the resource stays held.
+                    crate::spend::renew_spend_leases_tx(tx, &me.id)?;
                 }
                 tx.emit(&me.address, "session.ended", session_payload())?;
                 tx.execute(
