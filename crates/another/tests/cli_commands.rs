@@ -328,13 +328,14 @@ fn reap_plans_a_listener_and_refuses_one_a_resource_registered() {
 
     let plan = h.json(&["reap", &target, "--grace", "0"]);
     assert_eq!(plan["executed"], false);
-    let found = plan["blockers"]
+    let no_scanner = plan["blockers"]
         .as_array()
         .unwrap()
         .iter()
-        .all(|b| !b.as_str().unwrap().contains("not a listening process"));
-    if !found {
-        // No lsof or ss on this machine: nothing to observe.
+        .any(|b| b.as_str().unwrap().contains("found by none"));
+    if no_scanner {
+        // No lsof or ss on this machine: nothing to observe. A scanner that misses this
+        // process's listener is a failure, not a skip.
         return;
     }
     assert_eq!(plan["eligible"], true, "{plan}");
