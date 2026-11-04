@@ -81,10 +81,10 @@ The manager then relays the answer. Any of these works:
 
 **What gets recorded:**
 - `answered_by`: the person (default: the person asked).
-- `relayed_by`: the agent that called the API. Remote callers are always recorded as their token's agent and cannot set it to anyone else. **Only a manager bot (`grok_bot`) or a person (`human`) may relay, and never the agent that asked**: an agent can't approve its own question, whoever it claims answered.
+- `relayed_by`: the agent that called the API. Remote callers are always recorded as their token's agent and cannot set it to anyone else. **Only a manager bot (`grok_bot`) or a person (`human`) may relay, and never the agent that asked**: an agent can't approve its own question, whoever it claims answered. These roles are set by the person on the machine (`another agent register NAME --program grok_bot`); `register_agent` over MCP or a hook can't give an agent one, and a refresh keeps the role it has.
 - `answered_at`
 
-The asking agent receives a high-importance reply, `[decision] Ship behind a flag: …`, with the value, the label, any text, and who answered and relayed it. The request closes, and the lane is released.
+The asking agent receives a high-importance reply, `[decision] answered: ship (<id>)`, with the value, the label, any text, and who answered and relayed it in the body. Decision mail subjects carry ids, names and values only (they show in the activity feed); the question, labels and text are in the bodies. The request closes, and the lane is released.
 
 ## Reading
 
@@ -113,3 +113,5 @@ With `another serve --auth`:
 | `decision.answered` | `request_answered` |
 | `decision.expired` | `request_answered` |
 | `decision.cancelled` | `all` |
+
+Events carry ids and status only (`decision_id`, `project_id`, `lane_id`, `asker_id`, `human_id`, the option count, deadline and timeout rule). The question and option labels stay in the decision and its mail. A token sees only decisions in its projects: any other decision id gets the same `not_found` as an unknown one, for show, answer and cancel.
