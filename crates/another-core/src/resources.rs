@@ -577,14 +577,15 @@ fn outcome(tx: &Tx<'_>, resource_id: &str, agent_id: &str, what: &str) -> Result
 pub const LEASE_EXPIRING_WINDOW_MS: i64 = 5 * 60 * 1000;
 
 /// Emit `resource.lease_expiring` once for each live lease about to lapse. Renewing a lease
-/// re-arms the warning.
+/// re-arms the warning: every renewal clears `expiry_warned_at` (comparing timestamps can
+/// not tell a renewal in the same transaction as the warning apart).
 pub(crate) fn warn_expiring_leases_tx(tx: &Tx<'_>) -> Result<usize> {
     let mut stmt = tx.prepare(
         "SELECT l.lease_id, l.resource_id, l.agent_id, l.expires_at, r.project_id
          FROM resource_leases l JOIN resources r ON r.resource_id = l.resource_id
          WHERE l.node_id = ?1 AND l.released_at IS NULL
            AND l.expires_at > ?2 AND l.expires_at <= ?2 + MIN(?3, l.ttl_seconds * 500)
-           AND (l.expiry_warned_at IS NULL OR l.expiry_warned_at < l.renewed_at)",
+           AND l.expiry_warned_at IS NULL",
     )?;
     let due = stmt
         .query_map(params![tx.node_id, tx.now, LEASE_EXPIRING_WINDOW_MS], |r| {
@@ -692,7 +693,7 @@ pub(crate) fn session_leases_tx(tx: &Tx<'_>, agent: &AgentRef, release: bool) ->
         )?;
         for (lease_id, _, ttl) in &leases {
             tx.execute(
-                "UPDATE resource_leases SET renewed_at = ?2, expires_at = ?2 + ?3 * 1000
+                "UPDATE resource_leases SET renewed_at = ?2, expiry_warned_at = NULL, expires_at = ?2 + ?3 * 1000
                  WHERE lease_id = ?1",
                 params![lease_id, tx.now, ttl],
             )?;
@@ -738,6 +739,19 @@ impl Store {
                         existing,
                         current.owner.as_deref().unwrap_or("none")
                     )));
+                }
+                // Re-registering a lapsed resource adopts it: the same spend gate as borrowing
+                // applies, or a linked paid resource could be taken without approval or charge.
+                if let crate::spend::ResourceGate::Pending(decision_id) =
+                    crate::spend::resource_gate_tx(tx, &existing, &me, ttl)?
+                {
+                    touch(tx, &me.id)?;
+                    return Ok(LeaseOutcome {
+                        resource: get_resource(tx, &existing, tx.now)?,
+                        lease: None,
+                        outcome: "pending_approval".into(),
+                        decision_id: Some(decision_id),
+                    });
                 }
                 tx.emit(
                     &me.address,
@@ -902,7 +916,7 @@ impl Store {
                     }),
                 )?;
                 tx.execute(
-                    "UPDATE resource_leases SET ttl_seconds = ?2, renewed_at = ?3,
+                    "UPDATE resource_leases SET ttl_seconds = ?2, renewed_at = ?3, expiry_warned_at = NULL,
                        expires_at = ?3 + ?2 * 1000 WHERE lease_id = ?1",
                     params![lease_id, ttl, tx.now],
                 )?;
@@ -1091,7 +1105,7 @@ impl Store {
             }
             for (lease_id, rid, ttl) in &selected {
                 tx.execute(
-                    "UPDATE resource_leases SET renewed_at = ?2, expires_at = ?2 + ?3 * 1000
+                    "UPDATE resource_leases SET renewed_at = ?2, expiry_warned_at = NULL, expires_at = ?2 + ?3 * 1000
                      WHERE lease_id = ?1",
                     params![lease_id, tx.now, ttl],
                 )?;
