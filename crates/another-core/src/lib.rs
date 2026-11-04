@@ -69,7 +69,7 @@ pub use spend::{
 pub use store::{default_home, Clock, Event, NodeInfo, Store, DB_FILE};
 pub use summary::{
     summary_markdown, ClosedLane, DailySummary, DecisionSummary, HoldSummary, LaneSummary,
-    OpenDecision, RequestSummary, SpendLine,
+    OpenDecision, RequestSummary, SpendLine, FEED_CAP, OPEN_DECISIONS_CAP,
 };
 pub use time::fmt_ts;
 pub use tokens::{AuditEntry, AuditRecord, NewToken, Token, TokenScope};

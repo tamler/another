@@ -138,7 +138,7 @@ pub fn parse_kinds(raw: Option<&str>) -> another_core::Result<Vec<ActivityKind>>
 pub fn start_cursor(store: &Store, since: Option<&str>) -> another_core::Result<Since> {
     match since.map(str::trim).filter(|s| !s.is_empty()) {
         Some(raw) => Since::parse(raw, store.now()),
-        None => Ok(match store.latest_event_id()? {
+        None => Ok(match store.end_cursor()? {
             Some(id) => Since::After(id),
             None => Since::Time(store.now()),
         }),

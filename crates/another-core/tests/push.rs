@@ -153,9 +153,40 @@ fn scoped_feed_hides_other_projects() {
             Some(&scope),
         )
         .unwrap();
+    // The last event is hidden from shop, so the cursor is an opaque position past it, never
+    // that event's id; reading from it works and finds nothing new.
+    let next = feed.next_since.clone().unwrap();
+    assert_eq!(Some(next.clone()), s.end_cursor().unwrap());
+    assert_ne!(Some(next.clone()), s.latest_event_id().unwrap());
+    let again = s
+        .activity_scoped(
+            ActivityQuery {
+                since: Some(Since::parse(&next, s.now()).unwrap()),
+                limit: 500,
+                kinds: vec![],
+            },
+            Some(&scope),
+        )
+        .unwrap();
+    assert!(again.items.is_empty());
+    // A hidden event's id is no cursor for shop: the same not_found as an unknown id.
+    let hidden = s.latest_event_id().unwrap().unwrap();
+    let cursor = |id: &str| {
+        s.activity_scoped(
+            ActivityQuery {
+                since: Some(Since::After(id.into())),
+                limit: 10,
+                kinds: vec![],
+            },
+            Some(&scope),
+        )
+        .unwrap_err()
+    };
+    let (h, m) = (cursor(&hidden), cursor("01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+    assert_eq!((h.code(), m.code()), ("not_found", "not_found"));
     assert_eq!(
-        feed.next_since.as_deref(),
-        s.latest_event_id().unwrap().as_deref()
+        h.to_string().replace(&hidden, "X"),
+        m.to_string().replace("01ARZ3NDEKTSV4RRFFQ69G5FAV", "X")
     );
 
     // The summary only counts what the scope may see.

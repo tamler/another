@@ -370,7 +370,7 @@ fn people_hidden_budgets_and_truncation_in_the_digest() {
     assert!(!sum.truncated);
     assert!(!sum.markdown.contains("Truncated"));
     sum.truncated = true;
-    assert!(summary_markdown(&sum).contains("(Truncated: over 20000 events"));
+    assert!(summary_markdown(&sum).contains("(Truncated: over 20000 events in a section"));
 }
 
 #[test]
@@ -591,4 +591,48 @@ fn sweepers_sharing_a_home_send_the_rollup_once() {
         .filter(|m| m.message.subject.starts_with("[summary]"))
         .count();
     assert_eq!(rollups, 1);
+}
+
+#[test]
+fn every_open_decision_counts_and_the_oldest_are_kept() {
+    let (clock, h) = Clock::manual(NOV_21);
+    let s = Store::open_in_memory(clock).unwrap();
+    s.ensure_project("t", "/work/shop").unwrap();
+    s.register_agent_trusted(RegisterAgent {
+        name: "claude".into(),
+        program: Program::Claude,
+        project: Some("/work/shop".into()),
+        model: None,
+        description: None,
+    })
+    .unwrap();
+    let mut first = String::new();
+    for i in 0..(OPEN_DECISIONS_CAP + 1) {
+        let d = s
+            .ask_decision(
+                NewDecision {
+                    agent: "claude@shop".into(),
+                    question: format!("Question {i}?"),
+                    options: opts(),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        if i == 0 {
+            first = d.decision_id;
+        }
+        h.fetch_add(1000, std::sync::atomic::Ordering::SeqCst);
+    }
+    let sum = s.daily_summary(None, None).unwrap();
+    assert_eq!(sum.decisions.open_total as usize, OPEN_DECISIONS_CAP + 1);
+    assert_eq!(sum.decisions.open.len(), OPEN_DECISIONS_CAP);
+    assert_eq!(
+        sum.decisions.open[0].decision_id, first,
+        "the oldest is kept, first"
+    );
+    assert!(sum.truncated);
+    assert!(sum
+        .markdown
+        .contains(&format!("Decisions: {} open", OPEN_DECISIONS_CAP + 1)));
 }
