@@ -24,7 +24,8 @@ const FAKES: &[(&str, &str)] = &[
         r#"[ -n "$NO_BUS" ] && { echo "Failed to connect to bus: No medium found" >&2; exit 1; }
 case "$*" in
   *"enable --now"*) [ -n "$FAIL_ENABLE" ] && { echo "Unit another.service has a bad setting" >&2; exit 1; }; echo active > "$STATE" ;;
-  *" start "*|*restart*) echo active > "$STATE" ;;
+  *restart*) [ -n "$FAIL_RESTART" ] && { echo "Job for another.service failed" >&2; exit 1; }; echo active > "$STATE" ;;
+  *" start "*) echo active > "$STATE" ;;
   *"disable --now"*|*" stop "*) echo inactive > "$STATE" ;;
   *is-active*) s=$(cat "$STATE" 2>/dev/null || echo inactive); echo "$s"; [ "$s" = active ] || exit 3 ;;
   *MainPID*) if [ "$(cat "$STATE" 2>/dev/null)" = active ]; then echo 4242; else echo 0; fi ;;
@@ -44,7 +45,12 @@ exit 0"#,
       touch "$FAIL_BOOTSTRAP_ONCE"; echo "Bootstrap failed: 1: Operation not permitted" >&2; exit 1
     fi
     touch "$STATE" ;;
-  bootout) [ -f "$STATE" ] || exit 3; rm -f "$STATE" ;;
+  bootout)
+    [ -f "$STATE" ] || exit 3
+    if [ -n "$SLOW_BOOTOUT_ONCE" ] && [ ! -f "$SLOW_BOOTOUT_ONCE" ]; then
+      touch "$SLOW_BOOTOUT_ONCE"; exit 0
+    fi
+    rm -f "$STATE" ;;
 esac
 exit 0"#,
     ),
@@ -454,6 +460,57 @@ fn failed_systemd_update_restarts_the_previous_service() {
         Some("systemctl --user restart another.service"),
         "{calls:?}"
     );
+    let failed = calls.iter().rposition(|c| c.contains("enable --now"));
+    let reload = calls
+        .iter()
+        .rposition(|c| c == "systemctl --user daemon-reload");
+    assert!(reload > failed, "restored unit is reloaded: {calls:?}");
+}
+
+#[test]
+fn failed_systemd_update_of_a_stopped_service_leaves_it_stopped() {
+    let env = Env::new("systemd");
+    let bind = format!("127.0.0.1:{}", free_port());
+    env.json(&["service", "install", "--bind", &bind]);
+    env.json(&["service", "stop"]);
+    env.clear_calls();
+    let out = env
+        .cmd(&["service", "install", "--bind", &bind, "--federation"])
+        .env("FAIL_RESTART", "1")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("previous definition was restored"), "{err}");
+    assert_eq!(
+        env.calls().last().map(String::as_str),
+        Some("systemctl --user stop another.service"),
+        "`enable --now` had started the new definition"
+    );
+    assert_eq!(env.json(&["service", "status"])["loaded"], false);
+}
+
+#[test]
+fn slow_launchd_unload_during_an_update_still_reloads_the_previous_service() {
+    let env = Env::new("launchd");
+    let bind = format!("127.0.0.1:{}", free_port());
+    env.json(&["service", "install", "--bind", &bind]);
+    env.clear_calls();
+    // launchd accepts the unload but the job outlasts the wait, then goes away: still being
+    // loaded at rollback doesn't mean it survived.
+    let out = env
+        .cmd(&["service", "install", "--bind", &bind, "--federation"])
+        .env("SLOW_BOOTOUT_ONCE", env.user_home.join(".slow-once"))
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("still unloading"), "{err}");
+    let calls = env.calls();
+    assert!(
+        calls.iter().any(|c| c.starts_with("launchctl bootstrap ")),
+        "the previous definition is loaded again: {calls:?}"
+    );
 }
 
 #[test]
@@ -542,24 +599,66 @@ fn serve_shuts_down_gracefully_on_sigterm() {
         assert!(std::time::Instant::now() < deadline, "serve never listened");
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+    let status = terminate(&mut child).0;
+    assert_eq!(status.code(), Some(0), "a clean exit, not death by signal");
+}
+
+#[test]
+fn sigterm_is_not_held_up_by_a_stalled_request() {
+    use std::io::Write;
+    let env = Env::new("launchd");
+    let port = free_port();
+    let bind = format!("127.0.0.1:{port}");
+    let mut child = env
+        .cmd(&["serve", "--bind", &bind])
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut stalled = loop {
+        if let Ok(s) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            break s;
+        }
+        assert!(std::time::Instant::now() < deadline, "serve never listened");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    // A request whose body never finishes keeps its connection in flight.
+    write!(
+        stalled,
+        "POST /mcp HTTP/1.1\r\nHost: {bind}\r\nContent-Type: application/json\r\n\
+         Accept: application/json, text/event-stream\r\nContent-Length: 1000\r\n\r\n{{"
+    )
+    .unwrap();
+    stalled.flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let (status, took) = terminate(&mut child);
+    assert_eq!(status.code(), Some(0));
+    assert!(
+        took >= std::time::Duration::from_secs(2),
+        "the request should have held shutdown until the grace period: {took:?}"
+    );
+    drop(stalled);
+}
+
+/// SIGTERM a process and wait for it, up to 10 s. Returns its status and how long it took.
+fn terminate(child: &mut std::process::Child) -> (std::process::ExitStatus, std::time::Duration) {
     let killed = Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
         .status()
         .unwrap();
     assert!(killed.success());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let status = loop {
+    let start = std::time::Instant::now();
+    loop {
         if let Some(status) = child.try_wait().unwrap() {
-            break status;
+            return (status, start.elapsed());
         }
-        if std::time::Instant::now() >= deadline {
+        if start.elapsed() >= std::time::Duration::from_secs(10) {
             child.kill().unwrap();
             child.wait().unwrap();
-            panic!("serve ignored SIGTERM");
+            panic!("serve did not exit after SIGTERM");
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
-    };
-    assert_eq!(status.code(), Some(0), "a clean exit, not death by signal");
+    }
 }
 
 #[test]

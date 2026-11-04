@@ -630,14 +630,16 @@ fn roll_back(platform: Platform, path: &Path, previous: Option<&str>, was_loaded
         let _ = run("systemctl", &["--user", "daemon-reload"]);
     }
     if !was_loaded {
+        if systemd {
+            // `enable --now` may have started the new definition before a later step failed.
+            let _ = run("systemctl", &["--user", "stop", SYSTEMD_UNIT]);
+        }
         return "the update failed; the previous definition was restored".into();
     }
     let restarted = match platform {
-        Platform::Launchd => match manager_state(platform) {
-            // A failed unload leaves the old job running.
-            Ok((true, _)) => Ok(()),
-            _ => launchd_bootstrap(path),
-        },
+        // Still being loaded doesn't mean the old job survived: launchd may be partway through
+        // the unload. Finish it, then load the restored definition.
+        Platform::Launchd => launchd_bootout().and_then(|()| launchd_bootstrap(path)),
         Platform::Systemd => must("systemctl", &["--user", "restart", SYSTEMD_UNIT]).map(|_| ()),
     };
     match restarted {
