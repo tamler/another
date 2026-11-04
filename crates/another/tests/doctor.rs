@@ -328,3 +328,49 @@ async fn doctor_reports_each_problem_with_a_fix() {
         s.cancel();
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unreadable_hook_configs_fail_instead_of_passing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ah, home) = (dir.path().join("another"), dir.path().join("home"));
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    std::fs::create_dir_all(&ah).unwrap();
+    Store::open(&ah).unwrap();
+    let hooks = home.join(".codex").join("hooks.json");
+    let run = || {
+        let (ah, home) = (ah.clone(), home.clone());
+        tokio::task::spawn_blocking(move || doctor(&ah, &home, "http://127.0.0.1:9"))
+    };
+    // An edit cut short: still mentions the wrapper, no longer JSON.
+    std::fs::write(
+        &hooks,
+        "{\"hooks\": {\"SessionStart\": [{\"hooks\": [{\"type\": \"command\", \"command\": \"'/x/another-hook.sh' session-start",
+    )
+    .unwrap();
+    let (ok, r) = run().await.unwrap();
+    assert!(!ok);
+    let f = find(&r, "hooks:codex", "fail");
+    assert!(
+        f["detail"].as_str().unwrap().contains("not valid JSON"),
+        "{f}"
+    );
+    assert!(f["fix"]
+        .as_str()
+        .unwrap()
+        .contains("another hook install --client codex"));
+    assert!(
+        levels(&r, "hooks:codex-trust").is_empty(),
+        "no trust verdict on a broken file"
+    );
+    // Valid JSON that only mentions the wrapper outside any hook command.
+    std::fs::write(
+        &hooks,
+        r#"{"note": "another-hook.sh was here", "hooks": {}}"#,
+    )
+    .unwrap();
+    let (_, r) = run().await.unwrap();
+    assert!(find(&r, "hooks:codex", "fail")["detail"]
+        .as_str()
+        .unwrap()
+        .contains("no hook command runs it"));
+}

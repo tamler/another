@@ -455,6 +455,30 @@ fn check_hooks(opts: &DoctorOptions) -> Vec<Check> {
             }
             continue;
         }
+        // A config that mentions the wrapper but can't be read as hooks is broken, not
+        // installed: the client won't run anything from it.
+        let parsed = serde_json::from_str::<Value>(&text);
+        let mut commands = Vec::new();
+        if let Ok(v) = &parsed {
+            our_commands(v, &mut commands);
+        }
+        if parsed.is_err() || commands.is_empty() {
+            let why = match &parsed {
+                Err(e) => format!("is not valid JSON ({e})"),
+                Ok(_) => "mentions another-hook.sh but no hook command runs it".to_string(),
+            };
+            out.push(check(
+                &area,
+                Level::Fail,
+                format!("{} hook config {} {why}", client_name(c), path.display()),
+                Some(format!(
+                    "repair the file (or restore the `{}.another-backup-*` copy the installer made), then run `another hook install --client {}`",
+                    path.display(),
+                    c.as_str()
+                )),
+            ));
+            continue;
+        }
         // The config naming the wrapper is not enough: every hook runs the wrapper by its
         // absolute path, so it must exist and be executable.
         let broken: Vec<PathBuf> = wrapper_paths(&text)
