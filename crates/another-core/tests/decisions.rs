@@ -15,7 +15,7 @@ fn store() -> (Store, Handle) {
         ("claude", Some("/work/shop")),
         ("codex", Some("/work/vault")),
     ] {
-        s.register_agent(RegisterAgent {
+        s.register_agent_trusted(RegisterAgent {
             name: name.into(),
             // The manager relays answers, which only manager bots (and people) may do.
             program: if name == "manager" {
@@ -493,7 +493,7 @@ fn upgrades_a_database_created_before_decisions() {
         let old = Store::open_at_schema(dir.path(), 7).unwrap();
         old.ensure_project("t", "/work/shop").unwrap();
         for n in ["a", "b"] {
-            old.register_agent(RegisterAgent {
+            old.register_agent_trusted(RegisterAgent {
                 name: n.into(),
                 program: Program::Other,
                 project: Some("/work/shop".into()),
@@ -702,7 +702,7 @@ fn decider_setting_system_agent_and_option_notes() {
     assert_eq!(overdue.message.from, SYSTEM_AGENT);
     assert_eq!(overdue.message.thread_id, keep.thread_id);
     // The name is reserved.
-    let r = s.register_agent(RegisterAgent {
+    let r = s.register_agent_trusted(RegisterAgent {
         name: SYSTEM_AGENT.into(),
         program: Program::Other,
         project: None,
@@ -802,7 +802,7 @@ fn relayer_roles_are_bound_to_the_registration() {
 fn decision_events_carry_no_question_or_option_text() {
     let s = Store::open_in_memory(Clock::System).unwrap();
     s.ensure_project("t", "/work/shop").unwrap();
-    s.register_agent(RegisterAgent {
+    s.register_agent_trusted(RegisterAgent {
         name: "claude".into(),
         program: Program::Claude,
         project: Some("/work/shop".into()),
@@ -851,4 +851,68 @@ fn decision_events_carry_no_question_or_option_text() {
     // The question is still in the decision and its mail.
     let ds = s.decisions(DecisionFilter::default(), None).unwrap();
     assert_eq!(ds[0].question, "Rename the billing tables tonight?");
+}
+
+#[test]
+fn round4_roles_people_and_exact_options() {
+    let s = Store::open_in_memory(Clock::System).unwrap();
+    s.ensure_project("t", "/work/shop").unwrap();
+    let reg = |name: &str, program: Program, trusted: bool| {
+        let input = RegisterAgent {
+            name: name.into(),
+            program,
+            project: None,
+            model: None,
+            description: None,
+        };
+        if trusted {
+            s.register_agent_trusted(input)
+        } else {
+            s.register_agent(input)
+        }
+    };
+    // A brand-new untrusted registration can't pick a privileged role either.
+    for role in [Program::GrokBot, Program::Human] {
+        assert_eq!(reg("fresh", role, false).unwrap_err().code(), "forbidden");
+    }
+    assert!(s.agent("fresh").is_err());
+    reg("claude", Program::Claude, false).unwrap();
+    s.register_agent_trusted(RegisterAgent {
+        name: "claude".into(),
+        program: Program::Claude,
+        project: Some("/work/shop".into()),
+        model: None,
+        description: None,
+    })
+    .unwrap();
+    // A coding agent can't be the person a decision goes to.
+    let ask = |human: &str, options: Vec<DecisionOption>| {
+        s.ask_decision(
+            NewDecision {
+                agent: "claude@shop".into(),
+                question: "Which?".into(),
+                options,
+                human: Some(human.into()),
+                ..Default::default()
+            },
+            None,
+        )
+    };
+    let e = ask("claude", opts(&[("yes", "Yes"), ("no", "No")])).unwrap_err();
+    assert_eq!(e.code(), "invalid");
+    assert!(e.to_string().contains("not a person"), "{e}");
+    // Exact option values win over case-insensitive ones.
+    reg("sam", Program::Human, true).unwrap();
+    let d = ask("sam", opts(&[("A", "Upper"), ("a", "Lower")])).unwrap();
+    let answered = s
+        .answer_decision(
+            AnswerDecision {
+                decision: d.decision_id.clone(),
+                value: Some("a".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    assert_eq!(answered.answer.unwrap().value.as_deref(), Some("a"));
 }

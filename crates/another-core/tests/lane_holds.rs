@@ -18,7 +18,7 @@ fn store() -> (Store, Handle) {
         ("solo", Some("/work/shop")),
         ("vaulter", Some("/work/vault")),
     ] {
-        s.register_agent(RegisterAgent {
+        s.register_agent_trusted(RegisterAgent {
             name: name.into(),
             program: Program::Claude,
             project: project.map(Into::into),
@@ -237,7 +237,7 @@ fn upgrades_a_database_created_before_lane_holds() {
     {
         let old = Store::open_at_schema(dir.path(), 8).unwrap();
         old.ensure_project("t", "/work/shop").unwrap();
-        old.register_agent(RegisterAgent {
+        old.register_agent_trusted(RegisterAgent {
             name: "a".into(),
             program: Program::Other,
             project: Some("/work/shop".into()),
@@ -332,7 +332,7 @@ fn scoped_holds_by_lane_filters_never_resolve_node_wide() {
     let (s, clock) = store();
     // "twin" exists in both projects: a node-wide lookup would be ambiguous and name both.
     for p in ["/work/shop", "/work/vault"] {
-        s.register_agent(RegisterAgent {
+        s.register_agent_trusted(RegisterAgent {
             name: "twin".into(),
             program: Program::Claude,
             project: Some(p.into()),
@@ -377,4 +377,28 @@ fn scoped_holds_by_lane_filters_never_resolve_node_wide() {
     // lane show never lists an expired hold, even before anything else sweeps.
     advance(&clock, 3_600_000);
     assert!(s.lane("api", None).unwrap().holds.is_empty());
+}
+
+#[test]
+fn literal_filenames_with_glob_characters_hold_as_themselves() {
+    let (s, _) = store();
+    let lit = glob_escape("docs/notes[.md");
+    assert_eq!(lit, "docs/notes[[].md");
+    assert!(patterns_overlap(&lit, &glob_escape("docs/notes[.md")));
+    assert!(patterns_overlap(&lit, "docs/*.md"));
+    assert!(!patterns_overlap(&lit, &glob_escape("docs/notesX.md")));
+    let r = hold(&s, "claude@shop", "shop", &lit, None);
+    assert_eq!(r.granted.len(), 1);
+    let other = s
+        .acquire_holds(AcquireHolds {
+            agent: "vaulter@vault".into(),
+            project: "shop".into(),
+            paths: vec![glob_escape("docs/notes[.md"), "docs/ok.md".into()],
+            ttl_seconds: Some(600),
+            exclusive: true,
+            reason: None,
+            lane: None,
+        })
+        .unwrap();
+    assert_eq!(other.conflicts.len(), 1);
 }

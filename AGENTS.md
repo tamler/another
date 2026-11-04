@@ -54,7 +54,7 @@ Every way events leave the node applies the same visibility rule (D38). When add
 ## Decisions (phase 3)
 
 - **Who is asked:** the person is an agent with program `human`. The default is the `decider` node setting (`another config decider NAME`); never add an environment variable for it.
-- **Who may answer:** only a manager bot (`grok_bot`) or a person (`human`) may relay an answer, and never the agent that asked. Those roles come only from the local CLI (`Store::register_agent_trusted`); `register_agent` (MCP, hooks) can't grant them.
+- **Who may answer:** only a manager bot (`grok_bot`) or a person (`human`) may relay an answer, and never the agent that asked. Those roles come only from the local CLI (`Store::register_agent_trusted`); `register_agent` (MCP, hooks) can't grant them, even to a new name. Tests that need a manager or person use `register_agent_trusted`.
 - **Content:** `decision.*` events and decision mail subjects carry ids, names and values only. Hidden decisions are `not_found`, never `forbidden`. That covers spend approvals too. MCP `decision_answer` must name its relaying agent.
 - **Automatic mail** (timeouts, reminders) comes from the reserved system agent `another` (`SYSTEM_AGENT`), never in a person's name.
 - **Lookups:** projects are resolved and scope-checked first; lanes are then looked up within that project only. Hidden and missing objects get the same error.
