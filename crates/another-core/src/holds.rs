@@ -240,6 +240,30 @@ pub fn glob_escape(path: &str) -> String {
     out
 }
 
+/// The literal path behind a [`glob_escape`]d pattern, if every metacharacter in it is a
+/// one-character class (`[[]`, `[*]`, …); `None` for real globs and plain paths.
+fn unescape_literal(pattern: &str) -> Option<String> {
+    if !is_glob(pattern) {
+        return None;
+    }
+    let mut out = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '[' => {
+                let inner = chars.next()?;
+                if chars.next()? != ']' || !matches!(inner, '*' | '?' | '[' | ']' | '{' | '}') {
+                    return None;
+                }
+                out.push(inner);
+            }
+            '*' | '?' | '{' | '}' | ']' => return None,
+            c => out.push(c),
+        }
+    }
+    Some(out)
+}
+
 fn compile(pattern: &str) -> Result<GlobMatcher> {
     let glob: Glob = GlobBuilder::new(pattern)
         .literal_separator(true)
@@ -271,6 +295,19 @@ fn covers(dir: &str, path: &str) -> bool {
 pub fn patterns_overlap(a: &str, b: &str) -> bool {
     if a == b || a == "**" || b == "**" {
         return true;
+    }
+    // An escaped literal (`glob_escape`: `src/app/[[]id[]]/page.tsx`) is a plain path, not a
+    // glob: compare it as one, so distinct files under a bracketed directory don't overlap.
+    let (ua, ub) = (unescape_literal(a), unescape_literal(b));
+    if ua.is_some() || ub.is_some() {
+        let la = ua.as_deref().unwrap_or(a);
+        let lb = ub.as_deref().unwrap_or(b);
+        return match (ua.is_some() || !is_glob(a), ub.is_some() || !is_glob(b)) {
+            (true, true) => covers(la, lb) || covers(lb, la),
+            (true, false) => glob_touches_literal(b, la),
+            (false, true) => glob_touches_literal(a, lb),
+            (false, false) => unreachable!("one side is an escaped literal"),
+        };
     }
     match (is_glob(a), is_glob(b)) {
         (false, false) => covers(a, b) || covers(b, a),

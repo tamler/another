@@ -214,6 +214,17 @@ pub(crate) fn request_visible(
     scope: &TokenScope,
     request_id: &str,
 ) -> Result<bool> {
+    // A decision's request belongs to the decision's project, whoever asked it.
+    let decision_project: Option<String> = conn
+        .query_row(
+            "SELECT project_id FROM decisions WHERE request_id = ?1",
+            [request_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(project) = decision_project {
+        return scope_allows_project(conn, scope, &project);
+    }
     // The same rule as its events (`event_visible`): the request's projects decide, and the
     // own-agent exception applies only when it has no project at all.
     let p = serde_json::json!({ "request_id": request_id });
