@@ -167,16 +167,47 @@ pub async fn serve_http(
         store.node_id()
     );
     let app = http_router(store, ct.clone(), &opts);
-    axum::serve(
+    let graceful = ct.clone();
+    let server = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        ct.cancel();
-    })
-    .await?;
+        shutdown_signal().await;
+        graceful.cancel();
+    });
+    tokio::select! {
+        result = async { server.await } => result?,
+        _ = async {
+            ct.cancelled().await;
+            tokio::time::sleep(SHUTDOWN_GRACE).await;
+        } => tracing::warn!("open connections outlasted the shutdown grace period"),
+    }
     Ok(())
+}
+
+/// How long open connections get to finish after a shutdown signal. Shorter than the 5 s
+/// `another service` waits for launchd to unload the job, so a client holding a stream open
+/// can't make `stop` or an update fail.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+
+/// Ctrl-C, or SIGTERM: what launchd and systemd send to stop a service.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+                return;
+            }
+            Err(e) => tracing::warn!(error = %e, "cannot listen for SIGTERM"),
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 #[cfg(test)]
