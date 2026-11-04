@@ -54,10 +54,16 @@ Uninstall removes only entries that reference `another-hook.sh`, and deletes the
 **Before each edit**, the hook takes an exclusive hold on the files, with reason `pre-edit`:
 - The hold is for the agent's lane: `$ANOTHER_LANE`, else the one lane it leads there. See [lane-aware holds](LANES.md#path-holds-and-lanes).
 - **If another agent or lane holds a file, the edit is denied** with the standard `permissionDecision: "deny"` output. The reason names the holder, their lane and when the hold expires, so the agent can coordinate or move on.
-- Holds by agents in the same lane never block.
+- Holds by agents in the same lane never block, unless both holds are exclusive (the hook's are).
 - Files outside the project are ignored.
 
 **Otherwise** the hook prints nothing, and the client's normal permission flow applies. The hook never approves anything.
+
+**Codex: trust the hooks, and mind `codex exec`.** Codex runs a hook it doesn't manage only after you trust it, and trust is tied to the hook's hash, so it is needed again after reinstalling. To trust them, open Codex **interactively** and review them under `/hooks`.
+- `codex exec` (non-interactive) can't ask, so untrusted hooks are skipped silently and **edits are not held or blocked**. This was checked on Codex 0.166.0: `another hook run pre-edit` denied the edit correctly, but under `codex exec` the hook never ran and a patch went through over a live hold.
+- Trusting the hooks once in an interactive session in the same environment makes `codex exec` run them too.
+- For one-off automation whose hook sources you already vet, `codex exec --dangerously-bypass-hook-trust …` runs enabled hooks without stored trust.
+- Otherwise, **hold enforcement under `codex exec` isn't guaranteed**. Have such runs take their holds explicitly (`another hold acquire`), or check `another holds` first.
 
 **Lifetime:** holds taken this way expire after 30 minutes unless renewed. The prompt hook's heartbeat renews them, and session end releases them.
 
@@ -72,7 +78,7 @@ Installing without the flag removes the hook. Your own `PreToolUse` entries are 
 | Client | Config written | Events | Notes |
 |---|---|---|---|
 | Claude Code | `~/.claude/settings.json` | `SessionStart`, `UserPromptSubmit`, `SessionEnd` | Plain stdout is added to context. |
-| Codex CLI | `~/.codex/hooks.json` | `SessionStart`, `UserPromptSubmit`, `SessionEnd` | New hooks run only after you trust them: open Codex and review them under `/hooks`. |
+| Codex CLI | `~/.codex/hooks.json` | `SessionStart`, `UserPromptSubmit`, `SessionEnd` | New hooks run only after you trust them: open Codex interactively and review them under `/hooks`. Untrusted hooks are skipped by `codex exec` (see [above](#optional-hold-files-before-they-are-edited)). |
 | Grok CLI | `~/.grok/hooks/another.json` | `SessionStart`, `UserPromptSubmit`, `SessionEnd` | User-level hooks need no trust step (`/hooks-trust` applies to project hooks). See "Grok and shared hook files" below. |
 | Cursor (best effort) | `~/.cursor/hooks.json` | `sessionStart`, `beforeSubmitPrompt`, `sessionEnd` | Context is injected only at session start (`additional_context`); the prompt hook just renews holds and lets the prompt through. |
 

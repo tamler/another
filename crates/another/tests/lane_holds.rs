@@ -231,6 +231,18 @@ fn pre_edit_holds_files_and_denies_other_lanes() {
         "manager",
         "--abandon",
     ]);
+    // codex leads another open lane: the fallback must not slip the edit into it.
+    env.ok(&[
+        "lane",
+        "create",
+        "docs",
+        "--agent",
+        "manager",
+        "-p",
+        repo,
+        "--lead",
+        "codex@shop",
+    ]);
     let other = env.repo.join("src/billing.rs");
     let out = run_as("codex@shop", "billing", &other);
     assert!(out.status.success());
@@ -250,7 +262,7 @@ fn pre_edit_holds_files_and_denies_other_lanes() {
         .iter()
         .find(|h| h["pattern"] == "src/billing.rs")
         .expect("held");
-    assert!(h["lane"].is_null());
+    assert!(h["lane"].is_null(), "no lane, not codex's docs lane: {h}");
 
     // Files outside the project are ignored; a non-edit payload is a no-op.
     let out = env.pre_edit(

@@ -619,7 +619,7 @@ pub fn install(
     if install {
         if clients.contains(&Client::Codex) {
             notes.push(
-                "Codex runs new hooks only after review: open Codex and trust them under /hooks."
+                "Codex runs new hooks only after review: open Codex interactively and trust them under /hooks. `codex exec` can't ask, so until they are trusted it skips them (holds are then not enforced); for automation that vets its hooks, `codex exec --dangerously-bypass-hook-trust` runs them."
                     .to_string(),
             );
         }
@@ -1066,7 +1066,9 @@ fn pre_edit(
             );
             eprintln!("{w}");
             warning = Some(w);
-            acquire(None)?
+            // Explicitly no lane: inferring the agent's other lane would attribute the edit
+            // to the wrong lane (and could turn a conflict into a same-lane warning).
+            acquire(Some(another_core::NO_LANE.into()))?
         }
         Err(e) => return Err(e.into()),
     };
