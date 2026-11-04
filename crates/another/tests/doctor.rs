@@ -148,21 +148,81 @@ async fn doctor_reports_each_problem_with_a_fix() {
         fix.contains("/hooks") && fix.contains("codex exec"),
         "{fix}"
     );
-    // Once Codex has recorded trust for each of Another's hooks, it passes.
-    let hooks_json = codex.join("hooks.json").display().to_string();
-    let mut cfg = String::new();
-    for (i, ev) in ["session_start", "user_prompt_submit", "session_end"]
-        .iter()
-        .enumerate()
-    {
-        cfg.push_str(&format!(
-            "[hooks.state.\"{hooks_json}:{ev}:{i}:0\"]\ntrusted_hash = \"sha256:00\"\n\n"
-        ));
+    // Trust is matched per Another hook entry. Add an unrelated hook of the user's to the
+    // file (first in each event), trust only that: Another's are still untrusted.
+    let hooks_path = codex.join("hooks.json");
+    let hooks_json = hooks_path.display().to_string();
+    let mut hj: Value =
+        serde_json::from_str(&std::fs::read_to_string(&hooks_path).unwrap()).unwrap();
+    let events: Vec<String> = hj["hooks"].as_object().unwrap().keys().cloned().collect();
+    for ev in &events {
+        hj["hooks"][ev].as_array_mut().unwrap().insert(
+            0,
+            serde_json::json!({ "hooks": [{ "type": "command", "command": "echo mine" }] }),
+        );
     }
-    std::fs::write(codex.join("config.toml"), cfg).unwrap();
+    std::fs::write(&hooks_path, hj.to_string()).unwrap();
+    let snake = |e: &str| {
+        let mut o = String::new();
+        for (i, c) in e.chars().enumerate() {
+            if c.is_ascii_uppercase() {
+                if i > 0 {
+                    o.push('_');
+                }
+                o.push(c.to_ascii_lowercase());
+            } else {
+                o.push(c);
+            }
+        }
+        o
+    };
+    let trust = |group: usize| {
+        events
+            .iter()
+            .map(|ev| {
+                format!(
+                    "[hooks.state.\"{hooks_json}:{}:{group}:0\"]\ntrusted_hash = \"sha256:00\"\n\n",
+                    snake(ev)
+                )
+            })
+            .collect::<String>()
+    };
+    std::fs::write(codex.join("config.toml"), trust(0)).unwrap();
+    let (_, r) = check(url.clone()).await.unwrap();
+    assert_eq!(
+        levels(&r, "hooks:codex-trust"),
+        ["warn"],
+        "other hooks' trust doesn't count for Another's: {r}"
+    );
+    // Once Codex has recorded trust for each of Another's own entries (group 1 now), it passes.
+    std::fs::write(codex.join("config.toml"), trust(0) + &trust(1)).unwrap();
     let (ok, r) = check(url.clone()).await.unwrap();
     assert_eq!(levels(&r, "hooks:codex-trust"), ["pass"], "{r}");
     assert!(ok, "warnings don't fail: {r}");
+    // A missing wrapper fails, even though the config still names it.
+    let wrapper = ah.join("hooks").join("another-hook.sh");
+    let saved = std::fs::read(&wrapper).unwrap();
+    std::fs::remove_file(&wrapper).unwrap();
+    let (ok, r) = check(url.clone()).await.unwrap();
+    assert!(!ok);
+    let f = find(&r, "hooks:codex", "fail");
+    assert!(
+        f["detail"]
+            .as_str()
+            .unwrap()
+            .contains("missing or not executable"),
+        "{f}"
+    );
+    assert!(f["fix"]
+        .as_str()
+        .unwrap()
+        .contains("another hook install --client codex"));
+    std::fs::write(&wrapper, saved).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     // Claude Code isn't set up here: skipped, not failed.
     assert_eq!(levels(&r, "hooks:claude"), ["skip"]);
     std::fs::create_dir_all(home.join(".claude")).unwrap();
