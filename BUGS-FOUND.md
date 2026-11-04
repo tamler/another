@@ -201,6 +201,17 @@ Same rules: recorded here, not fixed, and each test asserts today's behaviour so
 
 ## 11. A paired spoke can rewrite what belongs to the hub
 
+**Fixed on the federation authority branch.** The table below records the historical
+reproductions at `faf0edc`. The authority and HTTP regression tests now assert refusal
+and unchanged state. Incoming events are validated against their signed origin before
+entering the relay log; SQL guards supplement those checks. Borrow permission uses the
+stored resource owner, and only that owner can adopt, stop or transfer its resource.
+Foreign borrowers cannot revive lapsed resources or their expired borrower leases.
+Report and answer carriers are read or marked read only for the correct origin and sender.
+Decision mirrors cannot borrow another node's asker, project, lane or question mail.
+This prevents new violations; it does not repair previously rewritten rows or remove
+forged events from an existing log.
+
 **Where:** `project_foreign`, `foreign_lease` and `spoke_may_publish` in `another-core/src/federation.rs`; `apply_proposal_tx` in `another-core/src/lanes.rs`
 
 **What:** `ingest` checks that an event is signed by the node it names, and that a spoke only pushes its own. It doesn't check that the signing node owns what the event describes, though many branches of `project_foreign` update rows by an id taken from the payload. `docs/FEDERATION.md` promises the opposite: each node is authoritative for its own agents, holds and resources, and events from other nodes "never rewrite another node's ownership".
@@ -229,7 +240,10 @@ The tests push the first event named in each row. `session.started`, `delivery.r
 
 **Over the wire:** two of these were also run through a real hub's `POST /fed/push` with a properly signed request. The route refuses an unsigned request and accepts the signed one. Forged mail then reaches a second, ordinary spoke when it syncs, and its inbox shows it from `alice@shop@hub`, so a spoke that did nothing wrong can't tell. The other rows went through `Store::ingest`, which is what the route calls.
 
-**Tests:** the `bug_*` tests in `another-core/tests/federation_authority.rs` and `another/tests/federation_route.rs`.
+**Tests:** the authority rejection, ID-collision, relay, lapse-clock and carrier tests in
+`another-core/tests/federation_authority.rs`, plus the real-loopback rejection, mixed-push
+and sync-cursor tests in `another/tests/federation_route.rs`. Existing legitimate mail,
+receipt, borrow, promotion, lane-proposal and decision flows remain positive controls.
 
 **Suggested fix:** in `project_foreign`, compare the row's `node_id` with the event's origin before updating it, as `hold.released` already does. Add that condition to the two `ON CONFLICT` updates and the second `resource.stopped` update. Require the sender of `message.sent` and the agent in `session.*`, `delivery.*` and `lane.report_proposed` to belong to the origin. For `resource.borrowed`, look up the resource's node instead of trusting the payload. In `foreign_lease`, refuse a resource the origin doesn't own unless it's a permitted borrow. Validate names in `node.renamed`.
 

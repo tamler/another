@@ -1182,8 +1182,8 @@ pub(crate) fn mirror_created_tx(
     let question: String = match s("message_id") {
         Some(mid) => tx
             .query_row(
-                "SELECT body FROM messages WHERE message_id = ?1",
-                [&mid],
+                "SELECT body FROM messages WHERE message_id = ?1 AND node_id = ?2",
+                params![mid, ev.node_id],
                 |r| r.get(0),
             )
             .optional()?,
@@ -1500,6 +1500,7 @@ pub(crate) fn apply_relayed_tx(
     if relayed.node_id != ev.node_id {
         return refuse("relayer_not_of_sender");
     }
+    let relayer_id = relayed.id.clone();
     let relayed = Some(relayed);
     if row.d.status != DecisionStatus::Open {
         tx.emit(
@@ -1514,16 +1515,19 @@ pub(crate) fn apply_relayed_tx(
         Some(mid) => {
             let body: Option<String> = tx
                 .query_row(
-                    "SELECT body FROM messages WHERE message_id = ?1 AND node_id = ?2",
-                    params![mid, ev.node_id],
+                    "SELECT body FROM messages WHERE message_id = ?1 AND node_id = ?2 AND sender_id = ?3",
+                    params![mid, ev.node_id, relayer_id],
                     |r| r.get(0),
                 )
                 .optional()?;
             // It only carried the text: the asker gets the answer mail itself.
-            tx.execute(
-                "UPDATE deliveries SET read_at = COALESCE(read_at, ?2) WHERE message_id = ?1",
-                params![mid, tx.now],
-            )?;
+            if body.is_some() {
+                tx.execute(
+                    "UPDATE deliveries SET read_at = COALESCE(read_at, ?2) WHERE message_id = ?1
+                       AND EXISTS (SELECT 1 FROM messages WHERE message_id = ?1 AND node_id = ?3 AND sender_id = ?4)",
+                    params![mid, tx.now, ev.node_id, relayer_id],
+                )?;
+            }
             body
         }
         None => None,

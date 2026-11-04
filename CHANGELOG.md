@@ -5,6 +5,8 @@ All notable changes to Another. Unreleased work is listed under the next version
 ## Unreleased
 
 ### Fixed
+
+- Federation validates signed origin authority before storing events: paired nodes cannot impersonate another node's agents, forge its mail or reports, or change its holds and resource ownership. Borrow permission comes from the stored resource owner; foreign borrowers cannot revive lapsed resources. Carrier receipts and decision mirrors respect their originating node. Existing corrupted state and historical events are not automatically repaired.
 - Cancelling an overdue decision commits its timeout result, request closure and automatic mail before returning a conflict, even without a running server or when the deadline passes as cancellation begins.
 
 ### Added

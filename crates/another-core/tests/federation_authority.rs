@@ -4,8 +4,7 @@
 //! for its own agents, holds and resources, and events from other nodes "never rewrite another
 //! node's ownership".
 //!
-//! `bug_*` tests assert today's behaviour and point at BUGS-FOUND.md, so whoever fixes a bug
-//! updates its test in the same change.
+//! BUGS-FOUND.md #11 regressions reject the signed forgeries before storing or relaying them.
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -40,10 +39,15 @@ fn hub() -> (Store, Arc<AtomicI64>) {
 struct Spoke {
     key: ed25519_dalek::SigningKey,
     seq: Cell<u32>,
+    node_id: String,
 }
 
 impl Spoke {
     fn paired_with(hub: &Store, perms: &[Perm]) -> Spoke {
+        Self::paired_as(hub, perms, EVIL, "evil")
+    }
+
+    fn paired_as(hub: &Store, perms: &[Perm], node_id: &str, name: &str) -> Spoke {
         let key = crypto::generate_key().unwrap();
         let code = hub.create_invite("http://hub.test", perms, 3600).unwrap();
         let invite = decode(&code);
@@ -51,8 +55,8 @@ impl Spoke {
             invite_id: invite.invite_id,
             secret: invite.secret,
             node: NodeEntry {
-                node_id: EVIL.into(),
-                display_name: "evil".into(),
+                node_id: node_id.into(),
+                display_name: name.into(),
                 public_key: crypto::public_of(&key),
             },
         })
@@ -60,21 +64,22 @@ impl Spoke {
         Spoke {
             key,
             seq: Cell::new(0),
+            node_id: node_id.into(),
         }
     }
 
     fn event(&self, hub: &Store, kind: &str, payload: Value) -> WireEvent {
         self.seq.set(self.seq.get() + 1);
         let (event_id, payload, ts) = (
-            format!("EV-{}", self.seq.get()),
+            format!("{}-EV-{}", self.node_id, self.seq.get()),
             payload.to_string(),
             hub.now(),
         );
-        let msg = crypto::event_message(&event_id, EVIL, ts, "mallory", kind, &payload);
+        let msg = crypto::event_message(&event_id, &self.node_id, ts, "mallory", kind, &payload);
         WireEvent {
             seq: i64::from(self.seq.get()),
             event_id,
-            node_id: EVIL.into(),
+            node_id: self.node_id.clone(),
             ts,
             actor: "mallory".into(),
             kind: kind.into(),
@@ -87,14 +92,22 @@ impl Spoke {
     /// Push one event and require the hub to accept it.
     fn accepted(&self, hub: &Store, kind: &str, payload: Value) {
         let ev = self.event(hub, kind, payload);
-        let r = hub.ingest(EVIL, &[ev], &[]).unwrap();
+        let r = hub.ingest(&self.node_id, &[ev], &[]).unwrap();
         assert_eq!(r.accepted, 1, "{kind}: {:?}", r.rejected);
     }
 
     fn rejected(&self, hub: &Store, kind: &str, payload: Value) -> String {
         let ev = self.event(hub, kind, payload);
-        let r = hub.ingest(EVIL, &[ev], &[]).unwrap();
+        let r = hub
+            .ingest(&self.node_id, std::slice::from_ref(&ev), &[])
+            .unwrap();
         assert_eq!(r.accepted, 0, "{kind} was accepted");
+        assert_eq!(r.rejected.len(), 1, "{r:?}");
+        assert!(hub
+            .events(20_000)
+            .unwrap()
+            .iter()
+            .all(|e| e.event_id != ev.event_id));
         r.rejected[0].reason.clone()
     }
 }
@@ -167,15 +180,54 @@ fn spoke_agent(hub: &Store, spoke: &Spoke) -> String {
     "EVIL-AGENT".into()
 }
 
+fn receiver(hub: &Store, perms: &[Perm]) -> Store {
+    receiver_at(hub, perms, T0)
+}
+
+fn receiver_at(hub: &Store, perms: &[Perm], now: i64) -> Store {
+    let s = Store::open_in_memory(Clock::manual(now).0).unwrap();
+    s.set_node_name("receiver").unwrap();
+    let code = hub.create_invite("http://hub.test", perms, 86_400).unwrap();
+    let (invite, req) = s.prepare_join(&code).unwrap();
+    let response = hub.accept_pairing(&req).unwrap();
+    s.complete_join(&invite, &response).unwrap();
+    s
+}
+
+fn decision(s: &Store) -> Decision {
+    s.ask_decision(
+        NewDecision {
+            agent: "alice@shop".into(),
+            human: Some("reviewer".into()),
+            question: "Proceed?".into(),
+            options: vec![
+                DecisionOption {
+                    value: "yes".into(),
+                    label: "Yes".into(),
+                    description: None,
+                },
+                DecisionOption {
+                    value: "no".into(),
+                    label: "No".into(),
+                    description: None,
+                },
+            ],
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap()
+}
+
 // ---------------------------------------------------------------------------------------
 // BUGS-FOUND.md #11: signed events rewrite what belongs to the hub.
 
 #[test]
-fn bug_a_spoke_rewrites_an_agent_of_the_hub() {
+fn a_spoke_cannot_rewrite_an_agent_of_the_hub() {
     let (s, _) = hub();
     let spoke = Spoke::paired_with(&s, &Perm::ALL);
     let alice = agent_id(&s, "alice@shop");
-    spoke.accepted(
+    spoke.rejected(
         &s,
         "agent.registered",
         json!({ "agent_id": alice, "name": "alice", "program": "grok_bot", "description": "owned" }),
@@ -183,23 +235,17 @@ fn bug_a_spoke_rewrites_an_agent_of_the_hub() {
     let after = s.agents().unwrap();
     let after = after.iter().find(|a| a.agent_id == alice).unwrap();
     assert_eq!(after.node_id, s.node_id(), "still recorded as the hub's");
-    assert_eq!(
-        after.program, "grok_bot",
-        "today's behaviour; should still be claude"
-    );
-    assert_eq!(after.description.as_deref(), Some("owned"));
-    assert_eq!(
-        after.address, "alice@@evil",
-        "today's behaviour: the hub's agent now reads as the spoke's"
-    );
+    assert_eq!(after.program, "claude");
+    assert_eq!(after.description, None);
+    assert_eq!(after.address, "alice@shop");
 }
 
 #[test]
-fn bug_a_spoke_sends_mail_as_an_agent_of_the_hub() {
+fn a_spoke_cannot_send_mail_as_an_agent_of_the_hub() {
     let (s, _) = hub();
     let spoke = Spoke::paired_with(&s, &Perm::ALL);
     let (alice, bob) = (agent_id(&s, "alice@shop"), agent_id(&s, "bob@shop"));
-    spoke.accepted(
+    spoke.rejected(
         &s,
         "message.sent",
         json!({
@@ -212,15 +258,12 @@ fn bug_a_spoke_sends_mail_as_an_agent_of_the_hub() {
         }),
     );
     let inbox = s.inbox("bob@shop", InboxQuery::default()).unwrap();
-    assert_eq!(inbox.unread, 1);
-    assert_eq!(
-        inbox.messages[0].message.from, "alice@shop",
-        "today's behaviour; should be refused: alice never sent this"
-    );
+    assert_eq!(inbox.unread, 0);
+    assert!(inbox.messages.is_empty());
 }
 
 #[test]
-fn bug_a_spoke_files_a_lane_report_as_the_hubs_lead() {
+fn a_spoke_cannot_file_a_lane_report_as_the_hubs_lead() {
     let (s, _) = hub();
     let spoke = Spoke::paired_with(&s, &Perm::ALL);
     let alice = agent_id(&s, "alice@shop");
@@ -237,8 +280,7 @@ fn bug_a_spoke_files_a_lane_report_as_the_hubs_lead() {
             None,
         )
         .unwrap();
-    // The proposal's carrier mail passes as alice's, which is what lets the report through.
-    spoke.accepted(
+    spoke.rejected(
         &s,
         "message.sent",
         json!({
@@ -250,7 +292,7 @@ fn bug_a_spoke_files_a_lane_report_as_the_hubs_lead() {
             "recipients": [{ "agent_id": alice, "node_id": s.node_id(), "role": "to" }],
         }),
     );
-    spoke.accepted(
+    spoke.rejected(
         &s,
         "lane.report_proposed",
         json!({
@@ -266,30 +308,21 @@ fn bug_a_spoke_files_a_lane_report_as_the_hubs_lead() {
         .reports
         .iter()
         .find(|r| r.summary == "all done, nothing to see");
-    assert_eq!(
-        report.map(|r| r.agent.as_str()),
-        Some("alice@shop"),
-        "today's behaviour; should be ignored: {:?}",
-        detail.reports
-    );
+    assert!(report.is_none(), "{:?}", detail.reports);
 }
 
 #[test]
-fn bug_a_spoke_takes_a_hub_agent_offline() {
+fn a_spoke_cannot_take_a_hub_agent_offline() {
     let (s, _) = hub();
     let spoke = Spoke::paired_with(&s, &Perm::ALL);
     let alice = agent_id(&s, "alice@shop");
     assert_eq!(s.agent("alice@shop").unwrap().status, "active");
-    spoke.accepted(&s, "session.ended", json!({ "agent_id": alice }));
-    assert_eq!(
-        s.agent("alice@shop").unwrap().status,
-        "offline",
-        "today's behaviour; should still be active"
-    );
+    spoke.rejected(&s, "session.ended", json!({ "agent_id": alice }));
+    assert_eq!(s.agent("alice@shop").unwrap().status, "active");
 }
 
 #[test]
-fn bug_a_spoke_acknowledges_mail_for_a_hub_agent() {
+fn a_spoke_cannot_acknowledge_mail_for_a_hub_agent() {
     let (s, _) = hub();
     let spoke = Spoke::paired_with(&s, &Perm::ALL);
     let mail = send(&s, "alice@shop", "bob@shop");
@@ -297,7 +330,7 @@ fn bug_a_spoke_acknowledges_mail_for_a_hub_agent() {
         s.inbox("bob@shop", InboxQuery::default()).unwrap().unread,
         1
     );
-    spoke.accepted(
+    spoke.rejected(
         &s,
         "delivery.acked",
         json!({
@@ -308,19 +341,19 @@ fn bug_a_spoke_acknowledges_mail_for_a_hub_agent() {
     );
     assert_eq!(
         s.inbox("bob@shop", InboxQuery::default()).unwrap().unread,
-        0,
-        "today's behaviour; bob never read it"
+        1,
+        "bob never read it"
     );
 }
 
 #[test]
-fn bug_a_spoke_stops_every_lease_on_a_hub_resource() {
+fn a_spoke_cannot_stop_leases_on_a_hub_resource() {
     let (s, _) = hub();
     let spoke = Spoke::paired_with(&s, &Perm::ALL);
     let r = resource(&s, "alice@shop", LeaseMode::Shared);
     s.borrow_resource("bob@shop", &ResourceRef::Id(r.resource_id.clone()), None)
         .unwrap();
-    spoke.accepted(
+    spoke.rejected(
         &s,
         "resource.stopped",
         json!({ "resource_id": r.resource_id }),
@@ -328,15 +361,11 @@ fn bug_a_spoke_stops_every_lease_on_a_hub_resource() {
     let after = s.resource(&ResourceRef::Id(r.resource_id.clone())).unwrap();
     // The resource itself is protected: only its node's word ends it.
     assert_ne!(after.status, "released");
-    assert!(
-        after.leases.is_empty(),
-        "today's behaviour; alice and bob should keep their leases: {:?}",
-        after.leases
-    );
+    assert_eq!(after.leases.len(), 2, "{:?}", after.leases);
 }
 
 #[test]
-fn bug_a_spoke_promotes_a_borrower_on_a_hub_resource() {
+fn a_spoke_cannot_promote_a_borrower_on_a_hub_resource() {
     let (s, _) = hub();
     let spoke = Spoke::paired_with(&s, &Perm::ALL);
     let r = resource(&s, "alice@shop", LeaseMode::Shared);
@@ -346,26 +375,24 @@ fn bug_a_spoke_promotes_a_borrower_on_a_hub_resource() {
         .lease
         .unwrap();
     assert_eq!(lease.role, "borrower");
-    spoke.accepted(
+    spoke.rejected(
         &s,
         "resource.transferred",
         json!({ "lease_id": lease.lease_id }),
     );
     let after = s.resource(&ResourceRef::Id(r.resource_id)).unwrap();
-    let roles: Vec<&str> = after.leases.iter().map(|l| l.role.as_str()).collect();
-    assert_eq!(
-        roles,
-        ["owner", "owner"],
-        "today's behaviour; bob should still be a borrower"
-    );
+    assert!(after
+        .leases
+        .iter()
+        .any(|l| l.lease_id == lease.lease_id && l.role == "borrower"));
 }
 
 #[test]
-fn bug_a_spoke_ends_a_hub_hold_by_rewriting_its_expiry() {
+fn a_spoke_cannot_end_a_hub_hold_by_rewriting_its_expiry() {
     let (s, _) = hub();
     let spoke = Spoke::paired_with(&s, &Perm::ALL);
     let id = hold(&s, "alice@shop", "src/main.rs");
-    spoke.accepted(
+    spoke.rejected(
         &s,
         "hold.updated",
         json!({
@@ -376,15 +403,12 @@ fn bug_a_spoke_ends_a_hub_hold_by_rewriting_its_expiry() {
             "expires_at": 1,
         }),
     );
-    assert!(
-        s.holds(HoldFilter::default()).unwrap().is_empty(),
-        "today's behaviour; alice's hold should survive"
-    );
+    assert_eq!(s.holds(HoldFilter::default()).unwrap().len(), 1);
 }
 
 /// The permission check reads `resource_node` from the payload, which the spoke writes.
 #[test]
-fn bug_a_spoke_borrows_without_the_permission_by_leaving_out_the_node() {
+fn a_spoke_cannot_borrow_without_permission_by_omitting_the_node() {
     let (s, _) = hub();
     let spoke = Spoke::paired_with(&s, &[]);
     let eve = spoke_agent(&s, &spoke);
@@ -395,15 +419,15 @@ fn bug_a_spoke_borrows_without_the_permission_by_leaving_out_the_node() {
         json!({ "resource_id": r.resource_id, "resource_node": s.node_id(), "lease_id": "L1", "agent_id": eve }),
     );
     assert!(reason.contains("may not borrow"), "{reason}");
-    spoke.accepted(
+    spoke.rejected(
         &s,
         "resource.borrowed",
         json!({ "resource_id": r.resource_id, "lease_id": "L2", "agent_id": eve }),
     );
     let after = s.resource(&ResourceRef::Id(r.resource_id)).unwrap();
     assert_eq!(
-        after.refcount, 2,
-        "today's behaviour; the spoke has no borrow permission: {:?}",
+        after.refcount, 1,
+        "the spoke has no borrow permission: {:?}",
         after.leases
     );
 }
@@ -411,7 +435,7 @@ fn bug_a_spoke_borrows_without_the_permission_by_leaving_out_the_node() {
 /// `resource.adopted` needs no permission and ignores the resource's mode and node, and
 /// `resource.registered` reaches the same code for an id the hub already has.
 #[test]
-fn bug_a_spoke_takes_over_a_lapsed_hub_resource() {
+fn a_spoke_cannot_take_over_a_lapsed_hub_resource() {
     for (kind, mode) in [
         ("resource.adopted", LeaseMode::Exclusive),
         ("resource.registered", LeaseMode::Shared),
@@ -430,7 +454,7 @@ fn bug_a_spoke_takes_over_a_lapsed_hub_resource() {
         } else {
             ("lease_id", "owner_id")
         };
-        spoke.accepted(
+        spoke.rejected(
             &s,
             kind,
             json!({ "resource_id": r.resource_id, lease: "TAKEN", owner: eve }),
@@ -438,29 +462,657 @@ fn bug_a_spoke_takes_over_a_lapsed_hub_resource() {
         let after = s.resource(&id).unwrap();
         assert_eq!(
             (after.status.as_str(), after.owner.as_deref()),
-            ("live", Some("eve@lab@evil")),
-            "{kind}: today's behaviour; a spoke with no permissions shouldn't own it"
+            ("lapsed", None),
+            "{kind}: a spoke cannot own this resource"
         );
         assert_eq!(
             s.lapsed_for_ms(&r.resource_id).unwrap(),
-            None,
-            "{kind}: today's behaviour; this also resets the clock reaping goes by"
+            Some(0),
+            "{kind}: the lapse clock is preserved"
         );
     }
 }
 
 #[test]
-fn bug_a_spoke_renames_itself_after_the_hub_with_an_invalid_name() {
+fn a_spoke_cannot_rename_itself_after_the_hub_or_use_an_invalid_name() {
     let (s, _) = hub();
     let spoke = Spoke::paired_with(&s, &Perm::ALL);
     for name in ["hub", "no spaces/allowed here"] {
-        spoke.accepted(&s, "node.renamed", json!({ "display_name": name }));
+        spoke.rejected(&s, "node.renamed", json!({ "display_name": name }));
         let peers = s.peers().unwrap();
+        assert_eq!(peers[0].display_name, "evil", "pairing refuses {name} too");
+    }
+}
+
+#[test]
+fn both_variants_of_each_authority_violation_are_refused() {
+    for kind in [
+        "session.started",
+        "delivery.read",
+        "hold.acquired",
+        "resource.reaped",
+    ] {
+        let (s, _) = hub();
+        let spoke = Spoke::paired_with(&s, &Perm::ALL);
+        let alice = agent_id(&s, "alice@shop");
+        let bob = agent_id(&s, "bob@shop");
+        let mail = send(&s, "alice@shop", "bob@shop");
+        let hid = hold(&s, "alice@shop", "a.rs");
+        let r = resource(&s, "alice@shop", LeaseMode::Shared);
+        if kind == "session.started" {
+            s.heartbeat("alice@shop", true).unwrap();
+        }
+        let before = s.agent("alice@shop").unwrap().status;
+        let project = s.ensure_project("t", "/work/shop").unwrap().project_id;
+        let payload = match kind {
+            "session.started" => json!({ "agent_id": alice }),
+            "delivery.read" => {
+                json!({ "agent_id": bob, "message_id": mail.message_id, "message_node": s.node_id() })
+            }
+            "hold.acquired" => {
+                json!({ "hold_id": hid, "agent_id": alice, "project_id": project, "pattern": "a.rs", "expires_at": 1 })
+            }
+            _ => json!({ "resource_id": r.resource_id }),
+        };
+        spoke.rejected(&s, kind, payload);
+        assert_eq!(s.agent("alice@shop").unwrap().status, before);
         assert_eq!(
-            peers[0].display_name, name,
-            "today's behaviour; pairing refuses this name"
+            s.inbox("bob@shop", InboxQuery::default()).unwrap().unread,
+            1
+        );
+        if kind != "session.started" {
+            assert_eq!(s.holds(HoldFilter::default()).unwrap().len(), 1);
+            assert_eq!(
+                s.resource(&ResourceRef::Id(r.resource_id))
+                    .unwrap()
+                    .refcount,
+                1
+            );
+        }
+    }
+}
+
+#[test]
+fn a_spoke_cannot_collide_with_another_spokes_objects_or_borrow_its_identity() {
+    let (s, _) = hub();
+    let spoke = Spoke::paired_with(&s, &Perm::ALL);
+    let eve = spoke_agent(&s, &spoke);
+    let other = Spoke::paired_as(&s, &Perm::ALL, "THIRD", "third");
+    other.accepted(
+        &s,
+        "project.ensured",
+        json!({ "project_id": "P3", "abs_path": "/work/third", "slug": "third" }),
+    );
+    other.accepted(
+        &s,
+        "agent.registered",
+        json!({ "agent_id": "A3", "name": "worker", "project_id": "P3", "program": "claude" }),
+    );
+    other.accepted(
+        &s,
+        "hold.acquired",
+        json!({ "hold_id": "H3", "project_id": "P3", "agent_id": "A3", "pattern": "a.rs" }),
+    );
+    other.accepted(&s, "resource.registered", json!({ "resource_id": "R3", "kind": "model_server", "name": "shared", "lease_id": "L3", "owner_id": "A3" }));
+    let local = resource(&s, "alice@shop", LeaseMode::Shared);
+    for (kind, payload) in [
+        (
+            "project.ensured",
+            json!({ "project_id": "P3", "abs_path": "/changed", "slug": "changed" }),
+        ),
+        (
+            "agent.registered",
+            json!({ "agent_id": "A3", "name": "worker", "program": "grok_bot" }),
+        ),
+        (
+            "agent.registered",
+            json!({ "agent_id": "BAD-A", "name": "impostor", "project_id": "P3" }),
+        ),
+        (
+            "hold.updated",
+            json!({ "hold_id": "H3", "project_id": "EVIL-PROJECT", "agent_id": eve, "expires_at": 1 }),
+        ),
+        (
+            "hold.acquired",
+            json!({ "hold_id": "BAD-H", "project_id": "EVIL-PROJECT", "agent_id": "A3", "pattern": "a.rs" }),
+        ),
+        (
+            "resource.registered",
+            json!({ "resource_id": "R3", "lease_id": "BAD-L", "owner_id": eve }),
+        ),
+        (
+            "resource.adopted",
+            json!({ "resource_id": "R3", "lease_id": "BAD-L", "agent_id": eve }),
+        ),
+        (
+            "resource.borrowed",
+            json!({ "resource_id": local.resource_id, "resource_node": s.node_id(), "lease_id": "BAD-L", "agent_id": "A3" }),
+        ),
+        (
+            "lane.report_proposed",
+            json!({ "lane_node": "THIRD", "lane_id": "REMOTE-LANE", "agent_id": "A3", "summary_message_id": "CARRIER" }),
+        ),
+    ] {
+        spoke.rejected(&s, kind, payload);
+    }
+    assert_eq!(s.agent("worker@third@third").unwrap().program, "claude");
+    assert_eq!(
+        s.resource(&ResourceRef::Id("R3".into()))
+            .unwrap()
+            .owner
+            .as_deref(),
+        Some("worker@third@third")
+    );
+    assert_eq!(
+        s.resource(&ResourceRef::Id(local.resource_id))
+            .unwrap()
+            .refcount,
+        1
+    );
+}
+
+#[test]
+fn a_message_id_collision_cannot_add_recipients_to_existing_mail() {
+    let (s, _) = hub();
+    let spoke = Spoke::paired_with(&s, &Perm::ALL);
+    let eve = spoke_agent(&s, &spoke);
+    let mail = send(&s, "alice@shop", "bob@shop");
+    spoke.rejected(
+        &s,
+        "message.sent",
+        json!({
+            "message_id": mail.message_id, "sender_id": eve,
+            "recipient_nodes": [s.node_id()],
+            "recipients": [{ "agent_id": eve, "node_id": EVIL, "role": "to" }],
+        }),
+    );
+    assert_eq!(s.message(&mail.message_id).unwrap().to, vec!["bob@shop"]);
+}
+
+#[test]
+fn transfer_authority_comes_from_the_stored_lease_not_the_claimed_resource() {
+    let (s, _) = hub();
+    let spoke = Spoke::paired_with(&s, &Perm::ALL);
+    let eve = spoke_agent(&s, &spoke);
+    spoke.accepted(&s, "resource.registered", json!({ "resource_id": "OWN-R", "kind": "model_server", "name": "own", "owner_id": eve, "lease_id": "OWN-L" }));
+    let r = resource(&s, "alice@shop", LeaseMode::Shared);
+    let lease = s
+        .borrow_resource("bob@shop", &ResourceRef::Id(r.resource_id.clone()), None)
+        .unwrap()
+        .lease
+        .unwrap();
+    spoke.rejected(
+        &s,
+        "resource.transferred",
+        json!({ "resource_id": "OWN-R", "lease_id": lease.lease_id }),
+    );
+    assert!(s
+        .resource(&ResourceRef::Id(r.resource_id))
+        .unwrap()
+        .leases
+        .iter()
+        .any(|l| l.lease_id == lease.lease_id && l.role == "borrower"));
+}
+
+#[test]
+fn a_permitted_borrower_cannot_revive_a_lapsed_resource_or_reset_its_clock() {
+    let (s, clock) = hub();
+    let spoke = Spoke::paired_with(&s, &Perm::ALL);
+    let eve = spoke_agent(&s, &spoke);
+    let r = resource(&s, "alice@shop", LeaseMode::Shared);
+    s.release_resource("alice@shop", &ResourceRef::Id(r.resource_id.clone()), false)
+        .unwrap();
+    clock.fetch_add(120_000, Ordering::SeqCst);
+    let before = s.lapsed_for_ms(&r.resource_id).unwrap();
+    let mut ev = spoke.event(&s, "resource.borrowed", json!({ "resource_id": r.resource_id, "resource_node": s.node_id(), "agent_id": eve, "lease_id": "BACKDATED", "ttl_seconds": 3600 }));
+    ev.ts = T0;
+    ev.sig = crypto::sign(
+        &spoke.key,
+        &crypto::event_message(
+            &ev.event_id,
+            &ev.node_id,
+            ev.ts,
+            &ev.actor,
+            &ev.kind,
+            &ev.payload,
+        ),
+    );
+    let result = s.ingest(EVIL, &[ev], &[]).unwrap();
+    assert_eq!(result.accepted, 1, "{result:?}");
+    assert_eq!(
+        s.resource(&ResourceRef::Id(r.resource_id.clone()))
+            .unwrap()
+            .refcount,
+        0
+    );
+    assert_eq!(s.lapsed_for_ms(&r.resource_id).unwrap(), before);
+}
+
+#[test]
+fn an_expired_foreign_borrower_lease_cannot_be_revived_by_renewal() {
+    let (s, clock) = hub();
+    let spoke = Spoke::paired_with(&s, &Perm::ALL);
+    let eve = spoke_agent(&s, &spoke);
+    let r = resource(&s, "alice@shop", LeaseMode::Shared);
+    let id = ResourceRef::Id(r.resource_id.clone());
+    spoke.accepted(&s, "resource.borrowed", json!({ "resource_id": r.resource_id, "resource_node": s.node_id(), "lease_id": "SHORT", "agent_id": eve, "ttl_seconds": 60 }));
+    clock.fetch_add(120_000, Ordering::SeqCst);
+    s.release_resource("alice@shop", &id, false).unwrap();
+    let before = s.lapsed_for_ms(&r.resource_id).unwrap();
+    spoke.accepted(
+        &s,
+        "resource.renewed",
+        json!({ "lease_ids": ["SHORT"], "ttl_seconds": 3600 }),
+    );
+    assert_eq!(s.resource(&id).unwrap().refcount, 0);
+    assert_eq!(s.lapsed_for_ms(&r.resource_id).unwrap(), before);
+}
+
+#[test]
+fn a_spoke_cannot_claim_a_foreign_decision_asker_project_or_lane() {
+    let (s, _) = hub();
+    let spoke = Spoke::paired_with(&s, &Perm::ALL);
+    let eve = spoke_agent(&s, &spoke);
+    let alice = agent_id(&s, "alice@shop");
+    let project = s.ensure_project("t", "/work/shop").unwrap().project_id;
+    let d = decision(&s);
+    let lane = s
+        .create_lane(
+            NewLane {
+                agent: "alice@shop".into(),
+                name: "owned".into(),
+                project: "shop".into(),
+                lead: "alice@shop".into(),
+                charter: String::new(),
+                status: None,
+            },
+            None,
+        )
+        .unwrap();
+    for payload in [
+        json!({ "decision_id": "BAD-ASKER", "asker_id": alice, "project_id": "EVIL-PROJECT" }),
+        json!({ "decision_id": "BAD-PROJECT", "asker_id": eve, "project_id": project }),
+        json!({ "decision_id": d.decision_id, "asker_id": eve, "project_id": "EVIL-PROJECT" }),
+        json!({ "decision_id": "BAD-LANE", "asker_id": eve, "project_id": "EVIL-PROJECT", "lane_id": lane.lane.lane_id }),
+    ] {
+        spoke.rejected(&s, "decision.created", payload);
+    }
+    for kind in [
+        "decision.answered",
+        "decision.expired",
+        "decision.cancelled",
+    ] {
+        spoke.accepted(
+            &s,
+            kind,
+            json!({ "decision_id": d.decision_id, "value": "yes" }),
+        );
+        assert_eq!(
+            s.decision(&d.decision_id, None).unwrap().status,
+            DecisionStatus::Open
         );
     }
+}
+
+#[test]
+fn decision_mirrors_do_not_copy_another_nodes_mail_body() {
+    let (s, _) = hub();
+    let spoke = Spoke::paired_with(&s, &Perm::ALL);
+    let eve = spoke_agent(&s, &spoke);
+    let mail = send(&s, "alice@shop", "bob@shop");
+    spoke.accepted(&s, "decision.created", json!({ "decision_id": "MIRROR", "asker_id": eve, "project_id": "EVIL-PROJECT", "message_id": mail.message_id, "human": "reviewer", "option_values": ["yes", "no"] }));
+    let d = s.decision("MIRROR", None).unwrap();
+    assert_ne!(d.question, mail.body);
+    assert!(
+        d.question.starts_with("(question asked on node"),
+        "{}",
+        d.question
+    );
+}
+
+fn check_foreign_carrier(kind: &str) {
+    let (s, _) = hub();
+    let spoke = Spoke::paired_with(&s, &Perm::ALL);
+    let eve = spoke_agent(&s, &spoke);
+    let d = decision(&s);
+    let lane = s
+        .create_lane(
+            NewLane {
+                agent: "alice@shop".into(),
+                name: "train".into(),
+                project: "shop".into(),
+                lead: "alice@shop".into(),
+                charter: String::new(),
+                status: Some(LaneStatus::Working),
+            },
+            None,
+        )
+        .unwrap();
+    let mail = send(&s, "alice@shop", "bob@shop");
+    if kind == "lane.report_proposed" {
+        spoke.accepted(&s, kind, json!({ "lane_node": s.node_id(), "lane_id": lane.lane.lane_id, "agent_id": eve, "summary_message_id": mail.message_id, "proposal_id": "P" }));
+    } else {
+        spoke.accepted(&s, kind, json!({ "decision_node": s.node_id(), "decision_id": d.decision_id, "relayed_by_id": eve, "text_message_id": mail.message_id, "value": "not-an-option" }));
+    }
+    assert_eq!(
+        s.inbox("bob@shop", InboxQuery::default()).unwrap().unread,
+        1
+    );
+    assert_eq!(
+        s.decision(&d.decision_id, None).unwrap().status,
+        DecisionStatus::Open
+    );
+}
+
+#[test]
+fn a_proposal_cannot_mark_a_hub_carrier_read() {
+    check_foreign_carrier("lane.report_proposed");
+}
+
+#[test]
+fn an_answer_relay_cannot_mark_a_hub_carrier_read() {
+    check_foreign_carrier("decision.answer_relayed");
+}
+
+#[test]
+fn a_feed_only_receiver_projects_a_permitted_borrow_and_owner_promotion() {
+    let (s, _) = hub();
+    let spoke = Spoke::paired_with(&s, &Perm::ALL);
+    let eve = spoke_agent(&s, &spoke);
+    let observer = receiver(&s, &[Perm::ReadFeed]);
+    let r = resource(&s, "alice@shop", LeaseMode::Shared);
+    let id = ResourceRef::Id(r.resource_id.clone());
+    spoke.accepted(&s, "resource.borrowed", json!({ "resource_id": r.resource_id, "resource_node": s.node_id(), "lease_id": "BORROW", "agent_id": eve }));
+    let page = s.pull_for(observer.node_id(), 0, 2000).unwrap();
+    let applied = observer
+        .ingest(s.node_id(), &page.events, &page.nodes)
+        .unwrap();
+    assert!(applied.rejected.is_empty(), "{applied:?}");
+    assert_eq!(observer.resource(&id).unwrap().refcount, 2);
+    s.release_resource("alice@shop", &id, false).unwrap();
+    assert_eq!(
+        s.resource(&id).unwrap().owner.as_deref(),
+        Some("eve@lab@evil")
+    );
+    let next = s.pull_for(observer.node_id(), page.cursor, 2000).unwrap();
+    let applied = observer
+        .ingest(s.node_id(), &next.events, &next.nodes)
+        .unwrap();
+    assert!(applied.rejected.is_empty(), "{applied:?}");
+    assert_eq!(
+        observer.resource(&id).unwrap().owner.as_deref(),
+        Some("eve@lab@evil")
+    );
+}
+
+#[test]
+fn duplicate_retries_are_not_revalidated_against_new_name_ownership() {
+    let (s, _) = hub();
+    let spoke = Spoke::paired_with(&s, &Perm::ALL);
+    let ev = spoke.event(&s, "node.renamed", json!({ "display_name": "old-name" }));
+    assert_eq!(
+        s.ingest(EVIL, std::slice::from_ref(&ev), &[])
+            .unwrap()
+            .accepted,
+        1
+    );
+    spoke.accepted(&s, "node.renamed", json!({ "display_name": "new-name" }));
+    s.set_node_name("old-name").unwrap();
+    let result = s.ingest(EVIL, &[ev], &[]).unwrap();
+    assert_eq!(
+        (result.accepted, result.duplicates, result.rejected.len()),
+        (0, 1, 0)
+    );
+    assert_eq!(s.peers().unwrap()[0].display_name, "new-name");
+}
+
+#[test]
+fn agent_updates_cannot_forge_addresses_or_erase_a_missing_name() {
+    let (s, _) = hub();
+    let spoke = Spoke::paired_with(&s, &Perm::ALL);
+    let eve = spoke_agent(&s, &spoke);
+    spoke.rejected(
+        &s,
+        "agent.registered",
+        json!({ "agent_id": eve, "name": "alice@shop@hub", "project_id": "EVIL-PROJECT" }),
+    );
+    spoke.rejected(
+        &s,
+        "project.ensured",
+        json!({ "project_id": "BAD-P", "abs_path": "/work/forged", "slug": "shop@hub" }),
+    );
+    spoke.accepted(&s, "agent.registered", json!({ "agent_id": eve }));
+    assert_eq!(s.agent("eve@lab@evil").unwrap().address, "eve@lab@evil");
+}
+
+#[test]
+fn a_spokes_system_agent_can_send_real_signed_mail() {
+    let (s, _) = hub();
+    let spoke = Spoke::paired_with(&s, &Perm::ALL);
+    spoke.accepted(
+        &s,
+        "agent.registered",
+        json!({ "agent_id": "SYSTEM", "name": "another", "program": "other" }),
+    );
+    let bob = agent_id(&s, "bob@shop");
+    spoke.accepted(&s, "message.sent", json!({ "message_id": "SYSTEM-MAIL", "sender_id": "SYSTEM", "subject": "summary", "body": "ready", "recipient_nodes": [s.node_id()], "recipients": [{ "agent_id": bob, "node_id": EVIL, "role": "to" }] }));
+    let inbox = s.inbox("bob@shop", InboxQuery::default()).unwrap();
+    assert_eq!(inbox.messages[0].message.from, "another@@evil");
+    s.acknowledge("bob@shop", &["SYSTEM-MAIL".into()], true)
+        .unwrap();
+    let (out, _) = s.outbound_events(0, 2000).unwrap();
+    let ack = out.iter().find(|e| e.kind == "delivery.acked").unwrap();
+    assert_eq!(ack.payload.parse::<Value>().unwrap()["message_node"], EVIL);
+}
+
+#[test]
+fn a_hub_relay_does_not_grant_authority_over_the_receivers_agents() {
+    let (s, _) = hub();
+    let spoke = Spoke::paired_with(&s, &Perm::ALL);
+    spoke_agent(&s, &spoke);
+    let observer = receiver(&s, &[Perm::ReadFeed]);
+    let page = s.pull_for(observer.node_id(), 0, 2000).unwrap();
+    observer
+        .ingest(s.node_id(), &page.events, &page.nodes)
+        .unwrap();
+    let alice = observer.agent("alice@shop@hub").unwrap();
+    let ev = spoke.event(
+        &s,
+        "agent.registered",
+        json!({ "agent_id": alice.agent_id, "name": "alice", "program": "grok_bot" }),
+    );
+    let result = observer
+        .ingest(s.node_id(), std::slice::from_ref(&ev), &[])
+        .unwrap();
+    assert_eq!((result.accepted, result.rejected.len()), (0, 1));
+    assert_eq!(observer.agent("alice@shop@hub").unwrap().program, "claude");
+    assert!(observer
+        .events(20_000)
+        .unwrap()
+        .iter()
+        .all(|e| e.event_id != ev.event_id));
+}
+
+#[test]
+fn complete_unknown_borrows_are_refused_on_push_and_noop_on_relay() {
+    let (s, _) = hub();
+    let spoke = Spoke::paired_with(&s, &Perm::ALL);
+    let eve = spoke_agent(&s, &spoke);
+    let observer = receiver(&s, &[Perm::ReadFeed]);
+    let page = s.pull_for(observer.node_id(), 0, 2000).unwrap();
+    observer
+        .ingest(s.node_id(), &page.events, &page.nodes)
+        .unwrap();
+    let ev = spoke.event(&s, "resource.borrowed", json!({ "resource_id": "UNKNOWN", "resource_node": s.node_id(), "agent_id": eve, "lease_id": "UNKNOWN-L" }));
+    let result = s.ingest(EVIL, std::slice::from_ref(&ev), &[]).unwrap();
+    assert_eq!((result.accepted, result.rejected.len()), (0, 1));
+    let result = observer.ingest(s.node_id(), &[ev], &[]).unwrap();
+    assert_eq!((result.accepted, result.rejected.len()), (1, 0));
+    assert!(observer
+        .resource(&ResourceRef::Id("UNKNOWN".into()))
+        .is_err());
+}
+
+#[test]
+fn borrowing_permission_and_routing_cannot_be_forged_in_payloads() {
+    for perms in [&[][..], &Perm::ALL[..]] {
+        let (s, _) = hub();
+        let spoke = Spoke::paired_with(&s, perms);
+        let eve = spoke_agent(&s, &spoke);
+        let r = resource(&s, "alice@shop", LeaseMode::Shared);
+        for hint in [Value::Null, json!(EVIL), json!("WRONG-NODE")] {
+            spoke.rejected(&s, "resource.borrowed", json!({ "resource_id": r.resource_id, "resource_node": hint, "lease_id": format!("L-{}", spoke.seq.get()), "agent_id": eve }));
+        }
+        assert_eq!(
+            s.resource(&ResourceRef::Id(r.resource_id))
+                .unwrap()
+                .refcount,
+            1
+        );
+    }
+}
+
+#[test]
+fn lane_creators_and_updated_leads_cannot_be_foreign_acting_identities() {
+    let (s, _) = hub();
+    let spoke = Spoke::paired_with(&s, &Perm::ALL);
+    let eve = spoke_agent(&s, &spoke);
+    let alice = agent_id(&s, "alice@shop");
+    spoke.rejected(&s, "lane.created", json!({ "lane_id": "BAD-CREATOR", "project_id": "EVIL-PROJECT", "name": "forged", "lead_id": eve, "created_by": alice }));
+    spoke.rejected(&s, "lane.created", json!({ "lane_id": "BAD-LEAD", "project_id": "EVIL-PROJECT", "name": "forged", "lead_id": alice }));
+    spoke.accepted(&s, "lane.created", json!({ "lane_id": "OWN-LANE", "project_id": "EVIL-PROJECT", "name": "own", "lead_id": eve }));
+    spoke.rejected(
+        &s,
+        "lane.updated",
+        json!({ "lane_id": "OWN-LANE", "lead_id": alice }),
+    );
+    assert_eq!(s.lane("OWN-LANE", None).unwrap().lane.lead, "eve@lab@evil");
+    // The actor display string cannot supply the missing creator from the hub's namespace.
+    let mut ev = spoke.event(&s, "lane.created", json!({ "lane_id": "ACTOR-LANE", "project_id": "EVIL-PROJECT", "name": "actor", "lead_id": eve }));
+    ev.actor = "alice@shop".into();
+    ev.sig = crypto::sign(
+        &spoke.key,
+        &crypto::event_message(
+            &ev.event_id,
+            &ev.node_id,
+            ev.ts,
+            &ev.actor,
+            &ev.kind,
+            &ev.payload,
+        ),
+    );
+    assert_eq!(s.ingest(EVIL, &[ev], &[]).unwrap().accepted, 1);
+    assert_eq!(
+        s.lane("ACTOR-LANE", None).unwrap().lane.created_by,
+        "eve@lab@evil"
+    );
+}
+
+#[test]
+fn another_node_cannot_collide_with_or_close_a_decision_mirror() {
+    let (s, _) = hub();
+    let spoke = Spoke::paired_with(&s, &Perm::ALL);
+    let eve = spoke_agent(&s, &spoke);
+    spoke.accepted(&s, "decision.created", json!({ "decision_id": "REMOTE-D", "asker_id": eve, "project_id": "EVIL-PROJECT", "human": "reviewer", "option_values": ["yes", "no"] }));
+    let other = Spoke::paired_as(&s, &Perm::ALL, "THIRD", "third");
+    other.rejected(&s, "decision.created", json!({ "decision_id": "REMOTE-D" }));
+    for kind in [
+        "decision.answered",
+        "decision.expired",
+        "decision.cancelled",
+    ] {
+        other.accepted(
+            &s,
+            kind,
+            json!({ "decision_id": "REMOTE-D", "value": "yes" }),
+        );
+        assert_eq!(
+            s.decision("REMOTE-D", None).unwrap().status,
+            DecisionStatus::Open
+        );
+    }
+}
+
+#[test]
+fn lease_id_collisions_cannot_reset_a_lapsed_resource() {
+    let (s, _) = hub();
+    let spoke = Spoke::paired_with(&s, &Perm::ALL);
+    let eve = spoke_agent(&s, &spoke);
+    let r = resource(&s, "alice@shop", LeaseMode::Shared);
+    let lease = &r.leases[0].lease_id;
+    spoke.rejected(&s, "resource.registered", json!({ "resource_id": "OWN-R", "kind": "model_server", "name": "own", "owner_id": eve, "lease_id": lease }));
+    assert!(s.resource(&ResourceRef::Id("OWN-R".into())).is_err());
+    assert_eq!(
+        s.resource(&ResourceRef::Id(r.resource_id))
+            .unwrap()
+            .refcount,
+        1
+    );
+}
+
+#[test]
+fn late_joiner_skips_historical_borrow_after_its_owner_lease_has_expired() {
+    let (s, _) = hub();
+    let spoke = Spoke::paired_with(&s, &Perm::ALL);
+    let eve = spoke_agent(&s, &spoke);
+    let r = resource(&s, "alice@shop", LeaseMode::Shared);
+    spoke.accepted(&s, "resource.borrowed", json!({ "resource_id": r.resource_id, "resource_node": s.node_id(), "agent_id": eve, "lease_id": "HISTORY", "ttl_seconds": 7200 }));
+    let observer = receiver_at(&s, &[Perm::ReadFeed], T0 + 3_601_000);
+    let page = s.pull_for(observer.node_id(), 0, 2000).unwrap();
+    let result = observer
+        .ingest(s.node_id(), &page.events, &page.nodes)
+        .unwrap();
+    assert!(result.rejected.is_empty(), "{result:?}");
+    assert_eq!(
+        observer
+            .resource(&ResourceRef::Id(r.resource_id))
+            .unwrap()
+            .refcount,
+        0
+    );
+}
+
+#[test]
+fn a_late_joiner_skips_conflicting_rename_history_and_keeps_syncing() {
+    let (s, _) = hub();
+    let first = Spoke::paired_as(&s, &Perm::ALL, "FIRST", "alpha");
+    let second = Spoke::paired_as(&s, &Perm::ALL, "SECOND", "beta");
+    first.accepted(&s, "node.renamed", json!({ "display_name": "alpha" }));
+    first.accepted(&s, "node.renamed", json!({ "display_name": "gamma" }));
+    second.accepted(&s, "node.renamed", json!({ "display_name": "beta" }));
+    second.accepted(&s, "node.renamed", json!({ "display_name": "alpha" }));
+    let observer = receiver(&s, &[Perm::ReadFeed]);
+    let page = s.pull_for(observer.node_id(), 0, 2000).unwrap();
+    let report = observer
+        .ingest(s.node_id(), &page.events, &page.nodes)
+        .unwrap();
+    assert_eq!(report.rejected.len(), 1, "{report:?}");
+    assert!(report.rejected[0].reason.contains("already named"));
+    assert!(report.accepted > 0);
+    // The next directory snapshot is still usable, including valid simultaneous name swaps.
+    let mut nodes = page.nodes;
+    for node in &mut nodes {
+        if node.node_id == "FIRST" {
+            node.display_name = "alpha".into();
+        }
+        if node.node_id == "SECOND" {
+            node.display_name = "gamma".into();
+        }
+    }
+    assert!(observer
+        .ingest(s.node_id(), &[], &nodes)
+        .unwrap()
+        .rejected
+        .is_empty());
+    assert!(matches!(
+        observer.set_node_name("alpha"),
+        Err(Error::Conflict(_))
+    ));
+    assert!(matches!(
+        observer.set_node_name("gamma"),
+        Err(Error::Conflict(_))
+    ));
+    assert!(observer.set_node_name("unused").is_ok());
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1099,38 +1751,61 @@ fn accepting_a_pairing_checks_the_invite_and_the_node() {
 
 #[test]
 fn a_known_nodes_key_is_pinned_and_its_name_can_change() {
-    let (s, _) = hub();
-    Spoke::paired_with(&s, &Perm::ALL);
+    let (hub, _) = hub();
+    let s = receiver(&hub, &Perm::ALL);
     let key = crypto::public_of(&crypto::generate_key().unwrap());
     let other = crypto::public_of(&crypto::generate_key().unwrap());
 
-    // A third node arrives through the spoke's node list, then is renamed.
+    // A third node arrives through the paired hub's directory, then is renamed.
     let third = |name: &str, public_key: &str| NodeEntry {
         node_id: "THIRD".into(),
         display_name: name.into(),
         public_key: public_key.into(),
     };
-    s.ingest(EVIL, &[], &[third("third", &key)]).unwrap();
-    s.ingest(EVIL, &[], &[third("third-2", &key)]).unwrap();
+    s.ingest(hub.node_id(), &[], &[third("third", &key)])
+        .unwrap();
+    s.ingest(hub.node_id(), &[], &[third("third-2", &key)])
+        .unwrap();
     // Another key for it is refused, and so is a key that isn't one.
     assert!(matches!(
-        s.ingest(EVIL, &[], &[third("third-2", &other)]),
+        s.ingest(hub.node_id(), &[], &[third("third-2", &other)]),
         Err(Error::Conflict(_))
     ));
-    assert!(s.ingest(EVIL, &[], &[third("third-2", "junk")]).is_err());
+    assert!(s
+        .ingest(hub.node_id(), &[], &[third("third-2", "junk")])
+        .is_err());
     // The hub's own entry is ignored, whatever it says.
     let mine = NodeEntry {
         node_id: s.node_id().to_string(),
         display_name: "not the hub".into(),
         public_key: "junk".into(),
     };
-    s.ingest(EVIL, &[], &[mine]).unwrap();
-    assert_eq!(s.node_entry().unwrap().display_name, "hub");
+    s.ingest(hub.node_id(), &[], &[mine]).unwrap();
+    assert_eq!(s.node_entry().unwrap().display_name, "receiver");
     // A renamed node's name can't be taken by this node.
     assert!(matches!(
         s.set_node_name("third-2"),
         Err(Error::Conflict(_))
     ));
+}
+
+#[test]
+fn a_spoke_cannot_inject_a_node_directory() {
+    let (s, _) = hub();
+    Spoke::paired_with(&s, &Perm::ALL);
+    let node = NodeEntry {
+        node_id: "INJECTED".into(),
+        display_name: "injected".into(),
+        public_key: crypto::public_of(&crypto::generate_key().unwrap()),
+    };
+    assert!(matches!(
+        s.ingest(EVIL, &[], &[node]),
+        Err(Error::Forbidden(_))
+    ));
+    assert!(
+        s.set_node_name("injected").is_ok(),
+        "the directory was not changed"
+    );
 }
 
 #[test]

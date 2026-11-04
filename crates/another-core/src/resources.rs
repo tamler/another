@@ -500,6 +500,11 @@ pub(crate) fn grant_after_approval_tx(
     me: &AgentRef,
     ttl: i64,
 ) -> Result<()> {
+    if resource_node(tx, rid)? != tx.node_id {
+        return Err(Error::Conflict(
+            "only a local resource can have a spend-approved grant".into(),
+        ));
+    }
     if my_lease(tx, rid, &me.id)?.is_some() {
         return Ok(());
     }
