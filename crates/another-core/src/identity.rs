@@ -370,6 +370,74 @@ pub(crate) fn resolve_agent(conn: &Connection, node_id: &str, who: &str) -> Resu
     Ok(agent)
 }
 
+/// [`resolve_agent`] as `scope` sees it: only agents in the token's projects, or with no
+/// project, exist for it. A hidden agent is the same `not_found` (same message) as a missing
+/// one, and ambiguity is reported only among agents it may see.
+pub(crate) fn resolve_agent_in(
+    conn: &Connection,
+    node_id: &str,
+    who: &str,
+    scope: Option<&crate::tokens::TokenScope>,
+) -> Result<AgentRef> {
+    let Some(scope) = scope else {
+        return resolve_agent(conn, node_id, who);
+    };
+    let who = who.trim();
+    let unknown = || {
+        Error::NotFound(format!(
+            "unknown agent {who:?}; register it with register_agent first"
+        ))
+    };
+    let parts: Vec<&str> = who.split('@').collect();
+    let (name, project) = match parts.as_slice() {
+        [n] => (*n, None),
+        [n, p] => (*n, Some(*p)),
+        _ => return Err(unknown()),
+    };
+    let mut stmt = conn.prepare(
+        "SELECT a.agent_id, a.address, a.project_id, p.slug, p.abs_path FROM agents a
+         LEFT JOIN projects p ON p.project_id = a.project_id
+         WHERE a.node_id = ?1 AND a.name = ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![node_id, name], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut visible = Vec::new();
+    for (id, addr, pid, slug, path) in rows {
+        let matches = match project {
+            Some(p) => slug.as_deref() == Some(p) || path.as_deref() == Some(p),
+            None => true,
+        };
+        let allowed = match &pid {
+            Some(pid) => crate::tokens::scope_allows_project(conn, scope, pid)?,
+            None => true,
+        };
+        if matches && allowed {
+            visible.push((id, addr));
+        }
+    }
+    match visible.as_slice() {
+        [] => Err(unknown()),
+        [(id, addr)] => Ok(AgentRef {
+            id: id.clone(),
+            address: addr.clone(),
+            node_id: node_id.to_string(),
+        }),
+        many => Err(Error::Ambiguous(format!(
+            "agent name {who:?} is ambiguous: it is registered in several projects; use name@project, one of: {}",
+            many.iter().map(|(_, a)| a.as_str()).collect::<Vec<_>>().join(", ")
+        ))),
+    }
+}
+
 /// Resolve an address on any known node (recipients, filters). See [`resolve_agent`] for
 /// identities that act.
 pub(crate) fn resolve_any(conn: &Connection, node_id: &str, who: &str) -> Result<AgentRef> {
@@ -528,6 +596,16 @@ impl Store {
                     )
                     .optional()?;
                 let privileged = |p: &str| p == Program::GrokBot.as_str() || p == Program::Human.as_str();
+                if current.is_none() && privileged(input.program.as_str()) {
+                    // Not even a brand-new name: otherwise any MCP caller could mint a
+                    // manager (or person) to relay answers to its own questions.
+                    return Err(Error::Forbidden(format!(
+                        "{} is a role the person sets on this machine (`another agent register {} --program {}`)",
+                        input.program.as_str(),
+                        input.name,
+                        input.program.as_str()
+                    )));
+                }
                 if let Some(cur) = current {
                     if cur != input.program.as_str() {
                         if privileged(input.program.as_str()) {
