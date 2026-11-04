@@ -46,7 +46,8 @@ Every way events leave the node applies the same visibility rule (D38). When add
   - An event with projects is visible when one of them matches the globs.
   - A project-less event is visible when it concerns the token's agent, **matched by agent id**, never by name.
   - `token.*`, `peer.*`, `node.*` and `invite.*` events are never visible to tokens.
-- **Payloads** carry ids, names and statuses, never bodies. A new event kind needs an activity summary that doesn't echo its payload.
+- **Object scope:** a lane, hold or resource event is scoped by that object's project only, never by the projects of the agents it mentions.
+- **Payloads** carry ids, names and statuses, never bodies; webhook `data` is filtered through an allowlist (`webhooks::webhook_data`), so new free-text fields can't leak. A new event kind needs an activity summary that doesn't echo its payload.
 - **Node-local events:** `hold.conflict` and `resource.lease_expiring` are never federated. Classify new purely local signals as `Share::Never`.
 - **`resource_find` stays node-wide** (decision recorded in D38).
 

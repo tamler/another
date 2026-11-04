@@ -87,11 +87,18 @@ pub fn deliver_once(store: &Store) -> another_core::Result<usize> {
         return Ok(0);
     }
     store.queue_webhook_deliveries()?;
-    let due = store.claim_due_deliveries(DELIVERY_BATCH)?;
-    for d in &due {
-        deliver(store, d)?;
+    // Claim one delivery right before sending it: a claim lasts a minute, and a batch of
+    // slow receivers could otherwise outlast the claims of the later deliveries, letting a
+    // second `serve` process send them again.
+    let mut sent = 0;
+    while sent < DELIVERY_BATCH as usize {
+        let Some(d) = store.claim_due_deliveries(1)?.into_iter().next() else {
+            break;
+        };
+        deliver(store, &d)?;
+        sent += 1;
     }
-    Ok(due.len())
+    Ok(sent)
 }
 
 /// Run the delivery worker every [`DELIVERY_EVERY`] until cancelled.
