@@ -142,8 +142,13 @@ pub(crate) fn event_projects(conn: &Connection, kind: &str, p: &Value) -> Result
         }
         _ => {}
     }
-    for agent in event_agents(conn, kind, p)? {
-        push(&mut out, agent_project(conn, &agent)?);
+    // An object's own project decides (a lane in B led by an agent of A is B's event).
+    // Only events about no project-bound object (mail, sessions, agents) fall back to the
+    // projects of the agents they concern.
+    if out.is_empty() {
+        for agent in event_agents(conn, kind, p)? {
+            push(&mut out, agent_project(conn, &agent)?);
+        }
     }
     Ok(out)
 }
