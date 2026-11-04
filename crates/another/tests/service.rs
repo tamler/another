@@ -99,6 +99,7 @@ impl Env {
             .env("STATE", self.user_home.join(".fake-state"))
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("ANOTHER_AGENT")
+            .env_remove("ANOTHER_SERVER")
             .stdin(Stdio::null());
         c
     }
@@ -634,21 +635,23 @@ fn trusted_proxy_header_reaches_the_installed_serve_command() {
 
         // The written command line is one `serve` accepts: the fake manager doesn't run it, so
         // run it here.
-        let mut child = Command::new(&args[0])
-            .args(&args[1..])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut server = Server(
+            Command::new(&args[0])
+                .args(&args[1..])
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
-            if let Some(exit) = child.try_wait().unwrap() {
+            if let Some(exit) = server.0.try_wait().unwrap() {
                 panic!("{platform}: serve refused the installed flags: {exit}");
             }
             assert!(std::time::Instant::now() < deadline, "serve never listened");
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        terminate(&mut child);
+        drop(server);
 
         let same = env.json(&[
             "service",
@@ -680,6 +683,219 @@ fn trusted_proxy_header_reaches_the_installed_serve_command() {
             "{text}"
         );
     }
+}
+
+/// `another doctor --json [args]`; it exits 1 on a failed check, so the status isn't asserted.
+fn doctor(env: &Env, args: &[&str]) -> Value {
+    let mut all = vec!["--json", "doctor"];
+    all.extend_from_slice(args);
+    let out = env.run(&all);
+    serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)))
+}
+
+fn doctor_check(report: &Value, area: &str, level: &str) -> (String, String) {
+    let check = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["area"] == area && c["level"] == level)
+        .unwrap_or_else(|| panic!("no {level} {area} in {report}"));
+    (
+        check["detail"].as_str().unwrap().to_string(),
+        check["fix"].as_str().unwrap_or_default().to_string(),
+    )
+}
+
+/// A real `another serve`, stopped on drop so a failed assertion doesn't leave it running.
+struct Server(std::process::Child);
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn serve_on(env: &Env, port: u16) -> Server {
+    let bind = format!("127.0.0.1:{port}");
+    let server = Server(
+        env.cmd(&["serve", "--bind", &bind])
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(std::time::Instant::now() < deadline, "serve never listened");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    server
+}
+
+#[test]
+fn doctor_checks_the_installed_service_instead_of_the_default_port() {
+    for platform in ["systemd", "launchd"] {
+        let env = Env::new(platform);
+        let port = free_port();
+        let bind = format!("127.0.0.1:{port}");
+        env.json(&["service", "install", "--bind", &bind]);
+        let _server = serve_on(&env, port);
+
+        let report = doctor(&env, &[]);
+        let (detail, _) = doctor_check(&report, "server", "pass");
+        assert!(detail.contains(&bind), "{platform}: {detail}");
+        let (detail, _) = doctor_check(&report, "service", "pass");
+        assert!(detail.contains(&bind), "{platform}: {detail}");
+
+        // The same directory through a symlink is the same home.
+        let link = env.user_home.join("home link");
+        std::os::unix::fs::symlink(&env.data, &link).unwrap();
+        let link = link.to_str().unwrap();
+        let report = doctor(&env, &["--server", &format!("http://{bind}")]);
+        doctor_check(&report, "service", "pass");
+        let out = env.run(&["--json", "--home", link, "doctor"]);
+        let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let (detail, _) = doctor_check(&report, "server", "pass");
+        assert!(detail.contains(&bind), "{platform}: {detail}");
+        doctor_check(&report, "service", "pass");
+    }
+}
+
+#[test]
+fn doctor_fix_hints_name_the_service_when_it_is_down() {
+    for platform in ["systemd", "launchd"] {
+        let env = Env::new(platform);
+        let bind = format!("127.0.0.1:{}", free_port());
+        env.json(&["service", "install", "--bind", &bind]);
+
+        // Loaded, but nothing answers: the logs say why, and starting it again wouldn't help.
+        let report = doctor(&env, &[]);
+        let (detail, fix) = doctor_check(&report, "server", "fail");
+        assert!(detail.contains(&bind), "{platform}: {detail}");
+        assert!(fix.contains("another service logs"), "{platform}: {fix}");
+
+        env.json(&["service", "stop"]);
+        let report = doctor(&env, &[]);
+        let (_, fix) = doctor_check(&report, "server", "fail");
+        assert!(fix.contains("another service start"), "{platform}: {fix}");
+        assert!(!fix.contains("another serve"), "{platform}: {fix}");
+        let (_, fix) = doctor_check(&report, "service", "warn");
+        assert!(fix.contains("another service start"), "{platform}: {fix}");
+    }
+}
+
+#[test]
+fn doctor_fails_a_service_whose_binary_is_gone() {
+    let env = Env::new("launchd");
+    let bind = format!("127.0.0.1:{}", free_port());
+    env.json(&["service", "install", "--bind", &bind]);
+    let path = plist_path(&env);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let real = env!("CARGO_BIN_EXE_another");
+    assert!(text.contains(real), "{text}");
+    std::fs::write(&path, text.replace(real, "/nonexistent/another")).unwrap();
+
+    let report = doctor(&env, &[]);
+    let (detail, fix) = doctor_check(&report, "service", "fail");
+    assert!(detail.contains("/nonexistent/another"), "{detail}");
+    assert!(fix.contains("another service install"), "{fix}");
+}
+
+#[test]
+fn doctor_warns_about_a_definition_it_cannot_read() {
+    let env = Env::new("systemd");
+    let bind = format!("127.0.0.1:{}", free_port());
+    env.json(&["service", "install", "--bind", &bind]);
+    std::fs::write(unit_path(&env), "[Service]\n").unwrap();
+    let dead = format!("http://127.0.0.1:{}", free_port());
+    let report = doctor(&env, &["--server", &dead]);
+    let (_, fix) = doctor_check(&report, "service", "warn");
+    assert!(fix.contains("another service install"), "{fix}");
+}
+
+#[test]
+fn doctor_keeps_the_default_server_when_the_service_uses_another_home() {
+    let env = Env::new("systemd");
+    let port = free_port();
+    let bind = format!("127.0.0.1:{port}");
+    let other = env.user_home.join("other data");
+    let other = other.to_str().unwrap();
+    env.json(&["--home", other, "service", "install", "--bind", &bind]);
+    std::fs::create_dir_all(&env.data).unwrap();
+    env.json(&["init"]);
+
+    let report = doctor(&env, &[]);
+    let (detail, fix) = doctor_check(&report, "service", "warn");
+    assert!(detail.contains(other), "{detail}");
+    assert!(fix.contains("--home"), "{fix}");
+    let server = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["area"] == "server")
+        .unwrap();
+    let detail = server["detail"].as_str().unwrap();
+    assert!(!detail.contains(&bind), "{detail}");
+    assert!(detail.contains(":7466"), "{detail}");
+}
+
+#[test]
+fn doctor_prefers_an_explicit_server_over_the_service() {
+    let env = Env::new("launchd");
+    let bind = format!("127.0.0.1:{}", free_port());
+    env.json(&["service", "install", "--bind", &bind]);
+    let dead_port = free_port();
+    let dead = format!("http://127.0.0.1:{dead_port}");
+
+    let report = doctor(&env, &["--server", &dead]);
+    let (detail, fix) = doctor_check(&report, "server", "fail");
+    assert!(detail.contains(&dead), "{detail}");
+    assert!(
+        fix.contains("another serve"),
+        "this address isn't the service: {fix}"
+    );
+
+    let out = env
+        .cmd(&["--json", "doctor"])
+        .env("ANOTHER_SERVER", &dead)
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let (detail, _) = doctor_check(&report, "server", "fail");
+    assert!(
+        detail.contains(&dead),
+        "ANOTHER_SERVER counts too: {detail}"
+    );
+}
+
+#[test]
+fn doctor_does_not_ask_a_manager_when_no_service_is_installed() {
+    for platform in ["systemd", "launchd"] {
+        let env = Env::new(platform);
+        let dead = format!("http://127.0.0.1:{}", free_port());
+        let report = doctor(&env, &["--server", &dead]);
+        doctor_check(&report, "service", "skip");
+        assert!(env.calls().is_empty(), "{platform}: {:?}", env.calls());
+    }
+}
+
+#[test]
+fn doctor_warns_when_the_manager_cannot_be_asked() {
+    let env = Env::new("systemd");
+    let bind = format!("127.0.0.1:{}", free_port());
+    env.json(&["service", "install", "--bind", &bind]);
+    std::fs::remove_file(env.bin.join("systemctl")).unwrap();
+    let dead = format!("http://127.0.0.1:{}", free_port());
+    // PATH holds only the remaining fakes, so a real systemctl can't answer either.
+    let out = env
+        .cmd(&["--json", "doctor", "--server", &dead])
+        .env("PATH", &env.bin)
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let (detail, _) = doctor_check(&report, "service", "warn");
+    assert!(detail.contains("systemctl"), "{detail}");
 }
 
 #[test]
