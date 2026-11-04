@@ -3,6 +3,7 @@
 //! remote-agent presence. Tests only; anything surprising is recorded in BUGS-FOUND.md.
 
 use another_core::*;
+use chrono::TimeZone;
 
 type Handle = std::sync::Arc<std::sync::atomic::AtomicI64>;
 
@@ -64,12 +65,15 @@ fn scheduled_summary_sends_once_a_day_and_not_when_off() {
             },
         )
         .unwrap();
+    // Named for the local date, which is how this wrapper differs from the fixed-offset call.
+    let local_day = chrono::Local
+        .timestamp_millis_opt(NOV_21)
+        .unwrap()
+        .date_naive();
+    let subject = format!("[summary] {local_day}");
     assert!(
-        inbox
-            .messages
-            .iter()
-            .any(|m| m.message.subject.starts_with("[summary]")),
-        "{:?}",
+        inbox.messages.iter().any(|m| m.message.subject == subject),
+        "wanted {subject:?} in {:?}",
         inbox
             .messages
             .iter()
@@ -77,8 +81,9 @@ fn scheduled_summary_sends_once_a_day_and_not_when_off() {
             .collect::<Vec<_>>()
     );
 
-    // Later the same day: not again (several sweepers may share one home).
-    advance(&h, HOUR);
+    // A second sweep at the same instant: not again (several sweepers may share one home).
+    // Advancing the clock here could cross local midnight in some timezones, so the rules
+    // about later times are in the fixed-offset test below.
     assert_eq!(s.send_scheduled_summary().unwrap(), None);
     assert!(s.summary_schedule().unwrap().last_sent_at.is_some());
 
@@ -86,6 +91,51 @@ fn scheduled_summary_sends_once_a_day_and_not_when_off() {
     s.set_summary_schedule(None, None).unwrap();
     advance(&h, 24 * HOUR);
     assert_eq!(s.send_scheduled_summary().unwrap(), None);
+}
+
+#[test]
+fn scheduled_summary_days_follow_the_offset_it_is_given() {
+    let east = |hours| chrono::FixedOffset::east_opt(hours * 3600).unwrap();
+    let schedule = |s: &Store| {
+        s.register_agent_trusted(RegisterAgent {
+            name: "pat".into(),
+            program: Program::Human,
+            project: None,
+            model: None,
+            description: None,
+        })
+        .unwrap();
+        s.set_summary_schedule(Some("00:00"), Some("mail:pat"))
+            .unwrap();
+    };
+
+    // NOV_21 is 00:00 at UTC: an hour later is the same day, and a day later is not.
+    let (s, h) = store();
+    schedule(&s);
+    assert!(s.send_scheduled_summary_at(east(0)).unwrap().is_some());
+    advance(&h, HOUR);
+    assert_eq!(s.send_scheduled_summary_at(east(0)).unwrap(), None);
+    advance(&h, 24 * HOUR);
+    assert!(s.send_scheduled_summary_at(east(0)).unwrap().is_some());
+
+    // At UTC-1 NOV_21 is 23:00 the day before, so the same hour does cross midnight.
+    let (s, h) = store();
+    schedule(&s);
+    assert!(s.send_scheduled_summary_at(east(-1)).unwrap().is_some());
+    advance(&h, HOUR);
+    assert!(s.send_scheduled_summary_at(east(-1)).unwrap().is_some());
+    let inbox = s.inbox("pat", InboxQuery::default()).unwrap();
+    let mut subjects: Vec<_> = inbox
+        .messages
+        .iter()
+        .map(|m| m.message.subject.as_str())
+        .collect();
+    subjects.sort_unstable();
+    assert_eq!(
+        subjects,
+        ["[summary] 2026-11-20", "[summary] 2026-11-21"],
+        "{inbox:?}"
+    );
 }
 
 #[test]
