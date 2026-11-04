@@ -84,17 +84,25 @@ pub fn run(opts: &DoctorOptions) -> Report {
         .clone()
         .or_else(|| service.url.clone())
         .unwrap_or_else(|| DEFAULT_SERVER.to_string());
-    let down_hint = service
-        .url
-        .as_deref()
-        .filter(|url| *url == server.trim_end_matches('/'))
-        .and(service.down_hint);
+    let is_service = service.url.as_deref() == Some(server.trim_end_matches('/'));
+    let down_hint = service.down_hint.filter(|_| is_service);
+    // How to run this server somewhere else.
+    let move_command = if is_service {
+        "another service install --bind"
+    } else {
+        "another serve --bind"
+    };
     checks.push(service.check);
-    checks.push(check_server(&server, node_id.as_deref(), down_hint));
+    checks.push(check_server(
+        &server,
+        node_id.as_deref(),
+        down_hint,
+        move_command,
+    ));
     match &store {
         Some(s) => {
             checks.extend(check_tokens(s));
-            checks.extend(check_resources(s, &server));
+            checks.extend(check_resources(s, &server, move_command));
         }
         None => {
             for area in ["tokens", "resources"] {
@@ -189,53 +197,44 @@ fn check_service(opts: &DoctorOptions) -> ServiceFinding {
             None,
         );
     };
-    if let Err(e) = service::Platform::current() {
-        return finding(Level::Skip, e.to_string(), None);
-    }
-    // `status` reads the definition first and only asks the manager if there is one.
-    let status = match service::status(user_home, &opts.another_home, 0) {
-        Ok(s) => s,
+    let platform = match service::Platform::current() {
+        Ok(p) => p,
+        Err(e) => return finding(Level::Skip, e.to_string(), None),
+    };
+    let definition = service::definition_path(platform, user_home);
+    const REINSTALL: &str = "run `another service install` with the flags you want to keep";
+    let text = match std::fs::read_to_string(&definition) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return finding(
+                Level::Skip,
+                "no background service installed (optional)".into(),
+                None,
+            )
+        }
         Err(e) => {
             return finding(
                 Level::Warn,
-                format!("can't ask the service manager: {e:#}"),
-                Some("run `another service status` once the service manager is available".into()),
+                format!(
+                    "can't read the service definition {}: {e}",
+                    definition.display()
+                ),
+                Some(REINSTALL.into()),
             )
         }
     };
-    if !status.installed {
-        return finding(
-            Level::Skip,
-            "no background service installed (optional)".into(),
-            None,
-        );
-    }
-    let reinstall = "run `another service install` with the flags you want to keep";
-    let (Some(exe), Some(bind)) = (status.args.first(), status.bind.as_deref()) else {
+    let args = service::installed_args(platform, &text);
+    let bind = service::bind_of(&args);
+    let (Some(exe), Some(bind)) = (args.first(), bind.as_deref()) else {
         return finding(
             Level::Warn,
-            format!("can't read the service definition {}", status.definition),
-            Some(reinstall.into()),
+            format!("can't read the service definition {}", definition.display()),
+            Some(REINSTALL.into()),
         );
     };
-    let exe = Path::new(exe);
-    if !is_executable(exe) {
-        return finding(
-            Level::Fail,
-            format!(
-                "the service runs {}, which is missing or not executable",
-                exe.display()
-            ),
-            Some(reinstall.into()),
-        );
-    }
-    let mine = same_path(
-        service::home_of(&status.args).as_deref(),
-        &opts.another_home,
-    );
-    if !mine {
-        let theirs = service::home_of(&status.args)
-            .map_or("no data directory".into(), |h| h.display().to_string());
+    let service_home = service::home_of(&args);
+    if !same_path(service_home.as_deref(), &opts.another_home) {
+        let theirs = service_home.map_or("no data directory".into(), |h| h.display().to_string());
         return finding(
             Level::Warn,
             format!(
@@ -247,8 +246,44 @@ fn check_service(opts: &DoctorOptions) -> ServiceFinding {
             )),
         );
     }
+    // From here the service is this home's server, whatever state it is in.
     let url = Some(bind_url(bind));
-    if !status.loaded {
+    let exe = Path::new(exe);
+    if !is_executable(exe) {
+        return ServiceFinding {
+            url,
+            down_hint: Some(REINSTALL),
+            ..finding(
+                Level::Fail,
+                format!(
+                    "the service runs {}, which is missing or not executable",
+                    exe.display()
+                ),
+                Some(REINSTALL.into()),
+            )
+        };
+    }
+    let state =
+        service::manager_reachable(platform).and_then(|()| service::manager_state(platform));
+    let (loaded, pid) = match state {
+        Ok(state) => state,
+        Err(e) => {
+            return ServiceFinding {
+                url,
+                down_hint: Some(
+                    "the service manager isn't answering; see `another service status`",
+                ),
+                ..finding(
+                    Level::Warn,
+                    format!("can't ask the service manager: {e:#}"),
+                    Some(
+                        "run `another service status` once the service manager is available".into(),
+                    ),
+                )
+            }
+        }
+    };
+    if !loaded {
         return ServiceFinding {
             url,
             down_hint: Some("start the installed service: `another service start`"),
@@ -260,7 +295,7 @@ fn check_service(opts: &DoctorOptions) -> ServiceFinding {
         };
     }
     let logs = Some("the service is loaded but not answering; see `another service logs`");
-    let Some(pid) = status.pid else {
+    let Some(pid) = pid else {
         return ServiceFinding {
             url,
             down_hint: logs,
@@ -301,7 +336,12 @@ pub fn bind_url(bind: &str) -> String {
     format!("http://{}", SocketAddr::new(ip, addr.port()))
 }
 
-fn check_server(base: &str, node_id: Option<&str>, down_hint: Option<&str>) -> Check {
+fn check_server(
+    base: &str,
+    node_id: Option<&str>,
+    down_hint: Option<&str>,
+    move_command: &str,
+) -> Check {
     let url = format!("{}/health", base.trim_end_matches('/'));
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
@@ -345,10 +385,9 @@ fn check_server(base: &str, node_id: Option<&str>, down_hint: Option<&str>) -> C
                     "server",
                     Level::Warn,
                     format!("{base} answers, but for another Another home (node {theirs})"),
-                    Some(
-                        "point ANOTHER_HOME at the home that server uses, or start one for this home on another port: `another serve --bind 127.0.0.1:7467`"
-                            .into(),
-                    ),
+                    Some(format!(
+                        "point ANOTHER_HOME at the home that server uses, or start one for this home on another port: `{move_command} 127.0.0.1:7467`"
+                    )),
                 ),
                 _ => check(
                     "server",
@@ -362,10 +401,9 @@ fn check_server(base: &str, node_id: Option<&str>, down_hint: Option<&str>) -> C
             "server",
             Level::Fail,
             format!("{base} answers, but it is not Another (port taken by another program)"),
-            Some(
-                "stop that program, or run Another on a free port: `another serve --bind 127.0.0.1:7467`"
-                    .into(),
-            ),
+            Some(format!(
+                "stop that program, or run Another on a free port: `{move_command} 127.0.0.1:7467`"
+            )),
         ),
     }
 }
@@ -448,7 +486,7 @@ fn check_tokens(store: &Store) -> Vec<Check> {
     out
 }
 
-fn check_resources(store: &Store, server: &str) -> Vec<Check> {
+fn check_resources(store: &Store, server: &str, move_command: &str) -> Vec<Check> {
     let mut out = Vec::new();
     let live = match store.find_resources(ResourceFilter {
         local_only: true,
@@ -497,7 +535,9 @@ fn check_resources(store: &Store, server: &str) -> Vec<Check> {
                     "port {port} is Another's server port but is registered for {}",
                     claims.join(", ")
                 ),
-                Some("move one of them: `another serve --bind 127.0.0.1:<free port>`".into()),
+                Some(format!(
+                    "move one of them: `{move_command} 127.0.0.1:<free port>`"
+                )),
             ));
         }
     }
