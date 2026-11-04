@@ -1090,3 +1090,45 @@ fn re_registering_a_linked_resource_goes_through_the_gate() {
         SpendLeaseStatus::Active
     );
 }
+
+#[test]
+fn open_leases_count_toward_earlier_periods_they_overlap() {
+    let (s, clock) = store();
+    account(&s, "cpu", SpendKind::Server, "USD", Some(100.0), |a| {
+        a.cost_per_hour = Some(3.0)
+    });
+    // Nov 30 23:00, kept open past the Dec 1 reset (long TTL, no release).
+    advance(&clock, 9 * 24 * HOUR + 23 * HOUR);
+    s.borrow_spend(
+        BorrowSpend {
+            agent: "codex@shop".into(),
+            account: "cpu".into(),
+            ttl_seconds: Some(4 * 3600),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    advance(&clock, 2 * HOUR); // Dec 1 01:00
+    let accrued = |period: &str| {
+        let r = s
+            .spend_report(
+                SpendQuery {
+                    period: period.parse().unwrap(),
+                    account: Some("cpu".into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        find(&r, "cpu").accrued
+    };
+    assert_eq!(
+        accrued("previous"),
+        3.0,
+        "November's hour, while still open"
+    );
+    assert_eq!(accrued("2026-11"), 3.0);
+    assert_eq!(accrued("current"), 3.0, "December's hour");
+    assert_eq!(accrued("2026-10"), 0.0, "before the lease");
+}
