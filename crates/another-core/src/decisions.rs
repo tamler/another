@@ -1738,27 +1738,34 @@ impl Store {
         scope: Option<&TokenScope>,
     ) -> Result<Decision> {
         self.write(|tx| {
-            // Deadlines first: a decision whose choose_default deadline has passed already has
-            // its outcome, and cancelling must not discard it.
             crate::holds::sweep_tx(tx)?;
-            let row = load_in(tx, tx.node_id, key, scope)?;
-            let me = resolve_agent(tx, tx.node_id, agent)?;
-            if me.id != row.asker_id {
-                return Err(Error::Forbidden(format!(
-                    "only {} (who asked) can cancel this decision",
-                    row.d.asker
-                )));
-            }
-            if row.d.status != DecisionStatus::Open {
-                return Err(Error::Conflict(format!(
-                    "decision {} is already {}",
-                    row.d.decision_id,
-                    row.d.status.as_str()
-                )));
-            }
+            let checked = (|| {
+                let row = load_in(tx, tx.node_id, key, scope)?;
+                let me = resolve_agent(tx, tx.node_id, agent)?;
+                if me.id != row.asker_id {
+                    return Err(Error::Forbidden(format!(
+                        "only {} (who asked) can cancel this decision",
+                        row.d.asker
+                    )));
+                }
+                if row.d.status != DecisionStatus::Open {
+                    return Err(Error::Conflict(format!(
+                        "decision {} is already {}",
+                        row.d.decision_id,
+                        row.d.status.as_str()
+                    )));
+                }
+                Ok((row, me))
+            })();
+            let (row, me) = match checked {
+                Ok(actors) => actors,
+                // Refusing cancellation must commit the sweep, while cancellation
+                // mutations below still roll back together if any of them fail.
+                Err(error) => return Ok(Err(error)),
+            };
             cancel_row_tx(tx, &me, &row, reason.as_deref())?;
-            Ok(load(tx, tx.node_id, &row.d.decision_id)?.d)
-        })
+            Ok(Ok(load(tx, tx.node_id, &row.d.decision_id)?.d))
+        })?
     }
 }
 
@@ -1823,6 +1830,72 @@ pub fn decision_markdown(d: &Decision) -> String {
         None => {}
     }
     out
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use crate::Clock;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn cancellation_cannot_discard_a_default_due_at_its_transaction_time() {
+        let deadline = 1_700_000_060_000;
+        let clock = Arc::new(AtomicI64::new(deadline - 60_000));
+        let s = Store::open_in_memory(Clock::Ticking(clock.clone())).unwrap();
+        s.ensure_project("t", "/work/shop").unwrap();
+        s.register_agent_trusted(RegisterAgent {
+            name: "coder".into(),
+            program: Program::Codex,
+            project: Some("/work/shop".into()),
+            model: None,
+            description: None,
+        })
+        .unwrap();
+        let d = s
+            .ask_decision(
+                NewDecision {
+                    agent: "coder@shop".into(),
+                    question: "Proceed?".into(),
+                    options: ["go", "wait"]
+                        .into_iter()
+                        .map(|value| DecisionOption {
+                            value: value.into(),
+                            label: value.into(),
+                            description: None,
+                        })
+                        .collect(),
+                    deadline_at: Some(deadline),
+                    on_timeout: DecisionTimeout::ChooseDefault,
+                    default_value: Some("wait".into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        // A separate sweep would run just before the deadline, and its following
+        // cancellation transaction at the deadline. The outcome must use its own time.
+        clock.store(deadline - 1, Ordering::SeqCst);
+        match s.cancel_decision("coder@shop", &d.decision_id, None, None) {
+            Ok(cancelled) => {
+                let at = chrono::DateTime::parse_from_rfc3339(&cancelled.updated_at)
+                    .unwrap()
+                    .timestamp_millis();
+                assert!(
+                    at < deadline,
+                    "cancellation at {at} discarded a due default"
+                );
+            }
+            Err(e) => {
+                assert_eq!(e.code(), "conflict", "{e}");
+                assert!(s.events(100).unwrap().iter().any(|event| {
+                    event.kind == "decision.expired"
+                        && event.payload["decision_id"] == d.decision_id
+                }));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
