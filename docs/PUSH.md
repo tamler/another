@@ -122,7 +122,7 @@ X-Another-Signature: sha256=5f1c...
 
 ### Verifying signatures
 
-Compute HMAC-SHA256 with the secret as the key over `"<X-Another-Timestamp>.<raw body>"`, hex-encode it, and compare it with the part of `X-Another-Signature` after `sha256=` using a constant-time comparison. Reject requests whose timestamp is more than a few minutes old.
+Compute HMAC-SHA256 with the secret as the key over `"<X-Another-Timestamp>.<raw body>"`, hex-encode it, and compare it with the part of `X-Another-Signature` after `sha256=` using a constant-time comparison. Reject requests whose timestamp is more than a few minutes old. Each retry is signed again with a new timestamp but keeps its `X-Another-Delivery` id, so dedupe on that id.
 
 ```python
 import hmac, hashlib, time
