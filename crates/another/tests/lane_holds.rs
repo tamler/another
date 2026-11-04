@@ -373,3 +373,16 @@ fn edited_files_follow_symlinks() {
     // Outside the project stays outside.
     assert!(edited_files(&input(&dir.path().join("elsewhere.rs")), &link, &link).is_empty());
 }
+
+#[test]
+fn patch_context_lines_are_not_file_headers() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    // Editing a document that shows a patch: its unchanged context line looks like a header.
+    let patch = "*** Begin Patch\n*** Update File: docs/howto.md\n@@\n *** Update File: src/api.rs\n-old\n+new\n*** End Patch\n";
+    let input = HookInput::parse(
+        &json!({ "tool_name": "apply_patch", "tool_input": { "patch": patch } }).to_string(),
+    );
+    assert_eq!(edited_files(&input, root, root), vec!["docs/howto.md"]);
+}

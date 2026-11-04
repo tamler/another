@@ -931,7 +931,7 @@ fn on_demand_people_cannot_relay_until_confirmed() {
     .unwrap();
     // A first-time untrusted registration can't pick the role either.
     let e = s
-        .register_agent_trusted(RegisterAgent {
+        .register_agent(RegisterAgent {
             name: "minted".into(),
             program: Program::Human,
             project: None,
