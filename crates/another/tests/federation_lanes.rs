@@ -218,6 +218,30 @@ fn lanes_decisions_and_holds_across_nodes() {
         spoke.store.lane(&mirror.lane_id, None).unwrap().lane.status,
         LaneStatus::Working
     );
+    // Same without a project: an agent with no project naming the mirror by id.
+    agent(&spoke.store, "roamer", Program::Claude, None);
+    let asked = spoke.store.ask_decision(
+        NewDecision {
+            agent: "roamer".into(),
+            question: "Ship it?".into(),
+            options: vec![
+                DecisionOption {
+                    value: "yes".into(),
+                    label: "Yes".into(),
+                    description: None,
+                },
+                DecisionOption {
+                    value: "no".into(),
+                    label: "No".into(),
+                    description: None,
+                },
+            ],
+            lane: Some(mirror.lane_id.clone()),
+            ..Default::default()
+        },
+        None,
+    );
+    assert_eq!(asked.unwrap_err().code(), "conflict");
     // The owner's changes replay onto the mirror in order.
     for to in [
         LaneStatus::Blocked,
@@ -311,6 +335,22 @@ fn lanes_decisions_and_holds_across_nodes() {
         .expect("mirrored on the hub");
     assert_eq!(m.node.as_deref(), Some("laptop"));
     assert_eq!(m.asker, "codex@shop@laptop");
+    // A coding agent can't relay: refused here, before the mirror is marked sent.
+    let refused = hub.store.answer_decision(
+        AnswerDecision {
+            decision: d.decision_id.clone(),
+            value: Some("yes".into()),
+            relayed_by: Some("claude@shop".into()),
+            ..Default::default()
+        },
+        None,
+    );
+    assert_eq!(refused.unwrap_err().code(), "forbidden");
+    assert_eq!(
+        hub.store.decision(&d.decision_id, None).unwrap().status,
+        DecisionStatus::Open,
+        "the mirror still takes a manager's answer"
+    );
     let relayed = hub
         .store
         .answer_decision(

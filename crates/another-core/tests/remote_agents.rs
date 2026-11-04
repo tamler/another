@@ -736,3 +736,104 @@ fn managers_can_kick_over_mcp_within_their_projects() {
         .iter()
         .all(|e| !e.payload.to_string().contains("done for today")));
 }
+
+#[test]
+fn round3_scoped_kick_and_persistent_leave() {
+    let (s, _) = hub();
+    s.register_agent_trusted(RegisterAgent {
+        name: "boss".into(),
+        program: Program::GrokBot,
+        project: Some("/work/shop".into()),
+        model: None,
+        description: None,
+    })
+    .unwrap();
+    let hold_in = |agent: &str, project: &str, path: &str| {
+        s.acquire_holds(AcquireHolds {
+            agent: agent.into(),
+            project: project.into(),
+            paths: vec![path.into()],
+            ttl_seconds: Some(3600),
+            exclusive: true,
+            reason: None,
+            lane: None,
+        })
+        .unwrap();
+    };
+    // A shop-scoped manager kicks an agent that also holds a vault file: the vault hold stays.
+    join(&s, &invite(&s, |i| i.agent = "wide".into()).code).unwrap();
+    hold_in("wide@shop", "shop", "src/w.rs");
+    hold_in("wide@shop", "vault", "keys/w.txt");
+    let t = s
+        .create_token("boss@shop", &["/work/shop".into()], None, None)
+        .unwrap();
+    let scope = s.verify_token(&t.secret).unwrap();
+    let d = s
+        .kick_agent_as("boss@shop", "wide@shop", None, Some(&scope))
+        .unwrap();
+    assert_eq!(d.holds_released, 1);
+    let left: Vec<String> = s
+        .holds(HoldFilter::default())
+        .unwrap()
+        .into_iter()
+        .filter(|h| h.agent == "wide@shop")
+        .map(|h| h.project)
+        .collect();
+    assert_eq!(left, vec!["vault"]);
+
+    // A persistent agent's leave ends its resource and spend leases like a session end.
+    let j = join(
+        &s,
+        &invite(&s, |i| {
+            i.agent = "keeper".into();
+            i.ephemeral = false;
+        })
+        .code,
+    )
+    .unwrap();
+    let pscope = s.verify_token(&j.token).unwrap();
+    s.register_resource(RegisterResource {
+        agent: "keeper@shop".into(),
+        kind: ResourceKind::DevServer,
+        name: "vite@5173".into(),
+        endpoint: None,
+        port: None,
+        pid: None,
+        project: Some("shop".into()),
+        purpose: None,
+        mode: LeaseMode::Shared,
+        ttl_seconds: Some(3600),
+        metadata: None,
+    })
+    .unwrap();
+    s.create_spend_account(
+        NewSpendAccount {
+            name: "cpu".into(),
+            kind: SpendKind::Server,
+            unit: "USD".into(),
+            budget: None,
+            period: SpendPeriod::Monthly,
+            reset_day: 1,
+            cost_per_hour: Some(1.0),
+            requires_approval: false,
+            approver: None,
+            project: Some("shop".into()),
+            description: None,
+        },
+        None,
+    )
+    .unwrap();
+    s.borrow_spend(
+        BorrowSpend {
+            agent: "keeper@shop".into(),
+            account: "cpu".into(),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    let d = s.leave_scoped("keeper@shop", Some(&pscope)).unwrap();
+    assert_eq!(d.leases_closed, 2, "{d:?}");
+    assert!(s.spend_leases(false, None).unwrap().is_empty());
+    assert!(s.verify_token(&j.token).is_ok(), "persistent: token kept");
+}
