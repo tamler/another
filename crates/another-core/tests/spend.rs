@@ -503,16 +503,25 @@ fn token_scope_hides_other_projects_spend() {
         Some(&shop),
     );
     assert_eq!(create.unwrap_err().code(), "forbidden");
-    let r = s.record_spend(
-        RecordSpend {
-            agent: Some("manager".into()),
-            account: "vault-domain".into(),
-            amount: 1.0,
-            ..Default::default()
-        },
-        Some(&shop),
+    // Another project's account is the same not_found as a missing one.
+    let rec = |account: &str| {
+        s.record_spend(
+            RecordSpend {
+                agent: Some("manager".into()),
+                account: account.into(),
+                amount: 1.0,
+                ..Default::default()
+            },
+            Some(&shop),
+        )
+        .unwrap_err()
+    };
+    let (hidden, missing) = (rec("vault-domain"), rec("no-such-account"));
+    assert_eq!((hidden.code(), missing.code()), ("not_found", "not_found"));
+    assert_eq!(
+        hidden.to_string().replace("vault-domain", "X"),
+        missing.to_string().replace("no-such-account", "X")
     );
-    assert_eq!(r.unwrap_err().code(), "forbidden");
     let r = s.record_spend(
         RecordSpend {
             agent: Some("manager".into()),
@@ -825,4 +834,68 @@ fn ending_a_session_closes_spend_leases() {
         s.lane("train", None).unwrap().lane.status,
         LaneStatus::Working
     );
+}
+
+#[test]
+fn round3_linked_release_explicit_month_and_period_checks() {
+    let (s, clock) = store();
+    account(&s, "pods", SpendKind::GpuPod, "USD", Some(100.0), |a| {
+        a.cost_per_hour = Some(2.0)
+    });
+    gpu_resource(&s, 86_400);
+    let target = ResourceRef::parse("gpu:pod:a100").unwrap();
+    s.link_resource_spend(&target, Some("pods"), None).unwrap();
+    s.borrow_resource("codex@shop", &target, Some(7200))
+        .unwrap();
+    let lease = s.spend_leases(false, None).unwrap()[0].clone();
+    // The spend lease can't be ended while its resource lease is held.
+    let e = s
+        .release_spend("codex@shop", &lease.lease_id, None)
+        .unwrap_err();
+    assert_eq!(e.code(), "conflict");
+    assert!(e.to_string().contains("release the resource"), "{e}");
+
+    // An explicit month naming the current period counts open leases like `current`.
+    advance(&clock, HOUR);
+    let cur = find(&report(&s, None), "pods").accrued;
+    assert_eq!(cur, 2.0);
+    let named = s
+        .spend_report(
+            SpendQuery {
+                period: "2026-11".parse().unwrap(),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    assert_eq!(find(&named, "pods").accrued, 2.0);
+    assert_eq!(find(&named, "pods").active_leases, 1);
+
+    // Out-of-range years are invalid input, never a panic.
+    for bad in ["999999-01", "0-05", "10000-01"] {
+        assert_eq!(
+            bad.parse::<PeriodSel>().unwrap_err().code(),
+            "invalid",
+            "{bad}"
+        );
+    }
+
+    // Releasing the resource ends the spend lease with it.
+    s.release_resource("codex@shop", &target, false).unwrap();
+    assert!(s.spend_leases(false, None).unwrap().is_empty());
+
+    // A hidden lease is the same not_found as a missing one.
+    account(&s, "vault-cpu", SpendKind::Server, "USD", None, |a| {
+        a.cost_per_hour = Some(1.0);
+        a.project = Some("vault".into());
+    });
+    let vl = borrow(&s, "vaulter@vault", "vault-cpu", None);
+    let t = s
+        .create_token("codex@shop", &["/work/shop".into()], None, None)
+        .unwrap();
+    let shop = s.verify_token(&t.secret).unwrap();
+    let e = s
+        .release_spend("codex@shop", &vl.lease.lease_id, Some(&shop))
+        .unwrap_err();
+    assert_eq!(e.code(), "not_found");
 }
