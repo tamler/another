@@ -1954,8 +1954,10 @@ pub(crate) fn spent_since(
     since_ms: i64,
     scope: Option<&TokenScope>,
 ) -> Result<Vec<(String, String, f64)>> {
+    // Keyed by account id: an archived account and a new one with the same name are
+    // different accounts (and may have different units).
     let mut stmt = conn.prepare(
-        "SELECT a.name, a.unit, e.amount, e.project_id, e.agent_id, a.project_id
+        "SELECT a.account_id, a.unit, e.amount, e.project_id, e.agent_id, a.project_id
          FROM spend_entries e JOIN spend_accounts a ON a.account_id = e.account_id
          WHERE e.node_id = ?1 AND e.at >= ?2 ORDER BY a.name",
     )?;
@@ -1972,18 +1974,46 @@ pub(crate) fn spent_since(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut out: Vec<(String, String, f64)> = Vec::new();
-    for (name, unit, amount, project, agent, account_project) in rows {
+    for (account_id, unit, amount, project, agent, account_project) in rows {
         if !account_visible(conn, scope, account_project.as_deref())?
             || !attributed_visible(conn, scope, project.as_deref(), agent.as_deref())?
         {
             continue;
         }
-        match out.iter_mut().find(|(n, _, _)| *n == name) {
+        match out.iter_mut().find(|(id, _, _)| *id == account_id) {
             Some(x) => x.2 = round(x.2 + amount),
-            None => out.push((name, unit, round(amount))),
+            None => out.push((account_id, unit, round(amount))),
         }
     }
     Ok(out)
+}
+
+/// Pending spend approvals `scope` may see, counted in SQL (no listing limit).
+pub(crate) fn pending_approvals(
+    conn: &Connection,
+    node_id: &str,
+    scope: Option<&TokenScope>,
+) -> Result<u32> {
+    let mut stmt = conn.prepare(
+        "SELECT project_id, agent_id, COUNT(*) FROM spend_leases
+         WHERE node_id = ?1 AND status = 'pending_approval' GROUP BY project_id, agent_id",
+    )?;
+    let groups = stmt
+        .query_map([node_id], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut n = 0;
+    for (project, agent, count) in groups {
+        if attributed_visible(conn, scope, project.as_deref(), Some(&agent))? {
+            n += count as u32;
+        }
+    }
+    Ok(n)
 }
 
 #[cfg(test)]
