@@ -1195,7 +1195,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             description,
         }) => {
             let project = project.as_deref().map(abs).transpose()?;
-            let a = store.register_agent(RegisterAgent {
+            let a = store.register_agent_trusted(RegisterAgent {
                 name,
                 program: program.parse::<Program>()?,
                 project,

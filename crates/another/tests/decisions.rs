@@ -179,7 +179,7 @@ async fn agent_asks_manager_answers_over_http() {
         .unwrap()
         .contains("1. Ship behind a flag (`ship`)"));
     let (status, _) = get(format!("/decisions/{vault_id}")).await;
-    assert_eq!(status, 403);
+    assert_eq!(status, 404, "a hidden decision is a missing one");
     assert_eq!(
         http.get(format!("{base}/decisions"))
             .send()
@@ -206,7 +206,7 @@ async fn agent_asks_manager_answers_over_http() {
         }
     };
     let (status, _) = post(vault_id.clone(), json!({ "value": "yes" })).await;
-    assert_eq!(status, 403);
+    assert_eq!(status, 404, "a hidden decision is a missing one");
     let (status, err) = post(shop_id.clone(), json!({ "value": "later" })).await;
     assert_eq!(
         (status, err["error"]["code"].as_str()),
@@ -237,7 +237,7 @@ async fn agent_asks_manager_answers_over_http() {
     // The asking agent got the answer in its inbox.
     let r = call(&c, "fetch_inbox", json!({})).await;
     let inbox = body(&r).to_string();
-    assert!(inbox.contains("[decision] Ship behind a flag"), "{inbox}");
+    assert!(inbox.contains("[decision] answered: ship"), "{inbox}");
 
     // Audited.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -349,7 +349,7 @@ fn decision_cli_and_wake() {
     assert!(md.contains("**Decision for sam**"));
     assert!(md.contains("2. SQLite (`sqlite`)"));
     let inbox = ok(home, &["inbox", "--agent", "sam"]);
-    assert!(inbox.contains("[decision] Which database?"), "{inbox}");
+    assert!(inbox.contains("[decision] claude@shop asks sam"), "{inbox}");
 
     // Wake target through a fake herdr that records its arguments.
     let log = home.join("herdr.log");
@@ -406,7 +406,7 @@ fn decision_cli_and_wake() {
     );
 
     let inbox = ok(home, &["--json", "inbox", "--agent", "claude@shop"]);
-    assert!(inbox.contains("[decision] Postgres"));
+    assert!(inbox.contains("[decision] answered: pg"), "{inbox}");
     assert!(inbox.contains("Answered by sam"));
 
     let out = bin(home, &["decision", "answer", &id, "sqlite"])
