@@ -319,14 +319,21 @@ fn agent_by_id(conn: &Connection, id: &str) -> Result<AgentRef> {
 
 /// The person as an agent: found by name among project-less agents, else registered.
 fn ensure_human(tx: &Tx<'_>, name: &str) -> Result<AgentRef> {
-    let existing: Option<String> = tx
+    let existing: Option<(String, String)> = tx
         .query_row(
-            "SELECT agent_id FROM agents WHERE node_id = ?1 AND name = ?2 AND project_id IS NULL",
+            "SELECT agent_id, program FROM agents WHERE node_id = ?1 AND name = ?2 AND project_id IS NULL",
             params![tx.node_id, name],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    if let Some(id) = existing {
+    if let Some((id, program)) = existing {
+        // Decisions go to people. An agent with that name is not one, and making it one is
+        // the person's call on this machine.
+        if program != Program::Human.as_str() {
+            return Err(Error::Invalid(format!(
+                "{name} is registered as a {program} agent, not a person (program human): name another person, or re-register it with `another agent register {name} --program human`"
+            )));
+        }
         return agent_by_id(tx, &id);
     }
     let agent = register_tx(
@@ -990,7 +997,9 @@ impl Store {
                 Some(v) => Some(
                     d.options
                         .iter()
-                        .find(|o| o.value == *v || o.value.eq_ignore_ascii_case(v))
+                        // An exact match wins over a case-insensitive one ("a" vs "A").
+                        .find(|o| o.value == *v)
+                        .or_else(|| d.options.iter().find(|o| o.value.eq_ignore_ascii_case(v)))
                         .or_else(|| {
                             // Accept the option number shown on the phone (1-based).
                             v.parse::<usize>()

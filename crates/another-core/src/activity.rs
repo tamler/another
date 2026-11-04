@@ -509,15 +509,12 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             )
         }
         "resource.registered" => (
+            // The purpose is free text: it stays in the registry (`resource_find`).
             format!(
-                "{actor} registered {} {} ({}){}",
+                "{actor} registered {} {} ({})",
                 s("kind"),
                 s("name"),
-                s("mode"),
-                p.get("purpose")
-                    .and_then(Value::as_str)
-                    .map(|x| format!(" for {x}"))
-                    .unwrap_or_default()
+                s("mode")
             ),
             json!({ "resource_id": s("resource_id") }),
         ),
@@ -578,11 +575,8 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             )
         }
         "resource.reap_requested" => (
-            format!(
-                "{actor} asked a human to reap {}: {}",
-                s("target"),
-                s("reason")
-            ),
+            // The reason is free text; the person reads it with the reap request.
+            format!("{actor} asked a human to reap {}", s("target")),
             json!({ "target": s("target") }),
         ),
         "resource.reaped" => (

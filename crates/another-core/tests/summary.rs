@@ -29,7 +29,7 @@ fn day() -> Store {
         ("codex", Some("/work/shop")),
         ("vaulter", Some("/work/vault")),
     ] {
-        s.register_agent(RegisterAgent {
+        s.register_agent_trusted(RegisterAgent {
             name: name.into(),
             program: Program::Claude,
             project: project.map(Into::into),
@@ -304,7 +304,7 @@ fn since_event_ids_resolve_through_the_scoped_feed() {
 #[test]
 fn people_hidden_budgets_and_truncation_in_the_digest() {
     let s = day();
-    s.register_agent(RegisterAgent {
+    s.register_agent_trusted(RegisterAgent {
         name: "sam".into(),
         program: Program::Human,
         project: None,
@@ -381,7 +381,7 @@ fn scheduled_summary_by_mail_and_webhook() {
     let s = Store::open_in_memory(clock).unwrap();
     s.ensure_project("t", "/work/shop").unwrap();
     for (name, program) in [("jacob", Program::Human), ("manager", Program::GrokBot)] {
-        s.register_agent(RegisterAgent {
+        s.register_agent_trusted(RegisterAgent {
             name: name.into(),
             program,
             project: None,
@@ -551,7 +551,7 @@ fn sweepers_sharing_a_home_send_the_rollup_once() {
     let (clock, _h) = Clock::manual(NOV_21 + 10 * HOUR);
     let first = Store::open_with_clock(dir.path(), clock.clone()).unwrap();
     first
-        .register_agent(RegisterAgent {
+        .register_agent_trusted(RegisterAgent {
             name: "jacob".into(),
             program: Program::Human,
             project: None,

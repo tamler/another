@@ -1040,6 +1040,19 @@ fn pre_edit(
     if files.is_empty() {
         return Ok(String::new());
     }
+    // File names from the tool input are literal: `notes[.md` must not be read as a glob
+    // (an invalid one would make the whole acquisition fail and the hook fail open).
+    let root_s = root.to_string_lossy().trim_end_matches('/').to_string();
+    let files: Vec<String> = files
+        .iter()
+        .map(|f| match f.strip_prefix(&root_s) {
+            // Escape only the part below the project root (the root may contain `[` too).
+            Some(rest) if rest.starts_with('/') => {
+                another_core::glob_escape(rest.trim_start_matches('/'))
+            }
+            _ => another_core::glob_escape(f),
+        })
+        .collect();
     let lane = std::env::var("ANOTHER_LANE")
         .ok()
         .filter(|l| !l.trim().is_empty());
