@@ -40,6 +40,7 @@ All notable changes to Another. Unreleased work is listed under the next version
 - **Lane-aware holds** ([design](docs/design/04-lane-holds.md)):
   - Holds carry a lane (explicit `lane`, else `$ANOTHER_LANE`, else the lane the agent leads), looked up in the hold's project only. Overlaps inside one lane are warnings, except two exclusive holds, which still block.
   - A cross-lane conflict also mails the holding lane's lead (from the system agent, debounced).
+  - Under `codex exec`, Codex skips hooks that haven't been trusted under `/hooks`; HOOKS.md and the installer say so (hold enforcement there isn't guaranteed without trust).
   - The pre-edit hook compares symlink-resolved paths, and warns (but still holds) when `$ANOTHER_LANE` is closed or belongs to another project.
   - Cross-lane conflicts emit `lane.hold_conflict`, which the `hold_conflict` webhook filter delivers.
   - `another holds --by-lane`, MCP `holds_by_lane`, and live holds in `lane show`.

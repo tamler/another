@@ -49,7 +49,7 @@ Every report is stored on the lane and also **mailed** to the lane's counterpart
 
 ## Path holds and lanes
 
-**Which lane a hold is for:** the `lane` argument of `hold_paths`, or `another hold acquire --lane` (defaults to `$ANOTHER_LANE`), looked up in the hold's project only; another project's lane is an unknown lane. Without one, it is the single open lane the agent leads in that project. Holds without a lane behave as before.
+**Which lane a hold is for:** the `lane` argument of `hold_paths`, or `another hold acquire --lane` (defaults to `$ANOTHER_LANE`), looked up in the hold's project only; another project's lane is an unknown lane. Without one, it is the single open lane the agent leads in that project. `-` means no lane, without that fallback. Holds without a lane behave as before.
 
 **Conflicts between lanes:**
 
@@ -60,7 +60,7 @@ Every report is stored on the lane and also **mailed** to the lane's counterpart
 | lane A | lane B, or no lane | Conflict. You get `hold.conflict`, plus `lane.hold_conflict` when both sides have a lane (the `hold_conflict` webhook filter delivers it), and lane B's lead is mailed by `another` (at most once per lane pair every 10 minutes) |
 | no lane | anything | Conflict, as before (when either hold is exclusive) |
 
-**Seeing who holds what for which lane:**
+**Seeing who holds what for which lane** (a token's `project`/`agent` filters only match holds it may see):
 - `another holds --by-lane`
 - MCP `holds_by_lane`
 - `lane show` lists the lane's live holds.

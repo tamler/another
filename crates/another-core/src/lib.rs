@@ -40,7 +40,7 @@ pub use federation::{
 pub use holds::{
     patterns_overlap, AcquireHolds, HeartbeatReport, Hold, HoldConflict, HoldFilter, HoldReport,
     LaneHolds, SessionInfo, SessionPhase, SweepReport, DEFAULT_HOLD_TTL_SECONDS,
-    MAX_HOLD_TTL_SECONDS, MIN_HOLD_TTL_SECONDS,
+    MAX_HOLD_TTL_SECONDS, MIN_HOLD_TTL_SECONDS, NO_LANE,
 };
 pub use identity::{Agent, Program, Project, RegisterAgent, SYSTEM_AGENT};
 pub use lanes::{

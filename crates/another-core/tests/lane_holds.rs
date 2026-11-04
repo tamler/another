@@ -326,3 +326,55 @@ fn cross_lane_conflicts_mail_the_holding_lead() {
         3
     );
 }
+
+#[test]
+fn scoped_holds_by_lane_filters_never_resolve_node_wide() {
+    let (s, clock) = store();
+    // "twin" exists in both projects: a node-wide lookup would be ambiguous and name both.
+    for p in ["/work/shop", "/work/vault"] {
+        s.register_agent(RegisterAgent {
+            name: "twin".into(),
+            program: Program::Claude,
+            project: Some(p.into()),
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    }
+    hold(&s, "twin@shop", "shop", "src/t.rs", None);
+    hold(&s, "twin@vault", "vault", "keys/t.rs", None);
+    let t = s
+        .create_token("manager", &["/work/shop".into()], None, None)
+        .unwrap();
+    let scope = s.verify_token(&t.secret).unwrap();
+    let by = |agent: Option<&str>, project: Option<&str>| {
+        s.holds_by_lane(
+            HoldFilter {
+                agent: agent.map(Into::into),
+                project: project.map(Into::into),
+            },
+            Some(&scope),
+        )
+    };
+    let g = by(Some("twin"), None).unwrap();
+    let all: Vec<String> = g
+        .iter()
+        .flat_map(|g| g.holds.iter().map(|h| h.agent.clone()))
+        .collect();
+    assert_eq!(all, vec!["twin@shop"]);
+    // A hidden project and a missing one look the same: an empty list.
+    assert!(by(None, Some("vault")).unwrap().is_empty());
+    assert!(by(None, Some("nowhere")).unwrap().is_empty());
+    assert!(by(Some("vaulter@vault"), None).unwrap().is_empty());
+    assert_eq!(by(None, Some("/work/shop")).unwrap().len(), 1);
+
+    // NO_LANE: an explicit "no lane" never falls back to the lane the agent leads.
+    let r = hold(&s, "claude@shop", "shop", "src/plain.rs", Some(NO_LANE));
+    assert_eq!(r.granted[0].lane, None);
+    let r = hold(&s, "claude@shop", "shop", "src/inferred.rs", None);
+    assert_eq!(r.granted[0].lane.as_deref(), Some("api"));
+
+    // lane show never lists an expired hold, even before anything else sweeps.
+    advance(&clock, 3_600_000);
+    assert!(s.lane("api", None).unwrap().holds.is_empty());
+}

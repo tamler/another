@@ -65,7 +65,9 @@ Every way events leave the node applies the same visibility rule (D38). When add
 - **Same lane:** exclusive vs exclusive blocks even inside a lane; otherwise same-lane overlaps are warnings.
 - **Cross-lane conflicts:** emit `lane.hold_conflict` (node-local) and mail the holding lane's lead from the system agent, debounced.
 - **Hooks fail open, visibly:** a problem with the agent's lane degrades to an unlaned hold plus a warning, never to no hold and never to a blocked edit.
-- **Not yet verified:** the pre-edit hook against a real Codex build (`apply_patch` payload). Fleshapron runs that check after these fixes.
+- **NO_LANE:** a hook's fallback after a bad `$ANOTHER_LANE` passes `NO_LANE` (`-`), never `None`, so it can't slip into another lane the agent leads.
+- **Scoped filters:** remote `holds_by_lane` filters are matched against visible holds, never resolved node-wide.
+- **Codex (verified by Fleshapron on 0.166.0):** `bearer_token_env_var` works, and `another hook run pre-edit` denies a foreign exclusive hold. Codex runs the hooks only once they are trusted under `/hooks`, so untrusted hooks are skipped by `codex exec`, and HOOKS.md says enforcement there isn't guaranteed. Never write Codex's trust state yourself.
 
 ## Review routing rule
 
