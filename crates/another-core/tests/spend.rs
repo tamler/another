@@ -1092,6 +1092,81 @@ fn re_registering_a_linked_resource_goes_through_the_gate() {
 }
 
 #[test]
+fn newly_started_leases_are_counted_before_the_clock_advances() {
+    let (s, _) = store();
+    account(&s, "cpu", SpendKind::Server, "USD", Some(100.0), |a| {
+        a.cost_per_hour = Some(3.0)
+    });
+    account(&s, "total", SpendKind::Server, "USD", None, |a| {
+        a.cost_per_hour = Some(3.0);
+        a.period = SpendPeriod::None;
+    });
+    borrow(&s, "codex@shop", "cpu", None);
+    borrow(&s, "codex@shop", "total", None);
+    for period in ["current", "2026-11", "previous", "2026-12"] {
+        let r = s
+            .spend_report(
+                SpendQuery {
+                    period: period.parse().unwrap(),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        let cpu = find(&r, "cpu");
+        let expected = u32::from(matches!(period, "current" | "2026-11"));
+        assert_eq!(cpu.accrued, 0.0, "{period}");
+        assert_eq!(cpu.active_leases, expected, "{period}");
+        let total = find(&r, "total");
+        assert_eq!((total.accrued, total.active_leases), (0.0, 1));
+    }
+}
+
+#[test]
+fn open_leases_at_a_monthly_reset_count_without_current_period_cost() {
+    let (s, clock) = store();
+    account(&s, "cpu", SpendKind::Server, "USD", Some(100.0), |a| {
+        a.cost_per_hour = Some(3.0)
+    });
+    advance(&clock, 9 * 24 * HOUR + 23 * HOUR); // Nov 30 23:00
+    s.borrow_spend(
+        BorrowSpend {
+            agent: "codex@shop".into(),
+            account: "cpu".into(),
+            ttl_seconds: Some(4 * 3600),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    advance(&clock, HOUR); // Dec 1 00:00, the selected period's start
+    borrow(&s, "claude@shop", "cpu", None);
+    for (period, accrued, active) in [
+        ("current", 0.0, 2),
+        ("2026-12", 0.0, 2),
+        ("previous", 3.0, 1),
+        ("2026-11", 3.0, 1),
+        ("2027-01", 0.0, 0),
+    ] {
+        let r = s
+            .spend_report(
+                SpendQuery {
+                    period: period.parse().unwrap(),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        let cpu = find(&r, "cpu");
+        assert_eq!(
+            (cpu.accrued, cpu.active_leases),
+            (accrued, active),
+            "{period}"
+        );
+    }
+}
+
+#[test]
 fn open_leases_count_toward_earlier_periods_they_overlap() {
     let (s, clock) = store();
     account(&s, "cpu", SpendKind::Server, "USD", Some(100.0), |a| {
