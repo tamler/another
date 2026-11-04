@@ -59,7 +59,7 @@ Uninstall removes only entries that reference `another-hook.sh`, and deletes the
 
 **Otherwise** the hook prints nothing, and the client's normal permission flow applies. The hook never approves anything.
 
-**Codex: trust the hooks, and mind `codex exec`.** Codex runs a hook it doesn't manage only after you trust it, and trust is tied to the hook's hash, so it is needed again after reinstalling. To trust them, open Codex **interactively** and review them under `/hooks`.
+**Codex: trust the hooks, and mind `codex exec`.** Codex runs a hook it doesn't manage only after you trust it, and trust is tied to the hook's hash, so it is needed again after reinstalling. To trust them, open Codex **interactively** and review them under `/hooks`. `another hook install` prints this caveat, and `another doctor` warns while no trust is recorded for Another's hooks. Doctor reads Codex's `[hooks.state]` entries in `~/.codex/config.toml`, a layout that isn't formally documented; it can't check the hash itself and never writes Codex's trust.
 - `codex exec` (non-interactive) can't ask, so untrusted hooks are skipped silently and **edits are not held or blocked**. This was checked on Codex 0.166.0: `another hook run pre-edit` denied the edit correctly, but under `codex exec` the hook never ran and a patch went through over a live hold.
 - Trusting the hooks once in an interactive session in the same environment makes `codex exec` run them too.
 - For one-off automation whose hook sources you already vet, `codex exec --dangerously-bypass-hook-trust …` runs enabled hooks without stored trust.

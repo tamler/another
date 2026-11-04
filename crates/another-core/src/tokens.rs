@@ -238,6 +238,32 @@ impl Store {
         })
     }
 
+    /// How many registered projects each token's globs reach (for `another doctor`).
+    pub fn token_reach(&self) -> Result<Vec<(Token, usize)>> {
+        let tokens = self.tokens()?;
+        self.read(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT abs_path, slug FROM projects WHERE node_id = ?1")?;
+            let projects = stmt
+                .query_map([self.node_id()], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(tokens
+                .into_iter()
+                .map(|t| {
+                    let n = projects
+                        .iter()
+                        .filter(|(path, slug)| {
+                            glob_allows(&t.project_globs, &[path.clone(), slug.clone()])
+                        })
+                        .count();
+                    (t, n)
+                })
+                .collect())
+        })
+    }
+
     pub fn revoke_token(&self, token_id: &str) -> Result<Token> {
         self.write(|tx| {
             let t = get_token(tx, token_id)?;
