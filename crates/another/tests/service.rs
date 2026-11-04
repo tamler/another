@@ -591,6 +591,98 @@ fn update_warns_about_what_it_drops() {
 }
 
 #[test]
+fn trusted_proxy_header_reaches_the_installed_serve_command() {
+    for platform in ["systemd", "launchd"] {
+        let env = Env::new(platform);
+        let port = free_port();
+        let bind = format!("127.0.0.1:{port}");
+        let refused = env.run(&[
+            "service",
+            "install",
+            "--bind",
+            &bind,
+            "--trusted-proxy-header",
+            "x-real-ip",
+        ]);
+        assert!(!refused.status.success(), "the flag needs --auth");
+        assert!(
+            !unit_path(&env).exists() && !plist_path(&env).exists(),
+            "a refused install writes nothing"
+        );
+
+        env.json(&[
+            "service",
+            "install",
+            "--bind",
+            &bind,
+            "--auth",
+            "--trusted-proxy-header",
+            "x-real-ip",
+        ]);
+        let status = env.json(&["service", "status", "--lines", "0"]);
+        let args: Vec<String> = status["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap().to_string())
+            .collect();
+        let at = args
+            .iter()
+            .position(|a| a == "--trusted-proxy-header")
+            .unwrap_or_else(|| panic!("{platform}: flag missing from {args:?}"));
+        assert_eq!(args[at + 1], "x-real-ip", "{platform}");
+
+        // The written command line is one `serve` accepts: the fake manager doesn't run it, so
+        // run it here.
+        let mut child = Command::new(&args[0])
+            .args(&args[1..])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+            if let Some(exit) = child.try_wait().unwrap() {
+                panic!("{platform}: serve refused the installed flags: {exit}");
+            }
+            assert!(std::time::Instant::now() < deadline, "serve never listened");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        terminate(&mut child);
+
+        let same = env.json(&[
+            "service",
+            "install",
+            "--bind",
+            &bind,
+            "--auth",
+            "--trusted-proxy-header",
+            "x-real-ip",
+        ]);
+        assert_eq!(same["warnings"], serde_json::json!([]), "{same}");
+        let changed = env.json(&[
+            "service",
+            "install",
+            "--bind",
+            &bind,
+            "--auth",
+            "--trusted-proxy-header",
+            "cf-connecting-ip",
+        ]);
+        assert!(changed["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("x-real-ip"));
+        let dropped = env.json(&["service", "install", "--bind", &bind, "--auth"]);
+        let text = dropped["warnings"][0].as_str().unwrap();
+        assert!(
+            text.contains("--trusted-proxy-header cf-connecting-ip was dropped"),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn serve_shuts_down_gracefully_on_sigterm() {
     let env = Env::new("launchd");
     let port = free_port();
