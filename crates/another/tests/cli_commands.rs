@@ -109,10 +109,8 @@ fn project_ensure_uses_the_path_or_the_current_directory_and_list_shows_them() {
     let here = h.json(&["project", "ensure"]);
     let path = here["abs_path"].as_str().unwrap();
     let user = std::fs::canonicalize(&h.user).unwrap();
-    assert!(
-        PathBuf::from(path) == h.user || PathBuf::from(path) == user,
-        "{path}"
-    );
+    let path_ref = std::path::Path::new(path);
+    assert!(path_ref == h.user || path_ref == user, "{path}");
 
     let listed = h.text(&["project", "list"]);
     has(&listed, &["/work/shop", path]);
