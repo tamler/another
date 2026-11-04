@@ -1,7 +1,7 @@
 //! Activity feed: a readable projection of the event log so every peer can see who is
 //! doing what. Items carry one-line summaries and ids, never message bodies.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -879,6 +879,25 @@ fn read_events(
     limit: u32,
     scope: Option<&TokenScope>,
 ) -> Result<(Vec<EventRow>, Option<String>)> {
+    let mut out = Vec::new();
+    let scanned = visit_events(conn, since, kinds, limit, scope, |row| out.push(row))?;
+    if since.is_none() {
+        out.reverse();
+    }
+    Ok((out, scanned))
+}
+
+/// Hand each matching event to `visit` as it is read: after `since` oldest first, otherwise
+/// newest first, up to `limit`. Returns the cursor position. Payloads can hold message bodies,
+/// so a caller that keeps only some rows stays bounded by what it keeps.
+fn visit_events(
+    conn: &Connection,
+    since: Option<&Since>,
+    kinds: &[ActivityKind],
+    limit: u32,
+    scope: Option<&TokenScope>,
+    mut visit: impl FnMut(EventRow),
+) -> Result<Option<String>> {
     let after_seq: Option<i64> = match since {
         Some(Since::After(id)) => Some(resolve_cursor(conn, id, scope)?.0),
         _ => None,
@@ -896,7 +915,7 @@ fn read_events(
     );
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query(params![after_seq, since_ts])?;
-    let mut out = Vec::new();
+    let mut visited = 0u32;
     let mut scanned: Option<String> = None;
     let mut scanned_at: Option<(i64, bool)> = None;
     while let Some(r) = rows.next()? {
@@ -931,13 +950,11 @@ fn read_events(
         if let Some((_, seen)) = scanned_at.as_mut() {
             *seen = true;
         }
-        out.push(row);
-        if out.len() as u32 >= limit {
+        visit(row);
+        visited += 1;
+        if visited >= limit {
             break;
         }
-    }
-    if newest_first {
-        out.reverse();
     }
     // Never hand a scoped caller the id of an event it can't see as its cursor: past a
     // hidden (or filtered) last event, the cursor is an opaque position instead.
@@ -952,7 +969,7 @@ fn read_events(
             }
         }
     }
-    Ok((out, scanned))
+    Ok(scanned)
 }
 
 impl Store {
@@ -1010,26 +1027,24 @@ impl Store {
                 Since::Time(t) => *t,
                 Since::After(id) => resolve_cursor(conn, id, scope)?.1,
             };
-            let (rows, _) = read_events(conn, Some(&since), &[], u32::MAX, scope)?;
             let mut counts: BTreeMap<String, u32> = BTreeMap::new();
-            for r in &rows {
+            let mut notable: VecDeque<EventRow> = VecDeque::with_capacity(HIGHLIGHTS + 1);
+            visit_events(conn, Some(&since), &[], u32::MAX, scope, |r| {
                 *counts
                     .entry(ActivityKind::of_event(&r.kind).as_str().to_string())
                     .or_default() += 1;
-            }
-            let notable: Vec<EventRow> = rows
-                .into_iter()
-                .filter(|r| {
-                    !matches!(
-                        r.kind.as_str(),
-                        "delivery.read" | "delivery.acked" | "hold.renewed" | "resource.renewed"
-                    )
-                })
-                .collect();
-            let skip = notable.len().saturating_sub(HIGHLIGHTS);
+                if !matches!(
+                    r.kind.as_str(),
+                    "delivery.read" | "delivery.acked" | "hold.renewed" | "resource.renewed"
+                ) {
+                    notable.push_back(r);
+                    if notable.len() > HIGHLIGHTS {
+                        notable.pop_front();
+                    }
+                }
+            })?;
             let highlights = notable
                 .into_iter()
-                .skip(skip)
                 .map(|r| item(conn, r).map(|i| i.summary))
                 .collect::<Result<Vec<_>>>()?;
 
