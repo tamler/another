@@ -20,6 +20,8 @@ pub const DB_FILE: &str = "another.db";
 pub enum Clock {
     System,
     Manual(Arc<AtomicI64>),
+    #[cfg(test)]
+    Ticking(Arc<AtomicI64>),
 }
 
 impl Clock {
@@ -33,6 +35,8 @@ impl Clock {
         match self {
             Clock::System => now_ms(),
             Clock::Manual(t) => t.load(Ordering::SeqCst),
+            #[cfg(test)]
+            Clock::Ticking(t) => t.fetch_add(1, Ordering::SeqCst),
         }
     }
 }
