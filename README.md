@@ -97,6 +97,8 @@ another activity --summary
 | Coordination 4 | Lane-aware holds and the pre-edit hook | 🔄 tamler/another#13 |
 | Coordination 5 | Spend ledger: budgets, hourly leases, approval gate, linked resources | 🔄 tamler/another#14 |
 
+Spend reports count active leases before any cost accrues and across monthly resets.
+
 Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88.
 
 ## Guides
