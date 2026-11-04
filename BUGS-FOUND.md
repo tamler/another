@@ -227,9 +227,9 @@ The tests push the first event named in each row. `session.started`, `delivery.r
 
 **Holding correctly:** `hold.released`, `hold.renewed`, `hold.expired`, `resource.released`, `resource.renewed`, `resource.lease_expired`, `lane.closed`, `lane.status_changed` and `lane.updated` all check the node, and a spoke can't affect the hub's objects with them. `a_spoke_cannot_end_the_hubs_holds_leases_lanes_or_resources` tests this.
 
-**Not tested:** these were pushed through `Store::ingest`, which is what the `/fed/push` route calls after verifying the request's signature. The route itself wasn't driven with a forged event. Nor was a hub relaying these events on to other spokes, which would apply them the same way.
+**Over the wire:** two of these were also run through a real hub's `POST /fed/push` with a properly signed request. The route refuses an unsigned request and accepts the signed one. Forged mail then reaches a second, ordinary spoke when it syncs, and its inbox shows it from `alice@shop@hub`, so a spoke that did nothing wrong can't tell. The other rows went through `Store::ingest`, which is what the route calls.
 
-**Tests:** the `bug_*` tests in `another-core/tests/federation_authority.rs`.
+**Tests:** the `bug_*` tests in `another-core/tests/federation_authority.rs` and `another/tests/federation_route.rs`.
 
 **Suggested fix:** in `project_foreign`, compare the row's `node_id` with the event's origin before updating it, as `hold.released` already does. Add that condition to the two `ON CONFLICT` updates and the second `resource.stopped` update. Require the sender of `message.sent` and the agent in `session.*`, `delivery.*` and `lane.report_proposed` to belong to the origin. For `resource.borrowed`, look up the resource's node instead of trusting the payload. In `foreign_lease`, refuse a resource the origin doesn't own unless it's a permitted borrow. Validate names in `node.renamed`.
 
