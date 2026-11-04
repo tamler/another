@@ -830,3 +830,41 @@ fn a_summary_that_cannot_be_delivered_fails_once_a_day() {
     );
     assert!(s.summary_schedule().unwrap().last_sent_at.is_some());
 }
+
+#[test]
+fn summary_times_are_exactly_two_digits_each() {
+    let (clock, _) = Clock::manual(NOV_21);
+    let s = Store::open_in_memory(clock).unwrap();
+    for odd in [
+        "+9:00",
+        "09:+5",
+        "+1:+2",
+        "-1:00",
+        "001:5",
+        "1:005",
+        "9:00",
+        "09:0",
+        "٠٩:٠٠",
+        "24:00",
+        "23:60",
+    ] {
+        assert_eq!(
+            s.set_setting("summary_daily", odd).unwrap_err().code(),
+            "invalid",
+            "{odd}"
+        );
+        assert_eq!(
+            s.set_summary_schedule(Some(odd), None).unwrap_err().code(),
+            "invalid",
+            "{odd}"
+        );
+    }
+    assert_eq!(s.summary_schedule().unwrap().daily_at, None);
+    for good in ["00:00", "09:05", "23:59"] {
+        assert_eq!(s.set_setting("summary_daily", good).unwrap().value, good);
+    }
+    assert_eq!(
+        s.set_setting("summary_daily", " 09:05 ").unwrap().value,
+        "09:05"
+    );
+}

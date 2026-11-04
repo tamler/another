@@ -519,8 +519,12 @@ pub fn parse_hhmm(v: &str) -> Result<u32> {
         ))
     };
     let (h, m) = v.trim().split_once(':').ok_or_else(bad)?;
+    let two_digits = |s: &str| s.len() == 2 && s.bytes().all(|b| b.is_ascii_digit());
+    if !two_digits(h) || !two_digits(m) {
+        return Err(bad());
+    }
     let (h, m): (u32, u32) = (h.parse().map_err(|_| bad())?, m.parse().map_err(|_| bad())?);
-    if h > 23 || m > 59 || v.trim().len() != 5 {
+    if h > 23 || m > 59 {
         return Err(bad());
     }
     Ok(h * 60 + m)
