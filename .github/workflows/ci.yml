@@ -10,6 +10,25 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # An unlocked `cargo install --git` resolves from scratch and reads no project config, so
+  # neither the lockfile nor `.cargo/config.toml` can protect it. Cargo finds config from the
+  # current directory, so resolving from outside the checkout matches that.
+  msrv-fresh-resolve:
+    name: msrv (Rust 1.88, fresh resolve)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Resolve from scratch
+        working-directory: ${{ runner.temp }}
+        run: cargo generate-lockfile --manifest-path "$GITHUB_WORKSPACE/Cargo.toml"
+
+      - name: cargo check
+        run: cargo check --workspace --all-targets --locked
+
   check:
     name: test / clippy / fmt
     runs-on: ubuntu-latest

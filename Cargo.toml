@@ -1,5 +1,7 @@
 [workspace]
-resolver = "2"
+# "3" keeps every fresh resolve within `rust-version`, including `cargo install --git`,
+# which reads this file but not the lockfile or `.cargo/config.toml`.
+resolver = "3"
 members = ["crates/another-core", "crates/another"]
 
 [workspace.package]
