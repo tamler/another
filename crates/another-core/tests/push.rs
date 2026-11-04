@@ -683,3 +683,61 @@ fn webhook_payloads_carry_ids_and_statuses_only() {
     let feed = serde_json::to_string(&all_items(&s, None)).unwrap();
     assert!(!feed.contains("private purpose") && !feed.contains("private reap reason"));
 }
+
+#[test]
+fn renewal_in_the_warning_sweep_re_arms_the_expiry_warning() {
+    let (s, clock) = store_with_clock();
+    s.register_resource(dev_server("shopper@shop", Some(600)))
+        .unwrap();
+    let count = |s: &Store| {
+        s.events(500)
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == "resource.lease_expiring")
+            .count()
+    };
+    // The heartbeat's own sweep warns, and the same transaction renews: no clock tick between.
+    advance(&clock, 6 * 60_000);
+    s.heartbeat_resources("shopper@shop", &[]).unwrap();
+    assert_eq!(count(&s), 1);
+    advance(&clock, 6 * 60_000);
+    s.sweep().unwrap();
+    assert_eq!(count(&s), 2, "the renewed lease warns again");
+}
+
+#[test]
+fn project_less_requests_into_another_project_stay_hidden() {
+    let (s, _) = store_with_clock();
+    // A project-less manager asks a vault agent for something.
+    s.send_message(SendMessage {
+        from: "manager".into(),
+        to: vec!["vaulter@vault".into()],
+        subject: "rotate".into(),
+        body: "please".into(),
+        request: Some(NewRequest::default()),
+        ..Default::default()
+    })
+    .unwrap();
+    // The manager's own shop-scoped token doesn't see it: the request is vault's.
+    let t = s
+        .create_token("manager", &["/work/shop".into()], None, None)
+        .unwrap();
+    let shop = s.verify_token(&t.secret).unwrap();
+    let sum = s
+        .activity_summary_scoped(Some(Since::Time(0)), Some(&shop))
+        .unwrap();
+    assert_eq!(
+        (sum.requests.open, sum.requests.claimed, sum.requests.stale),
+        (0, 0, 0),
+        "{sum:?}"
+    );
+    assert!(!sum.text.contains("rotate"), "{}", sum.text);
+    // Locally it counts.
+    assert_eq!(
+        s.activity_summary(Some(Since::Time(0)))
+            .unwrap()
+            .requests
+            .open,
+        1
+    );
+}
