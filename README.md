@@ -151,6 +151,7 @@ On macOS, when replacing an existing `another`, **remove the old binary first** 
 | Coordination 5 | Spend ledger: budgets, hourly leases, approval gate, linked resources | 🔄 tamler/another#14 |
 | Coordination 6 | Daily summary: pull (CLI, MCP, HTTP) or an opt-in daily rollup by mail or webhook | 🔄 tamler/another#15 |
 | Coordination 7 | First-class remote agents: invites, join, presence, kick, federation tie-in | 🔄 tamler/another#16 |
+| v0.1.0 prep | Release installs (`install.sh`, `SHA256SUMS`), `another doctor`, 90-second quickstart | 🔄 tamler/another#17 |
 
 Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88.
 
