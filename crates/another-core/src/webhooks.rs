@@ -446,6 +446,25 @@ const PAYLOAD_STRINGS: &[&str] = &[
     "outcome_kind",
 ];
 
+/// The `summary` of a webhook delivery's `event`: built from the event kind and the
+/// allowlisted `data` only, so text that the feed may show (request titles, mail subjects)
+/// never reaches a webhook receiver either.
+pub(crate) fn webhook_summary(kind: &str, data: &Value) -> String {
+    let mut parts = Vec::new();
+    for k in [
+        "name", "account", "status", "from", "to", "value", "kind", "filter",
+    ] {
+        if let Some(v) = data.get(k).and_then(Value::as_str) {
+            parts.push(format!("{k}={v}"));
+        }
+    }
+    if parts.is_empty() {
+        kind.to_string()
+    } else {
+        format!("{kind} ({})", parts.join(", "))
+    }
+}
+
 /// The `data` of a webhook delivery: the event payload reduced to ids, statuses, numbers
 /// and flags (D38). Anything else in the event stays in the node's own tables.
 pub(crate) fn webhook_data(payload: &Value) -> Value {
@@ -728,15 +747,21 @@ impl Store {
                     let delivery_id = new_id();
                     let event_id = row.event_id.clone();
                     let kind = row.kind.clone();
-                    let event = item(tx, row)?;
+                    let mut event = item(tx, row)?;
+                    // The scheduled rollup is the one delivery whose content is the point; it
+                    // only reaches local all-project webhooks (D42).
+                    let data = if kind == "summary.daily" {
+                        payload.clone()
+                    } else {
+                        webhook_data(&payload)
+                    };
+                    event.summary = webhook_summary(&kind, &data);
                     let body = json!({
                         "delivery_id": delivery_id,
                         "webhook_id": h.webhook_id,
                         "filter": filter.as_str(),
                         "event": event,
-                        // The scheduled rollup is the one delivery whose content is the
-                        // point; it only reaches local all-project webhooks (D42).
-                        "data": if kind == "summary.daily" { payload.clone() } else { webhook_data(&payload) },
+                        "data": data,
                     })
                     .to_string();
                     queued += tx.execute(

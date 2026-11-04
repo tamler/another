@@ -17,7 +17,7 @@ fn hub() -> (Store, Handle) {
         ("vaulter", Some("/work/vault")),
         ("claude", Some("/work/shop")),
     ] {
-        s.register_agent(RegisterAgent {
+        s.register_agent_trusted(RegisterAgent {
             name: name.into(),
             program: Program::Claude,
             project: project.map(Into::into),
@@ -546,7 +546,7 @@ fn invites_never_take_over_a_registered_name() {
     // A name registered after the invite was made: redeeming it fails like any bad code,
     // and the local agent gets no new token.
     let inv = invite(&s, |i| i.agent = "late".into());
-    s.register_agent(RegisterAgent {
+    s.register_agent_trusted(RegisterAgent {
         name: "late".into(),
         program: Program::Codex,
         project: Some("/work/shop".into()),
@@ -687,7 +687,7 @@ fn idle_expiry_follows_the_node_setting() {
 fn managers_can_kick_over_mcp_within_their_projects() {
     let (s, _) = hub();
     for (name, program) in [("boss", Program::GrokBot), ("jacob", Program::Human)] {
-        s.register_agent(RegisterAgent {
+        s.register_agent_trusted(RegisterAgent {
             name: name.into(),
             program,
             project: Some("/work/shop".into()),

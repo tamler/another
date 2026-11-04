@@ -20,17 +20,17 @@ The message has to read well on a phone. The manager bot wants the same informat
 |---|---|
 | `attention` | One line per item that needs a person: open decisions (oldest first, with their ids), blocked or `needs_decision` lanes, accounts over budget or on pace to exceed it, pending spend approvals, stale requests, dead webhook deliveries |
 | `lanes` | Open lanes by status; lanes that changed status, reported or closed in the window, from lane events; closed lanes with their outcome and PR link |
-| `decisions` | Open (with age and deadline); answered and expired in the window |
+| `decisions` | Open (with age and deadline): every visible open decision is counted (`open_total`), and the list keeps the oldest 500. Answered and expired in the window |
 | `requests` | Open, claimed and stale counts; completed in the window |
 | `holds` | Live holds; hold conflicts in the window (cross-lane ones counted separately) |
 | `spend` | Per account: spent in the window, plus the period's used % and status from `spend_report` |
 | `agents_active` | Agents active in the window (not the `another` system agent) |
 | `people_active` | People (program `human`) active in the window, listed apart from agents |
-| `truncated` | True when an event list hit the pager's cap (20,000 per section); the markdown says so |
+| `truncated` | True when an event list hit the pager's cap (20,000 per section) or there are more than 500 open decisions; the markdown says so |
 | `counts` | Events per category |
 | `markdown` | The phone version: a heading, the attention list, then one line per section, about 15 lines at most |
 
-`since` is a duration (default `24h`), an RFC 3339 time, or an event-id cursor, as elsewhere. An event id is resolved through the caller's scoped feed: an event the caller can't see gets the same `not_found` as an unknown id.
+`since` is a duration (default `24h`), an RFC 3339 time, or an event-id cursor, as elsewhere. An event id is resolved through the shared scoped cursor read (`activity::resolve_cursor`, which the feed and `activity_summarize` use too): an event the caller can't see gets the same `not_found` as an unknown id.
 
 **Budgets:** an account over budget whose percentage the caller can't see (no budget figure, or a zero budget) is listed as "over budget" with no percentage.
 

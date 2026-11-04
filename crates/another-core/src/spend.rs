@@ -531,8 +531,10 @@ fn attribute(
     project: Option<&str>,
     scope: Option<&TokenScope>,
 ) -> Result<Attribution> {
+    // Everything named is looked up as the caller sees it: a hidden project or agent is
+    // the same not_found as a missing one.
     let agent = match agent {
-        Some(a) => Some(resolve_agent(tx, node_id, a)?),
+        Some(a) => Some(crate::identity::resolve_agent_in(tx, node_id, a, scope)?),
         None => None,
     };
     let lane = match lane {
@@ -540,7 +542,7 @@ fn attribute(
         None => None,
     };
     let explicit = match project {
-        Some(p) => Some(find_project(tx, node_id, p)?.project_id),
+        Some(p) => Some(crate::identity::find_project_in(tx, node_id, p, scope)?.project_id),
         None => None,
     };
     let agent_project: Option<String> = match &agent {
@@ -790,18 +792,56 @@ fn end_lease_tx(tx: &Tx<'_>, row: &LeaseRow, at: i64, actor: &str, reason: &str)
         lane_id: row.lane_id.clone(),
         project_id: row.project_id.clone(),
     };
-    let entry_id = insert_entry(
-        tx,
-        &a,
-        account_project.as_deref(),
-        cost,
-        at,
-        &who,
-        Some(&format!("lease {} ({reason})", row.lease.lease_id)),
-        "lease",
-        Some(&row.lease.lease_id),
-        actor,
-    )?;
+    // A lease that ran across a monthly reset is charged to each period for its overlap
+    // with it: one entry per period, dated inside that period.
+    let mut segments: Vec<(i64, i64)> = Vec::new();
+    let start = row.started.unwrap_or(at).min(at);
+    if a.period == SpendPeriod::Monthly && at > start {
+        let mut cur = start;
+        while cur < at {
+            let (_, to) = period_bounds(PeriodSel::Current, cur, a.reset_day);
+            let end = to.min(at);
+            segments.push((cur, end));
+            cur = end;
+        }
+    }
+    if segments.is_empty() {
+        segments.push((start, at));
+    }
+    let parts = segments.len();
+    let mut entry_id = String::new();
+    for (i, (from, to)) in segments.iter().enumerate() {
+        let part = if parts == 1 {
+            lease_cost(row.lease.cost_per_hour, row.started, at)
+        } else {
+            lease_cost(row.lease.cost_per_hour, Some(*from), *to)
+        };
+        let last = i + 1 == parts;
+        if part == 0.0 && !last {
+            continue;
+        }
+        let note = if parts == 1 {
+            format!("lease {} ({reason})", row.lease.lease_id)
+        } else {
+            format!(
+                "lease {} ({reason}; period {} of {parts})",
+                row.lease.lease_id,
+                i + 1
+            )
+        };
+        entry_id = insert_entry(
+            tx,
+            &a,
+            account_project.as_deref(),
+            part,
+            if last { at } else { *to - 1 },
+            &who,
+            Some(&note),
+            "lease",
+            Some(&row.lease.lease_id),
+            actor,
+        )?;
+    }
     tx.emit(
         actor,
         "spend.lease_ended",
