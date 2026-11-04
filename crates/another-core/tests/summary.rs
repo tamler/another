@@ -739,3 +739,94 @@ fn pending_approvals_are_counted_past_the_lease_list_limit() {
     );
     assert_eq!(s.daily_summary(None, None).unwrap().pending_approvals, 201);
 }
+
+fn person(s: &Store, name: &str) {
+    s.register_agent_trusted(RegisterAgent {
+        name: name.into(),
+        program: Program::Human,
+        project: None,
+        model: None,
+        description: None,
+    })
+    .unwrap();
+}
+
+#[test]
+fn a_summary_to_an_unknown_person_is_refused_when_set() {
+    let (clock, _) = Clock::manual(NOV_21);
+    let s = Store::open_in_memory(clock).unwrap();
+    assert_eq!(
+        s.set_setting("summary_to", "mail:nobody")
+            .unwrap_err()
+            .code(),
+        "not_found"
+    );
+    assert_eq!(
+        s.set_summary_schedule(Some("00:00"), Some("mail:nobody"))
+            .unwrap_err()
+            .code(),
+        "not_found"
+    );
+    let sched = s.summary_schedule().unwrap();
+    assert_eq!(sched.to, "webhook", "the refused value is not stored");
+    assert_eq!(
+        sched.daily_at, None,
+        "the refused schedule is not turned on"
+    );
+
+    person(&s, "owner");
+    assert_eq!(
+        s.set_setting("summary_to", "mail:owner").unwrap().value,
+        "mail:owner"
+    );
+}
+
+#[test]
+fn a_summary_that_cannot_be_delivered_fails_once_a_day() {
+    let (clock, h) = Clock::manual(NOV_21);
+    let s = Store::open_in_memory(clock).unwrap();
+    let utc = chrono::FixedOffset::east_opt(0).unwrap();
+    person(&s, "owner");
+    s.set_summary_schedule(Some("00:00"), Some("mail:owner"))
+        .unwrap();
+    // Valid when set; a second owner registered afterwards makes the name ambiguous.
+    s.ensure_project("t", "/work/shop").unwrap();
+    s.register_agent_trusted(RegisterAgent {
+        name: "owner".into(),
+        program: Program::Claude,
+        project: Some("/work/shop".into()),
+        model: None,
+        description: None,
+    })
+    .unwrap();
+
+    assert_eq!(
+        s.send_scheduled_summary_at(utc).unwrap_err().code(),
+        "ambiguous",
+        "the first sweep of the day reports the failure"
+    );
+    h.fetch_add(60_000, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        s.send_scheduled_summary_at(utc).unwrap(),
+        None,
+        "later sweeps that day stay quiet"
+    );
+    assert_eq!(s.summary_schedule().unwrap().last_sent_at, None);
+
+    // The next day it is tried again, and reported again.
+    h.fetch_add(24 * HOUR, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        s.send_scheduled_summary_at(utc).unwrap_err().code(),
+        "ambiguous"
+    );
+
+    // Fixing the schedule retries the same day.
+    person(&s, "sam");
+    s.set_summary_schedule(Some("00:00"), Some("mail:sam"))
+        .unwrap();
+    assert_eq!(
+        s.send_scheduled_summary_at(utc).unwrap().as_deref(),
+        Some("mail:sam")
+    );
+    assert!(s.summary_schedule().unwrap().last_sent_at.is_some());
+}

@@ -46,6 +46,28 @@ fn summary_cli() {
 
     // The opt-in rollup: off, on, shown, off.
     assert!(run(&["summary", "schedule"]).contains("off"));
+    let refused = Command::new(env!("CARGO_BIN_EXE_another"))
+        .args([
+            "summary",
+            "schedule",
+            "--daily",
+            "08:30",
+            "--to",
+            "mail:owner",
+        ])
+        .env("ANOTHER_HOME", dir.path())
+        .env("HOME", dir.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!refused.status.success(), "owner isn't registered yet");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("unknown agent"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(run(&["summary", "schedule"]).contains("off"));
+    run(&["agent", "register", "owner", "--program", "human"]);
     let on = run(&[
         "summary",
         "schedule",

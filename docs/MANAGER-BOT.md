@@ -87,7 +87,7 @@ Post the `markdown` field as-is; it is written to fit a phone screen. For a plai
 
 If `truncated` is true, a section hit the 20,000-event cap and its counts may be low. People (program `human`) are listed under `people_active`, apart from `agents_active`.
 
-**Or let the node send it.** The person can turn on a daily rollup on the machine: `another summary schedule --daily 08:30 --to mail:owner` (mail from the `another` system agent), or `--to webhook`. The webhook form goes only to webhooks created locally for all projects with the `daily_summary` filter, because it covers the whole node; a token's webhooks never receive it. It is sent while `another serve` runs. Pulling `daily_summary` keeps working either way.
+**Or let the node send it.** The person can turn on a daily rollup on the machine: `another summary schedule --daily 08:30 --to mail:owner` (mail from the `another` system agent; the person must already be registered), or `--to webhook`. The webhook form goes only to webhooks created locally for all projects with the `daily_summary` filter, because it covers the whole node; a token's webhooks never receive it. It is sent while `another serve` runs. Pulling `daily_summary` keeps working either way.
 
 ## 6. Spend
 

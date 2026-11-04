@@ -538,6 +538,7 @@ pub struct SummarySchedule {
 
 const LAST_SENT_MS: &str = "summary_last_sent_ms";
 const LAST_SENT_DAY: &str = "summary_last_sent_day";
+pub(crate) const LAST_FAILED_DAY: &str = "summary_last_failed_day";
 
 impl Store {
     pub fn summary_schedule(&self) -> Result<SummarySchedule> {
@@ -601,20 +602,23 @@ impl Store {
         if local.hour() * 60 + local.minute() < due_min {
             return Ok(None);
         }
-        let (last_day, last_ms): (Option<String>, Option<i64>) = self.read(|conn| {
-            let get = |k: &str| -> Result<Option<String>> {
-                Ok(conn
-                    .query_row("SELECT value FROM node_settings WHERE key = ?1", [k], |r| {
-                        r.get(0)
-                    })
-                    .optional()?)
-            };
-            Ok((
-                get(LAST_SENT_DAY)?,
-                get(LAST_SENT_MS)?.and_then(|v| v.parse().ok()),
-            ))
-        })?;
-        if last_day.as_deref() == Some(day.as_str()) {
+        let (last_day, last_failed, last_ms): (Option<String>, Option<String>, Option<i64>) = self
+            .read(|conn| {
+                let get = |k: &str| -> Result<Option<String>> {
+                    Ok(conn
+                        .query_row("SELECT value FROM node_settings WHERE key = ?1", [k], |r| {
+                            r.get(0)
+                        })
+                        .optional()?)
+                };
+                Ok((
+                    get(LAST_SENT_DAY)?,
+                    get(LAST_FAILED_DAY)?,
+                    get(LAST_SENT_MS)?.and_then(|v| v.parse().ok()),
+                ))
+            })?;
+        if last_day.as_deref() == Some(day.as_str()) || last_failed.as_deref() == Some(day.as_str())
+        {
             return Ok(None);
         }
         let since = last_ms
@@ -622,7 +626,7 @@ impl Store {
             .unwrap_or(now - 86_400_000);
         let summary = self.daily_summary(Some(Since::Time(since)), None)?;
         let to = sched.to.clone();
-        let sent = self.write(|tx| {
+        let result = self.write(|tx| {
             // The claim: writes are serialized (BEGIN IMMEDIATE), so of several sweepers
             // sharing this home (an HTTP server plus stdio MCP servers), only the first to
             // get here sends today's rollup; the others see the marker and stop.
@@ -674,7 +678,26 @@ impl Store {
                 )?;
             }
             Ok(true)
-        })?;
+        });
+        let sent = match result {
+            Ok(sent) => sent,
+            // Database and file errors may pass, so the next sweep tries again.
+            Err(e @ (Error::Db(_) | Error::Io(_))) => return Err(e),
+            // Anything else (the person can't be resolved) will fail the same way on every
+            // sweep: report it once and try again tomorrow. If the marker can't be written,
+            // the next sweep just reports it again.
+            Err(e) => {
+                let _ = self.write(|tx| {
+                    tx.execute(
+                        "INSERT INTO node_settings (key, value, updated_at) VALUES (?1, ?2, ?3)
+                         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                        params![LAST_FAILED_DAY, day, tx.now],
+                    )?;
+                    Ok(())
+                });
+                return Err(e);
+            }
+        };
         Ok(sent.then_some(to))
     }
 }

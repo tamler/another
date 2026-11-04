@@ -104,6 +104,8 @@ Last hour: 7 event(s) since 2026-10-28T08:00:00.000Z; active agents: codex@shop;
 The Another MCP tools fetch_inbox, acknowledge and claim_request (or `another inbox --agent claude@shop`) show details.
 ```
 
+The session-start digest lists up to five unread messages: urgent first, then high, then the newest of the rest, newest first within each. The header counts all of them.
+
 Message bodies are never included in digests or the activity feed.
 
 ## Contract (for other clients)

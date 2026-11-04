@@ -22,7 +22,7 @@ another token list
 another token revoke <token-id>
 ```
 
-Project globs are matched against a project's absolute path and its slug (`*` stays within one path segment, `**` crosses segments). With no `--project`, the token can still use its own mailbox, heartbeat and the activity feed, but every project-scoped call is denied.
+Project globs are matched against a project's absolute path and its slug (`*` stays within one path segment, `**` crosses segments). With no `--project`, the token can still use its own mailbox, heartbeat and the activity feed, but every project-scoped call is denied. Project paths are per node, so path globs are node-local; use slug globs to cover a project across federated nodes.
 
 ## 2. Run an authenticated server on loopback
 

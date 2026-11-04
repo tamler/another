@@ -9,7 +9,9 @@
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 
-use another_core::{InboxQuery, Program, RegisterAgent, SessionInfo, SessionPhase, Since, Store};
+use another_core::{
+    Inbox, InboxItem, InboxQuery, Program, RegisterAgent, SessionInfo, SessionPhase, Since, Store,
+};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -753,6 +755,37 @@ fn hook_agent(store: &Store, client: Client, root: &Path) -> Result<String> {
     Ok(address)
 }
 
+/// The five unread messages a digest lists: urgent, then high, then the newest of the rest,
+/// newest first within each. `newest` is the unread inbox limited to five, which always holds
+/// enough of the rest to fill the list.
+fn digest_messages(store: &Store, agent: &str, newest: &Inbox) -> Result<Vec<InboxItem>> {
+    use another_core::Importance::{High, Urgent};
+    let mut listed = Vec::new();
+    if newest.urgent_unread > 0 {
+        listed = store
+            .inbox(
+                agent,
+                InboxQuery {
+                    unread_only: true,
+                    urgent_only: true,
+                    limit: newest.urgent_unread,
+                },
+            )?
+            .messages;
+        // Stable, so each group stays newest first.
+        listed.sort_by_key(|i| !matches!(i.message.importance, Urgent));
+    }
+    listed.extend(
+        newest
+            .messages
+            .iter()
+            .filter(|i| !matches!(i.message.importance, Urgent | High))
+            .cloned(),
+    );
+    listed.truncate(5);
+    Ok(listed)
+}
+
 /// Inbox + activity digest for session start, capped at [`MAX_DIGEST_CHARS`].
 pub fn session_digest(store: &Store, agent: &str) -> Result<String> {
     let inbox = store.inbox(
@@ -771,7 +804,7 @@ pub fn session_digest(store: &Store, agent: &str) -> Result<String> {
         inbox.awaiting_ack,
         inbox.requests.len()
     );
-    for item in &inbox.messages {
+    for item in &digest_messages(store, agent, &inbox)? {
         let m = &item.message;
         let tag = match m.importance {
             another_core::Importance::Urgent => "[urgent] ",

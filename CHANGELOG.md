@@ -5,6 +5,8 @@ All notable changes to Another. Unreleased work is listed under the next version
 ## Unreleased
 
 ### Fixed
+- `summary_to` and `another summary schedule --to mail:NAME` refuse a person who isn't registered. Before, the setting was accepted and every sweep of `another serve` failed. A send that fails later is logged once a day instead of on every sweep.
+- The session-start digest lists urgent and high-importance mail first, so newer ordinary mail can't push it out of the five messages shown.
 - Cancelling an overdue decision commits its timeout result, request closure and automatic mail before returning a conflict, even without a running server or when the deadline passes as cancellation begins.
 
 ### Added

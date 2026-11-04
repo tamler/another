@@ -137,6 +137,18 @@ impl Store {
         let value = value.trim();
         validate(key, value)?;
         self.write(|tx| {
+            // Refuse a person the scheduled summary could never reach. The same lookup runs
+            // when it is sent.
+            if let ("summary_to", Some(name)) = (key, value.strip_prefix("mail:")) {
+                crate::identity::resolve_agent(tx, tx.node_id, name)?;
+            }
+            // A changed schedule gets a fresh try today, even after a failed one.
+            if key.starts_with("summary_") {
+                tx.execute(
+                    "DELETE FROM node_settings WHERE key = ?1",
+                    [crate::summary::LAST_FAILED_DAY],
+                )?;
+            }
             tx.execute(
                 "INSERT INTO node_settings (key, value, updated_at) VALUES (?1, ?2, ?3)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
