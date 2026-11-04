@@ -17,7 +17,7 @@ fn setup() -> (Store, Arc<AtomicI64>) {
         ("carol", Program::GrokBot),
     ] {
         store
-            .register_agent(RegisterAgent {
+            .register_agent_trusted(RegisterAgent {
                 name: name.into(),
                 program,
                 project: None,
@@ -261,7 +261,8 @@ fn session_end_releases_resources_unless_kept() {
     let text: Vec<String> = feed.unwrap().items.into_iter().map(|i| i.summary).collect();
     let text = text.join("\n");
     assert!(
-        text.contains("alice registered model_server ollama@11434 (shared) for local llm"),
+        text.contains("alice registered model_server ollama@11434 (shared)")
+            && !text.contains("local llm"),
         "{text}"
     );
     assert!(
@@ -304,7 +305,7 @@ fn reap_requests_and_records_are_logged() {
     assert!(summary
         .highlights
         .iter()
-        .any(|h| h == "bob asked a human to reap model_server:ollama@11434: lease lapsed"));
+        .any(|h| h == "bob asked a human to reap model_server:ollama@11434"));
     assert!(summary
         .highlights
         .iter()
