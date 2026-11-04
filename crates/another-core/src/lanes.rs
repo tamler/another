@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::error::{Error, Result};
-use crate::identity::{find_project, get_agent, resolve_agent, AgentRef};
+use crate::identity::{find_project, get_agent, resolve_agent, resolve_agent_in, AgentRef};
 use crate::mail::{send_tx, touch, Importance, SendMessage};
 use crate::store::{new_id, Store, Tx};
 use crate::time::{fmt_opt, fmt_ts};
@@ -987,7 +987,8 @@ impl Store {
         }
         self.write(|tx| {
             let me = resolve_agent(tx, tx.node_id, &input.agent)?;
-            let lead = resolve_agent(tx, tx.node_id, &input.lead)?;
+            // Scoped callers can only name leads they may see (hidden = missing).
+            let lead = resolve_agent_in(tx, tx.node_id, &input.lead, scope)?;
             let project = find_project(tx, tx.node_id, &input.project)?;
             check_scope(tx, scope, &project.project_id)?;
             let taken = tx
@@ -1150,7 +1151,7 @@ impl Store {
                 }
             }
             if let Some(l) = &input.lead {
-                let lead = resolve_agent(tx, tx.node_id, l)?;
+                let lead = resolve_agent_in(tx, tx.node_id, l, scope)?;
                 changed.insert("lead_id".into(), json!(lead.id));
                 tx.execute(
                     "UPDATE lanes SET lead_id = ?2, updated_at = ?3, leaderless_at = NULL

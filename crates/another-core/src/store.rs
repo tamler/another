@@ -231,6 +231,18 @@ impl Store {
         })
     }
 
+    /// A cursor at the end of the log, usable by any caller: an opaque position (`@<seq>`)
+    /// rather than the newest event's id, which a scoped caller may not be allowed to see.
+    pub fn end_cursor(&self) -> Result<Option<String>> {
+        self.read(|conn| {
+            let seq: Option<i64> = conn
+                .query_row("SELECT MAX(seq) FROM events", [], |r| r.get(0))
+                .optional()?
+                .flatten();
+            Ok(seq.map(|n| format!("@{n}")))
+        })
+    }
+
     /// Run a read-only closure against the connection.
     pub(crate) fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         let conn = self.lock();

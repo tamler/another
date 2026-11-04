@@ -8,7 +8,6 @@ use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 
 use crate::activity::{ActivityItem, ActivityKind, ActivityQuery, RequestCounts, Since};
-use crate::decisions::{DecisionFilter, DecisionStatus};
 use crate::error::{Error, Result};
 use crate::holds::HoldFilter;
 use crate::lanes::{LaneFilter, LaneStatus};
@@ -50,8 +49,10 @@ pub struct OpenDecision {
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct DecisionSummary {
-    /// Oldest first.
+    /// Oldest first, at most [`OPEN_DECISIONS_CAP`] (see `open_total`).
     pub open: Vec<OpenDecision>,
+    /// All open decisions the caller may see.
+    pub open_total: u32,
     pub answered: u32,
     pub expired: u32,
 }
@@ -122,6 +123,9 @@ fn short(s: &str, n: usize) -> String {
     }
 }
 
+/// The most open decisions listed (oldest first); past this the summary is `truncated`.
+pub const OPEN_DECISIONS_CAP: usize = 500;
+
 /// The most feed items read per section; past this the summary is marked `truncated`.
 pub const FEED_CAP: usize = 20_000;
 
@@ -169,27 +173,11 @@ impl Store {
         let since = since.unwrap_or(Since::Time(now - 86_400_000));
         let since_ms = match &since {
             Since::Time(t) => *t,
-            // Resolved through the caller's view of the feed: an event it can't see is
+            // Resolved through the shared scoped read: an event the caller can't see is
             // as unknown as one that doesn't exist.
-            Since::After(id) => self.read(|conn| {
-                let row: Option<(i64, String, String, String, String)> = conn
-                    .query_row(
-                        "SELECT ts, node_id, actor, kind, payload FROM events WHERE event_id = ?1",
-                        [id],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-                    )
-                    .optional()?;
-                let unknown = || Error::NotFound(format!("unknown event id {id:?}"));
-                let (ts, node, actor, kind, payload) = row.ok_or_else(unknown)?;
-                if let Some(scope) = scope {
-                    if !crate::visibility::event_visible(
-                        conn, scope, &node, &actor, &kind, &payload,
-                    )? {
-                        return Err(unknown());
-                    }
-                }
-                Ok(ts)
-            })?,
+            Since::After(id) => {
+                self.read(|conn| Ok(crate::activity::resolve_cursor(conn, id, scope)?.1))?
+            }
         };
         let mut truncated = false;
         let base = self.activity_summary_scoped(Some(since.clone()), scope)?;
@@ -248,16 +236,16 @@ impl Store {
             .count() as u32;
 
         // Decisions.
-        let mut open_decisions: Vec<OpenDecision> = self
-            .decisions(
-                DecisionFilter {
-                    status: Some(DecisionStatus::Open),
-                    limit: 500,
-                    ..Default::default()
-                },
-                scope,
-            )?
+        // Every visible open decision, oldest first, so the longest-waiting are never the
+        // ones a cap drops; the list keeps the oldest OPEN_DECISIONS_CAP.
+        let all_open = self.open_decisions_oldest_first(scope)?;
+        let open_total = all_open.len() as u32;
+        if all_open.len() > OPEN_DECISIONS_CAP {
+            truncated = true;
+        }
+        let mut open_decisions: Vec<OpenDecision> = all_open
             .into_iter()
+            .take(OPEN_DECISIONS_CAP)
             .map(|d| OpenDecision {
                 age_hours: ((now - ms(&d.created_at)) as f64 / 3_600_000.0 * 10.0).round() / 10.0,
                 decision_id: d.decision_id,
@@ -276,6 +264,7 @@ impl Store {
             answered: count("decision.answered"),
             expired: count("decision.expired"),
             open: open_decisions,
+            open_total,
         };
         let requests = RequestSummary {
             completed: count("request.completed"),
@@ -471,9 +460,7 @@ pub fn summary_markdown(s: &DailySummary) -> String {
     }
     out.push_str(&format!(
         "Decisions: {} open, {} answered, {} timed out\n",
-        s.decisions.open.len(),
-        s.decisions.answered,
-        s.decisions.expired
+        s.decisions.open_total, s.decisions.answered, s.decisions.expired
     ));
     out.push_str(&format!(
         "Requests: {} open, {} claimed, {} stale, {} done\n",
@@ -520,7 +507,7 @@ pub fn summary_markdown(s: &DailySummary) -> String {
     }
     if s.truncated {
         out.push_str(&format!(
-            "(Truncated: over {FEED_CAP} events in a section; counts may be low.)\n"
+            "(Truncated: over {FEED_CAP} events in a section, or over {OPEN_DECISIONS_CAP} open decisions; lists may be incomplete.)\n"
         ));
     }
     out

@@ -84,7 +84,7 @@ async fn summary_over_mcp_and_http_is_scoped() {
         ("vaulter", Some("/work/vault")),
     ] {
         store
-            .register_agent(RegisterAgent {
+            .register_agent_trusted(RegisterAgent {
                 name: n.into(),
                 program: Program::Claude,
                 project: p.map(Into::into),

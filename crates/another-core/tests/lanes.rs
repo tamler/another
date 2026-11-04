@@ -12,7 +12,7 @@ fn store() -> Store {
         ("claude", Program::Claude),
         ("codex", Program::Codex),
     ] {
-        s.register_agent(RegisterAgent {
+        s.register_agent_trusted(RegisterAgent {
             name: name.into(),
             program,
             project: None,
@@ -361,7 +361,7 @@ fn upgrades_a_database_created_before_lanes() {
         let old = Store::open_at_schema(dir.path(), 5).unwrap();
         old.ensure_project("t", "/work/shop").unwrap();
         for n in ["manager", "claude"] {
-            old.register_agent(RegisterAgent {
+            old.register_agent_trusted(RegisterAgent {
                 name: n.into(),
                 program: Program::Other,
                 project: None,
@@ -472,7 +472,7 @@ fn events_carry_ids_not_content() {
 fn links_must_belong_to_the_lanes_project() {
     let s = store();
     lane(&s, "shop-lane", "shop");
-    s.register_agent(RegisterAgent {
+    s.register_agent_trusted(RegisterAgent {
         name: "vaulter".into(),
         program: Program::Codex,
         project: Some("/work/vault".into()),
@@ -547,7 +547,7 @@ fn links_must_belong_to_the_lanes_project() {
 fn scoped_list_filters_never_reveal_hidden_projects_or_agents() {
     let s = store();
     for p in ["/work/shop", "/work/vault"] {
-        s.register_agent(RegisterAgent {
+        s.register_agent_trusted(RegisterAgent {
             name: "dup".into(),
             program: Program::Codex,
             project: Some(p.into()),
@@ -609,4 +609,60 @@ fn scoped_list_filters_never_reveal_hidden_projects_or_agents() {
     };
     assert_eq!(local("dup").unwrap_err().code(), "ambiguous");
     assert_eq!(local("ghost").unwrap_err().code(), "not_found");
+}
+
+#[test]
+fn scoped_lead_lookups_never_reveal_hidden_agents() {
+    let s = store();
+    for p in ["/work/shop", "/work/vault"] {
+        s.register_agent_trusted(RegisterAgent {
+            name: "dup".into(),
+            program: Program::Claude,
+            project: Some(p.into()),
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    }
+    let t = s
+        .create_token("manager", &["/work/shop".into()], None, None)
+        .unwrap();
+    let shop = s.verify_token(&t.secret).unwrap();
+    let mk = |lead: &str| {
+        s.create_lane(
+            NewLane {
+                agent: "manager".into(),
+                name: format!("l-{}", lead.replace('@', "-")),
+                project: "shop".into(),
+                lead: lead.into(),
+                charter: String::new(),
+                status: None,
+            },
+            Some(&shop),
+        )
+    };
+    // The bare name resolves to the only visible agent; no ambiguity naming dup@vault.
+    assert_eq!(mk("dup").unwrap().lane.lead, "dup@shop");
+    // The hidden agent and a missing one fail the same way.
+    let hidden = mk("dup@vault").unwrap_err();
+    let missing = mk("ghost@vault").unwrap_err();
+    assert_eq!((hidden.code(), missing.code()), ("not_found", "not_found"));
+    assert_eq!(
+        hidden.to_string().replace("dup@vault", "X"),
+        missing.to_string().replace("ghost@vault", "X")
+    );
+    // Updating the lead follows the same rule; project-less agents stay usable.
+    let upd = |lead: &str| {
+        s.update_lane(
+            LaneUpdate {
+                agent: "manager".into(),
+                lane: "l-dup".into(),
+                lead: Some(lead.into()),
+                ..Default::default()
+            },
+            Some(&shop),
+        )
+    };
+    assert_eq!(upd("dup@vault").unwrap_err().code(), "not_found");
+    assert_eq!(upd("codex").unwrap().lane.lead, "codex");
 }

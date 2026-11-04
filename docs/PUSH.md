@@ -23,6 +23,8 @@ With `another serve --auth`, every event read is filtered by the token's project
 
 Items are one-line summaries plus ids. Message bodies are never included.
 
+**Cursors:** `next_since` is normally an event id. When the last event a read scanned is one the token can't see, `next_since` is an opaque position like `@1234` instead, so a hidden event's id is never handed out. Pass either form back as `since`. A hidden event's id is the same `not_found` as an unknown one.
+
 ## Stream (SSE)
 
 ```bash
@@ -111,7 +113,7 @@ X-Another-Signature: sha256=5f1c...
  "data":{"lane_id":"...","project_id":"...","name":"api","from":"working","to":"needs_decision"}}
 ```
 
-- `event` is the feed item. `data` is the event's payload **reduced to ids, statuses, names, numbers and flags**: free text such as a request's completion note, a subject, a summary or a reason is dropped. Mail events never match a filter, so bodies are never sent either.
+- `event` is the feed item, but its `summary` is rebuilt from the event kind and the allowlisted data (for example `lane.status_changed (name=api, from=working, to=needs_decision)`), so request titles and other text the local feed shows never reach the receiver. `data` is the event's payload **reduced to ids, statuses, names, numbers and flags**: free text such as a request's completion note, a subject, a summary or a reason is dropped. Mail events never match a filter, so bodies are never sent either.
 - **Success:** any 2xx response marks the delivery as delivered.
 - **Retries:** anything else (another status, a network error, a 10-second timeout) is retried after 10 s, 30 s, 2 min, 10 min, 1 h and 6 h. After 7 attempts the delivery is **dead**: it shows in `another webhook dead` with its last error, and `another webhook retry` re-queues it.
 - **Several servers:** if more than one `another serve` runs on the node, each delivery is claimed (for a minute) immediately before it is sent, so it goes out once even when receivers are slow.

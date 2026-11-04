@@ -67,7 +67,7 @@ fn node(name: &str, federation: bool) -> Node {
 }
 
 fn agent(s: &Store, name: &str, program: Program, project: Option<&str>) {
-    s.register_agent(RegisterAgent {
+    s.register_agent_trusted(RegisterAgent {
         name: name.into(),
         program,
         project: project.map(Into::into),

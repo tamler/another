@@ -223,6 +223,24 @@ pub(crate) fn normalize_pattern(project: &Project, raw: &str) -> Result<String> 
     Ok(pattern)
 }
 
+/// A literal path as a hold pattern: glob metacharacters become one-character classes
+/// (`notes[.md` -> `notes[[].md`), so a real filename is held as itself, never parsed (or
+/// rejected) as a glob.
+pub fn glob_escape(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        match c {
+            '*' | '?' | '[' | ']' | '{' | '}' => {
+                out.push('[');
+                out.push(c);
+                out.push(']');
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn compile(pattern: &str) -> Result<GlobMatcher> {
     let glob: Glob = GlobBuilder::new(pattern)
         .literal_separator(true)
@@ -1044,6 +1062,10 @@ impl Store {
                     // Spend leases close with the session (kept with --keep-resources, like
                     // the resource leases they pay for).
                     crate::spend::end_agent_leases_tx(tx, &me.id, "session_end", scope)?;
+                } else {
+                    // --keep-resources renews the resource leases; renew the spend leases
+                    // too, or charging would stop while the resource stays held.
+                    crate::spend::renew_spend_leases_tx(tx, &me.id, scope)?;
                 }
                 tx.emit(&me.address, "session.ended", session_payload())?;
                 tx.execute(
