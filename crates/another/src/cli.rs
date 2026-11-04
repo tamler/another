@@ -47,12 +47,14 @@ pub enum Command {
     Init,
     /// Show the local node, database location and registered agents.
     Status,
-    /// Check the setup: store, server, tokens, client hooks (and Codex hook trust), ports
-    /// and resources. Prints PASS / WARN / FAIL with a fix for each problem; exits 1 on FAIL.
+    /// Check the setup: store, background service, server, tokens, client hooks (and Codex hook
+    /// trust), ports and resources. Prints PASS / WARN / FAIL with a fix for each problem; exits
+    /// 1 on FAIL.
     Doctor {
-        /// The `another serve` HTTP address to check.
-        #[arg(long, default_value = "http://127.0.0.1:7466", env = "ANOTHER_SERVER")]
-        server: String,
+        /// The `another serve` HTTP address to check. Default: the installed background service
+        /// when it uses this home, otherwise http://127.0.0.1:7466.
+        #[arg(long, env = "ANOTHER_SERVER")]
+        server: Option<String>,
     },
     /// Run the daemon: MCP over loopback streamable HTTP (default) or stdio.
     Serve {

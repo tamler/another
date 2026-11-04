@@ -1,10 +1,12 @@
 //! `another doctor`: a read-mostly health check with a fix hint for every problem.
 //!
-//! Checks the store (path writable, schema current), the local server (reachable, ours),
-//! tokens and their scopes, client hooks (Claude Code, Codex, Grok; and whether Codex has
-//! trusted them), and port / resource conflicts. It never changes client configs, Codex's
-//! trust state, tokens or resources; the only write is a probe file in the Another home.
+//! Checks the store (path writable, schema current), the background service if one is
+//! installed, the local server (reachable, ours), tokens and their scopes, client hooks (Claude
+//! Code, Codex, Grok; and whether Codex has trusted them), and port / resource conflicts. It
+//! never changes client configs, Codex's trust state, tokens, resources or the service; the
+//! only write is a probe file in the Another home.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -13,6 +15,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::hooks::{Client, HookEnv, MARKER};
+use crate::service;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -61,22 +64,37 @@ fn check(area: &str, level: Level, detail: impl Into<String>, fix: Option<String
     }
 }
 
-/// Where the checks look. `server` is the HTTP base URL of `another serve`.
+const DEFAULT_SERVER: &str = "http://127.0.0.1:7466";
+
+/// Where the checks look. `server` is the HTTP base URL of `another serve`; without one, doctor
+/// checks the background service when it uses this home, otherwise [`DEFAULT_SERVER`].
 pub struct DoctorOptions {
     pub another_home: PathBuf,
     pub user_home: Option<PathBuf>,
-    pub server: String,
+    pub server: Option<String>,
 }
 
 pub fn run(opts: &DoctorOptions) -> Report {
     let mut checks = Vec::new();
     let store = check_store(&opts.another_home, &mut checks);
     let node_id = store.as_ref().map(|s| s.node_id().to_string());
-    checks.push(check_server(&opts.server, node_id.as_deref()));
+    let service = check_service(opts);
+    let server = opts
+        .server
+        .clone()
+        .or_else(|| service.url.clone())
+        .unwrap_or_else(|| DEFAULT_SERVER.to_string());
+    let down_hint = service
+        .url
+        .as_deref()
+        .filter(|url| *url == server.trim_end_matches('/'))
+        .and(service.down_hint);
+    checks.push(service.check);
+    checks.push(check_server(&server, node_id.as_deref(), down_hint));
     match &store {
         Some(s) => {
             checks.extend(check_tokens(s));
-            checks.extend(check_resources(s, &opts.server));
+            checks.extend(check_resources(s, &server));
         }
         None => {
             for area in ["tokens", "resources"] {
@@ -149,7 +167,141 @@ fn check_store(home: &Path, out: &mut Vec<Check>) -> Option<Store> {
     }
 }
 
-fn check_server(base: &str, node_id: Option<&str>) -> Check {
+/// What doctor learned about the background service, for its own check and the server's.
+struct ServiceFinding {
+    check: Check,
+    /// The service's address, when it serves the home being checked.
+    url: Option<String>,
+    /// What to do if that address doesn't answer.
+    down_hint: Option<&'static str>,
+}
+
+fn check_service(opts: &DoctorOptions) -> ServiceFinding {
+    let finding = |level, detail: String, fix: Option<String>| ServiceFinding {
+        check: check("service", level, detail, fix),
+        url: None,
+        down_hint: None,
+    };
+    let Some(user_home) = &opts.user_home else {
+        return finding(
+            Level::Skip,
+            "HOME is not set; can't find a background service".into(),
+            None,
+        );
+    };
+    if let Err(e) = service::Platform::current() {
+        return finding(Level::Skip, e.to_string(), None);
+    }
+    // `status` reads the definition first and only asks the manager if there is one.
+    let status = match service::status(user_home, &opts.another_home, 0) {
+        Ok(s) => s,
+        Err(e) => {
+            return finding(
+                Level::Warn,
+                format!("can't ask the service manager: {e:#}"),
+                Some("run `another service status` once the service manager is available".into()),
+            )
+        }
+    };
+    if !status.installed {
+        return finding(
+            Level::Skip,
+            "no background service installed (optional)".into(),
+            None,
+        );
+    }
+    let reinstall = "run `another service install` with the flags you want to keep";
+    let (Some(exe), Some(bind)) = (status.args.first(), status.bind.as_deref()) else {
+        return finding(
+            Level::Warn,
+            format!("can't read the service definition {}", status.definition),
+            Some(reinstall.into()),
+        );
+    };
+    let exe = Path::new(exe);
+    if !is_executable(exe) {
+        return finding(
+            Level::Fail,
+            format!(
+                "the service runs {}, which is missing or not executable",
+                exe.display()
+            ),
+            Some(reinstall.into()),
+        );
+    }
+    let mine = same_path(
+        service::home_of(&status.args).as_deref(),
+        &opts.another_home,
+    );
+    if !mine {
+        let theirs = service::home_of(&status.args)
+            .map_or("no data directory".into(), |h| h.display().to_string());
+        return finding(
+            Level::Warn,
+            format!(
+                "the service on {bind} uses {theirs}, not {}",
+                opts.another_home.display()
+            ),
+            Some(format!(
+                "to check it, run `another --home '{theirs}' doctor`; to change it, run `another --home <home> service install`"
+            )),
+        );
+    }
+    let url = Some(bind_url(bind));
+    if !status.loaded {
+        return ServiceFinding {
+            url,
+            down_hint: Some("start the installed service: `another service start`"),
+            ..finding(
+                Level::Warn,
+                format!("installed for {bind}, but not running"),
+                Some("`another service start`".into()),
+            )
+        };
+    }
+    let logs = Some("the service is loaded but not answering; see `another service logs`");
+    let Some(pid) = status.pid else {
+        return ServiceFinding {
+            url,
+            down_hint: logs,
+            ..finding(
+                Level::Warn,
+                format!("loaded for {bind}, but it has no running process"),
+                Some("see why with `another service logs`".into()),
+            )
+        };
+    };
+    ServiceFinding {
+        url,
+        down_hint: logs,
+        ..finding(Level::Pass, format!("running on {bind} (pid {pid})"), None)
+    }
+}
+
+/// Whether two paths name one directory. Falls back to comparing them as written when one
+/// can't be resolved, for example because it doesn't exist yet.
+fn same_path(a: Option<&Path>, b: &Path) -> bool {
+    let Some(a) = a else { return false };
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// The address to reach a `--bind` value from this machine. A wildcard listens on loopback too.
+fn bind_url(bind: &str) -> String {
+    let Ok(addr) = bind.parse::<SocketAddr>() else {
+        return format!("http://{bind}");
+    };
+    let ip = match addr.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    format!("http://{}", SocketAddr::new(ip, addr.port()))
+}
+
+fn check_server(base: &str, node_id: Option<&str>, down_hint: Option<&str>) -> Check {
     let url = format!("{}/health", base.trim_end_matches('/'));
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
@@ -159,10 +311,10 @@ fn check_server(base: &str, node_id: Option<&str>) -> Check {
             .build(),
     );
     let start_hint = || {
-        Some(
-            "start it with `another serve` (MCP clients using `another serve --stdio` don't need it, but hooks' wake and webhooks do)"
-                .into(),
-        )
+        Some(down_hint.map_or(
+            "start it with `another serve` (MCP clients using `another serve --stdio` don't need it, but hooks' wake and webhooks do)".to_string(),
+            str::to_string,
+        ))
     };
     let mut resp = match agent.get(&url).call() {
         Ok(r) => r,
@@ -707,4 +859,19 @@ pub fn render(r: &Report) -> String {
         format!("{} failed, {} warning(s).", r.failed, r.warnings)
     });
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bind_url;
+
+    #[test]
+    fn bind_url_reaches_a_wildcard_through_loopback() {
+        assert_eq!(bind_url("127.0.0.1:7467"), "http://127.0.0.1:7467");
+        assert_eq!(bind_url("0.0.0.0:7467"), "http://127.0.0.1:7467");
+        assert_eq!(bind_url("[::]:7467"), "http://[::1]:7467");
+        assert_eq!(bind_url("[::1]:7467"), "http://[::1]:7467");
+        assert_eq!(bind_url("192.168.1.5:7467"), "http://192.168.1.5:7467");
+        assert_eq!(bind_url("localhost:7467"), "http://localhost:7467");
+    }
 }

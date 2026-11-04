@@ -297,6 +297,14 @@ fn bind_of(args: &[String]) -> Option<String> {
         .cloned()
 }
 
+/// The data directory in an installed service's arguments.
+pub fn home_of(args: &[String]) -> Option<PathBuf> {
+    args.iter()
+        .position(|a| a == "--home")
+        .and_then(|i| args.get(i + 1))
+        .map(PathBuf::from)
+}
+
 // ---------------------------------------------------------------------------
 // Running the service manager
 
@@ -824,12 +832,7 @@ pub fn status(user_home: &Path, home: &Path, lines: usize) -> Result<StatusRepor
         .map(|t| installed_args(platform, t))
         .unwrap_or_default();
     // Logs live under the home the service was installed with.
-    let service_home = args
-        .iter()
-        .position(|a| a == "--home")
-        .and_then(|i| args.get(i + 1))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.to_path_buf());
+    let service_home = home_of(&args).unwrap_or_else(|| home.to_path_buf());
     let (loaded, pid) = if text.is_some() {
         manager_state(platform)?
     } else {
@@ -842,7 +845,8 @@ pub fn status(user_home: &Path, home: &Path, lines: usize) -> Result<StatusRepor
         loaded,
         pid,
         bind: bind_of(&args),
-        log_lines: if text.is_some() {
+        // No lines asked for means no need for journalctl, which may not be installed.
+        log_lines: if text.is_some() && lines > 0 {
             log_lines(platform, &service_home, lines)?
         } else {
             Vec::new()

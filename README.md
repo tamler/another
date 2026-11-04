@@ -147,7 +147,7 @@ another service install
 - **macOS**: a launchd user agent at `~/Library/LaunchAgents/one.toanother.another.plist` (`RunAtLoad`, `KeepAlive`), loaded with `launchctl bootstrap gui/$UID`. Logs go to `$ANOTHER_HOME/logs/`.
 - **Linux**: a systemd user unit at `~/.config/systemd/user/another.service` (`Restart=on-failure`), enabled with `systemctl --user enable --now`. Logs are in the journal (`journalctl --user -u another`). On a headless box, run `loginctl enable-linger $USER` so it starts at boot without a login session.
 
-`install` takes `serve`'s HTTP flags (`--bind`, `--auth`, `--allowed-host`, `--allow-remote-bind`, `--federation`) plus the global `--home`, and writes them into the service definition. Running it again updates the service in place and replaces every flag, so repeat the ones you want to keep; it warns about anything an update drops or changes. If an update fails, the previous service is restored. It refuses to install when something, such as another `another serve`, is already listening on the same port.
+`install` takes `serve`'s HTTP flags (`--bind`, `--auth`, `--allowed-host`, `--trusted-proxy-header`, `--allow-remote-bind`, `--federation`) plus the global `--home`, and writes them into the service definition. Running it again updates the service in place and replaces every flag, so repeat the ones you want to keep; it warns about anything an update drops or changes. If an update fails, the previous service is restored. It refuses to install when something, such as another `another serve`, is already listening on the same port.
 
 | Command | What it does |
 |---|---|
@@ -243,7 +243,7 @@ Every command takes `--json`. `--agent` and `--from` default to `$ANOTHER_AGENT`
 
 | Task | Commands |
 |---|---|
-| Node | `another init`, `another status`, `another doctor [--server URL]` (PASS/WARN/FAIL with a fix each; exit 1 on FAIL), `another node show`, `another node name [<name>]` (no name prints the current one), `another events` |
+| Node | `another init`, `another status`, `another doctor [--server URL]` (PASS/WARN/FAIL with a fix each; exit 1 on FAIL; checks the background service's address when one is installed for this home), `another node show`, `another node name [<name>]` (no name prints the current one), `another events` |
 | Agents | `another agent register <name> --program claude\|codex\|grok\|cursor\|grok_bot\|other [--project PATH]`, `another agent list` |
 | Mail | `another send`, `another inbox`, `another reply <message-id>`, `another ack <message-id>`, `another threads`, `another thread <id>` (there is no `another mail` command) |
 | Requests | `another requests`, `another request claim\|release\|complete\|cancel <id>` |
