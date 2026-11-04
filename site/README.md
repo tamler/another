@@ -2,7 +2,9 @@
 
 Static marketing and documentation pages for Another. Buildless HTML and CSS,
 with a self-hosted monospace font and native sans-serif prose; no client
-JavaScript, external asset requests, analytics, package dependencies or framework.
+JavaScript, external asset requests, analytics code, package dependencies or framework.
+Static JSON-LD describes the software; it does not execute. Cloudflare may inject
+its configured insights beacon into served responses.
 
 ## Build and preview
 
@@ -14,7 +16,8 @@ python3 -m http.server 8765 --bind 127.0.0.1 --directory site/dist
 ```
 
 Open `http://127.0.0.1:8765`. The build checks its public file allowlist, HTML
-landmarks, local links and anchors. It does not replace browser or accessibility
+landmarks, local links and anchors, unique SEO metadata, canonical URLs, JSON-LD,
+sitemap coverage, robots/llms files and 1200×630 social images. It does not replace browser or accessibility
 review. The stdlib server returns its own error page for missing URLs; Pages uses
 the provided `404.html`.
 
@@ -28,9 +31,10 @@ The build copies an explicit public file list. It excludes this README, check
 script, source notes and `review/` screenshots. `_headers` sets a restrictive CSP
 and disables access to camera, microphone and location.
 
-The site has no canonical domain configured. A preview deployment does not
-authorize adding a custom domain or changing DNS. Keep any preview project
-isolated from existing hosted products.
+Canonical origin: `https://toanother.one`. The existing Pages project is
+`another-site-review`, production branch `main`. Deploy only after checks and
+independent review; domain and DNS changes need separate authorization. Source
+and capture files, including `og-source.jpg`, stay out of the public allowlist.
 
 ## Content and visual review
 
