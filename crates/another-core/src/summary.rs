@@ -634,7 +634,20 @@ impl Store {
             .unwrap_or(now - 86_400_000);
         let summary = self.daily_summary(Some(Since::Time(since)), None)?;
         let to = sched.to.clone();
-        self.write(|tx| {
+        let sent = self.write(|tx| {
+            // The claim: writes are serialized (BEGIN IMMEDIATE), so of several sweepers
+            // sharing this home (an HTTP server plus stdio MCP servers), only the first to
+            // get here sends today's rollup; the others see the marker and stop.
+            let marked: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM node_settings WHERE key = ?1",
+                    [LAST_SENT_DAY],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if marked.as_deref() == Some(day.as_str()) {
+                return Ok(false);
+            }
             let me = crate::identity::system_agent_tx(tx)?;
             match to.split_once(':') {
                 Some(("mail", name)) => {
@@ -672,8 +685,8 @@ impl Store {
                     params![k, v, tx.now],
                 )?;
             }
-            Ok(())
+            Ok(true)
         })?;
-        Ok(Some(to))
+        Ok(sent.then_some(to))
     }
 }
