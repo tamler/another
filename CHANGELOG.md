@@ -87,7 +87,7 @@ The first release. It contains the local core built in milestones 1–6 and the 
     - Presence (`another agent remotes`).
     - Ephemeral agents leave when their session ends or when idle (`--idle-hours`, else the `remote_idle_hours` node setting, default 4): token revoked, holds and leases in the token's projects released, `lane.agent_left` emitted. Remote heartbeats and leave touch only the token's projects too.
     - When a lane's lead leaves, the longest-active member takes over; with nobody left, the lane is flagged leaderless (never blocked automatically).
-    - `another agent kick` removes any agent at once; manager agents can kick over MCP (`agent_kick`) within their projects.
+    - `another agent kick` removes any agent at once; a local manager agent (`grok_bot`) can kick over MCP (`agent_kick`). Tokens are refused `agent_kick` for now.
   - Remote-agent HTTP routes (`/agent/heartbeat`, `/agent/leave`, `/lanes`, `/lanes/{lane}/report`) and a client CLI (`another remote …`).
   - Federation:
     - Lanes are mirrored read-only on other nodes; only the owner writes. Reports into a mirror are proposals, which the owner applies when they sync.
