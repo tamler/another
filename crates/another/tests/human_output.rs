@@ -569,8 +569,10 @@ fn activity_events_and_summaries_read_plainly() {
     assert!(!h.run(&["activity", "--since", "whenever"]).status.success());
     has(&h.text(&["activity", "--summary"]), &["claude@shop"]);
     has(&h.text(&["events", "--limit", "5"]), &["message.sent"]);
-    let swept = h.text(&["sweep"]);
-    assert!(!swept.is_empty());
+    has(
+        &h.text(&["sweep"]),
+        &["expired 0 hold(s), 0 request(s) went stale"],
+    );
 }
 
 #[test]

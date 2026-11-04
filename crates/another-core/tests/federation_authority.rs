@@ -408,6 +408,47 @@ fn bug_a_spoke_borrows_without_the_permission_by_leaving_out_the_node() {
     );
 }
 
+/// `resource.adopted` needs no permission and ignores the resource's mode and node, and
+/// `resource.registered` reaches the same code for an id the hub already has.
+#[test]
+fn bug_a_spoke_takes_over_a_lapsed_hub_resource() {
+    for (kind, mode) in [
+        ("resource.adopted", LeaseMode::Exclusive),
+        ("resource.registered", LeaseMode::Shared),
+    ] {
+        let (s, _) = hub();
+        let spoke = Spoke::paired_with(&s, &[]);
+        let eve = spoke_agent(&s, &spoke);
+        let r = resource(&s, "alice@shop", mode);
+        let id = ResourceRef::Id(r.resource_id.clone());
+        s.release_resource("alice@shop", &id, false).unwrap();
+        assert_eq!(s.resource(&id).unwrap().status, "lapsed");
+        assert!(s.lapsed_for_ms(&r.resource_id).unwrap().is_some());
+
+        let (lease, owner) = if kind == "resource.adopted" {
+            ("lease_id", "agent_id")
+        } else {
+            ("lease_id", "owner_id")
+        };
+        spoke.accepted(
+            &s,
+            kind,
+            json!({ "resource_id": r.resource_id, lease: "TAKEN", owner: eve }),
+        );
+        let after = s.resource(&id).unwrap();
+        assert_eq!(
+            (after.status.as_str(), after.owner.as_deref()),
+            ("live", Some("eve@lab@evil")),
+            "{kind}: today's behaviour; a spoke with no permissions shouldn't own it"
+        );
+        assert_eq!(
+            s.lapsed_for_ms(&r.resource_id).unwrap(),
+            None,
+            "{kind}: today's behaviour; this also resets the clock reaping goes by"
+        );
+    }
+}
+
 #[test]
 fn bug_a_spoke_renames_itself_after_the_hub_with_an_invalid_name() {
     let (s, _) = hub();
@@ -427,9 +468,13 @@ fn bug_a_spoke_renames_itself_after_the_hub_with_an_invalid_name() {
 
 #[test]
 fn a_spoke_cannot_end_the_hubs_holds_leases_lanes_or_resources() {
-    let (s, _) = hub();
+    let (s, clock) = hub();
     let spoke = Spoke::paired_with(&s, &Perm::ALL);
     let hold_id = hold(&s, "alice@shop", "src/main.rs");
+    let hold_expiry = s.holds(HoldFilter::default()).unwrap()[0]
+        .expires_at
+        .clone();
+    clock.fetch_add(60_000, Ordering::SeqCst);
     let r = resource(&s, "alice@shop", LeaseMode::Shared);
     let lease = r.leases[0].lease_id.clone();
     let lane = s
@@ -476,7 +521,12 @@ fn a_spoke_cannot_end_the_hubs_holds_leases_lanes_or_resources() {
     ] {
         spoke.accepted(&s, kind, payload);
     }
-    assert_eq!(s.holds(HoldFilter::default()).unwrap().len(), 1);
+    let holds = s.holds(HoldFilter::default()).unwrap();
+    assert_eq!(holds.len(), 1);
+    assert_eq!(
+        holds[0].expires_at, hold_expiry,
+        "`hold.renewed` didn't apply"
+    );
     let after = s.resource(&ResourceRef::Id(r.resource_id)).unwrap();
     assert_eq!(after.leases.len(), 1);
     assert_eq!(after.leases[0].expires_at, r.leases[0].expires_at);
