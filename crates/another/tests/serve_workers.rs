@@ -252,7 +252,7 @@ struct AuthToken {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn bad_event_kinds_and_cursors_are_refused_and_audited() {
-    let (_dir, s, base, token, ct) = authed().await;
+    let (dir, s, base, token, ct) = authed().await;
     let http = reqwest::Client::new();
     for path in [
         "/events/poll?kinds=nonsense&timeout=0",
@@ -284,6 +284,11 @@ async fn bad_event_kinds_and_cursors_are_refused_and_audited() {
         "{errors:?}"
     );
     assert!(errors.contains(&"GET /events/poll"), "{errors:?}");
+    // The person reading the audit log sees the calls and where they came from.
+    let audit = another(dir.path()).args(["audit"]).output().unwrap();
+    let audit = String::from_utf8_lossy(&audit.stdout);
+    assert!(audit.contains("GET /events/stream"), "{audit}");
+    assert!(audit.contains("[127.0.0.1"), "{audit}");
     ct.cancel();
 }
 

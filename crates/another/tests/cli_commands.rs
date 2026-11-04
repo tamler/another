@@ -319,3 +319,51 @@ fn summary_schedule_and_wake_explain_what_is_missing() {
     );
     has(&h.refused(&["wake", "--dry-run"]), &["--agent", "--all"]);
 }
+
+/// Never passes `--confirm`, so nothing is signalled. The listener is this test process's own.
+#[test]
+fn reap_plans_a_listener_and_refuses_one_a_resource_registered() {
+    let h = with_agents();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    let target = format!("pid:{}", std::process::id());
+
+    let plan = h.json(&["reap", &target, "--grace", "0"]);
+    assert_eq!(plan["executed"], false);
+    let found = plan["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|b| !b.as_str().unwrap().contains("not a listening process"));
+    if !found {
+        // No lsof or ss on this machine: nothing to observe.
+        return;
+    }
+    assert_eq!(plan["eligible"], true, "{plan}");
+    has(
+        &h.text(&["reap", &target, "--grace", "0"]),
+        &["eligible; nothing was done", "--confirm"],
+    );
+
+    h.text(&[
+        "resource",
+        "register",
+        "--agent",
+        "claude@shop",
+        "model_server",
+        "mine",
+        "--project",
+        "shop",
+        "--port",
+        &port,
+        "--ttl",
+        "600",
+    ]);
+    let plan = h.json(&["reap", &target, "--grace", "0"]);
+    assert_eq!(plan["eligible"], false, "{plan}");
+    has(
+        &h.text(&["reap", &target, "--grace", "0"]),
+        &["blocked: ", "belongs to a registered resource"],
+    );
+    drop(listener);
+}
