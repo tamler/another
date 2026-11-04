@@ -199,10 +199,12 @@ fn webhooks_carry_only_matching_in_scope_events() {
 
     let due = s.claim_due_deliveries(10).unwrap();
     assert_eq!(due.len(), 2);
-    let bodies: Vec<serde_json::Value> = due
+    let mut bodies: Vec<serde_json::Value> = due
         .iter()
         .map(|d| serde_json::from_str(&d.body).unwrap())
         .collect();
+    // Queued in the same millisecond, the two can be claimed in either order.
+    bodies.sort_by_key(|b| b["filter"] != "lane_status");
     assert_eq!(bodies[0]["filter"], "lane_status");
     assert_eq!(bodies[0]["data"]["to"], "working");
     assert_eq!(bodies[1]["filter"], "needs_decision");
@@ -622,7 +624,7 @@ fn webhook_payloads_carry_ids_and_statuses_only() {
         .send_message(SendMessage {
             from: "manager".into(),
             to: vec!["shopper@shop".into()],
-            subject: "please".into(),
+            subject: "please rotate the staging keys".into(),
             body: "do it".into(),
             request: Some(NewRequest::default()),
             ..Default::default()
@@ -637,6 +639,18 @@ fn webhook_payloads_carry_ids_and_statuses_only() {
         due_in_seconds: None,
     })
     .unwrap();
+    // Free text in resource and reap events: purpose and reason.
+    s.register_resource(RegisterResource {
+        purpose: Some("the private purpose".into()),
+        ..dev_server("shopper@shop", None)
+    })
+    .unwrap();
+    s.note_reap_request(
+        "shopper@shop",
+        "dev_server:vite@5173",
+        "the private reap reason",
+    )
+    .unwrap();
     s.queue_webhook_deliveries().unwrap();
     let bodies: Vec<String> = s
         .claim_due_deliveries(200)
@@ -649,7 +663,22 @@ fn webhook_payloads_carry_ids_and_statuses_only() {
         bodies.iter().any(|b| b.contains("request.completed")),
         "{bodies:?}"
     );
+    assert!(
+        bodies.iter().any(|b| b.contains("resource.reap_requested")),
+        "{bodies:?}"
+    );
+    // The whole serialized delivery, summary included, carries no free text.
     for b in &bodies {
-        assert!(!b.contains("private completion note"), "{b}");
+        for leak in [
+            "private completion note",
+            "private purpose",
+            "private reap reason",
+            "staging keys",
+        ] {
+            assert!(!b.contains(leak), "{leak} in {b}");
+        }
     }
+    // Nor does the feed a token reads, for resource purposes and reap reasons.
+    let feed = serde_json::to_string(&all_items(&s, None)).unwrap();
+    assert!(!feed.contains("private purpose") && !feed.contains("private reap reason"));
 }
