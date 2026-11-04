@@ -46,14 +46,16 @@ Every way events leave the node applies the same visibility rule (D38). When add
   - An event with projects is visible when one of them matches the globs.
   - A project-less event is visible when it concerns the token's agent, **matched by agent id**, never by name.
   - `token.*`, `peer.*`, `node.*` and `invite.*` events are never visible to tokens.
-- **Payloads** carry ids, names and statuses, never bodies. A new event kind needs an activity summary that doesn't echo its payload.
+- **Object scope:** a lane, hold or resource event is scoped by that object's project only, never by the projects of the agents it mentions.
+- **Payloads** carry ids, names and statuses, never bodies; webhook `data` is filtered through an allowlist (`webhooks::webhook_data`), so new free-text fields can't leak. A new event kind needs an activity summary that doesn't echo its payload.
 - **Node-local events:** `hold.conflict` and `resource.lease_expiring` are never federated. Classify new purely local signals as `Share::Never`.
 - **`resource_find` stays node-wide** (decision recorded in D38).
 
 ## Decisions (phase 3)
 
 - **Who is asked:** the person is an agent with program `human`. The default is the `decider` node setting (`another config decider NAME`); never add an environment variable for it.
-- **Who may answer:** only a manager bot (`grok_bot`) or a person (`human`) may relay an answer, and never the agent that asked. That covers spend approvals too. MCP `decision_answer` must name its relaying agent.
+- **Who may answer:** only a manager bot (`grok_bot`) or a person (`human`) may relay an answer, and never the agent that asked. Those roles come only from the local CLI (`Store::register_agent_trusted`); `register_agent` (MCP, hooks) can't grant them.
+- **Content:** `decision.*` events and decision mail subjects carry ids, names and values only. Hidden decisions are `not_found`, never `forbidden`. That covers spend approvals too. MCP `decision_answer` must name its relaying agent.
 - **Automatic mail** (timeouts, reminders) comes from the reserved system agent `another` (`SYSTEM_AGENT`), never in a person's name.
 - **Lookups:** projects are resolved and scope-checked first; lanes are then looked up within that project only. Hidden and missing objects get the same error.
 
