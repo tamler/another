@@ -1364,6 +1364,49 @@ impl Store {
         })
     }
 
+    /// Refuse values for an account's fixed fields (local callers only): `invalid`, naming each
+    /// one that differs from the account's. `None` and the account's own values pass.
+    pub fn check_spend_account_fixed(
+        &self,
+        key: &str,
+        kind: Option<SpendKind>,
+        unit: Option<&str>,
+        period: Option<SpendPeriod>,
+        project: Option<&str>,
+        scope: Option<&TokenScope>,
+    ) -> Result<()> {
+        local_only(scope)?;
+        self.read(|conn| {
+            let (a, project_id) = account(conn, self.node_id(), key)?;
+            let mut differ = Vec::new();
+            if kind.is_some_and(|k| k != a.kind) {
+                differ.push(format!("kind (it is {})", a.kind.as_str()));
+            }
+            if unit.is_some_and(|u| u.trim() != a.unit) {
+                differ.push(format!("unit (it is {})", a.unit));
+            }
+            if period.is_some_and(|p| p != a.period) {
+                differ.push(format!("period (it is {})", a.period.as_str()));
+            }
+            if let Some(p) = project {
+                if project_id.as_deref()
+                    != Some(find_project(conn, self.node_id(), p)?.project_id.as_str())
+                {
+                    let current = a.project.as_deref().unwrap_or("shared");
+                    differ.push(format!("project (it is {current})"));
+                }
+            }
+            if differ.is_empty() {
+                return Ok(());
+            }
+            Err(Error::Invalid(format!(
+                "spend account {:?} can't change {}",
+                a.name,
+                differ.join(", ")
+            )))
+        })
+    }
+
     /// Change a spend account (local callers only).
     pub fn update_spend_account(
         &self,

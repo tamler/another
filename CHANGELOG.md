@@ -5,6 +5,7 @@ All notable changes to Another. Unreleased work is listed under the next version
 ## Unreleased
 
 ### Fixed
+- `spend_account_upsert` refuses a different `kind`, `unit`, `period` or `project` for an existing account, naming each field. Before, it dropped them and returned success.
 - Cancelling an overdue decision commits its timeout result, request closure and automatic mail before returning a conflict, even without a running server or when the deadline passes as cancellation begins.
 
 ### Added
