@@ -610,3 +610,59 @@ fn scoped_list_filters_never_reveal_hidden_projects_or_agents() {
     assert_eq!(local("dup").unwrap_err().code(), "ambiguous");
     assert_eq!(local("ghost").unwrap_err().code(), "not_found");
 }
+
+#[test]
+fn scoped_lead_lookups_never_reveal_hidden_agents() {
+    let s = store();
+    for p in ["/work/shop", "/work/vault"] {
+        s.register_agent(RegisterAgent {
+            name: "dup".into(),
+            program: Program::Claude,
+            project: Some(p.into()),
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    }
+    let t = s
+        .create_token("manager", &["/work/shop".into()], None, None)
+        .unwrap();
+    let shop = s.verify_token(&t.secret).unwrap();
+    let mk = |lead: &str| {
+        s.create_lane(
+            NewLane {
+                agent: "manager".into(),
+                name: format!("l-{}", lead.replace('@', "-")),
+                project: "shop".into(),
+                lead: lead.into(),
+                charter: String::new(),
+                status: None,
+            },
+            Some(&shop),
+        )
+    };
+    // The bare name resolves to the only visible agent; no ambiguity naming dup@vault.
+    assert_eq!(mk("dup").unwrap().lane.lead, "dup@shop");
+    // The hidden agent and a missing one fail the same way.
+    let hidden = mk("dup@vault").unwrap_err();
+    let missing = mk("ghost@vault").unwrap_err();
+    assert_eq!((hidden.code(), missing.code()), ("not_found", "not_found"));
+    assert_eq!(
+        hidden.to_string().replace("dup@vault", "X"),
+        missing.to_string().replace("ghost@vault", "X")
+    );
+    // Updating the lead follows the same rule; project-less agents stay usable.
+    let upd = |lead: &str| {
+        s.update_lane(
+            LaneUpdate {
+                agent: "manager".into(),
+                lane: "l-dup".into(),
+                lead: Some(lead.into()),
+                ..Default::default()
+            },
+            Some(&shop),
+        )
+    };
+    assert_eq!(upd("dup@vault").unwrap_err().code(), "not_found");
+    assert_eq!(upd("codex").unwrap().lane.lead, "codex");
+}
