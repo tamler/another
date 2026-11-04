@@ -472,6 +472,15 @@ pub(crate) fn check_relayer(conn: &Connection, relayer: &AgentRef, asker_id: &st
             relayer.address
         )));
     }
+    // The role must have been confirmed on this machine: a person created on demand as a
+    // decision's addressee (or any role an agent gave itself) can't relay.
+    if !crate::identity::role_confirmed(conn, &relayer.id, &program)? {
+        return Err(Error::Forbidden(format!(
+            "{} is not a confirmed {program}: confirm it on this machine with `another agent register {} --program {program}`",
+            relayer.address,
+            relayer.address.split('@').next().unwrap_or(&relayer.address)
+        )));
+    }
     Ok(())
 }
 
