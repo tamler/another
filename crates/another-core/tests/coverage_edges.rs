@@ -112,21 +112,24 @@ fn scheduled_summary_settings_reject_malformed_values() {
 }
 
 #[test]
-fn scheduled_summary_to_an_unknown_person_fails_every_sweep() {
-    // BUGS-FOUND.md #1: `summary_to = mail:NAME` only checks the name's shape, so a
-    // schedule to nobody is accepted and every sweep fails (never marked sent, retried).
+fn a_summary_to_an_unknown_person_is_never_recorded_as_sent() {
+    // BUGS-FOUND.md #1: today `summary_to = mail:NAME` only checks the name's shape, so a
+    // schedule to nobody is accepted and every sweep fails. PR #25 refuses it when set. What
+    // holds on both sides of that fix: nothing is delivered, and nothing claims it was.
     let (s, h) = store();
-    s.set_summary_schedule(Some("00:00"), Some("mail:nobody"))
-        .unwrap();
-    assert!(matches!(
-        s.send_scheduled_summary(),
-        Err(Error::NotFound(_))
-    ));
-    advance(&h, 60_000);
-    assert!(
-        s.send_scheduled_summary().is_err(),
-        "still failing on the next sweep"
-    );
+    if s.set_summary_schedule(Some("00:00"), Some("mail:nobody"))
+        .is_ok()
+    {
+        assert!(matches!(
+            s.send_scheduled_summary(),
+            Err(Error::NotFound(_))
+        ));
+        advance(&h, 60_000);
+        assert!(
+            s.send_scheduled_summary().is_err(),
+            "still failing on the next sweep"
+        );
+    }
     assert_eq!(s.summary_schedule().unwrap().last_sent_at, None);
 }
 

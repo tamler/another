@@ -2,7 +2,18 @@
 
 Found while adding edge-case tests for the ten lowest-covered public functions (see the PR for the `cargo llvm-cov` numbers). This PR **records these and does not fix them**. Each test that shows one asserts today's behaviour and points here, so whoever fixes a bug updates its test in the same change.
 
+## Status (2026-11-05)
+
+| Bug | Status |
+|---|---|
+| 1, 2 | Fixed in draft PR #25, not yet on the base. The tests here no longer depend on either side of those fixes. |
+| 4, 5 | Fixed on the base by `66100cf`. PR #25 also covers the remaining case of #4 described in its section. |
+| 6, 7 | Fixed in draft PR #25, not yet on the base. The tests here still assert the old behaviour and must change when the two branches meet. |
+| 3, 8, 9, 10 | Open. |
+
 ## 1. A daily summary to an unknown person is accepted, then fails on every sweep
+
+**Status:** fixed in draft PR #25.
 
 **Where:**
 - `summary_to` validation in `another-core/src/settings.rs`;
@@ -21,11 +32,13 @@ another summary schedule --daily 00:00 --to mail:nobody
 
 Then run `another serve` and watch it log `daily summary failed` on every sweep.
 
-**Test:** `another-core/tests/coverage_edges.rs::scheduled_summary_to_an_unknown_person_fails_every_sweep`
+**Test:** `another-core/tests/coverage_edges.rs::a_summary_to_an_unknown_person_is_never_recorded_as_sent` (holds with and without PR #25)
 
 **Suggested fix:** resolve the agent when `summary_to` is set, and refuse an unknown one. Optionally, also mark the day as attempted, so a later failure (the agent was removed) logs once a day instead of on every sweep.
 
 ## 2. The session digest can hide urgent mail behind newer, ordinary mail
+
+**Status:** fixed in draft PR #25.
 
 **Where:** `another/src/hooks.rs::session_digest`
 
@@ -34,7 +47,7 @@ Then run `another serve` and watch it log `daily summary failed` on every sweep.
 - Once five newer normal messages arrive, an urgent one drops out of the list. The header still says `(1 urgent)`, or `(2 urgent)` when counting high, but the agent can't see which message it is or who sent it.
 - The digest is Another's delivery guarantee for agents that don't poll. Urgent mail is exactly what it must not drop.
 
-**Test:** `another/tests/coverage_edges.rs::the_session_digest_flags_importance_and_caps_requests_at_five`
+**Test:** PR #25's `the_session_digest_lists_urgent_mail_before_newer_ordinary_mail`. This branch no longer asserts which five are listed.
 
 **Suggested fix:** list unread high and urgent messages first (the inbox already has `urgent_only`), then fill up to five with the newest of the rest. Or always include every urgent message and note "+N more".
 
@@ -66,6 +79,8 @@ Same rules as above: recorded here, not fixed, and each test asserts today's beh
 ## 4. Doctor passes a missing hook wrapper when it can't parse the command
 
 **Fixed in `66100cf` on `claude/v0.1.0-readiness`.** The tests below now assert the correct result. What follows describes the bug as found.
+
+**Remaining case (low):** a config with one recognised, healthy wrapper command and a second command that wraps a missing one, such as `/bin/sh '/gone/another-hook.sh' x`, still passes, because only recognised commands are checked. Checked with the real binary on `7af29ef`. Another's installer never writes this shape.
 
 **Where:** `wrapper_paths` in `another/src/doctor.rs`
 
@@ -113,6 +128,7 @@ ANOTHER_HOME="/tmp/o'brien" another doctor   # PASS  hooks:codex
 - For a file that isn't UTF-8, that install then refuses to touch it and exits non-zero. The person is sent in a circle, and nothing mentions that the file is damaged.
 - The check just below is written for this case ("a config that mentions the wrapper but can't be read as hooks is broken, not installed"), but an unreadable file never reaches it.
 - A directory at the config path takes the same route. See `every_installed_client_is_reported_on_its_own`.
+- So does a config the user can't read (mode 000), checked with the real binary on `7af29ef`: `WARN … hooks not installed`.
 
 **Test:** `another/tests/doctor.rs::bug_a_hook_config_that_is_not_utf8_reads_as_not_installed`
 
@@ -130,6 +146,47 @@ ANOTHER_HOME="/tmp/o'brien" another doctor   # PASS  hooks:codex
 **Test:** `another-core/tests/coverage_edges.rs::bug_summary_times_accept_a_plus_sign`
 
 **Suggested fix:** require both parts to be two ASCII digits.
+
+## 8. `hook install` writes a relative wrapper path for a relative Another home
+
+**Where:** the hook command built in `another/src/hooks.rs` (`HookEnv`, `sh_quote`)
+
+**What:**
+- With `ANOTHER_HOME=relative-home`, the install writes `'relative-home/hooks/another-hook.sh' session-start …`. A client runs that from its own working directory, where the path doesn't resolve.
+- Doctor reports this as `FAIL … mentions another-hook.sh but no hook command runs it`. Failing is right, but the message doesn't name the cause, and the reinstall it suggests writes the same relative path.
+- Low severity: it needs a relative `ANOTHER_HOME`.
+
+**Test:** `another/tests/doctor.rs::bug_hook_install_writes_a_relative_wrapper_for_a_relative_home`
+
+**Suggested fix:** make the home absolute when building `HookEnv`, or refuse a relative one.
+
+## 9. A refused late answer rolls back the sweep that expired the decision
+
+**Where:** `Store::answer_decision` in `another-core/src/decisions.rs`
+
+**What:**
+- The answer runs `sweep_tx` inside its transaction, and a `conflict` return rolls that back. So the default, its event and its mail aren't committed by the call that reported the decision as closed.
+- `cancel_decision` had the same shape, and `afa366a` fixed it there with a nested `Ok(Err(..))`.
+- Low severity: nothing is lost. The next sweeping read applied the default exactly once in the test, but without a running server that may be some time later.
+
+**Reproduce:** with a `choose_default` decision past its deadline, `answer_decision` returns `conflict`, and `events` shows no `decision.expired` until something sweeps.
+
+**Test:** none on this branch. Checked with a throwaway test on `7af29ef`.
+
+**Suggested fix:** use the same nested result as `cancel_decision`.
+
+## 10. Spend on an account archived during the window leaves the daily summary
+
+**Where:** `Store::daily_summary` in `another-core/src/summary.rs`
+
+**What:**
+- The summary's spend lines come from `spend_report`, which skips archived accounts, so money recorded today on an account archived today has no line and isn't flagged.
+- This predates `b4e6d8c`, which correctly stopped that spend being attributed to a same-named replacement.
+- Low severity: the entries remain in the ledger.
+
+**Test:** none on this branch. Checked with a throwaway test on `7af29ef`.
+
+**Suggested fix:** add a line for window spend on archived accounts, labelled as archived.
 
 ## Checked in the second pass and not a bug
 
