@@ -18,7 +18,7 @@ fn store() -> (Store, Handle) {
         ("solo", Some("/work/shop")),
         ("vaulter", Some("/work/vault")),
     ] {
-        s.register_agent(RegisterAgent {
+        s.register_agent_trusted(RegisterAgent {
             name: name.into(),
             program: Program::Claude,
             project: project.map(Into::into),
@@ -237,7 +237,7 @@ fn upgrades_a_database_created_before_lane_holds() {
     {
         let old = Store::open_at_schema(dir.path(), 8).unwrap();
         old.ensure_project("t", "/work/shop").unwrap();
-        old.register_agent(RegisterAgent {
+        old.register_agent_trusted(RegisterAgent {
             name: "a".into(),
             program: Program::Other,
             project: Some("/work/shop".into()),
@@ -332,7 +332,7 @@ fn scoped_holds_by_lane_filters_never_resolve_node_wide() {
     let (s, clock) = store();
     // "twin" exists in both projects: a node-wide lookup would be ambiguous and name both.
     for p in ["/work/shop", "/work/vault"] {
-        s.register_agent(RegisterAgent {
+        s.register_agent_trusted(RegisterAgent {
             name: "twin".into(),
             program: Program::Claude,
             project: Some(p.into()),
