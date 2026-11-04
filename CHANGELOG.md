@@ -4,6 +4,9 @@ All notable changes to Another. Unreleased work is listed under the next version
 
 ## Unreleased
 
+### Fixed
+- Cancelling an overdue decision commits its timeout result, request closure and automatic mail before returning a conflict, even without a running server or when the deadline passes as cancellation begins.
+
 ### Added
 - **`another doctor`**: checks the store (writable, schema), the local server (reachable, Another, same home), tokens (expired, expiring, matching no project), client hooks for Claude Code, Codex and Grok (and whether Codex has recorded trust for them), and port and resource conflicts. PASS / WARN / FAIL / SKIP with a fix per problem; `--json`; exit 1 on any FAIL.
 - **Release installs:** tagged releases also publish one `SHA256SUMS` and `install.sh`. One-line install: `curl -fsSL https://github.com/tamler/another/releases/latest/download/install.sh | sh`. It verifies the archive before installing (`ANOTHER_VERSION`, `ANOTHER_INSTALL_DIR` to pin or relocate).
@@ -82,6 +85,8 @@ All notable changes to Another. Unreleased work is listed under the next version
 - CI also runs on pull requests that target non-`main` branches, so stacked PRs are checked.
 
 ### Changed
+- Doctor rejects wrapper mentions outside executable hook commands and preserves recognition of installer paths containing spaces or apostrophes.
+- Spend reports keep active leases in the count before cost accrues, including at monthly resets, while retaining their overlap with historical periods.
 - **Remote event reads are now filtered by token scope** (D38, supersedes D16). `activity_feed`, `activity_summarize` and `GET /activity` used to show every project's events to any token. They now show only events from the token's projects (and project-less events concerning its own agent). Token, peer and node events are hidden from tokens. Local callers are unaffected.
 - `activity_summarize` request counts exclude decision requests (they are reported as decisions).
 - When reading forward, the feed's `next_since` now advances past events filtered out by `kinds` or scope.
