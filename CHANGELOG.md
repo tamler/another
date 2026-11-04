@@ -4,6 +4,9 @@ All notable changes to Another. Unreleased work is listed under the next version
 
 ## Unreleased
 
+### Fixed
+- Cancelling an overdue decision commits its timeout result, request closure and automatic mail before returning a conflict, even without a running server.
+
 ### Added
 - **Lanes** ([design](docs/design/01-lanes.md), [guide](docs/LANES.md)):
   - Named units of work with a charter, lead agent, project, status (`planned`, `working`, `blocked`, `needs_decision`, `done`, `abandoned`), linked threads, requests, holds and messages, and structured reports (summary, progress, links, artifacts) plus a DONE report with outcome and PR link.
@@ -63,6 +66,7 @@ All notable changes to Another. Unreleased work is listed under the next version
 - CI also runs on pull requests that target non-`main` branches, so stacked PRs are checked.
 
 ### Changed
+- Spend reports keep active leases in the count before cost accrues, including at monthly resets, while retaining their overlap with historical periods.
 - **Remote event reads are now filtered by token scope** (D38, supersedes D16). `activity_feed`, `activity_summarize` and `GET /activity` used to show every project's events to any token. They now show only events from the token's projects (and project-less events concerning its own agent). Token, peer and node events are hidden from tokens. Local callers are unaffected.
 - `activity_summarize` request counts exclude decision requests (they are reported as decisions).
 - When reading forward, the feed's `next_since` now advances past events filtered out by `kinds` or scope.
