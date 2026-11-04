@@ -19,6 +19,7 @@ With `another serve --auth`, every event read is filtered by the token's project
   - The token's agent having acted in another project does not make that event visible.
 - An event with no project, such as mail between agents that have no project or their sessions, is visible only if it concerns the token's own agent. The match is by agent id, never by name, so another node's agent with the same name doesn't count. Webhooks a token created follow the same rule.
 - Token, peer and node events are never visible to tokens.
+- Requests in `activity_summarize` counts follow the same rule as their events: a request into another project stays hidden even when the token's own agent sent it.
 - Local callers (CLI, stdio MCP, loopback HTTP without `--auth`) see everything.
 
 Items are one-line summaries plus ids. Message bodies are never included.
