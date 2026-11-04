@@ -24,7 +24,7 @@ impl Fixture {
             ("carol", Program::Grok),
         ] {
             store
-                .register_agent(RegisterAgent {
+                .register_agent_trusted(RegisterAgent {
                     name: name.into(),
                     program,
                     project: None,
@@ -118,7 +118,7 @@ fn register_agent_is_idempotent_and_touches_last_seen() {
     fx.advance_secs(30);
     let again = fx
         .store
-        .register_agent(RegisterAgent {
+        .register_agent_trusted(RegisterAgent {
             name: "alice".into(),
             program: Program::Claude,
             project: None,
@@ -137,7 +137,7 @@ fn agent_names_disambiguate_with_project() {
     let fx = Fixture::new();
     for path in ["/work/one", "/work/two"] {
         fx.store
-            .register_agent(RegisterAgent {
+            .register_agent_trusted(RegisterAgent {
                 name: "dave".into(),
                 program: Program::Cursor,
                 project: Some(path.into()),
@@ -178,7 +178,7 @@ fn bare_name_resolves_when_unique_across_projects() {
     let fx = Fixture::new();
     let register = |project: &str| {
         fx.store
-            .register_agent(RegisterAgent {
+            .register_agent_trusted(RegisterAgent {
                 name: "erin".into(),
                 program: Program::Codex,
                 project: Some(project.into()),
@@ -215,7 +215,7 @@ fn bare_name_resolves_when_unique_across_projects() {
 #[test]
 fn rejects_bad_names_and_paths() {
     let fx = Fixture::new();
-    let bad = fx.store.register_agent(RegisterAgent {
+    let bad = fx.store.register_agent_trusted(RegisterAgent {
         name: "has space".into(),
         program: Program::Other,
         project: None,
@@ -689,7 +689,7 @@ fn concurrent_connections_share_one_database() {
     let b = Store::open(dir.path()).unwrap();
     assert_eq!(a.node_id(), b.node_id());
     for name in ["x", "y"] {
-        a.register_agent(RegisterAgent {
+        a.register_agent_trusted(RegisterAgent {
             name: name.into(),
             program: Program::Other,
             project: None,

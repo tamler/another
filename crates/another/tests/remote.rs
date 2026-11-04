@@ -31,7 +31,7 @@ async fn start() -> Server {
         ("alice", Program::Claude, Some("/work/shop")),
     ] {
         store
-            .register_agent(RegisterAgent {
+            .register_agent_trusted(RegisterAgent {
                 name: name.into(),
                 program,
                 project: project.map(Into::into),

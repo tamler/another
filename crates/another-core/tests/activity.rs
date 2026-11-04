@@ -11,7 +11,7 @@ fn setup() -> (Store, std::sync::Arc<std::sync::atomic::AtomicI64>) {
     let store = Store::open_in_memory(clock).unwrap();
     for (name, program) in [("alice", Program::Claude), ("bob", Program::Grok)] {
         store
-            .register_agent(RegisterAgent {
+            .register_agent_trusted(RegisterAgent {
                 name: name.into(),
                 program,
                 project: Some("/work/app".into()),

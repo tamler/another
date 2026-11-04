@@ -17,7 +17,7 @@ fn setup() -> (Store, Arc<AtomicI64>) {
         ("carol", Program::GrokBot),
     ] {
         store
-            .register_agent(RegisterAgent {
+            .register_agent_trusted(RegisterAgent {
                 name: name.into(),
                 program,
                 project: None,
