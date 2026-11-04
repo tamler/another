@@ -1,13 +1,27 @@
 # Changelog
 
-All notable changes to Another. Unreleased work is listed under the next version.
+All notable changes to Another are documented in this file.
 
-## Unreleased
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.0] - Unreleased
+
+The first release. It contains the local core built in milestones 1–6 and the coordination series (Phases 1–7: lanes, push, decisions, lane holds, spend, summary, remote agents), plus the opt-in background service, `another doctor` and verified release installs. The date is set when `v0.1.0` is tagged. Release notes: [docs/release-notes-v0.1.0.md](docs/release-notes-v0.1.0.md).
 
 ### Added
-- **`another doctor`**: checks the store (writable, schema), the local server (reachable, Another, same home), tokens (expired, expiring, matching no project), client hooks for Claude Code, Codex and Grok (and whether Codex has recorded trust for them), and port and resource conflicts. PASS / WARN / FAIL / SKIP with a fix per problem; `--json`; exit 1 on any FAIL.
-- **Release installs:** tagged releases also publish one `SHA256SUMS` and `install.sh`. One-line install: `curl -fsSL https://github.com/tamler/another/releases/latest/download/install.sh | sh`. It verifies the archive before installing (`ANOTHER_VERSION`, `ANOTHER_INSTALL_DIR` to pin or relocate).
-- README quickstart rewritten as a 90-second demo script (install, start, two agents, a hold, a port claim, doctor).
+- **Local core** (milestones 1–6):
+  - One SQLite store per node (`~/.another`, or `$ANOTHER_HOME`; `another init`), an append-only event log, and agents and projects (`another agent`, `another project`).
+  - Mail with threads, read and ack receipts (`another send|reply|inbox|ack|threads|thread`), and requests with owners (`another requests`, `another request`).
+  - Expiring path holds (`another hold`, `another holds`, `another heartbeat`, `another sweep`).
+  - A resource registry with leases (`another resources|resource|borrow|release`), an orphan scanner (`another orphans`) and human-confirmed reaping (`another reap … --confirm`).
+  - An activity feed (`another activity`, `another events`) and hook packs for Claude Code, Codex, Grok CLI and Cursor that inject a short digest at session start (`another hook install`).
+  - MCP over stdio (`another serve --stdio`) or loopback streamable HTTP (`another serve`).
+  - Authenticated remote peers: bearer tokens with project globs (`another token`), an audit log of remote calls (`another audit`) and `GET /activity`.
+  - Federation: signed event logs, hub-and-spoke sync and cross-node mail (`another node`, `another pair`, `another peers`, `another sync`).
+  - Wake adapters for tmux, cmux and Herdr (`another wake`).
 - **Lanes** ([design](docs/design/01-lanes.md), [guide](docs/LANES.md)):
   - Named units of work with a charter, lead agent, project, status (`planned`, `working`, `blocked`, `needs_decision`, `done`, `abandoned`), linked threads, requests, holds and messages, and structured reports (summary, progress, links, artifacts) plus a DONE report with outcome and PR link.
   - `another lane create|list|show|update|report|done|close|export` and MCP tools `lane_create`, `lane_list`, `lane_show`, `lane_update`, `lane_report`, `lane_close`.
@@ -80,16 +94,25 @@ All notable changes to Another. Unreleased work is listed under the next version
     - Decisions asked on another node can be answered here, and the answer is relayed only to that node. Free text travels as mail, never in events.
     - Synced holds keep their lane.
 - CI also runs on pull requests that target non-`main` branches, so stacked PRs are checked.
+- **Background service** (opt-in; tamler/another#9):
+  - `another service install|status|logs|stop|start|uninstall`. It is never installed unless you run `another service install`.
+  - macOS: a launchd user agent (`one.toanother.another`, `RunAtLoad`, `KeepAlive`, logs in `$ANOTHER_HOME/logs/`). Linux: a systemd user unit (`another.service`, `Restart=on-failure`, journal logs).
+  - `install` takes `serve`'s flags (`--bind`, `--auth`, `--allowed-host`, `--allow-remote-bind`, `--federation`) and the global `--home`. Re-running it updates the service in place. It refuses when another process already listens on the port.
+- **`another doctor`**: checks the store (writable, schema), the local server (reachable, Another, same home), tokens (expired, expiring, matching no project), client hooks for Claude Code, Codex and Grok (and whether Codex has recorded trust for them), and port and resource conflicts. PASS / WARN / FAIL / SKIP with a fix per problem; `--json`; exit 1 on any FAIL.
+- **Release installs:** tagged releases also publish one `SHA256SUMS` and `install.sh`. One-line install: `curl -fsSL https://github.com/tamler/another/releases/latest/download/install.sh | sh`. It verifies the archive before installing (`ANOTHER_VERSION`, `ANOTHER_INSTALL_DIR` to pin or relocate).
+- README quickstart rewritten as a 90-second demo script (install, start, two agents, a hold, a port claim, doctor).
 
 ### Changed
 - **Remote event reads are now filtered by token scope** (D38, supersedes D16). `activity_feed`, `activity_summarize` and `GET /activity` used to show every project's events to any token. They now show only events from the token's projects (and project-less events concerning its own agent). Token, peer and node events are hidden from tokens. Local callers are unaffected.
 - `activity_summarize` request counts exclude decision requests (they are reported as decisions).
 - When reading forward, the feed's `next_since` now advances past events filtered out by `kinds` or scope.
+- **Database schema:** migrations 6–11, all additive; existing databases upgrade in place on first open.
+  - Migration 6 adds the `lanes`, `lane_links` and `lane_reports` tables.
+  - Migration 7 adds the `webhooks` and `webhook_deliveries` tables and a nullable `resource_leases.expiry_warned_at` column.
+  - Migration 8 adds the `decisions` table and `requests.kind` (default `task`).
+  - Migration 9 adds `holds.lane_id` (nullable).
+  - Migration 10 adds the `spend_accounts`, `spend_entries` and `spend_leases` tables, and a nullable `resources.spend_account_id`.
+  - Migration 11 adds the `agent_invites`, `remote_agents` and `remote_decisions` tables, and a nullable `lanes.leaderless_at`.
 
-### Database
-- Migration 6 adds the `lanes`, `lane_links` and `lane_reports` tables. It is additive; existing databases upgrade in place.
-- Migration 11 adds the `agent_invites`, `remote_agents` and `remote_decisions` tables, and a nullable `lanes.leaderless_at`. It is additive.
-- Migration 10 adds the `spend_accounts`, `spend_entries` and `spend_leases` tables, and a nullable `resources.spend_account_id`. It is additive.
-- Migration 9 adds `holds.lane_id` (nullable). It is additive.
-- Migration 8 adds the `decisions` table and `requests.kind` (default `task`). It is additive.
-- Migration 7 adds the `webhooks` and `webhook_deliveries` tables and a nullable `resource_leases.expiry_warned_at` column. It is additive.
+[Unreleased]: https://github.com/tamler/another/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/tamler/another/releases/tag/v0.1.0
