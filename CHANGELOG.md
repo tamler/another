@@ -4,6 +4,9 @@ All notable changes to Another. Unreleased work is listed under the next version
 
 ## Unreleased
 
+### Fixed
+- Cancelling an overdue decision commits its timeout result, request closure and automatic mail before returning a conflict, even without a running server.
+
 ### Added
 - **Lanes** ([design](docs/design/01-lanes.md), [guide](docs/LANES.md)):
   - Named units of work with a charter, lead agent, project, status (`planned`, `working`, `blocked`, `needs_decision`, `done`, `abandoned`), linked threads, requests, holds and messages, and structured reports (summary, progress, links, artifacts) plus a DONE report with outcome and PR link.
