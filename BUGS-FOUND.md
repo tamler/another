@@ -65,6 +65,8 @@ Same rules as above: recorded here, not fixed, and each test asserts today's beh
 
 ## 4. Doctor passes a missing hook wrapper when it can't parse the command
 
+**Fixed in `66100cf` on `claude/v0.1.0-readiness`.** The tests below now assert the correct result. What follows describes the bug as found.
+
 **Where:** `wrapper_paths` in `another/src/doctor.rs`
 
 **What:**
@@ -82,12 +84,14 @@ ANOTHER_HOME="/tmp/o'brien" another doctor   # PASS  hooks:codex
 ```
 
 **Tests:** in `another/tests/doctor.rs`:
-- `bug_a_missing_wrapper_passes_when_the_path_has_an_apostrophe`
-- `bug_a_missing_wrapper_passes_when_it_is_not_the_first_word`
+- `a_missing_wrapper_under_a_path_with_an_apostrophe_fails`
+- `a_wrapper_that_is_not_the_first_word_fails`
 
 **Suggested fix:** undo `sh_quote`'s escaping when reading the word. For a command where the wrapper can't be located, report a failure or warning rather than dropping it.
 
 ## 5. Doctor reports Codex trust as recorded "for all 0" hooks
+
+**Fixed in `66100cf` on `claude/v0.1.0-readiness`.** A command in that shape now fails the hook check, so the trust check doesn't run. What follows describes the bug as found.
 
 **Where:** `codex_trust` and `our_codex_hook_keys` in `another/src/doctor.rs`
 
@@ -96,7 +100,7 @@ ANOTHER_HOME="/tmp/o'brien" another doctor   # PASS  hooks:codex
 - With a command anywhere else, such as directly under the event with no group's `hooks` array, the trust check finds no hooks. No hooks missing trust counts as success: `PASS hooks:codex-trust: Codex trust recorded for all 0 of Another's hooks`.
 - A person reading that would conclude holds are enforced in `codex exec`. Whether Codex runs a hook written in that shape wasn't tested here. Either way, doctor has checked nothing.
 
-**Test:** `another/tests/doctor.rs::bug_codex_trust_passes_for_all_zero_hooks`
+**Test:** `another/tests/doctor.rs::a_hook_outside_a_group_fails_and_gets_no_trust_verdict`
 
 **Suggested fix:** when `ours` is empty, warn or fail (a config whose hooks doctor can't locate) instead of passing.
 
