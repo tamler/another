@@ -5,7 +5,7 @@ All notable changes to Another. Unreleased work is listed under the next version
 ## Unreleased
 
 ### Fixed
-- Cancelling an overdue decision commits its timeout result, request closure and automatic mail before returning a conflict, even without a running server.
+- Cancelling an overdue decision commits its timeout result, request closure and automatic mail before returning a conflict, even without a running server or when the deadline passes as cancellation begins.
 
 ### Added
 - **Lanes** ([design](docs/design/01-lanes.md), [guide](docs/LANES.md)):
