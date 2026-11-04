@@ -63,26 +63,29 @@ The first release. It contains the local core built in milestones 1–6 and the 
   - `another holds --by-lane`, MCP `holds_by_lane`, and live holds in `lane show`.
   - Opt-in pre-edit hook for Claude Code and Codex: `another hook install --pre-edit`. It holds files before each edit and denies the edit when another lane or agent holds them.
 - **Spend ledger** ([design](docs/design/05-spend.md), [guide](docs/SPEND.md)):
-  - Accounts: `gpu_pod`, `api_credits`, `plan_reset`, `server` and `domain`, each with a unit, budget, and monthly period with a reset day (or lifetime).
-  - Spend entries; hourly leases with an owner and a cost per hour, renewed by heartbeat.
+  - Accounts: `gpu_pod`, `api_credits`, `plan_reset`, `server` and `domain`, each with a unit, budget, and a `monthly` period with a reset day (1–28), or `none` (lifetime). `another spend account add|list|update|archive`.
+  - Spend entries (`another spend record`); hourly leases with an owner and a cost per hour, renewed by heartbeat (`another spend borrow|release|leases`).
   - Approval gate: `requires_approval` makes borrowing ask a decision first, of the account's approver or the node's decider. The borrower can't relay its own approval. Withdrawing a pending lease withdraws its decision (`spend.lease_withdrawn`).
   - Ending a session closes the agent's spend leases.
   - `another spend link ACCOUNT RESOURCE`: borrowing a linked resource goes through the account's approval gate and accrues cost while the resource lease lives.
   - Scoped tokens see the remaining budget of shared accounts (read-only), but only their own projects' spend.
-  - `another spend`: a report by period, lane and agent with a phone-sized burn-down. Also MCP `spend_report` and `GET /spend`.
+  - `another spend`: a report by period, lane and agent with a phone-sized burn-down (`--period current|previous|YYYY-MM`, `--account`, `--lane`, `--agent`). Also MCP `spend_report` and `GET /spend`.
+  - MCP tools `spend_record`, `spend_borrow`, `spend_release`, `spend_leases`, `spend_accounts`, and `spend_account_upsert` (local callers only).
+  - `spend.budget_threshold` fires at 80% and 100% of a budget.
   - `spend.*` events, a new `spend` activity category and a `budget` webhook filter.
   - No real accounts are built in; the examples live in [docs/SPEND.md](docs/SPEND.md).
 - **Daily summary** ([design](docs/design/06-summary.md)):
   - `another summary [--since 24h]`, MCP `daily_summary`, and `GET /summary` (JSON, or markdown with `format=markdown`).
-  - Contents: what needs a person, lanes moved, stuck and closed, decisions, requests, holds and conflicts, spend, active agents, and active people (listed separately). Scoped for remote callers, including an event-id `since`. `truncated` flags a section that hit the pager's cap.
-  - Opt-in daily rollup: `another summary schedule --daily HH:MM --to webhook|mail:NAME`, sent by `another serve` from the `another` system agent. A new `daily_summary` webhook filter (local all-project webhooks only).
+  - Contents: what needs a person, lanes moved, stuck and closed, decisions, requests, holds and conflicts, spend, active agents, and active people (listed separately). Scoped for remote callers, including an event-id `since`. `truncated` is set when any section hit its cap (20,000 events, or 500 open decisions).
+  - Opt-in daily rollup: `another summary schedule --daily HH:MM --to webhook|mail:NAME`, sent by `another serve` (HTTP or `--stdio`) from the `another` system agent; `--off` stops it. It covers the time since the last rollup, at most 48 hours. A new `daily_summary` webhook filter (local all-project webhooks only).
 - [Manager bot guide](docs/MANAGER-BOT.md): token, webhooks to subscribe, and which MCP tools to call.
 - **Remote agents** ([design](docs/design/07-remote-agents.md), [guide](docs/REMOTE-AGENTS.md)):
   - Invites:
-    - `another invite create|list|revoke`: single-use, expiring codes that fix the agent's name, program, project globs and lane.
+    - `another invite create|list|revoke`: expiring codes (24h by default, at most 30 days), single-use by default (`--uses` up to 100), that fix the agent's name, program, project globs and lane.
     - Redeem with `another join <hub> <code>` or `POST /join`. That registers the agent, issues a scoped token, and returns Claude Code / Codex MCP config and env vars.
-    - `--print-snippet` prints a shell block for cloud sessions, pinned to the hub's version and the release checksum.
-    - Invites never take over a registered agent's name; `POST /join` is rate-limited per client address.
+    - Invited agents are ephemeral unless the invite is created with `--persistent`.
+    - `--print-snippet --hub-url URL` prints a shell block for cloud sessions. It installs the inviting binary's version (a checksum-verified release archive, else `cargo install` of the same tag) unless `another` is already on `PATH`, then joins.
+    - Invites never take over a registered agent's name; `POST /join` (unauthenticated, served only with `--auth`) is limited to 10 attempts a minute per client address.
   - Lifecycle:
     - Presence (`another agent remotes`).
     - Ephemeral agents leave when their session ends or when idle (`--idle-hours`, else the `remote_idle_hours` node setting, default 4): token revoked, holds and leases in the token's projects released, `lane.agent_left` emitted. Remote heartbeats and leave touch only the token's projects too.
@@ -92,7 +95,7 @@ The first release. It contains the local core built in milestones 1–6 and the 
   - Federation:
     - Lanes are mirrored read-only on other nodes; only the owner writes. Reports into a mirror are proposals, which the owner applies when they sync.
     - Decisions asked on another node can be answered here, and the answer is relayed only to that node. Free text travels as mail, never in events.
-    - Synced holds keep their lane.
+    - Synced holds keep their lane when the receiving node knows it (its own lane or a mirror).
 - CI also runs on pull requests that target non-`main` branches, so stacked PRs are checked.
 - **Background service** (opt-in; tamler/another#9). *Pending: #9 is not merged into this branch yet. This entry describes the #9 branch, and it ships in 0.1.0 only if #9 is merged before the tag; otherwise remove it.*
   - `another service install|status|logs|stop|start|uninstall`. It is never installed unless you run `another service install`.
