@@ -214,16 +214,16 @@ pub(crate) fn request_visible(
     scope: &TokenScope,
     request_id: &str,
 ) -> Result<bool> {
+    // The same rule as its events (`event_visible`): the request's projects decide, and the
+    // own-agent exception applies only when it has no project at all.
     let p = serde_json::json!({ "request_id": request_id });
-    let agents = event_agents(conn, "request.created", &p)?;
-    if agents.contains(&scope.agent_id) {
-        return Ok(true);
+    let projects = event_projects(conn, "request.created", &p)?;
+    if projects.is_empty() {
+        return Ok(event_agents(conn, "request.created", &p)?.contains(&scope.agent_id));
     }
-    for a in agents {
-        if let Some(project) = agent_project(conn, &a)? {
-            if scope_allows_project(conn, scope, &project)? {
-                return Ok(true);
-            }
+    for project in projects {
+        if scope_allows_project(conn, scope, &project)? {
+            return Ok(true);
         }
     }
     Ok(false)

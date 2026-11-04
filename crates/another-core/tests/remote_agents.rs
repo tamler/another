@@ -89,7 +89,7 @@ fn invites_are_single_use_expiring_and_not_widened() {
     let j = join(&s, &c.code).unwrap();
     assert_eq!(j.agent, "cloud@shop", "registered in the lane's project");
     assert_eq!(j.project_globs, vec!["/work/shop".to_string()]);
-    assert_eq!(j.lane.as_deref(), Some("api"));
+    assert_eq!(j.lane.as_deref(), Some("api@shop"));
     let scope = s.verify_token(&j.token).unwrap();
     assert_eq!(scope.project_globs, vec!["/work/shop".to_string()]);
     assert_eq!(s.agent("cloud@shop").unwrap().program, "claude");

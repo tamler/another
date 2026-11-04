@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::error::{Error, Result};
-use crate::identity::{register_tx, resolve_agent, AgentRef, Program, RegisterAgent};
+use crate::identity::{register_with_tx, resolve_agent, AgentRef, Program, RegisterAgent};
 use crate::lanes::resolve_lane;
 use crate::store::{new_id, Store, Tx};
 use crate::time::fmt_ts;
@@ -715,12 +715,16 @@ impl Store {
                 return Err(invalid());
             }
             // Where the agent lives: the lane's project, else the single matching project.
+            // The lane the invite chose, as an unambiguous `name@project` for the client to
+            // keep (a bare name can match lanes in several projects).
+            let mut lane_ref: Option<String> = None;
             let lane_project: Option<(String, String)> = match &row.lane_id {
                 Some(lane_id) => {
                     let (lane, project_id) = resolve_lane(tx, tx.node_id, lane_id)?;
                     if lane.status.is_closed() {
                         return Err(invalid());
                     }
+                    lane_ref = Some(format!("{}@{}", lane.name, lane.project));
                     Some((project_id, lane.project_path))
                 }
                 None => None,
@@ -733,7 +737,8 @@ impl Store {
                 },
             };
             let program: Program = inv.program.parse().unwrap_or(Program::Other);
-            let agent = register_tx(
+            // The person chose this program when making the invite: a trusted registration.
+            let agent = register_with_tx(
                 tx,
                 &RegisterAgent {
                     name: inv.agent.clone(),
@@ -742,7 +747,8 @@ impl Store {
                     model: None,
                     description: Some(format!("remote agent (invite {})", inv.invite_id)),
                 },
-            )?;
+                true,
+    )?;
             let token = create_token_tx(
                 tx,
                 &agent.address,
@@ -802,7 +808,7 @@ impl Store {
                 token_id: token.token.token_id,
                 project_globs: inv.project_globs.clone(),
                 project: agent.project.clone(),
-                lane: inv.lane.clone(),
+                lane: lane_ref.clone(),
                 ephemeral: inv.ephemeral,
                 idle_hours: inv.idle_hours,
             })

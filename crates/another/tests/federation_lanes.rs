@@ -299,7 +299,32 @@ fn lanes_decisions_and_holds_across_nodes() {
         "different lanes"
     );
 
-    // 5. A decision asked on the spoke is answered on the hub and flows back.
+    // 5. A decision asked on the spoke is answered on the hub and flows back. The hub has an
+    //    older decision of its own, so bounded listings must merge before the limit.
+    let older = hub
+        .store
+        .ask_decision(
+            NewDecision {
+                agent: "claude@shop".into(),
+                question: "Hub-local, older".into(),
+                options: vec![
+                    DecisionOption {
+                        value: "a".into(),
+                        label: "A".into(),
+                        description: None,
+                    },
+                    DecisionOption {
+                        value: "b".into(),
+                        label: "B".into(),
+                        description: None,
+                    },
+                ],
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
     let d = spoke
         .store
         .ask_decision(
@@ -335,6 +360,78 @@ fn lanes_decisions_and_holds_across_nodes() {
         .expect("mirrored on the hub");
     assert_eq!(m.node.as_deref(), Some("laptop"));
     assert_eq!(m.asker, "codex@shop@laptop");
+    // Newest first across local and mirrored decisions, before the limit.
+    let newest = hub
+        .store
+        .decisions(
+            DecisionFilter {
+                limit: 1,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        newest[0].decision_id, d.decision_id,
+        "the newer mirror, not {}",
+        older.decision_id
+    );
+    // A lane filter includes matching mirrors: a hub decision on the hub's lane, listed on the
+    // spoke by that (mirrored) lane.
+    let on_lane = hub
+        .store
+        .ask_decision(
+            NewDecision {
+                agent: "claude@shop".into(),
+                question: "On the api lane".into(),
+                options: vec![
+                    DecisionOption {
+                        value: "a".into(),
+                        label: "A".into(),
+                        description: None,
+                    },
+                    DecisionOption {
+                        value: "b".into(),
+                        label: "B".into(),
+                        description: None,
+                    },
+                ],
+                lane: Some(hub_lane.lane.lane_id.clone()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    sync(&spoke);
+    let by_lane = spoke
+        .store
+        .decisions(
+            DecisionFilter {
+                lane: Some(hub_lane.lane.lane_id.clone()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    assert!(
+        by_lane.iter().any(|x| x.decision_id == on_lane.decision_id),
+        "{by_lane:?}"
+    );
+    // A person filter includes matching mirrors.
+    let for_human = hub
+        .store
+        .decisions(
+            DecisionFilter {
+                human: Some(m.human.clone()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    assert!(
+        for_human.iter().any(|x| x.decision_id == d.decision_id),
+        "{for_human:?}"
+    );
     // A coding agent can't relay: refused here, before the mirror is marked sent.
     let refused = hub.store.answer_decision(
         AnswerDecision {
