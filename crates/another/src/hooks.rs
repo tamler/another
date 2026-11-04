@@ -619,7 +619,7 @@ pub fn install(
     if install {
         if clients.contains(&Client::Codex) {
             notes.push(
-                "Codex runs new hooks only after review: open Codex and trust them under /hooks."
+                "Codex runs new hooks only after review: open Codex interactively and trust them under /hooks. `codex exec` can't ask, so until they are trusted it skips them (holds are then not enforced); for automation that vets its hooks, `codex exec --dangerously-bypass-hook-trust` runs them."
                     .to_string(),
             );
         }
@@ -1066,7 +1066,9 @@ fn pre_edit(
             );
             eprintln!("{w}");
             warning = Some(w);
-            acquire(None)?
+            // Explicitly no lane: inferring the agent's other lane would attribute the edit
+            // to the wrong lane (and could turn a conflict into a same-lane warning).
+            acquire(Some(another_core::NO_LANE.into()))?
         }
         Err(e) => return Err(e.into()),
     };
@@ -1167,8 +1169,17 @@ pub fn redact_secrets(text: &str) -> String {
             if i > 0 {
                 out.push('.');
             }
+            // Word characters that also work as punctuation (`-`, `_`, `/`, `+`) may hug a
+            // secret ("…cdef-", "/…cdef/"): check the core without them too, keeping them.
+            let edge = |c: char| matches!(c, '-' | '_' | '/' | '+');
+            let core = part.trim_matches(edge);
             if looks_secret(part) {
                 out.push_str("[redacted]");
+            } else if !core.is_empty() && core.len() < part.len() && looks_secret(core) {
+                let start = part.len() - part.trim_start_matches(edge).len();
+                out.push_str(&part[..start]);
+                out.push_str("[redacted]");
+                out.push_str(&part[start + core.len()..]);
             } else {
                 out.push_str(part);
             }
@@ -1287,6 +1298,35 @@ pub fn run_fail_open(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redacts_secrets_hugged_by_punctuation() {
+        let hex = "0123456789abcdef0123456789abcdef";
+        let b64 = "dGhpc0lzQVNlY3JldEtleVZhbHVlMTIzNDU2Nzg5MEFCQw";
+        for (input, want) in [
+            (format!("Key: {hex}."), "Key: [redacted]."),
+            (format!("Key: {hex}-"), "Key: [redacted]-"),
+            (format!("Key: {hex}_"), "Key: [redacted]_"),
+            (format!("path /{hex}/"), "path /[redacted]/"),
+            (format!("({hex}),"), "([redacted]),"),
+            (format!("'{hex}';"), "'[redacted]';"),
+            (format!("{b64}?"), "[redacted]?"),
+            (format!("{b64}=."), "[redacted]=."),
+            // base64url allows `-`, so the dashes go with it: still nothing leaks.
+            (format!("--{b64}--"), "[redacted]"),
+        ] {
+            assert_eq!(redact_secrets(&input), want, "{input}");
+        }
+        // Ordinary hyphenated or slashed words stay.
+        for keep in [
+            "fix-flaky-test_runner/",
+            "src/api/routes.rs",
+            "--dry-run",
+            "a+b",
+        ] {
+            assert_eq!(redact_secrets(keep), keep);
+        }
+    }
 
     #[test]
     fn parses_client_payloads() {

@@ -406,7 +406,11 @@ async fn remote_spend_is_scoped_and_audited() {
         json!({ "account": "vault-only", "amount": 1 }),
     )
     .await;
-    assert_eq!(code(&r).as_deref(), Some("forbidden"));
+    assert_eq!(
+        code(&r).as_deref(),
+        Some("not_found"),
+        "a hidden account is a missing one"
+    );
     let r = call(
         &client,
         "spend_record",

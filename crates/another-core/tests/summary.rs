@@ -507,6 +507,17 @@ fn scheduled_summary_by_mail_and_webhook() {
     };
     let d = got(&local.webhook.webhook_id);
     assert_eq!(d.len(), 1);
+    let body = s
+        .claim_due_deliveries(50)
+        .unwrap()
+        .into_iter()
+        .find(|o| o.kind == "summary.daily")
+        .unwrap()
+        .body;
+    assert!(
+        body.contains("**Another: last"),
+        "the rollup carries the digest: {body}"
+    );
     assert_eq!(d[0].filter, "daily_summary");
     assert!(
         got(&everything.webhook.webhook_id).is_empty(),

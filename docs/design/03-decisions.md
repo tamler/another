@@ -67,7 +67,7 @@ The existing sweeper (every 30 s in `serve`, and before most writes) handles dea
 - `another decision answer <id> <value> [--text …] [--as NAME]`
 - `another decision cancel <id>`
 
-**Events**, all with `project_id`, so scope filtering and webhooks work:
+**Events**, all with `project_id`, so scope filtering and webhooks work. They carry ids and status only, never the question, option labels or answer text (those stay in the table and the mail, whose subjects are content-free too):
 
 | Event | Fires when |
 |---|---|
