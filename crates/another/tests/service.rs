@@ -811,6 +811,64 @@ fn doctor_fails_a_service_whose_binary_is_gone() {
     let (detail, fix) = doctor_check(&report, "service", "fail");
     assert!(detail.contains("/nonexistent/another"), "{detail}");
     assert!(fix.contains("another service install"), "{fix}");
+    // It is still this home's server, so doctor checks its address, not the default port.
+    let (detail, fix) = doctor_check(&report, "server", "fail");
+    assert!(detail.contains(&bind), "{detail}");
+    assert!(fix.contains("another service install"), "{fix}");
+}
+
+#[test]
+fn doctor_says_the_user_manager_is_unreachable_instead_of_stopped() {
+    let env = Env::new("systemd");
+    let bind = format!("127.0.0.1:{}", free_port());
+    env.json(&["service", "install", "--bind", &bind]);
+    let out = env
+        .cmd(&["--json", "doctor"])
+        .env("NO_BUS", "1")
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let (detail, fix) = doctor_check(&report, "service", "warn");
+    assert!(detail.contains("Failed to connect to bus"), "{detail}");
+    assert!(!fix.contains("another service start"), "{fix}");
+    let (detail, fix) = doctor_check(&report, "server", "fail");
+    assert!(detail.contains(&bind), "{detail}");
+    assert!(!fix.contains("another service start"), "{fix}");
+}
+
+#[test]
+fn doctor_tells_a_service_user_to_move_the_service() {
+    let env = Env::new("launchd");
+    let port = free_port();
+    let bind = format!("127.0.0.1:{port}");
+    env.json(&["service", "install", "--bind", &bind]);
+    env.json(&["agent", "register", "claude", "--program", "claude"]);
+    env.json(&[
+        "resource",
+        "register",
+        "dev_server",
+        "web",
+        "--agent",
+        "claude",
+        "--port",
+        &port.to_string(),
+    ]);
+
+    // Something else answers on the service's port.
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        while let Ok((mut stream, _)) = listener.accept() {
+            let _ = stream.read(&mut [0; 1024]);
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi");
+        }
+    });
+
+    let report = doctor(&env, &[]);
+    let (_, fix) = doctor_check(&report, "server", "fail");
+    assert!(fix.contains("another service install --bind"), "{fix}");
+    let (_, fix) = doctor_check(&report, "ports", "fail");
+    assert!(fix.contains("another service install --bind"), "{fix}");
 }
 
 #[test]
@@ -897,16 +955,18 @@ fn doctor_warns_when_the_manager_cannot_be_asked() {
     let bind = format!("127.0.0.1:{}", free_port());
     env.json(&["service", "install", "--bind", &bind]);
     std::fs::remove_file(env.bin.join("systemctl")).unwrap();
-    let dead = format!("http://127.0.0.1:{}", free_port());
     // PATH holds only the remaining fakes, so a real systemctl can't answer either.
     let out = env
-        .cmd(&["--json", "doctor", "--server", &dead])
+        .cmd(&["--json", "doctor"])
         .env("PATH", &env.bin)
         .output()
         .unwrap();
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     let (detail, _) = doctor_check(&report, "service", "warn");
     assert!(detail.contains("systemctl"), "{detail}");
+    // The definition still says where the server should be.
+    let (detail, _) = doctor_check(&report, "server", "fail");
+    assert!(detail.contains(&bind), "{detail}");
 }
 
 #[test]

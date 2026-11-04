@@ -290,7 +290,7 @@ fn parse_systemd_words(line: &str) -> Vec<String> {
     words
 }
 
-fn bind_of(args: &[String]) -> Option<String> {
+pub fn bind_of(args: &[String]) -> Option<String> {
     args.iter()
         .position(|a| a == "--bind")
         .and_then(|i| args.get(i + 1))
@@ -400,7 +400,7 @@ fn launchd_bootstrap(plist: &Path) -> Result<()> {
 }
 
 /// (loaded, pid) as the service manager reports them.
-fn manager_state(platform: Platform) -> Result<(bool, Option<u32>)> {
+pub fn manager_state(platform: Platform) -> Result<(bool, Option<u32>)> {
     match platform {
         Platform::Launchd => {
             let out = run("launchctl", &["print", &launchd_target()?])?;
@@ -435,6 +435,15 @@ fn manager_state(platform: Platform) -> Result<(bool, Option<u32>)> {
             .filter(|p| *p > 0);
             Ok((loaded, pid))
         }
+    }
+}
+
+/// Whether `manager_state` can tell "stopped" from "couldn't ask". `systemctl is-active` fails
+/// the same way for both when there is no user bus; launchd's `print` has no such case.
+pub fn manager_reachable(platform: Platform) -> Result<()> {
+    match platform {
+        Platform::Launchd => Ok(()),
+        Platform::Systemd => systemd_reachable(),
     }
 }
 
@@ -845,8 +854,7 @@ pub fn status(user_home: &Path, home: &Path, lines: usize) -> Result<StatusRepor
         loaded,
         pid,
         bind: bind_of(&args),
-        // No lines asked for means no need for journalctl, which may not be installed.
-        log_lines: if text.is_some() && lines > 0 {
+        log_lines: if text.is_some() {
             log_lines(platform, &service_home, lines)?
         } else {
             Vec::new()
