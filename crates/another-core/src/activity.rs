@@ -319,11 +319,7 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             )
         }
         "decision.created" => (
-            format!(
-                "{actor} asked {} to decide: {}",
-                s("human"),
-                s("question").lines().next().unwrap_or_default()
-            ),
+            format!("{actor} asked for a decision ({})", s("decision_id")),
             json!({ "decision_id": s("decision_id"), "request_id": s("request_id"), "lane_id": p.get("lane_id") }),
         ),
         "decision.answered" => {

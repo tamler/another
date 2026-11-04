@@ -228,7 +228,11 @@ async fn remote_webhooks_and_streams_respect_token_scope() {
         json!({ "webhook_id": vault_hook }),
     )
     .await;
-    assert_eq!(code(&r).as_deref(), Some("forbidden"));
+    assert_eq!(
+        code(&r).as_deref(),
+        Some("not_found"),
+        "same as a missing webhook"
+    );
 
     // Events in both projects; each webhook receives only its own project's.
     lane(&srv.store, "shop-lane", "shop", "shopper");

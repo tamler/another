@@ -98,7 +98,16 @@ fn ask_answer_mail_request_and_lane() {
     assert_eq!(human.program, "human");
     let inbox = s.inbox(DEFAULT_DECIDER, InboxQuery::default()).unwrap();
     let q = &inbox.messages[0].message;
-    assert!(q.subject.starts_with("[decision] Ship the refactor"));
+    assert!(
+        q.subject.starts_with("[decision] claude@shop asks"),
+        "{}",
+        q.subject
+    );
+    assert!(
+        !q.subject.contains("Ship"),
+        "subjects carry no question text"
+    );
+    assert!(q.body.contains("Ship the refactor"));
     assert!(q.body.contains("1. Ship behind a flag [ship]"));
     assert!(q.body.contains("Link: https://example.test/pr/7"));
     assert_eq!(q.importance, Importance::High);
@@ -155,7 +164,11 @@ fn ask_answer_mail_request_and_lane() {
     let m = &inbox.messages[0].message;
     assert_eq!(m.thread_id, d.thread_id);
     assert_eq!(m.from, DEFAULT_DECIDER);
-    assert!(m.subject.starts_with("[decision] Wait for review"));
+    assert!(
+        m.subject.starts_with("[decision] answered: wait"),
+        "{}",
+        m.subject
+    );
     assert!(m.body.contains("Value: wait"));
     assert!(m.body.contains("relayed by manager"));
     assert_eq!(m.importance, Importance::High);
@@ -313,17 +326,20 @@ fn timeouts_default_cancel_and_keep_open() {
         .iter()
         .map(|m| m.message.subject.as_str())
         .collect();
+    assert!(
+        subjects
+            .iter()
+            .any(|s| s.starts_with("[decision] default applied: wait")),
+        "{subjects:?}"
+    );
     assert!(subjects
         .iter()
-        .any(|s| s.starts_with("[decision] default applied: Wait for review")));
-    assert!(subjects
-        .iter()
-        .any(|s| s.starts_with("[decision] cancelled:")));
+        .any(|s| s.starts_with("[decision] timed out, cancelled")));
     let human = s.inbox(DEFAULT_DECIDER, InboxQuery::default()).unwrap();
     assert!(human
         .messages
         .iter()
-        .any(|m| m.message.subject.starts_with("[decision] overdue:")));
+        .any(|m| m.message.subject.starts_with("[decision] overdue (")));
 
     // A keep_open decision can still be answered after its deadline.
     answer(&s, &keep.decision_id, Some("ship"), None).unwrap();
@@ -352,7 +368,7 @@ fn cancel_only_by_the_asker() {
     assert!(human.messages[0]
         .message
         .subject
-        .starts_with("[decision] withdrawn:"));
+        .starts_with("[decision] withdrawn ("));
     assert_eq!(
         answer(&s, &d.decision_id, Some("ship"), None)
             .unwrap_err()
@@ -379,11 +395,13 @@ fn token_scope_hides_other_projects_decisions() {
         .unwrap();
     assert_eq!(visible.len(), 1);
     assert_eq!(visible[0].decision_id, shop.decision_id);
+    // A hidden decision is exactly a missing one: show, answer and cancel.
+    let hidden = s.decision(&vault.decision_id, Some(&scope)).unwrap_err();
+    let missing = s.decision("NO-SUCH-DECISION", Some(&scope)).unwrap_err();
+    assert_eq!((hidden.code(), missing.code()), ("not_found", "not_found"));
     assert_eq!(
-        s.decision(&vault.decision_id, Some(&scope))
-            .unwrap_err()
-            .code(),
-        "forbidden"
+        hidden.to_string().replace(&vault.decision_id, "X"),
+        missing.to_string().replace("NO-SUCH-DECISION", "X")
     );
     let r = s.answer_decision(
         AnswerDecision {
@@ -394,7 +412,9 @@ fn token_scope_hides_other_projects_decisions() {
         },
         Some(&scope),
     );
-    assert_eq!(r.unwrap_err().code(), "forbidden");
+    assert_eq!(r.unwrap_err().code(), "not_found");
+    let r = s.cancel_decision("manager", &vault.decision_id, None, Some(&scope));
+    assert_eq!(r.unwrap_err().code(), "not_found");
     let r = s.ask_decision(
         NewDecision {
             agent: "manager".into(),
@@ -427,7 +447,7 @@ fn token_scope_hides_other_projects_decisions() {
         .iter()
         .map(|i| i.summary.clone() + "\n")
         .collect();
-    assert!(text.contains("Ship the refactor"), "{text}");
+    assert!(text.contains("asked for a decision"), "{text}");
     assert!(!text.contains("vault"), "{text}");
 }
 
@@ -665,7 +685,11 @@ fn decider_setting_system_agent_and_option_notes() {
     let expired = inbox
         .messages
         .iter()
-        .find(|m| m.message.subject.starts_with("[decision] cancelled:"))
+        .find(|m| {
+            m.message
+                .subject
+                .starts_with("[decision] timed out, cancelled")
+        })
         .unwrap();
     assert_eq!(expired.message.from, SYSTEM_AGENT);
     assert_eq!(expired.message.thread_id, d.thread_id);
@@ -673,7 +697,7 @@ fn decider_setting_system_agent_and_option_notes() {
     let overdue = sam
         .messages
         .iter()
-        .find(|m| m.message.subject.starts_with("[decision] overdue:"))
+        .find(|m| m.message.subject.starts_with("[decision] overdue ("))
         .unwrap();
     assert_eq!(overdue.message.from, SYSTEM_AGENT);
     assert_eq!(overdue.message.thread_id, keep.thread_id);
@@ -707,4 +731,124 @@ fn decider_setting_system_agent_and_option_notes() {
         done.answer.unwrap().text.as_deref(),
         Some("ship it, ping QA")
     );
+}
+
+#[test]
+fn relayer_roles_are_bound_to_the_registration() {
+    let s = Store::open_in_memory(Clock::System).unwrap();
+    s.ensure_project("t", "/work/shop").unwrap();
+    for (name, program) in [("claude", Program::Claude), ("manager", Program::GrokBot)] {
+        s.register_agent_trusted(RegisterAgent {
+            name: name.into(),
+            program,
+            project: Some("/work/shop".into()),
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    }
+    let reg = |name: &str, program: Program| {
+        s.register_agent(RegisterAgent {
+            name: name.into(),
+            program,
+            project: Some("/work/shop".into()),
+            model: None,
+            description: None,
+        })
+    };
+    // A coding agent can't promote itself to manager (or person)...
+    for role in [Program::GrokBot, Program::Human] {
+        assert_eq!(reg("claude", role).unwrap_err().code(), "forbidden");
+    }
+    assert_eq!(s.agent("claude@shop").unwrap().program, "claude");
+    // ...and a hook refreshing the manager as its client keeps the role.
+    let m = reg("manager", Program::Codex).unwrap();
+    assert_eq!(m.program, "grok_bot");
+    // So it still can't relay answers to someone else's decision.
+    let d = s
+        .ask_decision(
+            NewDecision {
+                agent: "manager@shop".into(),
+                question: "Ship?".into(),
+                options: opts(&[("yes", "Yes"), ("no", "No")]),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    let r = s.answer_decision(
+        AnswerDecision {
+            decision: d.decision_id.clone(),
+            value: Some("yes".into()),
+            relayed_by: Some("claude@shop".into()),
+            ..Default::default()
+        },
+        None,
+    );
+    assert_eq!(r.unwrap_err().code(), "forbidden");
+    // The person sets roles on the machine.
+    s.register_agent_trusted(RegisterAgent {
+        name: "claude".into(),
+        program: Program::GrokBot,
+        project: Some("/work/shop".into()),
+        model: None,
+        description: None,
+    })
+    .unwrap();
+    assert_eq!(s.agent("claude@shop").unwrap().program, "grok_bot");
+}
+
+#[test]
+fn decision_events_carry_no_question_or_option_text() {
+    let s = Store::open_in_memory(Clock::System).unwrap();
+    s.ensure_project("t", "/work/shop").unwrap();
+    s.register_agent(RegisterAgent {
+        name: "claude".into(),
+        program: Program::Claude,
+        project: Some("/work/shop".into()),
+        model: None,
+        description: None,
+    })
+    .unwrap();
+    s.ask_decision(
+        NewDecision {
+            agent: "claude@shop".into(),
+            question: "Rename the billing tables tonight?".into(),
+            options: vec![
+                DecisionOption {
+                    value: "yes".into(),
+                    label: "Go ahead with the rename".into(),
+                    description: Some("drops the old views".into()),
+                },
+                DecisionOption {
+                    value: "no".into(),
+                    label: "Wait".into(),
+                    description: None,
+                },
+            ],
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    let ev = s
+        .events(100)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "decision.created")
+        .unwrap();
+    let text = ev.payload.to_string();
+    for leak in ["billing", "rename", "old views", "Wait"] {
+        assert!(!text.contains(leak), "{leak} in {text}");
+    }
+    let feed = s
+        .activity(ActivityQuery {
+            limit: 100,
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(!serde_json::to_string(&feed).unwrap().contains("billing"));
+    // The question is still in the decision and its mail.
+    let ds = s.decisions(DecisionFilter::default(), None).unwrap();
+    assert_eq!(ds[0].question, "Rename the billing tables tonight?");
 }
