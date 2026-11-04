@@ -1538,12 +1538,14 @@ fn racing_answers_and_releases_take_effect_once() {
 }
 
 /// BUGS-FOUND.md #7: the digits aren't checked, only that `str::parse` takes them and that the
-/// text is five long, so a sign gets through and is stored as written.
+/// text is five long, so a sign gets through and is stored as written. PR #25 refuses it, with
+/// its own tests. What holds on both sides: a time is either refused or kept exactly as given.
 #[test]
-fn bug_summary_times_accept_a_plus_sign() {
+fn a_summary_time_with_a_plus_sign_is_refused_or_kept_as_written() {
     let (s, _) = store();
     for odd in ["+9:00", "09:+5", "+1:+2"] {
-        let set = s.set_summary_schedule(Some(odd), None).unwrap();
-        assert_eq!(set.daily_at.as_deref(), Some(odd));
+        if let Ok(set) = s.set_summary_schedule(Some(odd), None) {
+            assert_eq!(set.daily_at.as_deref(), Some(odd));
+        }
     }
 }

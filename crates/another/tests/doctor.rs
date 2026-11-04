@@ -978,10 +978,11 @@ fn every_installed_client_is_reported_on_its_own() {
         "trust is only about Codex hooks that are installed"
     );
 
-    // A client's config path taken by a directory: it can't be read, so not installed.
+    // A client's config path taken by a directory can't be read. Today that reads as not
+    // installed; PR #25 makes it a failure (BUGS-FOUND.md #6). Neither side passes it.
     std::fs::create_dir_all(h.home.join(".codex/hooks.json")).unwrap();
     let (_, r) = doctor(&h.ah, &h.home, DEAD);
-    assert_eq!(levels(&r, "hooks:codex"), ["warn"], "{r}");
+    assert_ne!(levels(&r, "hooks:codex"), ["pass"], "{r}");
 }
 
 #[cfg(unix)]
@@ -1176,28 +1177,18 @@ fn bug_hook_install_writes_a_relative_wrapper_for_a_relative_home() {
 }
 
 /// BUGS-FOUND.md #6: a hook config that isn't UTF-8 reads as empty, so doctor says "not
-/// installed" and offers a fix that refuses to run on that file.
+/// installed" and offers a fix that refuses to run on that file. PR #25 makes it a failure
+/// with a repair fix, with its own tests. What holds on both sides: doctor doesn't pass the
+/// file, and the installer refuses it and leaves it alone.
 #[test]
-fn bug_a_hook_config_that_is_not_utf8_reads_as_not_installed() {
+fn a_hook_config_that_is_not_utf8_never_passes_and_the_installer_leaves_it_alone() {
     let h = homes();
     std::fs::create_dir_all(h.home.join(".codex")).unwrap();
     let mut bytes = br#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"'/x/another-hook.sh' session-start"}]}]}} "#.to_vec();
     bytes.push(0xff);
     std::fs::write(h.home.join(".codex/hooks.json"), &bytes).unwrap();
     let (_, r) = doctor(&h.ah, &h.home, DEAD);
-    let w = find(&r, "hooks:codex", "warn");
-    assert!(
-        w["detail"]
-            .as_str()
-            .unwrap()
-            .contains("hooks not installed"),
-        "today's behaviour; should be the broken-config failure: {w}"
-    );
-    assert!(w["fix"]
-        .as_str()
-        .unwrap()
-        .contains("another hook install --client codex"));
-    // The fix it offers doesn't work on this file.
+    assert_ne!(levels(&r, "hooks:codex"), ["pass"], "{r}");
     let out = Command::new(env!("CARGO_BIN_EXE_another"))
         .args(["hook", "install", "--client", "codex"])
         .env("ANOTHER_HOME", &h.ah)

@@ -6,9 +6,8 @@ Found while adding edge-case tests for the ten lowest-covered public functions (
 
 | Bug | Status |
 |---|---|
-| 1, 2 | Fixed in draft PR #25, not yet on the base. The tests here no longer depend on either side of those fixes. |
+| 1, 2, 6, 7 | Fixed in draft PR #25, not yet on the base. The tests here no longer depend on either side of those fixes, and #25 has its own tests for the fixed behaviour. |
 | 4, 5 | Fixed on the base by `66100cf`. PR #25 also covers the remaining case of #4 described in its section. |
-| 6, 7 | Fixed in draft PR #25, not yet on the base. The tests here still assert the old behaviour and must change when the two branches meet. |
 | 3, 8, 9, 10 | Open. |
 
 ## 1. A daily summary to an unknown person is accepted, then fails on every sweep
@@ -130,7 +129,7 @@ ANOTHER_HOME="/tmp/o'brien" another doctor   # PASS  hooks:codex
 - A directory at the config path takes the same route. See `every_installed_client_is_reported_on_its_own`.
 - So does a config the user can't read (mode 000), checked with the real binary on `7af29ef`: `WARN … hooks not installed`.
 
-**Test:** `another/tests/doctor.rs::bug_a_hook_config_that_is_not_utf8_reads_as_not_installed`
+**Test:** `another/tests/doctor.rs::a_hook_config_that_is_not_utf8_never_passes_and_the_installer_leaves_it_alone`
 
 **Suggested fix:** treat a read error other than `NotFound` as the broken-config failure.
 
@@ -143,7 +142,7 @@ ANOTHER_HOME="/tmp/o'brien" another doctor   # PASS  hooks:codex
 - `+9:00`, `09:+5` and `+1:+2` are all accepted by `another config summary_daily` and `summary schedule`, and stored as written. The first means 09:00, and `summary_schedule` then shows `+9:00` as the time.
 - Low severity: the summary still goes out at the time the value parses to. It is a validation gap against the documented `HH:MM`.
 
-**Test:** `another-core/tests/coverage_edges.rs::bug_summary_times_accept_a_plus_sign`
+**Test:** `another-core/tests/coverage_edges.rs::a_summary_time_with_a_plus_sign_is_refused_or_kept_as_written`
 
 **Suggested fix:** require both parts to be two ASCII digits.
 
