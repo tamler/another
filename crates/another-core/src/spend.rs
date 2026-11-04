@@ -395,7 +395,7 @@ fn local_only(scope: Option<&TokenScope>) -> Result<()> {
 }
 
 fn ms_of(d: NaiveDate) -> i64 {
-    Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0).expect("midnight"))
+    Utc.from_utc_datetime(&d.and_time(chrono::NaiveTime::MIN))
         .timestamp_millis()
 }
 
@@ -405,7 +405,10 @@ fn add_month(y: i32, m: u32, by: i32) -> (i32, u32) {
 }
 
 /// `[start, end)` of the selected monthly period for an account resetting on `reset_day`.
-pub fn period_bounds(sel: PeriodSel, now_ms: i64, reset_day: u32) -> (i64, i64) {
+///
+/// An out-of-range month or `reset_day` (outside 1..=28) is `Invalid`, never a panic.
+pub fn period_bounds(sel: PeriodSel, now_ms: i64, reset_day: u32) -> Result<(i64, i64)> {
+    check_reset_day(reset_day)?;
     let today = chrono::DateTime::from_timestamp_millis(now_ms)
         .unwrap_or_default()
         .date_naive();
@@ -425,10 +428,11 @@ pub fn period_bounds(sel: PeriodSel, now_ms: i64, reset_day: u32) -> (i64, i64) 
             }
         }
     };
-    let start = NaiveDate::from_ymd_opt(y, m, reset_day).expect("reset_day <= 28");
+    let bad = || Error::Invalid(format!("invalid period {y:04}-{m:02}"));
+    let start = NaiveDate::from_ymd_opt(y, m, reset_day).ok_or_else(bad)?;
     let (ny, nm) = add_month(y, m, 1);
-    let end = NaiveDate::from_ymd_opt(ny, nm, reset_day).expect("reset_day <= 28");
-    (ms_of(start), ms_of(end))
+    let end = NaiveDate::from_ymd_opt(ny, nm, reset_day).ok_or_else(bad)?;
+    Ok((ms_of(start), ms_of(end)))
 }
 
 const ACCOUNT_SELECT: &str = "SELECT a.account_id, a.name, a.kind, a.unit, a.budget, a.period,
@@ -597,10 +601,10 @@ fn spent_between(conn: &Connection, account_id: &str, from: i64, to: i64) -> Res
     )?)
 }
 
-fn current_window(a: &SpendAccount, now: i64) -> (i64, i64) {
+fn current_window(a: &SpendAccount, now: i64) -> Result<(i64, i64)> {
     match a.period {
         SpendPeriod::Monthly => period_bounds(PeriodSel::Current, now, a.reset_day),
-        SpendPeriod::None => (0, i64::MAX),
+        SpendPeriod::None => Ok((0, i64::MAX)),
     }
 }
 
@@ -618,7 +622,7 @@ fn insert_entry(
     lease_id: Option<&str>,
     actor: &str,
 ) -> Result<String> {
-    let (from, to) = current_window(a, tx.now);
+    let (from, to) = current_window(a, tx.now)?;
     let before = spent_between(tx, &a.account_id, from, to)?;
     let entry_id = new_id();
     let event_id = tx.emit(
@@ -799,7 +803,7 @@ fn end_lease_tx(tx: &Tx<'_>, row: &LeaseRow, at: i64, actor: &str, reason: &str)
     if a.period == SpendPeriod::Monthly && at > start {
         let mut cur = start;
         while cur < at {
-            let (_, to) = period_bounds(PeriodSel::Current, cur, a.reset_day);
+            let (_, to) = period_bounds(PeriodSel::Current, cur, a.reset_day)?;
             let end = to.min(at);
             segments.push((cur, end));
             cur = end;
@@ -1179,7 +1183,10 @@ fn borrow_spend_tx(
         None,
         scope,
     )?;
-    let me = who.agent.clone().expect("agent given");
+    let me = who
+        .agent
+        .clone()
+        .ok_or_else(|| Error::Invalid("borrowing spend needs an agent".into()))?;
     if scope.is_some()
         && !matches!(&who.project_id, Some(p) if attributed_visible(tx, scope, Some(p), None)?)
     {
@@ -1717,7 +1724,7 @@ impl Store {
                 }
                 let partial = scope.is_some() && account_project.is_none();
                 let (from, to) = match a.period {
-                    SpendPeriod::Monthly => period_bounds(q.period, now, a.reset_day),
+                    SpendPeriod::Monthly => period_bounds(q.period, now, a.reset_day)?,
                     SpendPeriod::None => (0, i64::MAX),
                 };
                 let filtered = lane_id.is_some() || agent_id.is_some();
@@ -2069,23 +2076,23 @@ mod tests {
     fn periods() {
         let now = ms(2026, 11, 3) + 5_000;
         assert_eq!(
-            period_bounds(PeriodSel::Current, now, 1),
+            period_bounds(PeriodSel::Current, now, 1).unwrap(),
             (ms(2026, 11, 1), ms(2026, 12, 1))
         );
         assert_eq!(
-            period_bounds(PeriodSel::Current, now, 15),
+            period_bounds(PeriodSel::Current, now, 15).unwrap(),
             (ms(2026, 10, 15), ms(2026, 11, 15))
         );
         assert_eq!(
-            period_bounds(PeriodSel::Previous, now, 1),
+            period_bounds(PeriodSel::Previous, now, 1).unwrap(),
             (ms(2026, 10, 1), ms(2026, 11, 1))
         );
         assert_eq!(
-            period_bounds(PeriodSel::Month(2026, 12), now, 3),
+            period_bounds(PeriodSel::Month(2026, 12), now, 3).unwrap(),
             (ms(2026, 12, 3), ms(2027, 1, 3))
         );
         assert_eq!(
-            period_bounds(PeriodSel::Current, ms(2027, 1, 2), 5),
+            period_bounds(PeriodSel::Current, ms(2027, 1, 2), 5).unwrap(),
             (ms(2026, 12, 5), ms(2027, 1, 5))
         );
         assert_eq!(
@@ -2093,5 +2100,22 @@ mod tests {
             PeriodSel::Month(2026, 2)
         );
         assert!("2026-13".parse::<PeriodSel>().is_err());
+    }
+
+    #[test]
+    fn period_bounds_rejects_bad_input_instead_of_panicking() {
+        let now = ms(2026, 11, 3);
+        for (sel, day) in [
+            (PeriodSel::Month(2026, 13), 1),
+            (PeriodSel::Month(2026, 0), 1),
+            (PeriodSel::Current, 0),
+            (PeriodSel::Current, 31),
+            (PeriodSel::Month(2026, 2), 29),
+        ] {
+            assert!(
+                matches!(period_bounds(sel, now, day), Err(Error::Invalid(_))),
+                "{sel:?} day {day}"
+            );
+        }
     }
 }
