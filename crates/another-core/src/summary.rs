@@ -530,6 +530,26 @@ pub fn parse_hhmm(v: &str) -> Result<u32> {
     Ok(h * 60 + m)
 }
 
+// Older writes accepted five-byte numeric forms such as 001:5 and +9:00. Keep those
+// stored settings readable without relaxing the format required for new writes.
+fn stored_summary_time(value: &str) -> Result<Option<String>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let bad = || {
+        Error::Invalid(format!(
+            "expected a time like 09:00 (HH:MM, 24-hour), not {value:?}"
+        ))
+    };
+    let (h, m) = value.split_once(':').ok_or_else(bad)?;
+    let (h, m): (u32, u32) = (h.parse().map_err(|_| bad())?, m.parse().map_err(|_| bad())?);
+    if h > 23 || m > 59 || value.len() != 5 {
+        return Err(bad());
+    }
+    Ok(Some(format!("{h:02}:{m:02}")))
+}
+
 /// The opt-in daily rollup (`another summary schedule`).
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct SummarySchedule {
@@ -556,7 +576,7 @@ impl Store {
                 )
                 .optional()?;
             Ok(SummarySchedule {
-                daily_at: (!at.is_empty()).then_some(at),
+                daily_at: stored_summary_time(&at)?,
                 to: crate::settings::get(conn, "summary_to")?,
                 last_sent_at: last.and_then(|v| v.parse().ok()).map(fmt_ts),
             })
@@ -632,79 +652,318 @@ impl Store {
             .filter(|t| now - t <= 2 * 86_400_000)
             .unwrap_or(now - 86_400_000);
         let summary = self.daily_summary(Some(Since::Time(since)), None)?;
+        self.claim_scheduled_summary(sched, day, now, summary)
+    }
+
+    fn claim_scheduled_summary(
+        &self,
+        sched: SummarySchedule,
+        day: String,
+        now: i64,
+        summary: DailySummary,
+    ) -> Result<Option<String>> {
         let to = sched.to.clone();
-        let result = self.write(|tx| {
+        let sent = self.write(|tx| {
+            // Configuration can change after the outer reads. A stale attempt must neither
+            // send to its previous recipient nor mark the replacement schedule as failed.
+            let at = stored_summary_time(&crate::settings::get(tx, "summary_daily")?)?;
+            if at != sched.daily_at || crate::settings::get(tx, "summary_to")? != to {
+                return Ok(Ok(false));
+            }
             // The claim: writes are serialized (BEGIN IMMEDIATE), so of several sweepers
             // sharing this home (an HTTP server plus stdio MCP servers), only the first to
             // get here sends today's rollup; the others see the marker and stop.
-            let marked: Option<String> = tx
-                .query_row(
-                    "SELECT value FROM node_settings WHERE key = ?1",
-                    [LAST_SENT_DAY],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if marked.as_deref() == Some(day.as_str()) {
-                return Ok(false);
+            let marked: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM node_settings WHERE key IN (?1, ?2) AND value = ?3)",
+                params![LAST_SENT_DAY, LAST_FAILED_DAY, day],
+                |r| r.get(0),
+            )?;
+            if marked {
+                return Ok(Ok(false));
             }
-            let me = crate::identity::system_agent_tx(tx)?;
-            match to.split_once(':') {
-                Some(("mail", name)) => {
-                    let who = crate::identity::resolve_agent(tx, tx.node_id, name)?;
-                    crate::mail::send_tx(
-                        tx,
-                        &crate::mail::SendMessage {
-                            from: me.address.clone(),
-                            to: vec![who.address],
-                            subject: format!("[summary] {day}"),
-                            body: summary.markdown.clone(),
-                            ..Default::default()
-                        },
+            tx.execute_batch("SAVEPOINT scheduled_summary_send")?;
+            let result = (|| {
+                let me = crate::identity::system_agent_tx(tx)?;
+                match to.split_once(':') {
+                    Some(("mail", name)) => {
+                        let who = crate::identity::resolve_agent(tx, tx.node_id, name)?;
+                        crate::mail::send_tx(
+                            tx,
+                            &crate::mail::SendMessage {
+                                from: me.address.clone(),
+                                to: vec![who.address],
+                                subject: format!("[summary] {day}"),
+                                body: summary.markdown.clone(),
+                                ..Default::default()
+                            },
+                        )?;
+                    }
+                    _ => {
+                        // Node-local and never visible to tokens; only local webhooks without
+                        // project globs and the daily_summary filter receive it.
+                        tx.emit(
+                            &me.address,
+                            "summary.daily",
+                            serde_json::json!({
+                                "since": summary.since,
+                                "until": summary.until,
+                                "attention_count": summary.attention.len(),
+                                "summary": summary,
+                            }),
+                        )?;
+                    }
+                }
+                for (k, v) in [(LAST_SENT_DAY, day.clone()), (LAST_SENT_MS, now.to_string())] {
+                    tx.execute(
+                        "INSERT INTO node_settings (key, value, updated_at) VALUES (?1, ?2, ?3)
+                         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                        params![k, v, tx.now],
                     )?;
                 }
-                _ => {
-                    // Node-local and never visible to tokens; only local webhooks without
-                    // project globs and the `daily_summary` filter receive it.
-                    tx.emit(
-                        &me.address,
-                        "summary.daily",
-                        serde_json::json!({
-                            "since": summary.since,
-                            "until": summary.until,
-                            "attention_count": summary.attention.len(),
-                            "summary": summary,
-                        }),
-                    )?;
+                Ok(())
+            })();
+            match result {
+                Ok(()) => {
+                    tx.execute_batch("RELEASE scheduled_summary_send")?;
+                    Ok(Ok(true))
                 }
-            }
-            for (k, v) in [(LAST_SENT_DAY, day.clone()), (LAST_SENT_MS, now.to_string())] {
-                tx.execute(
-                    "INSERT INTO node_settings (key, value, updated_at) VALUES (?1, ?2, ?3)
-                     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                    params![k, v, tx.now],
-                )?;
-            }
-            Ok(true)
-        });
-        let sent = match result {
-            Ok(sent) => sent,
-            // Database and file errors may pass, so the next sweep tries again.
-            Err(e @ (Error::Db(_) | Error::Io(_))) => return Err(e),
-            // Anything else (the person can't be resolved) will fail the same way on every
-            // sweep: report it once and try again tomorrow. If the marker can't be written,
-            // the next sweep just reports it again.
-            Err(e) => {
-                let _ = self.write(|tx| {
+                // Transient storage errors roll the whole claim back so the next sweep retries.
+                Err(e @ (Error::Db(_) | Error::Io(_))) => Err(e),
+                Err(e) => {
+                    tx.execute_batch(
+                        "ROLLBACK TO scheduled_summary_send; RELEASE scheduled_summary_send",
+                    )?;
+                    // This marker and the refusal commit together, so another stale precheck
+                    // cannot report the same deterministic failure again today.
                     tx.execute(
                         "INSERT INTO node_settings (key, value, updated_at) VALUES (?1, ?2, ?3)
                          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
                         params![LAST_FAILED_DAY, day, tx.now],
                     )?;
-                    Ok(())
-                });
-                return Err(e);
+                    Ok(Err(e))
+                }
             }
-        };
+        })??;
         Ok(sent.then_some(to))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Clock, Program, RegisterAgent};
+
+    const DAY: i64 = 1_795_219_200_000;
+    const HOUR: i64 = 3_600_000;
+
+    fn store() -> Store {
+        let (clock, _) = Clock::manual(DAY + 23 * HOUR + 59 * 60_000);
+        Store::open_in_memory(clock).unwrap()
+    }
+
+    fn person(s: &Store, name: &str) {
+        s.register_agent_trusted(RegisterAgent {
+            name: name.into(),
+            program: Program::Human,
+            project: None,
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    }
+
+    fn ambiguous_mail_schedule(s: &Store) {
+        person(s, "owner");
+        s.set_summary_schedule(Some("00:00"), Some("mail:owner"))
+            .unwrap();
+        s.ensure_project("test", "/work/shop").unwrap();
+        s.register_agent_trusted(RegisterAgent {
+            name: "owner".into(),
+            program: Program::Claude,
+            project: Some("/work/shop".into()),
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    }
+
+    fn marker(s: &Store, key: &str) -> Option<String> {
+        s.read(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT value FROM node_settings WHERE key = ?1",
+                    [key],
+                    |r| r.get(0),
+                )
+                .optional()?)
+        })
+        .unwrap()
+    }
+
+    fn raw_daily(s: &Store, value: &str) {
+        // An older binary persisted these values before writes required canonical HH:MM.
+        s.write(|tx| {
+            tx.execute(
+                "INSERT INTO node_settings (key, value, updated_at) VALUES ('summary_daily', ?1, ?2)",
+                params![value, tx.now],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn stored_legacy_summary_times_still_send_once() {
+        let utc = chrono::FixedOffset::east_opt(0).unwrap();
+        for value in [
+            "001:5", "1:005", "9:000", "023:5", "+9:00", "09:+5", "+1:+2", " 001:5 ",
+        ] {
+            let s = store();
+            raw_daily(&s, value);
+            assert_eq!(
+                s.send_scheduled_summary_at(utc).unwrap().as_deref(),
+                Some("webhook"),
+                "legacy {value} must still deliver"
+            );
+            assert_eq!(s.send_scheduled_summary_at(utc).unwrap(), None, "{value}");
+            assert_eq!(marker(&s, "summary_daily").as_deref(), Some(value));
+        }
+    }
+
+    #[test]
+    fn stored_legacy_summary_time_reads_are_canonical_without_writes() {
+        for (value, canonical) in [
+            ("001:5", "01:05"),
+            ("1:005", "01:05"),
+            ("9:000", "09:00"),
+            ("023:5", "23:05"),
+            ("+9:00", "09:00"),
+            ("09:+5", "09:05"),
+            ("+1:+2", "01:02"),
+            (" 001:5 ", "01:05"),
+        ] {
+            let s = store();
+            raw_daily(&s, value);
+            let before = s.events(100).unwrap().len();
+            assert_eq!(
+                s.summary_schedule().unwrap().daily_at.as_deref(),
+                Some(canonical)
+            );
+            assert_eq!(marker(&s, "summary_daily").as_deref(), Some(value));
+            assert_eq!(s.events(100).unwrap().len(), before);
+        }
+    }
+
+    #[test]
+    fn stale_prechecks_report_a_delivery_failure_only_once() {
+        let s = store();
+        ambiguous_mail_schedule(&s);
+        // Both sweepers captured this state before either serialized claim ran.
+        let sched = s.summary_schedule().unwrap();
+        let summary = s.daily_summary(None, None).unwrap();
+        let day = "2026-11-21".to_string();
+        let before = s.events(100).unwrap().len();
+        let failed =
+            s.claim_scheduled_summary(sched.clone(), day.clone(), s.now(), summary.clone());
+        assert_eq!(failed.unwrap_err().code(), "ambiguous");
+        assert_eq!(marker(&s, LAST_FAILED_DAY).as_deref(), Some(day.as_str()));
+        assert_eq!(marker(&s, LAST_SENT_DAY), None);
+        assert_eq!(
+            s.events(100).unwrap().len(),
+            before,
+            "failed send mutations roll back"
+        );
+        assert_eq!(
+            s.claim_scheduled_summary(sched, day, s.now(), summary)
+                .unwrap(),
+            None,
+            "a second stale precheck must see the committed failure marker"
+        );
+    }
+
+    #[test]
+    fn stale_schedule_claim_cannot_send_after_settings_change() {
+        for (at, to) in [
+            (None, None),
+            (Some("23:58"), None),
+            (Some("00:00"), Some("mail:sam")),
+        ] {
+            let s = store();
+            person(&s, "owner");
+            person(&s, "sam");
+            s.set_summary_schedule(Some("00:00"), Some("mail:owner"))
+                .unwrap();
+            let sched = s.summary_schedule().unwrap();
+            let summary = s.daily_summary(None, None).unwrap();
+            s.set_summary_schedule(at, to).unwrap();
+            let before = s.events(100).unwrap().len();
+            assert_eq!(
+                s.claim_scheduled_summary(sched, "2026-11-21".into(), s.now(), summary)
+                    .unwrap(),
+                None
+            );
+            assert_eq!(s.events(100).unwrap().len(), before, "no stale send");
+            assert_eq!(marker(&s, LAST_SENT_DAY), None);
+            assert_eq!(marker(&s, LAST_FAILED_DAY), None);
+        }
+    }
+
+    #[test]
+    fn stale_schedule_failure_cannot_block_the_new_recipient() {
+        let s = store();
+        ambiguous_mail_schedule(&s);
+        let sched = s.summary_schedule().unwrap();
+        let summary = s.daily_summary(None, None).unwrap();
+        person(&s, "sam");
+        s.set_summary_schedule(Some("00:00"), Some("mail:sam"))
+            .unwrap();
+        assert_eq!(
+            s.claim_scheduled_summary(sched, "2026-11-21".into(), s.now(), summary)
+                .unwrap(),
+            None
+        );
+        assert_eq!(marker(&s, LAST_FAILED_DAY), None);
+        assert_eq!(
+            s.send_scheduled_summary_at(chrono::FixedOffset::east_opt(0).unwrap())
+                .unwrap()
+                .as_deref(),
+            Some("mail:sam")
+        );
+    }
+
+    #[test]
+    fn a_database_delivery_error_does_not_block_a_same_day_retry() {
+        let s = store();
+        person(&s, "owner");
+        s.set_summary_schedule(Some("00:00"), Some("mail:owner"))
+            .unwrap();
+        s.write(|tx| {
+            tx.execute_batch(
+                "CREATE TEMP TRIGGER fail_summary_delivery BEFORE INSERT ON messages
+                 WHEN NEW.subject LIKE '[summary]%'
+                 BEGIN SELECT RAISE(ABORT, 'temporary delivery failure'); END",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let before = s.events(100).unwrap().len();
+        let utc = chrono::FixedOffset::east_opt(0).unwrap();
+        assert!(matches!(
+            s.send_scheduled_summary_at(utc),
+            Err(Error::Db(_))
+        ));
+        assert_eq!(marker(&s, LAST_FAILED_DAY), None);
+        assert_eq!(marker(&s, LAST_SENT_DAY), None);
+        assert_eq!(s.events(100).unwrap().len(), before);
+
+        s.write(|tx| {
+            tx.execute_batch("DROP TRIGGER fail_summary_delivery")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            s.send_scheduled_summary_at(utc).unwrap().as_deref(),
+            Some("mail:owner")
+        );
     }
 }
