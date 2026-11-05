@@ -37,6 +37,30 @@ pub(crate) fn decider_tx(conn: &Connection) -> Result<String> {
 }
 
 impl Store {
+    fn write_decision<T>(&self, mutate: impl FnOnce(&Tx<'_>) -> Result<T>) -> Result<T> {
+        self.write(|tx| {
+            crate::holds::sweep_tx(tx)?;
+            tx.execute_batch("SAVEPOINT decision_mutation")?;
+            match mutate(tx) {
+                Ok(value) => {
+                    tx.execute_batch("RELEASE decision_mutation")?;
+                    Ok(Ok(value))
+                }
+                Err(
+                    error @ (Error::Invalid(_)
+                    | Error::NotFound(_)
+                    | Error::Conflict(_)
+                    | Error::Forbidden(_)
+                    | Error::Ambiguous(_)),
+                ) => {
+                    tx.execute_batch("ROLLBACK TO decision_mutation; RELEASE decision_mutation")?;
+                    Ok(Err(error))
+                }
+                Err(error) => Err(error),
+            }
+        })?
+    }
+
     /// The person asked when a decision names nobody: the `decider` node setting, else
     /// [`DEFAULT_DECIDER`].
     pub fn default_decider(&self) -> Result<String> {
@@ -886,13 +910,25 @@ pub(crate) fn ask_tx(
     Ok(decision_id)
 }
 
+fn check_answered_by(value: &str) -> Result<()> {
+    if !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_.@".contains(&c))
+    {
+        Ok(())
+    } else {
+        Err(Error::Invalid("answered_by must be a name or address of 1-64 ASCII letters, digits, '-', '_', '.' or '@'".into()))
+    }
+}
+
 impl Store {
     /// Ask a person a structured question. Mails them in a new thread and opens a request of
     /// kind `decision`.
     pub fn ask_decision(&self, input: NewDecision, scope: Option<&TokenScope>) -> Result<Decision> {
         validate(&input)?;
-        self.write(|tx| {
-            crate::holds::sweep_tx(tx)?;
+        self.write_decision(|tx| {
             let human_name = match input
                 .human
                 .as_ref()
@@ -1009,8 +1045,7 @@ impl Store {
         input: AnswerDecision,
         scope: Option<&TokenScope>,
     ) -> Result<Decision> {
-        self.write(|tx| {
-            crate::holds::sweep_tx(tx)?;
+        self.write_decision(|tx| {
             let row = load_in(tx, tx.node_id, &input.decision, scope)?;
             let d = &row.d;
             if d.status != DecisionStatus::Open {
@@ -1083,7 +1118,7 @@ impl Store {
                 .map(|a| a.trim().to_string())
                 .filter(|a| !a.is_empty())
                 .unwrap_or_else(|| d.human.clone());
-            check_text("answered_by", &answered_by, 64)?;
+            check_answered_by(&answered_by)?;
             let relayed = match &input.relayed_by {
                 Some(r) => Some(resolve_agent(tx, tx.node_id, r)?),
                 None => None,
@@ -1352,6 +1387,435 @@ mod cancellation_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn review_store() -> (Store, std::sync::Arc<std::sync::atomic::AtomicI64>) {
+        let (clock, handle) = crate::Clock::manual(1_800_000_000_000);
+        let store = Store::open_in_memory(clock).unwrap();
+        store.ensure_project("test", "/work/shop").unwrap();
+        store
+            .register_agent_trusted(RegisterAgent {
+                name: "worker".into(),
+                program: Program::Codex,
+                project: Some("/work/shop".into()),
+                model: None,
+                description: None,
+            })
+            .unwrap();
+        (store, handle)
+    }
+
+    fn review_question(store: &Store, deadline: bool) -> NewDecision {
+        NewDecision {
+            agent: "worker@shop".into(),
+            question: "Choose an option".into(),
+            options: vec![
+                DecisionOption {
+                    value: "wait".into(),
+                    label: "Wait".into(),
+                    description: None,
+                },
+                DecisionOption {
+                    value: "ship".into(),
+                    label: "Ship".into(),
+                    description: None,
+                },
+            ],
+            deadline_at: deadline.then(|| store.now() + 60_000),
+            on_timeout: if deadline {
+                DecisionTimeout::ChooseDefault
+            } else {
+                DecisionTimeout::KeepOpen
+            },
+            default_value: deadline.then(|| "wait".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn refused_decision_mutations_keep_due_defaults_and_roll_back_their_own_changes() {
+        for refusal in ["late_answer", "invalid_answer", "unknown_lane", "self_ask"] {
+            let (store, clock) = review_store();
+            let due = store
+                .ask_decision(review_question(&store, true), None)
+                .unwrap();
+            let active = store
+                .ask_decision(review_question(&store, false), None)
+                .unwrap();
+            clock.fetch_add(60_001, std::sync::atomic::Ordering::SeqCst);
+            let error = if refusal.ends_with("answer") {
+                store
+                    .answer_decision(
+                        AnswerDecision {
+                            decision: if refusal == "late_answer" {
+                                due.decision_id.clone()
+                            } else {
+                                active.decision_id.clone()
+                            },
+                            value: Some(
+                                if refusal == "late_answer" {
+                                    "wait"
+                                } else {
+                                    "missing-option"
+                                }
+                                .into(),
+                            ),
+                            text: None,
+                            answered_by: None,
+                            relayed_by: None,
+                        },
+                        None,
+                    )
+                    .unwrap_err()
+            } else {
+                let mut question = review_question(&store, false);
+                if refusal == "unknown_lane" {
+                    question.human = Some("new-person".into());
+                    question.lane = Some("missing-lane".into());
+                } else {
+                    question.agent = "owner".into();
+                    question.project = Some("shop".into());
+                }
+                store.ask_decision(question, None).unwrap_err()
+            };
+            assert!(
+                matches!(
+                    error,
+                    Error::Invalid(_) | Error::Conflict(_) | Error::NotFound(_)
+                ),
+                "{refusal}: {error}"
+            );
+            // Query directly: decision(), inbox() and request reads must not repair the result.
+            store.read(|conn| {
+                let status: String = conn.query_row("SELECT status FROM decisions WHERE decision_id = ?1", [&due.decision_id], |r| r.get(0))?;
+                assert_eq!(status, "expired", "{refusal}");
+                let request: String = conn.query_row("SELECT status FROM requests WHERE request_id = ?1", [&due.request_id], |r| r.get(0))?;
+                assert_eq!(request, "done", "{refusal}");
+                let automatic: i64 = conn.query_row("SELECT count(*) FROM messages WHERE thread_id = ?1 AND subject LIKE '[decision] default applied:%'", [&due.thread_id], |r| r.get(0))?;
+                assert_eq!(automatic, 1, "{refusal}");
+                let humans: i64 = conn.query_row("SELECT count(*) FROM agents WHERE name = 'new-person'", [], |r| r.get(0))?;
+                assert_eq!(humans, 0, "failed ask must roll back its new human");
+                Ok(())
+            }).unwrap();
+            let previous: String = store
+                .read(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT event_id FROM events WHERE node_id = ?1 ORDER BY seq DESC LIMIT 1",
+                        [store.node_id()],
+                        |r| r.get(0),
+                    )?)
+                })
+                .unwrap();
+            store.set_node_name("after-refusal").unwrap();
+            let next_previous: String = store
+                .read(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT prev_id FROM events WHERE node_id = ?1 ORDER BY seq DESC LIMIT 1",
+                        [store.node_id()],
+                        |r| r.get(0),
+                    )?)
+                })
+                .unwrap();
+            assert_eq!(
+                next_previous, previous,
+                "rolled-back events cannot remain in the chain"
+            );
+        }
+    }
+
+    #[test]
+    fn answer_labels_reject_prose_before_it_reaches_events() {
+        let (store, _) = review_store();
+        let decision = store
+            .ask_decision(review_question(&store, false), None)
+            .unwrap();
+        let error = store
+            .answer_decision(
+                AnswerDecision {
+                    decision: decision.decision_id.clone(),
+                    value: Some("wait".into()),
+                    text: None,
+                    answered_by: Some("a sentence with private details".into()),
+                    relayed_by: None,
+                },
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "invalid");
+        store
+            .read(|conn| {
+                let count: i64 = conn.query_row(
+                    "SELECT count(*) FROM events WHERE kind = 'decision.answered'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(count, 0);
+                Ok(())
+            })
+            .unwrap();
+        for name in ["alex", "alex@shop", "alex@shop@node", "alex@@node"] {
+            let decision = store
+                .ask_decision(review_question(&store, false), None)
+                .unwrap();
+            store
+                .answer_decision(
+                    AnswerDecision {
+                        decision: decision.decision_id,
+                        value: Some("wait".into()),
+                        text: None,
+                        answered_by: Some(name.into()),
+                        relayed_by: None,
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn a_database_failure_rolls_back_the_sweep_and_attempted_question() {
+        let (store, clock) = review_store();
+        let due = store
+            .ask_decision(review_question(&store, true), None)
+            .unwrap();
+        clock.fetch_add(60_001, std::sync::atomic::Ordering::SeqCst);
+        let before: i64 = store
+            .read(|conn| Ok(conn.query_row("SELECT count(*) FROM events", [], |r| r.get(0))?))
+            .unwrap();
+        store.read(|conn| {
+            conn.execute_batch("CREATE TEMP TRIGGER refuse_decision BEFORE INSERT ON decisions BEGIN SELECT RAISE(ABORT, 'injected write failure'); END")?;
+            Ok(())
+        }).unwrap();
+        let mut question = review_question(&store, false);
+        question.human = Some("new-person".into());
+        assert!(matches!(
+            store.ask_decision(question, None),
+            Err(Error::Db(_))
+        ));
+        store
+            .read(|conn| {
+                let status: String = conn.query_row(
+                    "SELECT status FROM decisions WHERE decision_id = ?1",
+                    [&due.decision_id],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(
+                    status, "open",
+                    "database failures roll back the whole transaction"
+                );
+                let events: i64 =
+                    conn.query_row("SELECT count(*) FROM events", [], |r| r.get(0))?;
+                assert_eq!(events, before);
+                let people: i64 = conn.query_row(
+                    "SELECT count(*) FROM agents WHERE name = 'new-person'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(people, 0);
+                conn.execute_batch("DROP TRIGGER refuse_decision")?;
+                Ok(())
+            })
+            .unwrap();
+        store
+            .ask_decision(review_question(&store, false), None)
+            .unwrap();
+        let status: String = store
+            .read(|conn| {
+                Ok(conn.query_row(
+                    "SELECT status FROM decisions WHERE decision_id = ?1",
+                    [&due.decision_id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            status, "expired",
+            "a successful retry can commit the timeout"
+        );
+    }
+
+    fn foreign_role_relay(history: &[Program], projected: Program, refresh: Option<Program>) {
+        let (hub, _) = review_store();
+        hub.set_node_name("hub").unwrap();
+        let decision = hub
+            .ask_decision(review_question(&hub, false), None)
+            .unwrap();
+        let human = hub.agent("owner").unwrap();
+        for &program in history {
+            hub.register_agent_trusted(RegisterAgent {
+                name: "owner".into(),
+                program,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+        }
+        let peer = Store::open_in_memory(crate::Clock::manual(hub.now()).0).unwrap();
+        peer.set_node_name("peer").unwrap();
+        // Use one clock for invite validity on both stores.
+        let code = hub
+            .create_invite("http://127.0.0.1:1", &crate::Perm::ALL, 60)
+            .unwrap();
+        let (invite, request) = peer.prepare_join(&code).unwrap();
+        let response = hub.accept_pairing(&request).unwrap();
+        peer.complete_join(&invite, &response).unwrap();
+        let event_id = peer
+            .write(|tx| {
+                tx.emit(
+                    "peer",
+                    "agent.registered",
+                    json!({
+                        "agent_id": human.agent_id,
+                        "name": "owner",
+                        "program": projected.as_str(),
+                        "role_confirmed": true
+                    }),
+                )
+            })
+            .unwrap();
+        let (events, _) = peer.outbound_events(0, 100).unwrap();
+        let report = hub.ingest(peer.node_id(), &events, &[]).unwrap();
+        assert!(report.accepted > 0);
+        assert!(hub
+            .events(100)
+            .unwrap()
+            .iter()
+            .any(|e| e.event_id == event_id));
+        if let Some(program) = refresh {
+            let refreshed = hub
+                .register_agent(RegisterAgent {
+                    name: "owner".into(),
+                    program,
+                    project: None,
+                    model: None,
+                    description: None,
+                })
+                .unwrap();
+            assert_eq!(refreshed.program, projected.as_str());
+            let latest = hub
+                .events(100)
+                .unwrap()
+                .into_iter()
+                .rev()
+                .find(|e| {
+                    e.node_id == hub.node_id()
+                        && e.kind == "agent.registered"
+                        && e.payload["agent_id"] == human.agent_id
+                })
+                .unwrap();
+            assert_eq!(latest.payload["program"], projected.as_str());
+            assert_eq!(latest.payload["role_confirmed"], false);
+        }
+        let asker = hub.agent("worker@shop").unwrap();
+        let denied = hub
+            .read(|conn| {
+                let relayer = resolve_agent(conn, hub.node_id(), "owner")?;
+                check_relayer(conn, &relayer, &asker.agent_id)
+            })
+            .unwrap_err();
+        assert_eq!(denied.code(), "forbidden");
+        let error = hub
+            .answer_decision(
+                AnswerDecision {
+                    decision: decision.decision_id.clone(),
+                    value: Some("wait".into()),
+                    text: None,
+                    answered_by: None,
+                    relayed_by: Some("owner".into()),
+                },
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "forbidden");
+        hub.register_agent_trusted(RegisterAgent {
+            name: "owner".into(),
+            program: projected,
+            project: None,
+            model: None,
+            description: None,
+        })
+        .unwrap();
+        hub.answer_decision(
+            AnswerDecision {
+                decision: decision.decision_id,
+                value: Some("wait".into()),
+                text: None,
+                answered_by: None,
+                relayed_by: Some("owner".into()),
+            },
+            None,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_signed_foreign_registration_cannot_confirm_a_local_human_role() {
+        foreign_role_relay(&[], Program::Human, None);
+    }
+
+    #[test]
+    fn a_peer_cannot_restore_a_locally_removed_privileged_role() {
+        foreign_role_relay(&[Program::Human, Program::Codex], Program::Human, None);
+    }
+
+    #[test]
+    fn an_untrusted_refresh_cannot_reconfirm_a_human_role_restored_by_a_peer() {
+        for refresh in [Program::Codex, Program::Human] {
+            foreign_role_relay(
+                &[Program::Human, Program::Codex],
+                Program::Human,
+                Some(refresh),
+            );
+        }
+    }
+
+    #[test]
+    fn an_untrusted_refresh_cannot_reconfirm_a_previous_privileged_role() {
+        for refresh in [Program::Codex, Program::GrokBot] {
+            foreign_role_relay(
+                &[Program::GrokBot, Program::Human],
+                Program::GrokBot,
+                Some(refresh),
+            );
+        }
+    }
+
+    #[test]
+    fn an_untrusted_same_program_refresh_keeps_genuine_role_confirmation() {
+        for program in [Program::Human, Program::GrokBot] {
+            let (hub, _) = review_store();
+            let decision = hub
+                .ask_decision(review_question(&hub, false), None)
+                .unwrap();
+            hub.register_agent_trusted(RegisterAgent {
+                name: "owner".into(),
+                program,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+            hub.register_agent(RegisterAgent {
+                name: "owner".into(),
+                program,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+            hub.answer_decision(
+                AnswerDecision {
+                    decision: decision.decision_id,
+                    value: Some("wait".into()),
+                    text: None,
+                    answered_by: None,
+                    relayed_by: Some("owner".into()),
+                },
+                None,
+            )
+            .unwrap();
+        }
+    }
 
     #[test]
     fn deadlines() {
