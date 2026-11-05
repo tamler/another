@@ -75,7 +75,7 @@ Items are `ActivityItem`s: one-line summaries plus ids. Message bodies are never
   - It POSTs due deliveries with `ureq` (10 s timeout, no redirects).
   - A due delivery is claimed for a minute before it is sent, so two `serve` processes never send it twice.
   - When no webhooks exist it only reads, so the many stdio servers agents run take no write lock.
-- **Body:** `{ "delivery_id", "webhook_id", "filter", "event": ActivityItem, "data": <event payload> }`. `data` is included because these event kinds carry no message bodies; mail events can't match any filter.
+- **Body:** `{ "delivery_id", "webhook_id", "filter", "event": ActivityItem, "data": <allowlisted event fields> }`. `data` keeps ids, timestamps, numbers and a short list of named strings, and drops notes, subjects and reasons; mail events can't match any filter.
 - **Headers:**
   - `X-Another-Event: <kind>`
   - `X-Another-Delivery: <id>`

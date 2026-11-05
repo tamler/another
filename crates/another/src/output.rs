@@ -594,7 +594,7 @@ pub fn webhooks(hs: &[Webhook]) -> String {
             .map_or_else(|| "all projects".to_string(), |g| g.join(", "));
         let _ = writeln!(
             out,
-            "{} {}\n  events: {}; projects: {}; {} pending, {} delivered, {} dead{}",
+            "{} {}\n  events: {}; projects: {}; {} pending, {} delivered, {} dead{}{}",
             h.webhook_id,
             h.url,
             filters.join(","),
@@ -602,6 +602,10 @@ pub fn webhooks(hs: &[Webhook]) -> String {
             h.pending,
             h.delivered,
             h.dead,
+            h.disabled_reason
+                .as_ref()
+                .map(|r| format!("; disabled: {r}"))
+                .unwrap_or_default(),
             h.description
                 .as_ref()
                 .map(|d| format!("; {d}"))
