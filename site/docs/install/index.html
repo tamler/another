@@ -64,16 +64,15 @@ cargo build --release --locked
       <p>Put the archive and either checksum file in one folder and change to that folder. Set <code>archive</code> on the first line to your file's name, then paste:</p>
       <pre class="code-block shell" tabindex="0" aria-label="Verify a release archive"><code>archive=another-0.1.0-aarch64-apple-darwin.tar.gz
 if [ -f "$archive.sha256" ]; then sums="$archive.sha256"; else sums=SHA256SUMS; fi
-line=$(awk -v file="$archive" '$2 == file &amp;&amp; length($1) == 64 &amp;&amp; $1 !~ /[^0-9a-fA-F]/' "$sums")
-if [ -z "$line" ]; then
-  echo "No valid checksum for $archive in $sums"; false
-elif command -v sha256sum &gt;/dev/null 2&gt;&amp;1; then
-  printf '%s\n' "$line" | sha256sum -c -
+expected=$(awk -v file="$archive" '$2 == file { print $1 }' "$sums")
+actual=$(sha256sum "$archive" 2&gt;/dev/null || shasum -a 256 "$archive")
+if [ -n "$expected" ] &amp;&amp; [ "$expected" = "${actual%% *}" ]; then
+  tar -xzf "$archive" &amp;&amp; echo "Verified and unpacked: $archive"
 else
-  printf '%s\n' "$line" | shasum -a 256 -c -
-fi &amp;&amp; tar -xzf "$archive" &amp;&amp; echo "Verified and unpacked: $archive"</code></pre>
-      <p>It uses <code>sha256sum</code> where that is installed and <code>shasum -a 256</code> otherwise. It checks only your archive's line, so other archives listed in <code>SHA256SUMS</code> need not be present.</p>
-      <p>A match prints your archive's name followed by <code>OK</code>, then unpacks it into a folder of the same name. If you see <code>FAILED</code>, or an error about a missing file or checksum line, nothing is unpacked. Stop there and delete the download; do not install it.</p>
+  echo "FAILED: do not install $archive"; false
+fi</code></pre>
+      <p>It hashes the archive with <code>sha256sum</code> where that is installed, or <code>shasum -a 256</code> otherwise, and compares the result with your archive's line. Other archives listed in <code>SHA256SUMS</code> need not be present. It compares the values itself because <code>sha256sum -c</code> on some macOS versions exits successfully when it finds no line it can read.</p>
+      <p>A match prints <code>Verified and unpacked</code> and unpacks the archive into a folder of the same name. If you see <code>FAILED</code>, nothing is unpacked. Stop there and delete the download; do not install it.</p>
       <p>No release exists yet, so this snippet has only run against local fixture archives built the way the release workflows build theirs. Every site build repeats that test.</p>
     </section>
     <section class="guide-section" aria-labelledby="replace-title">

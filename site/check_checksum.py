@@ -84,6 +84,13 @@ def fixture(directory, manifest, tamper=False, listed=True):
         (directory / f"{ARCHIVE}.sha256").write_text(lines[OTHER])
     if manifest == "malformed":
         (directory / f"{ARCHIVE}.sha256").write_text(f"not-a-checksum  {ARCHIVE}\n")
+    # Well-formed digests that are wrong, in layouts some `sha256sum -c` skip and still exit 0.
+    if manifest == "wrong-leading-space":
+        (directory / f"{ARCHIVE}.sha256").write_text(f" {'a' * 64}  {ARCHIVE}\n")
+    if manifest == "wrong-tab":
+        (directory / f"{ARCHIVE}.sha256").write_text(f"{'a' * 64}\t{ARCHIVE}\n")
+    if manifest == "conflicting":
+        (directory / "SHA256SUMS").write_text(f"{'a' * 64}  {ARCHIVE}\n{lines[ARCHIVE]}")
     if manifest == "SHA256SUMS":
         (directory / "SHA256SUMS").write_text("".join(lines[name] for name in sorted(lines)))
     (directory / OTHER).unlink()
@@ -115,6 +122,9 @@ def main():
         ("archive not listed", {"manifest": "SHA256SUMS", "listed": False}, False),
         ("per-archive names another file", {"manifest": "per-archive-wrong-name"}, False),
         ("malformed checksum line", {"manifest": "malformed"}, False),
+        ("wrong digest after a leading space", {"manifest": "wrong-leading-space"}, False),
+        ("wrong digest after a tab", {"manifest": "wrong-tab"}, False),
+        ("conflicting lines for one archive", {"manifest": "conflicting"}, False),
         ("no checksum file", {"manifest": None}, False),
     ]
     runs = 0
@@ -131,11 +141,10 @@ def main():
                     unpacked = (directory / ARCHIVE.removesuffix(".tar.gz") / "another").is_file()
                     if should_pass:
                         assert result.returncode == 0 and unpacked, where
-                        assert f"{ARCHIVE}: OK" in result.stdout, where
+                        assert f"Verified and unpacked: {ARCHIVE}" in result.stdout, where
                     else:
                         assert result.returncode != 0, where
                         assert not unpacked, f"failed check must not unpack: {where}"
-                    if "tampered" in label:
                         assert "FAILED" in result.stdout, where
                     if os.environ.get("CHECKSUM_RECIPE_VERBOSE"):
                         print(f"[{hasher} {shell}] {label}: exit {result.returncode}, unpacked={unpacked}")
