@@ -28,7 +28,7 @@ MCP:
 }
 ```
 
-CLI:
+CLI (the asking agent must be registered already, with `another agent register`):
 
 ```bash
 another decision ask --agent claude@shop -q "Ship behind a flag, or wait for review?" \
@@ -38,10 +38,9 @@ another decision ask --agent claude@shop -q "Ship behind a flag, or wait for rev
 
 **Fields:**
 - `options`: 2 to 6. `value` is a single word that comes back as the answer; `label` is what the person sees.
-- `human`: who is asked. Defaults to the node setting `another config decider NAME`, else `jacob`. The person is registered on demand as an agent with program `human`, so they have an inbox: `another inbox --agent jacob`.
+- `human` (`--to` on the CLI): who is asked. Defaults to the node setting `another config decider NAME`. Set that first: without it, decisions go to a built-in default name that isn't yours. The person is registered on demand as an agent with program `human`, so they have an inbox: `another inbox --agent pat`.
 - `project`: required for scoping. It is taken from the argument, else the asking agent's project, else the lane's.
-- `lane`: looked up within the decision's project only; a lane in another project is `unknown lane`.
-- `lane`: the lane shows `needs_decision` until the decision is answered, then returns to `working`.
+- `lane`: looked up within the decision's project only; a lane in another project is `unknown lane`. The lane shows `needs_decision` until the decision is answered, then returns to `working`.
 
 **When the deadline passes** (the automatic mail comes from the system agent `another`, not from the person):
 
@@ -58,7 +57,7 @@ To withdraw a question, the asking agent calls `decision_cancel` or `another dec
 The manager bot hears about new decisions through the `needs_decision` webhook (or `events_poll`) and shows the markdown on the phone:
 
 ```
-**Decision for jacob** (open) from claude@shop · shop · lane api-refactor
+**Decision for pat** (open) from claude@shop · shop · lane api-refactor
 
 Ship the refactor behind a flag, or wait for review?
 
@@ -75,9 +74,9 @@ Reply with a number or value. CLI: `another decision answer 01JD… <value>`
 The manager then relays the answer. Any of these works:
 
 - **Notes:** a short note (up to 280 characters) can go with a chosen option even when free text is off.
-- **MCP:** `decision_answer` with `{"decision": "01JD…", "value": "1", "answered_by": "jacob"}`. The value can be the option's value or its number.
-- **HTTP:** `POST /decisions/{id}/answer` with `{"value": "ship", "text": "…", "answered_by": "jacob"}`.
-- **CLI**, on the machine itself: `another decision answer 01JD… ship [--text "…"] [--as jacob]`.
+- **MCP:** `decision_answer` with `{"decision": "01JD…", "value": "1", "answered_by": "pat"}`. The value can be the option's value or its number.
+- **HTTP:** `POST /decisions/{id}/answer` with `{"value": "ship", "text": "…", "answered_by": "pat"}`.
+- **CLI**, on the machine itself: `another decision answer 01JD… ship [--text "…"] [--as pat]`.
 
 **What gets recorded:**
 - `answered_by`: the person (default: the person asked).
@@ -94,7 +93,7 @@ Borrowing from a [spend account](SPEND.md) that requires approval asks a decisio
 |---|---|
 | MCP | `decision_list` (open by default; `status`, `all`, `project`, `lane`, `human`), `decision_show` (with `markdown`) |
 | HTTP | `GET /decisions?status=open`, `GET /decisions/{id}` |
-| CLI | `another decision list [--all] [--for jacob]`, `another decision show <id> [--markdown]` |
+| CLI | `another decision list [--all] [--for pat]`, `another decision show <id> [--markdown]` |
 
 Decisions also appear in `another requests` as requests of kind `decision`. `another request claim|complete|cancel` refuses them, so use the decision commands.
 

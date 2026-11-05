@@ -82,7 +82,7 @@ another hold acquire --agent codex@shop src/app.rs
 
 ```
 nothing acquired
-conflict: src/app.rs is held by claude@shop (src/app.rs, exclusive until 2026-11-04T05:12:55Z)
+conflict: src/app.rs is held by claude@shop (src/app.rs, exclusive until 2026-11-04T05:12:55.272Z)
 ```
 
 With the pre-edit hook installed, the same check happens automatically before each edit, and the client denies the edit with that reason.
@@ -99,7 +99,7 @@ another borrow dev_server:vite@5173 --agent codex@shop
 
 ```
 borrowed dev_server vite@5173 as borrower until …
-live     dev_server   vite@5173   shared   claude@shop +1 borrower(s)   http://127.0.0.1:5173
+live     dev_server   vite@5173                  shared    claude@shop +1 borrower(s)   http://127.0.0.1:5173  (shop UI)  [01M…]
 ```
 
 **1:15 · Check the setup:**
@@ -111,6 +111,7 @@ another doctor
 ```
 another doctor (home ~/.another)
   PASS  store              ~/.another is writable; schema 11
+  SKIP  service            no background service installed (optional)
   PASS  server             http://127.0.0.1:7466 is up
   PASS  tokens             no active tokens (local use only)
   PASS  ports              1 claimed port(s), no conflicts
@@ -192,7 +193,7 @@ another token create --agent grok-bot --project '/path/to/work/*'
 Both flags are required:
 
 - **`--auth`**: Tailscale Serve delivers tailnet traffic to the service from loopback, so a server without `--auth` would accept anyone on your tailnet with no token. With `--auth`, API requests need a bearer token from `another token create`, and each call is audited (`another audit`); [docs/REMOTE.md](docs/REMOTE.md) lists the routes.
-- **`--allowed-host`**: the tunnel forwards your tailnet hostname in the `Host` header, and Another rejects unknown hosts to prevent DNS rebinding. Without the flag, every tunnelled request is refused.
+- **`--allowed-host`**: the tunnel forwards your tailnet hostname in the `Host` header, and `/mcp` refuses hosts it doesn't know, to prevent DNS rebinding. Without the flag, MCP clients coming through the tunnel get `403`. With `--auth`, the other routes don't check `Host`; the token protects them.
 
 Keep local agents on stdio MCP (or a separate unauthenticated loopback server) so they don't need a token. Use Tailscale Serve, not Funnel, unless you deliberately want the service on the public internet. [docs/REMOTE.md](docs/REMOTE.md) has the details, plus the Cloudflare Tunnel and `ssh -R` setups.
 
@@ -263,7 +264,7 @@ Every command takes `--json`. `--agent` and `--from` default to `$ANOTHER_AGENT`
 | Task | Commands |
 |---|---|
 | Node | `another init`, `another status`, `another doctor [--server URL]` (PASS/WARN/FAIL with a fix each; exit 1 on FAIL; checks the background service's address when one is installed for this home), `another node show`, `another node name [<name>]` (no name prints the current one), `another events` |
-| Agents | `another agent register <name> --program claude\|codex\|grok\|cursor\|grok_bot\|other [--project PATH]`, `another agent list` |
+| Agents | `another agent register <name> --program claude\|codex\|grok\|cursor\|grok_bot\|human\|other [--project PATH]`, `another agent list` |
 | Mail | `another send`, `another inbox`, `another reply <message-id>`, `another ack <message-id>`, `another threads`, `another thread <id>` (there is no `another mail` command) |
 | Requests | `another requests`, `another request claim\|release\|complete\|cancel <id>` |
 | Lanes | `another lane create\|list\|show\|update\|report\|done\|close\|export` |

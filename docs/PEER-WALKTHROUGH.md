@@ -31,11 +31,11 @@ another agent register codex --program codex --project .
 The person who answers questions is an agent too, with the program `human`. Make them the node's decider, so questions that name nobody go to them:
 
 ```bash
-another agent register jacob --program human
+another agent register pat --program human
 ```
 
 ```bash
-another config decider jacob
+another config decider pat
 ```
 
 ### 2. Split the work into lanes

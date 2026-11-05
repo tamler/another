@@ -13,6 +13,13 @@ Asking a [human decision](HUMAN-DECISIONS.md) with `lane` set moves the lane to 
 
 ## CLI
 
+The examples use two registered agents:
+
+```bash
+another agent register manager --program grok_bot
+another agent register claude --program claude --project ~/work/shop
+```
+
 ```bash
 another lane create billing --agent manager --project ~/work/shop --lead claude@shop --charter "Add invoices. Done = tests + docs + PR."
 ```
@@ -41,11 +48,13 @@ another lane show billing
 another lane update billing --agent manager --link-thread <thread-id> --link-request <request-id>
 ```
 
+To drop an open lane instead of finishing it:
+
 ```bash
 another lane close billing --agent manager --abandon --outcome "superseded by billing-v2"
 ```
 
-Every report is stored on the lane and also **mailed** to the lane's counterpart: the creator when the lead reports, the lead otherwise. The mail goes into the lane's thread with a subject like `[lane billing] needs_decision: Need a call on currency rounding`. Blocked and needs-decision reports are sent as high importance, so they appear in digests and `another wake`.
+Every report is stored on the lane and also **mailed** to the lane's counterpart: the creator when the lead reports, the lead otherwise. The mail goes into the lane's thread with a subject like `[lane billing] needs_decision: status report by claude@shop`. The summary is in the body. Blocked and needs-decision reports are sent as high importance, so they appear in digests and `another wake`.
 
 ## Path holds and lanes
 
