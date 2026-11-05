@@ -1002,11 +1002,22 @@ pub fn edited_files(input: &HookInput, root: &Path, cwd: &Path) -> Vec<String> {
         // Compare real paths (symlinks resolved: /var vs /private/var on macOS); fall back to
         // the lexical path for files that don't exist yet or outside a real tree.
         let real = canonical(&norm);
-        let rel = real
-            .strip_prefix(&real_root)
-            .or_else(|_| norm.strip_prefix(root))
-            .map(Path::to_path_buf);
-        if let Ok(rel) = rel {
+        let rel = match real.strip_prefix(&real_root) {
+            Ok(rel) => rel,
+            // Resolved to somewhere else: a symlink pointing out of the project is outside it.
+            Err(_) if real != norm => continue,
+            Err(_) => match norm.strip_prefix(root) {
+                Ok(rel) => rel,
+                Err(_) => continue,
+            },
+        };
+        // A symlink inside the project is also held under the name it was edited by, so a hold
+        // someone took on that name still applies (holds are compared lexically).
+        let alias = norm
+            .strip_prefix(root)
+            .or_else(|_| norm.strip_prefix(&real_root))
+            .ok();
+        for rel in std::iter::once(rel).chain(alias) {
             let rel = rel.to_string_lossy().replace('\\', "/");
             if !rel.is_empty() && !out.contains(&rel) {
                 out.push(rel);

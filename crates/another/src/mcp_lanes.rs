@@ -102,7 +102,7 @@ pub struct LaneReportArgs {
     /// status (default) or done. A done report closes the lane.
     #[serde(default)]
     pub kind: ReportKindArg,
-    /// What happened (first line is used as the mail subject).
+    /// What happened. Goes in the body of the report mail; the subject carries only the lane, status, kind and author.
     pub summary: String,
     /// Percent complete, 0-100.
     pub progress: Option<u8>,
