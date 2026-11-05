@@ -41,7 +41,7 @@ All notable changes to Another. Unreleased work is listed under the next version
     - MCP: `decision_ask`, `decision_list`, `decision_show`, `decision_answer`, `decision_cancel`.
     - HTTP: `GET /decisions`, `GET /decisions/{id}`, `POST /decisions/{id}/answer`.
     - CLI: `another decision ask|list|show|answer|cancel`.
-  - Events: `decision.created|answered|expired|overdue|cancelled`.
+  - Events: `decision.created|answered|expired|overdue|cancelled`. `decision.cancelled` carries a `has_reason` flag, never the reason's text, which stays in the mail and the request's note.
   - Requests gain a `kind` field (`task` or `decision`).
 - **Lane-aware holds** ([design](docs/design/04-lane-holds.md)):
   - Holds carry a lane (explicit `lane`, else `$ANOTHER_LANE`, else the lane the agent leads), looked up in the hold's project only. Overlaps inside one lane are warnings, except two exclusive holds, which still block.
