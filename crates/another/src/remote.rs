@@ -46,7 +46,7 @@ pub enum ForwardedHeader {
 }
 
 impl ForwardedHeader {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::CfConnectingIp => "cf-connecting-ip",
             Self::XForwardedFor => "x-forwarded-for",

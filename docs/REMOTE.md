@@ -26,6 +26,8 @@ Project globs are matched against a project's absolute path and its slug (`*` st
 
 ## 2. Run an authenticated server on loopback
 
+To keep the server below running across logins and reboots, install it as an opt-in background service instead: `another service install --auth --bind 127.0.0.1:7467 --allowed-host <tunnel hostname>` (see the README section "Run it in the background"). It takes `--trusted-proxy-header`, described below, as well.
+
 Keep your local agents on the plain loopback server (or stdio), and run a second, authenticated server for the tunnel:
 
 ```bash
