@@ -64,7 +64,7 @@ pub enum Command {
         /// HTTP bind address. Loopback unless --auth and --allow-remote-bind are both given.
         #[arg(long, default_value = crate::serve::DEFAULT_BIND)]
         bind: String,
-        /// Require bearer tokens (`another token create`) on /mcp and /activity; audit every call.
+        /// Require bearer tokens (`another token create`) on every route except /health, /join and /fed; audit every call.
         #[arg(long)]
         auth: bool,
         /// Allow a non-loopback --bind (requires --auth). Prefer a tunnel instead.
@@ -1207,6 +1207,9 @@ pub enum HoldCmd {
         paths: Vec<String>,
         #[arg(long)]
         shared: bool,
+        /// Lane to check for (default: $ANOTHER_LANE, else the one lane you lead here).
+        #[arg(long, env = "ANOTHER_LANE")]
+        lane: Option<String>,
     },
     /// Renew your holds (all, or the given ids).
     Renew {
@@ -1399,6 +1402,10 @@ fn service_command(cmd: &ServiceCmd, json: bool, home: PathBuf) -> anyhow::Resul
                         out.push_str(l);
                     }
                 }
+                if let Some(e) = &r.log_error {
+                    out.push_str("\ncan't read the logs: ");
+                    out.push_str(e);
+                }
                 out
             }))
         }
@@ -1416,6 +1423,9 @@ fn service_command(cmd: &ServiceCmd, json: bool, home: PathBuf) -> anyhow::Resul
             let status = service::status(&user_home, &home, *lines)?;
             if !status.installed {
                 anyhow::bail!("the background service is not installed");
+            }
+            if let Some(e) = status.log_error {
+                anyhow::bail!("can't read the logs: {e}");
             }
             Ok(emit(json, &status.log_lines, |l| l.join("\n")))
         }
@@ -1723,16 +1733,28 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             project,
             paths,
             shared,
+            lane,
         }) => {
             let project = project_key(&store, &agent.agent, project.project)?;
-            let conflicts = store.check_holds(&agent.agent, &project, &paths, !shared)?;
+            let lane = lane.filter(|l| !l.trim().is_empty());
+            let (conflicts, warnings) = store.check_holds_in_lane(
+                &agent.agent,
+                &project,
+                &paths,
+                !shared,
+                lane.as_deref(),
+            )?;
             let conflicted = !conflicts.is_empty();
-            emit(json, &conflicts, |c| {
-                if c.is_empty() {
-                    "no conflicts".to_string()
+            // JSON lists both; `same_lane: true` marks the overlaps that don't block.
+            let all: Vec<_> = conflicts.iter().chain(&warnings).collect();
+            emit(json, &all, |_| {
+                let mut out = if conflicts.is_empty() {
+                    "no conflicts\n".to_string()
                 } else {
-                    output::conflicts(c)
-                }
+                    output::conflicts(&conflicts)
+                };
+                out.push_str(&output::hold_warnings(&warnings));
+                out.trim_end().to_string()
             });
             if conflicted {
                 ExitCode::from(EXIT_CONFLICT)

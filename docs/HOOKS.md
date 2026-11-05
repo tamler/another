@@ -55,7 +55,7 @@ Uninstall removes only entries that reference `another-hook.sh`, and deletes the
 - The hold is for the agent's lane: `$ANOTHER_LANE`, else the one lane it leads there. See [lane-aware holds](LANES.md#path-holds-and-lanes).
 - **If another agent or lane holds a file, the edit is denied** with the standard `permissionDecision: "deny"` output. The reason names the holder, their lane and when the hold expires, so the agent can coordinate or move on.
 - Holds by agents in the same lane never block, unless both holds are exclusive (the hook's are).
-- Files outside the project are ignored. File names are held literally: glob characters in a name are escaped (`notes[.md` is held as `notes[[].md`), so they never break the hold.
+- Files outside the project are ignored, including a symlink that points out of it. A symlink inside the project is held under both its own name and its target's. File names are held literally: glob characters in a name are escaped (`notes[.md` is held as `notes[[].md`), so they never break the hold.
 
 **Otherwise** the hook prints nothing, and the client's normal permission flow applies. The hook never approves anything.
 

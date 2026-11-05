@@ -58,7 +58,7 @@ Every report is stored on the lane and also **mailed** to the lane's counterpart
 
 ## Path holds and lanes
 
-**Which lane a hold is for:** the `lane` argument of `hold_paths`, or `another hold acquire --lane` (defaults to `$ANOTHER_LANE`), looked up in the hold's project only; another project's lane is an unknown lane. Without one, it is the single open lane the agent leads in that project. `-` means no lane, without that fallback. Holds without a lane behave as before.
+**Which lane a hold is for:** the `lane` argument of `hold_paths`, or `another hold acquire --lane` (defaults to `$ANOTHER_LANE`; `hold check` takes the same flag and gives the same answer), looked up in the hold's project only; another project's lane is an unknown lane. Without one, it is the single open lane the agent leads in that project. `-` means no lane, without that fallback. Holds without a lane behave as before.
 
 **Conflicts between lanes:**
 
@@ -88,7 +88,7 @@ This writes `billing-STATUS.md`, and `DONE-billing.md` as well once the lane is 
 
 `lane_create`, `lane_list`, `lane_show`, `lane_update` (status, charter, lead, links), `lane_report` (`kind`: `status` or `done`), and `lane_close`.
 
-Over remote MCP (`serve --auth`), a token only sees and changes lanes whose project matches its globs, and acts as its own agent. A lead it names is looked up among the agents it may see (its projects, plus project-less agents), so a hidden agent is the same `not_found` as a missing one. Out-of-scope lanes return `forbidden`, and `lane_list` leaves them out.
+Over remote MCP (`serve --auth`), a token only sees and changes lanes whose project matches its globs, and acts as its own agent. A lead it names is looked up among the agents it may see (its projects, plus project-less agents), so a hidden agent is the same `not_found` as a missing one. Out-of-scope lanes return `not_found`, the same as missing ones, and `lane_list` leaves them out.
 
 ## Reporting automatically from Claude Code and Codex
 

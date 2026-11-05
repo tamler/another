@@ -217,10 +217,26 @@ pub fn hold_report(r: &HoldReport) -> String {
     } else {
         format!("nothing acquired\n{}", conflicts(&r.conflicts))
     };
-    for w in &r.warnings {
+    out.push_str(&hold_warnings(&r.warnings));
+    out
+}
+
+pub fn hold_warnings(warnings: &[HoldConflict]) -> String {
+    let mut out = String::new();
+    for w in warnings {
+        let where_held = if w.same_lane {
+            "in the same lane"
+        } else {
+            "on another node"
+        };
+        let advice = if w.same_lane {
+            "allowed; coordinate"
+        } else {
+            "holds are node-local; coordinate"
+        };
         let _ = writeln!(
             out,
-            "warning: {} overlaps {} held on another node by {} (holds are node-local; coordinate)",
+            "warning: {} overlaps {} held {where_held} by {} ({advice})",
             w.path, w.held.pattern, w.held.agent
         );
     }
@@ -577,6 +593,16 @@ pub fn lane_detail(d: &LaneDetail) -> String {
     for k in &d.links {
         let _ = writeln!(out, "  linked {} {}", k.kind.as_str(), k.ref_id);
     }
+    for h in &d.holds {
+        let _ = writeln!(
+            out,
+            "  hold {} by {} ({}, until {})",
+            h.pattern,
+            h.agent,
+            if h.exclusive { "exclusive" } else { "shared" },
+            h.expires_at
+        );
+    }
     out
 }
 
@@ -613,7 +639,7 @@ pub fn webhooks(hs: &[Webhook]) -> String {
             .map_or_else(|| "all projects".to_string(), |g| g.join(", "));
         let _ = writeln!(
             out,
-            "{} {}\n  events: {}; projects: {}; {} pending, {} delivered, {} dead{}",
+            "{} {}\n  events: {}; projects: {}; {} pending, {} delivered, {} dead{}{}",
             h.webhook_id,
             h.url,
             filters.join(","),
@@ -621,6 +647,10 @@ pub fn webhooks(hs: &[Webhook]) -> String {
             h.pending,
             h.delivered,
             h.dead,
+            h.disabled_reason
+                .as_ref()
+                .map(|r| format!("; disabled: {r}"))
+                .unwrap_or_default(),
             h.description
                 .as_ref()
                 .map(|d| format!("; {d}"))

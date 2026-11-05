@@ -80,7 +80,7 @@ Not fixed here. Any fix changes how every local client connects.
 - Cloud metadata services want GET or PUT with special headers, so a POST gets nothing from them.
 
 **Fix (D46):**
-- New node setting `remote_webhook_private_hosts`, default `off`, settable only on the machine. With it off, a token's `webhook_subscribe` is refused for loopback, unspecified (`0.0.0.0/8`, `::`), link-local (`169.254.0.0/16`, `fe80::/10`) and known metadata hosts (`100.100.100.200`, `168.63.129.16`, `fd00:ec2::254`, `metadata.google.internal`, `metadata.goog`, `instance-data.ec2.internal`).
+- New node setting `remote_webhook_private_hosts`, default `off`, settable only on the machine. With it off, a token's `webhook_subscribe` is refused for loopback, unspecified (`0.0.0.0/8`, `::`), link-local (`169.254.0.0/16`, `fe80::/10`) and known metadata hosts (`100.100.100.200`, `168.63.129.16`, `fd00:ec2::254`, `fd20:ce::254`, `metadata.google.internal`, `metadata.goog`, `instance-data.ec2.internal`).
 - The check covers the spellings a system resolver accepts: `127.1`, `0x7f000001`, `2130706433`, `0177.0.0.1`, a trailing dot, `*.localhost`, and IPv4 embedded in IPv6 (mapped, compatible, NAT64, 6to4). A host that isn't plainly a DNS name or an address (percent-encoding, IPv6 zone ids, a numeric last label that isn't a valid address) is refused too.
 - At delivery, the hub re-checks the host and every address the name resolves to. The check runs inside the connection's own lookup, so a second DNS answer can't get past it, and one refused address refuses the whole answer. Turning the setting off applies to existing webhooks.
 - These deliveries skip `HTTP(S)_PROXY`, because a proxy would resolve the name itself.

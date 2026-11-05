@@ -6,6 +6,8 @@ Free and open source, always: a local-first, vendor-neutral **inbox, activity fe
 
 **Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1–6 complete (local core, hooks, resources, remote peers, federation, polish); coordination series and v0.1.0 release prep in review
 
+The coordination series is in progress. Decision cancellation preserves a due default even when the deadline passes as cancellation begins.
+
 ## Why
 
 Agents working side by side still coordinate through stale markdown files. Another gives them:
@@ -21,7 +23,14 @@ Hooks inject a short digest at session start, so agents actually check their mai
 
 This doubles as the script for a 90-second demo recording: one terminal, a project folder, two agents. Timings are cues for narration; the commands themselves finish in about a second.
 
-**0:00 · Install** (macOS arm64/x86_64, Linux x86_64/arm64). The script downloads the release archive, checks it against the release's `SHA256SUMS`, and refuses to install anything that doesn't match:
+**0:00 · Install.** No release is published yet, so build from source, with Rust 1.88 or newer:
+
+<!-- Fenced as sh, not bash: the CI quickstart runs the bash blocks and installs through the script below, served locally. -->
+```sh
+cargo install --locked --git https://github.com/tamler/another another
+```
+
+**After v0.1.0 is released** (this URL returns 404 until then), use the install script instead, on macOS arm64/x86_64 or Linux x86_64/arm64. It downloads the release archive, checks it against the release's `SHA256SUMS`, and refuses to install anything that doesn't match:
 
 ```bash
 curl -fsSL https://github.com/tamler/another/releases/latest/download/install.sh | sh
@@ -130,19 +139,13 @@ another doctor (home ~/.another)
 
 ### Other ways to install
 
-- **Pin a version, or install somewhere else:**
+- **After v0.1.0: pin a version, or install somewhere else:**
 
   ```bash
   curl -fsSL https://github.com/tamler/another/releases/latest/download/install.sh | ANOTHER_VERSION=0.1.0 ANOTHER_INSTALL_DIR=/usr/local/bin sh
   ```
 
-- **From source**, with Rust 1.88 or newer:
-
-  ```bash
-  cargo install --locked --git https://github.com/tamler/another another
-  ```
-
-- **By hand:** each [release](https://github.com/tamler/another/releases) has `another-<version>-<target>.tar.gz` for `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, a `.sha256` per archive, one `SHA256SUMS` and `install.sh`. Check with `sha256sum -c SHA256SUMS --ignore-missing` (or `shasum -a 256 -c`).
+- **After v0.1.0: by hand.** Each [release](https://github.com/tamler/another/releases) has `another-<version>-<target>.tar.gz` for `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, a `.sha256` per archive, one `SHA256SUMS` and `install.sh`. Check with `sha256sum -c SHA256SUMS --ignore-missing` (or `shasum -a 256 -c`).
 
 **What the checksum proves:** `SHA256SUMS` is unsigned and comes from the same release as the archive. A match shows the download is intact (integrity). It doesn't show who built it (authenticity): someone who can change the release or the GitHub account can replace both files. The release's security rests on HTTPS and on that account. To reduce that trust, build from source at a commit you've reviewed.
 
@@ -164,7 +167,7 @@ another service install
 - **macOS**: a launchd user agent at `~/Library/LaunchAgents/one.toanother.another.plist` (`RunAtLoad`, `KeepAlive`), loaded with `launchctl bootstrap gui/$UID`. Logs go to `$ANOTHER_HOME/logs/`.
 - **Linux**: a systemd user unit at `~/.config/systemd/user/another.service` (`Restart=on-failure`), enabled with `systemctl --user enable --now`. Logs are in the journal (`journalctl --user -u another`). On a headless box, run `loginctl enable-linger $USER` so it starts at boot without a login session.
 
-`install` takes `serve`'s HTTP flags (`--bind`, `--auth`, `--allowed-host`, `--trusted-proxy-header`, `--allow-remote-bind`, `--federation`) plus the global `--home`, and writes them into the service definition. Running it again updates the service in place and replaces every flag, so repeat the ones you want to keep; it warns about anything an update drops or changes. If an update fails, the previous service is restored. It refuses to install when something, such as another `another serve`, is already listening on the same port.
+`install` takes `serve`'s HTTP flags (`--bind`, `--auth`, `--allowed-host`, `--trusted-proxy-header`, `--allow-remote-bind`, `--federation`) plus the global `--home`, and writes them into the service definition. Running it again updates the service in place and replaces every flag, so repeat the ones you want to keep; it warns when an update drops `--auth`, an allowed host, the trusted proxy header or `--federation`, or changes the proxy header, bind address or home. If an update fails, the previous service is restored. It refuses to install when something, such as another `another serve`, is already listening on the same port.
 
 | Command | What it does |
 |---|---|
@@ -172,7 +175,7 @@ another service install
 | `another service status` | Installed and loaded?, pid, bind address, last log lines |
 | `another service logs [-n 50]` | Recent log lines |
 | `another service stop` / `start` | Stop or start it; it stays installed (macOS: loads again at next login; Linux: starts again at the next boot or user-manager start) |
-| `another service uninstall` | Stop it and remove the definition |
+| `another service uninstall` | Stop it and remove the definition. If it can't be stopped, the command fails and keeps the definition so you can retry |
 
 ### Remote access through Tailscale Serve
 
@@ -215,6 +218,10 @@ Keep local agents on stdio MCP (or a separate unauthenticated loopback server) s
 | Coordination 6 | Daily summary: pull (CLI, MCP, HTTP) or an opt-in daily rollup by mail or webhook | 🔄 tamler/another#15 |
 | Coordination 7 | First-class remote agents: invites, join, presence, kick, federation tie-in | 🔄 tamler/another#16 |
 | v0.1.0 prep | Release installs (`install.sh`, `SHA256SUMS`), `another doctor`, 90-second quickstart | 🔄 tamler/another#17 |
+
+Doctor recognizes installed hooks by their executable wrapper commands in hook entries, including installer paths containing spaces or apostrophes.
+
+Spend reports count active leases before any cost accrues and across monthly resets.
 
 Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88.
 

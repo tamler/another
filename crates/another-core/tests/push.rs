@@ -532,6 +532,18 @@ fn webhooks_stop_when_their_token_is_revoked_or_expires() {
         s.queue_test_delivery(&h.webhook_id).unwrap_err().code(),
         "conflict"
     );
+    // A dead delivery on a disabled webhook can't be retried: nothing would ever send it.
+    let dead = s
+        .webhook_deliveries(Some(&h.webhook_id), Some(DeliveryStatus::Dead), 10)
+        .unwrap();
+    assert_eq!(
+        s.retry_delivery(&dead[0].delivery_id).unwrap_err().code(),
+        "conflict"
+    );
+    let still_dead = s
+        .webhook_deliveries(Some(&h.webhook_id), Some(DeliveryStatus::Dead), 10)
+        .unwrap();
+    assert_eq!(still_dead.len(), 1);
 
     // An expiring token: fine until it lapses, then disabled.
     let t2 = s
@@ -830,6 +842,9 @@ fn token_webhooks_refuse_hub_local_and_metadata_addresses() {
         "https://169.254.0.1/x",
         "https://[::ffff:169.254.169.254]/x",
         "https://[fd00:ec2::254]/x",
+        "https://[fd20:ce::254]/computeMetadata/v1/",
+        "https://[FD20:CE::254]/x",
+        "https://[fd20:ce:0:0:0:0:0:254]/x",
         "https://100.100.100.200/x",
         "https://168.63.129.16/x",
         "https://metadata.google.internal/x",
@@ -857,11 +872,32 @@ fn token_webhooks_keep_external_https_and_local_webhooks_keep_loopback() {
         "https://localhost.example.test/x",
         "https://93.184.216.34/x",
         "https://[2606:2800:220:1::1]/x",
+        // Private LAN receivers stay allowed (D46), next to the metadata addresses too.
+        "https://[fd12:3456:789a::1]/x",
+        "https://[fd20:ce::253]/x",
+        "https://[fd00:ec2::253]/x",
     ] {
         assert!(subscribe(&s, ok, Some(&scope)).is_ok(), "{ok}");
     }
     assert!(subscribe(&s, "http://127.0.0.1:9/x", None).is_ok());
     assert!(subscribe(&s, "https://169.254.169.254/x", None).is_ok());
+    assert!(subscribe(&s, "https://[fd20:ce::254]/x", None).is_ok());
+}
+
+/// The classifier the connection's resolver uses: the exact metadata addresses, not their
+/// neighbours in the same private range.
+#[test]
+fn the_ip_classifier_refuses_ipv6_metadata_but_not_private_neighbours() {
+    for (ip, refused) in [
+        ("fd00:ec2::254", true),
+        ("fd20:ce::254", true),
+        ("fd00:ec2::253", false),
+        ("fd20:ce::253", false),
+        ("fd12:3456:789a::1", false),
+    ] {
+        let parsed = ip.parse().unwrap();
+        assert_eq!(is_refused_webhook_ip(parsed), refused, "{ip}");
+    }
 }
 
 #[test]

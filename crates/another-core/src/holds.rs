@@ -57,8 +57,9 @@ pub struct HoldReport {
     /// Holds now owned by the caller (empty if any conflict was found).
     pub granted: Vec<Hold>,
     pub conflicts: Vec<HoldConflict>,
-    /// Overlapping holds on other nodes in a project with the same name. Holds are node-local,
-    /// so these never block; they flag a likely cross-machine clash.
+    /// Overlaps that never block: holds on other nodes in a project with the same name (holds
+    /// are node-local, so these flag a likely cross-machine clash), and non-exclusive overlaps
+    /// in the requester's own lane (`same_lane`).
     pub warnings: Vec<HoldConflict>,
 }
 
@@ -858,6 +859,21 @@ impl Store {
         paths: &[String],
         exclusive: bool,
     ) -> Result<Vec<HoldConflict>> {
+        Ok(self
+            .check_holds_in_lane(agent, project, paths, exclusive, None)?
+            .0)
+    }
+
+    /// What `acquire_holds` would do for these paths and this lane (the same default as
+    /// acquiring): the blocking conflicts, then the same-lane overlaps that only warn.
+    pub fn check_holds_in_lane(
+        &self,
+        agent: &str,
+        project: &str,
+        paths: &[String],
+        exclusive: bool,
+        lane: Option<&str>,
+    ) -> Result<(Vec<HoldConflict>, Vec<HoldConflict>)> {
         self.write(|tx| {
             sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, agent)?;
@@ -866,7 +882,15 @@ impl Store {
                 .iter()
                 .map(|raw| Ok((raw.clone(), normalize_pattern(&project, raw)?)))
                 .collect::<Result<Vec<_>>>()?;
-            conflicts_for(tx, &project.project_id, &me.id, &patterns, exclusive)
+            let lane_id = acquire_lane(tx, &me, &project.project_id, lane)?;
+            lane_conflicts_for(
+                tx,
+                &project.project_id,
+                &me.id,
+                &patterns,
+                exclusive,
+                lane_id.as_deref(),
+            )
         })
     }
 

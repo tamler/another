@@ -376,6 +376,44 @@ fn bin(home: &Path, args: &[&str]) -> Command {
     c
 }
 
+#[test]
+fn webhook_list_shows_why_a_webhook_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    store.ensure_project("shop", "/work/shop").unwrap();
+    store
+        .register_agent(RegisterAgent {
+            name: "manager".into(),
+            program: Program::Claude,
+            project: Some("/work/shop".into()),
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    let token = store
+        .create_token("manager@shop", &["/work/shop".into()], None, None)
+        .unwrap();
+    let scope = store.verify_token(&token.secret).unwrap();
+    store
+        .create_webhook(
+            another_core::NewWebhook {
+                url: "https://hooks.example.test/x".into(),
+                filters: vec![another_core::WebhookFilter::LaneStatus],
+                project_globs: None,
+                description: None,
+            },
+            Some(&scope),
+        )
+        .unwrap();
+    store.revoke_token(&token.token.token_id).unwrap();
+    store.queue_webhook_deliveries().unwrap();
+
+    let out = bin(dir.path(), &["webhook", "list"]).output().unwrap();
+    assert!(out.status.success());
+    let listed = String::from_utf8_lossy(&out.stdout);
+    assert!(listed.contains("disabled: token revoked"), "{listed}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn webhook_cli() {
     let dir = tempfile::tempdir().unwrap();
