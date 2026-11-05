@@ -2,7 +2,7 @@
 
 Do not submit the previous generated promotional tutorial. The [DEV AI-assisted article guidelines](https://dev.to/guidelines-for-ai-assisted-articles-on-dev), verified 2026-11-05, require disclosure for AI assistance and prohibit such articles from promoting a program, including the author's own. Human review or light rewriting does not resolve that restriction.
 
-A human may independently write from their own run and knowledge if the current rules permit the resulting article. Do not reuse this packet as promotional prose or have a model edit the submission to evade the rule.
+A human may independently write from their own run and knowledge if the current rules permit the resulting article. Copying a generated promotional draft, lightly rewriting it or adding a disclosure does not make that draft eligible. Do not use this packet as final article prose or have a model rewrite a promotional submission to evade the rule.
 
 Preparation facts: Another exposes local mail through a Rust CLI and MCP; hooks announce mail at lifecycle events; path holds are advisory; hook installation changes user-global config. Run the current locked source-install command in a fresh environment and keep genuine output, errors and limitations.
 
