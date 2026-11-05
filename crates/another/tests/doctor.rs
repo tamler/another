@@ -202,9 +202,12 @@ async fn doctor_reports_each_problem_with_a_fix() {
     // A command that only mentions the wrapper isn't one of Another's hooks, so it needs no trust.
     let saved_hooks = std::fs::read_to_string(&hooks_path).unwrap();
     for ev in &events {
-        hj["hooks"][ev].as_array_mut().unwrap().push(serde_json::json!({
-            "hooks": [{ "type": "command", "command": "echo another-hook.sh" }]
-        }));
+        hj["hooks"][ev]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "hooks": [{ "type": "command", "command": "echo another-hook.sh" }]
+            }));
     }
     std::fs::write(&hooks_path, hj.to_string()).unwrap();
     let (_, r) = check(url.clone()).await.unwrap();
