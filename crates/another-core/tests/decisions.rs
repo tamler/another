@@ -1003,6 +1003,66 @@ fn cancelling_before_a_choose_default_deadline_is_allowed() {
 }
 
 #[test]
+fn answering_after_a_choose_default_deadline_commits_the_default() {
+    let (s, clock) = store();
+    let now = s.now();
+    let d = ask(&s, "claude@shop", |d| {
+        d.deadline_at = Some(now + 3_600_000);
+        d.on_timeout = DecisionTimeout::ChooseDefault;
+        d.default_value = Some("wait".into());
+    })
+    .unwrap();
+    // The deadline passes with no sweep in between (no server running).
+    advance(&clock, 3_600_001);
+    let e = answer(&s, &d.decision_id, Some("ship"), None).unwrap_err();
+    assert_eq!(e.code(), "conflict", "{e}");
+    // Read events first: anything that sweeps would hide a rolled-back timeout.
+    assert!(
+        s.events(100)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "decision.expired" && e.payload["decision_id"] == d.decision_id),
+        "refusing the answer must commit the timeout"
+    );
+    assert_eq!(
+        s.request(&d.request_id).unwrap().status,
+        RequestStatus::Done
+    );
+}
+
+#[test]
+fn answered_by_is_a_name_not_a_sentence() {
+    let (s, _) = store();
+    let d = ask(&s, "claude@shop", |_| {}).unwrap();
+    let e = s
+        .answer_decision(
+            AnswerDecision {
+                decision: d.decision_id.clone(),
+                value: Some("ship".into()),
+                answered_by: Some("the rollout key is hunter2".into()),
+                relayed_by: Some("manager".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(e.code(), "invalid", "{e}");
+    let ok = s
+        .answer_decision(
+            AnswerDecision {
+                decision: d.decision_id.clone(),
+                value: Some("ship".into()),
+                answered_by: Some("owner@shop".into()),
+                relayed_by: Some("manager".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    assert_eq!(ok.answer.unwrap().answered_by, "owner@shop");
+}
+
+#[test]
 fn cancelling_after_a_choose_default_deadline_keeps_the_default() {
     let (s, clock) = store();
     let now = s.now();

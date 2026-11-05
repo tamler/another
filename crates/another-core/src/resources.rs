@@ -678,8 +678,9 @@ pub(crate) fn session_leases_tx(
     let mut leases = Vec::new();
     for (lease_id, rid, ttl, project) in all {
         let ok = match (scope, &project) {
+            (None, _) => true,
             (Some(s), Some(p)) => crate::tokens::scope_allows_project(tx, s, p)?,
-            _ => true,
+            (Some(_), None) => false,
         };
         if ok {
             leases.push((lease_id, rid, ttl));
