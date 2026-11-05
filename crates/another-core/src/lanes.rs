@@ -1252,6 +1252,13 @@ impl Store {
                 )));
             }
             check_scope(tx, scope, &project_id)?;
+            if lane.status.is_closed() {
+                return Err(Error::Conflict(format!(
+                    "lane {} is {}; create a new lane to continue",
+                    lane.name,
+                    lane.status.as_str()
+                )));
+            }
             let to = if abandon {
                 LaneStatus::Abandoned
             } else {
