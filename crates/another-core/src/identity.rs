@@ -629,19 +629,28 @@ impl Store {
     }
 }
 
-/// Whether a person on this machine confirmed `agent_id`'s privileged role (manager or
+/// Whether a person on the agent's node confirmed `agent_id`'s privileged role (manager or
 /// person): a trusted registration (`register_agent_trusted`, the CLI, or an invite the
 /// person made) recorded `role_confirmed` for its current program. A person registered on
 /// demand as a decision's addressee is not confirmed, so it can't relay answers.
+/// Only events authored by that node count, and confirmation must follow every registration
+/// there naming a different program. A different peer and an untrusted refresh cannot revive
+/// an older role. Callers bind the agent to this node or to a verified relay's origin.
 pub(crate) fn role_confirmed(conn: &Connection, agent_id: &str, program: &str) -> Result<bool> {
     Ok(conn
         .query_row(
-            "SELECT 1 FROM events WHERE kind = 'agent.registered'
-               AND json_extract(payload, '$.agent_id') = ?1
-               AND json_extract(payload, '$.program') = ?2
-               AND json_extract(payload, '$.role_confirmed') = 1
-               -- Only the agent's own node can confirm its role.
-               AND node_id = (SELECT node_id FROM agents WHERE agent_id = ?1)
+            "SELECT 1 FROM events e JOIN agents a ON a.agent_id = ?1
+             WHERE e.node_id = a.node_id AND e.kind = 'agent.registered'
+               AND json_extract(e.payload, '$.agent_id') = ?1
+               AND json_extract(e.payload, '$.program') = ?2
+               AND json_extract(e.payload, '$.role_confirmed') = 1
+               AND NOT EXISTS (
+                 SELECT 1 FROM events changed
+                 WHERE changed.node_id = a.node_id AND changed.kind = 'agent.registered'
+                   AND json_extract(changed.payload, '$.agent_id') = ?1
+                   AND json_extract(changed.payload, '$.program') != ?2
+                   AND changed.seq > e.seq
+               )
              LIMIT 1",
             params![agent_id, program],
             |_| Ok(()),
