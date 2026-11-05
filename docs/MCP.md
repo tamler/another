@@ -38,7 +38,7 @@ Generated from the server's own `tools/list` by `scripts/gen-docs.py`; do not ed
 | [`send_message`](#send_message) | Send a message to other agents, or reply in a thread with reply_to |
 | [`spend_account_upsert`](#spend_account_upsert) | Create or update a spend account (local callers only): kind, unit, monthly budget with reset day, hourly rate, approval rule, project |
 | [`spend_accounts`](#spend_accounts) | List spend accounts (budgets, units, rates, approval rules) |
-| [`spend_borrow`](#spend_borrow) | Start using a costed account by the hour (e.g |
+| [`spend_borrow`](#spend_borrow) | Start using a costed account by the hour (e.g. a GPU pod) |
 | [`spend_leases`](#spend_leases) | List spend leases (open ones unless all=true) |
 | [`spend_record`](#spend_record) | Record an amount spent against an account (for a lane or project) |
 | [`spend_release`](#spend_release) | End your spend lease (its cost is recorded) or withdraw a pending one |
@@ -282,7 +282,7 @@ Post a structured lane report (summary, progress, status, links, artifacts). kin
 | `pr_url` | string, optional |  | Done reports: pull request URL. |
 | `progress` | integer, optional |  | Percent complete, 0-100. |
 | `status` | object |  | Optional new open status, e.g. blocked or needs_decision. |
-| `summary` | string | yes | What happened (first line is used as the mail subject). |
+| `summary` | string | yes | What happened. Goes in the body of the report mail; the subject carries only the lane, status, kind and author. |
 
 ## lane_show
 

@@ -124,7 +124,7 @@ curl -H "Authorization: Bearer $ANOTHER_TOKEN" "https://my-laptop.my-tailnet.ts.
 | `decision_list`, `decision_show` | Only decisions whose project matches the token's globs |
 | `decision_ask`, `decision_cancel` | Token's agent; the decision's project must match (cancel: only the asking agent) |
 | `decision_answer` | Decision's project must match; `relayed_by` is always the token's agent |
-| `spend_report`, `spend_accounts`, `spend_leases` | Project accounts in the token's globs; shared accounts with only the token's projects' entries (`partial`, no budget figures) |
+| `spend_report`, `spend_accounts`, `spend_leases` | Project accounts in the token's globs; shared accounts with only the token's projects' entries (`partial`: spent and the by-lane and by-agent figures cover those entries; budget, remaining and status stay whole-account, D41) |
 | `spend_record`, `spend_borrow`, `spend_release` | Token's agent; attributed to a project in the token's globs |
 | `spend_account_upsert` | **Never** (accounts are configured locally) |
 | `daily_summary` | Built from the scoped reads above: only the token's projects |

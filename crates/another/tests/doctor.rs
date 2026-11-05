@@ -199,6 +199,20 @@ async fn doctor_reports_each_problem_with_a_fix() {
     let (ok, r) = check(url.clone()).await.unwrap();
     assert_eq!(levels(&r, "hooks:codex-trust"), ["pass"], "{r}");
     assert!(ok, "warnings don't fail: {r}");
+    // A command that only mentions the wrapper isn't one of Another's hooks, so it needs no trust.
+    let saved_hooks = std::fs::read_to_string(&hooks_path).unwrap();
+    for ev in &events {
+        hj["hooks"][ev]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "hooks": [{ "type": "command", "command": "echo another-hook.sh" }]
+            }));
+    }
+    std::fs::write(&hooks_path, hj.to_string()).unwrap();
+    let (_, r) = check(url.clone()).await.unwrap();
+    assert_eq!(levels(&r, "hooks:codex-trust"), ["pass"], "{r}");
+    std::fs::write(&hooks_path, saved_hooks).unwrap();
     // A missing wrapper fails, even though the config still names it.
     let wrapper = ah.join("hooks").join("another-hook.sh");
     let saved = std::fs::read(&wrapper).unwrap();
@@ -301,6 +315,18 @@ async fn doctor_reports_each_problem_with_a_fix() {
         .as_str()
         .unwrap()
         .contains("not Another"));
+    // Other programs' health checks also say ok; Another's always names its node.
+    let (bare_url, bare_stop) = serve(axum::Router::new().route(
+        "/health",
+        axum::routing::get(|| async { axum::Json(serde_json::json!({ "ok": true })) }),
+    ))
+    .await;
+    let (_, r) = check(bare_url).await.unwrap();
+    assert!(find(&r, "server", "fail")["detail"]
+        .as_str()
+        .unwrap()
+        .contains("not Another"));
+    bare_stop.cancel();
     let other_dir = tempfile::tempdir().unwrap();
     let other_store = Store::open(other_dir.path()).unwrap();
     let (theirs, their_stop) = another_server(&other_store).await;
@@ -373,4 +399,72 @@ async fn unreadable_hook_configs_fail_instead_of_passing() {
         .as_str()
         .unwrap()
         .contains("no hook command runs it"));
+    for config in [
+        r#"{"note":{"command":"see another-hook.sh"},"hooks":{}}"#,
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo another-hook.sh"}]}]}}"#,
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"'/x/another-hook.sh"}]}]}}"#,
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"'/x/another-hook.sh'.bak"}]}]}}"#,
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"another-hook.sh session-start"}]}]}}"#,
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"./another-hook.sh session-start"}]}]}}"#,
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"/x/not-another-hook.sh session-start"}]}]}}"#,
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"\u00a0'/x/another-hook.sh'"}]}]}}"#,
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"'/x/another-hook.sh'\u00a0foo"}]}]}}"#,
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"'/x/another-hook.sh/'"}]}]}}"#,
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"/x/another-hook.sh/."}]}]}}"#,
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"\"/x/another-hook.sh\""}]}]}}"#,
+    ] {
+        std::fs::write(&hooks, config).unwrap();
+        let (_, r) = run().await.unwrap();
+        assert!(find(&r, "hooks:codex", "fail")["detail"]
+            .as_str()
+            .unwrap()
+            .contains("no hook command runs it"));
+        assert!(levels(&r, "hooks:codex-trust").is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn installed_hook_commands_are_required_for_each_client() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ah, home) = (
+        dir.path().join("o'brien space/another"),
+        dir.path().join("home"),
+    );
+    std::fs::create_dir_all(&home).unwrap();
+    Store::open(&ah).unwrap();
+    for (client, config) in [
+        ("claude", ".claude/settings.json"),
+        ("codex", ".codex/hooks.json"),
+        ("grok", ".grok/hooks/another.json"),
+    ] {
+        let install = Command::new(env!("CARGO_BIN_EXE_another"))
+            .args(["hook", "install", "--client", client])
+            .env("ANOTHER_HOME", &ah)
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+        assert!(install.status.success(), "{client}: {install:?}");
+        let run = || {
+            let (ah, home) = (ah.clone(), home.clone());
+            tokio::task::spawn_blocking(move || doctor(&ah, &home, "http://127.0.0.1:9"))
+        };
+        let area = format!("hooks:{client}");
+        let (_, healthy) = run().await.unwrap();
+        assert_eq!(levels(&healthy, &area), ["pass"], "{client}: {healthy}");
+        let installed: Value =
+            serde_json::from_str(&std::fs::read_to_string(home.join(config)).unwrap()).unwrap();
+        let command = installed["hooks"]
+            .as_object()
+            .unwrap()
+            .values()
+            .flat_map(|groups| groups.as_array().unwrap())
+            .flat_map(|group| group["hooks"].as_array().unwrap())
+            .find_map(|hook| hook["command"].as_str())
+            .unwrap();
+        let outside = serde_json::json!({"disabled": {"command": command}, "hooks": {}});
+        std::fs::write(home.join(config), outside.to_string()).unwrap();
+        let (_, broken) = run().await.unwrap();
+        assert_eq!(levels(&broken, &area), ["fail"], "{client}: {broken}");
+        assert!(levels(&broken, "hooks:codex-trust").is_empty());
+    }
 }
