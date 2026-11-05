@@ -10,16 +10,17 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).parent / "dist"
 ORIGIN = "https://toanother.one"
 ROUTES = {
-    "/", "/docs/", "/docs/getting-started/", "/docs/install/", "/compare/",
+    "/", "/docs/", "/docs/getting-started/", "/docs/install/", "/compare/", "/guides/",
     "/guides/claude-code-codex/", "/guides/mcp-agent-messaging/",
     "/guides/avoid-agent-file-conflicts/", "/guides/local-agent-inbox/",
 }
+GUIDES = {route for route in ROUTES if route.startswith("/guides/") and route != "/guides/"}
 EXPECTED = {
     "index.html", "docs/index.html", "docs/getting-started/index.html",
     "docs/install/index.html", "compare/index.html", "404.html", "style.css",
     "_headers", "fonts/FragmentMono-Regular.woff2", "fonts/OFL.txt", "og.png",
     "twitter.png", "sitemap.xml", "robots.txt", "llms.txt", "favicon.svg",
-    "guides/claude-code-codex/index.html", "guides/mcp-agent-messaging/index.html",
+    "guides/index.html", "guides/claude-code-codex/index.html", "guides/mcp-agent-messaging/index.html",
     "guides/avoid-agent-file-conflicts/index.html", "guides/local-agent-inbox/index.html",
 }
 actual = {str(p.relative_to(ROOT)) for p in ROOT.rglob("*") if p.is_file()}
@@ -31,6 +32,7 @@ class Page(HTMLParser):
     def __init__(self, path):
         super().__init__(convert_charrefs=True)
         self.path, self.ids, self.links = path, set(), []
+        self.in_main_nav, self.main_nav_links = False, set()
         self.meta, self.canonicals, self.structured = {}, [], []
         self.title, self.in_title, self.in_script, self.script_data = "", False, False, ""
         self.text = ""
@@ -61,6 +63,10 @@ class Page(HTMLParser):
             self.ids.add(attrs["id"])
         self.headings += tag == "h1"
         self.mains += tag == "main"
+        if tag == "nav" and attrs.get("aria-label") == "Main":
+            self.in_main_nav = True
+        if tag == "a" and self.in_main_nav:
+            self.main_nav_links.add(attrs.get("href"))
         for key in ("href", "src"):
             if key in attrs:
                 self.links.append(attrs[key])
@@ -71,6 +77,8 @@ class Page(HTMLParser):
             assert attrs.get("href", "").startswith("/") and not attrs["href"].startswith("//"), f"{self.path}: external asset"
 
     def handle_endtag(self, tag):
+        if tag == "nav":
+            self.in_main_nav = False
         if tag == "title":
             self.in_title = False
         if tag == "script":
@@ -110,6 +118,7 @@ for path, page in pages.items():
 
 titles, descriptions, canonical_urls = set(), set(), set()
 for path, page in pages.items():
+    assert "/guides/" in page.main_nav_links, f"{path}: main nav must link to the guides hub"
     if path.name == "404.html":
         assert page.meta.get("robots") == "noindex" and not page.canonicals
         continue
@@ -117,6 +126,7 @@ for path, page in pages.items():
     canonical = ORIGIN + route
     assert route in ROUTES and page.canonicals == [canonical], f"{path}: canonical"
     assert page.title and page.title not in titles, f"{path}: unique title"
+    assert len(page.title) <= 60, f"{path}: title over 60 characters ({len(page.title)})"
     titles.add(page.title)
     description = page.meta.get("description", "")
     assert 130 <= len(description) <= 170 and description not in descriptions, f"{path}: unique description near 150 characters ({len(description)})"
@@ -137,13 +147,23 @@ for path, page in pages.items():
     data = page.structured[0]
     assert data["@context"] == "https://schema.org"
     graph = {item["@type"]: item for item in data["@graph"]}
-    assert set(graph) == {"SoftwareApplication", "SoftwareSourceCode"}
+    software = {"SoftwareApplication", "SoftwareSourceCode"}
+    in_guides = route.startswith("/guides/")
+    assert set(graph) == software | ({"BreadcrumbList"} if in_guides else set()), f"{path}: JSON-LD types"
     assert graph["SoftwareApplication"]["name"] == "Another"
     assert graph["SoftwareSourceCode"]["codeRepository"] == "https://github.com/tamler/another"
-    assert all(item["license"] == "https://www.apache.org/licenses/LICENSE-2.0" for item in graph.values())
+    assert all(graph[kind]["license"] == "https://www.apache.org/licenses/LICENSE-2.0" for kind in software)
+    if in_guides:
+        crumbs = graph["BreadcrumbList"]["itemListElement"]
+        trail = [ORIGIN + "/", ORIGIN + "/guides/"] + ([canonical] if route in GUIDES else [])
+        assert [c["item"] for c in crumbs] == trail, f"{path}: breadcrumb trail"
+        assert [c["position"] for c in crumbs] == list(range(1, len(trail) + 1)), f"{path}: breadcrumb positions"
+        assert all(c["@type"] == "ListItem" and c["name"] for c in crumbs), f"{path}: breadcrumb items"
     canonical_urls.add(canonical)
 
 assert canonical_urls == {ORIGIN + route for route in ROUTES}, "every public route needs metadata"
+hub_links = set(pages[ROOT / "guides/index.html"].links)
+assert GUIDES <= hub_links, f"guides hub misses {GUIDES - hub_links}"
 locations = [e.text for e in ET.parse(ROOT / "sitemap.xml").iter("{http://www.sitemaps.org/schemas/sitemap/0.9}loc")]
 assert len(locations) == len(set(locations)) == len(ROUTES) and set(locations) == canonical_urls
 robots = (ROOT / "robots.txt").read_text()

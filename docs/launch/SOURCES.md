@@ -19,5 +19,7 @@ Checked 2026-11-05. No posting eligibility, indexing result, benchmark or user a
 | Google | [Ownership verification](https://support.google.com/webmasters/answer/9008080?hl=en): exact token comes from the user's dialog |
 | Bing | [Add/verify guidance](https://www.bing.com/webmasters/help/add-and-verify-site-12184f8b): direct help requires JS; document Google import instead of inventing TXT support |
 | Discord | The [official MCP communication page](https://modelcontextprotocol.io/community/communication) links a contributor Discord, not a general support destination. No authenticated server/channel-rule review; no posting eligibility is inferred |
+| MCP directories | [Registry README](https://github.com/modelcontextprotocol/registry), [package types](https://raw.githubusercontent.com/modelcontextprotocol/registry/main/docs/modelcontextprotocol-io/package-types.mdx), [mcpservers.org form](https://mcpservers.org/submit) and [Glama list](https://glama.ai/mcp/servers), which documents no process. [crates.io API](https://crates.io/api/v1/crates/another) reported no `another` crate |
+| Rust venues | [This Week in Rust README](https://github.com/rust-lang/this-week-in-rust) and [Crate of the Week thread](https://users.rust-lang.org/t/crate-of-the-week/2704). r/rust's rules endpoint returned 403, so they are unverified |
 
 No real client hooks, MCP client settings, DNS records, search console properties or launch accounts were changed while preparing this packet.
