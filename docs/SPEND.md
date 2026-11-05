@@ -18,7 +18,7 @@ another spend account add codex-resets --kind plan_reset --unit resets --budget 
 
 # Example: an hourly GPU pod for one project, which needs approval before anyone borrows it
 another spend account add gpu-a100 --kind gpu_pod --unit USD --budget 150 \
-  --cost-per-hour 2.10 --requires-approval --approver owner -p ~/Projects/ml
+  --cost-per-hour 2.10 --requires-approval --approver pat -p ~/Projects/ml
 
 # Example: a domain with a yearly cost, tracked as a lifetime budget
 another spend account add example-domain --kind domain --unit USD --budget 15 --period none
@@ -32,6 +32,8 @@ another spend account archive example-domain
 - **Local only:** accounts are configured on the machine itself, through the CLI or a local MCP client. Remote tokens can't create or change them.
 
 ## Recording spend
+
+The examples below assume the agents (`claude@shop`, `codex@shop`, `codex@ml`) and lanes (`billing`, `finetune`) already exist; see [LANES.md](LANES.md#cli).
 
 ```bash
 another spend record --agent claude@shop --account claude-api --amount 12.40 --lane billing --note "eval batch"
@@ -58,12 +60,12 @@ MCP: `spend_borrow`, `spend_release`, `spend_leases`.
 
 - **Cost:** a lease costs `cost_per_hour` × hours. The rate is the account's unless you pass `--cost-per-hour`.
 - **Renewal and expiry:** the agent's heartbeat (its prompt hook) renews the lease, and it expires after its TTL (default 1 h) if not renewed.
-- **Session end** (the SessionEnd hook, or `another session end`) closes the agent's spend leases: active ones are charged up to then, and pending ones are withdrawn. `--keep-resources` keeps them, renewed along with the resource leases.
+- **Session end** (the SessionEnd hook, or `another heartbeat --end`) closes the agent's spend leases: active ones are charged up to then, and pending ones are withdrawn. `--keep` (MCP `keep_resources`) keeps them, renewed along with the resource leases.
 - **When it ends**, its cost is written as one entry, or one per period if it ran across a monthly reset (each period is charged for its overlap). While it runs, the cost so far shows as **accrued** in reports.
 - **Nothing is stopped or reaped** when a lease ends or a budget runs out. That always needs a person.
 
 **Approval:** if the account has `--requires-approval`, borrowing does not start the lease.
-1. It asks a **[decision](HUMAN-DECISIONS.md)** of the approver (the account's `--approver`, else the node's decider: `another config decider owner`): "Approve codex@ml borrowing gpu-a100 at 2.1 USD/h for 4 h (about 8.4 USD)? Purpose: LoRA run", with options **approve** and **deny**.
+1. It asks a **[decision](HUMAN-DECISIONS.md)** of the approver (the account's `--approver`, else the node's decider: `another config decider pat`): "Approve codex@ml borrowing gpu-a100 at 2.1 USD/h for 4 h (about 8.4 USD)? Purpose: LoRA run", with options **approve** and **deny**.
 2. The manager bot hears about it through the `needs_decision` and `budget` webhooks.
 3. When the person answers, the manager relays it, for example `POST /decisions/{id}/answer {"value":"approve"}`.
 4. If approved, the lease starts then; its clock starts at approval, not at the request.
@@ -74,7 +76,7 @@ MCP: `spend_borrow`, `spend_release`, `spend_leases`.
 
 ## Paying for registered resources
 
-A [registered resource](RESOURCES.md), such as a rented GPU pod, can be charged to an account with a `cost_per_hour`:
+A [registered resource](RESOURCES.md), such as a rented GPU pod (`another resource register gpu pod-a100 …`), can be charged to an account with a `cost_per_hour`:
 
 ```bash
 another spend link gpu-a100 gpu:pod-a100

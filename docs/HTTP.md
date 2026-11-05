@@ -4,7 +4,7 @@ Every route `another serve` serves. `scripts/gen-docs.py --check` fails CI when 
 
 **Auth:**
 - **Without `--auth`** (the default), the server binds loopback only and every route is open to local callers.
-- **With `--auth`**, every route except `GET /health`, `POST /join` and `/fed/*` needs `Authorization: Bearer <token>`. Token callers see only their token's projects (D38). Hidden objects return the same `not_found` as missing ones. See [REMOTE.md](REMOTE.md).
+- **With `--auth`**, every route except `GET /health`, `POST /join` and `/fed/*` needs `Authorization: Bearer <token>`. Token callers see only their token's projects (D38). Hidden objects return the same `not_found` as missing ones. `/mcp` also refuses a `Host` that `--allowed-host` doesn't name. See [REMOTE.md](REMOTE.md).
 - **`/fed/*`** is served only with `--federation`, and is authenticated by node signatures instead of tokens ([FEDERATION.md](FEDERATION.md)).
 
 Errors are JSON: `{"error": {"code": "not_found" | "forbidden" | "invalid" | "conflict" | "rate_limited" | …, "message": "…"}}`.
@@ -30,7 +30,7 @@ Errors are JSON: `{"error": {"code": "not_found" | "forbidden" | "invalid" | "co
 |---|---|---|
 | `GET /decisions` | token with `--auth` | Decisions, open ones by default. Query: `status`, `all`, `project`, `lane`, `limit`. |
 | `GET /decisions/{id}` | token with `--auth` | One decision, with its options and answer. |
-| `POST /decisions/{id}/answer` | token with `--auth` | Answer it. Body: `{"value": "ship", "text": "…", "answered_by": "owner"}` (`text` only when free text is allowed; `answered_by` defaults to the person asked). A token's agent is recorded as the relayer and must be a confirmed `grok_bot` or `human`. The asking agent can never answer. |
+| `POST /decisions/{id}/answer` | token with `--auth` | Answer it. Body: `{"value": "ship", "text": "…", "answered_by": "pat"}` (`text` only when free text is allowed; `answered_by` defaults to the person asked). A token's agent is recorded as the relayer and must be a confirmed `grok_bot` or `human`. The asking agent can never answer. |
 
 ## Spend and summary ([SPEND.md](SPEND.md), [MANAGER-BOT.md](MANAGER-BOT.md))
 

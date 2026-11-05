@@ -12,7 +12,7 @@ Another only calls these external CLIs as separate processes, with no shell and 
 
 ## Targets
 
-Another stores one wake target per agent:
+Another stores one wake target per registered agent:
 
 ```bash
 another wake set --agent codex@shop --via tmux --target %3

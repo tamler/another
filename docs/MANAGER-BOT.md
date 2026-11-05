@@ -10,6 +10,8 @@ Everything here works over `another serve --auth` behind a tunnel ([REMOTE.md](R
 ## 1. Token and server
 
 ```bash
+# The manager's identity: grok_bot lets it relay a person's answers
+another agent register manager --program grok_bot
 # A token that acts as the manager, limited to the projects it manages
 another token create --agent manager --project ~/Projects/shop --project ~/Projects/ml
 # Serve with auth on loopback, then expose it with `tailscale serve` or a tunnel
@@ -49,7 +51,7 @@ When the person taps an option:
 
 ```json
 { "tool": "decision_answer",
-  "arguments": { "decision": "01JD…", "value": "2", "answered_by": "owner", "text": "optional note" } }
+  "arguments": { "decision": "01JD…", "value": "2", "answered_by": "pat", "text": "optional note" } }
 ```
 
 or `POST /decisions/{id}/answer`.
@@ -87,7 +89,7 @@ Post the `markdown` field as-is; it is written to fit a phone screen. For a plai
 
 If `truncated` is true, a section hit the 20,000-event cap and its counts may be low, or more than 500 decisions are open and the list shows the oldest 500 (`open_total` stays complete). People (program `human`) are listed under `people_active`, apart from `agents_active`.
 
-**Or let the node send it.** The person can turn on a daily rollup on the machine: `another summary schedule --daily 08:30 --to mail:owner` (mail from the `another` system agent), or `--to webhook`. The webhook form goes only to webhooks created locally for all projects with the `daily_summary` filter, because it covers the whole node; a token's webhooks never receive it. It is sent while `another serve` runs. Pulling `daily_summary` keeps working either way.
+**Or let the node send it.** The person can turn on a daily rollup on the machine: `another summary schedule --daily 08:30 --to mail:pat` (mail from the `another` system agent), or `--to webhook`. The webhook form goes only to webhooks created locally for all projects with the `daily_summary` filter, because it covers the whole node; a token's webhooks never receive it. It is sent while `another serve` runs. Pulling `daily_summary` keeps working either way.
 
 ## 6. Spend
 

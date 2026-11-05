@@ -62,7 +62,7 @@ another node name laptop
 ```
 
 ```bash
-another pair join another-invite:...
+another pair join <invite-code>
 ```
 
 ```bash
@@ -73,13 +73,13 @@ another sync
 another sync --watch --every 30
 ```
 
-`another peers` lists paired nodes with key fingerprints, permissions and last sync. `another pair revoke <node>` cuts a node off: the hub refuses its next request.
+`another peers` lists paired nodes with key fingerprints and permissions. On a spoke it also shows the last sync; on the hub that column stays `never`. `another pair revoke <node>` cuts a node off: the hub refuses its next request.
 
 ## Cross-node behaviour
 
 - **Mail**: `another send --from bob --to carol@@runner …`. Replies, threads and acknowledgements work across nodes. Requests stay node-local: open them only with agents on the same node.
 - **Merged activity feed**: `another activity` shows other nodes' events prefixed with their node name, e.g. `[hub] alice@shop holds shop:src/**`. Message bodies never appear in the feed.
-- **Resources**: `another resources` lists other nodes' resources with their `node` and whether this machine can **reach** them (a TCP connect to the endpoint). They can be borrowed only when reachable and when `borrow_resource` was granted, and the lease is reported back to the owning node. Loopback endpoints are reachable only from the same machine.
+- **Resources**: `another resources` lists other nodes' resources, with the owner's full address (`name@project@node`, or `name@@node` for an agent without a project). `another --json resources` adds their `node` and whether this machine can **reach** them (a TCP connect to the endpoint). They can be borrowed only when reachable and when `borrow_resource` was granted, and the lease is reported back to the owning node. Borrow them by resource id: `kind:name` finds only this node's own resources. Loopback endpoints are reachable only from the same machine.
 - **Node settings** (`another config`, `node.setting_changed`) never leave their node.
 - **Lanes**: a lane is written only by the node that owns it. Other nodes keep a **read-only mirror** (name, project, lead, status; no charter or reports, which never travel), and `lane show` / `lane_list` mark it with `node`. Updating or closing a mirror, or asking a decision with it, is a `conflict`: change it on its node (for example through a remote-agent token, see [REMOTE-AGENTS.md](REMOTE-AGENTS.md)). **Reporting into a mirror makes a proposal** (`proposed_to` in the result): the summary goes as mail to the owner node, `lane.report_proposed` (ids and status only) goes to that node alone, and the owner applies it as a status report when it syncs. Done reports can't be proposed. Two nodes may each have an open lane with the same name; on each node the name means its own lane, and the other is reached by id.
 - **Decisions**: a decision asked on one node is listed on the others with `node` set (option values only; the question comes from the question mail when the person is on that node). Answering it there relays the answer **only to the decision's node**. Any free text or note travels as mail to the asking agent, and the relay event names that message; it never carries the text. The decision's node applies the first answer it receives (mail to the asking agent, lane release, spend approval) under the usual rules (no self-approval), and ignores later ones. The relaying agent must belong to the node that sent the answer and have its role confirmed there; answering another node's decision therefore needs `--relayed-by` (or `--as` a person registered on your node). Its `decision.answered` then settles the mirrors.
