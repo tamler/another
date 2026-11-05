@@ -105,7 +105,7 @@ curl -H "Authorization: Bearer $ANOTHER_TOKEN" "https://my-laptop.my-tailnet.ts.
 | `webhook_list`, `webhook_remove` | Only webhooks this token created |
 | `orphans_list` | Lapsed registrations only; the process scan is never run for remote peers |
 | `holds_by_lane` | Only holds in the token's projects |
-| `lane_list`, `lane_show` | Only lanes whose project matches the token's globs (others are omitted, or `forbidden`) |
+| `lane_list`, `lane_show` | Only lanes whose project matches the token's globs (others are omitted, or `not_found`) |
 | `lane_create` | Token's agent, and a `project` matching the globs (required) |
 | `lane_update`, `lane_report`, `lane_close` | Token's agent, on lanes in the token's projects |
 | `decision_list`, `decision_show` | Only decisions whose project matches the token's globs |
