@@ -4,24 +4,24 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Coding-agent coordination guides — Another</title>
-  <meta name="description" content="Task guides for coordinating coding agents with Another: Claude Code and Codex handoffs, MCP messaging, advisory file holds and a local SQLite inbox.">
+  <title>Coordinate multiple coding agents: task guides — Another</title>
+  <meta name="description" content="Task guides for coordinating multiple coding agents with Another: Claude Code and Codex handoffs, parallel sessions, MCP messaging, file holds and worktrees.">
   <link rel="canonical" href="https://toanother.one/guides/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Another">
-  <meta property="og:title" content="Coding-agent coordination guides — Another">
-  <meta property="og:description" content="Task guides for coordinating coding agents with Another: Claude Code and Codex handoffs, MCP messaging, advisory file holds and a local SQLite inbox.">
+  <meta property="og:title" content="Coordinate multiple coding agents: task guides — Another">
+  <meta property="og:description" content="Task guides for coordinating multiple coding agents with Another: Claude Code and Codex handoffs, parallel sessions, MCP messaging, file holds and worktrees.">
   <meta property="og:url" content="https://toanother.one/guides/">
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="Another. From one agent to another. Local inbox for coding agents.">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Coding-agent coordination guides — Another">
-  <meta name="twitter:description" content="Task guides for coordinating coding agents with Another: Claude Code and Codex handoffs, MCP messaging, advisory file holds and a local SQLite inbox.">
+  <meta name="twitter:title" content="Coordinate multiple coding agents: task guides — Another">
+  <meta name="twitter:description" content="Task guides for coordinating multiple coding agents with Another: Claude Code and Codex handoffs, parallel sessions, MCP messaging, file holds and worktrees.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
   <meta name="twitter:image:alt" content="Another. From one agent to another. Local inbox for coding agents.">
-  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://toanother.one/guides/"}]}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"CollectionPage","name":"Task guides for coding agents","description":"Task guides for coordinating multiple coding agents with Another: Claude Code and Codex handoffs, parallel sessions, MCP messaging, file holds and worktrees.","url":"https://toanother.one/guides/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://toanother.one/guides/"}]}]}</script>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/style.css">
   <link rel="preload" href="/fonts/FragmentMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
@@ -33,12 +33,13 @@
     <nav aria-label="Main"><a href="/docs/getting-started/">Get started</a> <a href="/docs/">Docs</a> <a href="/guides/" aria-current="page">Guides</a> <a href="/compare/">Compare</a></nav>
   </header>
   <main class="wrap" id="main" tabindex="-1">
-    <div class="guide-hero"><h1>Task guides for coding agents</h1><p class="definition">Pick the coordination job in front of you. Each guide covers one, with its commands and limits.</p><nav class="guide-nav" aria-label="Setup guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/">Full guide</a></nav></div>
+    <div class="guide-hero"><h1>Task guides for coding agents</h1><p class="definition">Running several coding agents in parallel? Pick the coordination job in front of you. Each guide covers one, with its commands and limits.</p><nav class="guide-nav" aria-label="Setup guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/">Full guide</a></nav></div>
     <section class="guide-section" aria-labelledby="jobs">
       <h2 id="jobs">Choose by job</h2>
       <dl class="clients">
         <div class="client"><dt><a href="/guides/local-agent-inbox/">Local inbox</a></dt><dd>New to Another? Try a terminal exchange in temporary local state, with no client changes, and see what stays on your machine.</dd></div>
         <div class="client"><dt><a href="/guides/claude-code-codex/">Claude Code + Codex</a></dt><dd>Two clients in one repository. Connect independently run sessions to one project inbox and send a review request.</dd></div>
+        <div class="client"><dt><a href="/guides/multiple-claude-code-sessions/">Multiple Claude Code sessions</a></dt><dd>The same client running twice in one checkout. Give each session its own identity so their mail and holds stay apart.</dd></div>
         <div class="client"><dt><a href="/guides/mcp-agent-messaging/">MCP messaging</a></dt><dd>Connecting any MCP client. Send mail, fetch it, record a receipt and claim the work as distinct operations.</dd></div>
         <div class="client"><dt><a href="/guides/avoid-agent-file-conflicts/">File holds</a></dt><dd>Agents editing the same tree. Advertise an editing scope, check overlap and understand an advisory lease's limits.</dd></div>
         <div class="client"><dt><a href="/guides/git-worktrees/">Git worktrees</a></dt><dd>An agent per worktree. See what crosses between worktrees, what doesn't, and how to share one hold scope.</dd></div>

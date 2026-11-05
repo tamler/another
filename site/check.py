@@ -17,6 +17,7 @@ ROUTES = {
     "/docs/faq/", "/docs/concepts/", "/compare/alternatives/",
     "/guides/git-worktrees/", "/guides/hand-off-tasks/", "/guides/share-model-server/",
     "/guides/wake-idle-agents/", "/guides/agents-on-two-machines/",
+    "/guides/multiple-claude-code-sessions/",
 }
 GUIDES = {route for route in ROUTES if route.startswith("/guides/") and route != "/guides/"}
 # Nested pages outside /guides/ carry an explicit trail from the home page.
@@ -39,7 +40,13 @@ EXPECTED = {
     "docs/faq/index.html", "docs/concepts/index.html", "compare/alternatives/index.html",
     "guides/git-worktrees/index.html", "guides/hand-off-tasks/index.html", "guides/share-model-server/index.html",
     "guides/wake-idle-agents/index.html", "guides/agents-on-two-machines/index.html",
+    "guides/multiple-claude-code-sessions/index.html",
 }
+# The page's own JSON-LD type, beside the software it describes.
+def page_type(route):
+    return {"/": "WebSite", "/guides/": "CollectionPage", "/docs/faq/": "FAQPage"}.get(route, "TechArticle")
+
+
 actual = {str(p.relative_to(ROOT)) for p in ROOT.rglob("*") if p.is_file()}
 assert actual == EXPECTED, f"public allowlist mismatch: {actual ^ EXPECTED}"
 assert not any(p.is_symlink() for p in ROOT.rglob("*")), "no public symlinks"
@@ -50,6 +57,8 @@ class Page(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.path, self.ids, self.links = path, set(), []
         self.in_main_nav, self.main_nav_links = False, set()
+        self.in_main, self.main_links = False, set()
+        self.in_h1, self.h1 = False, ""
         self.meta, self.canonicals, self.structured = {}, [], []
         self.title, self.in_title, self.in_script, self.script_data = "", False, False, ""
         self.text = ""
@@ -80,10 +89,14 @@ class Page(HTMLParser):
             self.ids.add(attrs["id"])
         self.headings += tag == "h1"
         self.mains += tag == "main"
+        self.in_main |= tag == "main"
+        self.in_h1 |= tag == "h1"
         if tag == "nav" and attrs.get("aria-label") == "Main":
             self.in_main_nav = True
         if tag == "a" and self.in_main_nav:
             self.main_nav_links.add(attrs.get("href"))
+        if tag == "a" and self.in_main:
+            self.main_links.add(attrs.get("href"))
         for key in ("href", "src"):
             if key in attrs:
                 self.links.append(attrs[key])
@@ -96,6 +109,10 @@ class Page(HTMLParser):
     def handle_endtag(self, tag):
         if tag == "nav":
             self.in_main_nav = False
+        if tag == "main":
+            self.in_main = False
+        if tag == "h1":
+            self.in_h1 = False
         if tag == "title":
             self.in_title = False
         if tag == "script":
@@ -106,6 +123,8 @@ class Page(HTMLParser):
     def handle_data(self, data):
         if not self.in_script:
             self.text += data
+        if self.in_h1:
+            self.h1 += data
         if self.in_title:
             self.title += data
         if self.in_script:
@@ -146,7 +165,7 @@ for path, page in pages.items():
     assert len(page.title) <= 60, f"{path}: title over 60 characters ({len(page.title)})"
     titles.add(page.title)
     description = page.meta.get("description", "")
-    assert 130 <= len(description) <= 170 and description not in descriptions, f"{path}: unique description near 150 characters ({len(description)})"
+    assert 130 <= len(description) <= 160 and description not in descriptions, f"{path}: unique description of 130 to 160 characters ({len(description)})"
     descriptions.add(description)
     assert "noindex" not in page.meta.get("robots", ""), f"{path}: unexpectedly noindex"
     required = {
@@ -167,8 +186,17 @@ for path, page in pages.items():
     software = {"SoftwareApplication", "SoftwareSourceCode"}
     in_guides = route.startswith("/guides/")
     trail_routes = TRAILS.get(route) or (["/", "/guides/"] + ([route] if route in GUIDES else []) if in_guides else None)
-    expected_types = software | ({"BreadcrumbList"} if trail_routes else set()) | ({"FAQPage"} if route == "/docs/faq/" else set())
+    own_type = page_type(route)
+    expected_types = software | {own_type} | ({"BreadcrumbList"} if trail_routes else set())
     assert set(graph) == expected_types, f"{path}: JSON-LD types"
+    own = graph[own_type]
+    if own_type != "FAQPage":
+        assert own["url"] == canonical, f"{path}: {own_type} url"
+    if own_type in {"TechArticle", "CollectionPage"}:
+        heading = " ".join(page.h1.split())
+        assert own["headline" if own_type == "TechArticle" else "name"] == heading, f"{path}: {own_type} must name the visible h1"
+        assert own["description"] == description, f"{path}: {own_type} description"
+        assert own["about"] == {"@id": ORIGIN + "/#application"}, f"{path}: {own_type} about"
     assert graph["SoftwareApplication"]["name"] == "Another"
     assert graph["SoftwareSourceCode"]["codeRepository"] == "https://github.com/tamler/another"
     assert all(graph[kind]["license"] == "https://www.apache.org/licenses/LICENSE-2.0" for kind in software)
@@ -201,6 +229,18 @@ while frontier:
             reached.add(step.path)
             frontier.append(step.path)
 assert reached == ROUTES, f"not reachable from the home page: {ROUTES - reached}"
+# Header and footer navigation don't count: a page needs related pages pointing at it.
+inbound = {route: set() for route in ROUTES}
+for path, page in pages.items():
+    if path.name == "404.html":
+        continue
+    source = "/" + path.relative_to(ROOT).as_posix().removesuffix("index.html")
+    for href in page.main_links:
+        step = urlsplit(href)
+        if not step.scheme and not step.netloc and step.path in ROUTES and step.path != source:
+            inbound[step.path].add(source)
+thin = {route for route, sources in inbound.items() if route != "/" and len(sources) < 2}
+assert not thin, f"fewer than two in-content links from other pages: {thin}"
 locations = [e.text for e in ET.parse(ROOT / "sitemap.xml").iter("{http://www.sitemaps.org/schemas/sitemap/0.9}loc")]
 assert len(locations) == len(set(locations)) == len(ROUTES) and set(locations) == canonical_urls
 robots = (ROOT / "robots.txt").read_text()
