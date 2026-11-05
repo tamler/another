@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>Install Another — Rust CLI and MCP server for coding agents</title>
-  <meta name="description" content="Install Another with Cargo or build the Rust CLI from source. Check PATH, learn macOS quarantine and safe binary replacement, and find future release archives.">
+  <meta name="description" content="Install Another with Cargo or build the Rust CLI from source. Check PATH, learn macOS quarantine and safe binary replacement, and verify future release archives.">
   <link rel="canonical" href="https://toanother.one/docs/install/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Another">
   <meta property="og:title" content="Install Another — Rust CLI and MCP server for coding agents">
-  <meta property="og:description" content="Install Another with Cargo or build the Rust CLI from source. Check PATH, learn macOS quarantine and safe binary replacement, and find future release archives.">
+  <meta property="og:description" content="Install Another with Cargo or build the Rust CLI from source. Check PATH, learn macOS quarantine and safe binary replacement, and verify future release archives.">
   <meta property="og:url" content="https://toanother.one/docs/install/">
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
@@ -18,7 +18,7 @@
   <meta property="og:image:alt" content="Another. From one agent to another. Local inbox for coding agents.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Install Another — Rust CLI and MCP server for coding agents">
-  <meta name="twitter:description" content="Install Another with Cargo or build the Rust CLI from source. Check PATH, learn macOS quarantine and safe binary replacement, and find future release archives.">
+  <meta name="twitter:description" content="Install Another with Cargo or build the Rust CLI from source. Check PATH, learn macOS quarantine and safe binary replacement, and verify future release archives.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
   <meta name="twitter:image:alt" content="Another. From one agent to another. Local inbox for coding agents.">
   <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}}]}</script>
@@ -53,10 +53,27 @@ cargo build --release --locked
     <section class="guide-section" aria-labelledby="binaries-title">
       <h2 id="binaries-title">Release archives</h2>
       <p>When v0.1.0 is published, <a href="https://github.com/tamler/another/releases">GitHub Releases</a> is the place to get prebuilt archives and SHA-256 checksums. Until the release is available, use Cargo or build from source.</p>
-      <p>The release workflow targets macOS Apple Silicon and Intel, plus static musl Linux binaries for x86_64 and arm64. After publication, choose the archive for your operating system and architecture, compare its checksum with the release's checksum file, unpack it and put <code>another</code> on your <code>PATH</code>. The planned binaries are unsigned; a matching checksum establishes byte integrity against the chosen checksum file, not publisher identity or a signature. Use the project's own release source.</p>
+      <p>The release workflow targets macOS Apple Silicon and Intel, plus static musl Linux binaries for x86_64 and arm64. After publication, choose the archive for your operating system and architecture, <a href="#verify">verify its checksum and unpack it</a>, then put <code>another</code> on your <code>PATH</code>. The planned binaries are unsigned; a matching checksum establishes byte integrity against the chosen checksum file, not publisher identity or a signature. Use the project's own release source.</p>
       <p>On macOS, a downloaded binary you have verified may need its quarantine attribute removed:</p>
       <pre class="code-block shell" tabindex="0" aria-label="Remove quarantine on a verified binary"><code>xattr -d com.apple.quarantine ./another</code></pre>
       <p>If the attribute is absent, this command may report that there is no such attribute. Source builds through Cargo do not need this download step.</p>
+    </section>
+    <section class="guide-section" id="verify" aria-labelledby="verify-title">
+      <h2 id="verify-title">Verify a release archive</h2>
+      <p>Archives are named <code>another-&lt;version&gt;-&lt;target&gt;.tar.gz</code>. The target is <code>aarch64-apple-darwin</code>, <code>x86_64-apple-darwin</code>, <code>x86_64-unknown-linux-musl</code> or <code>aarch64-unknown-linux-musl</code>. An archive's checksum is in a file with the same name plus <code>.sha256</code>, or on its line in a shared <code>SHA256SUMS</code> file.</p>
+      <p>Put the archive and either checksum file in one folder and change to that folder. Set <code>archive</code> on the first line to your file's name, then paste:</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Verify a release archive"><code>archive=another-0.1.0-aarch64-apple-darwin.tar.gz
+if [ -f "$archive.sha256" ]; then sums="$archive.sha256"; else sums=SHA256SUMS; fi
+expected=$(awk -v file="$archive" '$2 == file { print $1 }' "$sums")
+actual=$(sha256sum "$archive" 2&gt;/dev/null || shasum -a 256 "$archive")
+if [ -n "$expected" ] &amp;&amp; [ "$expected" = "${actual%% *}" ]; then
+  tar -xzf "$archive" &amp;&amp; echo "Verified and unpacked: $archive"
+else
+  echo "FAILED: do not install $archive"; false
+fi</code></pre>
+      <p>It hashes the archive with <code>sha256sum</code> where that is installed, or <code>shasum -a 256</code> otherwise, and compares the result with your archive's line. Other archives listed in <code>SHA256SUMS</code> need not be present. It compares the values itself because <code>sha256sum -c</code> on some macOS versions exits successfully when it finds no line it can read.</p>
+      <p>A match prints <code>Verified and unpacked</code> and unpacks the archive into a folder of the same name. If you see <code>FAILED</code>, nothing is unpacked. Stop there and delete the download; do not install it.</p>
+      <p>No release exists yet, so this snippet has only run against local fixture archives built the way the release workflows build theirs. Every site build repeats that test.</p>
     </section>
     <section class="guide-section" aria-labelledby="replace-title">
       <h2 id="replace-title">Replace a binary safely on macOS</h2>

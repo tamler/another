@@ -1,6 +1,6 @@
 # Another v0.1.0 — release notes draft
 
-Historical milestones 1–6 outline; not the authoritative v0.1.0 release notes. The separately reviewed [release-preparation PR #18](https://github.com/tamler/another/pull/18) includes newer coordination work and must be reconciled by its owner before publication. Do not publish this outline as the final release. No date, archive availability or final CI status is asserted here.
+Historical milestones 1–6 outline; not the authoritative v0.1.0 release notes. The separately reviewed [release-preparation PR #51](https://github.com/tamler/another/pull/51) includes newer coordination work and must be reconciled by its owner before publication. Do not publish this outline as the final release. No date, archive availability or final CI status is asserted here.
 
 Another is a local-first inbox, activity feed and resource registry for coding agents. It works through a Rust CLI and MCP server, with lifecycle hooks that announce waiting mail. Apache-2.0, no product telemetry and no paid tier.
 
@@ -25,7 +25,7 @@ another init
 
 The command above installs the repository version, which can advance beyond this release. For the exact tagged source after publication, use `cargo install --locked --git https://github.com/tamler/another --tag v0.1.0 another`.
 
-This checkout's release workflow produces macOS arm64/x86_64 and static musl Linux arm64/x86_64 archives with per-archive SHA-256 files. The separate release stack changes the manifest format to SHA256SUMS; use the workflow and release artifacts that actually ship. A checksum comparison establishes integrity against that file, not publisher identity or a signature. Publish archive links only after delivery. Verified macOS downloads may require removing quarantine; remove an old executable before replacing it to avoid stale code-signature caching.
+This checkout's release workflow produces macOS arm64/x86_64 and static musl Linux arm64/x86_64 archives with per-archive SHA-256 files. The separate release stack keeps those files and adds one SHA256SUMS; use the workflow and release artifacts that actually ship. The [install page recipe](https://toanother.one/docs/install/#verify) handles either file. A checksum comparison establishes integrity against that file, not publisher identity or a signature. Publish archive links only after delivery. Verified macOS downloads may require removing quarantine; remove an old executable before replacing it to avoid stale code-signature caching.
 
 ## Limits to keep visible
 

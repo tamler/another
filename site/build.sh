@@ -17,3 +17,4 @@ cp guides/avoid-agent-file-conflicts/index.html dist/guides/avoid-agent-file-con
 cp guides/local-agent-inbox/index.html dist/guides/local-agent-inbox/index.html
 cp fonts/FragmentMono-Regular.woff2 fonts/OFL.txt dist/fonts/
 python3 check.py
+python3 check_checksum.py
