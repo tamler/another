@@ -1427,9 +1427,13 @@ fn relay_answer_tx(
             .flatten();
         check_relayer(tx, r, asker.as_deref().unwrap_or(""))?;
     }
-    if let Some(answered_by) = &input.answered_by {
-        check_answered_by(answered_by.trim())?;
-    }
+    let answered_by = input
+        .answered_by
+        .as_deref()
+        .unwrap_or(d.human.as_str())
+        .trim()
+        .to_string();
+    check_answered_by(&answered_by)?;
     // Free text never goes in an event: it travels as mail to the asking agent on the
     // decision's node (mail is routed only to its recipients' nodes), and the relay event
     // names that message.
@@ -1467,11 +1471,6 @@ fn relay_answer_tx(
         None => None,
     };
     let relayed = relayed_ref.as_ref().map(|r| r.address.clone());
-    let answered_by = input
-        .answered_by
-        .clone()
-        .filter(|a| !a.trim().is_empty())
-        .unwrap_or_else(|| d.human.clone());
     tx.emit(
         relayed.as_deref().unwrap_or(answered_by.as_str()),
         "decision.answer_relayed",
@@ -2497,6 +2496,131 @@ mod tests {
                 None,
             )
             .unwrap();
+        }
+    }
+
+    fn relay_label_mirror(human: &str) -> Store {
+        let (store, _) = review_store();
+        store.set_node_name("hub").unwrap();
+        store
+            .register_agent_trusted(RegisterAgent {
+                name: "manager".into(),
+                program: Program::GrokBot,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+        let peer = Store::open_in_memory(crate::Clock::manual(store.now()).0).unwrap();
+        peer.set_node_name("origin").unwrap();
+        let code = store
+            .create_invite("http://127.0.0.1:1", &crate::Perm::ALL, 60)
+            .unwrap();
+        let (invite, request) = peer.prepare_join(&code).unwrap();
+        let response = store.accept_pairing(&request).unwrap();
+        peer.complete_join(&invite, &response).unwrap();
+        let project = store.ensure_project("test", "/work/shop").unwrap();
+        let payload = json!({
+            "decision_id": "MIRROR-LABEL",
+            "project_id": project.project_id,
+            "human_id": "unknown-human",
+            "human": human,
+            "option_values": ["wait", "ship"]
+        });
+        let event = crate::federation::WireEvent {
+            seq: 1,
+            event_id: "mirror-label-event".into(),
+            node_id: peer.node_id().into(),
+            ts: store.now(),
+            actor: "peer".into(),
+            kind: "decision.created".into(),
+            payload: payload.to_string(),
+            prev_id: None,
+            sig: String::new(),
+        };
+        store
+            .write(|tx| mirror_created_tx(tx, &event, &payload))
+            .unwrap();
+        store
+    }
+
+    fn relay_label_answer(answered_by: Option<&str>) -> AnswerDecision {
+        AnswerDecision {
+            decision: "MIRROR-LABEL".into(),
+            value: Some("wait".into()),
+            text: None,
+            answered_by: answered_by.map(str::to_string),
+            relayed_by: Some("manager".into()),
+        }
+    }
+
+    #[test]
+    fn mirrored_answers_validate_the_resolved_human_label() {
+        for human in ["private phrase", "alex\nline", ""] {
+            let store = relay_label_mirror(human);
+            let error = store
+                .answer_decision(relay_label_answer(None), None)
+                .unwrap_err();
+            assert!(matches!(error, Error::Invalid(_)), "{error:?}");
+            let row: (String, Option<String>, Option<i64>) = store
+                .read(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT status, answered_by, answered_at FROM remote_decisions
+                         WHERE decision_id = 'MIRROR-LABEL'",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )?)
+                })
+                .unwrap();
+            assert_eq!(row, ("open".into(), None, None));
+            assert!(!store
+                .events(100)
+                .unwrap()
+                .iter()
+                .any(|e| e.kind == "decision.answer_relayed"));
+        }
+    }
+
+    #[test]
+    fn mirrored_answers_normalize_explicit_labels_before_recording() {
+        for (input, expected) in [
+            (Some(" \talex@shop@node\n "), "alex@shop@node"),
+            (None, "owner"),
+        ] {
+            let store = relay_label_mirror("owner");
+            let decision = store
+                .answer_decision(relay_label_answer(input), None)
+                .unwrap();
+            assert_eq!(decision.answer.unwrap().answered_by, expected);
+            let stored: String = store
+                .read(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT answered_by FROM remote_decisions WHERE decision_id = 'MIRROR-LABEL'",
+                        [],
+                        |r| r.get(0),
+                    )?)
+                })
+                .unwrap();
+            assert_eq!(stored, expected);
+            let event = store
+                .events(100)
+                .unwrap()
+                .into_iter()
+                .find(|e| e.kind == "decision.answer_relayed")
+                .unwrap();
+            assert_eq!(event.payload["answered_by"], expected);
+        }
+        for input in ["", " \t\n "] {
+            let store = relay_label_mirror("owner");
+            assert!(matches!(
+                store.answer_decision(relay_label_answer(Some(input)), None),
+                Err(Error::Invalid(_))
+            ));
+            assert!(!store
+                .events(100)
+                .unwrap()
+                .iter()
+                .any(|e| e.kind == "decision.answer_relayed"));
         }
     }
 
