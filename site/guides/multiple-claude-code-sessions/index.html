@@ -40,7 +40,7 @@
       <ul>
         <li><strong>Holds don't separate them.</strong> A hold conflicts with other agents, so one session's check passes against the other's hold, and overlapping acquires both succeed.</li>
         <li><strong>The first session to end ends the agent.</strong> Its session-end hook releases every hold, including any the other session took, and marks <code>claude@shop</code> offline until the other session's next prompt.</li>
-        <li><strong>A new-mail notice appears once.</strong> Whichever session has the next prompt gets it, and the other session hears nothing about that message.</li>
+        <li><strong>A new-mail notice appears once.</strong> Whichever session has the next prompt gets it, and the other session hears nothing about that message. Cursor gets no prompt notices at all.</li>
       </ul>
     </section>
     <section class="guide-section" aria-labelledby="names">
