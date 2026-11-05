@@ -52,3 +52,36 @@ jobs:
 
       - name: cargo check
         run: cargo check --workspace --all-targets --locked
+
+  docs:
+    name: docs (quickstart, walkthrough, coverage)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build another
+        run: cargo build --locked -p another
+
+      - name: Every command, MCP tool and HTTP route is documented
+        env:
+          ANOTHER_BIN: ${{ github.workspace }}/target/debug/another
+        run: python3 scripts/gen-docs.py --check
+
+      - name: README quickstart, verbatim, as a new user
+        env:
+          ANOTHER_BIN: ${{ github.workspace }}/target/debug/another
+        run: |
+          shellcheck -S warning scripts/quickstart-ci.sh
+          sh scripts/quickstart-ci.sh
+
+      - name: Peer-only walkthrough, verbatim
+        run: |
+          export PATH="$GITHUB_WORKSPACE/target/debug:$PATH"
+          cd "$(mktemp -d)"
+          python3 "$GITHUB_WORKSPACE/scripts/run-doc-commands.py" "$GITHUB_WORKSPACE/docs/PEER-WALKTHROUGH.md" "## Run it" "## What you didn't need"

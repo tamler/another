@@ -36,9 +36,19 @@ cargo install --locked --git https://github.com/tamler/another another
 curl -fsSL https://github.com/tamler/another/releases/latest/download/install.sh | sh
 ```
 
+It installs to `~/.local/bin`. If that isn't on your `PATH` (the installer tells you), add it for this shell:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
 *Say:* "One static binary, no services to sign up for. Everything lives in one SQLite file on this machine."
 
-**0:10 · Start the local node and its server**, in your project folder (here `~/demo/shop`):
+**0:10 · Start the local node and its server**, in your project folder (here `~/demo/shop`; the folder's name, `shop`, becomes the project's name):
+
+```bash
+mkdir -p ~/demo/shop && cd ~/demo/shop
+```
 
 ```bash
 another init
@@ -74,6 +84,7 @@ another agent register codex --program codex --project .
 another hold acquire --agent claude@shop src/app.rs --reason "refactor checkout"
 ```
 
+<!-- doc-test: exit 3 -->
 ```bash
 another hold acquire --agent codex@shop src/app.rs
 ```
@@ -107,18 +118,23 @@ another doctor
 ```
 
 ```
+another doctor (home ~/.another)
   PASS  store              ~/.another is writable; schema 11
   PASS  server             http://127.0.0.1:7466 is up
+  PASS  tokens             no active tokens (local use only)
   PASS  ports              1 claimed port(s), no conflicts
+  PASS  resources          1 live resource(s), none lapsed
   PASS  hooks:claude       Claude Code hooks installed (~/.claude/settings.json)
   PASS  hooks:codex        Codex hooks installed (~/.codex/hooks.json)
-  WARN  hooks:codex-trust  no Codex trust recorded for ~/.codex/hooks.json: Codex will skip Another's 4 hook(s)
+  WARN  hooks:codex-trust  no Codex trust recorded for Another's 4 hook(s) in ~/.codex/hooks.json: Codex will skip them
         fix: open Codex interactively and trust them under `/hooks` …
+  SKIP  hooks:grok         Grok not set up for this user (~/.grok missing)
+0 failed, 1 warning(s).
 ```
 
 *Say:* "Every problem comes with the fix. Here it is the Codex trust step from earlier." Doctor exits 1 if anything fails, so it also works in scripts.
 
-**1:30 · End.**
+**1:30 · End.** The server keeps running in the background; stop it with `kill %1` (or `fg`, then Ctrl-C).
 
 ### Other ways to install
 
@@ -166,6 +182,8 @@ Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green
 
 | Doc | What it covers |
 |---|---|
+| [docs/PEER-WALKTHROUGH.md](docs/PEER-WALKTHROUGH.md) | Two peer agents and a person, no manager: lanes, holds, a conflict, a decision (run verbatim in CI) |
+| [docs/CLI.md](docs/CLI.md), [docs/MCP.md](docs/MCP.md), [docs/HTTP.md](docs/HTTP.md) | Reference: every subcommand (generated from `--help`), every MCP tool (generated from `tools/list`), every HTTP endpoint |
 | [docs/HOOKS.md](docs/HOOKS.md) | Hook packs for each client; trust steps; the digest |
 | [docs/RESOURCES.md](docs/RESOURCES.md) | Resource registry, orphans, human-approved reaping |
 | [docs/REMOTE.md](docs/REMOTE.md) | Remote peers (Grok Bot): tokens, `--auth`, tunnels, audit log |
