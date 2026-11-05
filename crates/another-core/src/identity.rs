@@ -629,17 +629,17 @@ impl Store {
     }
 }
 
-/// Whether a person on this machine confirmed `agent_id`'s privileged role (manager or
+/// Whether a person on the agent's node confirmed `agent_id`'s privileged role (manager or
 /// person): a trusted registration (`register_agent_trusted`, the CLI, or an invite the
 /// person made) recorded `role_confirmed` for its current program. A person registered on
 /// demand as a decision's addressee is not confirmed, so it can't relay answers.
-/// Only local events count, and confirmation must follow every local registration naming
-/// a different program. A peer's projection and an untrusted refresh cannot revive an older role.
+/// Only events authored by that node count, and confirmation must follow every registration
+/// there naming a different program. A different peer and an untrusted refresh cannot revive
+/// an older role. Callers bind the agent to this node or to a verified relay's origin.
 pub(crate) fn role_confirmed(conn: &Connection, agent_id: &str, program: &str) -> Result<bool> {
     Ok(conn
         .query_row(
             "SELECT 1 FROM events e JOIN agents a ON a.agent_id = ?1
-               JOIN nodes n ON n.node_id = a.node_id AND n.is_local = 1
              WHERE e.node_id = a.node_id AND e.kind = 'agent.registered'
                AND json_extract(e.payload, '$.agent_id') = ?1
                AND json_extract(e.payload, '$.program') = ?2
