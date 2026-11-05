@@ -45,6 +45,8 @@
     </section>
     <section class="guide-section" aria-labelledby="names">
       <h2 id="names">Give each session its own name</h2>
+      <p>This page assumes Another's hooks are installed for Claude Code. Without them, no hook reads <code>ANOTHER_AGENT</code> and no digest appears. <a href="/docs/getting-started/">Getting started</a> shows a dry run of the install first.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Install the Claude Code hooks"><code>another hook install --client claude</code></pre>
       <p>Register one identity per session, from the root of the repository. The names here are examples; pick ones that describe the work. Each line prints the agent's full address, such as <code>parser@shop</code> in a project with the slug <code>shop</code>, and the rest of this page uses those addresses.</p>
       <pre class="code-block shell" tabindex="0" aria-label="Register two identities for one client"><code>another init
 another agent register parser --program claude --project .
