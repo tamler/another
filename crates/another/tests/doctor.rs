@@ -199,6 +199,20 @@ async fn doctor_reports_each_problem_with_a_fix() {
     let (ok, r) = check(url.clone()).await.unwrap();
     assert_eq!(levels(&r, "hooks:codex-trust"), ["pass"], "{r}");
     assert!(ok, "warnings don't fail: {r}");
+    // A command that only mentions the wrapper isn't one of Another's hooks, so it needs no trust.
+    let saved_hooks = std::fs::read_to_string(&hooks_path).unwrap();
+    for ev in &events {
+        hj["hooks"][ev]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "hooks": [{ "type": "command", "command": "echo another-hook.sh" }]
+            }));
+    }
+    std::fs::write(&hooks_path, hj.to_string()).unwrap();
+    let (_, r) = check(url.clone()).await.unwrap();
+    assert_eq!(levels(&r, "hooks:codex-trust"), ["pass"], "{r}");
+    std::fs::write(&hooks_path, saved_hooks).unwrap();
     // A missing wrapper fails, even though the config still names it.
     let wrapper = ah.join("hooks").join("another-hook.sh");
     let saved = std::fs::read(&wrapper).unwrap();
@@ -301,6 +315,18 @@ async fn doctor_reports_each_problem_with_a_fix() {
         .as_str()
         .unwrap()
         .contains("not Another"));
+    // Other programs' health checks also say ok; Another's always names its node.
+    let (bare_url, bare_stop) = serve(axum::Router::new().route(
+        "/health",
+        axum::routing::get(|| async { axum::Json(serde_json::json!({ "ok": true })) }),
+    ))
+    .await;
+    let (_, r) = check(bare_url).await.unwrap();
+    assert!(find(&r, "server", "fail")["detail"]
+        .as_str()
+        .unwrap()
+        .contains("not Another"));
+    bare_stop.cancel();
     let other_dir = tempfile::tempdir().unwrap();
     let other_store = Store::open(other_dir.path()).unwrap();
     let (theirs, their_stop) = another_server(&other_store).await;
@@ -660,14 +686,14 @@ async fn the_server_check_goes_by_what_health_answers() {
         stop.cancel();
     }
 
-    // Healthy but with no node id: it can't be this home's server.
+    // Healthy but with no node id: Another always names its node, so this is something else,
+    // with or without a store of our own to compare it with.
     let (url, stop) = answering(200, r#"{"ok": true}"#).await;
     let (_, r) = check(url.clone(), h.ah.clone()).await.unwrap();
-    assert_eq!(levels(&r, "server"), ["warn"], "{r}");
-    // With no store of our own there is nothing to compare it with.
+    assert!(detail(&r, "server", "fail").contains("not Another"), "{r}");
     let nowhere = h.home.join("no-such-home");
     let (ok, r) = check(url, nowhere).await.unwrap();
-    assert_eq!(levels(&r, "server"), ["pass"], "{r}");
+    assert!(detail(&r, "server", "fail").contains("not Another"), "{r}");
     assert!(!ok, "the missing store still fails");
     stop.cancel();
 

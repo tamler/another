@@ -23,7 +23,14 @@ Hooks inject a short digest at session start, so agents actually check their mai
 
 This doubles as the script for a 90-second demo recording: one terminal, a project folder, two agents. Timings are cues for narration; the commands themselves finish in about a second.
 
-**0:00 · Install** (macOS arm64/x86_64, Linux x86_64/arm64). The script downloads the release archive, checks it against the release's `SHA256SUMS`, and refuses to install anything that doesn't match:
+**0:00 · Install.** No release is published yet, so build from source, with Rust 1.88 or newer:
+
+<!-- Fenced as sh, not bash: the CI quickstart runs the bash blocks and installs through the script below, served locally. -->
+```sh
+cargo install --locked --git https://github.com/tamler/another another
+```
+
+**After v0.1.0 is released** (this URL returns 404 until then), use the install script instead, on macOS arm64/x86_64 or Linux x86_64/arm64. It downloads the release archive, checks it against the release's `SHA256SUMS`, and refuses to install anything that doesn't match:
 
 ```bash
 curl -fsSL https://github.com/tamler/another/releases/latest/download/install.sh | sh
@@ -115,19 +122,13 @@ another doctor
 
 ### Other ways to install
 
-- **Pin a version, or install somewhere else:**
+- **After v0.1.0: pin a version, or install somewhere else:**
 
   ```bash
   curl -fsSL https://github.com/tamler/another/releases/latest/download/install.sh | ANOTHER_VERSION=0.1.0 ANOTHER_INSTALL_DIR=/usr/local/bin sh
   ```
 
-- **From source**, with Rust 1.88 or newer:
-
-  ```bash
-  cargo install --locked --git https://github.com/tamler/another another
-  ```
-
-- **By hand:** each [release](https://github.com/tamler/another/releases) has `another-<version>-<target>.tar.gz` for `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, a `.sha256` per archive, one `SHA256SUMS` and `install.sh`. Check with `sha256sum -c SHA256SUMS --ignore-missing` (or `shasum -a 256 -c`).
+- **After v0.1.0: by hand.** Each [release](https://github.com/tamler/another/releases) has `another-<version>-<target>.tar.gz` for `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, a `.sha256` per archive, one `SHA256SUMS` and `install.sh`. Check with `sha256sum -c SHA256SUMS --ignore-missing` (or `shasum -a 256 -c`).
 
 On macOS, when replacing an existing `another`, **remove the old binary first** (`rm "$(command -v another)"`) or use the install script, which moves a fresh file into place. Copying over the old file in place leaves a stale code signature cached, and macOS kills the new binary on launch. A binary downloaded with a browser may need `xattr -d com.apple.quarantine ./another`; `curl` downloads don't.
 
