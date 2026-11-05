@@ -193,7 +193,8 @@ pub struct HoldPathsArgs {
 pub struct HoldPathsOut {
     pub granted: Vec<Hold>,
     pub conflicts: Vec<HoldConflict>,
-    /// Overlapping holds on other nodes (same project name): warnings, never blocking.
+    /// Overlaps that never block: holds on other nodes (same project name), and non-exclusive
+    /// overlaps in your own lane (`same_lane`).
     pub warnings: Vec<HoldConflict>,
     pub renewed: Vec<Hold>,
     pub released: Vec<String>,
@@ -505,11 +506,12 @@ impl AnotherMcp {
                     out.warnings = report.warnings;
                 }
                 HoldAction::Check => {
-                    out.conflicts = s.check_holds(
+                    (out.conflicts, out.warnings) = s.check_holds_in_lane(
                         &a.agent,
                         &need_project()?,
                         &a.paths,
                         a.exclusive.unwrap_or(true),
+                        a.lane.as_deref(),
                     )?;
                 }
                 HoldAction::Renew => out.renewed = s.renew_holds(&a.agent, &a.hold_ids)?,
