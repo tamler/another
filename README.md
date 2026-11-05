@@ -176,7 +176,7 @@ another token create --agent grok-bot --project '/path/to/work/*'
 Both flags are required:
 
 - **`--auth`**: Tailscale Serve delivers tailnet traffic to the service from loopback, so a server without `--auth` would accept anyone on your tailnet with no token. With `--auth`, API requests need a bearer token from `another token create`, and each call is audited (`another audit`); [docs/REMOTE.md](docs/REMOTE.md) lists the routes.
-- **`--allowed-host`**: the tunnel forwards your tailnet hostname in the `Host` header, and Another rejects unknown hosts to prevent DNS rebinding. Without the flag, every tunnelled request is refused.
+- **`--allowed-host`**: the tunnel forwards your tailnet hostname in the `Host` header, and Another rejects unknown hosts to prevent DNS rebinding. Without the flag, MCP requests through the tunnel are refused.
 
 Keep local agents on stdio MCP (or a separate unauthenticated loopback server) so they don't need a token. Use Tailscale Serve, not Funnel, unless you deliberately want the service on the public internet. [docs/REMOTE.md](docs/REMOTE.md) has the details, plus the Cloudflare Tunnel and `ssh -R` setups.
 
