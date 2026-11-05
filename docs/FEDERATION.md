@@ -13,7 +13,7 @@ Several machines, such as a laptop, a remote runner and a GPU box, each run thei
 
 | Events | Sent to |
 |---|---|
-| Directory: node, project and agent registrations | every paired node |
+| Directory: node, project and agent registrations, including each project's absolute path | every paired node |
 | Mail (`message.sent`) | only nodes that host a recipient; mail between agents on one node never leaves it |
 | Read and acknowledgement receipts | only the node that sent the message |
 | Activity: sessions, requests, holds, resources | nodes with `read_feed`, plus the owner of a resource being borrowed |
@@ -44,8 +44,10 @@ another node name studio
 On the hub (keep it on loopback and expose it through a tunnel; see [REMOTE.md](REMOTE.md)):
 
 ```bash
-another serve --federation --bind 127.0.0.1:7468
+another serve --auth --federation --bind 127.0.0.1:7468
 ```
+
+Keep `--auth` on any hub a tunnel can reach. Spokes do not need a token, because `/fed/*` is authenticated by node signatures. Without `--auth`, `GET /activity` answers without a token, so anyone who can reach the tunnel can read the hub's feed: agent names, mail subjects and project paths.
 
 ```bash
 another pair invite --url https://studio.my-tailnet.ts.net --perms read_feed,send_mail,borrow_resource --expires 1h
@@ -71,7 +73,7 @@ another sync
 another sync --watch --every 30
 ```
 
-`another peers` lists paired nodes with key fingerprints, permissions and last sync. `another pair revoke <node>` cuts a node off: the hub refuses its next request.
+`another peers` lists paired nodes with key fingerprints, permissions and last sync. Only spokes record a last sync; on the hub, the column stays `never`. `another pair revoke <node>` cuts a node off: the hub refuses its next request.
 
 ## Cross-node behaviour
 
