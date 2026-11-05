@@ -190,6 +190,7 @@ for path, page in pages.items():
     expected_types = software | {own_type} | ({"BreadcrumbList"} if trail_routes else set())
     assert set(graph) == expected_types, f"{path}: JSON-LD types"
     own = graph[own_type]
+    assert own.get("author") == {"@type": "Organization", "name": "The Another Authors"}, f"{path}: {own_type} author"
     if own_type != "FAQPage":
         assert own["url"] == canonical, f"{path}: {own_type} url"
     if own_type in {"TechArticle", "CollectionPage"}:
