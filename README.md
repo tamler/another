@@ -146,14 +146,14 @@ On macOS, when replacing an existing `another`, **remove the old binary first** 
 | 4 | Authenticated remote peer (Grok Bot): scoped bearer tokens, audit log, `GET /activity` | ✅ tamler/another#4 |
 | 5 | Federation (v2): signed event logs, pairing, hub-and-spoke sync, cross-node mail | ✅ tamler/another#5 |
 | 6 | Polish: `another wake` (tmux, cmux, Herdr), Herdr plugin, release builds, quickstart, CONTRIBUTING | ✅ complete |
-| Coordination 1 | Lanes: charters, leads, statuses, structured reports, lane-scoped remote access | 🔄 tamler/another#10 |
-| Coordination 2 | Push: scoped SSE / long-poll, signed webhooks | 🔄 tamler/another#11 |
-| Coordination 3 | Human decisions: structured questions answered by phone, HTTP or CLI | 🔄 tamler/another#12 |
-| Coordination 4 | Lane-aware holds and the pre-edit hook | 🔄 tamler/another#13 |
-| Coordination 5 | Spend ledger: budgets, hourly leases, approval gate, linked resources | 🔄 tamler/another#14 |
-| Coordination 6 | Daily summary: pull (CLI, MCP, HTTP) or an opt-in daily rollup by mail or webhook | 🔄 tamler/another#15 |
-| Coordination 7 | First-class remote agents: invites, join, presence, kick, federation tie-in | 🔄 tamler/another#16 |
-| v0.1.0 prep | Release installs (`install.sh`, `SHA256SUMS`), `another doctor`, 90-second quickstart | 🔄 tamler/another#17 |
+| Coordination 1 | Lanes: charters, leads, statuses, structured reports, lane-scoped remote access | In review: tamler/another#43 |
+| Coordination 2 | Push: scoped SSE / long-poll, signed webhooks | In review: tamler/another#44 |
+| Coordination 3 | Human decisions: structured questions answered by phone, HTTP or CLI | In review: tamler/another#45 |
+| Coordination 4 | Lane-aware holds and the pre-edit hook | In review: tamler/another#46 |
+| Coordination 5 | Spend ledger: budgets, hourly leases, approval gate, linked resources | In review: tamler/another#47 |
+| Coordination 6 | Daily summary: pull (CLI, MCP, HTTP) or an opt-in daily rollup by mail or webhook | In review: tamler/another#48 |
+| Coordination 7 | First-class remote agents: invites, join, presence, kick, federation tie-in | In review: tamler/another#49 |
+| v0.1.0 prep | Release installs (`install.sh`, `SHA256SUMS`), `another doctor`, 90-second quickstart | In review: tamler/another#50 |
 
 Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88.
 
