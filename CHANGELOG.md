@@ -90,6 +90,11 @@ All notable changes to Another. Unreleased work is listed under the next version
 - **Remote event reads are now filtered by token scope** (D38, supersedes D16). `activity_feed`, `activity_summarize` and `GET /activity` used to show every project's events to any token. They now show only events from the token's projects (and project-less events concerning its own agent). Token, peer and node events are hidden from tokens. Local callers are unaffected.
 - `activity_summarize` request counts exclude decision requests (they are reported as decisions).
 - When reading forward, the feed's `next_since` now advances past events filtered out by `kinds` or scope.
+- **A token's webhooks can't target this machine, link-local or metadata addresses** (D46). A manager with a token and a receiver on the same machine needs `another config remote_webhook_private_hosts on`. Local webhooks are unaffected.
+- **Forwarding headers are ignored by default** (D47). The `/join` limit and the audit log use the TCP peer. Behind a tunnel, name the header it sets with `another serve --trusted-proxy-header`.
+- `another doctor` knows about the background service. Without `--server` or `ANOTHER_SERVER`, it checks the service's address when the service uses the same home, and a new `service` check reports a stopped service, a missing binary, a different home or an unreadable definition. Its fix hints name `another service start` and `another service logs` instead of `another serve`.
+- `another service install` takes `--trusted-proxy-header`, so a tunnelled service can give each client its own `/join` limit and audit address. An update warns if it drops or changes the header.
+- `agent_kick`'s description and docs now say what it does: local only, refused for every token. Its behaviour hasn't changed.
 
 ### Database
 - Migration 6 adds the `lanes`, `lane_links` and `lane_reports` tables. It is additive; existing databases upgrade in place.

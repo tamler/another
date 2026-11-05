@@ -27,6 +27,12 @@ pub const SETTINGS: &[SettingSpec] = &[
         help: "hours an ephemeral remote agent may go unseen before it is removed (1-720)",
     },
     SettingSpec {
+        key: crate::webhooks::REMOTE_PRIVATE_HOSTS,
+        default: "off",
+        help: "on = webhooks a token creates may target this machine and link-local or \
+               metadata addresses; off refuses them (on or off)",
+    },
+    SettingSpec {
         key: "summary_daily",
         default: "",
         help: "local time (HH:MM) `another serve` sends the daily summary; empty = off",
@@ -80,6 +86,10 @@ fn validate(key: &str, value: &str) -> Result<()> {
             _ => Err(Error::Invalid(
                 "remote_idle_hours must be a whole number of hours, 1-720".into(),
             )),
+        },
+        crate::webhooks::REMOTE_PRIVATE_HOSTS => match value {
+            "on" | "off" => Ok(()),
+            _ => Err(Error::Invalid(format!("{key} must be on or off"))),
         },
         "summary_daily" => {
             if value.is_empty() {

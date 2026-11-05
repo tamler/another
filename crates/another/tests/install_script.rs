@@ -117,3 +117,48 @@ fn the_install_script_parses() {
     let ok = Command::new("sh").arg("-n").arg(script()).status().unwrap();
     assert!(ok.success());
 }
+
+/// `curl | sh` runs whatever arrived: a download cut off at any line must run nothing (no
+/// output, nothing written), because the script is one function called on its last line.
+#[test]
+fn a_truncated_download_runs_nothing() {
+    use std::io::Write;
+    let full = std::fs::read_to_string(script()).unwrap();
+    let lines: Vec<&str> = full.lines().collect();
+    let tmp = tempfile::tempdir().unwrap();
+    for cut in 1..lines.len() {
+        let partial = lines[..cut].join("\n") + "\n";
+        let dir = tmp.path().join(format!("bin{cut}"));
+        let mut child = Command::new("sh")
+            .arg("-s")
+            .env("ANOTHER_VERSION", "0.1.0")
+            .env("ANOTHER_INSTALL_DIR", &dir)
+            .env(
+                "ANOTHER_DOWNLOAD_BASE",
+                format!("file://{}", tmp.path().display()),
+            )
+            .env("HOME", tmp.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(partial.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stderr.contains("another-install:"),
+            "cut after line {cut} ran part of the script: {stderr}"
+        );
+        assert!(
+            !dir.exists(),
+            "cut after line {cut} created {}",
+            dir.display()
+        );
+    }
+}

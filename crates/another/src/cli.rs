@@ -47,12 +47,14 @@ pub enum Command {
     Init,
     /// Show the local node, database location and registered agents.
     Status,
-    /// Check the setup: store, server, tokens, client hooks (and Codex hook trust), ports
-    /// and resources. Prints PASS / WARN / FAIL with a fix for each problem; exits 1 on FAIL.
+    /// Check the setup: store, background service, server, tokens, client hooks (and Codex hook
+    /// trust), ports and resources. Prints PASS / WARN / FAIL with a fix for each problem; exits
+    /// 1 on FAIL.
     Doctor {
-        /// The `another serve` HTTP address to check.
-        #[arg(long, default_value = "http://127.0.0.1:7466", env = "ANOTHER_SERVER")]
-        server: String,
+        /// The `another serve` HTTP address to check. Default: the installed background service
+        /// when it uses this home, otherwise http://127.0.0.1:7466.
+        #[arg(long, env = "ANOTHER_SERVER")]
+        server: Option<String>,
     },
     /// Run the daemon: MCP over loopback streamable HTTP (default) or stdio.
     Serve {
@@ -62,7 +64,7 @@ pub enum Command {
         /// HTTP bind address. Loopback unless --auth and --allow-remote-bind are both given.
         #[arg(long, default_value = crate::serve::DEFAULT_BIND)]
         bind: String,
-        /// Require bearer tokens (`another token create`) on /mcp and /activity; audit every call.
+        /// Require bearer tokens (`another token create`) on every route except /health, /join and /fed; audit every call.
         #[arg(long)]
         auth: bool,
         /// Allow a non-loopback --bind (requires --auth). Prefer a tunnel instead.
@@ -71,6 +73,10 @@ pub enum Command {
         /// Extra Host header to accept, e.g. a tunnel hostname (repeatable; requires --auth).
         #[arg(long = "allowed-host", requires = "auth")]
         allowed_hosts: Vec<String>,
+        /// Header your local tunnel sets with the client address, for the /join limit and the
+        /// audit log (requires --auth). Without it, forwarding headers are ignored.
+        #[arg(long, value_enum, requires = "auth")]
+        trusted_proxy_header: Option<crate::remote::ForwardedHeader>,
         /// Act as a federation hub: serve /fed/* for paired spokes (node-signed requests).
         #[arg(long)]
         federation: bool,
@@ -78,6 +84,10 @@ pub enum Command {
         #[arg(long, default_value_t = 30)]
         sweep_secs: u64,
     },
+    /// Opt-in background service running `another serve` (launchd on macOS, systemd on
+    /// Linux). Nothing is installed unless you run `another service install`.
+    #[command(subcommand)]
+    Service(ServiceCmd),
     /// Register projects or list them.
     #[command(subcommand)]
     Project(ProjectCmd),
@@ -972,6 +982,51 @@ fn parse_secs(raw: &str) -> anyhow::Result<i64> {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum ServiceCmd {
+    /// Install (or update in place) and start the service; it restarts at login and reboot.
+    /// Takes `serve`'s HTTP flags; `--home` selects the data directory it uses. An update
+    /// replaces every flag, so repeat the ones you want to keep.
+    Install {
+        /// HTTP bind address. Loopback unless --auth and --allow-remote-bind are both given.
+        #[arg(long, default_value = crate::serve::DEFAULT_BIND)]
+        bind: String,
+        /// Require bearer tokens (needed for remote access).
+        #[arg(long)]
+        auth: bool,
+        /// Allow a non-loopback --bind (requires --auth). Prefer a tunnel instead.
+        #[arg(long, requires = "auth")]
+        allow_remote_bind: bool,
+        /// Extra Host header to accept, e.g. a tunnel hostname (repeatable; requires --auth).
+        #[arg(long = "allowed-host", requires = "auth")]
+        allowed_hosts: Vec<String>,
+        /// Header your local tunnel sets with the client address, for the /join limit and the
+        /// audit log (requires --auth). Without it, forwarding headers are ignored.
+        #[arg(long, value_enum, requires = "auth")]
+        trusted_proxy_header: Option<crate::remote::ForwardedHeader>,
+        /// Also act as a federation hub.
+        #[arg(long)]
+        federation: bool,
+    },
+    /// Stop the service and remove it (safe when it is not installed).
+    Uninstall,
+    /// Show whether it is installed and loaded, its pid, bind address and recent log lines.
+    Status {
+        #[arg(long, default_value_t = 10)]
+        lines: usize,
+    },
+    /// Start the installed service.
+    Start,
+    /// Stop the installed service; it stays installed (launchd: loads again at next login;
+    /// systemd: starts again at next boot or user-manager start). Uninstall to remove it.
+    Stop,
+    /// Print the service's recent log lines.
+    Logs {
+        #[arg(long, short = 'n', default_value_t = 50)]
+        lines: usize,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum ResourceCmd {
     /// Register a running resource and take the owner lease.
     Register {
@@ -1261,6 +1316,122 @@ fn emit<T: Serialize>(json: bool, value: &T, human: impl FnOnce(&T) -> String) -
     ExitCode::SUCCESS
 }
 
+fn service_command(cmd: &ServiceCmd, json: bool, home: PathBuf) -> anyhow::Result<ExitCode> {
+    use crate::service;
+    let user_home = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
+    let home = if home.is_absolute() {
+        home
+    } else {
+        std::env::current_dir()?.join(home)
+    };
+    match cmd {
+        ServiceCmd::Install {
+            bind,
+            auth,
+            allow_remote_bind,
+            allowed_hosts,
+            trusted_proxy_header,
+            federation,
+        } => {
+            // Make sure the data directory exists and is initialised before the service runs.
+            Store::open(&home)?;
+            let spec = service::ServiceSpec {
+                // Keep symlinks (e.g. a stable ~/bin/another link) instead of pinning the
+                // current target, so upgrades behind the link keep working.
+                exe: {
+                    let exe = std::env::current_exe()?;
+                    if exe.is_absolute() {
+                        exe
+                    } else {
+                        std::env::current_dir()?.join(exe)
+                    }
+                },
+                home,
+                bind: bind.clone(),
+                auth: *auth,
+                allow_remote_bind: *allow_remote_bind,
+                allowed_hosts: allowed_hosts.clone(),
+                trusted_proxy_header: trusted_proxy_header.map(|h| h.name().to_string()),
+                federation: *federation,
+            };
+            let r = service::install(&spec, &user_home)?;
+            Ok(emit(json, &r, |r| {
+                let mut out = format!(
+                    "{} the background service ({:?}) at {}\nlogs: {}",
+                    r.action, r.platform, r.definition, r.logs
+                );
+                for w in &r.warnings {
+                    out.push_str(&format!("\nwarning: {w}"));
+                }
+                for h in &r.hints {
+                    out.push_str(&format!("\nhint: {h}"));
+                }
+                out
+            }))
+        }
+        ServiceCmd::Uninstall => {
+            let r = service::uninstall(&user_home)?;
+            Ok(emit(json, &r, |r| {
+                if r.removed {
+                    format!("removed the background service ({})", r.definition)
+                } else {
+                    "the background service is not installed".to_string()
+                }
+            }))
+        }
+        ServiceCmd::Status { lines } => {
+            let r = service::status(&user_home, &home, *lines)?;
+            Ok(emit(json, &r, |r| {
+                if !r.installed {
+                    return "not installed (opt in with `another service install`)".to_string();
+                }
+                let mut out = format!(
+                    "installed: {}\nloaded: {}\npid: {}\nbind: {}",
+                    r.definition,
+                    if r.loaded { "yes" } else { "no" },
+                    r.pid.map_or("-".to_string(), |p| p.to_string()),
+                    r.bind.as_deref().unwrap_or("-")
+                );
+                if !r.log_lines.is_empty() {
+                    out.push_str("\nrecent log lines:");
+                    for l in &r.log_lines {
+                        out.push_str("\n  ");
+                        out.push_str(l);
+                    }
+                }
+                if let Some(e) = &r.log_error {
+                    out.push_str("\ncan't read the logs: ");
+                    out.push_str(e);
+                }
+                out
+            }))
+        }
+        ServiceCmd::Start | ServiceCmd::Stop => {
+            let start = matches!(cmd, ServiceCmd::Start);
+            service::start_stop(&user_home, start)?;
+            let what = if start { "started" } else { "stopped" };
+            Ok(emit(
+                json,
+                &serde_json::json!({ "ok": true, "action": what }),
+                |_| format!("{what} the background service"),
+            ))
+        }
+        ServiceCmd::Logs { lines } => {
+            let status = service::status(&user_home, &home, *lines)?;
+            if !status.installed {
+                anyhow::bail!("the background service is not installed");
+            }
+            if let Some(e) = status.log_error {
+                anyhow::bail!("can't read the logs: {e}");
+            }
+            Ok(emit(json, &status.log_lines, |l| l.join("\n")))
+        }
+    }
+}
+
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     let json = cli.json;
     let home = cli.home.as_deref();
@@ -1270,6 +1441,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         auth,
         allow_remote_bind,
         allowed_hosts,
+        trusted_proxy_header,
         federation,
         sweep_secs,
     } = &cli.command
@@ -1287,6 +1459,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     auth: *auth,
                     allow_remote_bind: *allow_remote_bind,
                     allowed_hosts: allowed_hosts.clone(),
+                    trusted_proxy_header: *trusted_proxy_header,
                     federation: *federation,
                 };
                 crate::serve::serve_http(store, bind, opts, every).await
@@ -1301,6 +1474,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             None => another_core::default_home()?,
         })
     };
+    if let Command::Service(cmd) = &cli.command {
+        return service_command(cmd, json, another_home()?);
+    }
     if let Command::Hook(cmd) = &cli.command {
         return hook_command(cmd, json, another_home);
     }
@@ -1369,6 +1545,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             };
             emit(json, &status, output::status)
         }
+        Command::Service(_) => unreachable!("handled above"),
         Command::Project(ProjectCmd::Ensure { path }) => {
             let path = match path {
                 Some(p) => abs(&p)?,

@@ -784,3 +784,136 @@ fn project_less_requests_into_another_project_stay_hidden() {
         1
     );
 }
+
+fn token_scope(s: &Store) -> TokenScope {
+    let t = s
+        .create_token("manager", &["/work/shop".into()], None, None)
+        .unwrap();
+    s.verify_token(&t.secret).unwrap()
+}
+
+fn subscribe(s: &Store, url: &str, scope: Option<&TokenScope>) -> Result<WebhookCreated> {
+    s.create_webhook(
+        NewWebhook {
+            url: url.into(),
+            filters: vec![WebhookFilter::All],
+            project_globs: scope.is_none().then(|| vec!["/work/shop".to_string()]),
+            description: None,
+        },
+        scope,
+    )
+}
+
+/// Finding 3 of docs/security-review-v0.1.0.md: a token must not aim the hub's webhook sender
+/// at the hub itself or at a cloud metadata service, in any spelling the OS resolver accepts.
+#[test]
+fn token_webhooks_refuse_hub_local_and_metadata_addresses() {
+    let (s, _) = store_with_clock();
+    let scope = token_scope(&s);
+    for bad in [
+        "http://127.0.0.1:9/x",
+        "http://localhost:9/x",
+        "http://[::1]:9/x",
+        "https://127.0.0.1/x",
+        "https://127.8.8.8/x",
+        "https://127.0.0.1./x",
+        // inet_aton forms the system resolver turns into 127.0.0.1.
+        "https://127.1/x",
+        "https://0x7f000001/x",
+        "https://0x7f.0.0.1/x",
+        "https://2130706433/x",
+        "https://017700000001/x",
+        "https://0177.0.0.1/x",
+        // A numeric last label that is no valid address never reaches a real name.
+        "https://999.1.1.1/x",
+        "https://0.0.0.0/x",
+        "https://0/x",
+        "https://localhost/x",
+        "https://LOCALHOST./x",
+        "https://hub.localhost/x",
+        "https://[::1]/x",
+        "https://[::]/x",
+        "https://[::ffff:127.0.0.1]/x",
+        "https://[::ffff:7f00:1]/x",
+        "https://[64:ff9b::7f00:1]/x",
+        "https://[2002:7f00:1::]/x",
+        "https://[fe80::1]/x",
+        "https://169.254.169.254/latest/meta-data",
+        "https://169.254.0.1/x",
+        "https://[::ffff:169.254.169.254]/x",
+        "https://[fd00:ec2::254]/x",
+        "https://[fd20:ce::254]/computeMetadata/v1/",
+        "https://[FD20:CE::254]/x",
+        "https://[fd20:ce:0:0:0:0:0:254]/x",
+        "https://100.100.100.200/x",
+        "https://168.63.129.16/x",
+        "https://metadata.google.internal/x",
+        // Hosts a parser could read differently from the resolver.
+        "https://%31%32%37.0.0.1/x",
+        "https://[fe80::1%25en0]/x",
+    ] {
+        let err = match subscribe(&s, bad, Some(&scope)) {
+            Ok(_) => panic!("{bad} was accepted"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code(), "invalid", "{bad}");
+    }
+    assert!(s.webhooks(Some(&scope)).unwrap().is_empty());
+}
+
+#[test]
+fn token_webhooks_keep_external_https_and_local_webhooks_keep_loopback() {
+    let (s, _) = store_with_clock();
+    let scope = token_scope(&s);
+    for ok in [
+        "https://hooks.example.test/x",
+        "https://hooks.example.test:8443/a?b=c",
+        "https://1password.example.test/x",
+        "https://localhost.example.test/x",
+        "https://93.184.216.34/x",
+        "https://[2606:2800:220:1::1]/x",
+        // Private LAN receivers stay allowed (D46), next to the metadata addresses too.
+        "https://[fd12:3456:789a::1]/x",
+        "https://[fd20:ce::253]/x",
+        "https://[fd00:ec2::253]/x",
+    ] {
+        assert!(subscribe(&s, ok, Some(&scope)).is_ok(), "{ok}");
+    }
+    assert!(subscribe(&s, "http://127.0.0.1:9/x", None).is_ok());
+    assert!(subscribe(&s, "https://169.254.169.254/x", None).is_ok());
+    assert!(subscribe(&s, "https://[fd20:ce::254]/x", None).is_ok());
+}
+
+/// The classifier the connection's resolver uses: the exact metadata addresses, not their
+/// neighbours in the same private range.
+#[test]
+fn the_ip_classifier_refuses_ipv6_metadata_but_not_private_neighbours() {
+    for (ip, refused) in [
+        ("fd00:ec2::254", true),
+        ("fd20:ce::254", true),
+        ("fd00:ec2::253", false),
+        ("fd20:ce::253", false),
+        ("fd12:3456:789a::1", false),
+    ] {
+        let parsed = ip.parse().unwrap();
+        assert_eq!(is_refused_webhook_ip(parsed), refused, "{ip}");
+    }
+}
+
+#[test]
+fn the_person_can_allow_private_hosts_for_token_webhooks() {
+    let (s, _) = store_with_clock();
+    let scope = token_scope(&s);
+    let setting = s.setting("remote_webhook_private_hosts").unwrap();
+    assert_eq!(setting.value, "off");
+    assert_eq!(
+        s.set_setting("remote_webhook_private_hosts", "maybe")
+            .unwrap_err()
+            .code(),
+        "invalid"
+    );
+    s.set_setting("remote_webhook_private_hosts", "on").unwrap();
+    assert!(subscribe(&s, "http://127.0.0.1:9/x", Some(&scope)).is_ok());
+    // The transport rule still holds: plain http only ever goes to loopback.
+    assert!(subscribe(&s, "http://hooks.example.test/x", Some(&scope)).is_err());
+}

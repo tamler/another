@@ -166,9 +166,10 @@ pub async fn join_handler(State(store): State<Store>, req: axum::extract::Reques
     // The client address without the port, so reconnecting doesn't reset the limit.
     let client = remote
         .as_deref()
-        .map(|r| match r.rsplit_once(':') {
-            Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) => host.to_string(),
-            _ => r.to_string(),
+        .map(|r| match r.parse::<std::net::SocketAddr>() {
+            Ok(peer) => peer.ip().to_string(),
+            // A trusted forwarding header's value has no port.
+            Err(_) => r.to_string(),
         })
         .unwrap_or_else(|| "unknown".into());
     if !join_allowed(store.node_id(), &client) {

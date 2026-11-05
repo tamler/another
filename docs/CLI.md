@@ -6,8 +6,15 @@ Generated from `another … --help` by `scripts/gen-docs.py`; do not edit by han
 |---|---|
 | [`another init`](#another-init) | Create the data directory and database if needed; show the local node |
 | [`another status`](#another-status) | Show the local node, database location and registered agents |
-| [`another doctor`](#another-doctor) | Check the setup: store, server, tokens, client hooks (and Codex hook trust), ports and resources. Prints PASS / WARN / FAIL with a fix for each problem; exits 1 on FAIL |
+| [`another doctor`](#another-doctor) | Check the setup: store, background service, server, tokens, client hooks (and Codex hook trust), ports and resources. Prints PASS / WARN / FAIL with a fix for each problem; exits 1 on FAIL |
 | [`another serve`](#another-serve) | Run the daemon: MCP over loopback streamable HTTP (default) or stdio |
+| [`another service`](#another-service) | Opt-in background service running `another serve` (launchd on macOS, systemd on Linux). Nothing is installed unless you run `another service install` |
+| [`another service install`](#another-service-install) | Install (or update in place) and start the service; it restarts at login and reboot. Takes `serve`'s HTTP flags; `--home` selects the data directory it uses. An update replaces every flag, so repeat the ones you want to keep |
+| [`another service uninstall`](#another-service-uninstall) | Stop the service and remove it (safe when it is not installed) |
+| [`another service status`](#another-service-status) | Show whether it is installed and loaded, its pid, bind address and recent log lines |
+| [`another service start`](#another-service-start) | Start the installed service |
+| [`another service stop`](#another-service-stop) | Stop the installed service; it stays installed (launchd: loads again at next login; systemd: starts again at next boot or user-manager start). Uninstall to remove it |
+| [`another service logs`](#another-service-logs) | Print the service's recent log lines |
 | [`another project`](#another-project) | Register projects or list them |
 | [`another project ensure`](#another-project-ensure) | Register a project by path (default: current directory) |
 | [`another project list`](#another-project-list) | List registered projects |
@@ -128,8 +135,9 @@ Usage: another [OPTIONS] <COMMAND>
 Commands:
   init       Create the data directory and database if needed; show the local node
   status     Show the local node, database location and registered agents
-  doctor     Check the setup: store, server, tokens, client hooks (and Codex hook trust), ports and resources. Prints PASS / WARN / FAIL with a fix for each problem; exits 1 on FAIL
+  doctor     Check the setup: store, background service, server, tokens, client hooks (and Codex hook trust), ports and resources. Prints PASS / WARN / FAIL with a fix for each problem; exits 1 on FAIL
   serve      Run the daemon: MCP over loopback streamable HTTP (default) or stdio
+  service    Opt-in background service running `another serve` (launchd on macOS, systemd on Linux). Nothing is installed unless you run `another service install`
   project    Register projects or list them
   agent      Register agents, list them, or show one
   send       Send a message
@@ -207,13 +215,13 @@ Options:
 ## another doctor
 
 ```text
-Check the setup: store, server, tokens, client hooks (and Codex hook trust), ports and resources. Prints PASS / WARN / FAIL with a fix for each problem; exits 1 on FAIL
+Check the setup: store, background service, server, tokens, client hooks (and Codex hook trust), ports and resources. Prints PASS / WARN / FAIL with a fix for each problem; exits 1 on FAIL
 
 Usage: another doctor [OPTIONS]
 
 Options:
       --home <HOME>      Data directory (default: $ANOTHER_HOME, else ~/.another) [env: ANOTHER_HOME]
-      --server <SERVER>  The `another serve` HTTP address to check [env: ANOTHER_SERVER=] [default: http://127.0.0.1:7466]
+      --server <SERVER>  The `another serve` HTTP address to check. Default: the installed background service when it uses this home, otherwise http://127.0.0.1:7466 [env: ANOTHER_SERVER=]
       --json             Print machine-readable JSON
   -h, --help             Print help
 ```
@@ -226,16 +234,145 @@ Run the daemon: MCP over loopback streamable HTTP (default) or stdio
 Usage: another serve [OPTIONS]
 
 Options:
-      --home <HOME>                   Data directory (default: $ANOTHER_HOME, else ~/.another) [env: ANOTHER_HOME]
-      --stdio                         Serve MCP on stdin/stdout instead of HTTP (for MCP client configs)
-      --bind <BIND>                   HTTP bind address. Loopback unless --auth and --allow-remote-bind are both given [default: 127.0.0.1:7466]
-      --json                          Print machine-readable JSON
-      --auth                          Require bearer tokens (`another token create`) on /mcp and /activity; audit every call
-      --allow-remote-bind             Allow a non-loopback --bind (requires --auth). Prefer a tunnel instead
-      --allowed-host <ALLOWED_HOSTS>  Extra Host header to accept, e.g. a tunnel hostname (repeatable; requires --auth)
-      --federation                    Act as a federation hub: serve /fed/* for paired spokes (node-signed requests)
-      --sweep-secs <SWEEP_SECS>       Seconds between sweeps that expire holds and stale requests [default: 30]
-  -h, --help                          Print help
+      --home <HOME>
+          Data directory (default: $ANOTHER_HOME, else ~/.another) [env: ANOTHER_HOME]
+      --stdio
+          Serve MCP on stdin/stdout instead of HTTP (for MCP client configs)
+      --bind <BIND>
+          HTTP bind address. Loopback unless --auth and --allow-remote-bind are both given [default: 127.0.0.1:7466]
+      --json
+          Print machine-readable JSON
+      --auth
+          Require bearer tokens (`another token create`) on every route except /health, /join and /fed; audit every call
+      --allow-remote-bind
+          Allow a non-loopback --bind (requires --auth). Prefer a tunnel instead
+      --allowed-host <ALLOWED_HOSTS>
+          Extra Host header to accept, e.g. a tunnel hostname (repeatable; requires --auth)
+      --trusted-proxy-header <TRUSTED_PROXY_HEADER>
+          Header your local tunnel sets with the client address, for the /join limit and the audit log (requires --auth). Without it, forwarding headers are ignored [possible values: cf-connecting-ip, x-forwarded-for, x-real-ip]
+      --federation
+          Act as a federation hub: serve /fed/* for paired spokes (node-signed requests)
+      --sweep-secs <SWEEP_SECS>
+          Seconds between sweeps that expire holds and stale requests [default: 30]
+  -h, --help
+          Print help
+```
+
+## another service
+
+```text
+Opt-in background service running `another serve` (launchd on macOS, systemd on Linux). Nothing is installed unless you run `another service install`
+
+Usage: another service [OPTIONS] <COMMAND>
+
+Commands:
+  install    Install (or update in place) and start the service; it restarts at login and reboot. Takes `serve`'s HTTP flags; `--home` selects the data directory it uses. An update replaces every flag, so repeat the ones you want to keep
+  uninstall  Stop the service and remove it (safe when it is not installed)
+  status     Show whether it is installed and loaded, its pid, bind address and recent log lines
+  start      Start the installed service
+  stop       Stop the installed service; it stays installed (launchd: loads again at next login; systemd: starts again at next boot or user-manager start). Uninstall to remove it
+  logs       Print the service's recent log lines
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --home <HOME>  Data directory (default: $ANOTHER_HOME, else ~/.another) [env: ANOTHER_HOME]
+      --json         Print machine-readable JSON
+  -h, --help         Print help
+```
+
+## another service install
+
+```text
+Install (or update in place) and start the service; it restarts at login and reboot. Takes `serve`'s HTTP flags; `--home` selects the data directory it uses. An update replaces every flag, so repeat the ones you want to keep
+
+Usage: another service install [OPTIONS]
+
+Options:
+      --bind <BIND>
+          HTTP bind address. Loopback unless --auth and --allow-remote-bind are both given [default: 127.0.0.1:7466]
+      --home <HOME>
+          Data directory (default: $ANOTHER_HOME, else ~/.another) [env: ANOTHER_HOME]
+      --auth
+          Require bearer tokens (needed for remote access)
+      --json
+          Print machine-readable JSON
+      --allow-remote-bind
+          Allow a non-loopback --bind (requires --auth). Prefer a tunnel instead
+      --allowed-host <ALLOWED_HOSTS>
+          Extra Host header to accept, e.g. a tunnel hostname (repeatable; requires --auth)
+      --trusted-proxy-header <TRUSTED_PROXY_HEADER>
+          Header your local tunnel sets with the client address, for the /join limit and the audit log (requires --auth). Without it, forwarding headers are ignored [possible values: cf-connecting-ip, x-forwarded-for, x-real-ip]
+      --federation
+          Also act as a federation hub
+  -h, --help
+          Print help
+```
+
+## another service uninstall
+
+```text
+Stop the service and remove it (safe when it is not installed)
+
+Usage: another service uninstall [OPTIONS]
+
+Options:
+      --home <HOME>  Data directory (default: $ANOTHER_HOME, else ~/.another) [env: ANOTHER_HOME]
+      --json         Print machine-readable JSON
+  -h, --help         Print help
+```
+
+## another service status
+
+```text
+Show whether it is installed and loaded, its pid, bind address and recent log lines
+
+Usage: another service status [OPTIONS]
+
+Options:
+      --home <HOME>    Data directory (default: $ANOTHER_HOME, else ~/.another) [env: ANOTHER_HOME]
+      --lines <LINES>  [default: 10]
+      --json           Print machine-readable JSON
+  -h, --help           Print help
+```
+
+## another service start
+
+```text
+Start the installed service
+
+Usage: another service start [OPTIONS]
+
+Options:
+      --home <HOME>  Data directory (default: $ANOTHER_HOME, else ~/.another) [env: ANOTHER_HOME]
+      --json         Print machine-readable JSON
+  -h, --help         Print help
+```
+
+## another service stop
+
+```text
+Stop the installed service; it stays installed (launchd: loads again at next login; systemd: starts again at next boot or user-manager start). Uninstall to remove it
+
+Usage: another service stop [OPTIONS]
+
+Options:
+      --home <HOME>  Data directory (default: $ANOTHER_HOME, else ~/.another) [env: ANOTHER_HOME]
+      --json         Print machine-readable JSON
+  -h, --help         Print help
+```
+
+## another service logs
+
+```text
+Print the service's recent log lines
+
+Usage: another service logs [OPTIONS]
+
+Options:
+      --home <HOME>    Data directory (default: $ANOTHER_HOME, else ~/.another) [env: ANOTHER_HOME]
+  -n, --lines <LINES>  [default: 50]
+      --json           Print machine-readable JSON
+  -h, --help           Print help
 ```
 
 ## another project

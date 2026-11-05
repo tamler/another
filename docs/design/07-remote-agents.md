@@ -103,7 +103,7 @@ It goes away after `heartbeat --end` / `POST /agent/leave` ends its session, or 
 
 **Kicking:**
 - `another agent kick NAME [--reason]` (local) does the same at once, for **any** agent, ephemeral or not. It revokes **all** of the agent's tokens, so its next request gets 401, and emits `agent.kicked` plus `lane.agent_left`.
-- Over MCP, `agent_kick {agent, target, reason?}` is for **manager agents** (program `grok_bot`) only. A remote manager acts as its token's agent and can only kick agents in its projects; others are `not_found`. Its kick revokes all of the target's tokens but releases holds and leases, and tells lanes, only in the manager's projects. People and the system agent can't be kicked.
+- Over MCP, `agent_kick {agent, target, reason?}` is for **manager agents** (program `grok_bot`) only, and **as built it is local only**: `remote::authorize` has no arm for it, so every token is refused (docs/security-review-v0.1.0.md, finding 8). `Store::kick_agent_as` already holds the rules for a remote manager, should that be enabled later: it acts as its token's agent and can only kick agents in its projects (others are `not_found`), and its kick revokes all of the target's tokens but releases holds and leases, and tells lanes, only in the manager's projects. People and the system agent can't be kicked.
 - The reason is kept on the membership row, never in an event.
 
 **Views:**

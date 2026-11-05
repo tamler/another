@@ -161,6 +161,10 @@ async fn deliver(store: &Store) -> usize {
 async fn remote_webhooks_and_streams_respect_token_scope() {
     let srv = start().await;
     let (hook_url, received) = receiver(200, srv.ct.clone()).await;
+    // The receiver is on this machine, so the person has to allow that for tokens.
+    srv.store
+        .set_setting("remote_webhook_private_hosts", "on")
+        .unwrap();
     let shop = srv
         .store
         .create_token("manager", &["/work/shop".into()], None, None)
@@ -635,4 +639,56 @@ fn same_name_on_another_node_is_not_the_token_agent() {
         .unwrap();
     assert!(mine.items.iter().any(|i| i.kind == "session.started"));
     ct.cancel();
+}
+
+/// Finding 3: the rule also holds at delivery, so turning `remote_webhook_private_hosts` back
+/// off stops a token webhook that was created while it was on. A local webhook to the same
+/// receiver keeps working.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_token_webhook_to_loopback_is_not_delivered_once_private_hosts_are_off() {
+    let srv = start().await;
+    let (hook_url, received) = receiver(200, srv.ct.clone()).await;
+    srv.store
+        .set_setting("remote_webhook_private_hosts", "on")
+        .unwrap();
+    let token = srv
+        .store
+        .create_token("manager", &["/work/shop".into()], None, None)
+        .unwrap();
+    let scope = srv.store.verify_token(&token.secret).unwrap();
+    let hook = |project_globs| another_core::NewWebhook {
+        url: hook_url.clone(),
+        filters: vec![another_core::WebhookFilter::LaneStatus],
+        project_globs,
+        description: None,
+    };
+    let by_token = srv.store.create_webhook(hook(None), Some(&scope)).unwrap();
+    srv.store
+        .set_setting("remote_webhook_private_hosts", "off")
+        .unwrap();
+    lane(&srv.store, "blocked", "/work/shop", "shopper");
+
+    let s = srv.store.clone();
+    deliver(&s).await;
+    assert!(received.lock().unwrap().is_empty());
+    let deliveries = srv
+        .store
+        .webhook_deliveries(Some(&by_token.webhook.webhook_id), None, 10)
+        .unwrap();
+    assert_eq!(deliveries.len(), 1, "{deliveries:?}");
+    assert!(
+        deliveries[0]
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("not allowed")),
+        "{deliveries:?}"
+    );
+
+    srv.store
+        .create_webhook(hook(Some(vec!["/work/shop".into()])), None)
+        .unwrap();
+    lane(&srv.store, "local", "/work/shop", "shopper");
+    deliver(&s).await;
+    assert_eq!(received.lock().unwrap().len(), 1, "the local webhook only");
+    srv.ct.cancel();
 }
