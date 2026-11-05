@@ -206,6 +206,9 @@ impl Store {
                 continue;
             }
             *open.entry(l.status.as_str().to_string()).or_default() += 1;
+            if l.leaderless_since.is_some() {
+                stuck.push(format!("{} (no lead: its lead left)", l.name));
+            }
             if matches!(l.status, LaneStatus::Blocked | LaneStatus::NeedsDecision) {
                 stuck.push(format!(
                     "{} ({}, lead {})",

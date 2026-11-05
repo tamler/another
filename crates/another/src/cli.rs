@@ -309,6 +309,25 @@ pub enum Command {
     /// manager bot.
     #[command(subcommand)]
     Decision(DecisionCmd),
+    /// Invites for remote agents: single-use codes that admit an agent with a scoped token.
+    #[command(subcommand)]
+    Invite(InviteCmd),
+    /// Join a hub as a remote agent with an invite code (saves a profile, writes MCP config).
+    Join {
+        /// The hub's URL, e.g. https://my-laptop.my-tailnet.ts.net
+        hub: String,
+        /// The invite code (anj_…).
+        code: String,
+        /// Write MCP client config: auto, claude, codex, both or none.
+        #[arg(long, value_enum, default_value = "none")]
+        write_mcp: crate::join::WriteMcp,
+        /// Send a session-start heartbeat and a "joined" report to the invite's lane.
+        #[arg(long)]
+        hello: bool,
+    },
+    /// Act on the hub you joined (uses the profile `another join` saved).
+    #[command(subcommand)]
+    Remote(RemoteCmd),
     /// Daily summary: what needs you, lanes, decisions, requests, holds, spend, agents.
     #[command(args_conflicts_with_subcommands = true)]
     Summary {
@@ -402,6 +421,89 @@ pub enum WakeCmd {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum InviteCmd {
+    /// Mint an invite. Prints the code once (and, with --print-snippet, a join script).
+    Create {
+        /// Name the joining agent gets.
+        #[arg(long)]
+        agent: String,
+        /// claude | codex | grok | grok_bot | cursor | other
+        #[arg(long, default_value = "other")]
+        program: String,
+        /// Project path or slug glob the agent may touch (repeatable, required).
+        #[arg(long = "project", short = 'p', required = true)]
+        projects: Vec<String>,
+        /// How long the code is valid (default 24h, at most 30d).
+        #[arg(long, default_value = "24h")]
+        expires: String,
+        /// How many times it can be redeemed (each use gets its own token).
+        #[arg(long, default_value_t = 1)]
+        uses: u32,
+        /// Lane the agent joins (id, name or name@project).
+        #[arg(long)]
+        lane: Option<String>,
+        /// Ephemeral agents leave after this many hours unseen (default: the node's
+        /// `remote_idle_hours` setting, 4 unless changed with `another config`).
+        #[arg(long)]
+        idle_hours: Option<u32>,
+        /// Keep the agent after its session ends or it goes idle.
+        #[arg(long)]
+        persistent: bool,
+        /// Expiry of issued tokens (default: none).
+        #[arg(long)]
+        token_ttl: Option<String>,
+        /// Also print a shell snippet for a cloud session (needs --hub-url).
+        #[arg(long, requires = "hub_url")]
+        print_snippet: bool,
+        /// The hub URL the remote agent will use.
+        #[arg(long)]
+        hub_url: Option<String>,
+    },
+    /// List invites and their status.
+    List,
+    /// Stop an invite from being redeemed.
+    Revoke { invite_id: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RemoteCmd {
+    /// Show the saved profile and send a heartbeat.
+    Status,
+    /// Heartbeat (renews holds and leases); --end ends the session.
+    Heartbeat {
+        #[arg(long)]
+        end: bool,
+    },
+    /// Lanes in your scope on the hub.
+    Lanes,
+    /// Post a status report to a lane (default: the invite's lane).
+    Report {
+        #[arg(long)]
+        lane: Option<String>,
+        #[arg(long)]
+        summary: String,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        progress: Option<u8>,
+    },
+    /// Open decisions in your scope.
+    Decisions,
+    /// Answer a decision on the hub (as the relaying agent).
+    Answer {
+        decision: String,
+        value: Option<String>,
+        #[arg(long)]
+        text: Option<String>,
+        /// The person who decided.
+        #[arg(long = "as")]
+        answered_by: Option<String>,
+    },
+    /// Leave the hub (ephemeral agents: token revoked, holds released) and forget the profile.
+    Leave,
+}
+
+#[derive(Debug, Subcommand)]
 pub enum DecisionCmd {
     /// Ask a person (default: `another config decider`, else owner) a question with 2-6 options.
     Ask {
@@ -464,6 +566,10 @@ pub enum DecisionCmd {
         /// Who is answering (default: the person asked).
         #[arg(long = "as")]
         answered_by: Option<String>,
+        /// The manager or person on this node relaying the answer (needed for another node's
+        /// decision, unless --as names a person registered here).
+        #[arg(long)]
+        relayed_by: Option<String>,
     },
     /// Withdraw a decision you asked.
     Cancel {
@@ -992,6 +1098,14 @@ pub enum AgentCmd {
     Show {
         name: String,
     },
+    /// Remove an agent now: revoke all its tokens, release its holds and leases, tell its lanes.
+    Kick {
+        name: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Agents that joined through invites, with presence (online, idle, gone).
+    Remotes,
 }
 
 #[derive(Debug, Args)]
@@ -1185,10 +1299,38 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     if let Command::Hook(cmd) = &cli.command {
         return hook_command(cmd, json, another_home);
     }
+    if let Command::Join {
+        hub,
+        code,
+        write_mcp,
+        hello,
+    } = &cli.command
+    {
+        let home = another_home()?;
+        let user_home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.clone());
+        let out = crate::join::join(&home, &user_home, hub, code, *write_mcp, *hello)?;
+        return Ok(emit(json, &out, output::joined));
+    }
+    if let Command::Remote(cmd) = &cli.command {
+        return remote_command(&another_home()?, json, cmd);
+    }
 
     let store = open(home)?;
     let code = match cli.command {
-        Command::Serve { .. } | Command::Hook(_) => unreachable!("handled above"),
+        Command::Serve { .. } | Command::Hook(_) | Command::Join { .. } | Command::Remote(_) => {
+            unreachable!("handled above")
+        }
+        Command::Invite(cmd) => invite_command(&store, json, cmd)?,
+        Command::Agent(AgentCmd::Kick { name, reason }) => {
+            let d = store.kick_agent(&name, reason.as_deref())?;
+            emit(json, &d, output::departure)
+        }
+        Command::Agent(AgentCmd::Remotes) => {
+            let list = store.remote_agents()?;
+            emit(json, &list, |l| output::remote_agents(l))
+        }
         Command::Init | Command::Status => {
             let status = output::Status {
                 node: store.node()?,
@@ -2048,6 +2190,141 @@ fn spend_command(
     })
 }
 
+fn invite_command(store: &Store, json: bool, cmd: InviteCmd) -> anyhow::Result<ExitCode> {
+    Ok(match cmd {
+        InviteCmd::Create {
+            agent,
+            program,
+            projects,
+            expires,
+            uses,
+            lane,
+            idle_hours,
+            persistent,
+            token_ttl,
+            print_snippet,
+            hub_url,
+        } => {
+            let created = store.create_agent_invite(another_core::NewAgentInvite {
+                agent,
+                program: program.parse()?,
+                project_globs: projects,
+                lane,
+                expires_in_seconds: Some(parse_secs(&expires)?),
+                max_uses: Some(uses),
+                ephemeral: !persistent,
+                idle_hours,
+                token_ttl_seconds: token_ttl.as_deref().map(parse_secs).transpose()?,
+            })?;
+            let snippet = if print_snippet {
+                Some(crate::join::snippet(
+                    hub_url.as_deref().unwrap_or_default(),
+                    &created.code,
+                    &created.invite.expires_at,
+                ))
+            } else {
+                None
+            };
+            let out = serde_json::json!({ "invite": created.invite, "code": created.code, "snippet": snippet });
+            emit(json, &out, |o| {
+                let mut s = output::invites(std::slice::from_ref(&created.invite));
+                s.push_str(&format!(
+                    "code (single use, shown once): {}\n",
+                    o["code"].as_str().unwrap_or_default()
+                ));
+                match o["snippet"].as_str() {
+                    Some(sn) => s.push_str(&format!("\n{sn}")),
+                    None => s.push_str(
+                        "join with: another join <hub-url> <code>   (or POST <hub>/join)\n",
+                    ),
+                }
+                s
+            })
+        }
+        InviteCmd::List => {
+            let list = store.agent_invites()?;
+            emit(json, &list, |l| output::invites(l))
+        }
+        InviteCmd::Revoke { invite_id } => {
+            let i = store.revoke_agent_invite(&invite_id)?;
+            emit(json, &i, |i| {
+                format!("revoked invite {} ({})", i.invite_id, i.agent)
+            })
+        }
+    })
+}
+
+fn remote_command(home: &Path, json: bool, cmd: &RemoteCmd) -> anyhow::Result<ExitCode> {
+    use crate::join::{call, forget, load_profile};
+    use serde_json::json as j;
+    let p = load_profile(home)?;
+    let out = match cmd {
+        RemoteCmd::Status => {
+            let hb = call(
+                &p,
+                "POST",
+                "/agent/heartbeat",
+                Some(j!({ "phase": "beat" })),
+            )?;
+            j!({ "hub": p.hub, "agent": p.agent, "lane": p.lane, "project_globs": p.project_globs, "heartbeat": hb })
+        }
+        RemoteCmd::Heartbeat { end } => call(
+            &p,
+            "POST",
+            "/agent/heartbeat",
+            Some(j!({ "phase": if *end { "end" } else { "beat" } })),
+        )?,
+        RemoteCmd::Lanes => call(&p, "GET", "/lanes", None)?,
+        RemoteCmd::Report {
+            lane,
+            summary,
+            status,
+            progress,
+        } => {
+            let lane = lane
+                .clone()
+                .or(p.lane.clone())
+                .ok_or_else(|| anyhow::anyhow!("no lane: pass --lane"))?;
+            call(
+                &p,
+                "POST",
+                &format!("/lanes/{lane}/report"),
+                Some(j!({ "summary": summary, "status": status, "progress": progress })),
+            )?
+        }
+        RemoteCmd::Decisions => call(&p, "GET", "/decisions", None)?,
+        RemoteCmd::Answer {
+            decision,
+            value,
+            text,
+            answered_by,
+        } => call(
+            &p,
+            "POST",
+            &format!("/decisions/{decision}/answer"),
+            Some(j!({ "value": value, "text": text, "answered_by": answered_by })),
+        )?,
+        RemoteCmd::Leave => {
+            let v = call(&p, "POST", "/agent/leave", None)?;
+            forget(home)?;
+            v
+        }
+    };
+    Ok(emit(json, &out, |v| output::remote(cmd_name(cmd), v)))
+}
+
+fn cmd_name(cmd: &RemoteCmd) -> &'static str {
+    match cmd {
+        RemoteCmd::Status => "status",
+        RemoteCmd::Heartbeat { .. } => "heartbeat",
+        RemoteCmd::Lanes => "lanes",
+        RemoteCmd::Report { .. } => "report",
+        RemoteCmd::Decisions => "decisions",
+        RemoteCmd::Answer { .. } => "answer",
+        RemoteCmd::Leave => "leave",
+    }
+}
+
 fn decision_command(store: &Store, json: bool, cmd: DecisionCmd) -> anyhow::Result<ExitCode> {
     use another_core::{
         decision_markdown, parse_deadline, AnswerDecision, DecisionFilter, DecisionOption,
@@ -2156,6 +2433,7 @@ fn decision_command(store: &Store, json: bool, cmd: DecisionCmd) -> anyhow::Resu
             value,
             text,
             answered_by,
+            relayed_by,
         } => {
             let d = store.answer_decision(
                 AnswerDecision {
@@ -2163,7 +2441,7 @@ fn decision_command(store: &Store, json: bool, cmd: DecisionCmd) -> anyhow::Resu
                     value,
                     text,
                     answered_by,
-                    relayed_by: None,
+                    relayed_by,
                 },
                 None,
             )?;

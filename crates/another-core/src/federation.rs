@@ -183,7 +183,7 @@ fn classify(kind: &str, payload: &Value, origin: &str) -> Share {
     match kind.split('.').next().unwrap_or_default() {
         // Tokens, peers, the scheduled summary (it carries the digest) and node settings
         // stay on this node.
-        "token" | "peer" | "summary" => return Share::Never,
+        "token" | "peer" | "invite" | "summary" => return Share::Never,
         _ => {}
     }
     // Node-local signals (D38): a refused hold and an expiring lease are about this node's
@@ -207,6 +207,16 @@ fn classify(kind: &str, payload: &Value, origin: &str) -> Share {
                 Share::Mail(nodes)
             }
         }
+        // A relayed decision answer (it may carry free text) goes only to the decision's node.
+        "decision.answer_relayed" => match payload.get("decision_node").and_then(Value::as_str) {
+            Some(n) if n != origin => Share::Mail(vec![n.to_string()]),
+            _ => Share::Never,
+        },
+        // A report proposed for another node's lane goes to that node only.
+        "lane.report_proposed" => match payload.get("lane_node").and_then(Value::as_str) {
+            Some(n) if n != origin => Share::Mail(vec![n.to_string()]),
+            _ => Share::Never,
+        },
         "delivery.read" | "delivery.acked" => {
             match payload.get("message_node").and_then(Value::as_str) {
                 Some(n) if n != origin => Share::Mail(vec![n.to_string()]),
@@ -632,14 +642,27 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                 .and_then(Value::as_i64)
                 .unwrap_or(ts + ttl * 1000);
             let exclusive = p.get("exclusive").and_then(Value::as_bool).unwrap_or(true);
+            // Keep the hold's lane when this node knows that lane (its own or a mirror).
+            let lane_id = match s("lane_id") {
+                Some(l)
+                    if tx
+                        .query_row("SELECT 1 FROM lanes WHERE lane_id = ?1", [&l], |_| Ok(()))
+                        .optional()?
+                        .is_some() =>
+                {
+                    Some(l)
+                }
+                _ => None,
+            };
             tx.execute(
                 "INSERT INTO holds (hold_id, node_id, project_id, agent_id, pattern, exclusive, reason,
-                   ttl_seconds, created_at, renewed_at, expires_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10)
+                   ttl_seconds, created_at, renewed_at, expires_at, lane_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10, ?11)
                  ON CONFLICT(hold_id) DO UPDATE SET exclusive = excluded.exclusive,
                    reason = excluded.reason, ttl_seconds = excluded.ttl_seconds,
-                   renewed_at = excluded.renewed_at, expires_at = excluded.expires_at",
-                params![hold_id, origin, project, agent, s("pattern"), exclusive, s("reason"), ttl, ts, expires],
+                   renewed_at = excluded.renewed_at, expires_at = excluded.expires_at,
+                   lane_id = excluded.lane_id",
+                params![hold_id, origin, project, agent, s("pattern"), exclusive, s("reason"), ttl, ts, expires, lane_id],
             )?;
         }
         "hold.renewed" => {
@@ -666,6 +689,91 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                  WHERE hold_id = ?1 AND node_id = ?2 AND released_at IS NULL",
                 params![s("hold_id"), origin],
             )?;
+        }
+        // Lanes are written only by their owner node; others keep a read-only mirror (no
+        // charter or reports: events never carry them). docs/design/07-remote-agents.md §5.
+        "lane.created" => {
+            let (Some(lane_id), Some(project), Some(lead), Some(name)) =
+                (s("lane_id"), s("project_id"), s("lead_id"), s("name"))
+            else {
+                return Ok(());
+            };
+            let creator = match s("created_by") {
+                Some(c) => Some(c),
+                None => tx
+                    .query_row(
+                        "SELECT agent_id FROM agents WHERE address = ?1",
+                        [&ev.actor],
+                        |r| r.get(0),
+                    )
+                    .optional()?,
+            }
+            .unwrap_or_else(|| lead.clone());
+            if !project_exists(tx, &project)?
+                || !agent_exists(tx, &lead)?
+                || !agent_exists(tx, &creator)?
+            {
+                return Ok(());
+            }
+            tx.execute(
+                "INSERT OR IGNORE INTO lanes (lane_id, node_id, project_id, name, charter, lead_id,
+                   created_by, status, created_at, updated_at, event_id)
+                 VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, ?7, ?8, ?8, ?9)",
+                params![
+                    lane_id,
+                    origin,
+                    project,
+                    name,
+                    lead,
+                    creator,
+                    s("status").unwrap_or_else(|| "planned".into()),
+                    ts,
+                    ev.event_id
+                ],
+            )?;
+        }
+        "lane.status_changed" | "lane.closed" => {
+            let status = if ev.kind == "lane.closed" {
+                s("status")
+            } else {
+                s("to")
+            };
+            let Some(status) = status else { return Ok(()) };
+            let closed = matches!(status.as_str(), "done" | "abandoned");
+            tx.execute(
+                "UPDATE lanes SET status = ?2, updated_at = ?3,
+                   closed_at = CASE WHEN ?4 THEN ?3 ELSE closed_at END
+                 WHERE lane_id = ?1 AND node_id = ?5",
+                params![s("lane_id"), status, ts, closed, origin],
+            )?;
+        }
+        "lane.updated" => {
+            if let Some(lead) = s("lead_id").filter(|l| agent_exists(tx, l).unwrap_or(false)) {
+                tx.execute(
+                    "UPDATE lanes SET lead_id = ?2, updated_at = ?3 WHERE lane_id = ?1 AND node_id = ?4",
+                    params![s("lane_id"), lead, ts, origin],
+                )?;
+            }
+        }
+        "lane.reported" => {
+            tx.execute(
+                "UPDATE lanes SET updated_at = ?2 WHERE lane_id = ?1 AND node_id = ?3",
+                params![s("lane_id"), ts, origin],
+            )?;
+        }
+        "decision.created" => crate::decisions::mirror_created_tx(tx, ev, p)?,
+        "decision.answered" | "decision.expired" | "decision.cancelled" => {
+            crate::decisions::mirror_closed_tx(tx, ev, p)?
+        }
+        "decision.answer_relayed" => {
+            if s("decision_node").as_deref() == Some(tx.node_id) {
+                crate::decisions::apply_relayed_tx(tx, ev, p)?;
+            }
+        }
+        "lane.report_proposed" => {
+            if s("lane_node").as_deref() == Some(tx.node_id) {
+                crate::lanes::apply_proposal_tx(tx, ev, p)?;
+            }
         }
         "resource.registered" => {
             let Some(rid) = s("resource_id") else {

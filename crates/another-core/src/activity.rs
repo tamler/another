@@ -358,6 +358,22 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             },
             json!({ "decision_id": s("decision_id"), "lane_id": p.get("lane_id") }),
         ),
+        // The relayed answer's free text stays out of the feed.
+        "decision.answer_relayed" => (
+            format!(
+                "{actor} relayed an answer to decision {} on another node",
+                s("decision_id")
+            ),
+            json!({ "decision_id": s("decision_id"), "decision_node": s("decision_node") }),
+        ),
+        "decision.answer_ignored" => (
+            format!(
+                "a relayed answer to decision {} was ignored (already {})",
+                s("decision_id"),
+                s("status")
+            ),
+            json!({ "decision_id": s("decision_id") }),
+        ),
         "decision.overdue" => (
             format!(
                 "decision {} is past its deadline, still waiting",
@@ -463,6 +479,33 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             ),
             json!({ "account_id": s("account_id") }),
         ),
+        "agent.joined" => (
+            format!("{actor} joined from an invite ({})", s("program")),
+            json!({ "agent_id": s("agent_id"), "lane_id": p.get("lane_id") }),
+        ),
+        "agent.gone" | "agent.kicked" => {
+            let who = agent_address(conn, &s("agent_id"))?;
+            let verb = if row.kind == "agent.kicked" {
+                "was kicked"
+            } else {
+                "left"
+            };
+            (
+                format!("{who} {verb} ({})", s("reason")),
+                json!({ "agent_id": s("agent_id") }),
+            )
+        }
+        "lane.agent_joined" => (
+            format!("{actor} joined lane {}", s("name")),
+            json!({ "lane_id": s("lane_id"), "agent_id": s("agent_id") }),
+        ),
+        "lane.agent_left" => {
+            let who = agent_address(conn, &s("agent_id"))?;
+            (
+                format!("{who} left lane {} ({})", s("name"), s("reason")),
+                json!({ "lane_id": s("lane_id"), "agent_id": s("agent_id") }),
+            )
+        }
         "lane.hold_conflict" => {
             let lane_name = |id: &str| -> Result<String> {
                 Ok(conn
@@ -612,6 +655,25 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
         ),
         "lane.created" => (
             format!("{actor} created lane {} ({})", s("name"), s("status")),
+            json!({ "lane_id": s("lane_id") }),
+        ),
+        "lane.report_proposed" => (
+            format!(
+                "{actor} proposed a report for lane {} (applied by its node)",
+                s("name")
+            ),
+            json!({ "lane_id": s("lane_id"), "proposal_id": s("proposal_id") }),
+        ),
+        "lane.proposal_ignored" => (
+            format!(
+                "a proposed report for lane {} was not applied ({})",
+                s("lane_id"),
+                s("reason")
+            ),
+            json!({ "lane_id": s("lane_id"), "proposal_id": s("proposal_id") }),
+        ),
+        "lane.leaderless" => (
+            format!("lane {} has no lead (its lead left)", s("name")),
             json!({ "lane_id": s("lane_id") }),
         ),
         "lane.updated" => (

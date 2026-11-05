@@ -14,7 +14,7 @@ Milestones 1–6 are complete (tamler/another#1–#8). The coordination series i
 | 4 | Lane-aware holds, pre-edit hook | [04-lane-holds](docs/design/04-lane-holds.md) | tamler/another#13 |
 | 5 | Spend ledger, approval gate | [05-spend](docs/design/05-spend.md) | tamler/another#14 |
 | 6 | Daily summary | [06-summary](docs/design/06-summary.md) | tamler/another#15 |
-| 7 | First-class remote agents: invites, join, lifecycle, federation tie-in | remote-agents | (planned) |
+| 7 | First-class remote agents: invites, join, lifecycle, federation tie-in | [07-remote-agents](docs/design/07-remote-agents.md) | tamler/another#16 |
 
 Keep the [README.md](README.md) status and [CHANGELOG.md](CHANGELOG.md) (Unreleased) current in every PR.
 
@@ -81,6 +81,14 @@ Every way events leave the node applies the same visibility rule (D38). When add
 - **Built from scoped reads only.** Never query tables directly for a remote caller; a cursor (`since` event id) resolves through the scoped feed.
 - **The scheduled rollup is node-wide:** `summary.daily` is node-local and invisible to tokens, so only local all-project webhooks (filter `daily_summary`) or mail from the system agent carry it.
 - **People are not agents:** list program `human` separately, and never count the system agent as active.
+
+## Remote agents (phase 7)
+
+- **No free text in events:** answer text, notes, report summaries and kick reasons travel as mail or stay in rows; events and webhook payloads carry ids and status only.
+- **Token-scoped lifecycle:** heartbeats, leave and departures through a token touch only holds and leases in its projects.
+- **One writer per lane:** never write to a mirror (`lane.node` set). Reports become proposals for the owner, and decisions can't use a mirrored lane.
+- **Identity is never taken over:** invites can't reuse a registered name.
+- **Leads:** a departing lead hands over to the longest-active member, else the lane is flagged leaderless. Never auto-block.
 
 ## Review routing rule
 

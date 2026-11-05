@@ -141,6 +141,16 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
             "/decisions/{id}/answer",
             axum::routing::post(crate::http_decisions::answer),
         )
+        .route(
+            "/agent/heartbeat",
+            axum::routing::post(crate::join::heartbeat),
+        )
+        .route("/agent/leave", axum::routing::post(crate::join::leave))
+        .route("/lanes", axum::routing::get(crate::join::lanes))
+        .route(
+            "/lanes/{lane}/report",
+            axum::routing::post(crate::join::lane_report),
+        )
         .with_state(store.clone());
     let protected = if opts.auth {
         protected.layer(axum::middleware::from_fn_with_state(
@@ -152,6 +162,16 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
     };
     let protected = if opts.federation {
         protected.merge(crate::fed::router(store.clone()))
+    } else {
+        protected
+    };
+    // Redeeming an invite is the one unauthenticated route besides /health: the code is the
+    // credential. Only with --auth, since issued tokens need it.
+    let protected = if opts.auth {
+        protected.route(
+            "/join",
+            axum::routing::post(crate::join::join_handler).with_state(store.clone()),
+        )
     } else {
         protected
     };

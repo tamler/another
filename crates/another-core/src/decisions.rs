@@ -100,6 +100,8 @@ pub enum DecisionStatus {
     Answered,
     Expired,
     Cancelled,
+    /// Another node's decision: an answer was relayed to its node, which has not confirmed yet.
+    AnswerSent,
 }
 
 impl DecisionStatus {
@@ -109,6 +111,7 @@ impl DecisionStatus {
             DecisionStatus::Answered => "answered",
             DecisionStatus::Expired => "expired",
             DecisionStatus::Cancelled => "cancelled",
+            DecisionStatus::AnswerSent => "answer_sent",
         }
     }
 }
@@ -121,6 +124,7 @@ impl std::str::FromStr for DecisionStatus {
             "answered" => Ok(DecisionStatus::Answered),
             "expired" => Ok(DecisionStatus::Expired),
             "cancelled" => Ok(DecisionStatus::Cancelled),
+            "answer_sent" => Ok(DecisionStatus::AnswerSent),
             other => Err(Error::Invalid(format!(
                 "unknown decision status {other:?}; expected open, answered, expired or cancelled"
             ))),
@@ -163,6 +167,10 @@ pub struct Decision {
     pub thread_id: String,
     pub created_at: String,
     pub updated_at: String,
+    /// The node the decision was asked on, when it is a mirror of another node's decision
+    /// (answers are relayed there). `None` for this node's decisions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
 }
 
 /// Input for [`Store::ask_decision`].
@@ -416,6 +424,7 @@ fn decision_from_row(r: &Row<'_>) -> rusqlite::Result<Row0> {
             thread_id: r.get(19)?,
             created_at: fmt_ts(r.get(20)?),
             updated_at: fmt_ts(r.get(21)?),
+            node: None,
         },
         project_id: r.get(22)?,
         lane_id: r.get(23)?,
@@ -536,6 +545,10 @@ fn release_lane(tx: &Tx<'_>, actor: &AgentRef, lane_id: Option<&str>) -> Result<
         return Ok(());
     }
     let (lane, project_id): (Lane, String) = resolve_lane(tx, tx.node_id, lane_id)?;
+    if lane.node.is_some() {
+        // Never write to another node's lane mirror.
+        return Ok(());
+    }
     if lane.status == LaneStatus::NeedsDecision {
         set_status(tx, actor, &lane, &project_id, LaneStatus::Working)?;
     }
@@ -783,6 +796,16 @@ pub(crate) fn ask_tx(
         )?),
         None => None,
     };
+    // A mirrored lane belongs to another node: asking here would flip only the mirror to
+    // `needs_decision`. The owner node is checked before anything else about the lane.
+    if let Some((l, _)) = &lane {
+        if let Some(node) = &l.node {
+            return Err(Error::Conflict(format!(
+                "lane {} is owned by node {node}: ask the decision there (its MCP / HTTP API)",
+                l.name
+            )));
+        }
+    }
     let project_id = match (home, &lane) {
         (Some(p), _) => p,
         (None, Some((_, lane_project))) => lane_project.clone(),
@@ -844,6 +867,10 @@ pub(crate) fn ask_tx(
             // Ids and status only: the question and option labels stay in the decisions
             // table and the question mail (D39).
             "option_count": input.options.len(),
+            // Option values are single-word identifiers (like an answer's `value`), so
+            // other nodes can validate answers to their mirror; labels stay here.
+            "option_values": input.options.iter().map(|o| o.value.clone()).collect::<Vec<_>>(),
+            "message_id": msg.message_id,
             "allow_free_text": input.allow_free_text,
             "deadline_at": input.deadline_at,
             "on_timeout": input.on_timeout.as_str(),
@@ -884,6 +911,664 @@ pub(crate) fn ask_tx(
     }
     touch(tx, &asker.id)?;
     Ok(decision_id)
+}
+
+/// Answer a local decision inside a write transaction. `relayed` is the agent that relayed
+/// the answer (local API caller, or another node's agent for a relayed answer).
+/// `answered_by` travels in events and the feed, which carry names, not free text (D39).
+fn check_answered_by(answered_by: &str) -> Result<()> {
+    check_text("answered_by", answered_by, 64)?;
+    if answered_by
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@'))
+    {
+        Ok(())
+    } else {
+        Err(Error::Invalid(format!(
+            "answered_by {answered_by:?} must be a name: ASCII letters, digits, '-', '_', '.' or '@'"
+        )))
+    }
+}
+
+pub(crate) fn answer_tx(
+    tx: &Tx<'_>,
+    input: &AnswerDecision,
+    relayed: Option<AgentRef>,
+    scope: Option<&TokenScope>,
+) -> Result<Decision> {
+    let row = load_in(tx, tx.node_id, &input.decision, scope)?;
+    let d = &row.d;
+    if d.status != DecisionStatus::Open {
+        return Err(Error::Conflict(format!(
+            "decision {} is already {}",
+            d.decision_id,
+            d.status.as_str()
+        )));
+    }
+    let value = input
+        .value
+        .as_ref()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let text = input
+        .text
+        .as_ref()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    let option = match &value {
+        Some(v) => Some(
+            d.options
+                .iter()
+                // An exact match wins over a case-insensitive one ("a" vs "A").
+                .find(|o| o.value == *v)
+                .or_else(|| d.options.iter().find(|o| o.value.eq_ignore_ascii_case(v)))
+                .or_else(|| {
+                    // Accept the option number shown on the phone (1-based).
+                    v.parse::<usize>()
+                        .ok()
+                        .and_then(|i| i.checked_sub(1))
+                        .and_then(|i| d.options.get(i))
+                })
+                .ok_or_else(|| {
+                    Error::Invalid(format!(
+                        "{v:?} is not an option; choose one of {}",
+                        d.options
+                            .iter()
+                            .map(|o| o.value.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                })?
+                .clone(),
+        ),
+        None => None,
+    };
+    if let Some(t) = &text {
+        if d.allow_free_text {
+            check_text("answer text", t, MAX_ANSWER_TEXT)?;
+        } else if option.is_some() {
+            // A short note next to the chosen option is always allowed.
+            check_text("note", t, MAX_OPTION_NOTE)?;
+        } else {
+            return Err(Error::Invalid(
+                "this decision does not accept free text; choose an option (a short note may go with it)".into(),
+            ));
+        }
+    }
+    if option.is_none() && text.is_none() {
+        return Err(Error::Invalid(if d.allow_free_text {
+            "give an option value or free text".into()
+        } else {
+            "give an option value".into()
+        }));
+    }
+    let answered_by = input
+        .answered_by
+        .as_ref()
+        .map(|a| a.trim().to_string())
+        .filter(|a| !a.is_empty())
+        .unwrap_or_else(|| d.human.clone());
+    check_answered_by(&answered_by)?;
+    if let Some(r) = &relayed {
+        check_relayer(tx, r, &row.asker_id)?;
+    }
+    let human = agent_by_id(tx, &row.human_id)?;
+    let asker = agent_by_id(tx, &row.asker_id)?;
+    tx.emit(
+        relayed
+            .as_ref()
+            .map_or(answered_by.as_str(), |r| r.address.as_str()),
+        "decision.answered",
+        json!({
+            "decision_id": d.decision_id,
+            "project_id": row.project_id,
+            "lane_id": row.lane_id,
+            "asker_id": row.asker_id,
+            "value": option.as_ref().map(|o| o.value.clone()),
+            "has_text": text.is_some(),
+            "answered_by": answered_by,
+            "relayed_by": relayed.as_ref().map(|r| r.address.clone()),
+        }),
+    )?;
+    let mut body = String::new();
+    if let Some(o) = &option {
+        body.push_str(&format!("Value: {}\nLabel: {}\n", o.value, o.label));
+    }
+    if let Some(t) = &text {
+        body.push_str(&format!("\n{t}\n"));
+    }
+    body.push_str(&format!("\nAnswered by {answered_by}"));
+    if let Some(r) = &relayed {
+        body.push_str(&format!(" (relayed by {})", r.address));
+    }
+    body.push_str(&format!(
+        " at {}.\n(decision {})",
+        fmt_ts(tx.now),
+        d.decision_id
+    ));
+    let subject = match &option {
+        Some(o) => format!("[decision] answered: {} ({})", o.value, d.decision_id),
+        None => format!("[decision] answered ({})", d.decision_id),
+    };
+    let msg = send_tx(
+        tx,
+        &SendMessage {
+            from: human.address.clone(),
+            to: vec![asker.address.clone()],
+            subject,
+            body,
+            importance: Importance::High,
+            reply_to: Some(row.message_id.clone()),
+            ..Default::default()
+        },
+    )?;
+    tx.execute(
+        "UPDATE decisions SET status = 'answered', answer_value = ?2, answer_text = ?3,
+           answered_by = ?4, relayed_by = ?5, answered_at = ?6, updated_at = ?6,
+           answer_message_id = ?7
+         WHERE decision_id = ?1",
+        params![
+            d.decision_id,
+            option.as_ref().map(|o| o.value.clone()),
+            text,
+            answered_by,
+            relayed.as_ref().map(|r| r.address.clone()),
+            tx.now,
+            msg.message_id
+        ],
+    )?;
+    close_request(
+        tx,
+        &d.request_id,
+        "done",
+        Some(&human.id),
+        &format!(
+            "answered by {answered_by}: {}",
+            option.as_ref().map_or("free text", |o| o.value.as_str())
+        ),
+    )?;
+    crate::spend::decision_closed_tx(
+        tx,
+        &d.decision_id,
+        option.as_ref().is_some_and(|o| o.value == "approve"),
+    )?;
+    release_lane(
+        tx,
+        relayed.as_ref().unwrap_or(&human),
+        row.lane_id.as_deref(),
+    )?;
+    Ok(load(tx, tx.node_id, &d.decision_id)?.d)
+}
+
+// ---------------------------------------------------------------------------
+// Federation: mirrors of other nodes' decisions, relayed answers (07-remote-agents.md §5)
+
+const MIRROR_SELECT: &str =
+    "SELECT m.decision_id, m.status, m.question, m.options, m.allow_free_text,
+       m.deadline_at, m.human, a.address, p.slug, l.name, m.answer_value, m.answered_by,
+       m.relayed_by, m.answered_at, m.created_at, m.updated_at, n.display_name, m.project_id,
+       m.node_id
+     FROM remote_decisions m
+     LEFT JOIN agents a ON a.agent_id = m.asker_id
+     LEFT JOIN projects p ON p.project_id = m.project_id
+     LEFT JOIN lanes l ON l.lane_id = m.lane_id
+     LEFT JOIN nodes n ON n.node_id = m.node_id";
+
+/// A mirrored decision, with its project id and origin node id.
+fn mirror_from_row(r: &Row<'_>) -> rusqlite::Result<(Decision, Option<String>, String)> {
+    let options: Vec<DecisionOption> =
+        serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default();
+    let value: Option<String> = r.get(10)?;
+    let answered_at: Option<i64> = r.get(13)?;
+    let answer = answered_at.map(|at| DecisionAnswer {
+        label: value
+            .as_ref()
+            .and_then(|v| options.iter().find(|o| &o.value == v))
+            .map(|o| o.label.clone()),
+        value: value.clone(),
+        text: None,
+        answered_by: r
+            .get::<_, Option<String>>(11)
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        relayed_by: r.get(12).ok().flatten(),
+        answered_at: fmt_ts(at),
+    });
+    Ok((
+        Decision {
+            decision_id: r.get(0)?,
+            status: r
+                .get::<_, String>(1)?
+                .parse()
+                .unwrap_or(DecisionStatus::Open),
+            question: r.get(2)?,
+            options,
+            allow_free_text: r.get(4)?,
+            context_links: vec![],
+            deadline_at: r.get::<_, Option<i64>>(5)?.map(fmt_ts),
+            on_timeout: DecisionTimeout::KeepOpen,
+            default_value: None,
+            human: r.get(6)?,
+            asker: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
+            project: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+            lane: r.get(9)?,
+            answer,
+            request_id: String::new(),
+            thread_id: String::new(),
+            created_at: fmt_ts(r.get(14)?),
+            updated_at: fmt_ts(r.get(15)?),
+            node: Some(
+                r.get::<_, Option<String>>(16)?
+                    .unwrap_or_else(|| r.get(18).unwrap_or_default()),
+            ),
+        },
+        r.get(17)?,
+        r.get(18)?,
+    ))
+}
+
+fn load_mirror(conn: &Connection, key: &str) -> Result<Option<(Decision, Option<String>, String)>> {
+    Ok(conn
+        .query_row(
+            &format!("{MIRROR_SELECT} WHERE m.decision_id = ?1"),
+            [key.trim().to_ascii_uppercase()],
+            mirror_from_row,
+        )
+        .optional()?)
+}
+
+/// Store another node's `decision.created` as a mirror.
+pub(crate) fn mirror_created_tx(
+    tx: &Tx<'_>,
+    ev: &crate::federation::WireEvent,
+    p: &serde_json::Value,
+) -> Result<()> {
+    let s = |k: &str| {
+        p.get(k)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    let Some(id) = s("decision_id") else {
+        return Ok(());
+    };
+    // Events carry no question text: use the question mail if it was delivered here (the
+    // person lives on this node), else point at the decision's node.
+    let question: String = match s("message_id") {
+        Some(mid) => tx
+            .query_row(
+                "SELECT body FROM messages WHERE message_id = ?1",
+                [&mid],
+                |r| r.get(0),
+            )
+            .optional()?,
+        None => None,
+    }
+    .or_else(|| s("question"))
+    .unwrap_or_else(|| {
+        format!(
+            "(question asked on node {}; see the decision mail)",
+            ev.node_id
+        )
+    });
+    let options: Vec<DecisionOption> = match p.get("option_values").and_then(|v| v.as_array()) {
+        Some(values) => values
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|v| DecisionOption {
+                value: v.to_string(),
+                label: v.to_string(),
+                description: None,
+            })
+            .collect(),
+        None => p
+            .get("options")
+            .and_then(|o| serde_json::from_value(o.clone()).ok())
+            .unwrap_or_default(),
+    };
+    let human: String = match s("human_id") {
+        Some(hid) => tx
+            .query_row(
+                "SELECT address FROM agents WHERE agent_id = ?1",
+                [&hid],
+                |r| r.get(0),
+            )
+            .optional()?,
+        None => None,
+    }
+    .or_else(|| s("human"))
+    .unwrap_or_default();
+    let known = |table: &str, col: &str, v: &Option<String>| -> Result<Option<String>> {
+        match v {
+            Some(v) => Ok(tx
+                .query_row(
+                    &format!("SELECT 1 FROM {table} WHERE {col} = ?1"),
+                    [v],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .map(|_| v.clone())),
+            None => Ok(None),
+        }
+    };
+    let project = known("projects", "project_id", &s("project_id"))?;
+    let lane = known("lanes", "lane_id", &s("lane_id"))?;
+    let asker = known("agents", "agent_id", &s("asker_id"))?;
+    tx.execute(
+        "INSERT OR IGNORE INTO remote_decisions (decision_id, node_id, project_id, lane_id,
+           asker_id, human, question, options, allow_free_text, deadline_at, status, created_at,
+           updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'open', ?11, ?11)",
+        params![
+            id,
+            ev.node_id,
+            project,
+            lane,
+            asker,
+            human,
+            question,
+            serde_json::to_string(&options)?,
+            p.get("allow_free_text")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            p.get("deadline_at").and_then(serde_json::Value::as_i64),
+            ev.ts
+        ],
+    )?;
+    Ok(())
+}
+
+/// The origin closed a mirrored decision (answered, expired, cancelled).
+pub(crate) fn mirror_closed_tx(
+    tx: &Tx<'_>,
+    ev: &crate::federation::WireEvent,
+    p: &serde_json::Value,
+) -> Result<()> {
+    let s = |k: &str| {
+        p.get(k)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    let status = ev.kind.trim_start_matches("decision.");
+    tx.execute(
+        "UPDATE remote_decisions SET status = ?2, answer_value = ?3, answered_by = ?4,
+           relayed_by = ?5, answered_at = CASE WHEN ?3 IS NULL THEN answered_at ELSE ?6 END,
+           updated_at = ?6
+         WHERE decision_id = ?1 AND node_id = ?7",
+        params![
+            s("decision_id"),
+            status,
+            s("value"),
+            s("answered_by"),
+            s("relayed_by"),
+            ev.ts,
+            ev.node_id
+        ],
+    )?;
+    Ok(())
+}
+
+/// Answering another node's decision: validate against the mirror, mark it, and relay the
+/// answer to the decision's node only. Returns `None` for local decisions.
+fn relay_answer_tx(
+    tx: &Tx<'_>,
+    input: &AnswerDecision,
+    scope: Option<&TokenScope>,
+) -> Result<Option<Decision>> {
+    if load(tx, tx.node_id, &input.decision).is_ok() {
+        return Ok(None);
+    }
+    let Some((d, project_id, origin)) = load_mirror(tx, &input.decision)? else {
+        return Ok(None);
+    };
+    // A hidden mirror is a missing decision, as for local ones.
+    let hidden = match (&project_id, scope) {
+        (Some(p), Some(s)) => !scope_allows_project(tx, s, p)?,
+        (None, Some(_)) => true,
+        _ => false,
+    };
+    if hidden {
+        return Err(Error::NotFound(format!("no decision {:?}", input.decision)));
+    }
+    if d.status != DecisionStatus::Open {
+        return Err(Error::Conflict(format!(
+            "decision {} is already {}",
+            d.decision_id,
+            d.status.as_str()
+        )));
+    }
+    let value = input
+        .value
+        .as_ref()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let text = input
+        .text
+        .as_ref()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    let option = match &value {
+        Some(v) => Some(
+            d.options
+                .iter()
+                .find(|o| o.value == *v)
+                .or_else(|| d.options.iter().find(|o| o.value.eq_ignore_ascii_case(v)))
+                .or_else(|| {
+                    v.parse::<usize>()
+                        .ok()
+                        .and_then(|i| i.checked_sub(1))
+                        .and_then(|i| d.options.get(i))
+                })
+                .ok_or_else(|| Error::Invalid(format!("{v:?} is not an option")))?
+                .clone(),
+        ),
+        None => None,
+    };
+    // Same rules as a local answer, checked before anything is marked or sent.
+    if let Some(t) = &text {
+        if d.allow_free_text {
+            check_text("answer text", t, MAX_ANSWER_TEXT)?;
+        } else if option.is_some() {
+            check_text("note", t, MAX_OPTION_NOTE)?;
+        } else {
+            return Err(Error::Invalid(
+                "this decision does not accept free text; choose an option (a short note may go with it)".into(),
+            ));
+        }
+    }
+    if option.is_none() && text.is_none() {
+        return Err(Error::Invalid("give an option value".into()));
+    }
+    // Another node's decision is answered by someone here: the relaying agent (or the person
+    // answering, when they are registered here). The origin only accepts a relayer of this
+    // node, so one is required.
+    let relayed_ref = match (&input.relayed_by, &input.answered_by) {
+        (Some(r), _) => Some(resolve_agent(tx, tx.node_id, r)?),
+        (None, Some(a)) => resolve_agent(tx, tx.node_id, a).ok(),
+        (None, None) => None,
+    };
+    if relayed_ref.is_none() {
+        return Err(Error::Invalid(
+            "answering another node's decision needs a relaying agent on this node: --relayed-by (a confirmed manager or person), or --as a person registered here".into(),
+        ));
+    }
+    // The same relayer rule the origin applies, checked before anything is marked or sent,
+    // so a refused relayer can't leave the mirror stuck in `answer_sent`.
+    if let Some(r) = &relayed_ref {
+        let asker: Option<String> = tx
+            .query_row(
+                "SELECT asker_id FROM remote_decisions WHERE decision_id = ?1",
+                [&d.decision_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        check_relayer(tx, r, asker.as_deref().unwrap_or(""))?;
+    }
+    if let Some(answered_by) = &input.answered_by {
+        check_answered_by(answered_by.trim())?;
+    }
+    // Free text never goes in an event: it travels as mail to the asking agent on the
+    // decision's node (mail is routed only to its recipients' nodes), and the relay event
+    // names that message.
+    let text_message_id = match &text {
+        Some(t) => {
+            let (name, slug): (String, Option<String>) = tx
+                .query_row(
+                    "SELECT a.name, p.slug FROM remote_decisions r
+                     JOIN agents a ON a.agent_id = r.asker_id
+                     LEFT JOIN projects p ON p.project_id = a.project_id
+                     WHERE r.decision_id = ?1",
+                    [&d.decision_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?
+                .ok_or_else(|| {
+                    Error::Conflict("the asking agent isn't known here yet; sync first".into())
+                })?;
+            let from = match &relayed_ref {
+                Some(r) => r.address.clone(),
+                None => crate::identity::system_agent_tx(tx)?.address,
+            };
+            let msg = send_tx(
+                tx,
+                &SendMessage {
+                    from,
+                    to: vec![format!("{name}@{}@{origin}", slug.unwrap_or_default())],
+                    subject: format!("[decision] answer note ({})", d.decision_id),
+                    body: t.clone(),
+                    ..Default::default()
+                },
+            )?;
+            Some(msg.message_id)
+        }
+        None => None,
+    };
+    let relayed = relayed_ref.as_ref().map(|r| r.address.clone());
+    let answered_by = input
+        .answered_by
+        .clone()
+        .filter(|a| !a.trim().is_empty())
+        .unwrap_or_else(|| d.human.clone());
+    tx.emit(
+        relayed.as_deref().unwrap_or(answered_by.as_str()),
+        "decision.answer_relayed",
+        json!({
+            "decision_id": d.decision_id,
+            "decision_node": origin,
+            "project_id": project_id,
+            "value": option.as_ref().map(|o| o.value.clone()),
+            "has_text": text.is_some(),
+            "text_message_id": text_message_id,
+            "answered_by": answered_by,
+            "relayed_by": relayed,
+            // Agents sync as directory events, so the id resolves on the decision's node.
+            "relayed_by_id": relayed_ref.as_ref().map(|r| r.id.clone()),
+        }),
+    )?;
+    tx.execute(
+        "UPDATE remote_decisions SET status = 'answer_sent', answer_value = ?2, answered_by = ?3,
+           relayed_by = ?4, answered_at = ?5, updated_at = ?5 WHERE decision_id = ?1",
+        params![
+            d.decision_id,
+            option.as_ref().map(|o| o.value.clone()),
+            answered_by,
+            relayed,
+            tx.now
+        ],
+    )?;
+    Ok(load_mirror(tx, &d.decision_id)?.map(|(d, _, _)| d))
+}
+
+/// At the decision's node: apply the first relayed answer through the normal path (mail,
+/// wake, lane, spend approvals); later ones are ignored and recorded.
+pub(crate) fn apply_relayed_tx(
+    tx: &Tx<'_>,
+    ev: &crate::federation::WireEvent,
+    p: &serde_json::Value,
+) -> Result<()> {
+    let s = |k: &str| {
+        p.get(k)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    let Some(id) = s("decision_id") else {
+        return Ok(());
+    };
+    let Ok(row) = load(tx, tx.node_id, &id) else {
+        return Ok(());
+    };
+    // The relayer must be an agent of the node that signed the event. A missing, unknown or
+    // foreign identity is refused, never treated as a trusted local answer.
+    let relayed = s("relayed_by_id").and_then(|id| agent_by_id(tx, &id).ok());
+    let refuse = |why: &str| -> Result<()> {
+        tx.emit(
+            "system",
+            "decision.answer_ignored",
+            json!({ "decision_id": id, "project_id": row.project_id, "relayed_from": ev.node_id, "status": why }),
+        )?;
+        Ok(())
+    };
+    let Some(relayed) = relayed else {
+        return refuse("relayer_unknown");
+    };
+    if relayed.node_id != ev.node_id {
+        return refuse("relayer_not_of_sender");
+    }
+    let relayed = Some(relayed);
+    if row.d.status != DecisionStatus::Open {
+        tx.emit(
+            "system",
+            "decision.answer_ignored",
+            json!({ "decision_id": id, "project_id": row.project_id, "relayed_from": ev.node_id, "status": row.d.status.as_str() }),
+        )?;
+        return Ok(());
+    }
+    // The answer's text, if any, came as mail from the relaying node (never in the event).
+    let text = match s("text_message_id") {
+        Some(mid) => {
+            let body: Option<String> = tx
+                .query_row(
+                    "SELECT body FROM messages WHERE message_id = ?1 AND node_id = ?2",
+                    params![mid, ev.node_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            // It only carried the text: the asker gets the answer mail itself.
+            tx.execute(
+                "UPDATE deliveries SET read_at = COALESCE(read_at, ?2) WHERE message_id = ?1",
+                params![mid, tx.now],
+            )?;
+            body
+        }
+        None => None,
+    };
+    let applied = answer_tx(
+        tx,
+        &AnswerDecision {
+            decision: id.clone(),
+            value: s("value"),
+            text,
+            answered_by: s("answered_by"),
+            relayed_by: None,
+        },
+        relayed,
+        None,
+    );
+    match applied {
+        Ok(_) => Ok(()),
+        // A relayed answer that breaks the rules here (self-approval, bad option) is
+        // recorded and dropped, not retried forever.
+        Err(Error::Forbidden(_) | Error::Invalid(_) | Error::Conflict(_)) => {
+            tx.emit(
+                "system",
+                "decision.answer_ignored",
+                json!({ "decision_id": id, "project_id": row.project_id, "relayed_from": ev.node_id, "status": "refused" }),
+            )?;
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 impl Store {
@@ -962,6 +1647,35 @@ impl Store {
                     break;
                 }
             }
+            // Mirrors of other nodes' decisions (answers are relayed to their node), under the
+            // same filters, merged with the local ones before the limit so the newest win.
+            let mut stmt = conn.prepare(&format!(
+                "{MIRROR_SELECT} WHERE (?1 IS NULL OR m.status = ?1)
+                   AND (?2 IS NULL OR m.project_id = ?2) AND (?3 IS NULL OR m.lane_id = ?3)
+                   AND (?4 IS NULL OR m.human = ?4 OR m.human LIKE ?4 || '@%')
+                 ORDER BY m.created_at DESC"
+            ))?;
+            let mut rows = stmt.query(params![status, project_id, lane_id, filter.human])?;
+            // Visibility before the limit: hidden mirrors must not use up the slots of
+            // visible ones (they would hide permitted decisions, and their count).
+            let mut mirrors = 0u32;
+            while mirrors < limit {
+                let Some(r) = rows.next()? else { break };
+                let (d, project, _) = mirror_from_row(r)?;
+                let visible = match (scope, &project) {
+                    (None, _) => true,
+                    (Some(s), Some(p)) => scope_allows_project(conn, s, p)?,
+                    (Some(_), None) => false,
+                };
+                if visible {
+                    out.push(d);
+                    mirrors += 1;
+                }
+            }
+            out.sort_by(|x, y| {
+                (&y.created_at, &y.decision_id).cmp(&(&x.created_at, &x.decision_id))
+            });
+            out.truncate(limit as usize);
             Ok(out)
         })
     }
@@ -990,6 +1704,22 @@ impl Store {
                 }
                 out.push(r.d);
             }
+            let mut stmt = conn.prepare(&format!("{MIRROR_SELECT} WHERE m.status = 'open'"))?;
+            let mut rows = stmt.query([])?;
+            while let Some(r) = rows.next()? {
+                let (d, project, _) = mirror_from_row(r)?;
+                let visible = match (scope, &project) {
+                    (None, _) => true,
+                    (Some(s), Some(p)) => scope_allows_project(conn, s, p)?,
+                    (Some(_), None) => false,
+                };
+                if visible {
+                    out.push(d);
+                }
+            }
+            out.sort_by(|x, y| {
+                (&x.created_at, &x.decision_id).cmp(&(&y.created_at, &y.decision_id))
+            });
             Ok(out)
         })
     }
@@ -997,9 +1727,17 @@ impl Store {
     /// One decision, by decision id or its request id.
     pub fn decision(&self, key: &str, scope: Option<&TokenScope>) -> Result<Decision> {
         self.sweep()?;
-        self.read(|conn| {
-            let r = load_in(conn, self.node_id(), key, scope)?;
-            Ok(r.d)
+        self.read(|conn| match load_in(conn, self.node_id(), key, scope) {
+            Ok(r) => Ok(r.d),
+            // Another node's decision: same rule, a hidden mirror is a missing decision.
+            Err(e) => match load_mirror(conn, key)? {
+                Some((d, Some(project), _)) => match scope {
+                    Some(s) if !scope_allows_project(conn, s, &project)? => Err(e),
+                    _ => Ok(d),
+                },
+                Some((d, None, _)) if scope.is_none() => Ok(d),
+                _ => Err(e),
+            },
         })
     }
 
@@ -1011,173 +1749,26 @@ impl Store {
     ) -> Result<Decision> {
         self.write(|tx| {
             crate::holds::sweep_tx(tx)?;
-            let row = load_in(tx, tx.node_id, &input.decision, scope)?;
-            let d = &row.d;
-            if d.status != DecisionStatus::Open {
-                return Err(Error::Conflict(format!(
-                    "decision {} is already {}",
-                    d.decision_id,
-                    d.status.as_str()
-                )));
+            if let Some(d) = relay_answer_tx(tx, &input, scope)? {
+                return Ok(Ok(d));
             }
-            let value = input
-                .value
-                .as_ref()
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty());
-            let text = input
-                .text
-                .as_ref()
-                .map(|t| t.trim().to_string())
-                .filter(|t| !t.is_empty());
-            let option = match &value {
-                Some(v) => Some(
-                    d.options
-                        .iter()
-                        // An exact match wins over a case-insensitive one ("a" vs "A").
-                        .find(|o| o.value == *v)
-                        .or_else(|| d.options.iter().find(|o| o.value.eq_ignore_ascii_case(v)))
-                        .or_else(|| {
-                            // Accept the option number shown on the phone (1-based).
-                            v.parse::<usize>()
-                                .ok()
-                                .and_then(|i| i.checked_sub(1))
-                                .and_then(|i| d.options.get(i))
-                        })
-                        .ok_or_else(|| {
-                            Error::Invalid(format!(
-                                "{v:?} is not an option; choose one of {}",
-                                d.options
-                                    .iter()
-                                    .map(|o| o.value.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            ))
-                        })?
-                        .clone(),
-                ),
-                None => None,
-            };
-            if let Some(t) = &text {
-                if d.allow_free_text {
-                    check_text("answer text", t, MAX_ANSWER_TEXT)?;
-                } else if option.is_some() {
-                    // A short note next to the chosen option is always allowed.
-                    check_text("note", t, MAX_OPTION_NOTE)?;
-                } else {
-                    return Err(Error::Invalid(
-                        "this decision does not accept free text; choose an option (a short note may go with it)".into(),
-                    ));
+            // Refusing a late answer must commit the sweep, or a due default never lands
+            // while people keep answering.
+            if let Ok(row) = load_in(tx, tx.node_id, &input.decision, scope) {
+                if row.d.status != DecisionStatus::Open {
+                    return Ok(Err(Error::Conflict(format!(
+                        "decision {} is already {}",
+                        row.d.decision_id,
+                        row.d.status.as_str()
+                    ))));
                 }
             }
-            if option.is_none() && text.is_none() {
-                return Err(Error::Invalid(if d.allow_free_text {
-                    "give an option value or free text".into()
-                } else {
-                    "give an option value".into()
-                }));
-            }
-            let answered_by = input
-                .answered_by
-                .as_ref()
-                .map(|a| a.trim().to_string())
-                .filter(|a| !a.is_empty())
-                .unwrap_or_else(|| d.human.clone());
-            check_text("answered_by", &answered_by, 64)?;
             let relayed = match &input.relayed_by {
                 Some(r) => Some(resolve_agent(tx, tx.node_id, r)?),
                 None => None,
             };
-            if let Some(r) = &relayed {
-                check_relayer(tx, r, &row.asker_id)?;
-            }
-            let human = agent_by_id(tx, &row.human_id)?;
-            let asker = agent_by_id(tx, &row.asker_id)?;
-            tx.emit(
-                relayed
-                    .as_ref()
-                    .map_or(answered_by.as_str(), |r| r.address.as_str()),
-                "decision.answered",
-                json!({
-                    "decision_id": d.decision_id,
-                    "project_id": row.project_id,
-                    "lane_id": row.lane_id,
-                    "asker_id": row.asker_id,
-                    "value": option.as_ref().map(|o| o.value.clone()),
-                    "has_text": text.is_some(),
-                    "answered_by": answered_by,
-                    "relayed_by": relayed.as_ref().map(|r| r.address.clone()),
-                }),
-            )?;
-            let mut body = String::new();
-            if let Some(o) = &option {
-                body.push_str(&format!("Value: {}\nLabel: {}\n", o.value, o.label));
-            }
-            if let Some(t) = &text {
-                body.push_str(&format!("\n{t}\n"));
-            }
-            body.push_str(&format!("\nAnswered by {answered_by}"));
-            if let Some(r) = &relayed {
-                body.push_str(&format!(" (relayed by {})", r.address));
-            }
-            body.push_str(&format!(
-                " at {}.\n(decision {})",
-                fmt_ts(tx.now),
-                d.decision_id
-            ));
-            let subject = match &option {
-                Some(o) => format!("[decision] answered: {} ({})", o.value, d.decision_id),
-                None => format!("[decision] answered ({})", d.decision_id),
-            };
-            let msg = send_tx(
-                tx,
-                &SendMessage {
-                    from: human.address.clone(),
-                    to: vec![asker.address.clone()],
-                    subject,
-                    body,
-                    importance: Importance::High,
-                    reply_to: Some(row.message_id.clone()),
-                    ..Default::default()
-                },
-            )?;
-            tx.execute(
-                "UPDATE decisions SET status = 'answered', answer_value = ?2, answer_text = ?3,
-                   answered_by = ?4, relayed_by = ?5, answered_at = ?6, updated_at = ?6,
-                   answer_message_id = ?7
-                 WHERE decision_id = ?1",
-                params![
-                    d.decision_id,
-                    option.as_ref().map(|o| o.value.clone()),
-                    text,
-                    answered_by,
-                    relayed.as_ref().map(|r| r.address.clone()),
-                    tx.now,
-                    msg.message_id
-                ],
-            )?;
-            close_request(
-                tx,
-                &d.request_id,
-                "done",
-                Some(&human.id),
-                &format!(
-                    "answered by {answered_by}: {}",
-                    option.as_ref().map_or("free text", |o| o.value.as_str())
-                ),
-            )?;
-            crate::spend::decision_closed_tx(
-                tx,
-                &d.decision_id,
-                option.as_ref().is_some_and(|o| o.value == "approve"),
-            )?;
-            release_lane(
-                tx,
-                relayed.as_ref().unwrap_or(&human),
-                row.lane_id.as_deref(),
-            )?;
-            Ok(load(tx, tx.node_id, &d.decision_id)?.d)
-        })
+            answer_tx(tx, &input, relayed, scope).map(Ok)
+        })?
     }
 
     /// Withdraw an open decision (the asking agent only).
@@ -1352,6 +1943,186 @@ mod cancellation_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Clock, Program};
+
+    /// A newer mirror in a hidden project must not take the only slot of a visible one.
+    #[test]
+    fn hidden_mirrors_do_not_use_up_the_limit() {
+        let s = Store::open_in_memory(Clock::System).unwrap();
+        let shop = s.ensure_project("t", "/work/shop").unwrap().project_id;
+        let vault = s.ensure_project("t", "/work/vault").unwrap().project_id;
+        s.register_agent_trusted(RegisterAgent {
+            name: "manager".into(),
+            program: Program::GrokBot,
+            project: None,
+            model: None,
+            description: None,
+        })
+        .unwrap();
+        s.write(|tx| {
+            for (id, project, at) in [
+                ("MIRROR-SHOP", &shop, 1_000),
+                ("MIRROR-VAULT", &vault, 2_000),
+            ] {
+                tx.execute(
+                    "INSERT INTO remote_decisions (decision_id, node_id, project_id, human,
+                       question, options, status, created_at, updated_at)
+                     VALUES (?1, 'OTHER-NODE', ?2, 'owner', 'q', '[]', 'open', ?3, ?3)",
+                    params![id, project, at],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let t = s
+            .create_token("manager", &["/work/shop".into()], None, None)
+            .unwrap();
+        let scope = s.verify_token(&t.secret).unwrap();
+        let got = s
+            .decisions(
+                DecisionFilter {
+                    limit: 1,
+                    ..Default::default()
+                },
+                Some(&scope),
+            )
+            .unwrap();
+        assert_eq!(
+            got.iter()
+                .map(|d| d.decision_id.as_str())
+                .collect::<Vec<_>>(),
+            ["MIRROR-SHOP"]
+        );
+    }
+
+    /// The daily summary's read includes mirrors, in age order, and only those the caller
+    /// may see.
+    #[test]
+    fn open_decisions_for_the_summary_include_visible_mirrors() {
+        let s = Store::open_in_memory(Clock::System).unwrap();
+        let shop = s.ensure_project("t", "/work/shop").unwrap().project_id;
+        let vault = s.ensure_project("t", "/work/vault").unwrap().project_id;
+        s.register_agent_trusted(RegisterAgent {
+            name: "manager".into(),
+            program: Program::GrokBot,
+            project: None,
+            model: None,
+            description: None,
+        })
+        .unwrap();
+        s.write(|tx| {
+            for (id, project, status, at) in [
+                ("MIRROR-SHOP", &shop, "open", 1_000),
+                ("MIRROR-VAULT", &vault, "open", 2_000),
+                ("MIRROR-DONE", &shop, "answered", 3_000),
+            ] {
+                tx.execute(
+                    "INSERT INTO remote_decisions (decision_id, node_id, project_id, human,
+                       question, options, status, created_at, updated_at)
+                     VALUES (?1, 'OTHER-NODE', ?2, 'owner', 'q', '[]', ?3, ?4, ?4)",
+                    params![id, project, status, at],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let ids = |scope: Option<&TokenScope>| -> Vec<String> {
+            s.open_decisions_oldest_first(scope)
+                .unwrap()
+                .into_iter()
+                .map(|d| d.decision_id)
+                .collect()
+        };
+        assert_eq!(ids(None), ["MIRROR-SHOP", "MIRROR-VAULT"]);
+        let t = s
+            .create_token("manager", &["/work/shop".into()], None, None)
+            .unwrap();
+        let scope = s.verify_token(&t.secret).unwrap();
+        assert_eq!(ids(Some(&scope)), ["MIRROR-SHOP"]);
+    }
+
+    /// A signed relay names a relayer the sender doesn't own (this node's manager), or none:
+    /// both are refused at ingestion, and the decision stays open.
+    #[test]
+    fn relayed_answers_must_name_a_relayer_of_the_signing_node() {
+        let s = Store::open_in_memory(Clock::System).unwrap();
+        s.ensure_project("t", "/work/shop").unwrap();
+        for (name, program) in [("claude", Program::Claude), ("manager", Program::GrokBot)] {
+            s.register_agent_trusted(RegisterAgent {
+                name: name.into(),
+                program,
+                project: Some("/work/shop".into()),
+                model: None,
+                description: None,
+            })
+            .unwrap();
+        }
+        let d = s
+            .ask_decision(
+                NewDecision {
+                    agent: "claude@shop".into(),
+                    question: "Ship?".into(),
+                    options: vec![
+                        DecisionOption {
+                            value: "yes".into(),
+                            label: "Yes".into(),
+                            description: None,
+                        },
+                        DecisionOption {
+                            value: "no".into(),
+                            label: "No".into(),
+                            description: None,
+                        },
+                    ],
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        let manager = s.agent("manager@shop").unwrap().agent_id;
+        let relay = |relayer: Option<&str>| {
+            let payload = serde_json::json!({
+                "decision_id": d.decision_id,
+                "decision_node": s.node_id(),
+                "value": "yes",
+                "relayed_by_id": relayer,
+            });
+            let ev = crate::federation::WireEvent {
+                seq: 1,
+                event_id: crate::store::new_id(),
+                node_id: "SPOKE-NODE".into(),
+                ts: s.now(),
+                actor: "manager".into(),
+                kind: "decision.answer_relayed".into(),
+                payload: payload.to_string(),
+                prev_id: None,
+                sig: String::new(),
+            };
+            s.write(|tx| apply_relayed_tx(tx, &ev, &payload)).unwrap();
+        };
+        relay(Some(manager.as_str()));
+        relay(None);
+        relay(Some("NO-SUCH-AGENT"));
+        assert_eq!(
+            s.decision(&d.decision_id, None).unwrap().status,
+            DecisionStatus::Open
+        );
+        let why: Vec<String> = s
+            .events(100)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "decision.answer_ignored")
+            .map(|e| e.payload["status"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(
+            why,
+            [
+                "relayer_not_of_sender",
+                "relayer_unknown",
+                "relayer_unknown"
+            ]
+        );
+    }
 
     #[test]
     fn deadlines() {

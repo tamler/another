@@ -740,6 +740,64 @@ CREATE INDEX spend_leases_live ON spend_leases(status, expires_at);
 CREATE INDEX spend_leases_by_resource ON spend_leases(resource_id, agent_id, status);
 ALTER TABLE resources ADD COLUMN spend_account_id TEXT REFERENCES spend_accounts(account_id);
 "#,
+    r#"
+ALTER TABLE lanes ADD COLUMN leaderless_at INTEGER;
+CREATE TABLE agent_invites (
+    invite_id      TEXT PRIMARY KEY,
+    node_id        TEXT NOT NULL REFERENCES nodes(node_id),
+    code_hash      TEXT NOT NULL,
+    agent_name     TEXT NOT NULL,
+    program        TEXT NOT NULL,
+    project_globs  TEXT NOT NULL,
+    lane_id        TEXT REFERENCES lanes(lane_id),
+    max_uses       INTEGER NOT NULL,
+    uses           INTEGER NOT NULL DEFAULT 0,
+    ephemeral      INTEGER NOT NULL DEFAULT 1,
+    idle_hours     INTEGER,
+    token_ttl      INTEGER,
+    created_at     INTEGER NOT NULL,
+    expires_at     INTEGER NOT NULL,
+    revoked_at     INTEGER
+);
+
+CREATE TABLE remote_agents (
+    membership_id   TEXT PRIMARY KEY,
+    node_id         TEXT NOT NULL REFERENCES nodes(node_id),
+    agent_id        TEXT NOT NULL REFERENCES agents(agent_id),
+    invite_id       TEXT NOT NULL REFERENCES agent_invites(invite_id),
+    token_id        TEXT NOT NULL REFERENCES tokens(token_id),
+    lane_id         TEXT REFERENCES lanes(lane_id),
+    ephemeral       INTEGER NOT NULL,
+    idle_hours      INTEGER,
+    client_hostname TEXT,
+    client_version  TEXT,
+    joined_at       INTEGER NOT NULL,
+    state           TEXT NOT NULL,
+    left_at         INTEGER,
+    left_reason     TEXT
+);
+CREATE INDEX remote_agents_by_agent ON remote_agents(agent_id, state);
+
+CREATE TABLE remote_decisions (
+    decision_id     TEXT PRIMARY KEY,
+    node_id         TEXT NOT NULL,
+    project_id      TEXT,
+    lane_id         TEXT,
+    asker_id        TEXT,
+    human           TEXT NOT NULL,
+    question        TEXT NOT NULL,
+    options         TEXT NOT NULL,
+    allow_free_text INTEGER NOT NULL DEFAULT 0,
+    deadline_at     INTEGER,
+    status          TEXT NOT NULL,
+    answer_value    TEXT,
+    answered_by     TEXT,
+    relayed_by      TEXT,
+    answered_at     INTEGER,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL
+);
+"#,
 ];
 
 fn migrate_to(conn: &mut Connection, limit: usize) -> Result<()> {

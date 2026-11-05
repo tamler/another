@@ -3,10 +3,10 @@
 use std::fmt::Write;
 
 use another_core::{
-    ActivityFeed, Agent, AuditEntry, Decision, Event, HeartbeatReport, Hold, HoldConflict,
-    HoldReport, Inbox, Lane, LaneDetail, LaneHolds, LaneReport, LeaseOutcome, Message, NodeInfo,
-    Peer, Project, Request, Resource, SpendAccount, SpendLease, Thread, ThreadSummary, Token,
-    WakeTarget, Webhook, WebhookCreated, WebhookDelivery,
+    ActivityFeed, Agent, AgentInvite, AuditEntry, Decision, Departure, Event, HeartbeatReport,
+    Hold, HoldConflict, HoldReport, Inbox, Lane, LaneDetail, LaneHolds, LaneReport, LeaseOutcome,
+    Message, NodeInfo, Peer, Project, RemoteAgent, Request, Resource, SpendAccount, SpendLease,
+    Thread, ThreadSummary, Token, WakeTarget, Webhook, WebhookCreated, WebhookDelivery,
 };
 use serde::Serialize;
 
@@ -830,4 +830,232 @@ pub fn spend_leases(ls: &[SpendLease]) -> String {
         );
     }
     out
+}
+
+pub fn invites(list: &[AgentInvite]) -> String {
+    if list.is_empty() {
+        return "no invites".to_string();
+    }
+    let mut out = String::new();
+    for i in list {
+        let _ = writeln!(
+            out,
+            "{} {:<8} {} ({}) projects {}{} · {}/{} uses · {} · expires {}",
+            i.invite_id,
+            i.status,
+            i.agent,
+            i.program,
+            i.project_globs.join(", "),
+            i.lane
+                .as_ref()
+                .map(|l| format!(" lane {l}"))
+                .unwrap_or_default(),
+            i.uses,
+            i.max_uses,
+            if i.ephemeral {
+                format!("ephemeral, idle {}h", i.idle_hours)
+            } else {
+                "persistent".into()
+            },
+            i.expires_at
+        );
+    }
+    out
+}
+
+pub fn remote_agents(list: &[RemoteAgent]) -> String {
+    if list.is_empty() {
+        return "no remote agents".to_string();
+    }
+    let mut out = String::new();
+    for r in list {
+        let presence = match r.presence {
+            another_core::Presence::Online => "online",
+            another_core::Presence::Idle => "idle",
+            another_core::Presence::Gone => "gone",
+        };
+        let _ = writeln!(
+            out,
+            "{:<24} {:<6} {}{}{} · joined {}{}",
+            r.agent,
+            presence,
+            r.program,
+            r.lane
+                .as_ref()
+                .map(|l| format!(" · lane {l}"))
+                .unwrap_or_default(),
+            r.client_hostname
+                .as_ref()
+                .map(|h| format!(" · from {h}"))
+                .unwrap_or_default(),
+            r.joined_at,
+            r.left_reason
+                .as_ref()
+                .map(|x| format!(" · left: {x}"))
+                .unwrap_or_default()
+        );
+    }
+    out
+}
+
+pub fn departure(d: &Departure) -> String {
+    format!(
+        "{} removed ({}): {} token(s) revoked, {} hold(s) released, {} lease(s) closed{}",
+        d.agent,
+        d.reason,
+        d.tokens_revoked,
+        d.holds_released,
+        d.leases_closed,
+        if d.lanes.is_empty() {
+            String::new()
+        } else {
+            format!("; lanes told: {}", d.lanes.join(", "))
+        }
+    )
+}
+
+pub fn joined(v: &serde_json::Value) -> String {
+    let mut out = format!(
+        "joined {} as {}{}\nprofile: {}\nenv: {} (source it before starting your agent)\n",
+        v["hub"].as_str().unwrap_or_default(),
+        v["agent"].as_str().unwrap_or_default(),
+        v["lane"]
+            .as_str()
+            .map(|l| format!(" (lane {l})"))
+            .unwrap_or_default(),
+        v["profile"].as_str().unwrap_or_default(),
+        v["env_file"].as_str().unwrap_or_default()
+    );
+    let wrote = v["mcp_written"].as_array().cloned().unwrap_or_default();
+    if wrote.is_empty() {
+        out.push_str("MCP config (not written; pass --write-mcp auto to write it):\n");
+        out.push_str(&format!(
+            "  Claude Code: claude mcp add --scope user --transport http another {}/mcp --header \"Authorization: Bearer $ANOTHER_TOKEN\"\n",
+            v["hub"].as_str().unwrap_or_default()
+        ));
+        out.push_str("  Codex (~/.codex/config.toml):\n");
+        for line in v["mcp"]["codex"]["config_toml"]
+            .as_str()
+            .unwrap_or_default()
+            .lines()
+        {
+            out.push_str(&format!("    {line}\n"));
+        }
+    } else {
+        for w in wrote {
+            out.push_str(&format!("wrote {}\n", w.as_str().unwrap_or_default()));
+        }
+    }
+    if v["hello"].as_bool() == Some(true) {
+        out.push_str("said hello to the hub\n");
+    }
+    out
+}
+
+/// Human output for `another remote …` (the hub's JSON, shortened).
+pub fn remote(cmd: &str, v: &serde_json::Value) -> String {
+    let st = |x: &serde_json::Value| x.as_str().unwrap_or_default().to_string();
+    match cmd {
+        "status" => format!(
+            "{} on {}{} · projects {} · {} unread, {} open request(s)",
+            st(&v["agent"]),
+            st(&v["hub"]),
+            v["lane"]
+                .as_str()
+                .map(|l| format!(" · lane {l}"))
+                .unwrap_or_default(),
+            v["project_globs"]
+                .as_array()
+                .map(|a| a
+                    .iter()
+                    .filter_map(|x| x.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "))
+                .unwrap_or_default(),
+            v["heartbeat"]["unread"],
+            v["heartbeat"]["open_requests"]
+        ),
+        "heartbeat" => format!(
+            "{} is {} · {} hold(s) renewed, {} released",
+            st(&v["agent"]),
+            st(&v["status"]),
+            v["renewed_holds"].as_array().map_or(0, Vec::len),
+            v["released_holds"].as_array().map_or(0, Vec::len)
+        ),
+        "lanes" => {
+            let lanes = v["lanes"].as_array().cloned().unwrap_or_default();
+            if lanes.is_empty() {
+                return "no lanes in your scope".into();
+            }
+            lanes
+                .iter()
+                .map(|l| {
+                    format!(
+                        "{:<15} {:<20} {:<10} lead {}\n",
+                        st(&l["status"]),
+                        st(&l["name"]),
+                        st(&l["project"]),
+                        st(&l["lead"])
+                    )
+                })
+                .collect()
+        }
+        "report" => format!(
+            "reported to lane as {}{} (report {})",
+            st(&v["agent"]),
+            v["status"]
+                .as_str()
+                .map(|s| format!(", status {s}"))
+                .unwrap_or_default(),
+            st(&v["report_id"])
+        ),
+        "decisions" => {
+            let ds = v["decisions"].as_array().cloned().unwrap_or_default();
+            if ds.is_empty() {
+                return "no open decisions in your scope".into();
+            }
+            ds.iter()
+                .map(|d| {
+                    let opts: Vec<String> = d["options"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .enumerate()
+                                .map(|(i, o)| {
+                                    format!("{}. {} ({})", i + 1, st(&o["label"]), st(&o["value"]))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    format!(
+                        "{} for {} from {}: {}\n  {}\n",
+                        st(&d["decision_id"]),
+                        st(&d["human"]),
+                        st(&d["asker"]),
+                        st(&d["question"]),
+                        opts.join("   ")
+                    )
+                })
+                .collect()
+        }
+        "answer" => format!(
+            "answered decision {}: {} (by {}, relayed by {}); mailed to {}",
+            st(&v["decision_id"]),
+            v["answer"]["label"]
+                .as_str()
+                .or(v["answer"]["value"].as_str())
+                .unwrap_or("text"),
+            st(&v["answer"]["answered_by"]),
+            st(&v["answer"]["relayed_by"]),
+            st(&v["asker"])
+        ),
+        "leave" => format!(
+            "left the hub as {} ({}): {} token(s) revoked, {} hold(s) released; profile forgotten",
+            st(&v["agent"]),
+            st(&v["reason"]),
+            v["tokens_revoked"],
+            v["holds_released"]
+        ),
+        _ => serde_json::to_string_pretty(v).unwrap_or_default(),
+    }
 }

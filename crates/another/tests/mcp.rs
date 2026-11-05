@@ -66,6 +66,7 @@ async fn exposes_the_tool_surface() {
             "acknowledge",
             "activity_feed",
             "activity_summarize",
+            "agent_kick",
             "claim_request",
             "daily_summary",
             "decision_answer",

@@ -32,7 +32,7 @@ Keep your local agents on the plain loopback server (or stdio), and run a second
 another serve --auth --bind 127.0.0.1:7467
 ```
 
-With `--auth`, `/mcp`, `GET /activity` the push endpoints `GET /events/stream` and `GET /events/poll` ([PUSH.md](PUSH.md)), `GET /decisions`, `GET /decisions/{id}` and `POST /decisions/{id}/answer` ([HUMAN-DECISIONS.md](HUMAN-DECISIONS.md)), `GET /spend` ([SPEND.md](SPEND.md)), and `GET /summary` ([MANAGER-BOT.md](MANAGER-BOT.md#5-daily-digest)) require `Authorization: Bearer <token>`; `GET /health` stays open. Because tunnels deliver traffic from loopback, the authenticated server checks the token on **every** request, local or not.
+With `--auth`, `/mcp`, `GET /activity` the push endpoints `GET /events/stream` and `GET /events/poll` ([PUSH.md](PUSH.md)), `GET /decisions`, `GET /decisions/{id}` and `POST /decisions/{id}/answer` ([HUMAN-DECISIONS.md](HUMAN-DECISIONS.md)), `GET /spend` ([SPEND.md](SPEND.md)), the remote-agent routes `POST /agent/heartbeat`, `POST /agent/leave`, `GET /lanes` and `POST /lanes/{lane}/report` ([REMOTE-AGENTS.md](REMOTE-AGENTS.md)), and `GET /summary` ([MANAGER-BOT.md](MANAGER-BOT.md#5-daily-digest)) require `Authorization: Bearer <token>`; `GET /health` stays open, and so does `POST /join` (served only with `--auth`), where an invite code is the credential ([REMOTE-AGENTS.md](REMOTE-AGENTS.md)). Because tunnels deliver traffic from loopback, the authenticated server checks the token on **every** request, local or not.
 
 Tunnels usually forward the public hostname in the `Host` header. Another rejects unknown hosts (DNS-rebinding protection), so name each tunnel hostname with `--allowed-host`.
 

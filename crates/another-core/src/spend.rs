@@ -938,13 +938,28 @@ pub(crate) fn expire_spend_leases_tx(tx: &Tx<'_>) -> Result<usize> {
 
 /// Ends an agent's spend leases at session end: active ones are charged up to now, pending
 /// ones are withdrawn along with their approval decision. Returns how many were closed.
-pub(crate) fn end_agent_leases_tx(tx: &Tx<'_>, agent_id: &str, reason: &str) -> Result<usize> {
+/// With `scope`, only leases attributed to the token's projects.
+pub(crate) fn end_agent_leases_tx(
+    tx: &Tx<'_>,
+    agent_id: &str,
+    reason: &str,
+    scope: Option<&TokenScope>,
+) -> Result<usize> {
     let mut stmt = tx.prepare(&format!(
         "{LEASE_SELECT} WHERE l.agent_id = ?1 AND l.status IN ('active', 'pending_approval')"
     ))?;
-    let rows = stmt
+    let mut rows = stmt
         .query_map([agent_id], lease_from_row(tx.now))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    if scope.is_some() {
+        let mut kept = Vec::new();
+        for r in rows {
+            if lease_in_scope(tx, scope, &r)? {
+                kept.push(r);
+            }
+        }
+        rows = kept;
+    }
     if rows.is_empty() {
         return Ok(0);
     }
@@ -1065,13 +1080,39 @@ pub(crate) fn reconcile_resource_spend_tx(tx: &Tx<'_>) -> Result<usize> {
     Ok(rows.len())
 }
 
-/// Renew an agent's active spend leases by their TTL (session heartbeat).
-pub(crate) fn renew_spend_leases_tx(tx: &Tx<'_>, agent_id: &str) -> Result<usize> {
-    Ok(tx.execute(
-        "UPDATE spend_leases SET renewed_at = ?2, expires_at = ?2 + ttl_seconds * 1000
-         WHERE agent_id = ?1 AND status = 'active'",
-        params![agent_id, tx.now],
-    )?)
+/// A lease's project is in `scope` (project-less leases are not, for tokens).
+fn lease_in_scope(tx: &Tx<'_>, scope: Option<&TokenScope>, row: &LeaseRow) -> Result<bool> {
+    match (scope, &row.project_id) {
+        (None, _) => Ok(true),
+        (Some(s), Some(p)) => scope_allows_project(tx, s, p),
+        (Some(_), None) => Ok(false),
+    }
+}
+
+/// Renew an agent's active spend leases by their TTL (session heartbeat). With `scope`,
+/// only leases attributed to the token's projects.
+pub(crate) fn renew_spend_leases_tx(
+    tx: &Tx<'_>,
+    agent_id: &str,
+    scope: Option<&TokenScope>,
+) -> Result<usize> {
+    let mut stmt = tx.prepare(&format!(
+        "{LEASE_SELECT} WHERE l.agent_id = ?1 AND l.status = 'active'"
+    ))?;
+    let rows = stmt
+        .query_map([agent_id], lease_from_row(tx.now))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut n = 0;
+    for r in &rows {
+        if lease_in_scope(tx, scope, r)? {
+            n += tx.execute(
+                "UPDATE spend_leases SET renewed_at = ?2, expires_at = ?2 + ttl_seconds * 1000
+                 WHERE lease_id = ?1",
+                params![r.lease.lease_id, tx.now],
+            )?;
+        }
+    }
+    Ok(n)
 }
 
 /// A decision closed: start (approved) or deny the lease waiting on it.

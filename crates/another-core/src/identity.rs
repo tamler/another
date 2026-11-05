@@ -640,6 +640,8 @@ pub(crate) fn role_confirmed(conn: &Connection, agent_id: &str, program: &str) -
                AND json_extract(payload, '$.agent_id') = ?1
                AND json_extract(payload, '$.program') = ?2
                AND json_extract(payload, '$.role_confirmed') = 1
+               -- Only the agent's own node can confirm its role.
+               AND node_id = (SELECT node_id FROM agents WHERE agent_id = ?1)
              LIMIT 1",
             params![agent_id, program],
             |_| Ok(()),

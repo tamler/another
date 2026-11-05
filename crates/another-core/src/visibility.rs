@@ -164,7 +164,7 @@ pub(crate) fn event_visible(
 ) -> Result<bool> {
     if matches!(
         kind.split('.').next(),
-        Some("token" | "peer" | "node" | "summary")
+        Some("token" | "peer" | "node" | "invite" | "summary")
     ) {
         return Ok(false);
     }

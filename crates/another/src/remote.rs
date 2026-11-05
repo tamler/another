@@ -36,7 +36,7 @@ pub struct RemotePeer {
     pub remote: Option<String>,
 }
 
-fn remote_addr(headers: &HeaderMap, req: &Request) -> Option<String> {
+pub(crate) fn remote_addr(headers: &HeaderMap, req: &Request) -> Option<String> {
     for h in ["cf-connecting-ip", "x-forwarded-for", "x-real-ip"] {
         if let Some(v) = headers.get(h).and_then(|v| v.to_str().ok()) {
             return Some(format!("{h}: {}", v.split(',').next().unwrap_or(v).trim()));

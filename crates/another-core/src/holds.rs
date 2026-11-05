@@ -17,6 +17,7 @@ use crate::mail::touch;
 use crate::requests::stale_overdue_tx;
 use crate::store::{new_id, Store, Tx};
 use crate::time::fmt_ts;
+use crate::tokens::TokenScope;
 
 pub const DEFAULT_HOLD_TTL_SECONDS: i64 = 30 * 60;
 pub const MIN_HOLD_TTL_SECONDS: i64 = 60;
@@ -403,6 +404,7 @@ fn remote_clashes(
     tx: &Tx<'_>,
     project: &Project,
     patterns: &[(String, String)],
+    lane_id: Option<&str>,
 ) -> Result<Vec<HoldConflict>> {
     let mut stmt = tx.prepare(&format!(
         "{HOLD_SELECT} WHERE h.released_at IS NULL AND h.expires_at > ?1 AND h.node_id != ?2
@@ -418,7 +420,8 @@ fn remote_clashes(
                 out.push(HoldConflict {
                     path: requested.clone(),
                     held: held.clone(),
-                    same_lane: false,
+                    // Both nodes working in the same (mirrored) lane.
+                    same_lane: lane_id.is_some() && held.lane_id.as_deref() == lane_id,
                 });
             }
         }
@@ -554,6 +557,7 @@ pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
     crate::resources::warn_expiring_leases_tx(tx)?;
     crate::decisions::expire_decisions_tx(tx)?;
     crate::spend::expire_spend_leases_tx(tx)?;
+    crate::remote_agents::expire_remote_agents_tx(tx)?;
     crate::spend::reconcile_resource_spend_tx(tx)?;
     Ok(SweepReport {
         expired_holds: expired.len(),
@@ -562,7 +566,12 @@ pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
     })
 }
 
-fn release_tx(tx: &Tx<'_>, actor: &str, hold_ids: &[String], reason: &str) -> Result<()> {
+pub(crate) fn release_tx(
+    tx: &Tx<'_>,
+    actor: &str,
+    hold_ids: &[String],
+    reason: &str,
+) -> Result<()> {
     if hold_ids.is_empty() {
         return Ok(());
     }
@@ -596,7 +605,11 @@ fn renew_tx(tx: &Tx<'_>, actor: &str, holds: &[(String, i64)]) -> Result<()> {
 }
 
 /// Live holds owned by `agent_id`, optionally limited to `only` ids (error on unknown ids).
-fn owned_holds(tx: &Tx<'_>, agent_id: &str, only: &[String]) -> Result<Vec<(String, i64)>> {
+pub(crate) fn owned_holds(
+    tx: &Tx<'_>,
+    agent_id: &str,
+    only: &[String],
+) -> Result<Vec<(String, i64)>> {
     let mut stmt = tx.prepare(
         "SELECT hold_id, ttl_seconds FROM holds
          WHERE agent_id = ?1 AND released_at IS NULL ORDER BY created_at",
@@ -618,6 +631,30 @@ fn owned_holds(tx: &Tx<'_>, agent_id: &str, only: &[String]) -> Result<Vec<(Stri
                 .ok_or_else(|| Error::NotFound(format!("no live hold {id:?} owned by this agent")))
         })
         .collect()
+}
+
+/// [`owned_holds`] limited to holds in projects `scope` may see (all of them locally).
+pub(crate) fn owned_holds_in(
+    tx: &Tx<'_>,
+    agent_id: &str,
+    scope: Option<&TokenScope>,
+) -> Result<Vec<(String, i64)>> {
+    let owned = owned_holds(tx, agent_id, &[])?;
+    let Some(scope) = scope else {
+        return Ok(owned);
+    };
+    let mut out = Vec::new();
+    for (id, ttl) in owned {
+        let project: String = tx.query_row(
+            "SELECT project_id FROM holds WHERE hold_id = ?1",
+            [&id],
+            |r| r.get(0),
+        )?;
+        if crate::tokens::scope_allows_project(tx, scope, &project)? {
+            out.push((id, ttl));
+        }
+    }
+    Ok(out)
 }
 
 fn holds_by_id(conn: &Connection, ids: &[String]) -> Result<Vec<Hold>> {
@@ -665,7 +702,7 @@ impl Store {
                 input.exclusive,
                 lane_id.as_deref(),
             )?;
-            let mut warnings = remote_clashes(tx, &project, &patterns)?;
+            let mut warnings = remote_clashes(tx, &project, &patterns, lane_id.as_deref())?;
             warnings.extend(same_lane);
             if !conflicts.is_empty() {
                 let mut hold_ids: Vec<&str> = Vec::new();
@@ -1053,10 +1090,22 @@ impl Store {
         phase: SessionPhase,
         info: SessionInfo,
     ) -> Result<HeartbeatReport> {
+        self.session_scoped(agent, phase, info, None)
+    }
+
+    /// [`Store::session`] for a remote caller: only holds and leases in projects the token
+    /// may see are renewed or released (the agent may hold others locally).
+    pub fn session_scoped(
+        &self,
+        agent: &str,
+        phase: SessionPhase,
+        info: SessionInfo,
+        scope: Option<&TokenScope>,
+    ) -> Result<HeartbeatReport> {
         self.write(|tx| {
             sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, agent)?;
-            let owned = owned_holds(tx, &me.id, &[])?;
+            let owned = owned_holds_in(tx, &me.id, scope)?;
             let session_payload = || {
                 json!({
                     "agent_id": me.id,
@@ -1065,31 +1114,34 @@ impl Store {
                 })
             };
             let release_leases = phase == SessionPhase::End && !info.keep_resources;
-            let resource_leases = crate::resources::session_leases_tx(tx, &me, release_leases)?;
+            let resource_leases =
+                crate::resources::session_leases_tx(tx, &me, release_leases, scope)?;
             let (renewed, released, status) = if phase == SessionPhase::End {
                 let ids: Vec<String> = owned.into_iter().map(|(id, _)| id).collect();
                 release_tx(tx, &me.address, &ids, "session_end")?;
                 if release_leases {
                     // Spend leases close with the session (kept with --keep-resources, like
                     // the resource leases they pay for).
-                    crate::spend::end_agent_leases_tx(tx, &me.id, "session_end")?;
+                    crate::spend::end_agent_leases_tx(tx, &me.id, "session_end", scope)?;
                 } else {
                     // --keep-resources renews the resource leases; renew the spend leases
                     // too, or charging would stop while the resource stays held.
-                    crate::spend::renew_spend_leases_tx(tx, &me.id)?;
+                    crate::spend::renew_spend_leases_tx(tx, &me.id, scope)?;
                 }
                 tx.emit(&me.address, "session.ended", session_payload())?;
                 tx.execute(
                     "UPDATE agents SET status = 'offline', last_seen_at = ?2 WHERE agent_id = ?1",
                     params![me.id, tx.now],
                 )?;
+                // An ephemeral remote agent whose session ended leaves now.
+                crate::remote_agents::expire_remote_agents_tx(tx)?;
                 (Vec::new(), ids, "offline")
             } else {
                 if phase == SessionPhase::Start {
                     tx.emit(&me.address, "session.started", session_payload())?;
                 }
                 renew_tx(tx, &me.address, &owned)?;
-                crate::spend::renew_spend_leases_tx(tx, &me.id)?;
+                crate::spend::renew_spend_leases_tx(tx, &me.id, scope)?;
                 touch(tx, &me.id)?;
                 let ids: Vec<String> = owned.into_iter().map(|(id, _)| id).collect();
                 (holds_by_id(tx, &ids)?, Vec::new(), "active")
