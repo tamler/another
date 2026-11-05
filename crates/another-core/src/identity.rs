@@ -633,13 +633,23 @@ impl Store {
 /// person): a trusted registration (`register_agent_trusted`, the CLI, or an invite the
 /// person made) recorded `role_confirmed` for its current program. A person registered on
 /// demand as a decision's addressee is not confirmed, so it can't relay answers.
+/// Only local events count, and the latest local registration must still name that program:
+/// a peer's projection cannot restore a role that was removed on this machine.
 pub(crate) fn role_confirmed(conn: &Connection, agent_id: &str, program: &str) -> Result<bool> {
     Ok(conn
         .query_row(
-            "SELECT 1 FROM events WHERE kind = 'agent.registered'
-               AND json_extract(payload, '$.agent_id') = ?1
-               AND json_extract(payload, '$.program') = ?2
-               AND json_extract(payload, '$.role_confirmed') = 1
+            "SELECT 1 FROM events e JOIN agents a ON a.agent_id = ?1
+               JOIN nodes n ON n.node_id = a.node_id AND n.is_local = 1
+             WHERE e.node_id = a.node_id AND e.kind = 'agent.registered'
+               AND json_extract(e.payload, '$.agent_id') = ?1
+               AND json_extract(e.payload, '$.program') = ?2
+               AND json_extract(e.payload, '$.role_confirmed') = 1
+               AND ?2 = (
+                 SELECT json_extract(latest.payload, '$.program') FROM events latest
+                 WHERE latest.node_id = a.node_id AND latest.kind = 'agent.registered'
+                   AND json_extract(latest.payload, '$.agent_id') = ?1
+                 ORDER BY latest.seq DESC LIMIT 1
+               )
              LIMIT 1",
             params![agent_id, program],
             |_| Ok(()),
