@@ -686,14 +686,14 @@ async fn the_server_check_goes_by_what_health_answers() {
         stop.cancel();
     }
 
-    // Healthy but with no node id: it can't be this home's server.
+    // Healthy but with no node id: Another always names its node, so this is something else,
+    // with or without a store of our own to compare it with.
     let (url, stop) = answering(200, r#"{"ok": true}"#).await;
     let (_, r) = check(url.clone(), h.ah.clone()).await.unwrap();
-    assert_eq!(levels(&r, "server"), ["warn"], "{r}");
-    // With no store of our own there is nothing to compare it with.
+    assert!(detail(&r, "server", "fail").contains("not Another"), "{r}");
     let nowhere = h.home.join("no-such-home");
     let (ok, r) = check(url, nowhere).await.unwrap();
-    assert_eq!(levels(&r, "server"), ["pass"], "{r}");
+    assert!(detail(&r, "server", "fail").contains("not Another"), "{r}");
     assert!(!ok, "the missing store still fails");
     stop.cancel();
 
