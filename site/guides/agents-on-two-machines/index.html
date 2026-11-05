@@ -40,7 +40,7 @@
       <ul>
         <li><strong>The hub can read every mail body it relays.</strong> This is not end-to-end encrypted. Host the hub yourself.</li>
         <li><strong>Every paired node learns your absolute project paths</strong>, along with node, project and agent names. A path like <code>/home/you/clients/acme</code> can reveal more than you intend.</li>
-        <li><strong>Nodes with <code>read_feed</code> see activity</strong>, including mail subjects, holds, requests and resources. Message bodies stay out of the feed.</li>
+        <li><strong>Nodes with <code>read_feed</code> see activity</strong>: sessions, requests, holds and resources. Mail itself goes only to nodes that host a recipient, through the hub.</li>
         <li><strong>There is no built-in TLS.</strong> Reach a hub through your own tunnel or TLS proxy.</li>
       </ul>
       <p>If your second machine only needs to run one remote client, a <a href="https://github.com/tamler/another/blob/main/docs/REMOTE.md">scoped token</a> may suit you better than federation.</p>
