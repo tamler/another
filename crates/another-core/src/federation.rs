@@ -1251,7 +1251,6 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value, relayed: bool) -> Res
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 /// The TTL an event claims, within the limits local leases get.
 fn foreign_ttl(p: &Value) -> Option<i64> {
     p.get("ttl_seconds").and_then(Value::as_i64).map(|ttl| {
@@ -1262,6 +1261,7 @@ fn foreign_ttl(p: &Value) -> Option<i64> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn foreign_lease(
     tx: &Tx<'_>,
     resource_id: &str,
