@@ -17,6 +17,8 @@ command -v jq >/dev/null 2>&1 || { echo "these examples need jq" >&2; exit 1; }
 
 WORK=$(mktemp -d)
 export ANOTHER_HOME="$WORK/home"
+# Each example names its own agents and lanes; don't inherit them from the caller's session.
+unset ANOTHER_AGENT ANOTHER_LANE
 PIDS=""
 cleanup() {
   for p in $PIDS; do kill "$p" 2>/dev/null || true; done
