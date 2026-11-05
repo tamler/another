@@ -62,7 +62,7 @@ pub enum Command {
         /// HTTP bind address. Loopback unless --auth and --allow-remote-bind are both given.
         #[arg(long, default_value = crate::serve::DEFAULT_BIND)]
         bind: String,
-        /// Require bearer tokens (`another token create`) on /mcp and /activity; audit every call.
+        /// Require bearer tokens (`another token create`) on every route except /health, /join and /fed/*; audit every call.
         #[arg(long)]
         auth: bool,
         /// Allow a non-loopback --bind (requires --auth). Prefer a tunnel instead.

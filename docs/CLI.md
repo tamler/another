@@ -230,7 +230,7 @@ Options:
       --stdio                         Serve MCP on stdin/stdout instead of HTTP (for MCP client configs)
       --bind <BIND>                   HTTP bind address. Loopback unless --auth and --allow-remote-bind are both given [default: 127.0.0.1:7466]
       --json                          Print machine-readable JSON
-      --auth                          Require bearer tokens (`another token create`) on /mcp and /activity; audit every call
+      --auth                          Require bearer tokens (`another token create`) on every route except /health, /join and /fed/*; audit every call
       --allow-remote-bind             Allow a non-loopback --bind (requires --auth). Prefer a tunnel instead
       --allowed-host <ALLOWED_HOSTS>  Extra Host header to accept, e.g. a tunnel hostname (repeatable; requires --auth)
       --federation                    Act as a federation hub: serve /fed/* for paired spokes (node-signed requests)
