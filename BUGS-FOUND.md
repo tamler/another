@@ -8,7 +8,8 @@ Found while adding edge-case tests for the ten lowest-covered public functions (
 |---|---|
 | 1, 2, 6, 7 | Fixed in draft PR #25, not yet on the base. The tests here no longer depend on either side of those fixes, and #25 has its own tests for the fixed behaviour. |
 | 4, 5 | Fixed on the base by `66100cf`. PR #25 also covers the remaining case of #4 described in its section. |
-| 3, 8, 9, 10, 12 | Open. |
+| 3, 8, 9, 10 | Open. |
+| 12 | Open at the federation branch snapshot `0d37776`; companion PR #66 fixes it. See the integration check below. |
 | 11 | Fixed on the federation authority branch, in a draft PR. Rows and events already rewritten are not repaired. |
 
 ## 1. A daily summary to an unknown person is accepted, then fails on every sweep
@@ -250,13 +251,17 @@ receipt, borrow, promotion, lane-proposal and decision flows remain positive con
 
 ## 12. `spend_account_upsert` ignores fields it can't change
 
-**Where:** `spend_account_upsert` in `another/src/mcp_spend.rs`
+**Where:** `spend_account_upsert` in `crates/another/src/mcp_spend.rs`
 
-**What:** on an existing account, `kind`, `unit`, `period` and `project` are dropped silently, and the call returns success. An agent asking to change `unit` to `credits` gets back an account still in USD, with nothing saying its request was ignored.
+**Original behavior:** on an existing account, supplied `kind`, `unit`, `period` and `project` values were dropped silently, and the call returned success. An agent asking to change `unit` to `credits` got back an account still in USD, with nothing saying its request was ignored. This still reproduces at the federation branch snapshot `0d37776`, which does not include PR #66.
 
-**Test:** `another/tests/mcp_tools.rs::bug_upserting_an_account_ignores_fields_it_cannot_change`
+**Fixed behavior (PR #66, `claude/fix-spend-upsert`):** a differing value is refused with `invalid`, naming the field and its current value, before updating the account. Supplying the existing values still succeeds; a project can match by path or slug. An unknown project still returns `not_found`.
 
-**Suggested fix:** refuse a value that differs from the account's, naming the field.
+**Tests:**
+- The coverage regression at `0d37776`, `crates/another/tests/mcp_tools.rs::bug_upserting_an_account_ignores_fields_it_cannot_change`, records the original behavior.
+- PR #66's `crates/another/tests/mcp.rs::upserting_an_account_refuses_a_change_it_cannot_make` checks rejection, unchanged account data after refusal, and matching values.
+
+**Integration check:** once PR #66 and the coverage branch are combined, mark the status row fixed and rename the coverage regression to `upserting_an_account_refuses_fields_it_cannot_change`, expecting `invalid` and each differing field. Regenerate `docs/MCP.md` with `scripts/gen-docs.py` so the tool description states the rule. These are the spend-upsert parts of merge-plan step 22; the combined tree also needs its CLI reference regenerated after the help-text changes.
 
 ## Checked in the third pass and not a bug
 
