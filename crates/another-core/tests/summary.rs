@@ -821,3 +821,25 @@ fn pending_approvals_are_counted_past_the_lease_list_limit() {
     );
     assert_eq!(s.daily_summary(None, None).unwrap().pending_approvals, 201);
 }
+
+#[test]
+fn a_refused_summary_schedule_keeps_its_destination_and_time() {
+    let (clock, _) = Clock::manual(NOV_21);
+    let s = Store::open_in_memory(clock).unwrap();
+    s.set_summary_schedule(Some("09:00"), Some("webhook"))
+        .unwrap();
+
+    assert_eq!(
+        s.set_summary_schedule(Some("25:00"), Some("mail:owner"))
+            .unwrap_err()
+            .code(),
+        "invalid"
+    );
+    let schedule = s.summary_schedule().unwrap();
+    assert_eq!(schedule.to, "webhook");
+    assert_eq!(schedule.daily_at.as_deref(), Some("09:00"));
+
+    let off = s.set_summary_schedule(Some("   "), None).unwrap();
+    assert_eq!(off.daily_at, None, "whitespace-only time turns it off");
+    assert_eq!(off.to, "webhook");
+}
