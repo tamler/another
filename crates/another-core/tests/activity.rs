@@ -61,6 +61,7 @@ fn feed_summarizes_without_bodies() {
             ttl_seconds: None,
             exclusive: true,
             reason: None,
+            lane: None,
         })
         .unwrap();
     store.heartbeat("bob", true).unwrap();
@@ -192,6 +193,7 @@ fn summary_counts_and_digest() {
             ttl_seconds: None,
             exclusive: false,
             reason: None,
+            lane: None,
         })
         .unwrap();
     let sum = store.activity_summary(None).unwrap();

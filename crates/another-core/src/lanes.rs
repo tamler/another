@@ -174,6 +174,9 @@ pub struct LaneDetail {
     pub links: Vec<LaneLink>,
     /// Most recent first (up to 20).
     pub reports: Vec<LaneReport>,
+    /// Live path holds taken for this lane.
+    #[serde(default)]
+    pub holds: Vec<crate::holds::Hold>,
 }
 
 #[derive(Debug, Clone)]
@@ -288,8 +291,9 @@ fn lane_from_row(r: &Row<'_>) -> rusqlite::Result<(Lane, String)> {
     ))
 }
 
-/// Find a lane by id, `name` or `name@project` (project slug). Names are unique among open
-/// lanes of a project, so a bare name can match lanes in several projects.
+/// Find a lane by id, `name` or `name@project` (project slug). Lane names are per project
+/// (maintainer's rule): unique among a project's open lanes, so a bare name can match lanes in
+/// several projects. Callers with a project in hand use [`resolve_lane_in_project`].
 pub(crate) fn resolve_lane(conn: &Connection, node_id: &str, key: &str) -> Result<(Lane, String)> {
     resolve_lane_in(conn, node_id, key, None)
 }
@@ -462,7 +466,15 @@ fn detail(conn: &Connection, lane: Lane) -> Result<LaneDetail> {
     let reports = stmt
         .query_map([&lane.lane_id], report_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut stmt = conn.prepare(&format!(
+        "{} WHERE h.lane_id = ?1 AND h.released_at IS NULL ORDER BY h.created_at, h.hold_id",
+        crate::holds::HOLD_SELECT
+    ))?;
+    let holds = stmt
+        .query_map([&lane.lane_id], crate::holds::hold_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(LaneDetail {
+        holds,
         lane,
         links,
         reports,
@@ -733,6 +745,8 @@ impl Store {
 
     /// One lane with its links and most recent reports.
     pub fn lane(&self, key: &str, scope: Option<&TokenScope>) -> Result<LaneDetail> {
+        // Expire lapsed holds first, so the lane's live holds are current without a daemon.
+        self.sweep()?;
         self.read(|conn| {
             let (lane, project_id) = resolve_lane_in(conn, self.node_id(), key, scope)?;
             check_scope(conn, scope, &project_id)?;
@@ -1079,6 +1093,18 @@ pub fn lane_markdown(d: &LaneDetail) -> String {
         out.push_str("\n## Linked\n\n");
         for k in &d.links {
             out.push_str(&format!("- {} `{}`\n", k.kind.as_str(), k.ref_id));
+        }
+    }
+    if !d.holds.is_empty() {
+        out.push_str("\n## Holds\n\n");
+        for h in &d.holds {
+            out.push_str(&format!(
+                "- `{}` by {} ({}, until {})\n",
+                h.pattern,
+                h.agent,
+                if h.exclusive { "exclusive" } else { "shared" },
+                h.expires_at
+            ));
         }
     }
     out

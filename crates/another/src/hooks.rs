@@ -77,6 +77,21 @@ impl Client {
         }
     }
 
+    /// The pre-edit hook (opt-in with `--pre-edit`): (event key, event, timeout, tool matcher).
+    /// Only Claude Code and Codex have a pre-tool hook that can deny an edit.
+    fn pre_edit_event(self) -> Option<(&'static str, HookEvent, u32, &'static str)> {
+        match self {
+            Client::Claude => Some((
+                "PreToolUse",
+                HookEvent::PreEdit,
+                5,
+                "Edit|Write|MultiEdit|NotebookEdit",
+            )),
+            Client::Codex => Some(("PreToolUse", HookEvent::PreEdit, 5, "apply_patch")),
+            Client::Grok | Client::Cursor => None,
+        }
+    }
+
     /// (client event key, another hook event, timeout seconds)
     fn events(self) -> [(&'static str, HookEvent, u32); 3] {
         match self {
@@ -101,6 +116,9 @@ pub enum HookEvent {
     SessionEnd,
     /// End of an agent turn: posts an automatic lane report (opt-in).
     Stop,
+    /// Before a file edit: takes an exclusive hold on the files, denying the edit on a
+    /// conflict (opt-in; Claude Code and Codex).
+    PreEdit,
 }
 
 /// Optional hooks beyond the default three.
@@ -108,6 +126,8 @@ pub enum HookEvent {
 pub struct HookOptions {
     /// Also install the Stop hook that reports into the agent's lane.
     pub lane_reports: bool,
+    /// Also install the PreToolUse hook that holds files before they are edited.
+    pub pre_edit: bool,
 }
 
 impl HookEvent {
@@ -117,6 +137,7 @@ impl HookEvent {
             HookEvent::Prompt => "prompt",
             HookEvent::SessionEnd => "session-end",
             HookEvent::Stop => "stop",
+            HookEvent::PreEdit => "pre-edit",
         }
     }
 }
@@ -267,14 +288,25 @@ fn install_into(
         root.insert("version".into(), json!(1));
     }
     let hooks = object_entry(root, "hooks")?;
-    let mut wanted: Vec<(&str, HookEvent, u32)> = client.events().to_vec();
+    let mut wanted: Vec<(&str, HookEvent, u32, Option<&str>)> = client
+        .events()
+        .into_iter()
+        .map(|(k, e, t)| (k, e, t, None))
+        .collect();
     if opts.lane_reports {
-        wanted.push(client.stop_event());
+        let (k, e, t) = client.stop_event();
+        wanted.push((k, e, t, None));
     } else {
         // Declarative: installing without --lane-reports drops a Stop hook added earlier.
         remove_ours(client, hooks, client.stop_event().0);
     }
-    for (key, event, timeout) in wanted {
+    match client.pre_edit_event() {
+        Some((k, e, t, m)) if opts.pre_edit => wanted.push((k, e, t, Some(m))),
+        // Likewise for the pre-edit hook.
+        Some((k, ..)) => remove_ours(client, hooks, k),
+        None => {}
+    }
+    for (key, event, timeout, matcher) in wanted {
         let command = command_for(env, client, event);
         let groups = array_entry(hooks, key)?;
         let ours = json!({ "type": "command", "command": command, "timeout": timeout });
@@ -289,14 +321,28 @@ fn install_into(
             continue;
         }
         // Claude / Codex / Grok: matcher groups, each with a `hooks` array.
-        let existing = groups.iter_mut().find_map(|g| {
-            g.get_mut("hooks")
-                .and_then(Value::as_array_mut)
-                .and_then(|hs| hs.iter_mut().find(|h| is_ours(h)))
+        let existing = groups.iter_mut().find(|g| {
+            g.get("hooks")
+                .and_then(Value::as_array)
+                .is_some_and(|hs| hs.iter().any(is_ours))
         });
         match existing {
-            Some(h) => *h = ours,
-            None => groups.push(json!({ "hooks": [ours] })),
+            Some(g) => {
+                if let Some(h) = g
+                    .get_mut("hooks")
+                    .and_then(Value::as_array_mut)
+                    .and_then(|hs| hs.iter_mut().find(|h| is_ours(h)))
+                {
+                    *h = ours;
+                }
+                if let (Some(m), Some(obj)) = (matcher, g.as_object_mut()) {
+                    obj.insert("matcher".into(), json!(m));
+                }
+            }
+            None => groups.push(match matcher {
+                Some(m) => json!({ "matcher": m, "hooks": [ours] }),
+                None => json!({ "hooks": [ours] }),
+            }),
         }
         // Keep one entry: drop older copies (e.g. pre-rename entries), and any group that
         // held only such a copy.
@@ -322,6 +368,9 @@ fn uninstall_from(client: Client, root: &mut Map<String, Value>) {
         remove_ours(client, hooks, key);
     }
     remove_ours(client, hooks, client.stop_event().0);
+    if let Some((k, ..)) = client.pre_edit_event() {
+        remove_ours(client, hooks, k);
+    }
 }
 
 /// Remove our entries under one event key.
@@ -570,7 +619,7 @@ pub fn install(
     if install {
         if clients.contains(&Client::Codex) {
             notes.push(
-                "Codex runs new hooks only after review: open Codex and trust them under /hooks."
+                "Codex runs new hooks only after review: open Codex interactively and trust them under /hooks. `codex exec` can't ask, so until they are trusted it skips them (holds are then not enforced); for automation that vets its hooks, `codex exec --dangerously-bypass-hook-trust` runs them."
                     .to_string(),
             );
         }
@@ -604,6 +653,9 @@ pub struct HookInput {
     pub session_id: Option<String>,
     /// The agent's last reply, when the client sends it (Codex and Claude Code Stop hooks).
     pub last_message: Option<String>,
+    /// PreToolUse: the tool being called and its input.
+    pub tool_name: Option<String>,
+    pub tool_input: Option<Value>,
 }
 
 impl HookInput {
@@ -628,6 +680,8 @@ impl HookInput {
             cwd,
             session_id,
             last_message,
+            tool_name: s("tool_name"),
+            tool_input: v.get("tool_input").cloned(),
         }
     }
 
@@ -833,7 +887,7 @@ pub fn run(
     let Some(client) = effective_client(client, env) else {
         return Ok(String::new());
     };
-    let dir = match input.cwd {
+    let dir = match input.cwd.clone() {
         Some(d) => d,
         None => std::env::current_dir()?,
     };
@@ -841,7 +895,7 @@ pub fn run(
     let agent = hook_agent(store, client, &root)?;
     let info = SessionInfo {
         client: Some(client.as_str().to_string()),
-        session_id: input.session_id,
+        session_id: input.session_id.clone(),
         ..Default::default()
     };
     let text = match event {
@@ -875,8 +929,218 @@ pub fn run(
             lane_auto_report(store, env, &agent, &root, input.last_message.as_deref())?;
             String::new()
         }
+        HookEvent::PreEdit => pre_edit(store, &agent, &root, &dir, &input)?,
     };
     Ok(text)
+}
+
+/// Files a pre-tool call is about to edit, relative to the project root. Claude Code sends
+/// `tool_input.file_path` / `notebook_path`; Codex sends an `apply_patch` patch, in
+/// `tool_input.patch`, `tool_input.command`, `tool_input.input` or as a string. Files outside
+/// the project are left out.
+pub fn edited_files(input: &HookInput, root: &Path, cwd: &Path) -> Vec<String> {
+    let Some(ti) = &input.tool_input else {
+        return Vec::new();
+    };
+    let mut raw: Vec<String> = Vec::new();
+    for key in ["file_path", "notebook_path", "path"] {
+        if let Some(p) = ti.get(key).and_then(Value::as_str) {
+            raw.push(p.to_string());
+        }
+    }
+    let mut patches: Vec<String> = Vec::new();
+    if let Some(s) = ti.as_str() {
+        patches.push(s.to_string());
+    }
+    for key in ["patch", "command", "input"] {
+        match ti.get(key) {
+            Some(Value::String(s)) => patches.push(s.clone()),
+            Some(Value::Array(a)) => {
+                patches.extend(a.iter().filter_map(Value::as_str).map(str::to_string))
+            }
+            _ => {}
+        }
+    }
+    for patch in patches {
+        for line in patch.lines() {
+            // Headers start at column 0. A context line (" *** Update File: …", e.g. in a
+            // document that shows a patch) starts with a space and must not become one, so
+            // only the end of the line is trimmed before matching.
+            let line = line.trim_end();
+            for marker in [
+                "*** Add File:",
+                "*** Update File:",
+                "*** Delete File:",
+                "*** Move to:",
+            ] {
+                if let Some(p) = line.strip_prefix(marker) {
+                    raw.push(p.trim().to_string());
+                }
+            }
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    let real_root = canonical(root);
+    for p in raw {
+        let path = Path::new(&p);
+        let abs = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
+        // Lexically normalise `.` and `..` so a path cannot climb out of the project.
+        let mut norm = PathBuf::new();
+        for c in abs.components() {
+            match c {
+                std::path::Component::ParentDir => {
+                    norm.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => norm.push(other),
+            }
+        }
+        // Compare real paths (symlinks resolved: /var vs /private/var on macOS); fall back to
+        // the lexical path for files that don't exist yet or outside a real tree.
+        let real = canonical(&norm);
+        let rel = match real.strip_prefix(&real_root) {
+            Ok(rel) => rel,
+            // Resolved to somewhere else: a symlink pointing out of the project is outside it.
+            Err(_) if real != norm => continue,
+            Err(_) => match norm.strip_prefix(root) {
+                Ok(rel) => rel,
+                Err(_) => continue,
+            },
+        };
+        // A symlink inside the project is also held under the name it was edited by, so a hold
+        // someone took on that name still applies (holds are compared lexically).
+        let alias = norm
+            .strip_prefix(root)
+            .or_else(|_| norm.strip_prefix(&real_root))
+            .ok();
+        for rel in std::iter::once(rel).chain(alias) {
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            if !rel.is_empty() && !out.contains(&rel) {
+                out.push(rel);
+            }
+        }
+    }
+    out
+}
+
+/// `path` with symlinks resolved: the file itself if it exists, else its parent directory
+/// (a file about to be created), else the path unchanged.
+fn canonical(path: &Path) -> PathBuf {
+    if let Ok(p) = std::fs::canonicalize(path) {
+        return p;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(dir), Some(name)) => std::fs::canonicalize(dir)
+            .map(|d| d.join(name))
+            .unwrap_or_else(|_| path.to_path_buf()),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// Pre-edit hook: hold the files about to be edited (exclusive, for the agent's lane); on a
+/// conflict, deny the tool call with a reason the agent can act on. Prints nothing otherwise.
+fn pre_edit(
+    store: &Store,
+    agent: &str,
+    root: &Path,
+    cwd: &Path,
+    input: &HookInput,
+) -> Result<String> {
+    let files = edited_files(input, root, cwd);
+    if files.is_empty() {
+        return Ok(String::new());
+    }
+    // File names from the tool input are literal: `notes[.md` must not be read as a glob
+    // (an invalid one would make the whole acquisition fail and the hook fail open).
+    let root_s = root.to_string_lossy().trim_end_matches('/').to_string();
+    let files: Vec<String> = files
+        .iter()
+        .map(|f| match f.strip_prefix(&root_s) {
+            // Escape only the part below the project root (the root may contain `[` too).
+            Some(rest) if rest.starts_with('/') => {
+                another_core::glob_escape(rest.trim_start_matches('/'))
+            }
+            _ => another_core::glob_escape(f),
+        })
+        .collect();
+    let lane = std::env::var("ANOTHER_LANE")
+        .ok()
+        .filter(|l| !l.trim().is_empty());
+    let acquire = |lane: Option<String>| {
+        store.acquire_holds(another_core::AcquireHolds {
+            agent: agent.to_string(),
+            project: root.to_string_lossy().to_string(),
+            paths: files.clone(),
+            ttl_seconds: None,
+            exclusive: true,
+            reason: Some("pre-edit".into()),
+            lane,
+        })
+    };
+    // Fail open, visibly: a lane that is closed or not in this project still gets the files
+    // held (without a lane), and the person is told why.
+    let mut warning: Option<String> = None;
+    let report = match acquire(lane.clone()) {
+        Ok(r) => r,
+        Err(e) if lane.is_some() && matches!(e.code(), "not_found" | "conflict") => {
+            let w = format!(
+                "Another: $ANOTHER_LANE={} can't be used in this project ({e}); the files were held without a lane.",
+                lane.as_deref().unwrap_or_default()
+            );
+            eprintln!("{w}");
+            warning = Some(w);
+            // Explicitly no lane: inferring the agent's other lane would attribute the edit
+            // to the wrong lane (and could turn a conflict into a same-lane warning).
+            acquire(Some(another_core::NO_LANE.into()))?
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let Some(first) = report.conflicts.first() else {
+        return Ok(warning
+            .map(|w| json!({ "systemMessage": w }).to_string())
+            .unwrap_or_default());
+    };
+    let held = &first.held;
+    let mut reason = format!(
+        "Another: {} is held by {}{} until {}{}.",
+        first.path,
+        held.agent,
+        held.lane
+            .as_deref()
+            .map(|l| format!(" (lane {l})"))
+            .unwrap_or_default(),
+        held.expires_at,
+        held.reason
+            .as_deref()
+            .map(|r| format!(" for \"{r}\""))
+            .unwrap_or_default()
+    );
+    if report.conflicts.len() > 1 {
+        reason.push_str(&format!(
+            " {} more file(s) conflict.",
+            report.conflicts.len() - 1
+        ));
+    }
+    reason.push_str(&format!(
+        " Coordinate with {} (send_message) or work on something else until it is released; \
+         `another holds --by-lane` shows who holds what.",
+        held.agent
+    ));
+    let mut out = json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": truncate(reason, 600),
+        }
+    });
+    if let Some(w) = warning {
+        out["systemMessage"] = json!(w);
+    }
+    Ok(out.to_string())
 }
 
 /// Token prefixes that mark a secret (Another, OpenAI/Anthropic style, GitHub, GitLab,

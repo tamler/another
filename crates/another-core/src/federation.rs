@@ -189,7 +189,7 @@ fn classify(kind: &str, payload: &Value, origin: &str) -> Share {
     // Node settings (`another config`) are this node's own, never synced.
     if matches!(
         kind,
-        "hold.conflict" | "resource.lease_expiring" | "node.setting_changed"
+        "hold.conflict" | "lane.hold_conflict" | "resource.lease_expiring" | "node.setting_changed"
     ) {
         return Share::Never;
     }

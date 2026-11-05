@@ -27,7 +27,7 @@ pub enum WebhookFilter {
     RequestCreated,
     /// `request.completed`, `request.cancelled`, `decision.answered`, `decision.expired`.
     RequestAnswered,
-    /// `hold.conflict`: an acquire was refused.
+    /// `hold.conflict` (an acquire was refused) and `lane.hold_conflict` (between lanes).
     HoldConflict,
     /// `resource.lease_expiring`: a lease has under five minutes left.
     LeaseExpiring,
@@ -83,7 +83,7 @@ impl WebhookFilter {
                     | "decision.answered"
                     | "decision.expired"
             ),
-            WebhookFilter::HoldConflict => kind == "hold.conflict",
+            WebhookFilter::HoldConflict => matches!(kind, "hold.conflict" | "lane.hold_conflict"),
             WebhookFilter::LeaseExpiring => kind == "resource.lease_expiring",
             WebhookFilter::All => !matches!(
                 kind.split('.').next(),

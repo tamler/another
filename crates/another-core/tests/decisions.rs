@@ -963,7 +963,7 @@ fn round4_roles_people_and_exact_options() {
 fn on_demand_people_cannot_relay_until_confirmed() {
     let s = Store::open_in_memory(Clock::System).unwrap();
     s.ensure_project("t", "/work/shop").unwrap();
-    s.register_agent(RegisterAgent {
+    s.register_agent_trusted(RegisterAgent {
         name: "claude".into(),
         program: Program::Claude,
         project: Some("/work/shop".into()),

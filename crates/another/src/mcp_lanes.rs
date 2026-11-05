@@ -41,6 +41,20 @@ pub struct LaneListArgs {
     pub include_closed: bool,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HoldsByLaneArgs {
+    /// Project absolute path or slug.
+    pub project: Option<String>,
+    /// Only this agent's holds.
+    pub agent: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct HoldsByLaneOut {
+    /// Lanes first (by name), then holds outside any lane.
+    pub lanes: Vec<another_core::LaneHolds>,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct LanesOut {
     pub lanes: Vec<Lane>,
@@ -240,6 +254,26 @@ impl AnotherMcp {
                 },
                 scope.as_ref(),
             )
+        })
+        .await
+    }
+
+    #[tool(description = "Live path holds grouped by lane: who holds what for which lane.")]
+    async fn holds_by_lane(
+        &self,
+        Parameters(a): Parameters<HoldsByLaneArgs>,
+    ) -> ToolResult<HoldsByLaneOut> {
+        let scope = remote::current_scope();
+        self.run(move |s| {
+            Ok(HoldsByLaneOut {
+                lanes: s.holds_by_lane(
+                    another_core::HoldFilter {
+                        project: a.project,
+                        agent: a.agent,
+                    },
+                    scope.as_ref(),
+                )?,
+            })
         })
         .await
     }

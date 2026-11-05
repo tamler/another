@@ -47,6 +47,26 @@ another lane close billing --agent manager --abandon --outcome "superseded by bi
 
 Every report is stored on the lane and also **mailed** to the lane's counterpart: the creator when the lead reports, the lead otherwise. The mail goes into the lane's thread with a subject like `[lane billing] needs_decision: status report by manager@shop`; the summary is in the body. Blocked and needs-decision reports are sent as high importance, so they appear in digests and `another wake`.
 
+## Path holds and lanes
+
+**Which lane a hold is for:** the `lane` argument of `hold_paths`, or `another hold acquire --lane` (defaults to `$ANOTHER_LANE`; `hold check` takes the same flag and gives the same answer), looked up in the hold's project only; another project's lane is an unknown lane. Without one, it is the single open lane the agent leads in that project. `-` means no lane, without that fallback. Holds without a lane behave as before.
+
+**Conflicts between lanes:**
+
+| You (lane) | Overlapping hold by another agent | Result |
+|---|---|---|
+| lane A | lane A, one of the two holds shared | Not a conflict: listed under `warnings` with `same_lane: true` |
+| lane A, exclusive | lane A, exclusive | Conflict: lane-mates can't both hold the same file exclusively |
+| lane A | lane B, or no lane | Conflict. You get `hold.conflict`, plus `lane.hold_conflict` when both sides have a lane (the `hold_conflict` webhook filter delivers it), and lane B's lead is mailed by `another` (at most once per lane pair every 10 minutes) |
+| no lane | anything | Conflict, as before (when either hold is exclusive) |
+
+**Seeing who holds what for which lane** (a token's `project`/`agent` filters only match holds it may see):
+- `another holds --by-lane`
+- MCP `holds_by_lane`
+- `lane show` lists the lane's live holds.
+
+For holds taken automatically before each edit, see the [pre-edit hook](HOOKS.md#optional-hold-files-before-they-are-edited).
+
 ## Markdown export (the old `.lanes` files)
 
 ```bash
