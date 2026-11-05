@@ -36,7 +36,44 @@ pub(crate) fn decider_tx(conn: &Connection) -> Result<String> {
     crate::settings::get(conn, "decider")
 }
 
+fn check_answered_by(value: &str) -> Result<()> {
+    if !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_.@".contains(&c))
+    {
+        Ok(())
+    } else {
+        Err(Error::Invalid("answered_by must be a name or address of 1-64 ASCII letters, digits, '-', '_', '.' or '@'".into()))
+    }
+}
+
 impl Store {
+    fn write_decision<T>(&self, mutate: impl FnOnce(&Tx<'_>) -> Result<T>) -> Result<T> {
+        self.write(|tx| {
+            crate::holds::sweep_tx(tx)?;
+            tx.execute_batch("SAVEPOINT decision_mutation")?;
+            match mutate(tx) {
+                Ok(value) => {
+                    tx.execute_batch("RELEASE decision_mutation")?;
+                    Ok(Ok(value))
+                }
+                Err(
+                    error @ (Error::Invalid(_)
+                    | Error::NotFound(_)
+                    | Error::Conflict(_)
+                    | Error::Forbidden(_)
+                    | Error::Ambiguous(_)),
+                ) => {
+                    tx.execute_batch("ROLLBACK TO decision_mutation; RELEASE decision_mutation")?;
+                    Ok(Err(error))
+                }
+                Err(error) => Err(error),
+            }
+        })?
+    }
+
     /// The person asked when a decision names nobody: the `decider` node setting, else
     /// [`DEFAULT_DECIDER`].
     pub fn default_decider(&self) -> Result<String> {
@@ -916,20 +953,6 @@ pub(crate) fn ask_tx(
 /// Answer a local decision inside a write transaction. `relayed` is the agent that relayed
 /// the answer (local API caller, or another node's agent for a relayed answer).
 /// `answered_by` travels in events and the feed, which carry names, not free text (D39).
-fn check_answered_by(answered_by: &str) -> Result<()> {
-    check_text("answered_by", answered_by, 64)?;
-    if answered_by
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@'))
-    {
-        Ok(())
-    } else {
-        Err(Error::Invalid(format!(
-            "answered_by {answered_by:?} must be a name: ASCII letters, digits, '-', '_', '.' or '@'"
-        )))
-    }
-}
-
 pub(crate) fn answer_tx(
     tx: &Tx<'_>,
     input: &AnswerDecision,
@@ -1405,9 +1428,13 @@ fn relay_answer_tx(
             .flatten();
         check_relayer(tx, r, asker.as_deref().unwrap_or(""))?;
     }
-    if let Some(answered_by) = &input.answered_by {
-        check_answered_by(answered_by.trim())?;
-    }
+    let answered_by = input
+        .answered_by
+        .as_deref()
+        .unwrap_or(d.human.as_str())
+        .trim()
+        .to_string();
+    check_answered_by(&answered_by)?;
     // Free text never goes in an event: it travels as mail to the asking agent on the
     // decision's node (mail is routed only to its recipients' nodes), and the relay event
     // names that message.
@@ -1445,11 +1472,6 @@ fn relay_answer_tx(
         None => None,
     };
     let relayed = relayed_ref.as_ref().map(|r| r.address.clone());
-    let answered_by = input
-        .answered_by
-        .clone()
-        .filter(|a| !a.trim().is_empty())
-        .unwrap_or_else(|| d.human.clone());
     tx.emit(
         relayed.as_deref().unwrap_or(answered_by.as_str()),
         "decision.answer_relayed",
@@ -1580,8 +1602,7 @@ impl Store {
     /// kind `decision`.
     pub fn ask_decision(&self, input: NewDecision, scope: Option<&TokenScope>) -> Result<Decision> {
         validate(&input)?;
-        self.write(|tx| {
-            crate::holds::sweep_tx(tx)?;
+        self.write_decision(|tx| {
             let human_name = match input
                 .human
                 .as_ref()
@@ -1751,8 +1772,7 @@ impl Store {
         input: AnswerDecision,
         scope: Option<&TokenScope>,
     ) -> Result<Decision> {
-        self.write(|tx| {
-            crate::holds::sweep_tx(tx)?;
+        self.write_decision(|tx| {
             if let Some(d) = relay_answer_tx(tx, &input, scope)? {
                 return Ok(Ok(d));
             }
@@ -2126,6 +2146,639 @@ mod tests {
                 "relayer_unknown"
             ]
         );
+    }
+
+    fn review_store() -> (Store, std::sync::Arc<std::sync::atomic::AtomicI64>) {
+        let (clock, handle) = crate::Clock::manual(1_800_000_000_000);
+        let store = Store::open_in_memory(clock).unwrap();
+        store.ensure_project("test", "/work/shop").unwrap();
+        store
+            .register_agent_trusted(RegisterAgent {
+                name: "worker".into(),
+                program: Program::Codex,
+                project: Some("/work/shop".into()),
+                model: None,
+                description: None,
+            })
+            .unwrap();
+        (store, handle)
+    }
+
+    fn review_question(store: &Store, deadline: bool) -> NewDecision {
+        NewDecision {
+            agent: "worker@shop".into(),
+            question: "Choose an option".into(),
+            options: vec![
+                DecisionOption {
+                    value: "wait".into(),
+                    label: "Wait".into(),
+                    description: None,
+                },
+                DecisionOption {
+                    value: "ship".into(),
+                    label: "Ship".into(),
+                    description: None,
+                },
+            ],
+            deadline_at: deadline.then(|| store.now() + 60_000),
+            on_timeout: if deadline {
+                DecisionTimeout::ChooseDefault
+            } else {
+                DecisionTimeout::KeepOpen
+            },
+            default_value: deadline.then(|| "wait".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn refused_decision_mutations_keep_due_defaults_and_roll_back_their_own_changes() {
+        for refusal in ["late_answer", "invalid_answer", "unknown_lane", "self_ask"] {
+            let (store, clock) = review_store();
+            let due = store
+                .ask_decision(review_question(&store, true), None)
+                .unwrap();
+            let active = store
+                .ask_decision(review_question(&store, false), None)
+                .unwrap();
+            clock.fetch_add(60_001, std::sync::atomic::Ordering::SeqCst);
+            let error = if refusal.ends_with("answer") {
+                store
+                    .answer_decision(
+                        AnswerDecision {
+                            decision: if refusal == "late_answer" {
+                                due.decision_id.clone()
+                            } else {
+                                active.decision_id.clone()
+                            },
+                            value: Some(
+                                if refusal == "late_answer" {
+                                    "wait"
+                                } else {
+                                    "missing-option"
+                                }
+                                .into(),
+                            ),
+                            text: None,
+                            answered_by: None,
+                            relayed_by: None,
+                        },
+                        None,
+                    )
+                    .unwrap_err()
+            } else {
+                let mut question = review_question(&store, false);
+                if refusal == "unknown_lane" {
+                    question.human = Some("new-person".into());
+                    question.lane = Some("missing-lane".into());
+                } else {
+                    question.agent = "owner".into();
+                    question.project = Some("shop".into());
+                }
+                store.ask_decision(question, None).unwrap_err()
+            };
+            assert!(
+                matches!(
+                    error,
+                    Error::Invalid(_) | Error::Conflict(_) | Error::NotFound(_)
+                ),
+                "{refusal}: {error}"
+            );
+            // Query directly: decision(), inbox() and request reads must not repair the result.
+            store.read(|conn| {
+                let status: String = conn.query_row("SELECT status FROM decisions WHERE decision_id = ?1", [&due.decision_id], |r| r.get(0))?;
+                assert_eq!(status, "expired", "{refusal}");
+                let request: String = conn.query_row("SELECT status FROM requests WHERE request_id = ?1", [&due.request_id], |r| r.get(0))?;
+                assert_eq!(request, "done", "{refusal}");
+                let automatic: i64 = conn.query_row("SELECT count(*) FROM messages WHERE thread_id = ?1 AND subject LIKE '[decision] default applied:%'", [&due.thread_id], |r| r.get(0))?;
+                assert_eq!(automatic, 1, "{refusal}");
+                let humans: i64 = conn.query_row("SELECT count(*) FROM agents WHERE name = 'new-person'", [], |r| r.get(0))?;
+                assert_eq!(humans, 0, "failed ask must roll back its new human");
+                Ok(())
+            }).unwrap();
+            let previous: String = store
+                .read(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT event_id FROM events WHERE node_id = ?1 ORDER BY seq DESC LIMIT 1",
+                        [store.node_id()],
+                        |r| r.get(0),
+                    )?)
+                })
+                .unwrap();
+            store.set_node_name("after-refusal").unwrap();
+            let next_previous: String = store
+                .read(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT prev_id FROM events WHERE node_id = ?1 ORDER BY seq DESC LIMIT 1",
+                        [store.node_id()],
+                        |r| r.get(0),
+                    )?)
+                })
+                .unwrap();
+            assert_eq!(
+                next_previous, previous,
+                "rolled-back events cannot remain in the chain"
+            );
+        }
+    }
+
+    #[test]
+    fn answer_labels_reject_prose_before_it_reaches_events() {
+        let (store, _) = review_store();
+        let decision = store
+            .ask_decision(review_question(&store, false), None)
+            .unwrap();
+        let error = store
+            .answer_decision(
+                AnswerDecision {
+                    decision: decision.decision_id.clone(),
+                    value: Some("wait".into()),
+                    text: None,
+                    answered_by: Some("a sentence with private details".into()),
+                    relayed_by: None,
+                },
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "invalid");
+        store
+            .read(|conn| {
+                let count: i64 = conn.query_row(
+                    "SELECT count(*) FROM events WHERE kind = 'decision.answered'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(count, 0);
+                Ok(())
+            })
+            .unwrap();
+        for name in ["alex", "alex@shop", "alex@shop@node", "alex@@node"] {
+            let decision = store
+                .ask_decision(review_question(&store, false), None)
+                .unwrap();
+            store
+                .answer_decision(
+                    AnswerDecision {
+                        decision: decision.decision_id,
+                        value: Some("wait".into()),
+                        text: None,
+                        answered_by: Some(name.into()),
+                        relayed_by: None,
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn a_database_failure_rolls_back_the_sweep_and_attempted_question() {
+        let (store, clock) = review_store();
+        let due = store
+            .ask_decision(review_question(&store, true), None)
+            .unwrap();
+        clock.fetch_add(60_001, std::sync::atomic::Ordering::SeqCst);
+        let before: i64 = store
+            .read(|conn| Ok(conn.query_row("SELECT count(*) FROM events", [], |r| r.get(0))?))
+            .unwrap();
+        store.read(|conn| {
+            conn.execute_batch("CREATE TEMP TRIGGER refuse_decision BEFORE INSERT ON decisions BEGIN SELECT RAISE(ABORT, 'injected write failure'); END")?;
+            Ok(())
+        }).unwrap();
+        let mut question = review_question(&store, false);
+        question.human = Some("new-person".into());
+        assert!(matches!(
+            store.ask_decision(question, None),
+            Err(Error::Db(_))
+        ));
+        store
+            .read(|conn| {
+                let status: String = conn.query_row(
+                    "SELECT status FROM decisions WHERE decision_id = ?1",
+                    [&due.decision_id],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(
+                    status, "open",
+                    "database failures roll back the whole transaction"
+                );
+                let events: i64 =
+                    conn.query_row("SELECT count(*) FROM events", [], |r| r.get(0))?;
+                assert_eq!(events, before);
+                let people: i64 = conn.query_row(
+                    "SELECT count(*) FROM agents WHERE name = 'new-person'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(people, 0);
+                conn.execute_batch("DROP TRIGGER refuse_decision")?;
+                Ok(())
+            })
+            .unwrap();
+        store
+            .ask_decision(review_question(&store, false), None)
+            .unwrap();
+        let status: String = store
+            .read(|conn| {
+                Ok(conn.query_row(
+                    "SELECT status FROM decisions WHERE decision_id = ?1",
+                    [&due.decision_id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            status, "expired",
+            "a successful retry can commit the timeout"
+        );
+    }
+
+    fn legacy_foreign_role_relay(
+        history: &[Program],
+        projected: Program,
+        refresh: Option<Program>,
+    ) {
+        let (hub, _) = review_store();
+        hub.set_node_name("hub").unwrap();
+        let decision = hub
+            .ask_decision(review_question(&hub, false), None)
+            .unwrap();
+        let human = hub.agent("owner").unwrap();
+        for &program in history {
+            hub.register_agent_trusted(RegisterAgent {
+                name: "owner".into(),
+                program,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+        }
+        let peer = Store::open_in_memory(crate::Clock::manual(hub.now()).0).unwrap();
+        peer.set_node_name("peer").unwrap();
+        // Use one clock for invite validity on both stores.
+        let code = hub
+            .create_invite("http://127.0.0.1:1", &crate::Perm::ALL, 60)
+            .unwrap();
+        let (invite, request) = peer.prepare_join(&code).unwrap();
+        let response = hub.accept_pairing(&request).unwrap();
+        peer.complete_join(&invite, &response).unwrap();
+        let before = hub.agent("owner").unwrap();
+        let before_event: String = hub
+            .read(|conn| {
+                Ok(conn.query_row(
+                    "SELECT event_id FROM agents WHERE agent_id = ?1",
+                    [&human.agent_id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        let event_id = peer
+            .write(|tx| {
+                tx.emit(
+                    "peer",
+                    "agent.registered",
+                    json!({
+                        "agent_id": human.agent_id,
+                        "name": "owner",
+                        "program": projected.as_str(),
+                        "role_confirmed": true
+                    }),
+                )
+            })
+            .unwrap();
+        let (events, _) = peer.outbound_events(0, 100).unwrap();
+        let forged = events.iter().find(|e| e.event_id == event_id).unwrap();
+        let report = hub.ingest(peer.node_id(), &events, &[]).unwrap();
+        assert!(report.accepted > 0);
+        assert_eq!(report.rejected.len(), 1, "{report:?}");
+        assert_eq!(report.rejected[0].event_id, event_id);
+        assert!(report.rejected[0].reason.contains("does not own agents"));
+        assert!(hub
+            .events(100)
+            .unwrap()
+            .iter()
+            .all(|e| e.event_id != event_id));
+        assert_eq!(
+            serde_json::to_value(hub.agent("owner").unwrap()).unwrap(),
+            serde_json::to_value(&before).unwrap(),
+            "current admission must leave the local agent unchanged"
+        );
+
+        // Model a database written before origin enforcement. Current ingest rejects
+        // this event, and its projection guard cannot construct the legacy state.
+        hub.write(|tx| {
+            tx.execute(
+                "INSERT INTO events (event_id, node_id, ts, actor, kind, payload, prev_id, sig)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    forged.event_id,
+                    forged.node_id,
+                    forged.ts,
+                    forged.actor,
+                    forged.kind,
+                    forged.payload,
+                    forged.prev_id,
+                    forged.sig
+                ],
+            )?;
+            // The old conflict update preserved identity but replaced these fields.
+            assert_eq!(
+                tx.execute(
+                    "UPDATE agents SET program = ?2, model = NULL, description = NULL,
+                       status = 'active', updated_at = ?3, last_seen_at = ?3,
+                       address = 'owner@@peer' WHERE agent_id = ?1",
+                    params![human.agent_id, projected.as_str(), forged.ts],
+                )?,
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+        let stored = hub
+            .events(100)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.event_id == event_id)
+            .unwrap();
+        assert_eq!(stored.node_id, peer.node_id());
+        assert_eq!(stored.payload["role_confirmed"], true);
+        let legacy = hub.agent("owner").unwrap();
+        assert_eq!(legacy.agent_id, human.agent_id);
+        assert_eq!(legacy.node_id, hub.node_id());
+        assert_eq!(legacy.program, projected.as_str());
+        let projected_event: String = hub
+            .read(|conn| {
+                Ok(conn.query_row(
+                    "SELECT event_id FROM agents WHERE agent_id = ?1",
+                    [&human.agent_id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(projected_event, before_event);
+        assert!(!hub
+            .read(|conn| crate::identity::role_confirmed(conn, &human.agent_id, projected.as_str()))
+            .unwrap());
+        if let Some(program) = refresh {
+            let refreshed = hub
+                .register_agent(RegisterAgent {
+                    name: "owner".into(),
+                    program,
+                    project: None,
+                    model: None,
+                    description: None,
+                })
+                .unwrap();
+            assert_eq!(refreshed.program, projected.as_str());
+            let latest = hub
+                .events(100)
+                .unwrap()
+                .into_iter()
+                .rev()
+                .find(|e| {
+                    e.node_id == hub.node_id()
+                        && e.kind == "agent.registered"
+                        && e.payload["agent_id"] == human.agent_id
+                })
+                .unwrap();
+            assert_eq!(latest.payload["program"], projected.as_str());
+            assert_eq!(latest.payload["role_confirmed"], false);
+        }
+        let asker = hub.agent("worker@shop").unwrap();
+        let denied = hub
+            .read(|conn| {
+                let relayer = resolve_agent(conn, hub.node_id(), "owner")?;
+                check_relayer(conn, &relayer, &asker.agent_id)
+            })
+            .unwrap_err();
+        assert_eq!(denied.code(), "forbidden");
+        let error = hub
+            .answer_decision(
+                AnswerDecision {
+                    decision: decision.decision_id.clone(),
+                    value: Some("wait".into()),
+                    text: None,
+                    answered_by: None,
+                    relayed_by: Some("owner".into()),
+                },
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "forbidden");
+        hub.register_agent_trusted(RegisterAgent {
+            name: "owner".into(),
+            program: projected,
+            project: None,
+            model: None,
+            description: None,
+        })
+        .unwrap();
+        hub.answer_decision(
+            AnswerDecision {
+                decision: decision.decision_id,
+                value: Some("wait".into()),
+                text: None,
+                answered_by: None,
+                relayed_by: Some("owner".into()),
+            },
+            None,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_signed_foreign_registration_cannot_confirm_a_local_human_role() {
+        legacy_foreign_role_relay(&[], Program::Human, None);
+    }
+
+    #[test]
+    fn a_peer_cannot_restore_a_locally_removed_privileged_role() {
+        legacy_foreign_role_relay(&[Program::Human, Program::Codex], Program::Human, None);
+    }
+
+    #[test]
+    fn an_untrusted_refresh_cannot_reconfirm_a_human_role_restored_by_a_peer() {
+        for refresh in [Program::Codex, Program::Human] {
+            legacy_foreign_role_relay(
+                &[Program::Human, Program::Codex],
+                Program::Human,
+                Some(refresh),
+            );
+        }
+    }
+
+    #[test]
+    fn an_untrusted_refresh_cannot_reconfirm_a_previous_privileged_role() {
+        for refresh in [Program::Codex, Program::GrokBot] {
+            legacy_foreign_role_relay(
+                &[Program::GrokBot, Program::Human],
+                Program::GrokBot,
+                Some(refresh),
+            );
+        }
+    }
+
+    #[test]
+    fn an_untrusted_same_program_refresh_keeps_genuine_role_confirmation() {
+        for program in [Program::Human, Program::GrokBot] {
+            let (hub, _) = review_store();
+            let decision = hub
+                .ask_decision(review_question(&hub, false), None)
+                .unwrap();
+            hub.register_agent_trusted(RegisterAgent {
+                name: "owner".into(),
+                program,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+            hub.register_agent(RegisterAgent {
+                name: "owner".into(),
+                program,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+            hub.answer_decision(
+                AnswerDecision {
+                    decision: decision.decision_id,
+                    value: Some("wait".into()),
+                    text: None,
+                    answered_by: None,
+                    relayed_by: Some("owner".into()),
+                },
+                None,
+            )
+            .unwrap();
+        }
+    }
+
+    fn relay_label_mirror(human: &str) -> Store {
+        let (store, _) = review_store();
+        store.set_node_name("hub").unwrap();
+        store
+            .register_agent_trusted(RegisterAgent {
+                name: "manager".into(),
+                program: Program::GrokBot,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+        let peer = Store::open_in_memory(crate::Clock::manual(store.now()).0).unwrap();
+        peer.set_node_name("origin").unwrap();
+        let code = store
+            .create_invite("http://127.0.0.1:1", &crate::Perm::ALL, 60)
+            .unwrap();
+        let (invite, request) = peer.prepare_join(&code).unwrap();
+        let response = store.accept_pairing(&request).unwrap();
+        peer.complete_join(&invite, &response).unwrap();
+        let project = store.ensure_project("test", "/work/shop").unwrap();
+        let payload = json!({
+            "decision_id": "MIRROR-LABEL",
+            "project_id": project.project_id,
+            "human_id": "unknown-human",
+            "human": human,
+            "option_values": ["wait", "ship"]
+        });
+        let event = crate::federation::WireEvent {
+            seq: 1,
+            event_id: "mirror-label-event".into(),
+            node_id: peer.node_id().into(),
+            ts: store.now(),
+            actor: "peer".into(),
+            kind: "decision.created".into(),
+            payload: payload.to_string(),
+            prev_id: None,
+            sig: String::new(),
+        };
+        store
+            .write(|tx| mirror_created_tx(tx, &event, &payload))
+            .unwrap();
+        store
+    }
+
+    fn relay_label_answer(answered_by: Option<&str>) -> AnswerDecision {
+        AnswerDecision {
+            decision: "MIRROR-LABEL".into(),
+            value: Some("wait".into()),
+            text: None,
+            answered_by: answered_by.map(str::to_string),
+            relayed_by: Some("manager".into()),
+        }
+    }
+
+    #[test]
+    fn mirrored_answers_validate_the_resolved_human_label() {
+        for human in ["private phrase", "alex\nline", ""] {
+            let store = relay_label_mirror(human);
+            let error = store
+                .answer_decision(relay_label_answer(None), None)
+                .unwrap_err();
+            assert!(matches!(error, Error::Invalid(_)), "{error:?}");
+            let row: (String, Option<String>, Option<i64>) = store
+                .read(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT status, answered_by, answered_at FROM remote_decisions
+                         WHERE decision_id = 'MIRROR-LABEL'",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )?)
+                })
+                .unwrap();
+            assert_eq!(row, ("open".into(), None, None));
+            assert!(!store
+                .events(100)
+                .unwrap()
+                .iter()
+                .any(|e| e.kind == "decision.answer_relayed"));
+        }
+    }
+
+    #[test]
+    fn mirrored_answers_normalize_explicit_labels_before_recording() {
+        for (input, expected) in [
+            (Some(" \talex@shop@node\n "), "alex@shop@node"),
+            (None, "owner"),
+        ] {
+            let store = relay_label_mirror("owner");
+            let decision = store
+                .answer_decision(relay_label_answer(input), None)
+                .unwrap();
+            assert_eq!(decision.answer.unwrap().answered_by, expected);
+            let stored: String = store
+                .read(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT answered_by FROM remote_decisions WHERE decision_id = 'MIRROR-LABEL'",
+                        [],
+                        |r| r.get(0),
+                    )?)
+                })
+                .unwrap();
+            assert_eq!(stored, expected);
+            let event = store
+                .events(100)
+                .unwrap()
+                .into_iter()
+                .find(|e| e.kind == "decision.answer_relayed")
+                .unwrap();
+            assert_eq!(event.payload["answered_by"], expected);
+        }
+        for input in ["", " \t\n "] {
+            let store = relay_label_mirror("owner");
+            assert!(matches!(
+                store.answer_decision(relay_label_answer(Some(input)), None),
+                Err(Error::Invalid(_))
+            ));
+            assert!(!store
+                .events(100)
+                .unwrap()
+                .iter()
+                .any(|e| e.kind == "decision.answer_relayed"));
+        }
     }
 
     #[test]
