@@ -1,121 +1,60 @@
-# Merging the v0.1.0 stack
+# Reviewing the v0.1.0 stack
 
-Dry run of 2026-11-05, on a local scratch branch that was never pushed. It starts from this branch (tamler/another#9) and merges each later PR in the order below with `git merge --no-ff`. The branches are still moving, so repeat it before merging.
+Updated 2026-11-05 after the PR renumbering and repair passes. This is a dependency map for review, not merge or release approval. Earlier dry-run SHAs, conflict resolutions and test counts described older trees; they do not establish acceptance of the current stack.
+
+## Current PR map
 
 | PR | Branch | Base |
 |---|---|---|
-| #9 | `claude/background-service` | `main` |
-| #10 | `claude/phase1-lanes` | `main` |
-| #11–#16 | `claude/phase2-push` … `claude/phase7-remote-agents` | the previous phase |
-| #17 | `claude/v0.1.0-readiness` | `claude/phase7-remote-agents` |
-| #18–#25 | drafts | `claude/v0.1.0-readiness` |
-| follow-ups | `claude/service-followups` | `claude/hardening-review`, plus a merge of #9 |
-| docs | `claude/docs-regen-v010` | `claude/docs-audit-v010`, plus a merge of `claude/service-followups` |
+| #42 | `claude/background-service` | `main` |
+| #43 | `claude/phase1-lanes` | `main` |
+| #44 | `claude/phase2-push` | `claude/phase1-lanes` |
+| #45 | `claude/phase3-decisions` | `claude/phase2-push` |
+| #46 | `claude/phase4-lane-holds` | `claude/phase3-decisions` |
+| #47 | `claude/phase5-spend` | `claude/phase4-lane-holds` |
+| #48 | `claude/phase6-summary` | `claude/phase5-spend` |
+| #49 | `claude/phase7-remote-agents` | `claude/phase6-summary` |
+| #50 | `claude/v0.1.0-readiness` | `claude/phase7-remote-agents` |
+| #51-#58 | Changelog, reset-day alternatives, hardening, examples, docs and coverage | `claude/v0.1.0-readiness` |
+| #59 | `launch/seo` | `main` |
+| #60 | `claude/service-followups` | `claude/hardening-review` |
+| #61 | `claude/docs-regen-v010` | `claude/docs-audit-v010` |
+| #62 | `claude/test-coverage-r3` | `claude/test-coverage-v010` |
+| #63 | `launch/seo2` | `launch/seo` |
+| #64 | `launch/seo3` | `launch/seo2` |
+| #65 | `claude/install-msrv-compat` | `main` |
+| #66 | `claude/fix-spend-upsert` | `claude/v0.1.0-readiness` |
+| #67 | `claude/test-coverage-r4` | `claude/test-coverage-r3` |
+| #68 | `claude/docs-walkthrough-fixes` | `claude/docs-regen-v010` |
+| #69 | `claude/name-scrub` | `claude/v0.1.0-readiness` |
+| #70 | `claude/fed-optA` | `claude/test-coverage-r3` |
+| #71 | `launch/seo-audit-r4` | `launch/seo3` |
+| #72 | `launch/seo4` | `launch/seo3` |
 
-## Why there are two extra branches
+Base names alone do not show every incorporated branch. In particular, #60 includes the background-service implementation from #42, and #61 includes service follow-ups from #60. Recheck the graph and actual content before combining changes.
 
-Some follow-ups can't live on any PR already in the stack, because the code they touch is on separate branches:
+## Dependencies that require a deliberate decision
 
-- `service.rs` is only on #9. `doctor.rs` starts at #17. `ForwardedHeader` and `serve --trusted-proxy-header` are only on #20.
-- **`claude/service-followups`** merges #9 into #20, then adds `--trusted-proxy-header` to `another service install` and makes `another doctor` aware of the service. On #9 alone, the flag would have nothing to validate it, and a service installed with it would crash-loop, because `serve` there doesn't accept it.
-- **`claude/docs-regen-v010`** holds the regenerated `docs/CLI.md` and `docs/MCP.md`. They can't go on #22, because `gen-docs.py --check` compares them with the binary built from the same tree, so #22's own check would fail.
+- **Remote-agent authority:** #49 must not be accepted on its own while its P1 federation findings remain. #70 supplies the origin-authority and lease-admission work; its batch-settlement behavior needs its own exact-head review and tests. Keep this security dependency visible in any integrated candidate.
+- **Reset-day alternatives:** #52 clamps stored reset days while #57 uses a fallible calculation. They overlap; choose the intended behavior before resolving that code rather than combining both blindly.
+- **Service-aware doctor:** the service starts on #42, doctor starts on #50, and their integration is on #60. Release notes on a branch without those companions must describe the service conditionally.
+- **Spend upserts:** include #66's refusal of fields the upsert cannot change, then regenerate references when the MCP contract changes.
+- **Launch material:** #59 and its follow-ups prepare site/content changes. Source delivery does not authorize deployment, domain attachment, DNS changes or public submission.
 
-Merge both after their parents. If a later PR changes a command or an MCP tool, run `ANOTHER_BIN=target/debug/another python3 scripts/gen-docs.py` again after it.
+## Repair propagation and conflicts
 
-## Results
+Repairs can be replayed as narrow patch commits without merging a base branch. A dependent head then does not contain the base's new repair commit, even when its file changes are equivalent. Its merge-base diff may include the replayed repair. Review that patch separately from the feature diff, and reconcile equivalent changes once when assembling an integrated tree.
 
-| Step | Tested at | Result |
-|---|---|---|
-| #10 `phase1-lanes` | `ad88fb0` | 1 conflict: `docs/DECISIONS.md` |
-| #11 `phase2-push` | `7b6cc0e` | clean |
-| #12 `phase3-decisions` | `afa366a` | clean |
-| #13 `phase4-lane-holds` | `8463f06` | clean |
-| #14 `phase5-spend` | `8986578` | clean |
-| #15 `phase6-summary` | `16656e9` | clean |
-| #16 `phase7-remote-agents` | `ac074b2` | clean |
-| #17 `v0.1.0-readiness` | `7af29ef` | clean |
-| #18 `changelog-v010` | `78acdfe` | 1 conflict: `CHANGELOG.md` |
-| #19 `todo-sweep` | `b240144` | clean. #24 in its place also merges, with 1 conflict in `CHANGELOG.md` |
-| #20 `hardening-review` | `0f958d2` | 1 conflict: `CHANGELOG.md` |
-| `service-followups` | `45457ae` | clean |
-| #21 `examples` | `e8c933c` | clean |
-| #22 `docs-audit-v010` | `4eada80` | conflicts: `.github/workflows/ci.yml` (2), `README.md` (1), all with #21 |
-| `docs-regen-v010` | `07788ae` | clean |
-| #23 `test-coverage-v010` | `b2b8898` | clean |
-| #25 `fix-cov-bugs` | `26f2a84` | 2 hunks in `crates/another/tests/doctor.rs`, with #23 |
+Do not restore an older implementation simply to resolve a conflict. Keep decision timeout/savepoint behavior, local role-confirmation checks, schedule validation, recipient checks and the once-per-day failure claim together. #58 changes the same summary paths as #48, so inspect their combined behavior rather than selecting one whole file.
 
-#9 still needs its code where it is:
+Likely overlap points include CHANGELOG.md, README.md, DECISIONS.md, the examples/docs CI jobs and appended doctor tests. Preserve both CI jobs as complete jobs, all relevant guide links and independently needed tests. A historical conflict list is not an exhaustive current one.
 
-- `Command::Service(_)` has its own match arm, after `Init | Status`. Don't fold it into the `Serve | Hook` arm until the stack is merged, because #16 and #17 edit that line.
-- `ServiceCmd` sits before `ResourceCmd`, and `service_command` before `run`.
+## Verification before acceptance
 
-## Resolving the conflicts
+Freeze the then-current heads and bases, prepare the intended integrated tree, and run the full gate in [CONTRIBUTING.md](../CONTRIBUTING.md). Use a separate Cargo target for each branch under review so a binary from another branch cannot stand in for it.
 
-**`docs/DECISIONS.md` (#10).** Keep #9's row D36, then #10's row D37. This is the only conflict #9 causes. It can't be avoided, because both PRs append to the same table.
+Regenerate docs/CLI.md and docs/MCP.md from the binary built from that exact tree whenever commands, settings or MCP schemas change, then run scripts/gen-docs.py --check. Also exercise examples and documentation commands with isolated homes and ports. A symlinked temporary-path failure is not evidence about an unrelated repair.
 
-**`CHANGELOG.md` (#18, #20; #24 if chosen).** Keep the entries from both sides, then remove duplicates.
+Record exit statuses and concrete failures. One branch's passing gate does not establish that another head or the integrated stack passes. This document makes no current integrated test, CI, real-systemd, launchd, multi-machine federation, reboot or human-acceptance claim.
 
-**`.github/workflows/ci.yml` (#21 and #22).** Neither side is wrong: each adds a new job after `msrv`, and git sees their shared steps as one change. Keep #21's `examples` job as it is, then add #22's `docs` job after it, complete with its own `actions/checkout`, toolchain, cache and build steps:
-
-```yaml
-  examples:
-    name: examples (headless)
-    runs-on: ubuntu-latest
-    steps:
-      # checkout, toolchain, cache and build, then "Run the four examples"
-
-  docs:
-    name: docs (quickstart, walkthrough, coverage)
-    runs-on: ubuntu-latest
-    steps:
-      # checkout, toolchain, cache and build, then gen-docs --check, the quickstart and the walkthrough
-```
-
-**`README.md` (#21 and #22).** Both add rows to the same Guides table. Keep all the rows.
-
-**`crates/another/tests/doctor.rs` (#23 and #25).** Both only append tests. Keep #23's, then #25's.
-
-**#19 and #24: a choice, not a merge.** They are two TODO sweeps with incompatible changes to `period_bounds`. #19 clamps `reset_day` and keeps the signature. #24 returns `Result` and rejects bad values. Each passes the checks below in the stack without the other, but they can't both go in. This needs a maintainer's decision.
-
-## Follow-ups
-
-Done:
-
-- **Docs:** `gen-docs.py --check` passes on the merged tree, with `docs-regen-v010` in it.
-- **`--trusted-proxy-header`:** `another service install` takes it, and an update warns if it drops or changes the header.
-- **`another doctor`:** without `--server` or `ANOTHER_SERVER`, it checks the service's address when the service uses the same home. A new `service` check reports a stopped service, a missing binary, a different home, an unreadable definition and a service manager it can't reach. The fix hints name `another service` commands when the server is the service.
-- **Root `STACK-MERGE.md`:** removed from #10 in `ad88fb0`.
-- **#23's failing tests:** the three doctor tests now assert the fixed result. The tests that pin what #25 changes assert only what holds with or without #25, and #25's own tests cover the fixed behaviour. #23 passes both alone and merged with #25, so the two can merge in either order.
-
-Still open:
-
-- **"Pending" notes about #9 in #18:** remove them from `CHANGELOG.md` and `docs/release-notes-v0.1.0.md` once #9 is in, along with the release notes' line about `another doctor` not knowing about the service, and mention the update warnings, rollback, and the doctor and proxy changes.
-
-## Other findings
-
-- **`examples/peer-lanes` (#21) fails on macOS because a project path can be registered twice.** `--project "$SHOP"` stores the `/var/folders/…` path as given, while commands run from that folder use the working directory, which the OS reports as `/private/var/folders/…`. Another treats them as two projects, so the second agent's hold lands in `shop-2`, and the lane lookup finds nothing. With a temp directory whose path has no symlink, all four examples pass. This isn't specific to the example: anyone who passes a symlinked `--project` path and also runs from inside it gets two projects. The Linux CI result wasn't checked here.
-- **`/events/stream` (#11) ignores shutdown.** With a stream open, a stop takes the full 3 s grace period: 3.03 s for `serve` on SIGTERM and 3.08 s for `another service stop` on real launchd. Both exit cleanly, with a warning in the log. Ending the stream on the server's cancellation token would make the stop immediate, but isn't required.
-
-## Verification
-
-Results on the merged tree, on macOS, with #19 and then with #24 in its place:
-
-| Check | With #19 | With #24 |
-|---|---|---|
-| `cargo test --workspace --no-fail-fast` | 322 passed, 0 failed | 322 passed, 0 failed |
-| `cargo clippy --workspace --all-targets --locked -- -D warnings` | pass | pass |
-| `cargo fmt --all -- --check` | pass | pass |
-| `cargo +1.88 check --workspace --all-targets --locked` | pass | pass |
-| `scripts/gen-docs.py --check` | pass | pass |
-| `scripts/quickstart-ci.sh` | pass, but another server already held port 7466 here | not run |
-| Peer walkthrough | pass | not run |
-| `examples/run-all.sh` | **fails**: `peer-lanes` only, as above. Passes from a temp directory with no symlink | not run |
-
-Real launchd, in a temporary `HOME` and `ANOTHER_HOME` with spaces in the paths, on a non-default port, on `claude/service-followups` (not the merged tree): install with `--auth` and `--trusted-proxy-header`, `doctor` passing against the service, `stop` with doctor's warning and start hint, `start`, `uninstall`, and doctor's skip afterwards. No job or listener was left behind.
-
-Not tested:
-
-- **The combined `ci.yml`.** It parses, and the steps of its `docs` and `examples` jobs were run by hand, but it hasn't run on GitHub. The `shellcheck` lines weren't run, because it isn't installed here.
-- **Real systemd.** There is no Linux machine here, so systemd has only been run against the fake `systemctl`, including all of doctor's service checks.
-- **A reboot or login restart** on either platform.
-- **Rollback against a real manager.** It has only been run against the fake managers, because forcing a real activation failure isn't practical.
+Author-only history rewrites change commit identities while preserving trees. Re-freeze review SHAs afterward; retain private before/after provenance rather than putting obsolete SHA pins in this map. Cached commits and read-only PR refs can remain available after branch rewrites.

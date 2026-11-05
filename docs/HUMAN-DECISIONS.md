@@ -79,7 +79,7 @@ The manager then relays the answer. Any of these works:
 - **CLI**, on the machine itself: `another decision answer 01JD… ship [--text "…"] [--as pat]`.
 
 **What gets recorded:**
-- `answered_by`: the person (default: the person asked).
+- `answered_by`: the person's name or address label (default: the person asked), limited to 64 ASCII letters, digits, `-`, `_`, `.` or `@`. Put prose in the answer text or note. The label is recorded, not authenticated; the relayer's permissions are checked separately.
 - `relayed_by`: the agent that called the API. Remote callers are always recorded as their token's agent and cannot set it to anyone else. **Only a manager bot (`grok_bot`) or a person (`human`) may relay, and never the agent that asked**: an agent can't approve its own question, whoever it claims answered. These roles are set by the person on the machine (`another agent register NAME --program grok_bot`); `register_agent` over MCP or a hook can't give an agent one, even under a brand-new name, and a refresh keeps the role it has.
 - `answered_at`
 
