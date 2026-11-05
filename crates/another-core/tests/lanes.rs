@@ -293,6 +293,25 @@ fn validation_links_and_close() {
             .code(),
         "conflict"
     );
+
+    // Closing again in the same status is refused too: no new outcome, no second event.
+    assert_eq!(
+        s.close_lane("manager", "docs", true, Some("rewritten".into()), None)
+            .unwrap_err()
+            .code(),
+        "conflict"
+    );
+    assert_eq!(
+        s.lane("docs", None).unwrap().lane.outcome.as_deref(),
+        Some("superseded")
+    );
+    let closes = s
+        .events(500)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "lane.closed")
+        .count();
+    assert_eq!(closes, 1);
 }
 
 #[test]

@@ -101,7 +101,7 @@ curl -H "Authorization: Bearer $ANOTHER_TOKEN" "https://my-laptop.my-tailnet.ts.
 | `threads` | Only threads the token's agent sent or received in |
 | `activity_feed`, `activity_summarize`, `resource_find` | Node-wide, read-only awareness (no message bodies) |
 | `orphans_list` | Lapsed registrations only; the process scan is never run for remote peers |
-| `lane_list`, `lane_show` | Only lanes whose project matches the token's globs (others are omitted, or `forbidden`) |
+| `lane_list`, `lane_show` | Only lanes whose project matches the token's globs (others are omitted, or `not_found`) |
 | `lane_create` | Token's agent, and a `project` matching the globs (required) |
 | `lane_update`, `lane_report`, `lane_close` | Token's agent, on lanes in the token's projects |
 | `resource_reap` | **Never** (remote reaping is disabled) |
