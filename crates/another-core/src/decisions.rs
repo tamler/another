@@ -1113,7 +1113,7 @@ impl Store {
             tx.emit(
                 &me.address,
                 "decision.cancelled",
-                json!({ "decision_id": row.d.decision_id, "project_id": row.project_id, "asker_id": row.asker_id, "lane_id": row.lane_id, "reason": reason }),
+                json!({ "decision_id": row.d.decision_id, "project_id": row.project_id, "asker_id": row.asker_id, "lane_id": row.lane_id, "has_reason": reason.is_some() }),
             )?;
             tx.execute(
                 "UPDATE decisions SET status = 'cancelled', updated_at = ?2 WHERE decision_id = ?1",
