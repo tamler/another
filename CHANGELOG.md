@@ -7,7 +7,7 @@ All notable changes to Another. Unreleased work is listed under the next version
 ### Fixed
 - Cancelling an overdue decision commits its timeout result, request closure and automatic mail before returning a conflict, even without a running server or when the deadline passes as cancellation begins.
 - A paired node can no longer use signed events to act on what belongs to this node through remote-agent state: copy a local message body into a mirrored decision or file that mirror under a local project, lane or asker, add a recipient to a local message, mark a local agent's mail read, file a lane report as a local agent, influence who becomes a lane's next lead, or make a local ephemeral agent leave by ending its session or backdating it.
-- Holding a thread, message or request id no longer exposes other people's mail over a token. The remote `threads` tool now returns only the messages the token's agent sent or received, so an agent added midway no longer reads earlier messages this way. `reply_to` needs a message that agent can see, and `claim_request` needs a request visible to the token or in a thread its agent is part of; other ids read as missing.
+- Holding a thread, message or request id no longer exposes other people's mail over a token. The remote `threads` tool now returns only the messages the token's agent sent or received, so an agent added midway no longer reads earlier messages this way. `reply_to` needs a message that agent can see, and `claim_request` needs a request visible to the token or mail for it that its agent sent or received; other ids read as missing.
 - A paired node can no longer leave mail showing another node's agent as the sender.
 
 ### Added

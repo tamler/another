@@ -570,6 +570,45 @@ async fn a_token_with_no_project_globs_still_claims_a_request_addressed_to_it() 
 }
 
 #[tokio::test]
+async fn later_mail_in_a_thread_does_not_open_an_earlier_request_to_a_no_glob_token() {
+    let srv = start().await;
+    let client = cloud_client(&srv, &[]).await;
+    let private = private_mail(&srv, None);
+    srv.store
+        .send_message(SendMessage {
+            from: "alice@shop".into(),
+            to: vec!["cloud@shop".into()],
+            subject: "for you".into(),
+            body: "please look".into(),
+            thread_id: Some(private.thread_id.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+    let request = private.request_id.unwrap();
+    let missing = call(
+        &client,
+        "claim_request",
+        json!({ "request_id": "NO-SUCH-ID", "action": "complete" }),
+    )
+    .await;
+    let res = call(
+        &client,
+        "claim_request",
+        json!({ "request_id": request, "action": "complete" }),
+    )
+    .await;
+    let (code, message) = denial(&res);
+    let (missing_code, missing_message) = denial(&missing);
+    assert_eq!(code, missing_code);
+    assert_eq!(message.replace(&request, "NO-SUCH-ID"), missing_message);
+    assert_eq!(
+        srv.store.request(&request).unwrap().status,
+        RequestStatus::Open
+    );
+    srv.ct.cancel();
+}
+
+#[tokio::test]
 async fn a_lane_report_does_not_open_the_lane_thread_to_the_reporter() {
     let srv = start().await;
     let client = cloud_client(&srv, &["/work/*".into()]).await;
