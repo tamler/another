@@ -837,6 +837,23 @@ pub(crate) fn resolve_cursor(
     // `@<seq>`: an opaque position handed out as `next_since` when the last event a read
     // scanned is one the caller can't see (it names no event).
     if let Some(seq) = id.strip_prefix('@').and_then(|n| n.parse::<i64>().ok()) {
+        // A scoped caller gets the time of the last event it can see: the time of a hidden
+        // event at this position would leak when the other project was active.
+        if let Some(s) = scope {
+            let mut stmt = conn.prepare(
+                "SELECT ts, node_id, actor, kind, payload FROM events
+                 WHERE seq <= ?1 ORDER BY seq DESC",
+            )?;
+            let mut rows = stmt.query([seq])?;
+            while let Some(r) = rows.next()? {
+                let (node, actor, kind, payload): (String, String, String, String) =
+                    (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?);
+                if crate::visibility::event_visible(conn, s, &node, &actor, &kind, &payload)? {
+                    return Ok((seq, r.get(0)?));
+                }
+            }
+            return Ok((seq, 0));
+        }
         let ts: Option<i64> = conn
             .query_row(
                 "SELECT ts FROM events WHERE seq <= ?1 ORDER BY seq DESC LIMIT 1",
