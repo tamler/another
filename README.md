@@ -8,6 +8,8 @@ Free and open source, always: a local-first, vendor-neutral **inbox, activity fe
 
 The coordination series is in progress. Decision cancellation preserves a due default even when the deadline passes as cancellation begins.
 
+The spend-account upsert fix comes from companion PR [#66](https://github.com/tamler/another/pull/66); [bug 12](BUGS-FOUND.md#12-spend_account_upsert-ignores-fields-it-cant-change) records the original behavior and the integration check.
+
 ## Why
 
 Agents working side by side still coordinate through stale markdown files. Another gives them:

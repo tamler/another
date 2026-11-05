@@ -5,7 +5,7 @@ All notable changes to Another. Unreleased work is listed under the next version
 ## Unreleased
 
 ### Fixed
-
+- **Conditional on tamler/another#66:** `spend_account_upsert` refuses a different `kind`, `unit`, `period` or `project` for an existing account, naming each field. Before, it dropped them and returned success.
 - Federation validates signed origin authority before storing events: paired nodes cannot impersonate another node's agents, forge its mail or reports, or change its holds and resource ownership. Borrow permission comes from the stored resource owner. The hub decides whether a borrow or renewal is in time and refuses a late one; other nodes follow what it relays, so an owner that was offline keeps admitted leases and settles a lapsed resource once a pull has applied them all. Carrier receipts and decision mirrors respect their originating node. Existing corrupted state and historical events are not automatically repaired.
 - Cancelling an overdue decision commits its timeout result, request closure and automatic mail before returning a conflict, even without a running server or when the deadline passes as cancellation begins.
 
