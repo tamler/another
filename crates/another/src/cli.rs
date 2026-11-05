@@ -1401,6 +1401,10 @@ fn service_command(cmd: &ServiceCmd, json: bool, home: PathBuf) -> anyhow::Resul
                         out.push_str(l);
                     }
                 }
+                if let Some(e) = &r.log_error {
+                    out.push_str("\ncan't read the logs: ");
+                    out.push_str(e);
+                }
                 out
             }))
         }
@@ -1418,6 +1422,9 @@ fn service_command(cmd: &ServiceCmd, json: bool, home: PathBuf) -> anyhow::Resul
             let status = service::status(&user_home, &home, *lines)?;
             if !status.installed {
                 anyhow::bail!("the background service is not installed");
+            }
+            if let Some(e) = status.log_error {
+                anyhow::bail!("can't read the logs: {e}");
             }
             Ok(emit(json, &status.log_lines, |l| l.join("\n")))
         }
