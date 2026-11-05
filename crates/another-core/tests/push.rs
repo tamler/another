@@ -500,6 +500,18 @@ fn webhooks_stop_when_their_token_is_revoked_or_expires() {
         s.queue_test_delivery(&h.webhook_id).unwrap_err().code(),
         "conflict"
     );
+    // A dead delivery on a disabled webhook can't be retried: nothing would ever send it.
+    let dead = s
+        .webhook_deliveries(Some(&h.webhook_id), Some(DeliveryStatus::Dead), 10)
+        .unwrap();
+    assert_eq!(
+        s.retry_delivery(&dead[0].delivery_id).unwrap_err().code(),
+        "conflict"
+    );
+    let still_dead = s
+        .webhook_deliveries(Some(&h.webhook_id), Some(DeliveryStatus::Dead), 10)
+        .unwrap();
+    assert_eq!(still_dead.len(), 1);
 
     // An expiring token: fine until it lapses, then disabled.
     let t2 = s
