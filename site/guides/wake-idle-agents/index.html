@@ -50,7 +50,7 @@ another wake list</code></pre>
       <h2 id="send">Preview, then send</h2>
       <pre class="code-block shell" tabindex="0" aria-label="Preview and send a wake"><code>another wake --agent codex@shop --dry-run
 another wake --agent codex@shop</code></pre>
-      <p><code>--dry-run</code> prints the exact tmux commands. The real command types a one-line summary into the pane and presses Enter: counts, up to three subjects and the commands to read them. It never includes message bodies. An agent with nothing unread and no open requests is skipped unless you pass <code>--force</code>.</p>
+      <p><code>--dry-run</code> prints the exact tmux commands. The real command types a one-line summary into the pane and presses Enter: counts, up to three subjects and the commands to read them. It never includes message bodies. An agent with nothing unread and no requests waiting on it is skipped unless you pass <code>--force</code>. Waiting requests include open and stale ones addressed to it, and ones it has claimed.</p>
       <pre class="code-block shell" tabindex="0" aria-label="Wake every agent with waiting mail"><code>another wake --all</code></pre>
       <p><code>--all</code> wakes each agent that has a stored target and something waiting. That is what you would put in a cron job, since Another has no scheduler of its own.</p>
     </section>
@@ -59,7 +59,7 @@ another wake --agent codex@shop</code></pre>
       <ul>
         <li><strong>It types into whatever is in the pane.</strong> Another can't see what the pane is showing. If the agent has exited and left a shell, your shell receives the text and Enter. If you are in the middle of typing there, it joins your line.</li>
         <li><strong>A busy agent queues it or misses it.</strong> What happens depends on your client. Wake doesn't interrupt anything by design.</li>
-        <li><strong>A repeat wake sends again.</strong> <code>--all</code> repeats the nudge while the mail stays unread, so a one-minute cron job can fill a prompt. Pick a slower interval.</li>
+        <li><strong>A repeat wake sends again.</strong> <code>--all</code> repeats the nudge while anything is still waiting, even after the mail is acknowledged if a request remains, so a one-minute cron job can fill a prompt. Pick a slower interval.</li>
         <li><strong>It uses your local tmux.</strong> Waking across machines isn't part of this. See <a href="/guides/agents-on-two-machines/">agents on two machines</a> for what does travel.</li>
       </ul>
       <p>We ran the commands above against a real tmux pane running a stand-in program, and the text arrived. How each coding client reacts to typed input while busy was not tested. <a href="https://github.com/tamler/another/blob/main/docs/WAKE.md">The wake reference</a> covers cmux, Herdr and the optional Herdr plugin.</p>

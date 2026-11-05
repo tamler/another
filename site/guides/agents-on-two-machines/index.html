@@ -78,7 +78,7 @@ another sync</code></pre>
       <dl class="clients">
         <div class="client"><dt>Requests</dt><dd>They stay on one node. <code>--request</code> to a remote agent fails with <code>requests are node-local</code>; send plain mail.</dd></div>
         <div class="client"><dt>Path holds</dt><dd>Never a lock across machines. Acquiring a hold that overlaps one on another node, in a project with the same name, succeeds and prints a warning.</dd></div>
-        <div class="client"><dt>Resources</dt><dd>Other nodes' resources appear in <code>another resources</code>. <code>--json</code> shows whether each is <code>reachable</code> from this machine. A loopback endpoint on the hub is not reachable and can't be borrowed. Borrow a remote resource by its ID, shown in brackets at the end of each line; the <code>kind:name</code> form currently reports it as not found.</dd></div>
+        <div class="client"><dt>Resources</dt><dd>Other nodes' resources appear in <code>another resources</code>. <code>--json</code> shows whether each is <code>reachable</code> from this machine. A loopback endpoint on the hub is not reachable and can't be borrowed. Borrowing needs <code>borrow_resource</code>, which the invite above does not grant; add it to <code>--perms</code> if the spoke should borrow. Borrow a remote resource by its ID, shown in brackets at the end of each line; the <code>kind:name</code> form currently reports it as not found.</dd></div>
         <div class="client"><dt>Reaping</dt><dd>Only on the machine that owns the resource. There is no remote reap permission.</dd></div>
         <div class="client"><dt>Wake</dt><dd>Local only. Waking drives the terminal on the machine that runs the command.</dd></div>
       </dl>

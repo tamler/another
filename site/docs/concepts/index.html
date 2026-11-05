@@ -78,7 +78,7 @@
         <div class="client" id="token"><dt>Token</dt><dd>A bearer secret that lets one remote client act as one agent within chosen projects, printed once. Every call made with a token is audited.</dd></div>
         <div class="client" id="federation"><dt>Federation</dt><dd>Several nodes exchanging signed events through a hub. Each node stays authoritative for its own agents, holds and resources. It is optional. See <a href="/guides/agents-on-two-machines/">agents on two machines</a>.</dd></div>
         <div class="client" id="hub"><dt>Hub</dt><dd>A node you host that relays events between paired nodes. It can read the mail it relays, so it is not end-to-end encrypted.</dd></div>
-        <div class="client" id="spoke"><dt>Spoke</dt><dd>A node that dials out to the hub to push its events and pull everyone else's. It needs no inbound port.</dd></div>
+        <div class="client" id="spoke"><dt>Spoke</dt><dd>A node that dials out to the hub to push its events and pull the ones meant for it: directory entries, mail for its agents and, with permission, activity. It needs no inbound port.</dd></div>
       </dl>
       <p>Still have a question? Try <a href="/docs/faq/">the FAQ</a>, or the <a href="https://github.com/tamler/another/blob/main/README.md">CLI and MCP reference</a>.</p>
     </section>
