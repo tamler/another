@@ -36,6 +36,19 @@ pub(crate) fn decider_tx(conn: &Connection) -> Result<String> {
     crate::settings::get(conn, "decider")
 }
 
+fn check_answered_by(value: &str) -> Result<()> {
+    if !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_.@".contains(&c))
+    {
+        Ok(())
+    } else {
+        Err(Error::Invalid("answered_by must be a name or address of 1-64 ASCII letters, digits, '-', '_', '.' or '@'".into()))
+    }
+}
+
 impl Store {
     fn write_decision<T>(&self, mutate: impl FnOnce(&Tx<'_>) -> Result<T>) -> Result<T> {
         self.write(|tx| {
@@ -702,19 +715,6 @@ pub(crate) fn expire_decisions_tx(tx: &Tx<'_>) -> Result<usize> {
         release_lane(tx, &asker, row.lane_id.as_deref())?;
     }
     Ok(due.len())
-}
-
-fn check_answered_by(value: &str) -> Result<()> {
-    if !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || b"-_.@".contains(&c))
-    {
-        Ok(())
-    } else {
-        Err(Error::Invalid("answered_by must be a name or address of 1-64 ASCII letters, digits, '-', '_', '.' or '@'".into()))
-    }
 }
 
 impl Store {
