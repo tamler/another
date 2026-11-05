@@ -1099,6 +1099,23 @@ fn a_gated_re_register_refuses_changes_it_could_not_apply() {
         .unwrap_err();
     assert_eq!(e.code(), "conflict", "{e}");
     assert!(e.to_string().contains("approval"), "{e}");
+    // A different project is a change too.
+    let e = s
+        .register_resource(RegisterResource {
+            agent: "codex@shop".into(),
+            kind: ResourceKind::Gpu,
+            name: "pod:a100".into(),
+            endpoint: None,
+            port: None,
+            pid: None,
+            project: Some("vault".into()),
+            purpose: None,
+            mode: LeaseMode::Shared,
+            ttl_seconds: Some(3600),
+            metadata: None,
+        })
+        .unwrap_err();
+    assert_eq!(e.code(), "conflict", "{e}");
     // Nothing was left waiting for an approval that would drop the change.
     assert!(s.spend_leases(false, None).unwrap().is_empty());
 }
