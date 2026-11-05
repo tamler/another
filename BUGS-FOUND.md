@@ -8,7 +8,8 @@ Found while adding edge-case tests for the ten lowest-covered public functions (
 |---|---|
 | 1, 2, 6, 7 | Fixed in draft PR #25, not yet on the base. The tests here no longer depend on either side of those fixes, and #25 has its own tests for the fixed behaviour. |
 | 4, 5 | Fixed on the base by `66100cf`. PR #25 also covers the remaining case of #4 described in its section. |
-| 3, 8, 9, 10 | Open. |
+| 3, 8, 9, 10, 12 | Open. |
+| 11 | **Open, and the most serious here:** a paired spoke can rewrite what belongs to the hub. |
 
 ## 1. A daily summary to an unknown person is accepted, then fails on every sweep
 
@@ -193,3 +194,56 @@ ANOTHER_HOME="/tmp/o'brien" another doctor   # PASS  hooks:codex
 - **A spend lease ends at exactly its TTL.** A lease with the default hour can't be released at the one-hour mark, because the sweep has already ended it, and `release` returns `conflict`.
 - **An empty period means the current one.** `""` parses as `PeriodSel::Current` on purpose.
 - **The system agent can't be kicked, but it only exists once it has sent something.** Before that, kicking it returns `not_found` rather than `forbidden`. Nothing is exposed either way.
+
+# Bugs found by the third coverage pass
+
+Same rules: recorded here, not fixed, and each test asserts today's behaviour so the fix updates it.
+
+## 11. A paired spoke can rewrite what belongs to the hub
+
+**Where:** `project_foreign`, `foreign_lease` and `spoke_may_publish` in `another-core/src/federation.rs`; `apply_proposal_tx` in `another-core/src/lanes.rs`
+
+**What:** `ingest` checks that an event is signed by the node it names, and that a spoke only pushes its own. It doesn't check that the signing node owns what the event describes, though many branches of `project_foreign` update rows by an id taken from the payload. `docs/FEDERATION.md` promises the opposite: each node is authoritative for its own agents, holds and resources, and events from other nodes "never rewrite another node's ownership".
+
+**Who can do this:** a node holding a key the hub has paired. An outsider can't: unsigned, wrongly signed and unpaired events are refused, and `federation_authority.rs` tests that too. So this breaks the boundary between paired nodes, for instance a compromised or careless runner against the hub. Agent, lease and hold ids reach spokes through normal sync, so a spoke has what it needs.
+
+Each of these was shown on a hub by ingesting properly signed events:
+
+| Event | Effect on the hub | Missing check |
+|---|---|---|
+| `agent.registered` with a hub agent's id | Rewrites its program and description, and its address reads `alice@@evil` | `ON CONFLICT(agent_id)` updates whichever node owns the row |
+| `message.sent` with a hub agent as sender, from a spoke with `send_mail` | The recipient's inbox shows mail from `alice@shop` that alice never sent | Only that the sender exists |
+| `lane.report_proposed`, with such a mail as its carrier | A report on the hub's lane, filed as its lead | `apply_proposal_tx` doesn't check the agent belongs to the signing node. `apply_relayed_tx` does this for decisions. |
+| `session.ended` or `session.started` | Marks a hub agent offline or active | No node check |
+| `delivery.acked` or `delivery.read` | Marks a hub agent's mail as read, and with `delivery.acked` also acknowledged | No check that the agent belongs to the signing node |
+| `resource.stopped` or `resource.reaped` | Ends every lease on a hub resource, though the resource itself is protected | The first `UPDATE` checks the node, and the second, on leases, doesn't |
+| `resource.transferred` | Promotes a borrower on a hub resource to owner | No node check |
+| `hold.updated` or `hold.acquired` with a hub hold's id | Rewrites its expiry, so the next sweep ends it | `ON CONFLICT(hold_id)` updates whichever node owns the row |
+| `resource.borrowed` without `resource_node` | Takes a lease with no `borrow_resource` permission | The check reads `resource_node` from the payload the spoke wrote |
+| `resource.adopted`, or `resource.registered` with a hub resource's id | With no permissions, takes ownership of a lapsed hub resource, even an exclusive one, and resets the clock reaping goes by | `foreign_lease` checks only that the agent and resource exist, and its `lapsed_at` update has no node check. Found by the Grok review. |
+| `node.renamed` | The spoke's own entry takes the hub's name, or one with spaces and slashes, both of which pairing refuses. Lookups by name then see the clash. | No `validate_node_name` or clash check |
+
+The tests push the first event named in each row. `session.started`, `delivery.read`, `hold.acquired` and `resource.reaped` share the same statement as the tested event, and were checked by reading the code.
+
+**Holding correctly:** `hold.released`, `hold.renewed`, `hold.expired`, `resource.released`, `resource.renewed`, `resource.lease_expired`, `lane.closed`, `lane.status_changed` and `lane.updated` all check the node, and a spoke can't affect the hub's objects with them. `a_spoke_cannot_end_the_hubs_holds_leases_lanes_or_resources` tests this.
+
+**Over the wire:** two of these were also run through a real hub's `POST /fed/push` with a properly signed request. The route refuses an unsigned request and accepts the signed one. Forged mail then reaches a second, ordinary spoke when it syncs, and its inbox shows it from `alice@shop@hub`, so a spoke that did nothing wrong can't tell. The other rows went through `Store::ingest`, which is what the route calls.
+
+**Tests:** the `bug_*` tests in `another-core/tests/federation_authority.rs` and `another/tests/federation_route.rs`.
+
+**Suggested fix:** in `project_foreign`, compare the row's `node_id` with the event's origin before updating it, as `hold.released` already does. Add that condition to the two `ON CONFLICT` updates and the second `resource.stopped` update. Require the sender of `message.sent` and the agent in `session.*`, `delivery.*` and `lane.report_proposed` to belong to the origin. For `resource.borrowed`, look up the resource's node instead of trusting the payload. In `foreign_lease`, refuse a resource the origin doesn't own unless it's a permitted borrow. Validate names in `node.renamed`.
+
+## 12. `spend_account_upsert` ignores fields it can't change
+
+**Where:** `spend_account_upsert` in `another/src/mcp_spend.rs`
+
+**What:** on an existing account, `kind`, `unit`, `period` and `project` are dropped silently, and the call returns success. An agent asking to change `unit` to `credits` gets back an account still in USD, with nothing saying its request was ignored.
+
+**Test:** `another/tests/mcp_tools.rs::bug_upserting_an_account_ignores_fields_it_cannot_change`
+
+**Suggested fix:** refuse a value that differs from the account's, naming the field.
+
+## Checked in the third pass and not a bug
+
+- **`resource_find` shows a token every project's resources.** This is deliberate and documented (`docs/REMOTE.md`, D38).
+- **A spoke's holds don't appear in the hub's `holds()`.** Holds are node-local, and they surface only as warnings on acquires in a project of the same name.
