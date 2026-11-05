@@ -854,6 +854,48 @@ fn decision_events_carry_no_question_or_option_text() {
 }
 
 #[test]
+fn the_cancelled_event_flags_a_reason_without_carrying_its_text() {
+    let (s, _) = store();
+    let cancelled = |id: &str| {
+        s.events(100)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.kind == "decision.cancelled" && e.payload["decision_id"] == id)
+            .expect("decision.cancelled")
+    };
+
+    let with_reason = ask(&s, "claude@shop", |_| {}).unwrap();
+    s.cancel_decision(
+        "claude@shop",
+        &with_reason.decision_id,
+        Some("the vendor contract fell through".into()),
+        None,
+    )
+    .unwrap();
+    let ev = cancelled(&with_reason.decision_id);
+    assert_eq!(ev.payload["has_reason"], true);
+    assert!(ev.payload.get("reason").is_none(), "{}", ev.payload);
+    assert!(
+        !ev.payload.to_string().contains("vendor contract"),
+        "{}",
+        ev.payload
+    );
+    // The reason still reaches the person, in the mail.
+    let human = s.inbox(DEFAULT_DECIDER, InboxQuery::default()).unwrap();
+    assert!(human
+        .messages
+        .iter()
+        .any(|m| m.message.body.contains("the vendor contract fell through")));
+
+    let without_reason = ask(&s, "claude@shop", |_| {}).unwrap();
+    s.cancel_decision("claude@shop", &without_reason.decision_id, None, None)
+        .unwrap();
+    let ev = cancelled(&without_reason.decision_id);
+    assert_eq!(ev.payload["has_reason"], false);
+    assert!(ev.payload.get("reason").is_none(), "{}", ev.payload);
+}
+
+#[test]
 fn round4_roles_people_and_exact_options() {
     let s = Store::open_in_memory(Clock::System).unwrap();
     s.ensure_project("t", "/work/shop").unwrap();

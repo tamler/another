@@ -118,4 +118,4 @@ With `another serve --auth`:
 | `decision.expired` | `request_answered` |
 | `decision.cancelled` | `all` |
 
-Events carry ids and status only (`decision_id`, `project_id`, `lane_id`, `asker_id`, `human_id`, the option count, deadline and timeout rule). The question and option labels stay in the decision and its mail. A token sees only decisions in its projects: any other decision id gets the same `not_found` as an unknown one, for show, answer and cancel.
+Events carry ids and status only (`decision_id`, `project_id`, `lane_id`, `asker_id`, `human_id`, the option count, deadline and timeout rule). The question and option labels stay in the decision and its mail. `decision.cancelled` only says whether a reason was given (`has_reason`); the reason itself stays in the mail and the request's note. A token sees only decisions in its projects: any other decision id gets the same `not_found` as an unknown one, for show, answer and cancel.
