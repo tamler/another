@@ -6,6 +6,7 @@ All notable changes to Another. Unreleased work is listed under the next version
 
 ### Fixed
 - Cancelling an overdue decision commits its timeout result, request closure and automatic mail before returning a conflict, even without a running server or when the deadline passes as cancellation begins.
+- A stored `reset_day` outside 1–28 is clamped when a period is calculated, instead of panicking `another spend`, `GET /spend`, the summary and sweeps.
 
 ### Added
 - **`another doctor`**: checks the store (writable, schema), the local server (reachable, Another, same home), tokens (expired, expiring, matching no project), client hooks for Claude Code, Codex and Grok (and whether Codex has recorded trust for them), and port and resource conflicts. PASS / WARN / FAIL / SKIP with a fix per problem; `--json`; exit 1 on any FAIL.
