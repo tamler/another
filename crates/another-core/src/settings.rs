@@ -72,7 +72,7 @@ pub(crate) fn get(conn: &Connection, key: &str) -> Result<String> {
     Ok(stored.unwrap_or_else(|| spec(key).map(|s| s.default.to_string()).unwrap_or_default()))
 }
 
-fn validate(key: &str, value: &str) -> Result<()> {
+pub(crate) fn validate(key: &str, value: &str) -> Result<()> {
     match key {
         "decider" => crate::identity::validate_name(value),
         "remote_idle_hours" => match value.parse::<u32>() {
