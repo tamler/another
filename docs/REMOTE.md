@@ -34,7 +34,7 @@ another serve --auth --bind 127.0.0.1:7467
 
 With `--auth`, `/mcp` and `GET /activity` require `Authorization: Bearer <token>`; `GET /health` stays open. Because tunnels deliver traffic from loopback, the authenticated server checks the token on **every** request, local or not.
 
-Tunnels usually forward the public hostname in the `Host` header. Another rejects unknown hosts (DNS-rebinding protection), so name each tunnel hostname with `--allowed-host`.
+Tunnels usually forward the public hostname in the `Host` header. On `/mcp`, Another rejects unknown hosts (DNS-rebinding protection), so name each tunnel hostname with `--allowed-host`. `GET /activity` relies on the token alone, so never point a tunnel at a server without `--auth`: there, it answers without a token.
 
 ## 3. Expose it through a tunnel (pick one)
 

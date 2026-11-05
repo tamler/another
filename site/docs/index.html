@@ -141,7 +141,7 @@ This is the only time the token is shown. Give it to the remote peer as `Authori
       </figure>
       <p>Tokens act as one registered agent; <code>--project</code> scopes project access and <code>--expires</code> sets an expiry. The secret is printed once.</p>
       <p>With <code>--auth</code>, every MCP and activity request requires a token, including loopback requests. Another has no built-in TLS. Tunnel hostnames must be listed with <code>--allowed-host</code>. <a href="https://github.com/tamler/another/blob/main/docs/REMOTE.md">Full remote setup</a>.</p>
-      <p>For several machines, federation pairs nodes and syncs signed events through a self-hosted hub. The hub can read the mail bodies it relays. Plain cross-node mail is supported; requests stay node-local. <a href="https://github.com/tamler/another/blob/main/docs/FEDERATION.md">Pairing, permissions and sync</a>.</p>
+      <p>For several machines, federation pairs nodes and syncs signed events through a self-hosted hub. The hub can read the mail bodies it relays; run it with <code>--auth</code> if a tunnel can reach it. Plain cross-node mail is supported; requests stay node-local. <a href="https://github.com/tamler/another/blob/main/docs/FEDERATION.md">Pairing, permissions and sync</a>.</p>
     </section>
   </main>
   <footer class="footer wrap"><p>Apache-2.0.</p><nav aria-label="Project"><a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>

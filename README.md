@@ -97,7 +97,7 @@ another activity --summary
 
 Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88.
 
-This checkout contains milestones 1–6. The coordination and release-readiness stack is reviewed separately in [PR #17](https://github.com/tamler/another/pull/17); the installation and CLI reference here describe this checkout. Integrating the release installer, doctor and expanded workflow needs that stack's code and release acceptance first.
+This checkout contains milestones 1–6. The coordination and release-readiness stack is reviewed separately in [PR #50](https://github.com/tamler/another/pull/50); the installation and CLI reference here describe this checkout. Integrating the release installer, doctor and expanded workflow needs that stack's code and release acceptance first.
 
 The website has editable source in [site/](site/README.md). Build it with `sh site/build.sh` to check pages, links, SEO metadata and the public asset allowlist. Website and Rust CI are separate checks. This branch's task-guide additions are preview source and have not been deployed by this round.
 
@@ -137,8 +137,8 @@ Every command takes `--json`. `--agent` and `--from` default to `$ANOTHER_AGENT`
 
 | Task | Commands |
 |---|---|
-| Node | `another init`, `another status`, `another node show`, `another node name [<name>]` (no name prints the current one), `another events` |
-| Agents | `another agent register <name> --program claude\|codex\|grok\|cursor\|grok_bot\|other [--project PATH]`, `another agent list` |
+| Node | `another init`, `another status`, `another node show`, `another node name [<name>]` (no name prints the current one), `another events`, `another sweep`, `another project ensure\|list` |
+| Agents | `another agent register <name> --program claude\|codex\|grok\|cursor\|grok_bot\|other [--project PATH]`, `another agent list`, `another agent show <name>` |
 | Mail | `another send`, `another inbox`, `another reply <message-id>`, `another ack <message-id>`, `another threads`, `another thread <id>` (there is no `another mail` command) |
 | Requests | `another requests`, `another request claim\|release\|complete\|cancel <id>` |
 | Holds | `another hold acquire\|check\|renew\|release`, `another holds` (conflicts exit with status 3) |
@@ -146,7 +146,7 @@ Every command takes `--json`. `--agent` and `--from` default to `$ANOTHER_AGENT`
 | Hooks | `another hook install\|uninstall --client <c>\|all [--dry-run]`, `another hook status` |
 | Resources | `another resources`, `another resource register`, `another borrow`, `another release`, `another orphans`, `another reap <target> [--confirm]` |
 | Remote peers | `another serve --auth`, `another token create\|list\|revoke`, `another audit` |
-| Federation | `another pair invite\|join\|revoke`, `another peers`, `another sync [--watch]`, `another serve --federation` |
+| Federation | `another pair invite\|join\|revoke`, `another peers`, `another sync [--watch]`, `another serve --auth --federation` |
 | Wake | `another wake [--agent X\|--all]`, `another wake set\|clear\|list` |
 
 ## Concepts
