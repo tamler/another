@@ -336,3 +336,69 @@ async fn streamable_http_on_loopback() {
     ct.cancel();
     server.await.unwrap();
 }
+
+/// The error message of a call that must fail with `invalid`.
+async fn invalid_message(client: &Client, tool: &str, args: Value) -> String {
+    let res = call(client, tool, args).await;
+    assert_eq!(res.is_error, Some(true), "{tool} should fail: {res:?}");
+    let text = serde_json::to_value(&res.content).unwrap()[0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["error"]["code"], "invalid", "{body}");
+    body["error"]["message"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn upserting_an_account_refuses_a_change_it_cannot_make() {
+    let (clock, _) = Clock::manual(1_795_219_200_000);
+    let store = Store::open_in_memory(clock).unwrap();
+    store.ensure_project("t", "/work/shop").unwrap();
+    store.ensure_project("t", "/work/vault").unwrap();
+    let client = in_process(store).await;
+    let upsert = "spend_account_upsert";
+    let made = json!({
+        "name": "gpu", "kind": "gpu_pod", "unit": "USD", "period": "monthly",
+        "project": "shop", "budget": 100.0,
+    });
+    call_ok(&client, upsert, made.clone()).await;
+
+    for (field, args, shown) in [
+        ("kind", json!({ "kind": "domain" }), "gpu_pod"),
+        ("unit", json!({ "unit": "credits" }), "USD"),
+        ("period", json!({ "period": "none" }), "monthly"),
+        ("project", json!({ "project": "vault" }), "shop"),
+        ("project", json!({ "project": "/work/vault" }), "shop"),
+    ] {
+        let mut request = json!({ "name": "gpu", "budget": 1.0 });
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(args.as_object().unwrap().clone());
+        let msg = invalid_message(&client, upsert, request).await;
+        assert!(msg.contains(field) && msg.contains(shown), "{msg}");
+    }
+
+    // Every field that differs is named, and a refused call changes nothing.
+    let msg = invalid_message(
+        &client,
+        upsert,
+        json!({ "name": "GPU", "kind": "domain", "unit": "credits" }),
+    )
+    .await;
+    assert!(msg.contains("kind") && msg.contains("unit"), "{msg}");
+    let listed = call_ok(&client, "spend_accounts", json!({})).await;
+    assert_eq!(listed["accounts"][0]["budget"], 100.0, "{listed}");
+
+    // The values it already has are fine, so repeating a create is an update.
+    let same = call_ok(&client, upsert, made).await;
+    assert_eq!(same["unit"], "USD");
+    let by_path = json!({ "name": "gpu", "project": "/work/shop/", "unit": "USD", "budget": 50.0 });
+    assert_eq!(call_ok(&client, upsert, by_path).await["budget"], 50.0);
+
+    // A project that doesn't exist is the usual not_found.
+    let code = call_err(&client, upsert, json!({ "name": "gpu", "project": "nope" })).await;
+    assert_eq!(code, "not_found");
+    client.cancel().await.unwrap();
+}

@@ -215,7 +215,8 @@ impl AnotherMcp {
 
     #[tool(
         description = "Create or update a spend account (local callers only): kind, unit, \
-        monthly budget with reset day, hourly rate, approval rule, project."
+        monthly budget with reset day, hourly rate, approval rule, project. An existing \
+        account can't change its kind, unit, period or project; a different value is refused."
     )]
     async fn spend_account_upsert(
         &self,
@@ -228,6 +229,14 @@ impl AnotherMcp {
                 .into_iter()
                 .any(|x| x.name == a.name.trim().to_ascii_lowercase());
             if exists {
+                s.check_spend_account_fixed(
+                    &a.name,
+                    a.kind,
+                    a.unit.as_deref(),
+                    a.period,
+                    a.project.as_deref(),
+                    scope.as_ref(),
+                )?;
                 s.update_spend_account(
                     &a.name,
                     SpendAccountUpdate {
