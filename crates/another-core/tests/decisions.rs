@@ -1003,6 +1003,45 @@ fn cancelling_before_a_choose_default_deadline_is_allowed() {
 }
 
 #[test]
+fn a_bare_lane_name_in_two_projects_is_ambiguous_not_unknown() {
+    let (s, _) = store();
+    for (project, lead) in [("shop", "claude@shop"), ("vault", "codex@vault")] {
+        s.create_lane(
+            NewLane {
+                agent: "manager".into(),
+                name: "api".into(),
+                project: project.into(),
+                lead: lead.into(),
+                charter: String::new(),
+                status: Some(LaneStatus::Working),
+            },
+            None,
+        )
+        .unwrap();
+    }
+    let e = s
+        .decisions(
+            DecisionFilter {
+                lane: Some("api".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(e.code(), "ambiguous", "{e}");
+    let unknown = s
+        .decisions(
+            DecisionFilter {
+                lane: Some("nope".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(unknown.code(), "not_found", "{unknown}");
+}
+
+#[test]
 fn cancelling_after_a_choose_default_deadline_keeps_the_default() {
     let (s, clock) = store();
     let now = s.now();

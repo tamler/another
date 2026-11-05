@@ -27,15 +27,15 @@ A **decision** is a request of kind `decision` addressed to a human.
 ### Reusing mail and requests
 
 - **The human is an agent.** The human is registered on demand as an agent with the new program `human`, with no project. That gives them an address (`owner`) and an inbox: `another inbox --agent owner` lists what is waiting.
-- **Asking** sends a message from the asking agent to the human. The subject is `[decision] <question>`, and the body lists the options, links and deadline. It also writes a `requests` row of kind `decision`, so `another requests` shows the decision next to other work.
+- **Asking** sends a message from the asking agent to the human. The subject is `[decision] <asker> asks <human> (<id>)`, because subjects reach the activity feed and federated peers; the question and the options stay in the body, which lists the options, links and deadline. It also writes a `requests` row of kind `decision`, so `another requests` shows the decision next to other work.
   - The row is written directly, without a `request.created` event, so webhooks fire once, on `decision.created`.
   - Its `due_at` stays empty, because the deadline belongs to the decision, not to the stale-request sweep.
 - **Answering** is a reply in the same thread, from the human to the asking agent, with high importance:
-  - subject `[decision] <option label>`;
+  - subject `[decision] answered: <value> (<id>)`;
   - the body has the value, the label, any free text, and who answered or relayed it.
   - Because it is mail, the answer reaches the agent through the hooks it already uses (the digest at the next prompt or session start).
   - If the agent has a wake target (`another wake set`), the answering CLI or server also runs `another wake` for it.
-- The request row is closed with the decision: `done` when answered, `cancelled` when it expires or is cancelled.
+- The request row is closed with the decision: `done` when answered or when a default applies at the deadline, `cancelled` when it expires with no default or is cancelled.
 - `claim_request` and `another request …` refuse kind-`decision` requests with `conflict`, pointing to the decision commands, so the two can't drift apart.
 - **Lane link:** asking with a lane moves an open lane to `needs_decision`. When the lane's last open decision closes, and the lane is still `needs_decision`, it moves back to `working`.
 
