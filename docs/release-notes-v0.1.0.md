@@ -4,6 +4,8 @@
 
 Everything in this release works with **peer agents only**. A manager bot is optional: a person can answer decisions and approve spend from the CLI or over HTTP, and decisions go to the node's `decider` setting (default `owner`) when nobody else is named.
 
+The background service is conditional on tamler/another#42 landing, and its service-aware doctor checks also require tamler/another#60. Those companion changes are absent from this branch. Here, `another doctor` checks `--server` or `ANOTHER_SERVER`, defaulting to `http://127.0.0.1:7466`.
+
 ## Highlights
 
 - **Lanes.** Named units of work with a charter, a lead, a status (`planned`, `working`, `blocked`, `needs_decision`, `done`, `abandoned`) and structured reports. `another lane …` and the `lane_*` MCP tools replace hand-kept `.lanes` STATUS and DONE files, and `lane export` still writes them. An opt-in Stop hook (`another hook install --lane-reports`) files reports automatically.
@@ -15,7 +17,7 @@ Everything in this release works with **peer agents only**. A manager bot is opt
 - **Remote agents.** Expiring invites, single-use by default, (`another invite create`) admit a cloud or remote agent with a scoped token (`another join <hub> <code>`). Ephemeral agents leave when their session ends or goes idle. Lanes and decisions federate between nodes.
 - **`another doctor`.** One command checks the store, the local server, tokens, client hooks (including Codex hook trust) and port conflicts, and prints a fix for each problem.
 - **Verified installs.** Prebuilt binaries for macOS (arm64, x86_64) and static Linux (x86_64, arm64), one `SHA256SUMS`, and an `install.sh` that refuses to install an archive that doesn't match.
-- **Opt-in background service.** `another service install` runs `another serve` as a launchd user agent on macOS or a systemd user unit on Linux. Nothing installs it for you.
+- **Opt-in background service (conditional on tamler/another#42 and tamler/another#60 landing).** Those companion changes add `another service install`, which runs `another serve` as a launchd user agent on macOS or a systemd user unit on Linux. Installation is explicit.
 
 The local core from earlier milestones ships here too: mail and requests, path holds, the resource registry with the orphan scanner and confirmed reaping, the activity feed and session hooks, authenticated remote peers with an audit log, hub-and-spoke federation, and wake adapters for tmux, cmux and Herdr.
 
@@ -70,10 +72,10 @@ This is the first release, so there is no earlier release to break. Two changes 
 
 ## Known limitations
 
-- **No Windows binaries.** Releases cover macOS and Linux only. The background service supports launchd and systemd only.
+- **No Windows binaries.** Releases cover macOS and Linux only. The conditional background-service changes support launchd and systemd only.
 - **Pre-edit enforcement needs a client with a pre-tool hook.** The pre-edit hold works in Claude Code and Codex. Grok CLI and Cursor get session and Stop hooks but no pre-edit check. Under `codex exec`, untrusted hooks don't run.
 - **Federation is hub-and-spoke, not peer-to-peer.** Spokes sync through one hub. Lanes are mirrored read-only, so reports filed into a mirror are proposals that the owning node applies when it syncs. `hold.conflict` and `resource.lease_expiring` events stay on the node that emits them.
-- **Webhooks and the daily rollup are delivered by `another serve`.** Without a running server (or the background service), nothing is sent. Each webhook keeps a cursor in the event log, so when `another serve` starts again it delivers from where that webhook left off.
+- **Webhooks and the daily rollup are delivered by `another serve`.** Without a running server, nothing is sent. The conditional background-service changes can run that server for you. Each webhook keeps a cursor in the event log, so when `another serve` starts again it delivers from where that webhook left off.
 - **Spend tracking is a ledger, not a billing integration.** No real providers are built in. Amounts come from `another spend record` and from leases, at the hourly rate you set.
 - **Local callers are not identified.** Stdio MCP and an unauthenticated loopback server carry no caller identity, so any local process acts as this machine. Rules such as "the borrower can't approve its own spend lease" and "the asking agent can't answer its own decision" are enforced for token callers. For local agents they are a convention. For a real gate, run agents with tokens on an `--auth` server and answer through an authenticated channel. The hardening review in `docs/security-review-v0.1.0.md` covers this in more detail.
 - **One SQLite file per node.** Another is meant for one machine, or a small group of nodes federated through a hub. It is not a multi-tenant server.
