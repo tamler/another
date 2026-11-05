@@ -7,6 +7,7 @@
 //! - Linux: a systemd user unit (`~/.config/systemd/user/another.service`,
 //!   `Restart=on-failure`), enabled with `systemctl --user enable --now`.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -331,6 +332,29 @@ fn must(cmd: &str, args: &[&str]) -> Result<Out> {
     Ok(out)
 }
 
+/// Replace a service definition in one step, so a failed write leaves the old one whole.
+fn replace_file(path: &Path, text: &str) -> std::io::Result<()> {
+    write_via(path, |f| f.write_all(text.as_bytes()))
+}
+
+fn write_via(
+    path: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = path.with_file_name(format!(".{name}.tmp"));
+    let result = std::fs::File::create(&tmp)
+        .and_then(|mut f| {
+            write(&mut f)?;
+            f.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 fn uid() -> Result<String> {
     let out = must("id", &["-u"])?;
     Ok(out.stdout.trim().to_string())
@@ -536,7 +560,7 @@ pub fn install(spec: &ServiceSpec, user_home: &Path) -> Result<InstallReport> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::create_dir_all(spec.log_dir())?;
-    std::fs::write(&path, &text).with_context(|| format!("writing {}", path.display()))?;
+    replace_file(&path, &text).with_context(|| format!("writing {}", path.display()))?;
     let path_s = path.to_string_lossy().into_owned();
 
     let activate = || -> Result<()> {
@@ -620,7 +644,7 @@ fn roll_back(platform: Platform, path: &Path, previous: Option<&str>, was_loaded
         }
         return "the service could not be started; nothing was left installed".into();
     };
-    if let Err(e) = std::fs::write(path, old) {
+    if let Err(e) = replace_file(path, old) {
         return format!(
             "the update failed, and the previous definition could not be restored at {}: {e}",
             path.display()
@@ -754,6 +778,9 @@ pub struct StatusReport {
     pub bind: Option<String>,
     pub args: Vec<String>,
     pub log_lines: Vec<String>,
+    /// Why the log lines couldn't be read, so an empty list isn't mistaken for quiet logs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_error: Option<String>,
 }
 
 fn tail(path: &Path, n: usize) -> Vec<String> {
@@ -792,6 +819,9 @@ pub fn log_lines(platform: Platform, home: &Path, n: usize) -> Result<Vec<String
                     "cat",
                 ],
             )?;
+            if !out.ok {
+                anyhow::bail!("journalctl failed: {}", out.stderr.trim());
+            }
             out.stdout.lines().map(str::to_string).collect()
         }
     })
@@ -817,6 +847,11 @@ pub fn status(user_home: &Path, home: &Path, lines: usize) -> Result<StatusRepor
     } else {
         (false, None)
     };
+    let logs = if text.is_some() {
+        log_lines(platform, &service_home, lines)
+    } else {
+        Ok(Vec::new())
+    };
     Ok(StatusReport {
         platform,
         installed: text.is_some(),
@@ -824,11 +859,8 @@ pub fn status(user_home: &Path, home: &Path, lines: usize) -> Result<StatusRepor
         loaded,
         pid,
         bind: bind_of(&args),
-        log_lines: if text.is_some() {
-            log_lines(platform, &service_home, lines)?
-        } else {
-            Vec::new()
-        },
+        log_lines: logs.as_ref().cloned().unwrap_or_default(),
+        log_error: logs.err().map(|e| format!("{e:#}")),
         args,
     })
 }
@@ -867,6 +899,25 @@ pub fn start_stop(user_home: &Path, start: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_write_keeps_the_previous_definition() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("another.service");
+        std::fs::write(&path, "previous").unwrap();
+
+        let failed = write_via(&path, |f| {
+            f.write_all(b"partial")?;
+            Err(std::io::Error::other("disk full"))
+        });
+        assert!(failed.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+
+        replace_file(&path, "next").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "next");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 
     fn spec() -> ServiceSpec {
         ServiceSpec {

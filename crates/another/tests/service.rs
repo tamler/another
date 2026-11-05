@@ -34,7 +34,7 @@ exit 0"#,
     ),
     (
         "journalctl",
-        "echo 'another line one'\necho 'another line two'",
+        "[ -n \"$FAIL_JOURNAL\" ] && { echo 'Failed to open journal' >&2; exit 1; }\necho 'another line one'\necho 'another line two'",
     ),
     (
         "launchctl",
@@ -443,6 +443,34 @@ fn failed_new_unit_does_not_leave_an_enable_link() {
         .rposition(|c| c == "systemctl --user daemon-reload");
     assert!(disable.is_some(), "{calls:?}");
     assert!(disable < reload, "{calls:?}");
+}
+
+#[test]
+fn a_journal_failure_is_not_reported_as_empty_logs() {
+    let env = Env::new("systemd");
+    let bind = format!("127.0.0.1:{}", free_port());
+    env.json(&["service", "install", "--bind", &bind]);
+
+    let out = env
+        .cmd(&["service", "logs"])
+        .env("FAIL_JOURNAL", "1")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("Failed to open journal"), "{err}");
+
+    // status still reports the service, and says why there are no log lines.
+    let out = env
+        .cmd(&["--json", "service", "status"])
+        .env("FAIL_JOURNAL", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let status: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(status["installed"], true);
+    let error = status["log_error"].as_str().unwrap();
+    assert!(error.contains("Failed to open journal"), "{error}");
 }
 
 #[test]
