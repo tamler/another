@@ -1145,9 +1145,18 @@ fn decision_requests_are_scoped_by_the_decisions_project() {
         0,
         "not shop's request, though a shop agent asked"
     );
+    // From the daily summary on (D42), request counts are task requests only and decisions
+    // are reported on their own: vault's token sees this one there, shop's doesn't.
     assert_eq!(
         open("/work/vault"),
-        1,
-        "vault's decision is vault's request"
+        0,
+        "decisions aren't counted as requests"
     );
+    let decisions = |glob: &str| {
+        s.daily_summary(None, Some(&scope_for(glob)))
+            .unwrap()
+            .decisions
+            .open_total
+    };
+    assert_eq!((decisions("/work/shop"), decisions("/work/vault")), (0, 1));
 }

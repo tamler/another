@@ -58,11 +58,17 @@ All notable changes to Another. Unreleased work is listed under the next version
   - `another spend`: a report by period, lane and agent with a phone-sized burn-down. Also MCP `spend_report` and `GET /spend`.
   - `spend.*` events, a new `spend` activity category and a `budget` webhook filter.
   - No real accounts are built in; the examples live in [docs/SPEND.md](docs/SPEND.md).
+- **Daily summary** ([design](docs/design/06-summary.md)):
+  - `another summary [--since 24h]`, MCP `daily_summary`, and `GET /summary` (JSON, or markdown with `format=markdown`).
+  - Contents: what needs a person, lanes moved, stuck and closed, decisions, requests, holds and conflicts, spend, active agents, and active people (listed separately). Scoped for remote callers, including an event-id `since`. `truncated` flags a section that hit the pager's cap.
+  - Opt-in daily rollup: `another summary schedule --daily HH:MM --to webhook|mail:NAME`, sent by `another serve` from the `another` system agent. A new `daily_summary` webhook filter (local all-project webhooks only).
+- [Manager bot guide](docs/MANAGER-BOT.md): token, webhooks to subscribe, and which MCP tools to call.
 - CI also runs on pull requests that target non-`main` branches, so stacked PRs are checked.
 
 ### Changed
 - Spend reports keep active leases in the count before cost accrues, including at monthly resets, while retaining their overlap with historical periods.
 - **Remote event reads are now filtered by token scope** (D38, supersedes D16). `activity_feed`, `activity_summarize` and `GET /activity` used to show every project's events to any token. They now show only events from the token's projects (and project-less events concerning its own agent). Token, peer and node events are hidden from tokens. Local callers are unaffected.
+- `activity_summarize` request counts exclude decision requests (they are reported as decisions).
 - When reading forward, the feed's `next_since` now advances past events filtered out by `kinds` or scope.
 
 ### Database

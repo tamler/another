@@ -24,6 +24,8 @@ With `another serve --auth`, every event read is filtered by the token's project
 
 Items are one-line summaries plus ids. Message bodies are never included.
 
+**Cursors:** `next_since` is normally an event id. When the last event a read scanned is one the token can't see, `next_since` is an opaque position like `@1234` instead, so a hidden event's id is never handed out. Pass either form back as `since`. A hidden event's id is the same `not_found` as an unknown one.
+
 ## Stream (SSE)
 
 ```bash

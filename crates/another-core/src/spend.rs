@@ -1952,6 +1952,75 @@ pub fn spend_markdown(r: &SpendReport) -> String {
     out
 }
 
+/// Spend recorded since `since_ms`, per account (name, unit, amount), as `scope` sees it.
+pub(crate) fn spent_since(
+    conn: &Connection,
+    node_id: &str,
+    since_ms: i64,
+    scope: Option<&TokenScope>,
+) -> Result<Vec<(String, String, f64)>> {
+    // Keyed by account id: an archived account and a new one with the same name are
+    // different accounts (and may have different units).
+    let mut stmt = conn.prepare(
+        "SELECT a.account_id, a.unit, e.amount, e.project_id, e.agent_id, a.project_id
+         FROM spend_entries e JOIN spend_accounts a ON a.account_id = e.account_id
+         WHERE e.node_id = ?1 AND e.at >= ?2 ORDER BY a.name",
+    )?;
+    let rows = stmt
+        .query_map(params![node_id, since_ms], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, f64>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<String>>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut out: Vec<(String, String, f64)> = Vec::new();
+    for (account_id, unit, amount, project, agent, account_project) in rows {
+        if !account_visible(conn, scope, account_project.as_deref())?
+            || !attributed_visible(conn, scope, project.as_deref(), agent.as_deref())?
+        {
+            continue;
+        }
+        match out.iter_mut().find(|(id, _, _)| *id == account_id) {
+            Some(x) => x.2 = round(x.2 + amount),
+            None => out.push((account_id, unit, round(amount))),
+        }
+    }
+    Ok(out)
+}
+
+/// Pending spend approvals `scope` may see, counted in SQL (no listing limit).
+pub(crate) fn pending_approvals(
+    conn: &Connection,
+    node_id: &str,
+    scope: Option<&TokenScope>,
+) -> Result<u32> {
+    let mut stmt = conn.prepare(
+        "SELECT project_id, agent_id, COUNT(*) FROM spend_leases
+         WHERE node_id = ?1 AND status = 'pending_approval' GROUP BY project_id, agent_id",
+    )?;
+    let groups = stmt
+        .query_map([node_id], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut n = 0;
+    for (project, agent, count) in groups {
+        if attributed_visible(conn, scope, project.as_deref(), Some(&agent))? {
+            n += count as u32;
+        }
+    }
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

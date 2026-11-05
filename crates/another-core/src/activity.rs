@@ -111,6 +111,10 @@ impl Since {
         if raw.len() == 26 && ulid::Ulid::from_string(raw).is_ok() {
             return Ok(Since::After(raw.to_ascii_uppercase()));
         }
+        // A position cursor from `next_since` (`@<seq>`).
+        if raw.len() > 1 && raw.starts_with('@') && raw[1..].chars().all(|c| c.is_ascii_digit()) {
+            return Ok(Since::After(raw.to_string()));
+        }
         Err(Error::Invalid(format!(
             "invalid since {raw:?}: use a duration like 30m or 2h, an RFC 3339 time, or an event id"
         )))
@@ -414,6 +418,15 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
                 )
             },
             json!({ "resource_id": s("resource_id"), "account_id": p.get("account_id") }),
+        ),
+        "summary.daily" => (
+            format!(
+                "daily summary: {} item(s) need attention",
+                p.get("attention_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default()
+            ),
+            json!({ "since": s("since"), "until": s("until") }),
         ),
         "spend.lease_withdrawn" => (
             format!(
@@ -750,6 +763,69 @@ fn kind_matches(kinds: &[ActivityKind], kind: &str) -> bool {
     kinds.is_empty() || kinds.contains(&ActivityKind::of_event(kind))
 }
 
+/// Resolve an event-id cursor as `scope` sees it: `(seq, ts)` of the event. An event the
+/// caller can't see is the same `not_found` (same message) as one that doesn't exist. Every
+/// scoped read (feed, `activity_summarize`, the daily summary) resolves cursors here.
+pub(crate) fn resolve_cursor(
+    conn: &Connection,
+    id: &str,
+    scope: Option<&TokenScope>,
+) -> Result<(i64, i64)> {
+    let unknown = || Error::NotFound(format!("unknown event id {id:?}"));
+    // `@<seq>`: an opaque position handed out as `next_since` when the last event a read
+    // scanned is one the caller can't see (it names no event).
+    if let Some(seq) = id.strip_prefix('@').and_then(|n| n.parse::<i64>().ok()) {
+        // A scoped caller gets the time of the last event it can see: the time of a hidden
+        // event at this position would leak when the other project was active.
+        if let Some(s) = scope {
+            let mut stmt = conn.prepare(
+                "SELECT ts, node_id, actor, kind, payload FROM events
+                 WHERE seq <= ?1 ORDER BY seq DESC",
+            )?;
+            let mut rows = stmt.query([seq])?;
+            while let Some(r) = rows.next()? {
+                let (node, actor, kind, payload): (String, String, String, String) =
+                    (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?);
+                if crate::visibility::event_visible(conn, s, &node, &actor, &kind, &payload)? {
+                    return Ok((seq, r.get(0)?));
+                }
+            }
+            return Ok((seq, 0));
+        }
+        let ts: Option<i64> = conn
+            .query_row(
+                "SELECT ts FROM events WHERE seq <= ?1 ORDER BY seq DESC LIMIT 1",
+                [seq],
+                |r| r.get(0),
+            )
+            .optional()?;
+        return Ok((seq, ts.unwrap_or(0)));
+    }
+    let row: Option<(i64, i64, String, String, String, String)> = conn
+        .query_row(
+            "SELECT seq, ts, node_id, actor, kind, payload FROM events WHERE event_id = ?1",
+            [id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let (seq, ts, node, actor, kind, payload) = row.ok_or_else(unknown)?;
+    if let Some(s) = scope {
+        if !crate::visibility::event_visible(conn, s, &node, &actor, &kind, &payload)? {
+            return Err(unknown());
+        }
+    }
+    Ok((seq, ts))
+}
+
 /// Events after `since`, oldest first; without `since`, the newest `limit` events.
 fn read_events(
     conn: &Connection,
@@ -759,13 +835,7 @@ fn read_events(
     scope: Option<&TokenScope>,
 ) -> Result<(Vec<EventRow>, Option<String>)> {
     let after_seq: Option<i64> = match since {
-        Some(Since::After(id)) => Some(
-            conn.query_row("SELECT seq FROM events WHERE event_id = ?1", [id], |r| {
-                r.get(0)
-            })
-            .optional()?
-            .ok_or_else(|| Error::NotFound(format!("unknown event id {id:?}")))?,
-        ),
+        Some(Since::After(id)) => Some(resolve_cursor(conn, id, scope)?.0),
         _ => None,
     };
     let since_ts = match since {
@@ -774,7 +844,7 @@ fn read_events(
     };
     let newest_first = since.is_none();
     let sql = format!(
-        "SELECT event_id, node_id, ts, actor, kind, payload FROM events
+        "SELECT event_id, node_id, ts, actor, kind, payload, seq FROM events
          WHERE (?1 IS NULL OR seq > ?1) AND (?2 IS NULL OR ts >= ?2)
          ORDER BY seq {}",
         if newest_first { "DESC" } else { "ASC" }
@@ -783,10 +853,12 @@ fn read_events(
     let mut rows = stmt.query(params![after_seq, since_ts])?;
     let mut out = Vec::new();
     let mut scanned: Option<String> = None;
+    let mut scanned_at: Option<(i64, bool)> = None;
     while let Some(r) = rows.next()? {
         let kind: String = r.get(4)?;
         if !newest_first {
             scanned = Some(r.get(0)?);
+            scanned_at = Some((r.get(6)?, false));
         }
         if !kind_matches(kinds, &kind) {
             continue;
@@ -811,6 +883,9 @@ fn read_events(
                 continue;
             }
         }
+        if let Some((_, seen)) = scanned_at.as_mut() {
+            *seen = true;
+        }
         out.push(row);
         if out.len() as u32 >= limit {
             break;
@@ -818,6 +893,19 @@ fn read_events(
     }
     if newest_first {
         out.reverse();
+    }
+    // Never hand a scoped caller the id of an event it can't see as its cursor: past a
+    // hidden (or filtered) last event, the cursor is an opaque position instead.
+    if let (Some(_), Some((seq, seen))) = (scope, scanned_at) {
+        if !seen {
+            let visible = match &scanned {
+                Some(id) => resolve_cursor(conn, id, scope).is_ok(),
+                None => false,
+            };
+            if !visible {
+                scanned = Some(format!("@{seq}"));
+            }
+        }
     }
     Ok((out, scanned))
 }
@@ -875,12 +963,7 @@ impl Store {
         self.read(|conn| {
             let since_ms = match &since {
                 Since::Time(t) => *t,
-                Since::After(id) => conn
-                    .query_row("SELECT ts FROM events WHERE event_id = ?1", [id], |r| {
-                        r.get(0)
-                    })
-                    .optional()?
-                    .ok_or_else(|| Error::NotFound(format!("unknown event id {id:?}")))?,
+                Since::After(id) => resolve_cursor(conn, id, scope)?.1,
             };
             let (rows, _) = read_events(conn, Some(&since), &[], u32::MAX, scope)?;
             let mut counts: BTreeMap<String, u32> = BTreeMap::new();
@@ -940,7 +1023,7 @@ impl Store {
             };
             let mut stmt = conn.prepare(
                 "SELECT request_id, status FROM requests
-                 WHERE node_id = ?1 AND status IN ('open', 'claimed', 'stale')",
+                 WHERE node_id = ?1 AND status IN ('open', 'claimed', 'stale') AND kind = 'task'",
             )?;
             let open_requests = stmt
                 .query_map([self.node_id()], |r| {

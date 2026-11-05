@@ -1002,6 +1002,34 @@ impl Store {
         })
     }
 
+    /// Every open decision `scope` may see, oldest first, with no page limit (the daily
+    /// summary must never drop the longest-waiting ones).
+    pub(crate) fn open_decisions_oldest_first(
+        &self,
+        scope: Option<&TokenScope>,
+    ) -> Result<Vec<Decision>> {
+        self.sweep()?;
+        self.read(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "{DECISION_SELECT} WHERE d.node_id = ?1 AND d.status = 'open'
+                 ORDER BY d.created_at ASC, d.decision_id ASC"
+            ))?;
+            let rows = stmt
+                .query_map([self.node_id()], decision_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut out = Vec::new();
+            for r in rows {
+                if let Some(s) = scope {
+                    if !scope_allows_project(conn, s, &r.project_id)? {
+                        continue;
+                    }
+                }
+                out.push(r.d);
+            }
+            Ok(out)
+        })
+    }
+
     /// One decision, by decision id or its request id.
     pub fn decision(&self, key: &str, scope: Option<&TokenScope>) -> Result<Decision> {
         self.sweep()?;

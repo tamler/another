@@ -15,11 +15,23 @@ pub struct SettingSpec {
 }
 
 /// Settings this build understands.
-pub const SETTINGS: &[SettingSpec] = &[SettingSpec {
-    key: "decider",
-    default: crate::decisions::DEFAULT_DECIDER,
-    help: "who is asked when a decision (or a spend approval) names nobody",
-}];
+pub const SETTINGS: &[SettingSpec] = &[
+    SettingSpec {
+        key: "decider",
+        default: crate::decisions::DEFAULT_DECIDER,
+        help: "who is asked when a decision (or a spend approval) names nobody",
+    },
+    SettingSpec {
+        key: "summary_daily",
+        default: "",
+        help: "local time (HH:MM) `another serve` sends the daily summary; empty = off",
+    },
+    SettingSpec {
+        key: "summary_to",
+        default: "webhook",
+        help: "where the scheduled summary goes: webhook (daily_summary filter) or mail:NAME",
+    },
+];
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Setting {
@@ -55,9 +67,23 @@ pub(crate) fn get(conn: &Connection, key: &str) -> Result<String> {
     Ok(stored.unwrap_or_else(|| spec(key).map(|s| s.default.to_string()).unwrap_or_default()))
 }
 
-fn validate(key: &str, value: &str) -> Result<()> {
+pub(crate) fn validate(key: &str, value: &str) -> Result<()> {
     match key {
         "decider" => crate::identity::validate_name(value),
+        "summary_daily" => {
+            if value.is_empty() {
+                Ok(())
+            } else {
+                crate::summary::parse_hhmm(value).map(|_| ())
+            }
+        }
+        "summary_to" => match value.split_once(':') {
+            _ if value == "webhook" => Ok(()),
+            Some(("mail", name)) => crate::identity::validate_name(name),
+            _ => Err(Error::Invalid(format!(
+                "summary_to must be webhook or mail:NAME, not {value:?}"
+            ))),
+        },
         _ => Ok(()),
     }
 }

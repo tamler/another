@@ -181,7 +181,9 @@ fn classify(kind: &str, payload: &Value, origin: &str) -> Share {
     let not_origin =
         |nodes: Vec<String>| -> Vec<String> { nodes.into_iter().filter(|n| n != origin).collect() };
     match kind.split('.').next().unwrap_or_default() {
-        "token" | "peer" => return Share::Never,
+        // Tokens, peers, the scheduled summary (it carries the digest) and node settings
+        // stay on this node.
+        "token" | "peer" | "summary" => return Share::Never,
         _ => {}
     }
     // Node-local signals (D38): a refused hold and an expiring lease are about this node's
