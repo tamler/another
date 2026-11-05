@@ -1556,24 +1556,22 @@ mod tests {
         );
     }
 
-    fn foreign_role_relay(previously_confirmed: bool) {
+    fn foreign_role_relay(history: &[Program], projected: Program, refresh: Option<Program>) {
         let (hub, _) = review_store();
         hub.set_node_name("hub").unwrap();
         let decision = hub
             .ask_decision(review_question(&hub, false), None)
             .unwrap();
         let human = hub.agent("owner").unwrap();
-        if previously_confirmed {
-            for program in [Program::Human, Program::Codex] {
-                hub.register_agent_trusted(RegisterAgent {
-                    name: "owner".into(),
-                    program,
-                    project: None,
-                    model: None,
-                    description: None,
-                })
-                .unwrap();
-            }
+        for &program in history {
+            hub.register_agent_trusted(RegisterAgent {
+                name: "owner".into(),
+                program,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
         }
         let peer = Store::open_in_memory(crate::Clock::manual(hub.now()).0).unwrap();
         peer.set_node_name("peer").unwrap();
@@ -1592,7 +1590,7 @@ mod tests {
                     json!({
                         "agent_id": human.agent_id,
                         "name": "owner",
-                        "program": "human",
+                        "program": projected.as_str(),
                         "role_confirmed": true
                     }),
                 )
@@ -1606,6 +1604,31 @@ mod tests {
             .unwrap()
             .iter()
             .any(|e| e.event_id == event_id));
+        if let Some(program) = refresh {
+            let refreshed = hub
+                .register_agent(RegisterAgent {
+                    name: "owner".into(),
+                    program,
+                    project: None,
+                    model: None,
+                    description: None,
+                })
+                .unwrap();
+            assert_eq!(refreshed.program, projected.as_str());
+            let latest = hub
+                .events(100)
+                .unwrap()
+                .into_iter()
+                .rev()
+                .find(|e| {
+                    e.node_id == hub.node_id()
+                        && e.kind == "agent.registered"
+                        && e.payload["agent_id"] == human.agent_id
+                })
+                .unwrap();
+            assert_eq!(latest.payload["program"], projected.as_str());
+            assert_eq!(latest.payload["role_confirmed"], false);
+        }
         let asker = hub.agent("worker@shop").unwrap();
         let denied = hub
             .read(|conn| {
@@ -1629,7 +1652,7 @@ mod tests {
         assert_eq!(error.code(), "forbidden");
         hub.register_agent_trusted(RegisterAgent {
             name: "owner".into(),
-            program: Program::Human,
+            program: projected,
             project: None,
             model: None,
             description: None,
@@ -1650,12 +1673,71 @@ mod tests {
 
     #[test]
     fn a_signed_foreign_registration_cannot_confirm_a_local_human_role() {
-        foreign_role_relay(false);
+        foreign_role_relay(&[], Program::Human, None);
     }
 
     #[test]
     fn a_peer_cannot_restore_a_locally_removed_privileged_role() {
-        foreign_role_relay(true);
+        foreign_role_relay(&[Program::Human, Program::Codex], Program::Human, None);
+    }
+
+    #[test]
+    fn an_untrusted_refresh_cannot_reconfirm_a_human_role_restored_by_a_peer() {
+        for refresh in [Program::Codex, Program::Human] {
+            foreign_role_relay(
+                &[Program::Human, Program::Codex],
+                Program::Human,
+                Some(refresh),
+            );
+        }
+    }
+
+    #[test]
+    fn an_untrusted_refresh_cannot_reconfirm_a_previous_privileged_role() {
+        for refresh in [Program::Codex, Program::GrokBot] {
+            foreign_role_relay(
+                &[Program::GrokBot, Program::Human],
+                Program::GrokBot,
+                Some(refresh),
+            );
+        }
+    }
+
+    #[test]
+    fn an_untrusted_same_program_refresh_keeps_genuine_role_confirmation() {
+        for program in [Program::Human, Program::GrokBot] {
+            let (hub, _) = review_store();
+            let decision = hub
+                .ask_decision(review_question(&hub, false), None)
+                .unwrap();
+            hub.register_agent_trusted(RegisterAgent {
+                name: "owner".into(),
+                program,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+            hub.register_agent(RegisterAgent {
+                name: "owner".into(),
+                program,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+            hub.answer_decision(
+                AnswerDecision {
+                    decision: decision.decision_id,
+                    value: Some("wait".into()),
+                    text: None,
+                    answered_by: None,
+                    relayed_by: Some("owner".into()),
+                },
+                None,
+            )
+            .unwrap();
+        }
     }
 
     #[test]
