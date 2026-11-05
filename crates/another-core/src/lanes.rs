@@ -374,7 +374,10 @@ pub(crate) fn resolve_lane_in_project(
 ) -> Result<(Lane, String)> {
     let unknown = || Error::NotFound(format!("unknown lane {:?}", key.trim()));
     let Some(project_id) = project_id else {
-        return resolve_lane_in(conn, node_id, key, scope).map_err(|_| unknown());
+        return resolve_lane_in(conn, node_id, key, scope).map_err(|e| match e {
+            Error::Ambiguous(_) => e,
+            _ => unknown(),
+        });
     };
     let slug: String = conn
         .query_row(
