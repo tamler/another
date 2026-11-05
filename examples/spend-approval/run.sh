@@ -12,8 +12,8 @@ cd "$SHOP"
 step "A node, one agent, the person who approves, and a GPU budget"
 another init >/dev/null
 another agent register claude --program claude --project "$SHOP"
-another agent register jacob --program human
-another config decider jacob
+another agent register pat --program human
+another config decider pat
 another spend account add gpu --kind gpu_pod --unit USD --budget 50 --cost-per-hour 2.5 \
   --requires-approval --description "Rented A100 pod"
 

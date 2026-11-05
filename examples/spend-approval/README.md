@@ -8,9 +8,9 @@ sh examples/spend-approval/run.sh
 
 What happens:
 
-1. **The account.** `another spend account add gpu --kind gpu_pod --unit USD --budget 50 --cost-per-hour 2.5 --requires-approval`. The approver is the node's decider, `jacob`.
+1. **The account.** `another spend account add gpu --kind gpu_pod --unit USD --budget 50 --cost-per-hour 2.5 --requires-approval`. The approver is the node's decider, `pat`.
 2. **Spend so far.** `another spend record` books 30 USD, so the report shows 20 left.
-3. **Borrow.** `another spend borrow --hours 3` returns a lease in `pending_approval` and a decision for `jacob` with the options `approve` and `deny`.
+3. **Borrow.** `another spend borrow --hours 3` returns a lease in `pending_approval` and a decision for `pat` with the options `approve` and `deny`.
 4. **Approve.** `another decision answer <id> approve` starts the lease (`active`), and the agent is mailed.
 5. **Deny.** A second, bigger request is denied with a note. Its lease never becomes active and costs nothing.
 6. **Release.** `another spend release` ends the approved lease and records its cost. `another spend` prints the phone-sized burn-down.

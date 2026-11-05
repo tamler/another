@@ -13,8 +13,8 @@ cd "$SHOP"
 step "A node, one agent, and the person who decides"
 another init >/dev/null
 another agent register claude --program claude --project "$SHOP"
-another agent register jacob --program human
-another config decider jacob
+another agent register pat --program human
+another config decider pat
 
 step "The agent asks (default deadline behaviour: keep_open)"
 ID=$(q decision ask --agent claude@shop --project "$SHOP" \
@@ -49,8 +49,8 @@ ID2=$(q decision ask --agent claude@shop --project "$SHOP" \
   --question "Merge the search lane today?" --option yes="Merge today" --option no="Not yet" --json \
   | jq -r '.decision_id')
 must "$ID2" "second decision ask"
-TOKEN=$(q token create --agent jacob --project "$SHOP" --json | jq -r '.secret')
-must "$TOKEN" "token for jacob"
+TOKEN=$(q token create --agent pat --project "$SHOP" --json | jq -r '.secret')
+must "$TOKEN" "token for pat"
 APORT=$(free_port)
 serve_bg "$ANOTHER_HOME" "$APORT" --auth
 code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$APORT/decisions")
@@ -68,7 +68,7 @@ must "$ID3" "third decision ask"
 CTOKEN=$(q token create --agent claude@shop --project "$SHOP" --json | jq -r '.secret')
 must "$CTOKEN" "token for claude"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$APORT/decisions/$ID3/answer" \
-  -H "authorization: Bearer $CTOKEN" -H 'content-type: application/json' -d '{"value": "yes", "answered_by": "jacob"}')
+  -H "authorization: Bearer $CTOKEN" -H 'content-type: application/json' -d '{"value": "yes", "answered_by": "pat"}')
 expect_eq "$code" "403" "the asker's own token is refused"
 expect_eq "$(q decision show "$ID3" --json | jq -r '.status')" "open" "the decision stays open"
 

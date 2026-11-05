@@ -20,6 +20,13 @@ case "$(uname -s)-$(uname -m)" in
   *) echo "unsupported platform" >&2; exit 1 ;;
 esac
 
+# The quickstart's `another serve &` needs port 7466. With another server there, its doctor
+# step would pass against that server instead.
+if curl -fsS -m 1 http://127.0.0.1:7466/health >/dev/null 2>&1; then
+  echo "a server is already on 127.0.0.1:7466; run this on a machine without one" >&2
+  exit 1
+fi
+
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 release="$work/release"
