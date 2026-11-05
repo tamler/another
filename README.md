@@ -81,6 +81,50 @@ another inbox --agent bob
 another activity --summary
 ```
 
+## Run it in the background (optional)
+
+You don't need a daemon: stdio MCP clients start `another serve --stdio` themselves, and the CLI works without one. If you want a long-running HTTP server, for example for remote access, you can opt in to a background service that starts at login and restarts after a reboot. It is **never installed unless you run this**:
+
+```bash
+another service install
+```
+
+- **macOS**: a launchd user agent at `~/Library/LaunchAgents/one.toanother.another.plist` (`RunAtLoad`, `KeepAlive`), loaded with `launchctl bootstrap gui/$UID`. Logs go to `$ANOTHER_HOME/logs/`.
+- **Linux**: a systemd user unit at `~/.config/systemd/user/another.service` (`Restart=on-failure`), enabled with `systemctl --user enable --now`. Logs are in the journal (`journalctl --user -u another`). On a headless box, run `loginctl enable-linger $USER` so it starts at boot without a login session.
+
+`install` takes `serve`'s HTTP flags (`--bind`, `--auth`, `--allowed-host`, `--allow-remote-bind`, `--federation`) plus the global `--home`, and writes them into the service definition. Running it again updates the service in place and replaces every flag, so repeat the ones you want to keep; it warns about anything an update drops or changes. If an update fails, the previous service is restored. It refuses to install when something, such as another `another serve`, is already listening on the same port.
+
+| Command | What it does |
+|---|---|
+| `another service install [serve flags]` | Write or update the service and start it |
+| `another service status` | Installed and loaded?, pid, bind address, last log lines |
+| `another service logs [-n 50]` | Recent log lines |
+| `another service stop` / `start` | Stop or start it; it stays installed (macOS: loads again at next login; Linux: starts again at the next boot or user-manager start) |
+| `another service uninstall` | Stop it and remove the definition |
+
+### Remote access through Tailscale Serve
+
+To reach the service from another machine on your tailnet (for example a remote Grok Bot), run an **authenticated** service on a loopback port and put `tailscale serve` in front of it:
+
+```bash
+another service install --auth --bind 127.0.0.1:7467 --allowed-host my-mac.my-tailnet.ts.net
+```
+
+```bash
+tailscale serve --bg 7467
+```
+
+```bash
+another token create --agent grok-bot --project '/path/to/work/*'
+```
+
+Both flags are required:
+
+- **`--auth`**: Tailscale Serve delivers tailnet traffic to the service from loopback, so a server without `--auth` would accept anyone on your tailnet with no token. With `--auth`, API requests need a bearer token from `another token create`, and each call is audited (`another audit`); [docs/REMOTE.md](docs/REMOTE.md) lists the routes.
+- **`--allowed-host`**: the tunnel forwards your tailnet hostname in the `Host` header, and Another rejects unknown hosts to prevent DNS rebinding. Without the flag, every tunnelled request is refused.
+
+Keep local agents on stdio MCP (or a separate unauthenticated loopback server) so they don't need a token. Use Tailscale Serve, not Funnel, unless you deliberately want the service on the public internet. [docs/REMOTE.md](docs/REMOTE.md) has the details, plus the Cloudflare Tunnel and `ssh -R` setups.
+
 ## Status
 
 | Milestone | Scope | Status |
@@ -135,6 +179,7 @@ Every command takes `--json`. `--agent` and `--from` default to `$ANOTHER_AGENT`
 | Hooks | `another hook install\|uninstall --client <c>\|all [--dry-run]`, `another hook status` |
 | Resources | `another resources`, `another resource register`, `another borrow`, `another release`, `another orphans`, `another reap <target> [--confirm]` |
 | Remote peers | `another serve --auth`, `another token create\|list\|revoke`, `another audit` |
+| Background service | `another service install\|uninstall\|status\|start\|stop\|logs` (opt-in) |
 | Federation | `another pair invite\|join\|revoke`, `another peers`, `another sync [--watch]`, `another serve --federation` |
 | Wake | `another wake [--agent X\|--all]`, `another wake set\|clear\|list` |
 
