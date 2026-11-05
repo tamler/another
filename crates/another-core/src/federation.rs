@@ -276,6 +276,30 @@ fn require_named(entry: &NodeEntry) -> Result<()> {
 }
 
 /// Record (or confirm) another node. Keys are pinned on first sight.
+/// Rename a known node, and the addresses of its agents with it (they end in `@<node name>`),
+/// so a peer that synced before the rename agrees with one that synced after it.
+fn rename_foreign_node(tx: &Tx<'_>, node_id: &str, name: &str) -> Result<()> {
+    let old: Option<String> = tx
+        .query_row(
+            "SELECT display_name FROM nodes WHERE node_id = ?1",
+            [node_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    tx.execute(
+        "UPDATE nodes SET display_name = ?2 WHERE node_id = ?1",
+        params![node_id, name],
+    )?;
+    if let Some(old) = old.filter(|old| old != name) {
+        tx.execute(
+            "UPDATE agents SET address = substr(address, 1, length(address) - length(?2)) || ?3
+             WHERE node_id = ?1 AND substr(address, -length(?2) - 1) = '@' || ?2",
+            params![node_id, old, name],
+        )?;
+    }
+    Ok(())
+}
+
 fn upsert_node(tx: &Tx<'_>, node: &NodeEntry) -> Result<()> {
     if node.node_id == tx.node_id {
         return Ok(());
@@ -295,10 +319,7 @@ fn upsert_node(tx: &Tx<'_>, node: &NodeEntry) -> Result<()> {
         ))),
         Some((name, _)) => {
             if name != node.display_name {
-                tx.execute(
-                    "UPDATE nodes SET display_name = ?2 WHERE node_id = ?1",
-                    params![node.node_id, node.display_name],
-                )?;
+                rename_foreign_node(tx, &node.node_id, &node.display_name)?;
             }
             tx.execute(
                 "UPDATE nodes SET public_key = ?2 WHERE node_id = ?1 AND public_key IS NULL",
@@ -774,10 +795,7 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value, relayed: bool) -> Res
         "node.created" => {}
         "node.renamed" => {
             if let Some(name) = s("display_name") {
-                tx.execute(
-                    "UPDATE nodes SET display_name = ?2 WHERE node_id = ?1",
-                    params![origin, name],
-                )?;
+                rename_foreign_node(tx, origin, &name)?;
             }
         }
         "project.ensured" => {
@@ -1168,7 +1186,7 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value, relayed: bool) -> Res
                        expires_at = ?2 + coalesce(?4, ttl_seconds) * 1000
                      WHERE lease_id = ?1 AND node_id = ?3 AND released_at IS NULL
                        AND (?6 OR expires_at > ?5 OR resource_id IN (SELECT resource_id FROM resources WHERE node_id = ?3))",
-                    params![id, ts, origin, p.get("ttl_seconds").and_then(Value::as_i64), tx.now, relayed],
+                    params![id, ts.min(tx.now), origin, foreign_ttl(p), tx.now, relayed],
                 )?;
                 if relayed {
                     let resource: Option<String> = tx
@@ -1234,6 +1252,16 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value, relayed: bool) -> Res
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The TTL an event claims, within the limits local leases get.
+fn foreign_ttl(p: &Value) -> Option<i64> {
+    p.get("ttl_seconds").and_then(Value::as_i64).map(|ttl| {
+        ttl.clamp(
+            crate::resources::MIN_LEASE_TTL_SECONDS,
+            crate::resources::MAX_LEASE_TTL_SECONDS,
+        )
+    })
+}
+
 fn foreign_lease(
     tx: &Tx<'_>,
     resource_id: &str,
@@ -1259,11 +1287,9 @@ fn foreign_lease(
             "only the resource's node may create an owner lease".into(),
         ));
     }
-    let ttl = p.get("ttl_seconds").and_then(Value::as_i64).unwrap_or(1800);
-    let expires = ttl
-        .checked_mul(1000)
-        .and_then(|ttl| ts.checked_add(ttl))
-        .ok_or_else(|| Error::Invalid("lease expiry is out of range".into()))?;
+    let ttl = foreign_ttl(p).unwrap_or(1800);
+    // The signed time and TTL are the sender's claim: keep them to this node's clock and limit.
+    let expires = ts.min(tx.now) + ttl * 1000;
     let inserted = tx.execute(
         "INSERT OR IGNORE INTO resource_leases (lease_id, resource_id, node_id, agent_id, role,
            ttl_seconds, created_at, renewed_at, expires_at)
@@ -1819,6 +1845,78 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A signed borrow or renewal can't buy a lease beyond the local limit, whatever TTL and
+    /// timestamp it claims.
+    #[test]
+    fn foreign_leases_keep_to_the_ttl_limit_and_this_nodes_clock() {
+        let (clock, _) = crate::Clock::manual(1_800_000_000_000);
+        let s = Store::open_in_memory(clock).unwrap();
+        let agent = s
+            .register_agent_trusted(crate::RegisterAgent {
+                name: "worker".into(),
+                program: crate::Program::Codex,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+        let resource = s
+            .register_resource(crate::RegisterResource {
+                agent: "worker".into(),
+                kind: crate::ResourceKind::Gpu,
+                name: "pod:a".into(),
+                endpoint: None,
+                port: None,
+                pid: None,
+                project: None,
+                purpose: None,
+                mode: crate::LeaseMode::Shared,
+                ttl_seconds: Some(3600),
+                metadata: None,
+            })
+            .unwrap();
+        let now = s.now();
+        let far = now + 10 * 365 * 86_400_000;
+        let limit = now + crate::resources::MAX_LEASE_TTL_SECONDS * 1000;
+        let huge = json!({ "ttl_seconds": 999_999_999 });
+        let expiry = |tx: &Tx<'_>| -> Result<i64> {
+            Ok(tx.query_row(
+                "SELECT expires_at FROM resource_leases WHERE lease_id = 'FORGED'",
+                [],
+                |r| r.get(0),
+            )?)
+        };
+        s.write(|tx| {
+            foreign_lease(
+                tx,
+                &resource.resource.resource_id,
+                Some("FORGED".into()),
+                Some(agent.agent_id.clone()),
+                "borrower",
+                &huge,
+                far,
+                tx.node_id,
+            )?;
+            assert!(expiry(tx)? <= limit, "borrow past the limit");
+            let renewal = WireEvent {
+                seq: 1,
+                event_id: "E".into(),
+                node_id: tx.node_id.to_string(),
+                ts: far,
+                actor: "worker".into(),
+                kind: "resource.renewed".into(),
+                payload: String::new(),
+                prev_id: None,
+                sig: String::new(),
+            };
+            let p = json!({ "lease_ids": ["FORGED"], "ttl_seconds": 999_999_999 });
+            project_foreign(tx, &renewal, &p, false)?;
+            assert!(expiry(tx)? <= limit, "renewal past the limit");
+            Ok(())
+        })
+        .unwrap();
+    }
 
     #[test]
     fn classification() {

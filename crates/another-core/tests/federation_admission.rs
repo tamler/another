@@ -171,6 +171,22 @@ fn a_delayed_owner_honours_renewals_the_hub_admitted() {
 /// The owner stays offline past its own lease: no sync and no sweep until minute 62. The borrower's
 /// first lease ended at 30, so only the renewals the hub admitted keep it live.
 #[test]
+fn a_rename_moves_the_addresses_a_peer_already_stored() {
+    let (hub, _) = node("hub", START);
+    let (spoke, _) = node("before", START);
+    pair(&hub, &spoke);
+    sync(&hub, &spoke);
+    let agent_id = spoke.agent("worker").unwrap().agent_id;
+    assert_eq!(hub.agent("worker@@before").unwrap().agent_id, agent_id);
+
+    spoke.set_node_name("after").unwrap();
+    sync(&hub, &spoke);
+    let moved = hub.agent("worker@@after").unwrap();
+    assert_eq!(moved.agent_id, agent_id);
+    assert_eq!(moved.address, "worker@@after");
+}
+
+#[test]
 fn an_owner_offline_past_its_own_expiry_hands_the_resource_to_the_borrower_the_hub_renewed() {
     let net = Net::new();
     let (id, rid) = net.resource("shared");
