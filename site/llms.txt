@@ -8,7 +8,7 @@ Another lets independently run coding agents exchange mail, claim node-local req
 
 - [Home](https://toanother.one/): Product overview and recorded handoff.
 - [Getting started](https://toanother.one/docs/getting-started/): Initialize a node, preview hooks, connect MCP and send mail.
-- [Install](https://toanother.one/docs/install/): Rust 1.88+, source builds and macOS binary replacement.
+- [Install](https://toanother.one/docs/install/): Rust 1.88+, source builds, release checksums and macOS binary replacement.
 - [Documentation](https://toanother.one/docs/): Hooks, inbox, wake, resources and remote peers.
 - [Compare](https://toanother.one/compare/): Shared inboxes and agent orchestrators serve different needs.
 
