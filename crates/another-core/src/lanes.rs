@@ -987,6 +987,13 @@ impl Store {
             let me = resolve_agent(tx, tx.node_id, agent)?;
             let (lane, project_id) = resolve_lane_in(tx, tx.node_id, lane, scope)?;
             check_scope(tx, scope, &project_id)?;
+            if lane.status.is_closed() {
+                return Err(Error::Conflict(format!(
+                    "lane {} is {}; create a new lane to continue",
+                    lane.name,
+                    lane.status.as_str()
+                )));
+            }
             let to = if abandon {
                 LaneStatus::Abandoned
             } else {
