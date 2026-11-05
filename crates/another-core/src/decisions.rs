@@ -1220,8 +1220,8 @@ pub(crate) fn mirror_created_tx(
     let question: String = match s("message_id") {
         Some(mid) => tx
             .query_row(
-                "SELECT body FROM messages WHERE message_id = ?1",
-                [&mid],
+                "SELECT body FROM messages WHERE message_id = ?1 AND node_id = ?2",
+                params![mid, ev.node_id],
                 |r| r.get(0),
             )
             .optional()?,
@@ -1261,12 +1261,14 @@ pub(crate) fn mirror_created_tx(
     }
     .or_else(|| s("human"))
     .unwrap_or_default();
+    // A decision's project, lane and asker are its own node's: naming this node's would file
+    // the mirror among objects the sender has no say over.
     let known = |table: &str, col: &str, v: &Option<String>| -> Result<Option<String>> {
         match v {
             Some(v) => Ok(tx
                 .query_row(
-                    &format!("SELECT 1 FROM {table} WHERE {col} = ?1"),
-                    [v],
+                    &format!("SELECT 1 FROM {table} WHERE {col} = ?1 AND node_id = ?2"),
+                    params![v, ev.node_id],
                     |_| Ok(()),
                 )
                 .optional()?
@@ -1537,6 +1539,7 @@ pub(crate) fn apply_relayed_tx(
     if relayed.node_id != ev.node_id {
         return refuse("relayer_not_of_sender");
     }
+    let relayer_id = relayed.id.clone();
     let relayed = Some(relayed);
     if row.d.status != DecisionStatus::Open {
         tx.emit(
@@ -1551,16 +1554,19 @@ pub(crate) fn apply_relayed_tx(
         Some(mid) => {
             let body: Option<String> = tx
                 .query_row(
-                    "SELECT body FROM messages WHERE message_id = ?1 AND node_id = ?2",
-                    params![mid, ev.node_id],
+                    "SELECT body FROM messages WHERE message_id = ?1 AND node_id = ?2 AND sender_id = ?3",
+                    params![mid, ev.node_id, relayer_id],
                     |r| r.get(0),
                 )
                 .optional()?;
             // It only carried the text: the asker gets the answer mail itself.
-            tx.execute(
-                "UPDATE deliveries SET read_at = COALESCE(read_at, ?2) WHERE message_id = ?1",
-                params![mid, tx.now],
-            )?;
+            if body.is_some() {
+                tx.execute(
+                    "UPDATE deliveries SET read_at = COALESCE(read_at, ?2) WHERE message_id = ?1
+                       AND EXISTS (SELECT 1 FROM messages WHERE message_id = ?1 AND node_id = ?3 AND sender_id = ?4)",
+                    params![mid, tx.now, ev.node_id, relayer_id],
+                )?;
+            }
             body
         }
         None => None,
@@ -2437,6 +2443,16 @@ mod tests {
             .unwrap()
             .iter()
             .any(|e| e.event_id == event_id));
+        // Projection no longer lets another node rewrite a local agent, but a database from an
+        // older version can already hold the rewritten row: that must not confirm the role.
+        hub.write(|tx| {
+            tx.execute(
+                "UPDATE agents SET program = ?2 WHERE agent_id = ?1",
+                params![human.agent_id, projected.as_str()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
         if let Some(program) = refresh {
             let refreshed = hub
                 .register_agent(RegisterAgent {

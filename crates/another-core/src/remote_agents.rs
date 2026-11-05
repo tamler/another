@@ -343,9 +343,10 @@ pub(crate) fn depart_tx(
 }
 
 /// The lead of an open lane left: the lane member active longest (remote agents joined to
-/// the lane, agents holding files for it) becomes lead, and they and the lane's creator are
-/// told. With nobody left, the lane stays open with no working lead, flagged
-/// `leaderless_since`; it is never blocked automatically.
+/// the lane, agents holding files for it on this node) becomes lead, and they and the lane's
+/// creator are told. A hold another node reported is not membership, whichever agent it names.
+/// With nobody left, the lane stays open with no working lead, flagged `leaderless_since`; it
+/// is never blocked automatically.
 fn hand_over_lane_tx(
     tx: &Tx<'_>,
     lane_id: &str,
@@ -360,7 +361,8 @@ fn hand_over_lane_tx(
                WHERE r.lane_id = ?1 AND r.state = 'active' GROUP BY r.agent_id
                UNION ALL
                SELECT h.agent_id, MIN(h.created_at) FROM holds h
-               WHERE h.lane_id = ?1 AND h.released_at IS NULL GROUP BY h.agent_id
+               WHERE h.lane_id = ?1 AND h.released_at IS NULL AND h.node_id = ?3
+               GROUP BY h.agent_id
              ) m JOIN agents a ON a.agent_id = m.agent_id
              WHERE m.agent_id != ?2 AND a.node_id = ?3
              GROUP BY m.agent_id ORDER BY MIN(m.since), m.agent_id LIMIT 1",

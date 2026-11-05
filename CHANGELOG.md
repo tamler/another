@@ -6,6 +6,7 @@ All notable changes to Another. Unreleased work is listed under the next version
 
 ### Fixed
 - Cancelling an overdue decision commits its timeout result, request closure and automatic mail before returning a conflict, even without a running server or when the deadline passes as cancellation begins.
+- A paired node can no longer use signed events to act on what belongs to this node through remote-agent state: copy a local message body into a mirrored decision or file that mirror under a local project, lane or asker, add a recipient to a local message, mark a local agent's mail read, file a lane report as a local agent, influence who becomes a lane's next lead, or make a local ephemeral agent leave by ending its session or backdating it.
 
 ### Added
 - **Lanes** ([design](docs/design/01-lanes.md), [guide](docs/LANES.md)):

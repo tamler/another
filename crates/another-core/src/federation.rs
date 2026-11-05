@@ -533,7 +533,8 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                  ON CONFLICT(agent_id) DO UPDATE SET program = excluded.program,
                    model = excluded.model, description = excluded.description,
                    updated_at = excluded.updated_at, last_seen_at = excluded.last_seen_at,
-                   status = 'active', address = excluded.address",
+                   status = 'active', address = excluded.address
+                 WHERE agents.node_id = excluded.node_id",
                 params![
                     agent_id,
                     origin,
@@ -555,8 +556,8 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                 "offline"
             };
             tx.execute(
-                "UPDATE agents SET status = ?2, last_seen_at = ?3 WHERE agent_id = ?1",
-                params![s("agent_id"), status, ts],
+                "UPDATE agents SET status = ?2, last_seen_at = ?3 WHERE agent_id = ?1 AND node_id = ?4",
+                params![s("agent_id"), status, ts, origin],
             )?;
         }
         "message.sent" => {
@@ -593,6 +594,16 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                     ev.event_id
                 ],
             )?;
+            // The insert keeps an existing row, so this id may be someone else's message:
+            // adding a recipient would let that agent read it.
+            let own: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM messages WHERE message_id = ?1 AND node_id = ?2 AND sender_id = ?3)",
+                params![message_id, origin, sender],
+                |r| r.get(0),
+            )?;
+            if !own {
+                return Ok(());
+            }
             for r in p
                 .get("recipients")
                 .and_then(Value::as_array)
@@ -623,8 +634,9 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
             tx.execute(
                 "UPDATE deliveries SET read_at = coalesce(read_at, ?3),
                    acked_at = CASE WHEN ?4 THEN coalesce(acked_at, ?3) ELSE acked_at END
-                 WHERE message_id = ?1 AND agent_id = ?2",
-                params![s("message_id"), s("agent_id"), ts, acked],
+                 WHERE message_id = ?1 AND agent_id = ?2
+                   AND agent_id IN (SELECT agent_id FROM agents WHERE node_id = ?5)",
+                params![s("message_id"), s("agent_id"), ts, acked, origin],
             )?;
         }
         "hold.acquired" | "hold.updated" => {
@@ -661,7 +673,8 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                  ON CONFLICT(hold_id) DO UPDATE SET exclusive = excluded.exclusive,
                    reason = excluded.reason, ttl_seconds = excluded.ttl_seconds,
                    renewed_at = excluded.renewed_at, expires_at = excluded.expires_at,
-                   lane_id = excluded.lane_id",
+                   lane_id = excluded.lane_id
+                 WHERE holds.node_id = excluded.node_id",
                 params![hold_id, origin, project, agent, s("pattern"), exclusive, s("reason"), ttl, ts, expires, lane_id],
             )?;
         }

@@ -912,11 +912,6 @@ pub(crate) fn apply_proposal_tx(
             |r| r.get(0),
         )
         .optional()?;
-    // The carrier only brought the summary: the report mail is what people read.
-    tx.execute(
-        "UPDATE deliveries SET read_at = COALESCE(read_at, ?2) WHERE message_id = ?1",
-        params![mid, tx.now],
-    )?;
     let ignored = |reason: &str| -> Result<()> {
         tx.emit(
             "system",
@@ -936,8 +931,8 @@ pub(crate) fn apply_proposal_tx(
     }
     let me = match tx
         .query_row(
-            "SELECT agent_id, address, node_id FROM agents WHERE agent_id = ?1",
-            [&agent_id],
+            "SELECT agent_id, address, node_id FROM agents WHERE agent_id = ?1 AND node_id = ?2",
+            params![agent_id, ev.node_id],
             |r| {
                 Ok(AgentRef {
                     id: r.get(0)?,
@@ -951,6 +946,13 @@ pub(crate) fn apply_proposal_tx(
         Some(a) => a,
         None => return ignored("unknown_agent"),
     };
+    // Only the verified proposer's carrier can be marked read. A named local or other
+    // node's message is not a carrier, even when its id is known to this spoke.
+    tx.execute(
+        "UPDATE deliveries SET read_at = COALESCE(read_at, ?2) WHERE message_id = ?1
+           AND EXISTS (SELECT 1 FROM messages WHERE message_id = ?1 AND node_id = ?3 AND sender_id = ?4)",
+        params![mid, tx.now, ev.node_id, agent_id],
+    )?;
     let input = LaneReportInput {
         agent: me.address.clone(),
         lane: lane_id.clone(),

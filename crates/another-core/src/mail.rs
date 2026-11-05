@@ -652,3 +652,75 @@ fn thread_participants(conn: &Connection, thread_id: &str) -> Result<Vec<String>
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A foreign agent has no inbox here, so its delivery row is read directly.
+    #[test]
+    fn a_nodes_own_receipt_marks_its_agents_delivery() {
+        let hub = Store::open_in_memory(crate::Clock::manual(1_800_000_000_000).0).unwrap();
+        hub.set_node_name("hub").unwrap();
+        hub.register_agent_trusted(crate::RegisterAgent {
+            name: "alice".into(),
+            program: crate::Program::Claude,
+            project: None,
+            model: None,
+            description: None,
+        })
+        .unwrap();
+        let peer = Store::open_in_memory(crate::Clock::manual(hub.now()).0).unwrap();
+        peer.set_node_name("peer").unwrap();
+        let code = hub
+            .create_invite("http://127.0.0.1:1", &crate::Perm::ALL, 60)
+            .unwrap();
+        let (invite, request) = peer.prepare_join(&code).unwrap();
+        let response = hub.accept_pairing(&request).unwrap();
+        peer.complete_join(&invite, &response).unwrap();
+        let eve = peer
+            .register_agent_trusted(crate::RegisterAgent {
+                name: "eve".into(),
+                program: crate::Program::Codex,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+        let (events, cursor) = peer.outbound_events(0, 100).unwrap();
+        hub.ingest(peer.node_id(), &events, &[]).unwrap();
+
+        let mail = hub
+            .send_message(SendMessage {
+                from: "alice".into(),
+                to: vec!["eve@@peer".into()],
+                subject: "hello".into(),
+                body: "hi".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        peer.write(|tx| {
+            tx.emit(
+                "eve",
+                "delivery.read",
+                serde_json::json!({ "message_id": mail.message_id, "agent_id": eve.agent_id,
+                                    "message_node": hub.node_id() }),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let (events, _) = peer.outbound_events(cursor, 100).unwrap();
+        hub.ingest(peer.node_id(), &events, &[]).unwrap();
+
+        let read_at: Option<i64> = hub
+            .read(|conn| {
+                Ok(conn.query_row(
+                    "SELECT read_at FROM deliveries WHERE message_id = ?1 AND agent_id = ?2",
+                    [&mail.message_id, &eve.agent_id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert!(read_at.is_some());
+    }
+}

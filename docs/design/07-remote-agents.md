@@ -176,6 +176,15 @@ Migration 11, additive: the `agent_invites`, `remote_agents` and `remote_decisio
 - **Kick and gone:** revocation is immediate, because every request verifies the token; open SSE streams close within 30 s (note 02).
 - **Snippet:** contains no secret except the single-use code. `remote.json` and `remote.env` are `0600`, and the hub's `0700` home is never touched.
 - **Federation:** decision answer text and proposed report summaries travel only as mail to the owner node; the events carry ids and status. Lane mirrors carry no content.
+- **A signature names the sender, not its rights.** What this phase reads from another node's event has to belong to that node:
+  - A mirror's question mail, project, lane and asker. Anything else is left out of the mirror.
+  - A proposal's author, and the carrier it marks read. A proposal naming another node's agent is ignored and marks nothing read.
+  - A relayed answer's text mail, which must come from its relayer before it is read or marked read.
+  - Read and ack receipts, which apply only to that node's agents, and new recipients, which can be added only to that node's own message from the sender that wrote it.
+  - Session events and re-registrations change only that node's agents, and a hold event changes only that node's holds.
+  - Lead handover ranks only holds this node recorded itself, so another node's claimed hold or timestamp can't choose a lead.
+
+  These guards apply where this phase uses the data. They don't refuse the event: other forged events are still stored, and a forged hold or mail still shows in lists until tamler/another#70 (origin checks before storing) lands. That PR's open page/sweep question concerns resource lapses only, and none of these guards depend on how it is decided.
 - **Snippet:** pinned to the hub's version and the release's checksum.
 
 ## Out of scope
