@@ -38,7 +38,7 @@ another decision ask --agent claude@shop -q "Ship behind a flag, or wait for rev
 
 **Fields:**
 - `options`: 2 to 6. `value` is a single word that comes back as the answer; `label` is what the person sees.
-- `human`: who is asked. Defaults to the node setting `another config decider NAME`, else `owner`. The person is registered on demand as an agent with program `human`, so they have an inbox: `another inbox --agent owner`.
+- `human`: who is asked. Defaults to the node setting `another config decider NAME`, else the placeholder `owner`, so set your own name once. Changing the setting affects new decisions only: open ones stay with the person they were addressed to. The person is registered on demand as an agent with program `human`, so they have an inbox: `another inbox --agent owner`.
 - `project`: required for scoping. It is taken from the argument, else the asking agent's project, else the lane's.
 - `lane`: looked up within the decision's project only; a lane in another project is `unknown lane`.
 - `lane`: the lane shows `needs_decision` until the decision is answered, then returns to `working`.
