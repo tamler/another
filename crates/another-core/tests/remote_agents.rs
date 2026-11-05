@@ -837,3 +837,34 @@ fn round3_scoped_kick_and_persistent_leave() {
     assert!(s.spend_leases(false, None).unwrap().is_empty());
     assert!(s.verify_token(&j.token).is_ok(), "persistent: token kept");
 }
+
+#[test]
+fn a_scoped_leave_keeps_project_less_resource_leases() {
+    let (s, _) = hub();
+    let e = join(&s, &invite(&s, |i| i.agent = "eph".into()).code).unwrap();
+    let scope = s.verify_token(&e.token).unwrap();
+    s.register_resource(RegisterResource {
+        agent: "eph@shop".into(),
+        kind: ResourceKind::Gpu,
+        name: "pod:shared".into(),
+        endpoint: None,
+        port: None,
+        pid: None,
+        project: None,
+        purpose: None,
+        mode: LeaseMode::Shared,
+        ttl_seconds: Some(3600),
+        metadata: None,
+    })
+    .unwrap();
+    s.leave_scoped("eph@shop", Some(&scope)).unwrap();
+    let target = ResourceRef::parse("gpu:pod:shared").unwrap();
+    assert!(
+        s.resource(&target)
+            .unwrap()
+            .leases
+            .iter()
+            .any(|l| l.agent.starts_with("eph@shop")),
+        "a project-scoped token only touches leases in its projects"
+    );
+}
