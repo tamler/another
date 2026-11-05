@@ -767,7 +767,13 @@ impl Store {
                     crate::spend::resource_gate_tx(tx, &existing, &me, ttl)?
                 {
                     // Approval only grants the lease, so changes would be dropped silently.
-                    let changes = (input.endpoint.is_some() && input.endpoint != current.endpoint)
+                    let stored_project: Option<String> = tx.query_row(
+                        "SELECT project_id FROM resources WHERE resource_id = ?1",
+                        [&existing],
+                        |r| r.get(0),
+                    )?;
+                    let changes = (project_id.is_some() && project_id != stored_project)
+                        || (input.endpoint.is_some() && input.endpoint != current.endpoint)
                         || (input.port.is_some() && input.port != current.port)
                         || (input.pid.is_some() && input.pid != current.pid)
                         || (input.purpose.is_some() && input.purpose != current.purpose)
@@ -775,7 +781,7 @@ impl Store {
                     if changes {
                         return Err(Error::Conflict(format!(
                             "{}:{} needs approval to adopt, and approval can't apply a new \
-                             endpoint, port, pid, purpose or mode; re-register with its current \
+                             project, endpoint, port, pid, purpose or mode; re-register with its current \
                              values",
                             input.kind.as_str(),
                             input.name
