@@ -26,7 +26,8 @@ case "$*" in
   *"enable --now"*) [ -n "$FAIL_ENABLE" ] && { echo "Unit another.service has a bad setting" >&2; exit 1; }; echo active > "$STATE" ;;
   *restart*) [ -n "$FAIL_RESTART" ] && { echo "Job for another.service failed" >&2; exit 1; }; echo active > "$STATE" ;;
   *" start "*) echo active > "$STATE" ;;
-  *"disable --now"*|*" stop "*) echo inactive > "$STATE" ;;
+  *"disable --now"*) [ -n "$FAIL_DISABLE" ] && { echo "Failed to stop another.service: access denied" >&2; exit 1; }; echo inactive > "$STATE" ;;
+  *" stop "*) echo inactive > "$STATE" ;;
   *is-active*) s=$(cat "$STATE" 2>/dev/null || echo inactive); echo "$s"; [ "$s" = active ] || exit 3 ;;
   *MainPID*) if [ "$(cat "$STATE" 2>/dev/null)" = active ]; then echo 4242; else echo 0; fi ;;
 esac
@@ -238,6 +239,60 @@ fn systemd_install_update_status_uninstall() {
     assert_eq!(env.json(&["service", "status"])["installed"], false);
     let start = env.run(&["service", "start"]);
     assert!(!start.status.success());
+}
+
+#[test]
+fn systemd_uninstall_keeps_the_unit_when_the_stop_fails() {
+    let env = Env::new("systemd");
+    let bind = format!("127.0.0.1:{}", free_port());
+    env.json(&["service", "install", "--bind", &bind]);
+    let unit = std::fs::read(unit_path(&env)).unwrap();
+    env.clear_calls();
+
+    let out = env
+        .cmd(&["service", "uninstall"])
+        .env("FAIL_DISABLE", "1")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "failed stop must fail uninstall");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("access denied"), "{err}");
+    assert!(err.contains("kept"), "{err}");
+    assert!(err.contains("uninstall"), "{err}");
+    assert_eq!(std::fs::read(unit_path(&env)).unwrap(), unit);
+    assert_eq!(
+        std::fs::read_to_string(env.user_home.join(".fake-state")).unwrap(),
+        "active\n"
+    );
+    let calls = env.calls();
+    assert_eq!(
+        calls.last().map(String::as_str),
+        Some("systemctl --user disable --now another.service"),
+        "{calls:?}"
+    );
+    assert!(!calls.iter().any(|c| c.contains("daemon-reload")));
+    assert!(!calls.iter().any(|c| c.contains("reset-failed")));
+
+    env.clear_calls();
+    let no_bus = env
+        .cmd(&["service", "uninstall"])
+        .env("NO_BUS", "1")
+        .output()
+        .unwrap();
+    assert!(!no_bus.status.success());
+    let err = String::from_utf8_lossy(&no_bus.stderr);
+    assert!(err.contains("No medium found"), "{err}");
+    assert!(err.contains("user bus"), "{err}");
+    assert_eq!(std::fs::read(unit_path(&env)).unwrap(), unit);
+    assert_eq!(
+        env.calls(),
+        ["systemctl --user show-environment".to_string()]
+    );
+
+    let uninstalled = env.json(&["service", "uninstall"]);
+    assert_eq!(uninstalled["removed"], true);
+    assert_eq!(uninstalled["warnings"], serde_json::json!([]));
+    assert!(!unit_path(&env).exists());
 }
 
 #[test]

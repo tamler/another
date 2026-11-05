@@ -728,11 +728,12 @@ pub struct UninstallReport {
 }
 
 /// Stop the service and remove its definition. Safe to run when it is not installed.
+/// A failed stop keeps the definition so the person can retry.
 pub fn uninstall(user_home: &Path) -> Result<UninstallReport> {
     let platform = Platform::current()?;
     let path = definition_path(platform, user_home);
     let existed = path.exists();
-    let mut warnings = Vec::new();
+    let warnings = Vec::new();
     match platform {
         Platform::Launchd => {
             let (loaded, _) = manager_state(platform)?;
@@ -742,14 +743,15 @@ pub fn uninstall(user_home: &Path) -> Result<UninstallReport> {
         }
         Platform::Systemd => {
             if existed {
-                let out = run("systemctl", &["--user", "disable", "--now", SYSTEMD_UNIT])?;
-                if !out.ok {
-                    warnings.push(format!(
-                        "systemctl --user disable failed ({}); the enable link may remain under \
-                         ~/.config/systemd/user/default.target.wants/",
-                        out.stderr.trim().lines().last().unwrap_or("no output")
-                    ));
-                }
+                systemd_reachable()
+                    .and_then(|()| must("systemctl", &["--user", "disable", "--now", SYSTEMD_UNIT]))
+                    .with_context(|| {
+                        format!(
+                            "the service may still be running; its definition was kept at {}. \
+                             Retry `another service uninstall` from a login session with a user bus",
+                            path.display()
+                        )
+                    })?;
             }
         }
     }
