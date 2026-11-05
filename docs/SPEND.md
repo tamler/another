@@ -63,7 +63,7 @@ MCP: `spend_borrow`, `spend_release`, `spend_leases`.
 - **Nothing is stopped or reaped** when a lease ends or a budget runs out. That always needs a person.
 
 **Approval:** if the account has `--requires-approval`, borrowing does not start the lease.
-1. It asks a **[decision](HUMAN-DECISIONS.md)** of the approver (the account's `--approver`, else the node's decider: `another config decider alex`): "Approve codex@ml borrowing gpu-a100 at 2.1 USD/h for 4 h (about 8.4 USD)? Purpose: LoRA run", with options **approve** and **deny**.
+1. It asks a **[decision](HUMAN-DECISIONS.md)** of the approver (the account's `--approver`, else the node's decider: `another config decider NAME`): "Approve codex@ml borrowing gpu-a100 at 2.1 USD/h for 4 h (about 8.4 USD)? Purpose: LoRA run", with options **approve** and **deny**.
 2. The manager bot hears about it through the `needs_decision` and `budget` webhooks.
 3. When the person answers, the manager relays it, for example `POST /decisions/{id}/answer {"value":"approve"}`.
 4. If approved, the lease starts then; its clock starts at approval, not at the request.
