@@ -307,7 +307,7 @@ pub enum Command {
     #[command(subcommand)]
     Lane(LaneCmd),
     /// Node settings: `another config` lists them, `another config KEY` shows one,
-    /// `another config KEY VALUE` sets it (e.g. `another config decider owner`).
+    /// `another config KEY VALUE` sets it (e.g. `another config decider alex`).
     Config {
         key: Option<String>,
         value: Option<String>,
