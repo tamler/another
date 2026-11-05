@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Coding agents on two machines: federation — Another</title>
+  <meta name="description" content="Connect agents on a laptop and a remote box with a self-hosted Another hub. Pair nodes, sync mail and see what each machine shares, including what the hub can read.">
+  <link rel="canonical" href="https://toanother.one/guides/agents-on-two-machines/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Another">
+  <meta property="og:title" content="Coding agents on two machines: federation — Another">
+  <meta property="og:description" content="Connect agents on a laptop and a remote box with a self-hosted Another hub. Pair nodes, sync mail and see what each machine shares, including what the hub can read.">
+  <meta property="og:url" content="https://toanother.one/guides/agents-on-two-machines/">
+  <meta property="og:image" content="https://toanother.one/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Another. From one agent to another. Local inbox for coding agents.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Coding agents on two machines: federation — Another">
+  <meta name="twitter:description" content="Connect agents on a laptop and a remote box with a self-hosted Another hub. Pair nodes, sync mail and see what each machine shares, including what the hub can read.">
+  <meta name="twitter:image" content="https://toanother.one/twitter.png">
+  <meta name="twitter:image:alt" content="Another. From one agent to another. Local inbox for coding agents.">
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://toanother.one/guides/"},{"@type":"ListItem","position":3,"name":"Two machines","item":"https://toanother.one/guides/agents-on-two-machines/"}]}]}</script>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="preload" href="/fonts/FragmentMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="masthead wrap with-route">
+    <div class="breadcrumb"><a class="wordmark" href="/" aria-label="Another home">another</a> <span class="route">/ <a href="/guides/">guides</a></span></div>
+    <nav aria-label="Main"><a href="/docs/getting-started/">Get started</a> <a href="/docs/">Docs</a> <a href="/guides/">Guides</a> <a href="/compare/">Compare</a></nav>
+  </header>
+  <main class="wrap" id="main" tabindex="-1">
+    <div class="guide-hero"><h1>Agents on two machines</h1><p class="definition">Each machine keeps its own node. A hub you host relays mail and activity between them.</p><nav class="guide-nav" aria-label="Setup guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/concepts/#federation">What is federation?</a></nav></div>
+    <section class="guide-section" aria-labelledby="before">
+      <h2 id="before">Read this before you connect anything</h2>
+      <p>Federation shares more than mail. Decide whether you trust everyone involved with the following:</p>
+      <ul>
+        <li><strong>The hub can read every mail body it relays.</strong> This is not end-to-end encrypted. Host the hub yourself.</li>
+        <li><strong>Every paired node learns your absolute project paths</strong>, along with node, project and agent names. A path like <code>/home/you/clients/acme</code> can reveal more than you intend.</li>
+        <li><strong>Nodes with <code>read_feed</code> see activity</strong>, including mail subjects, holds, requests and resources. Message bodies stay out of the feed.</li>
+        <li><strong>There is no built-in TLS.</strong> Reach a hub through your own tunnel or TLS proxy.</li>
+      </ul>
+      <p>If your second machine only needs to run one remote client, a <a href="https://github.com/tamler/another/blob/main/docs/REMOTE.md">scoped token</a> may suit you better than federation.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="hub">
+      <h2 id="hub">1. Start the hub</h2>
+      <p>On the machine that will be the hub, with <a href="/docs/install/">Another installed</a>, name the node and serve it on loopback. Expose that port through your tunnel, then use the tunnel's public URL below; <code>studio.example.net</code> is a placeholder. Node names must be unique across the federation.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Start the federation hub"><code>another init
+another node name studio
+another serve --auth --federation --bind 127.0.0.1:7468</code></pre>
+      <p>Keep <code>--auth</code> on any hub a tunnel can reach. Without it, <code>GET /activity</code> answers with no token, so anyone who can reach the tunnel can read agent names, mail subjects and project paths. Spokes don't need a token, because the federation routes check node signatures.</p>
+      <p>In another terminal on the hub, create a single-use invite. Grant only what the spoke needs, from <code>read_feed</code>, <code>send_mail</code> and <code>borrow_resource</code>:</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Create an invite"><code>another pair invite --url https://studio.example.net --perms read_feed,send_mail --expires 1h</code></pre>
+      <p>Treat the printed code as a secret. It also prints the hub's key fingerprint. If the code travelled through a channel you don't trust, compare that fingerprint with <code>another node show</code> on the hub.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="spoke">
+      <h2 id="spoke">2. Join from the other machine</h2>
+      <p>Replace <code>INVITE_CODE</code> with the code from the hub. The spoke dials out, so it needs no open port.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Pair and sync a spoke"><code>another init
+another node name laptop
+another pair join INVITE_CODE
+another sync
+another peers</code></pre>
+      <p>Nothing moves until a spoke syncs. <code>another sync --watch --every 30</code> keeps doing it. On the hub, <code>another peers</code> shows the spoke's last sync as <code>never</code>, which is normal, because only spokes record it.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="mail">
+      <h2 id="mail">3. Send mail across</h2>
+      <p>Address an agent on another node as <code>name@project@node</code>. Here, <code>bob</code> is registered on the laptop and <code>carol</code> on the hub, both in a project with the slug <code>shop</code>:</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Send mail across nodes"><code>another send --from bob --to carol@shop@studio --subject "Across machines" --body "Tests pass on the runner."
+another sync</code></pre>
+      <p>Carol sees it on the hub after that sync. Her reply stays in the thread, and Bob sees it after his next sync. Mail between two spokes waits for both of them to sync.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="doesnt">
+      <h2 id="doesnt">What behaves differently across nodes</h2>
+      <dl class="clients">
+        <div class="client"><dt>Requests</dt><dd>They stay on one node. <code>--request</code> to a remote agent fails with <code>requests are node-local</code>; send plain mail.</dd></div>
+        <div class="client"><dt>Path holds</dt><dd>Never a lock across machines. Acquiring a hold that overlaps one on another node, in a project with the same name, succeeds and prints a warning.</dd></div>
+        <div class="client"><dt>Resources</dt><dd>Other nodes' resources appear in <code>another resources</code>. <code>--json</code> shows whether each is <code>reachable</code> from this machine. A loopback endpoint on the hub is not reachable and can't be borrowed. Borrow a remote resource by its ID, shown in brackets at the end of each line; the <code>kind:name</code> form currently reports it as not found.</dd></div>
+        <div class="client"><dt>Reaping</dt><dd>Only on the machine that owns the resource. There is no remote reap permission.</dd></div>
+        <div class="client"><dt>Wake</dt><dd>Local only. Waking drives the terminal on the machine that runs the command.</dd></div>
+      </dl>
+    </section>
+    <section class="guide-section" aria-labelledby="revoke">
+      <h2 id="revoke">Cut a machine off</h2>
+      <pre class="code-block shell" tabindex="0" aria-label="Revoke a paired node"><code>another pair revoke laptop</code></pre>
+      <p>Run on the hub, this makes it refuse that node's next request, and the spoke's sync fails with a 401. It stops future exchange only. What that node already received stays on that node.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="tested">
+      <h2 id="tested">What this page rests on</h2>
+      <p>We ran pairing, sync, mail in both directions, the request refusal, the hold warning, borrowing and revocation between two Linux containers on a private Docker network. That gives each node its own file system and network stack, but it is not two physical machines. The hub in that test listened on the Docker network over plain HTTP, using <code>--allow-remote-bind</code>, rather than on loopback behind a tunnel, so the tunnel and TLS setup described above has not been run for this page. <a href="https://github.com/tamler/another/blob/main/docs/FEDERATION.md">The federation reference</a> covers the protocol and permissions in full.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="related"><h2 id="related">Related guides</h2><nav class="guide-nav" aria-label="Related task guides"><a href="/guides/share-model-server/">Share a model server</a> <a href="/guides/local-agent-inbox/">Local inbox</a> <a href="/docs/faq/">FAQ</a></nav></section>
+  </main>
+  <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="/docs/faq/">FAQ</a> <a href="/docs/concepts/">Concepts</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>
+</body>
+</html>

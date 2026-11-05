@@ -61,11 +61,11 @@ another agent list</code></pre>
       <pre class="code-block shell" tabindex="0" aria-label="Send a review request"><code>another send --from claude --to codex --subject "Review the parser" --body "Please check the error paths." --request --ack
 another inbox --agent codex
 another activity --summary</code></pre>
-      <p>The recipient can fetch its inbox, claim the request before starting, reply in its thread and acknowledge the mail. Completing a request and acknowledging a message are separate operations. This is a workflow to run, not a terminal recording.</p>
+      <p>The recipient can fetch its inbox, claim the request before starting, reply in its thread and acknowledge the mail. Completing a request and acknowledging a message are separate operations. This is a workflow to run, not a terminal recording. <a href="/guides/hand-off-tasks/">Hand off a task</a> covers claiming and completing in full.</p>
       <p>For review-only work, specify the files and behavior to inspect. If both agents need to edit, agree on separate scopes and <a href="/guides/avoid-agent-file-conflicts/">check advisory path holds</a>. A shared inbox does not merge changes or evaluate the review.</p>
     </section>
     <section class="guide-section" aria-labelledby="related"><h2 id="related">Related guides</h2><nav class="guide-nav" aria-label="Related task guides"><a href="/guides/mcp-agent-messaging/">MCP messaging</a> <a href="/guides/avoid-agent-file-conflicts/">File holds</a> <a href="/guides/local-agent-inbox/">Local inbox</a></nav></section>
   </main>
-  <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>
+  <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="/docs/faq/">FAQ</a> <a href="/docs/concepts/">Concepts</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>
 </body>
 </html>

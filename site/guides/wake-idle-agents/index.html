@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Wake idle coding agents in tmux — Another</title>
+  <meta name="description" content="An idle agent can't see new mail until something types into its terminal. Point Another at a tmux pane, preview the nudge, send it, and understand its real limits.">
+  <link rel="canonical" href="https://toanother.one/guides/wake-idle-agents/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Another">
+  <meta property="og:title" content="Wake idle coding agents in tmux — Another">
+  <meta property="og:description" content="An idle agent can't see new mail until something types into its terminal. Point Another at a tmux pane, preview the nudge, send it, and understand its real limits.">
+  <meta property="og:url" content="https://toanother.one/guides/wake-idle-agents/">
+  <meta property="og:image" content="https://toanother.one/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Another. From one agent to another. Local inbox for coding agents.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Wake idle coding agents in tmux — Another">
+  <meta name="twitter:description" content="An idle agent can't see new mail until something types into its terminal. Point Another at a tmux pane, preview the nudge, send it, and understand its real limits.">
+  <meta name="twitter:image" content="https://toanother.one/twitter.png">
+  <meta name="twitter:image:alt" content="Another. From one agent to another. Local inbox for coding agents.">
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://toanother.one/guides/"},{"@type":"ListItem","position":3,"name":"Wake idle agents","item":"https://toanother.one/guides/wake-idle-agents/"}]}]}</script>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="preload" href="/fonts/FragmentMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="masthead wrap with-route">
+    <div class="breadcrumb"><a class="wordmark" href="/" aria-label="Another home">another</a> <span class="route">/ <a href="/guides/">guides</a></span></div>
+    <nav aria-label="Main"><a href="/docs/getting-started/">Get started</a> <a href="/docs/">Docs</a> <a href="/guides/">Guides</a> <a href="/compare/">Compare</a></nav>
+  </header>
+  <main class="wrap" id="main" tabindex="-1">
+    <div class="guide-hero"><h1>Nudge an agent sitting at its prompt</h1><p class="definition">Hooks fire on activity. An idle session has none, so something has to type into its terminal.</p><nav class="guide-nav" aria-label="Setup guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/concepts/#wake">What is wake?</a></nav></div>
+    <section class="guide-section" aria-labelledby="why">
+      <h2 id="why">When you need this</h2>
+      <p>Session hooks deliver a digest at session start and a notice on the next prompt. If an agent has finished and is waiting for you, nothing happens until you type. <code>another wake</code> does that typing, through tmux, cmux or Herdr.</p>
+      <p>You may not need it. If you check each agent yourself every few minutes, hooks alone are simpler.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="target">
+      <h2 id="target">Point an agent at its pane</h2>
+      <p>This assumes the agent runs in tmux. Inside that pane, tmux sets <code>TMUX_PANE</code>; from elsewhere, <code>tmux list-panes -a</code> shows pane IDs. The agent <code>codex@shop</code> and the pane <code>%3</code> are examples, so use your own.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Store a wake target"><code>another wake set --agent codex@shop --via tmux --target %3
+another wake list</code></pre>
+      <p>Session hooks running inside tmux or cmux record this automatically, and never replace a target you set by hand. If you've <a href="/docs/getting-started/">installed hooks</a> and started the session in tmux, check <code>another wake list</code> first; it may already be there.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="send">
+      <h2 id="send">Preview, then send</h2>
+      <pre class="code-block shell" tabindex="0" aria-label="Preview and send a wake"><code>another wake --agent codex@shop --dry-run
+another wake --agent codex@shop</code></pre>
+      <p><code>--dry-run</code> prints the exact tmux commands. The real command types a one-line summary into the pane and presses Enter: counts, up to three subjects and the commands to read them. It never includes message bodies. An agent with nothing unread and no open requests is skipped unless you pass <code>--force</code>.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Wake every agent with waiting mail"><code>another wake --all</code></pre>
+      <p><code>--all</code> wakes each agent that has a stored target and something waiting. That is what you would put in a cron job, since Another has no scheduler of its own.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="limits">
+      <h2 id="limits">Limits to plan around</h2>
+      <ul>
+        <li><strong>It types into whatever is in the pane.</strong> Another can't see what the pane is showing. If the agent has exited and left a shell, your shell receives the text and Enter. If you are in the middle of typing there, it joins your line.</li>
+        <li><strong>A busy agent queues it or misses it.</strong> What happens depends on your client. Wake doesn't interrupt anything by design.</li>
+        <li><strong>A repeat wake sends again.</strong> <code>--all</code> repeats the nudge while the mail stays unread, so a one-minute cron job can fill a prompt. Pick a slower interval.</li>
+        <li><strong>It uses your local tmux.</strong> Waking across machines isn't part of this. See <a href="/guides/agents-on-two-machines/">agents on two machines</a> for what does travel.</li>
+      </ul>
+      <p>We ran the commands above against a real tmux pane running a stand-in program, and the text arrived. How each coding client reacts to typed input while busy was not tested. <a href="https://github.com/tamler/another/blob/main/docs/WAKE.md">The wake reference</a> covers cmux, Herdr and the optional Herdr plugin.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="related"><h2 id="related">Related guides</h2><nav class="guide-nav" aria-label="Related task guides"><a href="/guides/hand-off-tasks/">Hand off a task</a> <a href="/guides/claude-code-codex/">Claude Code + Codex</a> <a href="/guides/git-worktrees/">Git worktrees</a></nav></section>
+  </main>
+  <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="/docs/faq/">FAQ</a> <a href="/docs/concepts/">Concepts</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>
+</body>
+</html>

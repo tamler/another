@@ -13,8 +13,21 @@ ROUTES = {
     "/", "/docs/", "/docs/getting-started/", "/docs/install/", "/compare/", "/guides/",
     "/guides/claude-code-codex/", "/guides/mcp-agent-messaging/",
     "/guides/avoid-agent-file-conflicts/", "/guides/local-agent-inbox/",
+    "/docs/install/macos/", "/docs/install/linux/", "/docs/install/windows/",
+    "/docs/faq/", "/docs/concepts/", "/compare/alternatives/",
+    "/guides/git-worktrees/", "/guides/hand-off-tasks/", "/guides/share-model-server/",
+    "/guides/wake-idle-agents/", "/guides/agents-on-two-machines/",
 }
 GUIDES = {route for route in ROUTES if route.startswith("/guides/") and route != "/guides/"}
+# Nested pages outside /guides/ carry an explicit trail from the home page.
+TRAILS = {
+    "/docs/install/macos/": ["/", "/docs/", "/docs/install/", "/docs/install/macos/"],
+    "/docs/install/linux/": ["/", "/docs/", "/docs/install/", "/docs/install/linux/"],
+    "/docs/install/windows/": ["/", "/docs/", "/docs/install/", "/docs/install/windows/"],
+    "/docs/faq/": ["/", "/docs/", "/docs/faq/"],
+    "/docs/concepts/": ["/", "/docs/", "/docs/concepts/"],
+    "/compare/alternatives/": ["/", "/compare/", "/compare/alternatives/"],
+}
 EXPECTED = {
     "index.html", "docs/index.html", "docs/getting-started/index.html",
     "docs/install/index.html", "compare/index.html", "404.html", "style.css",
@@ -22,6 +35,10 @@ EXPECTED = {
     "twitter.png", "sitemap.xml", "robots.txt", "llms.txt", "favicon.svg",
     "guides/index.html", "guides/claude-code-codex/index.html", "guides/mcp-agent-messaging/index.html",
     "guides/avoid-agent-file-conflicts/index.html", "guides/local-agent-inbox/index.html",
+    "docs/install/macos/index.html", "docs/install/linux/index.html", "docs/install/windows/index.html",
+    "docs/faq/index.html", "docs/concepts/index.html", "compare/alternatives/index.html",
+    "guides/git-worktrees/index.html", "guides/hand-off-tasks/index.html", "guides/share-model-server/index.html",
+    "guides/wake-idle-agents/index.html", "guides/agents-on-two-machines/index.html",
 }
 actual = {str(p.relative_to(ROOT)) for p in ROOT.rglob("*") if p.is_file()}
 assert actual == EXPECTED, f"public allowlist mismatch: {actual ^ EXPECTED}"
@@ -149,13 +166,23 @@ for path, page in pages.items():
     graph = {item["@type"]: item for item in data["@graph"]}
     software = {"SoftwareApplication", "SoftwareSourceCode"}
     in_guides = route.startswith("/guides/")
-    assert set(graph) == software | ({"BreadcrumbList"} if in_guides else set()), f"{path}: JSON-LD types"
+    trail_routes = TRAILS.get(route) or (["/", "/guides/"] + ([route] if route in GUIDES else []) if in_guides else None)
+    expected_types = software | ({"BreadcrumbList"} if trail_routes else set()) | ({"FAQPage"} if route == "/docs/faq/" else set())
+    assert set(graph) == expected_types, f"{path}: JSON-LD types"
     assert graph["SoftwareApplication"]["name"] == "Another"
     assert graph["SoftwareSourceCode"]["codeRepository"] == "https://github.com/tamler/another"
     assert all(graph[kind]["license"] == "https://www.apache.org/licenses/LICENSE-2.0" for kind in software)
-    if in_guides:
+    if route == "/docs/faq/":
+        visible = " ".join(page.text.split())
+        questions = graph["FAQPage"]["mainEntity"]
+        assert questions, f"{path}: FAQPage needs questions"
+        for question in questions:
+            assert question["@type"] == "Question" and question["acceptedAnswer"]["@type"] == "Answer"
+            for said in (question["name"], question["acceptedAnswer"]["text"]):
+                assert said in visible, f"{path}: FAQ JSON-LD not on the page: {said}"
+    if trail_routes:
         crumbs = graph["BreadcrumbList"]["itemListElement"]
-        trail = [ORIGIN + "/", ORIGIN + "/guides/"] + ([canonical] if route in GUIDES else [])
+        trail = [ORIGIN + step for step in trail_routes]
         assert [c["item"] for c in crumbs] == trail, f"{path}: breadcrumb trail"
         assert [c["position"] for c in crumbs] == list(range(1, len(trail) + 1)), f"{path}: breadcrumb positions"
         assert all(c["@type"] == "ListItem" and c["name"] for c in crumbs), f"{path}: breadcrumb items"
@@ -164,6 +191,16 @@ for path, page in pages.items():
 assert canonical_urls == {ORIGIN + route for route in ROUTES}, "every public route needs metadata"
 hub_links = set(pages[ROOT / "guides/index.html"].links)
 assert GUIDES <= hub_links, f"guides hub misses {GUIDES - hub_links}"
+# Every route must be reachable by following links from the home page.
+reached, frontier = {"/"}, ["/"]
+while frontier:
+    current = pages[ROOT / frontier.pop().lstrip("/") / "index.html"]
+    for href in current.links:
+        step = urlsplit(href)
+        if not step.scheme and not step.netloc and step.path in ROUTES and step.path not in reached:
+            reached.add(step.path)
+            frontier.append(step.path)
+assert reached == ROUTES, f"not reachable from the home page: {ROUTES - reached}"
 locations = [e.text for e in ET.parse(ROOT / "sitemap.xml").iter("{http://www.sitemaps.org/schemas/sitemap/0.9}loc")]
 assert len(locations) == len(set(locations)) == len(ROUTES) and set(locations) == canonical_urls
 robots = (ROOT / "robots.txt").read_text()

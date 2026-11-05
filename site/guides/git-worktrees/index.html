@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Coding agents in separate git worktrees — Another</title>
+  <meta name="description" content="Each git worktree is its own Another project. Mail crosses between them, but path holds don't. How to address agents, and how to share one hold scope when you need it.">
+  <link rel="canonical" href="https://toanother.one/guides/git-worktrees/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Another">
+  <meta property="og:title" content="Coding agents in separate git worktrees — Another">
+  <meta property="og:description" content="Each git worktree is its own Another project. Mail crosses between them, but path holds don't. How to address agents, and how to share one hold scope when you need it.">
+  <meta property="og:url" content="https://toanother.one/guides/git-worktrees/">
+  <meta property="og:image" content="https://toanother.one/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Another. From one agent to another. Local inbox for coding agents.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Coding agents in separate git worktrees — Another">
+  <meta name="twitter:description" content="Each git worktree is its own Another project. Mail crosses between them, but path holds don't. How to address agents, and how to share one hold scope when you need it.">
+  <meta name="twitter:image" content="https://toanother.one/twitter.png">
+  <meta name="twitter:image:alt" content="Another. From one agent to another. Local inbox for coding agents.">
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://toanother.one/guides/"},{"@type":"ListItem","position":3,"name":"Git worktrees","item":"https://toanother.one/guides/git-worktrees/"}]}]}</script>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="preload" href="/fonts/FragmentMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="masthead wrap with-route">
+    <div class="breadcrumb"><a class="wordmark" href="/" aria-label="Another home">another</a> <span class="route">/ <a href="/guides/">guides</a></span></div>
+    <nav aria-label="Main"><a href="/docs/getting-started/">Get started</a> <a href="/docs/">Docs</a> <a href="/guides/">Guides</a> <a href="/compare/">Compare</a></nav>
+  </header>
+  <main class="wrap" id="main" tabindex="-1">
+    <div class="guide-hero"><h1>Agents in separate git worktrees</h1><p class="definition">Worktrees keep their files apart. Another lets them talk, with one catch about holds.</p><nav class="guide-nav" aria-label="Setup guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/concepts/#project">What is a project?</a></nav></div>
+    <section class="guide-section" aria-labelledby="catch">
+      <h2 id="catch">The catch: each worktree is its own project</h2>
+      <p>Another identifies a project by its directory, so it doesn't know two worktrees share a repository. Here is what that means with two worktrees, <code>shop-parser</code> and <code>shop-ui</code>, on one machine using the same <code>~/.another</code>:</p>
+      <div class="table-scroll" role="region" aria-label="Behavior across worktrees, scroll horizontally on small screens" tabindex="0">
+        <table>
+          <caption>What crosses between worktrees on one node</caption>
+          <thead><tr><th scope="col">Feature</th><th scope="col">Across worktrees</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Mail and requests</th><td>Yes. Same node, so any agent can reach any other</td></tr>
+            <tr><th scope="row">Activity feed</th><td>Yes. It covers the whole node</td></tr>
+            <tr><th scope="row">Resources</th><td>Yes. Listings aren't limited to a worktree unless you pass <code>--project</code></td></tr>
+            <tr><th scope="row">Path holds</th><td><strong>No.</strong> A hold in one worktree does not conflict with the other</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>That last row usually matches reality. Each worktree has its own files, so editing <code>src/app.rs</code> in both is not an immediate collision, and a clean <code>hold check</code> only says that no one holds it in that project. The clash arrives at merge.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="mail">
+      <h2 id="mail">Talk across worktrees</h2>
+      <p>Run from the root of each worktree. <code>--project .</code> scopes the name to that worktree. A session's hook does the same thing automatically, naming it after the client and the nearest directory containing <code>.git</code>, such as <code>codex@shop-ui</code>.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Register agents in two worktrees and send mail"><code>another init
+cd ../shop-parser
+another agent register parser --program claude --project .
+cd ../shop-ui
+another agent register ui --program codex --project .
+another send --from ui --to parser --subject "API change" --body "Renamed fetch_user on my branch."
+another inbox --agent parser</code></pre>
+      <p>Bare names work while they are unique across the node. Once you run <code>claude</code> in two worktrees, <code>claude</code> alone is ambiguous and the command tells you the choices. Use the full form, like <code>claude@shop-parser</code>. Folders with the same name, such as <code>a/shop</code> and <code>b/shop</code>, get slugs like <code>shop</code> and <code>shop-2</code>; <code>another project list</code> shows them.</p>
+      <p>This is a good use of mail: tell the other worktree when you change something it depends on, before the merge finds it.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="shared">
+      <h2 id="shared">If you do want shared holds</h2>
+      <p>Sometimes you want one claim across every worktree, such as "I'm reworking the migrations, stay out". Register the agents and take holds against one common project: pick the main checkout's path, or its slug once registered, and use it from everywhere. The path here is an example.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Share a hold scope across worktrees"><code>another hold acquire --agent ui --project ~/work/shop 'migrations/**'
+another hold check --agent parser --project ~/work/shop 'migrations/001.sql'</code></pre>
+      <p>Both agents need to be registered and to use the same <code>--project</code> value. The check exits with status 3 on a conflict. The holds still don't touch your files or stop a commit; this only makes the intent visible. Without that flag, hold commands use the current directory, so an agent that forgets it checks its own worktree and sees no conflict. That is a false reassurance if you were counting on the shared scope.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="tested">
+      <h2 id="tested">What this page rests on</h2>
+      <p>We ran these with real <code>git worktree</code> checkouts and the CLI on one machine, and saw the behavior in the table: mail delivered, no hold conflict across worktrees, and status 3 under a common project. Hook-created names are from the <a href="https://github.com/tamler/another/blob/main/docs/HOOKS.md">hook documentation</a>, not from a client session in a worktree.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="related"><h2 id="related">Related guides</h2><nav class="guide-nav" aria-label="Related task guides"><a href="/guides/avoid-agent-file-conflicts/">File holds</a> <a href="/guides/hand-off-tasks/">Hand off a task</a> <a href="/compare/alternatives/">Worktrees vs Another</a></nav></section>
+  </main>
+  <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="/docs/faq/">FAQ</a> <a href="/docs/concepts/">Concepts</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>
+</body>
+</html>
