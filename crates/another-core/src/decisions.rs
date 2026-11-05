@@ -2393,7 +2393,11 @@ mod tests {
         );
     }
 
-    fn foreign_role_relay(history: &[Program], projected: Program, refresh: Option<Program>) {
+    fn legacy_foreign_role_relay(
+        history: &[Program],
+        projected: Program,
+        refresh: Option<Program>,
+    ) {
         let (hub, _) = review_store();
         hub.set_node_name("hub").unwrap();
         let decision = hub
@@ -2419,6 +2423,16 @@ mod tests {
         let (invite, request) = peer.prepare_join(&code).unwrap();
         let response = hub.accept_pairing(&request).unwrap();
         peer.complete_join(&invite, &response).unwrap();
+        let before = hub.agent("owner").unwrap();
+        let before_event: String = hub
+            .read(|conn| {
+                Ok(conn.query_row(
+                    "SELECT event_id FROM agents WHERE agent_id = ?1",
+                    [&human.agent_id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
         let event_id = peer
             .write(|tx| {
                 tx.emit(
@@ -2434,13 +2448,78 @@ mod tests {
             })
             .unwrap();
         let (events, _) = peer.outbound_events(0, 100).unwrap();
+        let forged = events.iter().find(|e| e.event_id == event_id).unwrap();
         let report = hub.ingest(peer.node_id(), &events, &[]).unwrap();
         assert!(report.accepted > 0);
+        assert_eq!(report.rejected.len(), 1, "{report:?}");
+        assert_eq!(report.rejected[0].event_id, event_id);
+        assert!(report.rejected[0].reason.contains("does not own agents"));
         assert!(hub
             .events(100)
             .unwrap()
             .iter()
-            .any(|e| e.event_id == event_id));
+            .all(|e| e.event_id != event_id));
+        assert_eq!(
+            serde_json::to_value(hub.agent("owner").unwrap()).unwrap(),
+            serde_json::to_value(&before).unwrap(),
+            "current admission must leave the local agent unchanged"
+        );
+
+        // Model a database written before origin enforcement. Current ingest rejects
+        // this event, and its projection guard cannot construct the legacy state.
+        hub.write(|tx| {
+            tx.execute(
+                "INSERT INTO events (event_id, node_id, ts, actor, kind, payload, prev_id, sig)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    forged.event_id,
+                    forged.node_id,
+                    forged.ts,
+                    forged.actor,
+                    forged.kind,
+                    forged.payload,
+                    forged.prev_id,
+                    forged.sig
+                ],
+            )?;
+            // The old conflict update preserved identity but replaced these fields.
+            assert_eq!(
+                tx.execute(
+                    "UPDATE agents SET program = ?2, model = NULL, description = NULL,
+                       status = 'active', updated_at = ?3, last_seen_at = ?3,
+                       address = 'owner@@peer' WHERE agent_id = ?1",
+                    params![human.agent_id, projected.as_str(), forged.ts],
+                )?,
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+        let stored = hub
+            .events(100)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.event_id == event_id)
+            .unwrap();
+        assert_eq!(stored.node_id, peer.node_id());
+        assert_eq!(stored.payload["role_confirmed"], true);
+        let legacy = hub.agent("owner").unwrap();
+        assert_eq!(legacy.agent_id, human.agent_id);
+        assert_eq!(legacy.node_id, hub.node_id());
+        assert_eq!(legacy.program, projected.as_str());
+        let projected_event: String = hub
+            .read(|conn| {
+                Ok(conn.query_row(
+                    "SELECT event_id FROM agents WHERE agent_id = ?1",
+                    [&human.agent_id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(projected_event, before_event);
+        assert!(!hub
+            .read(|conn| crate::identity::role_confirmed(conn, &human.agent_id, projected.as_str()))
+            .unwrap());
         if let Some(program) = refresh {
             let refreshed = hub
                 .register_agent(RegisterAgent {
@@ -2510,18 +2589,18 @@ mod tests {
 
     #[test]
     fn a_signed_foreign_registration_cannot_confirm_a_local_human_role() {
-        foreign_role_relay(&[], Program::Human, None);
+        legacy_foreign_role_relay(&[], Program::Human, None);
     }
 
     #[test]
     fn a_peer_cannot_restore_a_locally_removed_privileged_role() {
-        foreign_role_relay(&[Program::Human, Program::Codex], Program::Human, None);
+        legacy_foreign_role_relay(&[Program::Human, Program::Codex], Program::Human, None);
     }
 
     #[test]
     fn an_untrusted_refresh_cannot_reconfirm_a_human_role_restored_by_a_peer() {
         for refresh in [Program::Codex, Program::Human] {
-            foreign_role_relay(
+            legacy_foreign_role_relay(
                 &[Program::Human, Program::Codex],
                 Program::Human,
                 Some(refresh),
@@ -2532,7 +2611,7 @@ mod tests {
     #[test]
     fn an_untrusted_refresh_cannot_reconfirm_a_previous_privileged_role() {
         for refresh in [Program::Codex, Program::GrokBot] {
-            foreign_role_relay(
+            legacy_foreign_role_relay(
                 &[Program::GrokBot, Program::Human],
                 Program::GrokBot,
                 Some(refresh),

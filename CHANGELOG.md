@@ -6,6 +6,7 @@ All notable changes to Another. Unreleased work is listed under the next version
 
 ### Fixed
 
+- Role-barrier fixtures explicitly seed legacy foreign registrations after checking that current federation admission rejects them, preserving coverage for untrusted refreshes and trusted recovery.
 - Federation validates signed origin authority before storing events: paired nodes cannot impersonate another node's agents, forge its mail or reports, or change its holds and resource ownership. Borrow permission comes from the stored resource owner. The hub decides whether a borrow or renewal is in time and refuses a late one; other nodes follow what it relays, so an owner that was offline keeps admitted leases and settles a lapsed resource once a pull has applied them all. Carrier receipts and decision mirrors respect their originating node. Existing corrupted state and historical events are not automatically repaired.
 - Cancelling an overdue decision commits its timeout result, request closure and automatic mail before returning a conflict, even without a running server or when the deadline passes as cancellation begins.
 
