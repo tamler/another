@@ -1037,6 +1037,73 @@ fn report_agent_filters_resolve_in_scope() {
 }
 
 #[test]
+fn a_lease_ending_on_the_reset_is_charged_to_the_period_it_ran_in() {
+    let (s, clock) = store();
+    account(&s, "cpu", SpendKind::Server, "USD", Some(100.0), |a| {
+        a.cost_per_hour = Some(3.0)
+    });
+    advance(&clock, 9 * 24 * HOUR + 23 * HOUR); // Nov 30 23:00
+    let l = s
+        .borrow_spend(
+            BorrowSpend {
+                agent: "codex@shop".into(),
+                account: "cpu".into(),
+                ttl_seconds: Some(4 * 3600),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    advance(&clock, HOUR); // Dec 1 00:00, exactly the reset
+    s.release_spend("codex@shop", &l.lease.lease_id, None)
+        .unwrap();
+    let month = |m: &str| {
+        let r = s
+            .spend_report(
+                SpendQuery {
+                    period: m.parse().unwrap(),
+                    account: Some("cpu".into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        find(&r, "cpu").spent
+    };
+    assert_eq!((month("2026-11"), month("2026-12")), (3.0, 0.0));
+}
+
+#[test]
+fn a_gated_re_register_refuses_changes_it_could_not_apply() {
+    let (s, _) = store();
+    gpu_with_approval(&s);
+    gpu_resource(&s, 86_400);
+    let target = ResourceRef::parse("gpu:pod:a100").unwrap();
+    s.link_resource_spend(&target, Some("gpu-h100"), None)
+        .unwrap();
+    s.release_resource("claude@shop", &target, false).unwrap();
+    let e = s
+        .register_resource(RegisterResource {
+            agent: "codex@shop".into(),
+            kind: ResourceKind::Gpu,
+            name: "pod:a100".into(),
+            endpoint: Some("https://new.example.test".into()),
+            port: None,
+            pid: None,
+            project: Some("shop".into()),
+            purpose: None,
+            mode: LeaseMode::Shared,
+            ttl_seconds: Some(3600),
+            metadata: None,
+        })
+        .unwrap_err();
+    assert_eq!(e.code(), "conflict", "{e}");
+    assert!(e.to_string().contains("approval"), "{e}");
+    // Nothing was left waiting for an approval that would drop the change.
+    assert!(s.spend_leases(false, None).unwrap().is_empty());
+}
+
+#[test]
 fn re_registering_a_linked_resource_goes_through_the_gate() {
     let (s, _) = store();
     gpu_with_approval(&s);

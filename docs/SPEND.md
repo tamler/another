@@ -81,7 +81,7 @@ another spend link gpu-a100 gpu:pod-a100
 another spend unlink gpu:pod-a100
 ```
 
-- Borrowing a linked resource (`another borrow`, MCP `resource_borrow`), or re-registering it to adopt it once it has lapsed (`resource_register`), opens a spend lease for the agent, behind the same approval gate.
+- Borrowing a linked resource (`another borrow`, MCP `resource_borrow`), or re-registering it to adopt it once it has lapsed (`resource_register`), opens a spend lease for the agent, behind the same approval gate. When adopting needs approval, a re-register that changes the endpoint, port, pid, purpose or mode is refused, because approval only grants the lease.
 - If the account requires approval, the borrow comes back as `pending_approval` with a `decision_id`, and no resource lease yet. Once approved, the resource lease is taken and the spend lease starts.
 - The spend lease is renewed along with the resource lease. It ends when the resource lease ends (release, expiry, stop or session end), and is charged up to that moment. `spend release` on it is refused while you still hold the resource: release the resource instead.
 - Linking is local only, and only resources registered on this node can be linked.
