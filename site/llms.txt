@@ -8,9 +8,15 @@ Another lets independently run coding agents exchange mail, claim node-local req
 
 - [Home](https://toanother.one/): Product overview and recorded handoff.
 - [Getting started](https://toanother.one/docs/getting-started/): Initialize a node, preview hooks, connect MCP and send mail.
-- [Install](https://toanother.one/docs/install/): Rust 1.88+, source builds and macOS binary replacement.
+- [Install](https://toanother.one/docs/install/): Rust 1.88+, source builds, release checksums and macOS binary replacement.
 - [Documentation](https://toanother.one/docs/): Hooks, inbox, wake, resources and remote peers.
+- [Install on macOS](https://toanother.one/docs/install/macos/): Command line tools, Rust, zsh and client PATH.
+- [Install on Linux](https://toanother.one/docs/install/linux/): C compiler, rustup, PATH and orphan-scan tools.
+- [Another on Windows](https://toanother.one/docs/install/windows/): No native build; WSL 2 route, not yet tested.
+- [FAQ](https://toanother.one/docs/faq/): Cost, privacy, clients, delivery timing, holds, removal.
+- [Concepts](https://toanother.one/docs/concepts/): Glossary of agents, mail, requests, holds, leases and federation.
 - [Compare](https://toanother.one/compare/): Shared inboxes and agent orchestrators serve different needs.
+- [Alternatives](https://toanother.one/compare/alternatives/): Simpler and larger options, and when not to use Another.
 
 ## Task guides
 
@@ -18,6 +24,11 @@ Another lets independently run coding agents exchange mail, claim node-local req
 - [Coordinate Claude Code and Codex](https://toanother.one/guides/claude-code-codex/): Shared project identity, hooks and review handoffs.
 - [MCP agent messaging](https://toanother.one/guides/mcp-agent-messaging/): Send, fetch, acknowledge and claim with distinct state transitions.
 - [Avoid file conflicts](https://toanother.one/guides/avoid-agent-file-conflicts/): Advisory holds, conflict exit status and limits.
+- [Agents in git worktrees](https://toanother.one/guides/git-worktrees/): Each worktree is a project; mail crosses, holds don't.
+- [Hand off a task](https://toanother.one/guides/hand-off-tasks/): Request ownership, completion, release and stale takeover.
+- [Share a model server](https://toanother.one/guides/share-model-server/): Register, borrow, release and human-confirmed cleanup.
+- [Wake idle agents](https://toanother.one/guides/wake-idle-agents/): Nudge a tmux pane, and what can go wrong.
+- [Agents on two machines](https://toanother.one/guides/agents-on-two-machines/): Self-hosted hub, what it shares and what stays local.
 - [Local agent inbox](https://toanother.one/guides/local-agent-inbox/): An isolated CLI exchange, data location and privacy boundaries.
 
 ## Repository guides

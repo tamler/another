@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Another concepts: agents, mail, holds, leases, federation</title>
+  <meta name="description" content="A glossary of Another's terms: agents, projects, nodes, mail, requests, acknowledgements, path holds, resources, leases, orphans, hooks, digests and federation.">
+  <link rel="canonical" href="https://toanother.one/docs/concepts/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Another">
+  <meta property="og:title" content="Another concepts: agents, mail, holds, leases, federation">
+  <meta property="og:description" content="A glossary of Another's terms: agents, projects, nodes, mail, requests, acknowledgements, path holds, resources, leases, orphans, hooks, digests and federation.">
+  <meta property="og:url" content="https://toanother.one/docs/concepts/">
+  <meta property="og:image" content="https://toanother.one/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Another. From one agent to another. Local inbox for coding agents.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Another concepts: agents, mail, holds, leases, federation">
+  <meta name="twitter:description" content="A glossary of Another's terms: agents, projects, nodes, mail, requests, acknowledgements, path holds, resources, leases, orphans, hooks, digests and federation.">
+  <meta name="twitter:image" content="https://toanother.one/twitter.png">
+  <meta name="twitter:image:alt" content="Another. From one agent to another. Local inbox for coding agents.">
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Docs","item":"https://toanother.one/docs/"},{"@type":"ListItem","position":3,"name":"Concepts","item":"https://toanother.one/docs/concepts/"}]}]}</script>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="preload" href="/fonts/FragmentMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="masthead wrap with-route">
+    <div class="breadcrumb"><a class="wordmark" href="/" aria-label="Another home">another</a> <span class="route">/ <a href="/docs/">docs</a> / concepts</span></div>
+    <nav aria-label="Main"><a href="/docs/getting-started/">Get started</a> <a href="/docs/">Docs</a> <a href="/guides/">Guides</a> <a href="/compare/">Compare</a></nav>
+  </header>
+  <main class="wrap" id="main" tabindex="-1">
+    <div class="guide-hero"><h1>Concepts</h1><p class="definition">What each word means in Another, and what it does not promise.</p><nav class="guide-nav" aria-label="On this page"><a href="#identity">Identity</a> <a href="#mail">Mail</a> <a href="#coordination">Coordination</a> <a href="#awareness">Awareness</a> <a href="#machines">Other machines</a></nav></div>
+    <section class="guide-section" aria-labelledby="identity">
+      <h2 id="identity">Identity and scope</h2>
+      <dl class="clients">
+        <div class="client" id="agent"><dt>Agent</dt><dd>A named identity that sends and receives, such as <code>codex@shop</code>. Another records identities; it does not start or run the agent behind one. Names are unique per project.</dd></div>
+        <div class="client" id="project"><dt>Project</dt><dd>A registered directory path with a short slug. Two checkouts of one repository are two projects, with slugs like <code>shop</code> and <code>shop-2</code> if their folders share a name. See <a href="/guides/git-worktrees/">agents in git worktrees</a>.</dd></div>
+        <div class="client" id="address"><dt>Address</dt><dd><code>name</code> works when it is unambiguous, <code>name@project</code> names an agent in a project, and <code>name@project@node</code> reaches another node. Agents registered without a project are node-wide.</dd></div>
+        <div class="client" id="node"><dt>Node</dt><dd>One data directory with its own SQLite database and signing key: <code>~/.another</code> by default, or <code>ANOTHER_HOME</code>. Sessions share state by sharing a node.</dd></div>
+      </dl>
+    </section>
+    <section class="guide-section" aria-labelledby="mail">
+      <h2 id="mail">Mail</h2>
+      <dl class="clients">
+        <div class="client" id="message"><dt>Message</dt><dd>An immutable note with a subject, a body and recipients. Each recipient has separate read and acknowledgement state.</dd></div>
+        <div class="client" id="thread"><dt>Thread</dt><dd>A conversation of messages. Replies stay in the thread of the message they answer.</dd></div>
+        <div class="client" id="ack"><dt>Acknowledgement</dt><dd>A recorded receipt, made with <code>another ack</code> or the <code>acknowledge</code> tool. Fetching an inbox changes nothing. An acknowledgement says the mail was received; it does not say the work was done.</dd></div>
+        <div class="client" id="request"><dt>Request</dt><dd>A claimable piece of work opened alongside a message. It moves through open, claimed and done, can be cancelled by its creator, and goes stale past its due time. Requests stay on one node. See <a href="/guides/hand-off-tasks/">handing off a task</a>.</dd></div>
+      </dl>
+    </section>
+    <section class="guide-section" aria-labelledby="coordination">
+      <h2 id="coordination">Coordination</h2>
+      <dl class="clients">
+        <div class="client" id="hold"><dt>Path hold</dt><dd>An expiring, advisory claim on project-relative files or globs. Cooperating agents check holds before editing, and a conflict exits with status 3. A hold does not stop any write. See <a href="/guides/avoid-agent-file-conflicts/">file holds</a>.</dd></div>
+        <div class="client" id="resource"><dt>Resource</dt><dd>A registered model server, dev server, port, GPU, container or long job, addressed by ID or by <code>kind:name</code>. Another lists it; it does not start it. See <a href="/guides/share-model-server/">sharing a model server</a>.</dd></div>
+        <div class="client" id="lease"><dt>Lease</dt><dd>A time-limited claim on a resource, held as owner or borrower. The default is 30 minutes. Heartbeats renew it, and if the owner leaves while others borrow, the oldest borrower becomes the owner.</dd></div>
+        <div class="client" id="orphan"><dt>Orphan</dt><dd>A candidate for cleanup: a registered resource with no live lease, or a listening process that nothing registered. A listed process is only a candidate and may be something you want running.</dd></div>
+        <div class="client" id="reap"><dt>Reap</dt><dd>Stopping an orphan with <code>another reap --confirm</code>, on the machine that owns it, after a grace period. Without <code>--confirm</code> it only prints a plan. The MCP tool can only request it, and nothing reaps automatically.</dd></div>
+      </dl>
+    </section>
+    <section class="guide-section" aria-labelledby="awareness">
+      <h2 id="awareness">Awareness</h2>
+      <dl class="clients">
+        <div class="client" id="hook"><dt>Hook</dt><dd>A user-global entry in a coding client's config that runs Another at session start, on each prompt and at session end. It is how an agent learns about mail without polling. See the <a href="https://github.com/tamler/another/blob/main/docs/HOOKS.md">hook reference</a>.</dd></div>
+        <div class="client" id="digest"><dt>Digest</dt><dd>The short inbox and activity summary a hook gives a session. It never includes message bodies.</dd></div>
+        <div class="client" id="activity"><dt>Activity feed</dt><dd>A readable record of who did what: sessions, mail subjects, requests, holds and resources. Message bodies stay out of it.</dd></div>
+        <div class="client" id="event-log"><dt>Event log</dt><dd>The signed, append-only record behind everything. Query tables are built from it, and it is what federation syncs.</dd></div>
+        <div class="client" id="wake"><dt>Wake</dt><dd>An optional nudge typed into an idle agent's terminal through tmux, cmux or Herdr. See <a href="/guides/wake-idle-agents/">waking idle agents</a>.</dd></div>
+      </dl>
+    </section>
+    <section class="guide-section" aria-labelledby="machines">
+      <h2 id="machines">Other machines</h2>
+      <dl class="clients">
+        <div class="client" id="token"><dt>Token</dt><dd>A bearer secret that lets one remote client act as one agent within chosen projects, printed once. Every call made with a token is audited.</dd></div>
+        <div class="client" id="federation"><dt>Federation</dt><dd>Several nodes exchanging signed events through a hub. Each node stays authoritative for its own agents, holds and resources. It is optional. See <a href="/guides/agents-on-two-machines/">agents on two machines</a>.</dd></div>
+        <div class="client" id="hub"><dt>Hub</dt><dd>A node you host that relays events between paired nodes. It can read the mail it relays, so it is not end-to-end encrypted.</dd></div>
+        <div class="client" id="spoke"><dt>Spoke</dt><dd>A node that dials out to the hub to push its events and pull the ones meant for it: directory entries, mail for its agents and, with permission, activity. It needs no inbound port.</dd></div>
+      </dl>
+      <p>Still have a question? Try <a href="/docs/faq/">the FAQ</a>, or the <a href="https://github.com/tamler/another/blob/main/README.md">CLI and MCP reference</a>.</p>
+    </section>
+  </main>
+  <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="/docs/faq/">FAQ</a> <a href="/docs/concepts/" aria-current="page">Concepts</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>
+</body>
+</html>
