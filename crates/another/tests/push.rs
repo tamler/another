@@ -380,7 +380,7 @@ fn webhook_list_shows_why_a_webhook_stopped() {
     store
         .register_agent(RegisterAgent {
             name: "manager".into(),
-            program: Program::GrokBot,
+            program: Program::Claude,
             project: Some("/work/shop".into()),
             model: None,
             description: None,
