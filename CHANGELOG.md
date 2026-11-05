@@ -93,8 +93,8 @@ All notable changes to Another. Unreleased work is listed under the next version
 
 ### Database
 - Migration 6 adds the `lanes`, `lane_links` and `lane_reports` tables. It is additive; existing databases upgrade in place.
-- Migration 11 adds the `agent_invites`, `remote_agents` and `remote_decisions` tables, and a nullable `lanes.leaderless_at`. It is additive.
 - Migration 10 adds the `spend_accounts`, `spend_entries` and `spend_leases` tables, and a nullable `resources.spend_account_id`. It is additive.
+- Migration 11 adds the `agent_invites`, `remote_agents` and `remote_decisions` tables, and a nullable `lanes.leaderless_at`. It is additive.
 - Migration 9 adds `holds.lane_id` (nullable). It is additive.
 - Migration 8 adds the `decisions` table and `requests.kind` (default `task`). It is additive.
 - Migration 7 adds the `webhooks` and `webhook_deliveries` tables and a nullable `resource_leases.expiry_warned_at` column. It is additive.
