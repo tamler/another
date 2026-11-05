@@ -171,7 +171,7 @@ another service install
 | `another service status` | Installed and loaded?, pid, bind address, last log lines |
 | `another service logs [-n 50]` | Recent log lines |
 | `another service stop` / `start` | Stop or start it; it stays installed (macOS: loads again at next login; Linux: starts again at the next boot or user-manager start) |
-| `another service uninstall` | Stop it and remove the definition |
+| `another service uninstall` | Stop it and remove the definition. If it can't be stopped, the command fails and keeps the definition so you can retry |
 
 ### Remote access through Tailscale Serve
 
