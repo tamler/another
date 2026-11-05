@@ -168,6 +168,32 @@ fn a_delayed_owner_honours_renewals_the_hub_admitted() {
     );
 }
 
+/// The owner stays offline past its own lease: no sync and no sweep until minute 62. The borrower's
+/// first lease ended at 30, so only the renewals the hub admitted keep it live.
+#[test]
+fn an_owner_offline_past_its_own_expiry_hands_the_resource_to_the_borrower_the_hub_renewed() {
+    let net = Net::new();
+    let (id, rid) = net.resource("shared");
+    net.renewed_to_65(&id);
+
+    net.at(62);
+    sync(&net.hub, &net.owner);
+    net.owner.sweep().unwrap();
+
+    let after = net.owner.resource(&id).unwrap();
+    assert_eq!(after.status, "live", "not lapsed");
+    assert_eq!(after.owner.as_deref(), Some(BORROWER));
+    assert_eq!(after.refcount, 1);
+    assert_eq!(net.owner.lapsed_for_ms(&rid).unwrap(), None);
+    assert_eq!(kinds(&net.owner, "resource.transferred"), 1);
+
+    sync(&net.hub, &net.owner);
+    assert_eq!(
+        net.hub.resource(&id).unwrap().owner.as_deref(),
+        Some(BORROWER)
+    );
+}
+
 #[test]
 fn a_late_observer_counts_a_lease_that_outlived_its_owner() {
     let (hub, hub_time) = node("hub", START);

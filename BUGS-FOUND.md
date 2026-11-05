@@ -9,7 +9,7 @@ Found while adding edge-case tests for the ten lowest-covered public functions (
 | 1, 2, 6, 7 | Fixed in draft PR #25, not yet on the base. The tests here no longer depend on either side of those fixes, and #25 has its own tests for the fixed behaviour. |
 | 4, 5 | Fixed on the base by `66100cf`. PR #25 also covers the remaining case of #4 described in its section. |
 | 3, 8, 9, 10, 12 | Open. |
-| 11 | **Open, and the most serious here:** a paired spoke can rewrite what belongs to the hub. |
+| 11 | Fixed on the federation authority branch, in a draft PR. Rows and events already rewritten are not repaired. |
 
 ## 1. A daily summary to an unknown person is accepted, then fails on every sweep
 
