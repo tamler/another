@@ -11,6 +11,7 @@ use crate::error::{Error, Result};
 use crate::identity::address;
 use crate::store::Store;
 use crate::time::fmt_ts;
+use crate::tokens::{scope_allows_project, TokenScope};
 
 /// Coarse activity categories, derived from event kinds.
 #[derive(
@@ -25,10 +26,11 @@ pub enum ActivityKind {
     Session,
     System,
     Federation,
+    Lane,
 }
 
 impl ActivityKind {
-    pub const ALL: [ActivityKind; 7] = [
+    pub const ALL: [ActivityKind; 8] = [
         ActivityKind::Mail,
         ActivityKind::Request,
         ActivityKind::Hold,
@@ -36,6 +38,7 @@ impl ActivityKind {
         ActivityKind::Session,
         ActivityKind::System,
         ActivityKind::Federation,
+        ActivityKind::Lane,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -47,6 +50,7 @@ impl ActivityKind {
             ActivityKind::Session => "session",
             ActivityKind::System => "system",
             ActivityKind::Federation => "federation",
+            ActivityKind::Lane => "lane",
         }
     }
 
@@ -58,6 +62,7 @@ impl ActivityKind {
             "hold" => ActivityKind::Hold,
             "resource" | "orphan" => ActivityKind::Resource,
             "session" | "agent" => ActivityKind::Session,
+            "lane" => ActivityKind::Lane,
             "peer" | "sync" | "pair" | "federation" => ActivityKind::Federation,
             _ => ActivityKind::System,
         }
@@ -72,7 +77,7 @@ impl std::str::FromStr for ActivityKind {
             .find(|k| k.as_str() == s)
             .ok_or_else(|| {
                 Error::Invalid(format!(
-                    "unknown activity kind {s:?}; expected mail, request, hold, resource, session, system or federation"
+                    "unknown activity kind {s:?}; expected mail, request, hold, resource, session, system, federation or lane"
                 ))
             })
     }
@@ -422,6 +427,53 @@ fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             format!("unpaired node {}", s("node_id")),
             json!({ "node_id": s("node_id") }),
         ),
+        "lane.created" => (
+            format!("{actor} created lane {} ({})", s("name"), s("status")),
+            json!({ "lane_id": s("lane_id") }),
+        ),
+        "lane.updated" => (
+            format!("{actor} updated lane {}", s("name")),
+            json!({ "lane_id": s("lane_id") }),
+        ),
+        "lane.status_changed" => (
+            format!(
+                "lane {}: {} -> {} (by {actor})",
+                s("name"),
+                s("from"),
+                s("to")
+            ),
+            json!({ "lane_id": s("lane_id") }),
+        ),
+        "lane.linked" => (
+            format!(
+                "{actor} linked {} {} to lane {}",
+                s("kind"),
+                s("ref_id"),
+                s("name")
+            ),
+            json!({ "lane_id": s("lane_id"), "ref_id": s("ref_id") }),
+        ),
+        // Report summaries, charters and links stay in the lane tables (`lane_show`); the
+        // feed carries names, statuses and ids only.
+        "lane.reported" => {
+            let status = p
+                .get("status")
+                .and_then(Value::as_str)
+                .map(|x| format!(", {x}"))
+                .unwrap_or_default();
+            (
+                format!(
+                    "{actor} reported on lane {} ({}{status})",
+                    s("name"),
+                    s("kind")
+                ),
+                json!({ "lane_id": s("lane_id"), "report_id": s("report_id") }),
+            )
+        }
+        "lane.closed" => (
+            format!("lane {} closed as {}", s("name"), s("status")),
+            json!({ "lane_id": s("lane_id") }),
+        ),
         other => (format!("{actor}: {other}"), p.clone()),
     };
     // Merged feed: events from other nodes carry their node's name.
@@ -534,6 +586,7 @@ fn read_events(
     since: Option<&Since>,
     kinds: &[ActivityKind],
     limit: u32,
+    scope: Option<&TokenScope>,
 ) -> Result<Vec<EventRow>> {
     let after_seq: Option<i64> = match since {
         Some(Since::After(id)) => Some(
@@ -564,14 +617,20 @@ fn read_events(
         if !kind_matches(kinds, &kind) {
             continue;
         }
-        out.push(EventRow {
+        let row = EventRow {
             event_id: r.get(0)?,
             node_id: r.get(1)?,
             ts: r.get(2)?,
             actor: r.get(3)?,
             kind,
             payload: r.get(5)?,
-        });
+        };
+        if let Some(scope) = scope {
+            if !lane_event_visible(conn, scope, &row)? {
+                continue;
+            }
+        }
+        out.push(row);
         if out.len() as u32 >= limit {
             break;
         }
@@ -582,16 +641,38 @@ fn read_events(
     Ok(out)
 }
 
+/// Lane events belong to their lane's project: a token only sees those of its projects.
+/// (Other event kinds keep the node-wide awareness rule, D16, until push scoping.)
+fn lane_event_visible(conn: &Connection, scope: &TokenScope, row: &EventRow) -> Result<bool> {
+    if !row.kind.starts_with("lane.") {
+        return Ok(true);
+    }
+    let p: Value = serde_json::from_str(&row.payload).unwrap_or(Value::Null);
+    match p.get("project_id").and_then(Value::as_str) {
+        Some(project_id) => scope_allows_project(conn, scope, project_id),
+        None => Ok(false),
+    }
+}
+
 impl Store {
     /// Read the activity feed.
     pub fn activity(&self, query: ActivityQuery) -> Result<ActivityFeed> {
+        self.activity_scoped(query, None)
+    }
+
+    /// Read the activity feed as a token scope sees it (`None` = everything).
+    pub fn activity_scoped(
+        &self,
+        query: ActivityQuery,
+        scope: Option<&TokenScope>,
+    ) -> Result<ActivityFeed> {
         let limit = match query.limit {
             0 => 50,
             n => n.min(MAX_LIMIT),
         };
         self.sweep()?;
         self.read(|conn| {
-            let rows = read_events(conn, query.since.as_ref(), &query.kinds, limit)?;
+            let rows = read_events(conn, query.since.as_ref(), &query.kinds, limit, scope)?;
             let items = rows
                 .into_iter()
                 .map(|r| item(conn, r))
@@ -609,6 +690,15 @@ impl Store {
 
     /// Summarize activity since a point in time (default: the last hour).
     pub fn activity_summary(&self, since: Option<Since>) -> Result<ActivitySummary> {
+        self.activity_summary_scoped(since, None)
+    }
+
+    /// Summarize activity as a token scope sees it (`None` = everything).
+    pub fn activity_summary_scoped(
+        &self,
+        since: Option<Since>,
+        scope: Option<&TokenScope>,
+    ) -> Result<ActivitySummary> {
         let now = self.now();
         let since = since.unwrap_or(Since::Time(now - 3_600_000));
         self.sweep()?;
@@ -622,7 +712,7 @@ impl Store {
                     .optional()?
                     .ok_or_else(|| Error::NotFound(format!("unknown event id {id:?}")))?,
             };
-            let rows = read_events(conn, Some(&since), &[], u32::MAX)?;
+            let rows = read_events(conn, Some(&since), &[], u32::MAX, scope)?;
             let mut counts: BTreeMap<String, u32> = BTreeMap::new();
             for r in &rows {
                 *counts

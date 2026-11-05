@@ -293,6 +293,9 @@ pub enum Command {
         #[command(flatten)]
         run: WakeRun,
     },
+    /// Lanes: named units of work with a charter, lead, status and structured reports.
+    #[command(subcommand)]
+    Lane(LaneCmd),
     /// Show the activity feed (who is doing what), or a summary of it.
     Activity {
         /// Start point: a duration (30m, 2h, 1d), an RFC 3339 time, or an event id cursor.
@@ -363,6 +366,115 @@ pub enum WakeCmd {
     },
     /// List stored wake targets.
     List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LaneCmd {
+    /// Create a lane (status starts at planned).
+    Create {
+        name: String,
+        #[command(flatten)]
+        agent: AgentArg,
+        /// Project path or slug.
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        /// Agent that leads the work.
+        #[arg(long)]
+        lead: String,
+        /// The brief; `-` reads stdin.
+        #[arg(long, default_value = "")]
+        charter: String,
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// List lanes (open ones unless --all or --status).
+    List {
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        #[arg(long)]
+        lead: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show a lane with links and recent reports.
+    Show {
+        lane: String,
+        /// Print as markdown (like the old STATUS files).
+        #[arg(long)]
+        markdown: bool,
+    },
+    /// Change status, charter or lead, or link threads / requests / holds / messages.
+    Update {
+        lane: String,
+        #[command(flatten)]
+        agent: AgentArg,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        charter: Option<String>,
+        #[arg(long)]
+        lead: Option<String>,
+        #[arg(long = "link-thread")]
+        link_threads: Vec<String>,
+        #[arg(long = "link-request")]
+        link_requests: Vec<String>,
+        #[arg(long = "link-hold")]
+        link_holds: Vec<String>,
+        #[arg(long = "link-message")]
+        link_messages: Vec<String>,
+    },
+    /// Post a status report (also mailed to the lane's counterpart).
+    Report {
+        lane: String,
+        #[command(flatten)]
+        agent: AgentArg,
+        /// `-` reads stdin.
+        #[arg(long, short = 's')]
+        summary: String,
+        #[arg(long)]
+        progress: Option<u8>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long = "link")]
+        links: Vec<String>,
+        #[arg(long = "artifact")]
+        artifacts: Vec<String>,
+    },
+    /// Post the DONE report: outcome and optional PR link; closes the lane.
+    Done {
+        lane: String,
+        #[command(flatten)]
+        agent: AgentArg,
+        #[arg(long)]
+        outcome: String,
+        #[arg(long)]
+        pr: Option<String>,
+        #[arg(long, short = 's')]
+        summary: Option<String>,
+        #[arg(long = "artifact")]
+        artifacts: Vec<String>,
+    },
+    /// Close a lane without a report (done, or abandoned with --abandon).
+    Close {
+        lane: String,
+        #[command(flatten)]
+        agent: AgentArg,
+        #[arg(long)]
+        abandon: bool,
+        #[arg(long)]
+        outcome: Option<String>,
+    },
+    /// Write a lane as markdown: to stdout, --out FILE, or --dir DIR (<name>-STATUS.md, plus
+    /// DONE-<name>.md when done).
+    Export {
+        lane: String,
+        #[arg(long, conflicts_with = "dir")]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -517,6 +629,10 @@ pub enum HookCmd {
         /// Show what would change without writing anything.
         #[arg(long)]
         dry_run: bool,
+        /// Also install a Stop hook that posts an automatic report into the agent's lane
+        /// (debounced to one every 15 minutes). Installing without it removes that hook.
+        #[arg(long)]
+        lane_reports: bool,
     },
     /// Remove Another hooks from client configs, leaving other hooks untouched.
     Uninstall {
@@ -1254,6 +1370,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             };
             emit(json, &plans, |p| output::wake_plans(p))
         }
+        Command::Lane(cmd) => lane_command(&store, json, cmd)?,
         Command::Audit { limit } => {
             let entries = store.audit_log(limit)?;
             emit(json, &entries, |e| output::audit(e))
@@ -1313,10 +1430,27 @@ fn hook_command(
             }
             Ok(ExitCode::SUCCESS)
         }
-        HookCmd::Install { client, dry_run } | HookCmd::Uninstall { client, dry_run } => {
-            let install = matches!(cmd, HookCmd::Install { .. });
+        HookCmd::Install {
+            client,
+            dry_run,
+            lane_reports,
+        } => {
             let env = HookEnv::detect(another_home()?)?;
-            let report = hooks::install(&env, &clients(client), install, *dry_run)?;
+            let opts = hooks::HookOptions {
+                lane_reports: *lane_reports,
+            };
+            let report = hooks::install(&env, &clients(client), true, *dry_run, opts)?;
+            Ok(emit(json, &report, output::hook_report))
+        }
+        HookCmd::Uninstall { client, dry_run } => {
+            let env = HookEnv::detect(another_home()?)?;
+            let report = hooks::install(
+                &env,
+                &clients(client),
+                false,
+                *dry_run,
+                hooks::HookOptions::default(),
+            )?;
             Ok(emit(json, &report, output::hook_report))
         }
         HookCmd::Status => {
@@ -1336,4 +1470,188 @@ fn hook_command(
             Ok(emit(json, &rows, |r| output::hook_status(r)))
         }
     }
+}
+
+fn lane_command(store: &Store, json: bool, cmd: LaneCmd) -> anyhow::Result<ExitCode> {
+    use another_core::{
+        lane_markdown, LaneFilter, LaneLinkKind, LaneReportInput, LaneStatus, LaneUpdate, NewLane,
+        ReportKind,
+    };
+    let status = |s: Option<String>| -> anyhow::Result<Option<LaneStatus>> {
+        Ok(s.map(|v| v.parse::<LaneStatus>()).transpose()?)
+    };
+    Ok(match cmd {
+        LaneCmd::Create {
+            name,
+            agent,
+            project,
+            lead,
+            charter,
+            status: st,
+        } => {
+            let project = project_key(store, &agent.agent, project)?;
+            let d = store.create_lane(
+                NewLane {
+                    agent: agent.agent,
+                    name,
+                    project,
+                    lead,
+                    charter: body_arg(charter)?,
+                    status: status(st)?,
+                },
+                None,
+            )?;
+            emit(json, &d, output::lane_detail)
+        }
+        LaneCmd::List {
+            status: st,
+            project,
+            lead,
+            all,
+        } => {
+            let lanes = store.lanes(
+                LaneFilter {
+                    status: status(st)?,
+                    project,
+                    lead,
+                    include_closed: all,
+                },
+                None,
+            )?;
+            emit(json, &lanes, |l| output::lanes(l))
+        }
+        LaneCmd::Show { lane, markdown } => {
+            let d = store.lane(&lane, None)?;
+            if markdown && !json {
+                println!("{}", lane_markdown(&d).trim_end());
+                ExitCode::SUCCESS
+            } else {
+                emit(json, &d, output::lane_detail)
+            }
+        }
+        LaneCmd::Update {
+            lane,
+            agent,
+            status: st,
+            charter,
+            lead,
+            link_threads,
+            link_requests,
+            link_holds,
+            link_messages,
+        } => {
+            let mut links = Vec::new();
+            links.extend(link_threads.into_iter().map(|i| (LaneLinkKind::Thread, i)));
+            links.extend(
+                link_requests
+                    .into_iter()
+                    .map(|i| (LaneLinkKind::Request, i)),
+            );
+            links.extend(link_holds.into_iter().map(|i| (LaneLinkKind::Hold, i)));
+            links.extend(
+                link_messages
+                    .into_iter()
+                    .map(|i| (LaneLinkKind::Message, i)),
+            );
+            let d = store.update_lane(
+                LaneUpdate {
+                    agent: agent.agent,
+                    lane,
+                    status: status(st)?,
+                    charter,
+                    lead,
+                    links,
+                },
+                None,
+            )?;
+            emit(json, &d, output::lane_detail)
+        }
+        LaneCmd::Report {
+            lane,
+            agent,
+            summary,
+            progress,
+            status: st,
+            links,
+            artifacts,
+        } => {
+            let r = store.report_lane(
+                LaneReportInput {
+                    agent: agent.agent,
+                    lane,
+                    kind: ReportKind::Status,
+                    summary: body_arg(summary)?,
+                    progress,
+                    status: status(st)?,
+                    links,
+                    artifacts,
+                    outcome: None,
+                    pr_url: None,
+                },
+                None,
+            )?;
+            emit(json, &r, output::lane_report)
+        }
+        LaneCmd::Done {
+            lane,
+            agent,
+            outcome,
+            pr,
+            summary,
+            artifacts,
+        } => {
+            let r = store.report_lane(
+                LaneReportInput {
+                    agent: agent.agent,
+                    lane,
+                    kind: ReportKind::Done,
+                    summary: summary.unwrap_or_else(|| outcome.clone()),
+                    progress: Some(100),
+                    status: None,
+                    links: vec![],
+                    artifacts,
+                    outcome: Some(outcome),
+                    pr_url: pr,
+                },
+                None,
+            )?;
+            emit(json, &r, output::lane_report)
+        }
+        LaneCmd::Close {
+            lane,
+            agent,
+            abandon,
+            outcome,
+        } => {
+            let d = store.close_lane(&agent.agent, &lane, abandon, outcome, None)?;
+            emit(json, &d, output::lane_detail)
+        }
+        LaneCmd::Export { lane, out, dir } => {
+            let d = store.lane(&lane, None)?;
+            let md = lane_markdown(&d);
+            let mut written = Vec::new();
+            match (out, dir) {
+                (Some(path), _) => {
+                    std::fs::write(&path, &md)?;
+                    written.push(path.display().to_string());
+                }
+                (None, Some(dir)) => {
+                    std::fs::create_dir_all(&dir)?;
+                    let status = dir.join(format!("{}-STATUS.md", d.lane.name));
+                    std::fs::write(&status, &md)?;
+                    written.push(status.display().to_string());
+                    if d.lane.status == LaneStatus::Done {
+                        let done = dir.join(format!("DONE-{}.md", d.lane.name));
+                        std::fs::write(&done, &md)?;
+                        written.push(done.display().to_string());
+                    }
+                }
+                (None, None) => {
+                    print!("{md}");
+                    return Ok(ExitCode::SUCCESS);
+                }
+            }
+            emit(json, &written, |w| format!("wrote {}", w.join(", ")))
+        }
+    })
 }

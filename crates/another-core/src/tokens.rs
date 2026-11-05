@@ -90,6 +90,25 @@ fn random_hex(bytes: usize) -> Result<String> {
     Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// Whether a token's project globs cover the project `project_id` (by path or slug).
+pub(crate) fn scope_allows_project(
+    conn: &Connection,
+    scope: &TokenScope,
+    project_id: &str,
+) -> Result<bool> {
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT abs_path, slug FROM projects WHERE project_id = ?1",
+            [project_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(match row {
+        Some((path, slug)) => glob_allows(&scope.project_globs, &[path, slug]),
+        None => false,
+    })
+}
+
 /// Whether `candidate` matches any of the token's project globs.
 fn glob_allows(globs: &[String], candidates: &[String]) -> bool {
     globs.iter().any(|g| {

@@ -13,6 +13,22 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+tokio::task_local! {
+    /// The verified token scope of the remote caller whose tool call is running.
+    static SCOPE: Option<TokenScope>;
+}
+
+/// The scope of the remote caller for the tool call in progress (`None` for local callers).
+/// Read it before moving work to a blocking thread: task-locals do not follow.
+pub fn current_scope() -> Option<TokenScope> {
+    SCOPE.try_with(|s| s.clone()).ok().flatten()
+}
+
+/// Run `fut` with `scope` visible to [`current_scope`].
+pub async fn with_scope<F: std::future::Future>(scope: Option<TokenScope>, fut: F) -> F::Output {
+    SCOPE.scope(scope, fut).await
+}
+
 /// The authenticated caller, attached to the request by [`require_token`].
 #[derive(Debug, Clone)]
 pub struct RemotePeer {
@@ -172,6 +188,13 @@ pub fn authorize(
     match tool {
         "resource_reap" => Err("reaping is never available to remote peers".into()),
         "activity_feed" | "activity_summarize" | "resource_find" => Ok(()),
+        // Lane reads are filtered / checked against the token scope inside the tool.
+        "lane_list" | "lane_show" => Ok(()),
+        "lane_create" => {
+            acting(args, "agent")?;
+            project(s(args, "project"), true)
+        }
+        "lane_update" | "lane_report" | "lane_close" => acting(args, "agent"),
         "orphans_list" => {
             // Remote peers see lapsed registrations only, never a process scan.
             args.insert("scan".into(), Value::Bool(false));
@@ -242,6 +265,7 @@ pub async fn activity(
     Query(params): Query<ActivityParams>,
 ) -> Response {
     let peer = peer.map(|p| p.0);
+    let scope = peer.as_ref().map(|p| p.scope.clone());
     let query_store = store.clone();
     let detail = format!(
         "since={:?} limit={:?} kinds={:?}",
@@ -261,11 +285,14 @@ pub async fn activity(
             .filter(|k| !k.trim().is_empty())
             .map(|k| k.trim().parse::<ActivityKind>())
             .collect::<another_core::Result<Vec<_>>>()?;
-        query_store.activity(ActivityQuery {
-            since,
-            limit: params.limit.unwrap_or(50),
-            kinds,
-        })
+        query_store.activity_scoped(
+            ActivityQuery {
+                since,
+                limit: params.limit.unwrap_or(50),
+                kinds,
+            },
+            scope.as_ref(),
+        )
     })
     .await;
     let (status, body, outcome) = match result {

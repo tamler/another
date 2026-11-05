@@ -21,22 +21,22 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
 pub struct AnotherMcp {
-    store: Store,
+    pub(crate) store: Store,
     tool_router: ToolRouter<Self>,
 }
 
-type ToolResult<T> = Result<Json<T>, String>;
+pub(crate) type ToolResult<T> = Result<Json<T>, String>;
 
 impl AnotherMcp {
     pub fn new(store: Store) -> Self {
         Self {
             store,
-            tool_router: Self::tool_router(),
+            tool_router: Self::tool_router() + Self::lane_router(),
         }
     }
 
     /// Run a store call off the async runtime; errors become structured tool errors.
-    async fn run<T, F>(&self, f: F) -> ToolResult<T>
+    pub(crate) async fn run<T, F>(&self, f: F) -> ToolResult<T>
     where
         T: Send + 'static,
         F: FnOnce(&Store) -> another_core::Result<T> + Send + 'static,
@@ -690,13 +690,17 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<ActivityFeedArgs>,
     ) -> ToolResult<ActivityFeed> {
+        let scope = crate::remote::current_scope();
         self.run(move |s| {
             let since = a.since.map(|v| Since::parse(&v, s.now())).transpose()?;
-            s.activity(ActivityQuery {
-                since,
-                limit: a.limit.unwrap_or(50),
-                kinds: a.kinds,
-            })
+            s.activity_scoped(
+                ActivityQuery {
+                    since,
+                    limit: a.limit.unwrap_or(50),
+                    kinds: a.kinds,
+                },
+                scope.as_ref(),
+            )
         })
         .await
     }
@@ -709,9 +713,10 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<ActivitySummarizeArgs>,
     ) -> ToolResult<ActivitySummary> {
+        let scope = crate::remote::current_scope();
         self.run(move |s| {
             let since = a.since.map(|v| Since::parse(&v, s.now())).transpose()?;
-            s.activity_summary(since)
+            s.activity_summary_scoped(since, scope.as_ref())
         })
         .await
     }
@@ -751,6 +756,7 @@ impl ServerHandler for AnotherMcp {
         };
         let store = self.store.clone();
         let mut args = request.arguments.take().unwrap_or_default();
+        let scope = peer.scope.clone();
         let checked = tokio::task::spawn_blocking(move || {
             remote::authorize(&store, &peer.scope, &tool, &mut args).map(|_| args)
         })
@@ -772,10 +778,12 @@ impl ServerHandler for AnotherMcp {
                 );
             }
         }
-        let result = self
-            .tool_router
-            .call(ToolCallContext::new(self, request, context))
-            .await;
+        let result = remote::with_scope(
+            Some(scope),
+            self.tool_router
+                .call(ToolCallContext::new(self, request, context)),
+        )
+        .await;
         let failed = match &result {
             Ok(CallToolResponse::Complete(r)) => r.is_error == Some(true),
             Ok(_) => false,
