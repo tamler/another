@@ -1173,9 +1173,6 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value, relayed: bool) -> Res
                     ts,
                     origin,
                 )?;
-                if relayed {
-                    crate::resources::reopen_after_admission_tx(tx, &rid)?;
-                }
             }
         }
         "resource.renewed" => {
@@ -1188,18 +1185,6 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value, relayed: bool) -> Res
                        AND (?6 OR expires_at > ?5 OR resource_id IN (SELECT resource_id FROM resources WHERE node_id = ?3))",
                     params![id, ts.min(tx.now), origin, foreign_ttl(p), tx.now, relayed],
                 )?;
-                if relayed {
-                    let resource: Option<String> = tx
-                        .query_row(
-                            "SELECT resource_id FROM resource_leases WHERE lease_id = ?1 AND node_id = ?2",
-                            params![id, origin],
-                            |r| r.get(0),
-                        )
-                        .optional()?;
-                    if let Some(rid) = resource {
-                        crate::resources::reopen_after_admission_tx(tx, &rid)?;
-                    }
-                }
             }
         }
         "resource.released" => {
@@ -1761,6 +1746,18 @@ impl Store {
         events: &[WireEvent],
         nodes: &[NodeEntry],
     ) -> Result<IngestReport> {
+        self.ingest_page(from, events, nodes, false)
+    }
+
+    /// `ingest` for one page of a pull. `more` says the hub has further pages, so lapsed resources
+    /// wait to be settled until the last page has been applied.
+    pub fn ingest_page(
+        &self,
+        from: &str,
+        events: &[WireEvent],
+        nodes: &[NodeEntry],
+        more: bool,
+    ) -> Result<IngestReport> {
         self.write(|tx| {
             let Some((role, perms, None)) = peer_row(tx, from)? else {
                 return Err(Error::Forbidden("not a paired node".into()));
@@ -1836,6 +1833,10 @@ impl Store {
                     tracing::warn!(event = %ev.event_id, kind = %ev.kind, error = %e, "could not project foreign event");
                 }
                 report.accepted += 1;
+            }
+            // The completed history decides: a later event can renew an older lease or end a newer one.
+            if role != "spoke" && !more {
+                crate::resources::reopen_after_admission_tx(tx)?;
             }
             Ok(report)
         })

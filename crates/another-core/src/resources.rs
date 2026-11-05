@@ -451,27 +451,29 @@ fn emit_renewed(tx: &Tx<'_>, actor: &str, lease_ids: &[&String]) -> Result<()> {
     Ok(())
 }
 
-/// A borrow or renewal the hub admitted reached this resource's owner after the owner lapsed it.
-/// If that left a lease live at this node's clock, the lapse no longer holds: clear it and promote
-/// as usual. A lease already expired here changes nothing, and a stopped resource stays stopped.
-pub(crate) fn reopen_after_admission_tx(tx: &Tx<'_>, resource_id: &str) -> Result<()> {
-    let lapsed = tx
-        .query_row(
-            "SELECT 1 FROM resources WHERE resource_id = ?1 AND node_id = ?2
-               AND lapsed_at IS NOT NULL AND released_at IS NULL",
-            params![resource_id, tx.node_id],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some();
-    if !lapsed || live_leases(tx, resource_id, tx.now)?.is_empty() {
-        return Ok(());
+/// Borrows and renewals the hub admitted can reach a resource's owner after the owner lapsed it.
+/// Once a pull has applied them all, a lapse with another node's lease still live at this node's
+/// clock no longer holds: clear it and promote as usual. A lease already expired here changes
+/// nothing, and a stopped resource stays stopped.
+pub(crate) fn reopen_after_admission_tx(tx: &Tx<'_>) -> Result<()> {
+    let reopened = {
+        let mut stmt = tx.prepare(
+            "SELECT r.resource_id FROM resources r
+             WHERE r.node_id = ?1 AND r.lapsed_at IS NOT NULL AND r.released_at IS NULL
+               AND EXISTS (SELECT 1 FROM resource_leases l WHERE l.resource_id = r.resource_id
+                 AND l.node_id != ?1 AND l.released_at IS NULL AND l.expires_at > ?2)
+             ORDER BY r.resource_id",
+        )?;
+        let rows = stmt.query_map(params![tx.node_id, tx.now], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for resource_id in &reopened {
+        tx.execute(
+            "UPDATE resources SET lapsed_at = NULL WHERE resource_id = ?1",
+            [resource_id],
+        )?;
+        settle(tx, resource_id, "system", tx.now)?;
     }
-    tx.execute(
-        "UPDATE resources SET lapsed_at = NULL WHERE resource_id = ?1",
-        [resource_id],
-    )?;
-    settle(tx, resource_id, "system", tx.now)?;
     Ok(())
 }
 

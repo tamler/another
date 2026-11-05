@@ -210,6 +210,133 @@ fn an_owner_offline_past_its_own_expiry_hands_the_resource_to_the_borrower_the_h
     );
 }
 
+/// Two agents on the borrower node, known to the hub, on a resource the owner holds to minute 60.
+fn two_borrowers() -> (Net, ResourceRef, String) {
+    let net = Net::new();
+    for name in ["old", "new"] {
+        net.borrower
+            .register_agent_trusted(RegisterAgent {
+                name: name.into(),
+                program: Program::Codex,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+    }
+    let (id, rid) = net.resource("shared");
+    (net, id, rid)
+}
+
+#[test]
+fn a_replayed_history_promotes_the_oldest_borrower_it_leaves_live() {
+    let (net, id, rid) = two_borrowers();
+    let borrow = |agent: &str, minutes: i64, ttl: i64| {
+        net.at(minutes);
+        net.borrower.borrow_resource(agent, &id, Some(ttl)).unwrap();
+        sync(&net.hub, &net.borrower);
+    };
+    borrow("old", 0, 1800);
+    borrow("new", 10, 7200);
+    borrow("old", 20, 7200);
+
+    net.at(61);
+    net.owner.sweep().unwrap();
+    assert!(net.owner.lapsed_for_ms(&rid).unwrap().is_some());
+
+    // Old's first lease has ended by now, so only its renewal, later in this batch, keeps it live.
+    net.at(100);
+    pull(&net.hub, &net.owner);
+    let after = net.owner.resource(&id).unwrap();
+    assert_eq!(after.owner.as_deref(), Some("old@@borrower"));
+    assert_eq!(after.refcount, 2);
+    assert_eq!(kinds(&net.owner, "resource.transferred"), 1);
+}
+
+#[test]
+fn a_history_split_across_pull_pages_is_settled_after_the_last_page() {
+    let (net, id, rid) = two_borrowers();
+    let borrow = |agent: &str, minutes: i64, ttl: i64| {
+        net.at(minutes);
+        net.borrower.borrow_resource(agent, &id, Some(ttl)).unwrap();
+        sync(&net.hub, &net.borrower);
+    };
+    borrow("old", 0, 1800);
+    borrow("new", 10, 7200);
+    borrow("old", 20, 7200);
+
+    net.at(61);
+    net.owner.sweep().unwrap();
+    net.at(100);
+    let mut cursor = 0;
+    loop {
+        let page = net.hub.pull_for(net.owner.node_id(), cursor, 1).unwrap();
+        net.owner
+            .ingest_page(net.hub.node_id(), &page.events, &page.nodes, page.more)
+            .unwrap();
+        cursor = page.cursor;
+        if page.more {
+            assert!(net.owner.lapsed_for_ms(&rid).unwrap().is_some());
+        } else {
+            break;
+        }
+    }
+    let after = net.owner.resource(&id).unwrap();
+    assert_eq!(after.owner.as_deref(), Some("old@@borrower"));
+    assert_eq!(kinds(&net.owner, "resource.transferred"), 1);
+}
+
+#[test]
+fn a_replayed_borrower_that_released_in_the_same_history_is_not_promoted() {
+    let (net, id, rid) = two_borrowers();
+    net.borrower
+        .borrow_resource("new", &id, Some(7200))
+        .unwrap();
+    sync(&net.hub, &net.borrower);
+    net.at(5);
+    net.borrower
+        .borrow_resource("old", &id, Some(7200))
+        .unwrap();
+    sync(&net.hub, &net.borrower);
+    net.at(10);
+    net.borrower.release_resource("new", &id, false).unwrap();
+    sync(&net.hub, &net.borrower);
+
+    net.at(61);
+    net.owner.sweep().unwrap();
+    assert!(net.owner.lapsed_for_ms(&rid).unwrap().is_some());
+
+    net.at(62);
+    pull(&net.hub, &net.owner);
+    let after = net.owner.resource(&id).unwrap();
+    assert_eq!(after.owner.as_deref(), Some("old@@borrower"));
+    assert_eq!(after.refcount, 1);
+    assert_eq!(kinds(&net.owner, "resource.transferred"), 1);
+}
+
+#[test]
+fn a_replayed_borrow_released_in_the_same_history_leaves_the_resource_lapsed() {
+    let (net, id, rid) = two_borrowers();
+    net.borrower
+        .borrow_resource("old", &id, Some(7200))
+        .unwrap();
+    sync(&net.hub, &net.borrower);
+    net.at(10);
+    net.borrower.release_resource("old", &id, false).unwrap();
+    sync(&net.hub, &net.borrower);
+
+    net.at(61);
+    net.owner.sweep().unwrap();
+    let lapsed = net.owner.lapsed_for_ms(&rid).unwrap();
+    assert!(lapsed.is_some());
+
+    net.at(62);
+    pull(&net.hub, &net.owner);
+    assert_eq!(net.owner.resource(&id).unwrap().status, "lapsed");
+    assert_eq!(kinds(&net.owner, "resource.transferred"), 0);
+    assert!(net.owner.lapsed_for_ms(&rid).unwrap().is_some());
+}
+
 #[test]
 fn a_late_observer_counts_a_lease_that_outlived_its_owner() {
     let (hub, hub_time) = node("hub", START);

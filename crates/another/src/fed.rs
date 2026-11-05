@@ -338,7 +338,7 @@ pub fn sync(store: &Store) -> Result<SyncReport> {
         let resp = signed(store, &agent, &url, "GET", &path, None)?;
         let page: PullResponse = read(resp, "pull")?;
         report.pulled += page.events.len();
-        let r = store.ingest(&hub, &page.events, &page.nodes)?;
+        let r = store.ingest_page(&hub, &page.events, &page.nodes, page.more)?;
         report.applied += r.accepted;
         report.pull_duplicates += r.duplicates;
         report.pull_rejected.extend(r.rejected);
