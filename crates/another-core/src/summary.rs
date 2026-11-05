@@ -615,7 +615,7 @@ impl Store {
             return Ok(None);
         }
         let since = last_ms
-            .filter(|t| now - t <= 2 * 86_400_000)
+            .map(|t| t.max(now - 2 * 86_400_000))
             .unwrap_or(now - 86_400_000);
         let summary = self.daily_summary(Some(Since::Time(since)), None)?;
         let to = sched.to.clone();
