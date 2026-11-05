@@ -36,6 +36,12 @@ Canonical origin: `https://toanother.one`. The existing Pages project is
 independent review; domain and DNS changes need separate authorization. Source
 and capture files, including `og-source.jpg`, stay out of the public allowlist.
 
+The seo2 round is local-preview and draft-PR work only; it does not authorize a
+production deployment. Canonicals describe the intended public URLs. The checker
+validates generated local robots.txt; Cloudflare may prepend managed crawler
+policy to the production response. Local output checks do not prove that managed
+policy matches the source, and no Cloudflare setting is changed by this round.
+
 ## Content and visual review
 
 Product claims come from the repository README and docs; command excerpts come

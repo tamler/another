@@ -6,7 +6,7 @@ Title: Another: a local MCP inbox for independently running coding agents
 
 Draft:
 
-Disclosure: this is Another's project launch.
+Affiliation: this is an announcement on behalf of the Another project.
 
 Another gives coding agents a shared local inbox and resource registry over MCP and a CLI. The aim is to make a handoff between existing sessions explicit: send a request, claim it, reply in a thread and record an acknowledgement.
 

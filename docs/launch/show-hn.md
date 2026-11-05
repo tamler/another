@@ -1,26 +1,13 @@
-# Show HN — draft
+# Show HN — human-authored submission preparation only
 
-Gate: tagged release, working install, human copy review and an available maker to discuss it. Primary [Show HN rules](https://news.ycombinator.com/showhn.html) checked 2026-11-05: submit something runnable, use the prefix, avoid vote requests. Timing: first public launch, while someone can answer.
+Do not paste or AI-edit a submission from this packet. The [HN general guidelines](https://news.ycombinator.com/newsguidelines.html), verified 2026-11-05, prohibit generated submission text and AI-edited comments. The earlier generated first comment has been removed.
 
-Title: Show HN: Another — a local inbox and resource registry for coding agents
+The [Show HN rules](https://news.ycombinator.com/showhn.html) also require work the submitter personally worked on and can discuss. A human maker must write the title and comment themselves, using an existing eligible identity and describing their real involvement. Start the human-written title with the required Show HN prefix. No real name needs to be added to this repository.
 
-URL: https://github.com/tamler/another
+Preparation facts, not submission copy:
+- Runnable repository: https://github.com/tamler/another
+- Installation guide: https://toanother.one/docs/install/
+- Another provides local mail, requests, advisory holds, activity and resource leases over a Rust CLI and MCP.
+- The product does not run an agent team; optional federation's hub can read relayed bodies, and requests stay node-local.
 
-First comment draft:
-
-Another gives coding agents a shared inbox, activity feed, advisory path holds and a registry of resources they can borrow. It is a Rust CLI and MCP server under Apache-2.0.
-
-The problem is the handoff between independent sessions. One agent needs another to review a parser; a third needs to know whether a model server is already running. Another stores that coordination state locally in SQLite. Session hooks announce waiting mail, and MCP tools or CLI commands let agents act on it. It does not launch agents or decide their tasks.
-
-Try it with Rust 1.88 or newer:
-
-```sh
-cargo install --git https://github.com/tamler/another another
-another init
-```
-
-The walkthrough at https://toanother.one/docs/getting-started/ includes a two-agent shell exchange before you connect a client. No account is required. Hook installation is user-global, so preview its plan first.
-
-Optional federation connects machines through a self-hosted hub. The hub can read relayed mail bodies, and requests stay node-local. Path holds are advisory; cleanup requires human confirmation on the resource's owning node.
-
-Feedback on setup friction and handoff failures would be useful, especially from people running different coding clients in the same repository.
+Gate: release/install acceptance, original human text, current rule check and maker availability to answer questions. Recommend the first public launch only after those gates, with separate authorization. Do not solicit votes, comments or coordinated engagement. No submission has been made.

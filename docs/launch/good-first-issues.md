@@ -2,6 +2,8 @@
 
 Authorized destination: tamler/another only. Before creation, check all existing issues for duplicate work. Labels already exist: `documentation`, `good first issue`. These are bounded documentation follow-ups, not product defects or promises. Published issue URLs are recorded in the lane STATUS/DONE, not invented here.
 
+Round-two note for the issue owner: #26–#28 remain newcomer work; no glossary, ambiguity walkthrough or checksum recipe is implemented here. The release-preparation stack changes per-archive .sha256 files to SHA256SUMS. Before accepting #28, reconcile its filename assumptions with the workflow actually selected for release. This note does not edit the live issue or close it.
+
 ## 1. Docs: add a glossary for requests, path holds and resource leases
 
 Body:

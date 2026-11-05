@@ -1,19 +1,11 @@
-# Lobsters — optional technical submission draft
+# Lobsters — eligibility and human preparation notes
 
-[About and guidelines](https://lobste.rs/about) checked 2026-11-05. Computing substance matters; a launch announcement alone is a weak fit. Use only an existing eligible account. Do not request invitations, create an account or solicit votes. Before submission, inspect current tags, duplicate links and self-promotion rules. Timing: after real technical feedback exists.
+No submission or account creation. [Guidelines](https://lobste.rs/about) verified 2026-11-05: users in their first 70 days cannot submit self-promotion; self-promotion should account for less than a quarter of a user's stories and comments in the last year. An existing account without that history cannot use this launch plan. The site also treats content lacking meaningful human authorship as spam, so there is no generated ready-to-submit comment here.
 
-Title: Another: local agent mail, advisory holds and resource leases in Rust
+The human must choose a substantive computing angle, disclose their actual project involvement and write from their own knowledge. Local SQLite coordination, advisory holds and the federation trust boundary are possible technical topics. A product announcement alone can be a poor fit.
 
-URL: https://github.com/tamler/another
+Source to assess: https://github.com/tamler/another
 
-Suggested tags, only if present and fitting: rust, programming, release.
+[Current tags](https://lobste.rs/tags): rust and show fit a Rust project; building-ai-tooling may fit a discussion of the tool's design. Use release only for an actual release. programming is a fallback when no specific tag fits, not a default extra tag. vibecoding was marked inactive when checked and should not be selected.
 
-Comment draft:
-
-Disclosure: this submission is about Another's own project.
-
-Another stores coordination between independently run coding agents in local SQLite: threaded mail, requests with owners, expiring path holds and resource leases. A CLI and MCP server expose the same local state, while lifecycle hooks provide short digests.
-
-The design choices worth discussing are advisory leases rather than workspace locks, explicit human confirmation for owning-node cleanup, and optional signed-event federation. The hub can read relayed mail bodies, and requests are node-local.
-
-The source and design decisions are linked in the repository. If a release announcement is not substantive enough under the current guidelines, skip this submission and write a technical design article after real operational evidence is available.
+Timing: optional, after release/install feedback and only through an eligible existing account. Verify duplicates and rules again before a separately authorized human submission; never request invitations or votes.

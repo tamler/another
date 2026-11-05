@@ -4,7 +4,7 @@
 
 Comment draft:
 
-Sharing Another, a project for coordinating Claude Code with other coding sessions. Disclosure: this is the project's launch.
+Sharing Another, a project for coordinating Claude Code with other coding sessions. Affiliation: posting on behalf of the Another project.
 
 It adds a local inbox, activity feed and resource registry over MCP and a Rust CLI. Claude Code hooks announce waiting mail at session start and on prompts; another client, such as Codex, can receive and reply through the same inbox. It is Apache-2.0, uses local SQLite and has no product telemetry.
 
