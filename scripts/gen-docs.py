@@ -161,7 +161,9 @@ def mcp_markdown(tools):
         "|---|---|",
     ]
     for t in tools:
-        first = " ".join(t.get("description", "").split()).split(". ")[0].rstrip(".")
+        description = " ".join(t.get("description", "").split())
+        # The first sentence; "e.g." and "i.e." don't end one.
+        first = re.split(r"(?<!e\.g)(?<!i\.e)\. ", description)[0].rstrip(".")
         cell = first.replace("|", "\\|")
         out.append(f"| [`{t['name']}`](#{t['name']}) | {cell} |")
     for t in tools:
