@@ -276,6 +276,30 @@ fn require_named(entry: &NodeEntry) -> Result<()> {
 }
 
 /// Record (or confirm) another node. Keys are pinned on first sight.
+/// Rename a known node, and the addresses of its agents with it (they end in `@<node name>`),
+/// so a peer that synced before the rename agrees with one that synced after it.
+fn rename_foreign_node(tx: &Tx<'_>, node_id: &str, name: &str) -> Result<()> {
+    let old: Option<String> = tx
+        .query_row(
+            "SELECT display_name FROM nodes WHERE node_id = ?1",
+            [node_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    tx.execute(
+        "UPDATE nodes SET display_name = ?2 WHERE node_id = ?1",
+        params![node_id, name],
+    )?;
+    if let Some(old) = old.filter(|old| old != name) {
+        tx.execute(
+            "UPDATE agents SET address = substr(address, 1, length(address) - length(?2)) || ?3
+             WHERE node_id = ?1 AND substr(address, -length(?2) - 1) = '@' || ?2",
+            params![node_id, old, name],
+        )?;
+    }
+    Ok(())
+}
+
 fn upsert_node(tx: &Tx<'_>, node: &NodeEntry) -> Result<()> {
     if node.node_id == tx.node_id {
         return Ok(());
@@ -295,10 +319,7 @@ fn upsert_node(tx: &Tx<'_>, node: &NodeEntry) -> Result<()> {
         ))),
         Some((name, _)) => {
             if name != node.display_name {
-                tx.execute(
-                    "UPDATE nodes SET display_name = ?2 WHERE node_id = ?1",
-                    params![node.node_id, node.display_name],
-                )?;
+                rename_foreign_node(tx, &node.node_id, &node.display_name)?;
             }
             tx.execute(
                 "UPDATE nodes SET public_key = ?2 WHERE node_id = ?1 AND public_key IS NULL",
@@ -440,7 +461,13 @@ fn verify_wire(conn: &Connection, ev: &WireEvent) -> Result<()> {
 }
 
 /// Permission checks the hub applies to events a spoke pushes.
-fn spoke_may_publish(perms: &[Perm], from: &str, ev: &WireEvent, payload: &Value) -> Result<()> {
+fn spoke_may_publish(
+    conn: &Connection,
+    perms: &[Perm],
+    from: &str,
+    ev: &WireEvent,
+    payload: &Value,
+) -> Result<()> {
     if ev.node_id != from {
         return Err(Error::Forbidden(
             "spokes may only push events they authored".into(),
@@ -464,7 +491,225 @@ fn spoke_may_publish(perms: &[Perm], from: &str, ev: &WireEvent, payload: &Value
             ))
         }
         _ => Ok(()),
+    }?;
+    if ev.kind == "resource.borrowed"
+        && payload.get("agent_id").and_then(Value::as_str).is_some()
+        && payload.get("lease_id").and_then(Value::as_str).is_some()
+    {
+        if let Some(id) = payload.get("resource_id").and_then(Value::as_str) {
+            let owner = row_owner(conn, "resources", "resource_id", id)?
+                .ok_or_else(|| Error::NotFound(format!("unknown borrowed resource {id}")))?;
+            if owner != from && !perms.contains(&Perm::BorrowResource) {
+                return Err(Error::Forbidden(
+                    "this node may not borrow resources of other nodes".into(),
+                ));
+            }
+        }
     }
+    Ok(())
+}
+
+// Table and column names below are code constants, never wire values. Unknown dependencies
+// retain the existing projection no-op behavior; known IDs cannot change their authority.
+fn row_owner(conn: &Connection, table: &str, column: &str, id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT node_id FROM {table} WHERE {column} = ?1"),
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+fn require_origin(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    id: Option<&str>,
+    origin: &str,
+) -> Result<()> {
+    if let Some(id) = id {
+        if row_owner(conn, table, column, id)?.is_some_and(|n| n != origin) {
+            return Err(Error::Forbidden(format!(
+                "origin node {origin} does not own {table} {id}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn check_lease_identity(
+    conn: &Connection,
+    resource_id: &str,
+    lease_id: Option<&str>,
+    agent_id: Option<&str>,
+    origin: &str,
+) -> Result<()> {
+    require_origin(conn, "agents", "agent_id", agent_id, origin)?;
+    let Some(lease_id) = lease_id else {
+        return Ok(());
+    };
+    let existing: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT node_id, resource_id, agent_id FROM resource_leases WHERE lease_id = ?1",
+            [lease_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    if existing.is_some_and(|(node, resource, agent)| {
+        node != origin || resource != resource_id || Some(agent.as_str()) != agent_id
+    }) {
+        return Err(Error::Forbidden(
+            "lease identity belongs to another resource or agent".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn check_node_rename(conn: &Connection, origin: &str, name: &str) -> Result<()> {
+    validate_node_name(name)?;
+    let taken = conn
+        .query_row(
+            "SELECT 1 FROM nodes WHERE display_name = ?1 AND node_id != ?2",
+            params![name, origin],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if taken {
+        return Err(Error::Conflict(format!(
+            "another known node is already named {name:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_slug(slug: &str) -> Result<()> {
+    if slug.is_empty()
+        || !slug
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        return Err(Error::Invalid(
+            "invalid project slug in directory event".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate authority before the event enters the relay log. This also runs on hub relays:
+/// the transport peer's identity or grants cannot substitute for the signed origin.
+fn validate_foreign_authority(conn: &Connection, ev: &WireEvent, p: &Value) -> Result<()> {
+    let s = |key: &str| p.get(key).and_then(Value::as_str);
+    let origin = ev.node_id.as_str();
+    let agent = |id| require_origin(conn, "agents", "agent_id", id, origin);
+    let project = |id| require_origin(conn, "projects", "project_id", id, origin);
+    match ev.kind.as_str() {
+        "node.renamed" => {
+            if let Some(name) = s("display_name") {
+                check_node_rename(conn, origin, name)?;
+            }
+        }
+        "project.ensured" => {
+            project(s("project_id"))?;
+            if let Some(slug) = s("slug") {
+                validate_slug(slug)?;
+            }
+        }
+        "agent.registered" => {
+            agent(s("agent_id"))?;
+            project(s("project_id"))?;
+            if let Some(name) = s("name") {
+                crate::identity::validate_name(name)?;
+            }
+        }
+        "session.started"
+        | "session.ended"
+        | "delivery.read"
+        | "delivery.acked"
+        | "lane.report_proposed" => agent(s("agent_id"))?,
+        "message.sent" => {
+            agent(s("sender_id"))?;
+            require_origin(conn, "messages", "message_id", s("message_id"), origin)?;
+        }
+        "hold.acquired" | "hold.updated" => {
+            require_origin(conn, "holds", "hold_id", s("hold_id"), origin)?;
+            project(s("project_id"))?;
+            agent(s("agent_id"))?;
+        }
+        "lane.created" => {
+            require_origin(conn, "lanes", "lane_id", s("lane_id"), origin)?;
+            project(s("project_id"))?;
+            agent(s("lead_id"))?;
+            agent(s("created_by"))?;
+        }
+        "lane.updated" => {
+            if let Some(id) = s("lane_id") {
+                if row_owner(conn, "lanes", "lane_id", id)?.as_deref() == Some(origin) {
+                    agent(s("lead_id"))?;
+                }
+            }
+        }
+        "decision.created" => {
+            require_origin(conn, "decisions", "decision_id", s("decision_id"), origin)?;
+            require_origin(
+                conn,
+                "remote_decisions",
+                "decision_id",
+                s("decision_id"),
+                origin,
+            )?;
+            project(s("project_id"))?;
+            agent(s("asker_id"))?;
+            require_origin(conn, "lanes", "lane_id", s("lane_id"), origin)?;
+        }
+        "resource.registered" | "resource.adopted" => {
+            require_origin(conn, "resources", "resource_id", s("resource_id"), origin)?;
+            if ev.kind == "resource.registered" {
+                project(s("project_id"))?;
+            }
+            let who = s(if ev.kind == "resource.registered" {
+                "owner_id"
+            } else {
+                "agent_id"
+            });
+            if let Some(id) = s("resource_id") {
+                check_lease_identity(conn, id, s("lease_id"), who, origin)?;
+            }
+        }
+        "resource.borrowed" => {
+            if let (Some(id), Some(lease), Some(who)) =
+                (s("resource_id"), s("lease_id"), s("agent_id"))
+            {
+                check_lease_identity(conn, id, Some(lease), Some(who), origin)?;
+                if let Some(owner) = row_owner(conn, "resources", "resource_id", id)? {
+                    if owner != origin && s("resource_node") != Some(owner.as_str()) {
+                        return Err(Error::Forbidden(
+                            "borrow routing hint does not match resource owner".into(),
+                        ));
+                    }
+                }
+            }
+        }
+        "resource.transferred" => {
+            if let Some(lease) = s("lease_id") {
+                let owner: Option<String> = conn.query_row(
+                    "SELECT r.node_id FROM resource_leases l JOIN resources r ON r.resource_id = l.resource_id WHERE l.lease_id = ?1",
+                    [lease], |r| r.get(0),
+                ).optional()?;
+                if owner.is_some_and(|n| n != origin) {
+                    return Err(Error::Forbidden(
+                        "only a resource's node may transfer its ownership".into(),
+                    ));
+                }
+            }
+        }
+        "resource.stopped" | "resource.reaped" => {
+            require_origin(conn, "resources", "resource_id", s("resource_id"), origin)?;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn agent_exists(conn: &Connection, id: &str) -> Result<bool> {
@@ -483,18 +728,74 @@ fn project_exists(conn: &Connection, id: &str) -> Result<bool> {
         .is_some())
 }
 
+/// The hub decides whether a borrow or renewal pushed to it is in time, at its own clock, and
+/// refuses a late one before it can be stored or relayed. Receivers of its relays replay what it
+/// admitted without a clock check, so every replay of one history gives the same leases.
+/// A renewal is refused whole, because a stored event replays whole.
+fn check_admission(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
+    let s = |key: &str| p.get(key).and_then(Value::as_str);
+    let origin = ev.node_id.as_str();
+    match ev.kind.as_str() {
+        "resource.borrowed" => {
+            let (Some(rid), Some(_), Some(_)) = (s("resource_id"), s("lease_id"), s("agent_id"))
+            else {
+                return Ok(());
+            };
+            let row: Option<(String, String, Option<i64>, bool)> = tx
+                .query_row(
+                    "SELECT mode, node_id, released_at,
+                       EXISTS (SELECT 1 FROM resource_leases l WHERE l.resource_id = resources.resource_id
+                         AND l.released_at IS NULL AND l.expires_at > ?2)
+                     FROM resources WHERE resource_id = ?1",
+                    params![rid, tx.now],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?;
+            if let Some((mode, owner, released, live)) = row {
+                if owner != origin && (mode != "shared" || released.is_some() || !live) {
+                    return Err(Error::Conflict(
+                        "this resource can't take a borrower: it needs to be shared, not stopped, and have a live lease".into(),
+                    ));
+                }
+            }
+        }
+        "resource.renewed" => {
+            for id in strings(p, "lease_ids") {
+                let stale = tx
+                    .query_row(
+                        "SELECT 1 FROM resource_leases l JOIN resources r ON r.resource_id = l.resource_id
+                         WHERE l.lease_id = ?1 AND l.released_at IS NULL AND l.expires_at <= ?2
+                           AND r.node_id != ?3",
+                        params![id, tx.now, origin],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some();
+                if stale {
+                    return Err(Error::Conflict(format!(
+                        "lease {id} had expired when this renewal arrived"
+                    )));
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Fold a foreign event into local read models. Idempotent; unknown kinds are only stored.
-fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
+/// `relayed` means the paired hub delivered it, so that hub has already admitted it.
+fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value, relayed: bool) -> Result<()> {
     let s = |k: &str| p.get(k).and_then(Value::as_str).map(str::to_string);
     let ts = ev.ts;
     let origin = ev.node_id.as_str();
     match ev.kind.as_str() {
-        "node.created" | "node.renamed" => {
+        // The pinned directory already identifies this node. First-boot names are historical
+        // (usually "local") and must not overwrite its paired/current name during catch-up.
+        "node.created" => {}
+        "node.renamed" => {
             if let Some(name) = s("display_name") {
-                tx.execute(
-                    "UPDATE nodes SET display_name = ?2 WHERE node_id = ?1",
-                    params![origin, name],
-                )?;
+                rename_foreign_node(tx, origin, &name)?;
             }
         }
         "project.ensured" => {
@@ -508,7 +809,7 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
             let Some(agent_id) = s("agent_id") else {
                 return Ok(());
             };
-            let name = s("name").unwrap_or_default();
+            let Some(name) = s("name") else { return Ok(()) };
             let project_id = s("project_id").filter(|id| project_exists(tx, id).unwrap_or(false));
             let slug: Option<String> = match &project_id {
                 Some(id) => tx
@@ -525,6 +826,9 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                 [origin],
                 |r| r.get(0),
             )?;
+            if let Some(slug) = &slug {
+                validate_slug(slug)?;
+            }
             let address = format!("{name}@{}@{node_name}", slug.unwrap_or_default());
             tx.execute(
                 "INSERT INTO agents (agent_id, node_id, project_id, name, program, model, description,
@@ -533,7 +837,8 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                  ON CONFLICT(agent_id) DO UPDATE SET program = excluded.program,
                    model = excluded.model, description = excluded.description,
                    updated_at = excluded.updated_at, last_seen_at = excluded.last_seen_at,
-                   status = 'active', address = excluded.address",
+                   status = 'active', address = excluded.address
+                 WHERE agents.node_id = excluded.node_id",
                 params![
                     agent_id,
                     origin,
@@ -555,15 +860,15 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                 "offline"
             };
             tx.execute(
-                "UPDATE agents SET status = ?2, last_seen_at = ?3 WHERE agent_id = ?1",
-                params![s("agent_id"), status, ts],
+                "UPDATE agents SET status = ?2, last_seen_at = ?3 WHERE agent_id = ?1 AND node_id = ?4",
+                params![s("agent_id"), status, ts, origin],
             )?;
         }
         "message.sent" => {
             let (Some(message_id), Some(sender)) = (s("message_id"), s("sender_id")) else {
                 return Ok(());
             };
-            if !agent_exists(tx, &sender)? {
+            if row_owner(tx, "agents", "agent_id", &sender)?.as_deref() != Some(origin) {
                 return Err(Error::NotFound(format!("unknown sender agent {sender}")));
             }
             let reply_to = s("reply_to").filter(|id| {
@@ -603,17 +908,20 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                     .get("agent_id")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                if !agent_exists(tx, agent)? {
+                let Some(recipient_node) = row_owner(tx, "agents", "agent_id", agent)? else {
                     continue;
-                }
+                };
                 tx.execute(
                     "INSERT OR IGNORE INTO deliveries (message_id, agent_id, node_id, role)
-                     VALUES (?1, ?2, ?3, ?4)",
+                     SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (
+                       SELECT 1 FROM messages WHERE message_id = ?1 AND node_id = ?5 AND sender_id = ?6)",
                     params![
                         message_id,
                         agent,
-                        r.get("node_id").and_then(Value::as_str).unwrap_or(origin),
-                        r.get("role").and_then(Value::as_str).unwrap_or("to")
+                        recipient_node,
+                        r.get("role").and_then(Value::as_str).unwrap_or("to"),
+                        origin,
+                        sender
                     ],
                 )?;
             }
@@ -623,8 +931,9 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
             tx.execute(
                 "UPDATE deliveries SET read_at = coalesce(read_at, ?3),
                    acked_at = CASE WHEN ?4 THEN coalesce(acked_at, ?3) ELSE acked_at END
-                 WHERE message_id = ?1 AND agent_id = ?2",
-                params![s("message_id"), s("agent_id"), ts, acked],
+                 WHERE message_id = ?1 AND agent_id = ?2
+                   AND agent_id IN (SELECT agent_id FROM agents WHERE node_id = ?5)",
+                params![s("message_id"), s("agent_id"), ts, acked, origin],
             )?;
         }
         "hold.acquired" | "hold.updated" => {
@@ -661,7 +970,8 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                  ON CONFLICT(hold_id) DO UPDATE SET exclusive = excluded.exclusive,
                    reason = excluded.reason, ttl_seconds = excluded.ttl_seconds,
                    renewed_at = excluded.renewed_at, expires_at = excluded.expires_at,
-                   lane_id = excluded.lane_id",
+                   lane_id = excluded.lane_id
+                 WHERE holds.node_id = excluded.node_id",
                 params![hold_id, origin, project, agent, s("pattern"), exclusive, s("reason"), ttl, ts, expires, lane_id],
             )?;
         }
@@ -702,13 +1012,20 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                 Some(c) => Some(c),
                 None => tx
                     .query_row(
-                        "SELECT agent_id FROM agents WHERE address = ?1",
-                        [&ev.actor],
+                        "SELECT agent_id FROM agents WHERE address = ?1 AND node_id = ?2",
+                        params![ev.actor, origin],
                         |r| r.get(0),
                     )
                     .optional()?,
-            }
-            .unwrap_or_else(|| lead.clone());
+            };
+            let creator = match creator {
+                Some(creator) => Some(creator),
+                None => (row_owner(tx, "agents", "agent_id", &lead)?.as_deref() == Some(origin))
+                    .then(|| lead.clone()),
+            };
+            let Some(creator) = creator else {
+                return Ok(());
+            };
             if !project_exists(tx, &project)?
                 || !agent_exists(tx, &lead)?
                 || !agent_exists(tx, &creator)?
@@ -748,7 +1065,10 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
             )?;
         }
         "lane.updated" => {
-            if let Some(lead) = s("lead_id").filter(|l| agent_exists(tx, l).unwrap_or(false)) {
+            if let Some(lead) = s("lead_id") {
+                if row_owner(tx, "agents", "agent_id", &lead)?.as_deref() != Some(origin) {
+                    return Ok(());
+                }
                 tx.execute(
                     "UPDATE lanes SET lead_id = ?2, updated_at = ?3 WHERE lane_id = ?1 AND node_id = ?4",
                     params![s("lane_id"), lead, ts, origin],
@@ -831,14 +1151,18 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                 return Ok(());
             };
             // The owning node decides: no borrowers on exclusive or released resources.
-            let ok: Option<(String, Option<i64>)> = tx
+            let ok: Option<(String, String, Option<i64>, bool)> = tx
                 .query_row(
-                    "SELECT mode, released_at FROM resources WHERE resource_id = ?1",
-                    [&rid],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    "SELECT mode, node_id, released_at,
+                       EXISTS (SELECT 1 FROM resource_leases l WHERE l.resource_id = resources.resource_id
+                         AND l.released_at IS NULL AND l.expires_at > ?2)
+                     FROM resources WHERE resource_id = ?1",
+                    params![rid, tx.now],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
                 .optional()?;
-            if matches!(ok, Some((ref mode, None)) if mode == "shared") {
+            if matches!(ok, Some((ref mode, ref owner, None, live)) if mode == "shared" && (relayed || owner == origin || live))
+            {
                 foreign_lease(
                     tx,
                     &rid,
@@ -857,8 +1181,9 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                     "UPDATE resource_leases SET renewed_at = ?2, expiry_warned_at = NULL,
                        ttl_seconds = coalesce(?4, ttl_seconds),
                        expires_at = ?2 + coalesce(?4, ttl_seconds) * 1000
-                     WHERE lease_id = ?1 AND node_id = ?3 AND released_at IS NULL",
-                    params![id, ts, origin, p.get("ttl_seconds").and_then(Value::as_i64)],
+                     WHERE lease_id = ?1 AND node_id = ?3 AND released_at IS NULL
+                       AND (?6 OR expires_at > ?5 OR resource_id IN (SELECT resource_id FROM resources WHERE node_id = ?3))",
+                    params![id, ts.min(tx.now), origin, foreign_ttl(p), tx.now, relayed],
                 )?;
             }
         }
@@ -885,8 +1210,9 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
         }
         "resource.transferred" => {
             tx.execute(
-                "UPDATE resource_leases SET role = 'owner' WHERE lease_id = ?1",
-                params![s("lease_id")],
+                "UPDATE resource_leases SET role = 'owner' WHERE lease_id = ?1
+                   AND resource_id IN (SELECT resource_id FROM resources WHERE node_id = ?2)",
+                params![s("lease_id"), origin],
             )?;
         }
         "resource.stopped" | "resource.reaped" => {
@@ -899,14 +1225,25 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                 )?;
                 tx.execute(
                     "UPDATE resource_leases SET released_at = ?2, release_reason = 'stopped'
-                     WHERE resource_id = ?1 AND released_at IS NULL",
-                    params![rid, ts],
+                     WHERE resource_id = ?1 AND released_at IS NULL
+                       AND EXISTS (SELECT 1 FROM resources WHERE resource_id = ?1 AND node_id = ?3)",
+                    params![rid, ts, origin],
                 )?;
             }
         }
         _ => {}
     }
     Ok(())
+}
+
+/// The TTL an event claims, within the limits local leases get.
+fn foreign_ttl(p: &Value) -> Option<i64> {
+    p.get("ttl_seconds").and_then(Value::as_i64).map(|ttl| {
+        ttl.clamp(
+            crate::resources::MIN_LEASE_TTL_SECONDS,
+            crate::resources::MAX_LEASE_TTL_SECONDS,
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -923,22 +1260,22 @@ fn foreign_lease(
     let (Some(lease_id), Some(agent_id)) = (lease_id, agent_id) else {
         return Ok(());
     };
-    if !agent_exists(tx, &agent_id)? {
+    check_lease_identity(tx, resource_id, Some(&lease_id), Some(&agent_id), origin)?;
+    if row_owner(tx, "agents", "agent_id", &agent_id)?.as_deref() != Some(origin) {
         return Ok(());
     }
-    let exists = tx
-        .query_row(
-            "SELECT 1 FROM resources WHERE resource_id = ?1",
-            [resource_id],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some();
-    if !exists {
+    let Some(owner) = row_owner(tx, "resources", "resource_id", resource_id)? else {
         return Ok(());
+    };
+    if role == "owner" && owner != origin {
+        return Err(Error::Forbidden(
+            "only the resource's node may create an owner lease".into(),
+        ));
     }
-    let ttl = p.get("ttl_seconds").and_then(Value::as_i64).unwrap_or(1800);
-    tx.execute(
+    let ttl = foreign_ttl(p).unwrap_or(1800);
+    // The signed time and TTL are the sender's claim: keep them to this node's clock and limit.
+    let expires = ts.min(tx.now) + ttl * 1000;
+    let inserted = tx.execute(
         "INSERT OR IGNORE INTO resource_leases (lease_id, resource_id, node_id, agent_id, role,
            ttl_seconds, created_at, renewed_at, expires_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8)",
@@ -950,13 +1287,15 @@ fn foreign_lease(
             role,
             ttl,
             ts,
-            ts + ttl * 1000
+            expires
         ],
     )?;
-    tx.execute(
-        "UPDATE resources SET lapsed_at = NULL WHERE resource_id = ?1",
-        [resource_id],
-    )?;
+    if inserted != 0 && role == "owner" {
+        tx.execute(
+            "UPDATE resources SET lapsed_at = NULL WHERE resource_id = ?1 AND node_id = ?2",
+            params![resource_id, origin],
+        )?;
+    }
     Ok(())
 }
 
@@ -1407,10 +1746,25 @@ impl Store {
         events: &[WireEvent],
         nodes: &[NodeEntry],
     ) -> Result<IngestReport> {
+        self.ingest_page(from, events, nodes, false)
+    }
+
+    /// `ingest` for one page of a pull. `more` says the hub has further pages, so lapsed resources
+    /// wait to be settled until the last page has been applied.
+    pub fn ingest_page(
+        &self,
+        from: &str,
+        events: &[WireEvent],
+        nodes: &[NodeEntry],
+        more: bool,
+    ) -> Result<IngestReport> {
         self.write(|tx| {
             let Some((role, perms, None)) = peer_row(tx, from)? else {
                 return Err(Error::Forbidden("not a paired node".into()));
             };
+            if role == "spoke" && !nodes.is_empty() {
+                return Err(Error::Forbidden("only the paired hub may supply a node directory".into()));
+            }
             for n in nodes {
                 upsert_node(tx, n)?;
             }
@@ -1431,15 +1785,40 @@ impl Store {
                         continue;
                     }
                 };
-                if role == "spoke" {
-                    if let Err(e) = spoke_may_publish(&perms, from, ev, &payload) {
-                        report.rejected.push(reject(e.to_string()));
-                        continue;
-                    }
+                if role == "spoke" && ev.node_id != from {
+                    report.rejected.push(reject("spokes may only push events they authored".into()));
+                    continue;
                 }
                 if let Err(e) = verify_wire(tx, ev) {
                     report.rejected.push(reject(e.to_string()));
                     continue;
+                }
+                let duplicate = tx.query_row("SELECT 1 FROM events WHERE event_id = ?1", [&ev.event_id], |_| Ok(())).optional()?.is_some();
+                if duplicate {
+                    report.duplicates += 1;
+                    continue;
+                }
+                let relayed = role != "spoke";
+                let allowed = if relayed {
+                    Ok(())
+                } else {
+                    spoke_may_publish(tx, &perms, from, ev, &payload)
+                }
+                .and_then(|()| validate_foreign_authority(tx, ev, &payload))
+                .and_then(|()| {
+                    if relayed {
+                        Ok(())
+                    } else {
+                        check_admission(tx, ev, &payload)
+                    }
+                });
+                match allowed {
+                    Ok(()) => {}
+                    Err(e @ (Error::Forbidden(_) | Error::Invalid(_) | Error::Conflict(_) | Error::NotFound(_))) => {
+                        report.rejected.push(reject(e.to_string()));
+                        continue;
+                    }
+                    Err(e) => return Err(e),
                 }
                 let inserted = tx.execute(
                     "INSERT OR IGNORE INTO events (event_id, node_id, ts, actor, kind, payload, prev_id, sig)
@@ -1450,10 +1829,14 @@ impl Store {
                     report.duplicates += 1;
                     continue;
                 }
-                if let Err(e) = project_foreign(tx, ev, &payload) {
+                if let Err(e) = project_foreign(tx, ev, &payload, relayed) {
                     tracing::warn!(event = %ev.event_id, kind = %ev.kind, error = %e, "could not project foreign event");
                 }
                 report.accepted += 1;
+            }
+            // The completed history decides: a later event can renew an older lease or end a newer one.
+            if role != "spoke" && !more {
+                crate::resources::reopen_after_admission_tx(tx)?;
             }
             Ok(report)
         })
@@ -1463,6 +1846,78 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A signed borrow or renewal can't buy a lease beyond the local limit, whatever TTL and
+    /// timestamp it claims.
+    #[test]
+    fn foreign_leases_keep_to_the_ttl_limit_and_this_nodes_clock() {
+        let (clock, _) = crate::Clock::manual(1_800_000_000_000);
+        let s = Store::open_in_memory(clock).unwrap();
+        let agent = s
+            .register_agent_trusted(crate::RegisterAgent {
+                name: "worker".into(),
+                program: crate::Program::Codex,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+        let resource = s
+            .register_resource(crate::RegisterResource {
+                agent: "worker".into(),
+                kind: crate::ResourceKind::Gpu,
+                name: "pod:a".into(),
+                endpoint: None,
+                port: None,
+                pid: None,
+                project: None,
+                purpose: None,
+                mode: crate::LeaseMode::Shared,
+                ttl_seconds: Some(3600),
+                metadata: None,
+            })
+            .unwrap();
+        let now = s.now();
+        let far = now + 10 * 365 * 86_400_000;
+        let limit = now + crate::resources::MAX_LEASE_TTL_SECONDS * 1000;
+        let huge = json!({ "ttl_seconds": 999_999_999 });
+        let expiry = |tx: &Tx<'_>| -> Result<i64> {
+            Ok(tx.query_row(
+                "SELECT expires_at FROM resource_leases WHERE lease_id = 'FORGED'",
+                [],
+                |r| r.get(0),
+            )?)
+        };
+        s.write(|tx| {
+            foreign_lease(
+                tx,
+                &resource.resource.resource_id,
+                Some("FORGED".into()),
+                Some(agent.agent_id.clone()),
+                "borrower",
+                &huge,
+                far,
+                tx.node_id,
+            )?;
+            assert!(expiry(tx)? <= limit, "borrow past the limit");
+            let renewal = WireEvent {
+                seq: 1,
+                event_id: "E".into(),
+                node_id: tx.node_id.to_string(),
+                ts: far,
+                actor: "worker".into(),
+                kind: "resource.renewed".into(),
+                payload: String::new(),
+                prev_id: None,
+                sig: String::new(),
+            };
+            let p = json!({ "lease_ids": ["FORGED"], "ttl_seconds": 999_999_999 });
+            project_foreign(tx, &renewal, &p, false)?;
+            assert!(expiry(tx)? <= limit, "renewal past the limit");
+            Ok(())
+        })
+        .unwrap();
+    }
 
     #[test]
     fn classification() {

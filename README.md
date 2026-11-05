@@ -160,6 +160,10 @@ Doctor recognizes installed hooks by their executable wrapper commands in hook e
 
 Spend reports count active leases before any cost accrues and across monthly resets.
 
+Federation checks signed event origins against stored object ownership before accepting
+state changes. This prevents new cross-node forgeries; it does not repair rows or remove
+malicious events accepted by an older version.
+
 Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88.
 
 ## Guides

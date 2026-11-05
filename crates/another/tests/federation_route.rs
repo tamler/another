@@ -159,7 +159,7 @@ impl Spoke {
 }
 
 #[test]
-fn bug_the_push_route_accepts_events_that_rewrite_the_hub() {
+fn the_push_route_rejects_events_that_rewrite_the_hub() {
     let hub = start_hub();
     let s = &hub.node.store;
     s.ensure_project("t", "/work/shop").unwrap();
@@ -172,20 +172,17 @@ fn bug_the_push_route_accepts_events_that_rewrite_the_hub() {
     assert_eq!(status, 401);
     assert_eq!(s.agent("alice@shop").unwrap().status, "active");
 
-    // With them, the route takes a spoke's word about a hub agent.
+    // A valid signature does not grant authority over a hub agent.
     let (status, body) = spoke.push(&hub, true, vec![forged]);
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body["accepted"], 1, "{body}");
-    assert_eq!(
-        s.agent("alice@shop").unwrap().status,
-        "offline",
-        "today's behaviour; alice should still be active"
-    );
+    assert_eq!(body["accepted"], 0, "{body}");
+    assert_eq!(body["rejected"].as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(s.agent("alice@shop").unwrap().status, "active");
     hub.stop.cancel();
 }
 
 #[test]
-fn bug_forged_mail_reaches_a_second_spoke_as_the_hubs_agent() {
+fn forged_mail_never_reaches_a_second_spoke_as_the_hubs_agent() {
     let hub = start_hub();
     let s = &hub.node.store;
     s.ensure_project("t", "/work/shop").unwrap();
@@ -216,7 +213,8 @@ fn bug_forged_mail_reaches_a_second_spoke_as_the_hubs_agent() {
             }),
         )],
     );
-    assert_eq!(body["accepted"], 1, "{status}: {body}");
+    assert_eq!(body["accepted"], 0, "{status}: {body}");
+    assert_eq!(body["rejected"].as_array().unwrap().len(), 1, "{body}");
 
     let report = fed::sync(&laptop.store).unwrap();
     assert!(
@@ -225,10 +223,71 @@ fn bug_forged_mail_reaches_a_second_spoke_as_the_hubs_agent() {
         report.pull_rejected
     );
     let inbox = laptop.store.inbox("bob", InboxQuery::default()).unwrap();
-    assert_eq!(inbox.unread, 1, "{inbox:?}");
+    assert_eq!(inbox.unread, 0, "{inbox:?}");
+    assert!(inbox.messages.is_empty());
+    hub.stop.cancel();
+}
+
+#[test]
+fn a_mixed_push_rejects_the_forgery_and_keeps_the_valid_event() {
+    let hub = start_hub();
+    let s = &hub.node.store;
+    s.ensure_project("t", "/work/shop").unwrap();
+    let alice = register(s, "alice", Some("/work/shop"));
+    let spoke = Spoke::paired(&hub);
+    let bad = spoke.event(&hub, "session.ended", json!({ "agent_id": alice.agent_id }));
+    let good = spoke.event(
+        &hub,
+        "agent.registered",
+        json!({ "agent_id": "GOOD", "name": "worker", "program": "codex" }),
+    );
+    let (status, result) = spoke.push(&hub, true, vec![bad.clone(), good]);
+    assert_eq!(status, 200);
+    assert_eq!(result["accepted"], 1, "{result}");
+    assert_eq!(result["rejected"].as_array().unwrap().len(), 1, "{result}");
+    assert_eq!(s.agent("alice@shop").unwrap().status, "active");
+    assert!(s.agent("worker@@evil").is_ok());
+    let observer = node("observer");
+    let code = s.create_invite(&hub.url, &Perm::ALL, 3600).unwrap();
+    fed::join(&observer.store, &code).unwrap();
+    let result = fed::sync(&observer.store).unwrap();
+    assert!(result.pull_rejected.is_empty(), "{result:?}");
+    assert!(observer.store.agent("worker@@evil").is_ok());
+    assert!(observer
+        .store
+        .events(20_000)
+        .unwrap()
+        .iter()
+        .all(|e| e.event_id != bad.event_id));
+    hub.stop.cancel();
+}
+
+#[test]
+fn sync_advances_past_a_rejected_historical_rename_and_does_not_retry_it() {
+    let hub = start_hub();
+    let spoke = node("runner");
+    // These names were set before the spoke knew the hub; only the final name is current.
+    spoke.store.set_node_name("hub").unwrap();
+    spoke.store.set_node_name("runner").unwrap();
+    register(&spoke.store, "worker", None);
+    let code = hub
+        .node
+        .store
+        .create_invite(&hub.url, &Perm::ALL, 3600)
+        .unwrap();
+    fed::join(&spoke.store, &code).unwrap();
+    let first = fed::sync(&spoke.store).unwrap();
+    assert_eq!(first.push_rejected.len(), 1, "{first:?}");
+    assert!(first.push_rejected[0].reason.contains("already named"));
+    assert!(first.pushed > 0);
+    assert!(hub.node.store.agent("worker@@runner").is_ok());
+    let cursor = spoke.store.push_cursor(hub.node.store.node_id()).unwrap();
+    let again = fed::sync(&spoke.store).unwrap();
+    assert_eq!(again.pushed, 0, "{again:?}");
+    assert!(again.push_rejected.is_empty(), "{again:?}");
     assert_eq!(
-        inbox.messages[0].message.from, "alice@shop@hub",
-        "today's behaviour; alice never sent this, and the laptop can't tell"
+        spoke.store.push_cursor(hub.node.store.node_id()).unwrap().0,
+        cursor.0
     );
     hub.stop.cancel();
 }

@@ -33,6 +33,22 @@ The hub grants each spoke a set of permissions at pairing:
 
 The hub enforces permissions on what spokes push, and each node checks them again before sending. A spoke may only push events it authored itself.
 
+Receivers check the signed origin against stored object ownership before accepting a
+state-changing event, including events relayed by the hub. A signature alone does not
+authorize its sender to name another node's agents, holds, mail or resources. Violations
+are reported as rejected events, excluded from the relay log, and skipped without
+stalling synchronization. Borrow permission uses the resource's stored owner. This
+validation is prospective: it does not repair rows or remove malicious events already
+accepted by an older version.
+
+The hub decides whether a borrow or renewal is in time, once, when the borrower pushes
+it, and refuses a late one before storing or relaying it. Other nodes, including a
+resource's owner, follow what the hub relays even if it arrives after the lease's
+local expiry. If that leaves a live lease on a resource its owner had lapsed, the owner
+reopens it and promotes as usual; a lease already expired on arrival changes nothing.
+Only the resource's node can stop it, and a stop outranks any lease. This trusts the
+hub for timing: a compromised hub can make owners accept false leases.
+
 ## Set up
 
 Name each node first; names must be unique across the federation:
