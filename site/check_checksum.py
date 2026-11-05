@@ -89,8 +89,11 @@ def fixture(directory, manifest, tamper=False, listed=True):
         (directory / f"{ARCHIVE}.sha256").write_text(f" {'a' * 64}  {ARCHIVE}\n")
     if manifest == "wrong-tab":
         (directory / f"{ARCHIVE}.sha256").write_text(f"{'a' * 64}\t{ARCHIVE}\n")
-    if manifest == "conflicting":
+    # Both orders: a recipe that trusts only the first or only the last line fails one of these.
+    if manifest == "conflicting-wrong-first":
         (directory / "SHA256SUMS").write_text(f"{'a' * 64}  {ARCHIVE}\n{lines[ARCHIVE]}")
+    if manifest == "conflicting-right-first":
+        (directory / "SHA256SUMS").write_text(f"{lines[ARCHIVE]}{'a' * 64}  {ARCHIVE}\n")
     if manifest == "SHA256SUMS":
         (directory / "SHA256SUMS").write_text("".join(lines[name] for name in sorted(lines)))
     (directory / OTHER).unlink()
@@ -124,7 +127,8 @@ def main():
         ("malformed checksum line", {"manifest": "malformed"}, False),
         ("wrong digest after a leading space", {"manifest": "wrong-leading-space"}, False),
         ("wrong digest after a tab", {"manifest": "wrong-tab"}, False),
-        ("conflicting lines for one archive", {"manifest": "conflicting"}, False),
+        ("conflicting lines, wrong digest first", {"manifest": "conflicting-wrong-first"}, False),
+        ("conflicting lines, right digest first", {"manifest": "conflicting-right-first"}, False),
         ("no checksum file", {"manifest": None}, False),
     ]
     runs = 0
