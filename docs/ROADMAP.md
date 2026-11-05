@@ -41,4 +41,7 @@ These were scoped out of v0.1.0 on purpose and are listed in [SPEC.md](SPEC.md) 
 - **MCP resources/subscribe** for clients that act on it. Hooks remain the delivery guarantee.
 - **Web UI or TUI**, a pre-commit hold guard, and auto-reap policies. Reaping stays human-confirmed.
 - **Cross-repo contact directory**, an A2A bridge and Beads linkage. Requests stay inside Another for now.
+
+Not in SPEC or DECISIONS, and also not covered in 0.1.0:
+
 - **Windows** binaries and a Windows background service. Releases cover macOS and Linux.
