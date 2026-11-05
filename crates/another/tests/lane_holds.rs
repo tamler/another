@@ -373,6 +373,12 @@ fn hold_check_output_and_lane_views_know_about_the_lane() {
     let text = String::from_utf8_lossy(&same.stdout);
     assert!(text.contains("same lane"), "{text}");
     assert_eq!(check(&[]).status.code(), Some(3));
+    // JSON keeps the overlap too, flagged as not blocking.
+    let json = check(&["--lane", "api", "--json"]);
+    assert!(json.status.success());
+    let listed: Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+    assert_eq!(listed[0]["same_lane"], true, "{listed}");
 
     // Same-lane warnings don't claim the holder is on another machine.
     let acquired = env.ok(&[
