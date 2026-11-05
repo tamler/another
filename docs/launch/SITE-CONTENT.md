@@ -43,3 +43,7 @@ Windows and WSL; x86_64 Linux; a clean Mac; a tunnel or TLS in front of a hub; t
 
 - **Remote borrow by name:** `another borrow kind:name` reports `no registered resource` for a resource on another node, while its ID works. `docs/RESOURCES.md` says either form addresses a resource. The two-machines guide documents the ID form. It should be corrected there if the behavior is fixed.
 - **Reap and shell access:** `docs/RESOURCES.md` says agents cannot reap. That holds for MCP. The CLI's `--confirm` can't tell who is typing, so an agent with shell access could run it. The FAQ and resource guide say this plainly.
+
+## Left as is
+
+`docs/WAKE.md` and `another wake --help` still describe the wake skip rule as "no open requests". The code also counts stale requests and ones the agent has claimed, as the site pages now say.
