@@ -514,20 +514,65 @@ fn check_hooks(opts: &DoctorOptions) -> Vec<Check> {
     out
 }
 
-/// Every `command` string in a client config that runs Another's wrapper.
+/// Installer-shaped hook commands that directly run Another's wrapper.
 fn our_commands(v: &Value, out: &mut Vec<String>) {
-    match v {
-        Value::Object(m) => {
-            for (k, x) in m {
-                match x {
-                    Value::String(c) if k == "command" && c.contains(MARKER) => out.push(c.clone()),
-                    _ => our_commands(x, out),
+    if let Some(events) = v.get("hooks").and_then(Value::as_object) {
+        for groups in events.values() {
+            for group in groups.as_array().into_iter().flatten() {
+                for hook in group
+                    .get("hooks")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if hook.get("type").and_then(Value::as_str) == Some("command") {
+                        if let Some(command) = hook.get("command").and_then(Value::as_str) {
+                            if wrapper_path(command).is_some() {
+                                out.push(command.to_string());
+                            }
+                        }
+                    }
                 }
             }
         }
-        Value::Array(a) => a.iter().for_each(|x| our_commands(x, out)),
-        _ => {}
     }
+}
+
+/// Decode the installer's `sh_quote` form or a plain absolute first word, without
+/// evaluating shell syntax. Concatenated quoted segments preserve literal apostrophes.
+fn wrapper_path(command: &str) -> Option<PathBuf> {
+    let command = command.trim_start_matches([' ', '\t', '\n']);
+    let word = if let Some(mut rest) = command.strip_prefix('\'') {
+        let mut word = String::new();
+        loop {
+            let (part, tail) = rest.split_once('\'')?;
+            word.push_str(part);
+            if let Some(next) = tail.strip_prefix("\\''") {
+                word.push('\'');
+                rest = next;
+            } else {
+                if !tail.is_empty() && !tail.starts_with([' ', '\t', '\n']) {
+                    return None;
+                }
+                break;
+            }
+        }
+        word
+    } else {
+        let word = command.split([' ', '\t', '\n']).next()?;
+        if word.contains([
+            '\'', '"', '\\', ';', '&', '|', '<', '>', '(', ')', '$', '`', '*', '?', '[', ']', '{',
+            '}',
+        ]) {
+            return None;
+        }
+        word.to_string()
+    };
+    if word.ends_with('/') || word.ends_with("/.") {
+        return None;
+    }
+    let path = PathBuf::from(word);
+    (path.is_absolute() && path.ends_with(MARKER)).then_some(path)
 }
 
 /// The wrapper paths Another's hook commands run: the first shell word of each command
@@ -540,14 +585,10 @@ fn wrapper_paths(text: &str) -> Vec<PathBuf> {
     our_commands(&v, &mut cmds);
     let mut out: Vec<PathBuf> = Vec::new();
     for c in cmds {
-        let c = c.trim_start();
-        let word = match c.strip_prefix('\'') {
-            Some(rest) => rest.split('\'').next().unwrap_or_default().to_string(),
-            None => c.split_whitespace().next().unwrap_or_default().to_string(),
-        };
-        let p = PathBuf::from(word);
-        if p.ends_with(MARKER) && !out.contains(&p) {
-            out.push(p);
+        if let Some(p) = wrapper_path(&c) {
+            if !out.contains(&p) {
+                out.push(p);
+            }
         }
     }
     out
