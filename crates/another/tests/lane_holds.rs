@@ -311,6 +311,144 @@ fn pre_edit_holds_files_and_denies_other_lanes() {
 }
 
 #[test]
+fn hold_check_output_and_lane_views_know_about_the_lane() {
+    let env = Env::new();
+    let repo = env.repo.to_str().unwrap();
+    for name in ["claude", "helper"] {
+        env.ok(&[
+            "agent",
+            "register",
+            name,
+            "--program",
+            "claude",
+            "--project",
+            repo,
+        ]);
+    }
+    env.ok(&["agent", "register", "manager", "--program", "grok_bot"]);
+    env.ok(&[
+        "lane",
+        "create",
+        "api",
+        "--agent",
+        "manager",
+        "-p",
+        repo,
+        "--lead",
+        "claude@shop",
+    ]);
+    env.ok(&[
+        "hold",
+        "acquire",
+        "src/a.rs",
+        "--shared",
+        "--agent",
+        "claude@shop",
+        "-p",
+        repo,
+        "--lane",
+        "api",
+    ]);
+
+    // A lane-mate's check agrees with what acquire would do.
+    let check = |extra: &[&str]| {
+        let mut args = vec![
+            "hold",
+            "check",
+            "src/a.rs",
+            "--agent",
+            "helper@shop",
+            "-p",
+            repo,
+        ];
+        args.extend_from_slice(extra);
+        env.cmd(&args).stdin(Stdio::null()).output().unwrap()
+    };
+    let same = check(&["--lane", "api"]);
+    assert!(
+        same.status.success(),
+        "{}",
+        String::from_utf8_lossy(&same.stderr)
+    );
+    let text = String::from_utf8_lossy(&same.stdout);
+    assert!(text.contains("same lane"), "{text}");
+    assert_eq!(check(&[]).status.code(), Some(3));
+
+    // Same-lane warnings don't claim the holder is on another machine.
+    let acquired = env.ok(&[
+        "hold",
+        "acquire",
+        "src/a.rs",
+        "--agent",
+        "helper@shop",
+        "-p",
+        repo,
+        "--lane",
+        "api",
+    ]);
+    assert!(acquired.contains("same lane"), "{acquired}");
+    assert!(!acquired.contains("another node"), "{acquired}");
+
+    // The lane's live holds appear in both human views.
+    let shown = env.ok(&["lane", "show", "api"]);
+    assert!(shown.contains("src/a.rs"), "{shown}");
+    let markdown = env.ok(&["lane", "show", "api", "--markdown"]);
+    assert!(markdown.contains("src/a.rs"), "{markdown}");
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_edits_respect_holds_on_the_alias_and_ignore_outside_targets() {
+    let env = Env::new();
+    let repo = env.repo.to_str().unwrap();
+    std::fs::create_dir_all(env.repo.join("src")).unwrap();
+    std::fs::write(env.repo.join("src/real.rs"), "x").unwrap();
+    std::os::unix::fs::symlink("real.rs", env.repo.join("src/link.rs")).unwrap();
+    let outside = env.user.join("outside.txt");
+    std::fs::write(&outside, "x").unwrap();
+    std::os::unix::fs::symlink(&outside, env.repo.join("src/out")).unwrap();
+
+    let input = |p: &str| {
+        HookInput::parse(&json!({ "tool_input": { "file_path": env.repo.join(p) } }).to_string())
+    };
+    let mut files = edited_files(&input("src/link.rs"), &env.repo, &env.repo);
+    files.sort();
+    assert_eq!(files, vec!["src/link.rs", "src/real.rs"]);
+    assert!(edited_files(&input("src/out"), &env.repo, &env.repo).is_empty());
+
+    for name in ["claude", "codex"] {
+        env.ok(&[
+            "agent",
+            "register",
+            name,
+            "--program",
+            name,
+            "--project",
+            repo,
+        ]);
+    }
+    env.ok(&[
+        "hold",
+        "acquire",
+        "src/link.rs",
+        "--agent",
+        "codex@shop",
+        "-p",
+        repo,
+    ]);
+    let denied = env.pre_edit(
+        "claude",
+        "claude@shop",
+        json!({
+            "cwd": repo,
+            "tool_name": "Edit",
+            "tool_input": { "file_path": env.repo.join("src/link.rs") },
+        }),
+    );
+    assert!(denied.contains("deny"), "{denied:?}");
+}
+
+#[test]
 fn parses_edit_payloads() {
     let root = Path::new("/w/shop");
     let input = |v: Value| HookInput::parse(&v.to_string());

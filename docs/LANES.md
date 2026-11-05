@@ -49,7 +49,7 @@ Every report is stored on the lane and also **mailed** to the lane's counterpart
 
 ## Path holds and lanes
 
-**Which lane a hold is for:** the `lane` argument of `hold_paths`, or `another hold acquire --lane` (defaults to `$ANOTHER_LANE`), looked up in the hold's project only; another project's lane is an unknown lane. Without one, it is the single open lane the agent leads in that project. `-` means no lane, without that fallback. Holds without a lane behave as before.
+**Which lane a hold is for:** the `lane` argument of `hold_paths`, or `another hold acquire --lane` (defaults to `$ANOTHER_LANE`; `hold check` takes the same flag and gives the same answer), looked up in the hold's project only; another project's lane is an unknown lane. Without one, it is the single open lane the agent leads in that project. `-` means no lane, without that fallback. Holds without a lane behave as before.
 
 **Conflicts between lanes:**
 
