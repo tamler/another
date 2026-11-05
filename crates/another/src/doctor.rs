@@ -181,7 +181,8 @@ fn check_server(base: &str, node_id: Option<&str>) -> Check {
         .ok()
         .and_then(|b| serde_json::from_str(&b).ok());
     match body {
-        Some(v) if v["ok"] == true => {
+        // Plenty of programs answer `{"ok": true}`; Another's health always names its node.
+        Some(v) if v["ok"] == true && v["node_id"].as_str().is_some_and(|n| !n.is_empty()) => {
             let theirs = v["node_id"].as_str().unwrap_or_default();
             let auth = if v["auth"] == true {
                 ", token auth on"
@@ -641,10 +642,11 @@ fn our_codex_hook_keys(text: &str, hooks_json: &Path) -> Vec<String> {
                     .flatten()
                     .enumerate()
                 {
-                    if hook
-                        .get("command")
-                        .and_then(Value::as_str)
-                        .is_some_and(|c| c.contains(MARKER))
+                    if hook.get("type").and_then(Value::as_str) == Some("command")
+                        && hook
+                            .get("command")
+                            .and_then(Value::as_str)
+                            .is_some_and(|c| wrapper_path(c).is_some())
                     {
                         keys.push(format!("{path}:{}:{g}:{h}", snake(event)));
                     }

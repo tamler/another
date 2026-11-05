@@ -854,6 +854,48 @@ fn decision_events_carry_no_question_or_option_text() {
 }
 
 #[test]
+fn the_cancelled_event_flags_a_reason_without_carrying_its_text() {
+    let (s, _) = store();
+    let cancelled = |id: &str| {
+        s.events(100)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.kind == "decision.cancelled" && e.payload["decision_id"] == id)
+            .expect("decision.cancelled")
+    };
+
+    let with_reason = ask(&s, "claude@shop", |_| {}).unwrap();
+    s.cancel_decision(
+        "claude@shop",
+        &with_reason.decision_id,
+        Some("the vendor contract fell through".into()),
+        None,
+    )
+    .unwrap();
+    let ev = cancelled(&with_reason.decision_id);
+    assert_eq!(ev.payload["has_reason"], true);
+    assert!(ev.payload.get("reason").is_none(), "{}", ev.payload);
+    assert!(
+        !ev.payload.to_string().contains("vendor contract"),
+        "{}",
+        ev.payload
+    );
+    // The reason still reaches the person, in the mail.
+    let human = s.inbox(DEFAULT_DECIDER, InboxQuery::default()).unwrap();
+    assert!(human
+        .messages
+        .iter()
+        .any(|m| m.message.body.contains("the vendor contract fell through")));
+
+    let without_reason = ask(&s, "claude@shop", |_| {}).unwrap();
+    s.cancel_decision("claude@shop", &without_reason.decision_id, None, None)
+        .unwrap();
+    let ev = cancelled(&without_reason.decision_id);
+    assert_eq!(ev.payload["has_reason"], false);
+    assert!(ev.payload.get("reason").is_none(), "{}", ev.payload);
+}
+
+#[test]
 fn round4_roles_people_and_exact_options() {
     let s = Store::open_in_memory(Clock::System).unwrap();
     s.ensure_project("t", "/work/shop").unwrap();
@@ -1000,6 +1042,105 @@ fn cancelling_before_a_choose_default_deadline_is_allowed() {
         s.request(&d.request_id).unwrap().status,
         RequestStatus::Cancelled
     );
+}
+
+#[test]
+fn answering_after_a_choose_default_deadline_commits_the_default() {
+    let (s, clock) = store();
+    let now = s.now();
+    let d = ask(&s, "claude@shop", |d| {
+        d.deadline_at = Some(now + 3_600_000);
+        d.on_timeout = DecisionTimeout::ChooseDefault;
+        d.default_value = Some("wait".into());
+    })
+    .unwrap();
+    // The deadline passes with no sweep in between (no server running).
+    advance(&clock, 3_600_001);
+    let e = answer(&s, &d.decision_id, Some("ship"), None).unwrap_err();
+    assert_eq!(e.code(), "conflict", "{e}");
+    // Read events first: anything that sweeps would hide a rolled-back timeout.
+    assert!(
+        s.events(100)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "decision.expired" && e.payload["decision_id"] == d.decision_id),
+        "refusing the answer must commit the timeout"
+    );
+    assert_eq!(
+        s.request(&d.request_id).unwrap().status,
+        RequestStatus::Done
+    );
+}
+
+#[test]
+fn answered_by_is_a_name_not_a_sentence() {
+    let (s, _) = store();
+    let d = ask(&s, "claude@shop", |_| {}).unwrap();
+    let e = s
+        .answer_decision(
+            AnswerDecision {
+                decision: d.decision_id.clone(),
+                value: Some("ship".into()),
+                answered_by: Some("the rollout key is hunter2".into()),
+                relayed_by: Some("manager".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(e.code(), "invalid", "{e}");
+    let ok = s
+        .answer_decision(
+            AnswerDecision {
+                decision: d.decision_id.clone(),
+                value: Some("ship".into()),
+                answered_by: Some("owner@shop".into()),
+                relayed_by: Some("manager".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    assert_eq!(ok.answer.unwrap().answered_by, "owner@shop");
+}
+
+#[test]
+fn a_bare_lane_name_in_two_projects_is_ambiguous_not_unknown() {
+    let (s, _) = store();
+    for (project, lead) in [("shop", "claude@shop"), ("vault", "codex@vault")] {
+        s.create_lane(
+            NewLane {
+                agent: "manager".into(),
+                name: "api".into(),
+                project: project.into(),
+                lead: lead.into(),
+                charter: String::new(),
+                status: Some(LaneStatus::Working),
+            },
+            None,
+        )
+        .unwrap();
+    }
+    let e = s
+        .decisions(
+            DecisionFilter {
+                lane: Some("api".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(e.code(), "ambiguous", "{e}");
+    let unknown = s
+        .decisions(
+            DecisionFilter {
+                lane: Some("nope".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(unknown.code(), "not_found", "{unknown}");
 }
 
 #[test]

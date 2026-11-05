@@ -11,7 +11,7 @@ All notable changes to Another. Unreleased work is listed under the next version
 ### Added
 - **`another doctor`**: checks the store (writable, schema), the local server (reachable, Another, same home), tokens (expired, expiring, matching no project), client hooks for Claude Code, Codex and Grok (and whether Codex has recorded trust for them), and port and resource conflicts. PASS / WARN / FAIL / SKIP with a fix per problem; `--json`; exit 1 on any FAIL.
 - **Release installs:** tagged releases also publish one `SHA256SUMS` and `install.sh`. One-line install: `curl -fsSL https://github.com/tamler/another/releases/latest/download/install.sh | sh`. It verifies the archive before installing (`ANOTHER_VERSION`, `ANOTHER_INSTALL_DIR` to pin or relocate).
-- README quickstart rewritten as a 90-second demo script (install, start, two agents, a hold, a port claim, doctor).
+- README quickstart rewritten as a 90-second demo script (install, start, two agents, a hold, a port claim, doctor). It installs from source until a release exists; the install script is labelled for after v0.1.0.
 - **Lanes** ([design](docs/design/01-lanes.md), [guide](docs/LANES.md)):
   - Named units of work with a charter, lead agent, project, status (`planned`, `working`, `blocked`, `needs_decision`, `done`, `abandoned`), linked threads, requests, holds and messages, and structured reports (summary, progress, links, artifacts) plus a DONE report with outcome and PR link.
   - `another lane create|list|show|update|report|done|close|export` and MCP tools `lane_create`, `lane_list`, `lane_show`, `lane_update`, `lane_report`, `lane_close`.
@@ -42,7 +42,7 @@ All notable changes to Another. Unreleased work is listed under the next version
     - MCP: `decision_ask`, `decision_list`, `decision_show`, `decision_answer`, `decision_cancel`.
     - HTTP: `GET /decisions`, `GET /decisions/{id}`, `POST /decisions/{id}/answer`.
     - CLI: `another decision ask|list|show|answer|cancel`.
-  - Events: `decision.created|answered|expired|overdue|cancelled`.
+  - Events: `decision.created|answered|expired|overdue|cancelled`. `decision.cancelled` carries a `has_reason` flag, never the reason's text, which stays in the mail and the request's note.
   - Requests gain a `kind` field (`task` or `decision`).
 - **Lane-aware holds** ([design](docs/design/04-lane-holds.md)):
   - Holds carry a lane (explicit `lane`, else `$ANOTHER_LANE`, else the lane the agent leads), looked up in the hold's project only. Overlaps inside one lane are warnings, except two exclusive holds, which still block.

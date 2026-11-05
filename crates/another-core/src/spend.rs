@@ -822,6 +822,8 @@ fn end_lease_tx(tx: &Tx<'_>, row: &LeaseRow, at: i64, actor: &str, reason: &str)
         if part == 0.0 && !last {
             continue;
         }
+        // Periods are half-open, so a lease ending exactly on the reset is dated just before it.
+        let on_reset = a.period == SpendPeriod::Monthly && at == *to && at > *from;
         let note = if parts == 1 {
             format!("lease {} ({reason})", row.lease.lease_id)
         } else {
@@ -836,7 +838,7 @@ fn end_lease_tx(tx: &Tx<'_>, row: &LeaseRow, at: i64, actor: &str, reason: &str)
             &a,
             account_project.as_deref(),
             part,
-            if last { at } else { *to - 1 },
+            if last && !on_reset { at } else { *to - 1 },
             &who,
             Some(&note),
             "lease",
