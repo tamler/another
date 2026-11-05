@@ -6,6 +6,7 @@ A **lane** is a named unit of work that a manager (often a remote `grok_bot` age
 
 `planned → working ⇄ blocked ⇄ needs_decision → done | abandoned`. Any open status can move to any other open status. `done` and `abandoned` close the lane, and a closed lane's name can be used again.
 
+Asking a [human decision](HUMAN-DECISIONS.md) with `lane` set moves the lane to `needs_decision` automatically. When its last open decision is answered, expires or is cancelled, the lane returns to `working` (if it is still `needs_decision`).
 **Names** are unique among a project's open lanes, so `shop` and `vault` can each have an `api` lane. Refer to a lane by name, by `name@project` (`api@shop`) when the name is used in more than one project, or by id.
 
 **Events** carry ids, the lane name, project and status, never the charter or report text; read those with `lane show`.

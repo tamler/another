@@ -32,7 +32,7 @@ Keep your local agents on the plain loopback server (or stdio), and run a second
 another serve --auth --bind 127.0.0.1:7467
 ```
 
-With `--auth`, `/mcp`, `GET /activity` and the push endpoints `GET /events/stream` and `GET /events/poll` ([PUSH.md](PUSH.md)) require `Authorization: Bearer <token>`; `GET /health` stays open. Because tunnels deliver traffic from loopback, the authenticated server checks the token on **every** request, local or not.
+With `--auth`, `/mcp`, `GET /activity` the push endpoints `GET /events/stream` and `GET /events/poll` ([PUSH.md](PUSH.md)), and `GET /decisions`, `GET /decisions/{id}` and `POST /decisions/{id}/answer` ([HUMAN-DECISIONS.md](HUMAN-DECISIONS.md)) require `Authorization: Bearer <token>`; `GET /health` stays open. Because tunnels deliver traffic from loopback, the authenticated server checks the token on **every** request, local or not.
 
 Tunnels usually forward the public hostname in the `Host` header. Another rejects unknown hosts (DNS-rebinding protection), so name each tunnel hostname with `--allowed-host`.
 
@@ -107,6 +107,9 @@ curl -H "Authorization: Bearer $ANOTHER_TOKEN" "https://my-laptop.my-tailnet.ts.
 | `lane_list`, `lane_show` | Only lanes whose project matches the token's globs (others are omitted, or `forbidden`) |
 | `lane_create` | Token's agent, and a `project` matching the globs (required) |
 | `lane_update`, `lane_report`, `lane_close` | Token's agent, on lanes in the token's projects |
+| `decision_list`, `decision_show` | Only decisions whose project matches the token's globs |
+| `decision_ask`, `decision_cancel` | Token's agent; the decision's project must match (cancel: only the asking agent) |
+| `decision_answer` | Decision's project must match; `relayed_by` is always the token's agent |
 | `resource_reap` | **Never** (remote reaping is disabled) |
 
 ## Audit log

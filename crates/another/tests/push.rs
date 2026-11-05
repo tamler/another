@@ -57,7 +57,7 @@ async fn start() -> Server {
         ("vaulter", Some("/work/vault")),
     ] {
         store
-            .register_agent(RegisterAgent {
+            .register_agent_trusted(RegisterAgent {
                 name: name.into(),
                 program: Program::GrokBot,
                 project: project.map(Into::into),
@@ -538,7 +538,7 @@ fn same_name_on_another_node_is_not_the_token_agent() {
     let hub = Store::open(hub_dir.path()).unwrap();
     hub.set_node_name("hub").unwrap();
     hub.ensure_project("t", "/work/shop").unwrap();
-    hub.register_agent(RegisterAgent {
+    hub.register_agent_trusted(RegisterAgent {
         name: "manager".into(),
         program: Program::GrokBot,
         project: None,
@@ -572,7 +572,7 @@ fn same_name_on_another_node_is_not_the_token_agent() {
     let spoke = Store::open(spoke_dir.path()).unwrap();
     spoke.set_node_name("laptop").unwrap();
     spoke
-        .register_agent(RegisterAgent {
+        .register_agent_trusted(RegisterAgent {
             name: "manager".into(),
             program: Program::GrokBot,
             project: None,

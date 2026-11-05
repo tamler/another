@@ -55,7 +55,7 @@ Items are `ActivityItem`s: one-line summaries plus ids. Message bodies are never
 |---|---|
 | `lane_status` | `lane.created`, `lane.status_changed`, `lane.closed` |
 | `lane_report` | `lane.reported` |
-| `needs_decision` | a lane moving to `needs_decision` (status change, or a report with that status); `decision.created` (phase 3) |
+| `needs_decision` | a lane moving to `needs_decision` (status change, or a report with that status); `decision.created`, `decision.overdue` (phase 3) |
 | `request_created` | `request.created`, `decision.created` |
 | `request_answered` | `request.completed`, `request.cancelled`, `decision.answered`, `decision.expired` |
 | `hold_conflict` | `hold.conflict` (new event when an acquire is refused; node-local, never federated) |

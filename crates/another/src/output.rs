@@ -3,9 +3,10 @@
 use std::fmt::Write;
 
 use another_core::{
-    ActivityFeed, Agent, AuditEntry, Event, HeartbeatReport, Hold, HoldConflict, HoldReport, Inbox,
-    Lane, LaneDetail, LaneReport, LeaseOutcome, Message, NodeInfo, Peer, Project, Request,
-    Resource, Thread, ThreadSummary, Token, WakeTarget, Webhook, WebhookCreated, WebhookDelivery,
+    ActivityFeed, Agent, AuditEntry, Decision, Event, HeartbeatReport, Hold, HoldConflict,
+    HoldReport, Inbox, Lane, LaneDetail, LaneReport, LeaseOutcome, Message, NodeInfo, Peer,
+    Project, Request, Resource, Thread, ThreadSummary, Token, WakeTarget, Webhook, WebhookCreated,
+    WebhookDelivery,
 };
 use serde::Serialize;
 
@@ -639,6 +640,44 @@ pub fn deliveries(ds: &[WebhookDelivery]) -> String {
                 .as_ref()
                 .map(|t| format!("; next {t}"))
                 .unwrap_or_default()
+        );
+    }
+    out
+}
+
+pub fn decisions(ds: &[Decision]) -> String {
+    if ds.is_empty() {
+        return "no decisions".to_string();
+    }
+    let mut out = String::new();
+    for d in ds {
+        let values: Vec<&str> = d.options.iter().map(|o| o.value.as_str()).collect();
+        let answer = d
+            .answer
+            .as_ref()
+            .map(|a| {
+                format!(
+                    " -> {} by {}",
+                    a.value.as_deref().unwrap_or("text"),
+                    a.answered_by
+                )
+            })
+            .unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "{} {:<9} for {} from {} [{}]{}\n  {}  ({}){}",
+            d.decision_id,
+            d.status.as_str(),
+            d.human,
+            d.asker,
+            d.project,
+            d.lane
+                .as_ref()
+                .map(|l| format!(" lane {l}"))
+                .unwrap_or_default(),
+            d.question.lines().next().unwrap_or_default(),
+            values.join(" | "),
+            answer
         );
     }
     out

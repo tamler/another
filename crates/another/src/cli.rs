@@ -296,6 +296,16 @@ pub enum Command {
     /// Lanes: named units of work with a charter, lead, status and structured reports.
     #[command(subcommand)]
     Lane(LaneCmd),
+    /// Node settings: `another config` lists them, `another config KEY` shows one,
+    /// `another config KEY VALUE` sets it (e.g. `another config decider owner`).
+    Config {
+        key: Option<String>,
+        value: Option<String>,
+    },
+    /// Decisions: structured questions from agents to a person, answered here or by the
+    /// manager bot.
+    #[command(subcommand)]
+    Decision(DecisionCmd),
     /// Webhooks: signed HTTP POSTs for lane, request, hold and lease events.
     #[command(subcommand)]
     Webhook(WebhookCmd),
@@ -369,6 +379,80 @@ pub enum WakeCmd {
     },
     /// List stored wake targets.
     List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DecisionCmd {
+    /// Ask a person (default: `another config decider`, else owner) a question with 2-6 options.
+    Ask {
+        #[command(flatten)]
+        agent: AgentArg,
+        #[arg(long, short = 'q')]
+        question: String,
+        /// `value=Label` (repeat 2-6 times), e.g. `--option ship="Ship behind a flag"`.
+        #[arg(long = "option", short = 'o', required = true)]
+        options: Vec<String>,
+        /// Accept a free-text answer too.
+        #[arg(long)]
+        free_text: bool,
+        /// Context link (repeatable).
+        #[arg(long = "link")]
+        links: Vec<String>,
+        /// Duration (2h) or RFC 3339 time.
+        #[arg(long)]
+        deadline: Option<String>,
+        /// choose_default, cancel or keep_open (default).
+        #[arg(long)]
+        on_timeout: Option<String>,
+        /// Option value applied by choose_default.
+        #[arg(long)]
+        default: Option<String>,
+        /// Who to ask.
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        #[arg(long)]
+        lane: Option<String>,
+    },
+    /// List decisions (open ones unless --status or --all).
+    List {
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        #[arg(long)]
+        lane: Option<String>,
+        /// Only decisions for this person.
+        #[arg(long = "for")]
+        human: Option<String>,
+    },
+    /// Show a decision; --markdown prints the short phone-readable form.
+    Show {
+        decision: String,
+        #[arg(long)]
+        markdown: bool,
+    },
+    /// Answer a decision: an option value (or its number), and/or --text if allowed.
+    Answer {
+        decision: String,
+        value: Option<String>,
+        #[arg(long)]
+        text: Option<String>,
+        /// Who is answering (default: the person asked).
+        #[arg(long = "as")]
+        answered_by: Option<String>,
+    },
+    /// Withdraw a decision you asked.
+    Cancel {
+        decision: String,
+        #[command(flatten)]
+        agent: AgentArg,
+        #[arg(long)]
+        reason: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -954,7 +1038,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             description,
         }) => {
             let project = project.as_deref().map(abs).transpose()?;
-            let a = store.register_agent(RegisterAgent {
+            let a = store.register_agent_trusted(RegisterAgent {
                 name,
                 program: program.parse::<Program>()?,
                 project,
@@ -1419,6 +1503,27 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Command::Lane(cmd) => lane_command(&store, json, cmd)?,
         Command::Webhook(cmd) => webhook_command(&store, json, cmd)?,
+        Command::Decision(cmd) => decision_command(&store, json, cmd)?,
+        Command::Config { key, value } => {
+            let list = match (key, value) {
+                (None, _) => store.settings()?,
+                (Some(k), None) => vec![store.setting(&k)?],
+                (Some(k), Some(v)) => vec![store.set_setting(&k, &v)?],
+            };
+            emit(json, &list, |l| {
+                l.iter()
+                    .map(|s| {
+                        format!(
+                            "{} = {}{}  # {}\n",
+                            s.key,
+                            s.value,
+                            if s.default { " (default)" } else { "" },
+                            s.help
+                        )
+                    })
+                    .collect()
+            })
+        }
         Command::Audit { limit } => {
             let entries = store.audit_log(limit)?;
             emit(json, &entries, |e| output::audit(e))
@@ -1518,6 +1623,149 @@ fn hook_command(
             Ok(emit(json, &rows, |r| output::hook_status(r)))
         }
     }
+}
+
+fn decision_command(store: &Store, json: bool, cmd: DecisionCmd) -> anyhow::Result<ExitCode> {
+    use another_core::{
+        decision_markdown, parse_deadline, AnswerDecision, DecisionFilter, DecisionOption,
+        DecisionStatus, DecisionTimeout, NewDecision,
+    };
+    Ok(match cmd {
+        DecisionCmd::Ask {
+            agent,
+            question,
+            options,
+            free_text,
+            links,
+            deadline,
+            on_timeout,
+            default,
+            to,
+            project,
+            lane,
+        } => {
+            let options = options
+                .iter()
+                .map(|o| {
+                    let (value, label) = o.split_once('=').unwrap_or((o, o));
+                    DecisionOption {
+                        value: value.trim().to_string(),
+                        label: label.trim().to_string(),
+                        description: None,
+                    }
+                })
+                .collect();
+            // Project: explicit, else the lane's, else the agent's own, else the cwd.
+            let project = match (project, &lane) {
+                (Some(p), _) => Some(project_key(store, &agent.agent, Some(p))?),
+                (None, Some(_)) => None,
+                (None, None) => match store.agent(&agent.agent)?.project {
+                    Some(_) => None,
+                    None => Some(project_key(store, &agent.agent, None)?),
+                },
+            };
+            let d = store.ask_decision(
+                NewDecision {
+                    agent: agent.agent,
+                    question,
+                    options,
+                    allow_free_text: free_text,
+                    context_links: links,
+                    deadline_at: deadline
+                        .as_deref()
+                        .map(|d| parse_deadline(d, store.now()))
+                        .transpose()?,
+                    on_timeout: on_timeout
+                        .as_deref()
+                        .map(str::parse::<DecisionTimeout>)
+                        .transpose()?
+                        .unwrap_or_default(),
+                    default_value: default,
+                    human: to,
+                    project,
+                    lane,
+                },
+                None,
+            )?;
+            emit(json, &d, |d| {
+                format!(
+                    "asked {} (decision {})\n{}",
+                    d.human,
+                    d.decision_id,
+                    decision_markdown(d)
+                )
+            })
+        }
+        DecisionCmd::List {
+            status,
+            all,
+            project,
+            lane,
+            human,
+        } => {
+            let list = store.decisions(
+                DecisionFilter {
+                    status: status
+                        .as_deref()
+                        .map(str::parse::<DecisionStatus>)
+                        .transpose()?,
+                    all,
+                    project,
+                    lane,
+                    human,
+                    limit: 100,
+                },
+                None,
+            )?;
+            emit(json, &list, |l| output::decisions(l))
+        }
+        DecisionCmd::Show { decision, markdown } => {
+            let d = store.decision(&decision, None)?;
+            if markdown && !json {
+                println!("{}", decision_markdown(&d).trim_end());
+                ExitCode::SUCCESS
+            } else {
+                emit(json, &d, decision_markdown)
+            }
+        }
+        DecisionCmd::Answer {
+            decision,
+            value,
+            text,
+            answered_by,
+        } => {
+            let d = store.answer_decision(
+                AnswerDecision {
+                    decision,
+                    value,
+                    text,
+                    answered_by,
+                    relayed_by: None,
+                },
+                None,
+            )?;
+            let woke = crate::wake::wake_if_targeted(store, &d.asker).is_some_and(|p| p.sent);
+            emit(json, &d, |d| {
+                let a = d.answer.as_ref();
+                format!(
+                    "answered decision {}: {}; mailed to {}{}",
+                    d.decision_id,
+                    a.and_then(|a| a.label.clone().or(a.value.clone()))
+                        .unwrap_or_else(|| "free text".into()),
+                    d.asker,
+                    if woke { " (woken)" } else { "" }
+                )
+            })
+        }
+        DecisionCmd::Cancel {
+            decision,
+            agent,
+            reason,
+        } => {
+            let d = store.cancel_decision(&agent.agent, &decision, reason, None)?;
+            emit(json, &d, |d| format!("withdrew decision {}", d.decision_id))
+        }
+    })
 }
 
 fn webhook_command(store: &Store, json: bool, cmd: WebhookCmd) -> anyhow::Result<ExitCode> {

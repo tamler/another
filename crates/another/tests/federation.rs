@@ -22,7 +22,7 @@ fn node(name: &str) -> Node {
 
 fn register(store: &Store, name: &str, program: Program, project: Option<&str>) {
     store
-        .register_agent(RegisterAgent {
+        .register_agent_trusted(RegisterAgent {
             name: name.into(),
             program,
             project: project.map(Into::into),

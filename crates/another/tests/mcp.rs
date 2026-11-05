@@ -67,6 +67,11 @@ async fn exposes_the_tool_surface() {
             "activity_feed",
             "activity_summarize",
             "claim_request",
+            "decision_answer",
+            "decision_ask",
+            "decision_cancel",
+            "decision_list",
+            "decision_show",
             "ensure_project",
             "events_poll",
             "fetch_inbox",
@@ -301,12 +306,21 @@ async fn streamable_http_on_loopback() {
     let agent = call_ok(
         &client,
         "register_agent",
+        json!({ "name": "web-agent", "program": "claude", "project": "/work/site" }),
+    )
+    .await;
+    assert_eq!(agent["address"], "web-agent@site");
+    // Written through HTTP, visible to any other connection on the same database.
+    assert_eq!(store.agent("web-agent").unwrap().program, "claude");
+    // MCP can't mint a manager (or a person), even under a new name.
+    let r = call(
+        &client,
+        "register_agent",
         json!({ "name": "grok-bot", "program": "grok_bot", "project": "/work/site" }),
     )
     .await;
-    assert_eq!(agent["address"], "grok-bot@site");
-    // Written through HTTP, visible to any other connection on the same database.
-    assert_eq!(store.agent("grok-bot").unwrap().program, "grok_bot");
+    assert_eq!(r.is_error, Some(true));
+    assert!(store.agent("grok-bot").is_err());
 
     client.cancel().await.unwrap();
     ct.cancel();

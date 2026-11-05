@@ -345,6 +345,7 @@ pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
     let stale_requests = stale_overdue_tx(tx)?;
     let expired_leases = crate::resources::expire_leases_tx(tx)?;
     crate::resources::warn_expiring_leases_tx(tx)?;
+    crate::decisions::expire_decisions_tx(tx)?;
     Ok(SweepReport {
         expired_holds: expired.len(),
         stale_requests,

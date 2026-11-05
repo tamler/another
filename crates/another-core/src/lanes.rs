@@ -288,17 +288,16 @@ fn lane_from_row(r: &Row<'_>) -> rusqlite::Result<(Lane, String)> {
     ))
 }
 
-/// Resolve a lane by id or name (an open lane with that name, else the newest closed one).
 /// Find a lane by id, `name` or `name@project` (project slug). Names are unique among open
 /// lanes of a project, so a bare name can match lanes in several projects.
-fn resolve_lane(conn: &Connection, node_id: &str, key: &str) -> Result<(Lane, String)> {
+pub(crate) fn resolve_lane(conn: &Connection, node_id: &str, key: &str) -> Result<(Lane, String)> {
     resolve_lane_in(conn, node_id, key, None)
 }
 
 /// [`resolve_lane`] as `scope` sees it: lanes outside the scope's projects do not exist for
 /// it (the error is the same `not_found` as for an unknown name), and ambiguity is only
 /// reported among lanes it may see.
-fn resolve_lane_in(
+pub(crate) fn resolve_lane_in(
     conn: &Connection,
     node_id: &str,
     key: &str,
@@ -359,7 +358,52 @@ fn resolve_lane_in(
     }
 }
 
-fn check_scope(conn: &Connection, scope: Option<&TokenScope>, project_id: &str) -> Result<()> {
+/// Resolve a lane **within one project** (or, without one, within the scope): an id or a
+/// name in that project. Lanes elsewhere, outside the scope, or missing all give the same
+/// "unknown lane" error, so a lookup can never reveal another project's lane.
+pub(crate) fn resolve_lane_in_project(
+    conn: &Connection,
+    node_id: &str,
+    key: &str,
+    project_id: Option<&str>,
+    scope: Option<&TokenScope>,
+) -> Result<(Lane, String)> {
+    let unknown = || Error::NotFound(format!("unknown lane {:?}", key.trim()));
+    let Some(project_id) = project_id else {
+        return resolve_lane_in(conn, node_id, key, scope).map_err(|e| match e {
+            Error::Ambiguous(_) => e,
+            _ => unknown(),
+        });
+    };
+    let slug: String = conn
+        .query_row(
+            "SELECT slug FROM projects WHERE project_id = ?1",
+            [project_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or_else(unknown)?;
+    let k = key.trim();
+    let by_id = conn
+        .query_row("SELECT 1 FROM lanes WHERE lane_id = ?1", [k], |_| Ok(()))
+        .optional()?
+        .is_some();
+    let qualified = if by_id || k.contains('@') {
+        k.to_string()
+    } else {
+        format!("{k}@{slug}")
+    };
+    match resolve_lane_in(conn, node_id, &qualified, scope) {
+        Ok((lane, p)) if p == project_id => Ok((lane, p)),
+        _ => Err(unknown()),
+    }
+}
+
+pub(crate) fn check_scope(
+    conn: &Connection,
+    scope: Option<&TokenScope>,
+    project_id: &str,
+) -> Result<()> {
     match scope {
         Some(s) if !scope_allows_project(conn, s, project_id)? => Err(Error::Forbidden(
             "this lane is outside the token's project globs".into(),
@@ -425,7 +469,7 @@ fn detail(conn: &Connection, lane: Lane) -> Result<LaneDetail> {
     })
 }
 
-fn set_status(
+pub(crate) fn set_status(
     tx: &Tx<'_>,
     actor: &AgentRef,
     lane: &Lane,

@@ -79,6 +79,8 @@ impl std::str::FromStr for RequestAction {
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Request {
     pub request_id: String,
+    /// `task` (agent work) or `decision` (a question for a human; see `decision_*`).
+    pub kind: String,
     pub title: String,
     pub status: RequestStatus,
     pub owner: Option<String>,
@@ -114,7 +116,7 @@ pub struct RequestFilter {
 }
 
 const REQUEST_SELECT: &str = "SELECT r.request_id, r.title, r.status, o.address, NULL, c.address, NULL,
-       r.thread_id, r.message_id, r.due_at, r.note, r.created_at, r.updated_at, r.claimed_at, r.closed_at
+       r.thread_id, r.message_id, r.due_at, r.note, r.created_at, r.updated_at, r.claimed_at, r.closed_at, r.kind
      FROM requests r
      JOIN agents c ON c.agent_id = r.created_by
      LEFT JOIN projects cp ON cp.project_id = c.project_id
@@ -141,6 +143,7 @@ fn request_from_row(r: &Row<'_>) -> rusqlite::Result<Request> {
         updated_at: fmt_ts(r.get(12)?),
         claimed_at: fmt_opt(r.get(13)?),
         closed_at: fmt_opt(r.get(14)?),
+        kind: r.get(15)?,
     })
 }
 
@@ -284,6 +287,18 @@ impl Store {
                 .ok_or_else(|| {
                     Error::NotFound(format!("unknown request {:?}", input.request_id))
                 })?;
+            let kind: String = tx.query_row(
+                "SELECT kind FROM requests WHERE request_id = ?1",
+                [&input.request_id],
+                |r| r.get(0),
+            )?;
+            if kind == "decision" {
+                return Err(Error::Conflict(format!(
+                    "request {} is a decision for a human; use decision_answer / decision_cancel \
+                     (CLI: another decision answer|cancel)",
+                    input.request_id
+                )));
+            }
             let status: RequestStatus = status.parse()?;
             let owned_by_me = owner_id.as_deref() == Some(me.id.as_str());
             let owner_name = || -> Result<String> {

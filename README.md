@@ -6,6 +6,8 @@ Free and open source, always: a local-first, vendor-neutral **inbox, activity fe
 
 **Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1–6 complete (local core, hooks, resources, remote peers, federation, polish)
 
+The coordination series is in progress. Decision cancellation preserves a due default even when the deadline passes as cancellation begins.
+
 ## Why
 
 Agents working side by side still coordinate through stale markdown files. Another gives them:
@@ -104,6 +106,7 @@ Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green
 | [docs/REMOTE.md](docs/REMOTE.md) | Remote peers (Grok Bot): tokens, `--auth`, tunnels, audit log |
 | [docs/FEDERATION.md](docs/FEDERATION.md) | Several machines: node keys, pairing, sync, permissions |
 | [docs/LANES.md](docs/LANES.md) | Lanes: units of work for a manager bot and coding agents; reports, export, hooks |
+| [docs/HUMAN-DECISIONS.md](docs/HUMAN-DECISIONS.md) | Structured questions from agents to a person, answered by phone (via the manager), HTTP or CLI |
 | [docs/PUSH.md](docs/PUSH.md) | Push: SSE stream, long-poll and signed webhooks, all filtered by token scope |
 | [docs/WAKE.md](docs/WAKE.md) | `another wake` adapters (tmux, cmux, Herdr) and the Herdr plugin |
 | [docs/SPEC.md](docs/SPEC.md) | Research and product spec |
@@ -117,6 +120,7 @@ Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green
 | Identity | `ensure_project`, `register_agent`, `heartbeat` (`start` / `end` record sessions) |
 | Mail | `send_message` (with `reply_to`, `create_request`), `fetch_inbox`, `threads`, `acknowledge` |
 | Requests | `claim_request` (`claim` / `release` / `complete` / `cancel`) |
+| Decisions | `decision_ask`, `decision_list`, `decision_show`, `decision_answer`, `decision_cancel` |
 | Lanes | `lane_create`, `lane_list`, `lane_show`, `lane_update`, `lane_report` (`status` / `done`), `lane_close` |
 | Path holds | `hold_paths` (`acquire` / `check` / `renew` / `release` / `list`) |
 | Awareness | `activity_feed`, `activity_summarize` (summaries and ids, never message bodies) |
@@ -136,6 +140,7 @@ Every command takes `--json`. `--agent` and `--from` default to `$ANOTHER_AGENT`
 | Mail | `another send`, `another inbox`, `another reply <message-id>`, `another ack <message-id>`, `another threads`, `another thread <id>` (there is no `another mail` command) |
 | Requests | `another requests`, `another request claim\|release\|complete\|cancel <id>` |
 | Lanes | `another lane create\|list\|show\|update\|report\|done\|close\|export` |
+| Decisions | `another decision ask\|list\|show\|answer\|cancel` |
 | Holds | `another hold acquire\|check\|renew\|release`, `another holds` (conflicts exit with status 3) |
 | Sessions and feed | `another heartbeat [--start\|--end [--keep]]`, `another activity [--since 1h] [--kinds mail,request] [--summary]` |
 | Hooks | `another hook install\|uninstall --client <c>\|all [--dry-run] [--lane-reports]`, `another hook status` |

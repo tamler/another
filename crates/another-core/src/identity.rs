@@ -24,16 +24,19 @@ pub enum Program {
     Cursor,
     GrokBot,
     Other,
+    /// A person (decision addressee), not a coding agent.
+    Human,
 }
 
 impl Program {
-    pub const ALL: [Program; 6] = [
+    pub const ALL: [Program; 7] = [
         Program::Claude,
         Program::Grok,
         Program::Codex,
         Program::Cursor,
         Program::GrokBot,
         Program::Other,
+        Program::Human,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -44,6 +47,7 @@ impl Program {
             Program::Cursor => "cursor",
             Program::GrokBot => "grok_bot",
             Program::Other => "other",
+            Program::Human => "human",
         }
     }
 }
@@ -56,7 +60,7 @@ impl std::str::FromStr for Program {
             .find(|p| p.as_str() == s)
             .ok_or_else(|| {
                 Error::Invalid(format!(
-                    "unknown program {s:?}; expected one of claude, grok, codex, cursor, grok_bot, other"
+                    "unknown program {s:?}; expected one of claude, grok, codex, cursor, grok_bot, other, human"
                 ))
             })
     }
@@ -143,7 +147,7 @@ pub(crate) fn agent_from_row(r: &Row<'_>) -> rusqlite::Result<Agent> {
     })
 }
 
-fn validate_name(name: &str) -> Result<()> {
+pub(crate) fn validate_name(name: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name.len() <= 64
         && name
@@ -282,11 +286,74 @@ pub(crate) fn find_project(conn: &Connection, node_id: &str, key: &str) -> Resul
         project_from_row,
     )
     .optional()?
-    .ok_or_else(|| {
-        Error::NotFound(format!(
-            "unknown project {key:?}; call ensure_project with its absolute path first"
-        ))
-    })
+    .ok_or_else(|| unknown_project(key))
+}
+
+/// The error for a project that doesn't exist **or** is outside the caller's scope.
+pub(crate) fn unknown_project(key: &str) -> Error {
+    Error::NotFound(format!(
+        "unknown project {key:?}; call ensure_project with its absolute path first"
+    ))
+}
+
+/// [`find_project`] as a scope sees it: out-of-scope projects are reported exactly like
+/// missing ones.
+pub(crate) fn find_project_in(
+    conn: &Connection,
+    node_id: &str,
+    key: &str,
+    scope: Option<&crate::tokens::TokenScope>,
+) -> Result<Project> {
+    let p = find_project(conn, node_id, key)?;
+    match scope {
+        Some(s) if !crate::tokens::scope_allows_project(conn, s, &p.project_id)? => {
+            Err(unknown_project(key))
+        }
+        _ => Ok(p),
+    }
+}
+
+/// Name of the reserved system agent that sends automatic mail (timeouts, reminders).
+pub const SYSTEM_AGENT: &str = "another";
+
+/// The system agent, registered on first use (project-less, program `other`).
+pub(crate) fn system_agent_tx(tx: &Tx<'_>) -> Result<AgentRef> {
+    let existing: Option<String> = tx
+        .query_row(
+            "SELECT agent_id FROM agents WHERE node_id = ?1 AND name = ?2 AND project_id IS NULL",
+            params![tx.node_id, SYSTEM_AGENT],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let id = match existing {
+        Some(id) => id,
+        None => {
+            register_tx(
+                tx,
+                &RegisterAgent {
+                    name: SYSTEM_AGENT.into(),
+                    program: Program::Other,
+                    project: None,
+                    model: None,
+                    description: Some(
+                        "Another itself: automatic mail (timeouts, reminders)".into(),
+                    ),
+                },
+            )?
+            .agent_id
+        }
+    };
+    Ok(tx.query_row(
+        "SELECT agent_id, address, node_id FROM agents WHERE agent_id = ?1",
+        [&id],
+        |r| {
+            Ok(AgentRef {
+                id: r.get(0)?,
+                address: r.get(1)?,
+                node_id: r.get(2)?,
+            })
+        },
+    )?)
 }
 
 /// Resolve an acting agent (must live on this node). Addresses: `name` or `name@project` on this node, or
@@ -492,77 +559,185 @@ impl Store {
     }
 
     /// Register a new agent or update an existing one's details; touches `last_seen_at`.
+    /// Register or refresh an agent (MCP `register_agent`, hooks). The roles that carry
+    /// privileges, manager bot (`grok_bot`) and person (`human`), are bound to the
+    /// registration the person made on this machine: this path can't give an existing agent
+    /// one of them (`forbidden`), and a refresh that names another program keeps the role.
+    /// The CLI uses [`Store::register_agent_trusted`] to set roles.
     pub fn register_agent(&self, input: RegisterAgent) -> Result<Agent> {
-        validate_name(&input.name)?;
-        self.write(|tx| {
-            let project = match &input.project {
-                Some(path) => Some(ensure_project_tx(tx, &input.name, path)?),
-                None => None,
-            };
-            let project_id = project.as_ref().map(|p| p.project_id.clone());
-            let slug = project.as_ref().map(|p| p.slug.as_str());
-            let addr = address(&input.name, slug);
-            let existing: Option<String> = tx
-                .query_row(
-                    "SELECT agent_id FROM agents
-                     WHERE node_id = ?1 AND name = ?2 AND ifnull(project_id, '') = ifnull(?3, '')",
-                    params![tx.node_id, input.name, project_id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            let agent_id = existing.clone().unwrap_or_else(new_id);
-            let event_id = tx.emit(
-                &addr,
-                "agent.registered",
-                json!({
-                    "agent_id": agent_id,
-                    "name": input.name,
-                    "project_id": project_id,
-                    "program": input.program.as_str(),
-                    "model": input.model,
-                    "description": input.description,
-                    "new": existing.is_none(),
-                }),
-            )?;
-            if existing.is_some() {
-                tx.execute(
-                    "UPDATE agents SET program = ?2, model = ?3, description = ?4,
-                       status = 'active', updated_at = ?5, last_seen_at = ?5, event_id = ?6,
-                       address = ?7
-                     WHERE agent_id = ?1",
-                    params![
-                        agent_id,
-                        input.program.as_str(),
-                        input.model,
-                        input.description,
-                        tx.now,
-                        event_id,
-                        addr
-                    ],
-                )?;
-            } else {
-                tx.execute(
-                    "INSERT INTO agents (agent_id, node_id, project_id, name, program, model,
-                       description, status, created_at, updated_at, last_seen_at, event_id, address)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', ?8, ?8, ?8, ?9, ?10)",
-                    params![
-                        agent_id,
-                        tx.node_id,
-                        project_id,
-                        input.name,
-                        input.program.as_str(),
-                        input.model,
-                        input.description,
-                        tx.now,
-                        event_id,
-                        addr
-                    ],
-                )?;
-            }
-            get_agent(tx, &agent_id)
-        })
+        self.register_checked(input, false)
     }
 
+    /// [`Store::register_agent`] for the local CLI (`another agent register`), which may set
+    /// or change any program, including the privileged roles.
+    pub fn register_agent_trusted(&self, input: RegisterAgent) -> Result<Agent> {
+        self.register_checked(input, true)
+    }
+
+    fn register_checked(&self, mut input: RegisterAgent, trusted: bool) -> Result<Agent> {
+        validate_name(&input.name)?;
+        if input.name == SYSTEM_AGENT {
+            return Err(Error::Invalid(format!(
+                "the name {SYSTEM_AGENT:?} is reserved for Another's own automatic mail"
+            )));
+        }
+        self.write(|tx| {
+            if !trusted {
+                let project_id = match &input.project {
+                    Some(p) => find_project(tx, tx.node_id, p).ok().map(|p| p.project_id),
+                    None => None,
+                };
+                let current: Option<String> = tx
+                    .query_row(
+                        "SELECT program FROM agents
+                         WHERE node_id = ?1 AND name = ?2 AND ifnull(project_id, '') = ifnull(?3, '')",
+                        params![tx.node_id, input.name, project_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let privileged = |p: &str| p == Program::GrokBot.as_str() || p == Program::Human.as_str();
+                if current.is_none() && privileged(input.program.as_str()) {
+                    // Not even a brand-new name: otherwise any MCP caller could mint a
+                    // manager (or person) to relay answers to its own questions.
+                    return Err(Error::Forbidden(format!(
+                        "{} is a role the person sets on this machine (`another agent register {} --program {}`)",
+                        input.program.as_str(),
+                        input.name,
+                        input.program.as_str()
+                    )));
+                }
+                if let Some(cur) = current {
+                    if cur != input.program.as_str() {
+                        if privileged(input.program.as_str()) {
+                            return Err(Error::Forbidden(format!(
+                                "{} is a role the person sets on this machine (`another agent register {} --program {}`)",
+                                input.program.as_str(),
+                                input.name,
+                                input.program.as_str()
+                            )));
+                        }
+                        if privileged(&cur) {
+                            // A session hook re-registering a manager or person as its
+                            // client program keeps the role.
+                            input.program = cur.parse().unwrap_or(input.program);
+                        }
+                    }
+                }
+            }
+            register_with_tx(tx, &input, trusted)
+        })
+    }
+}
+
+/// Whether a person on the agent's node confirmed `agent_id`'s privileged role (manager or
+/// person): a trusted registration (`register_agent_trusted`, the CLI, or an invite the
+/// person made) recorded `role_confirmed` for its current program. A person registered on
+/// demand as a decision's addressee is not confirmed, so it can't relay answers.
+/// Only events authored by that node count, and confirmation must follow every registration
+/// there naming a different program. A different peer and an untrusted refresh cannot revive
+/// an older role. Callers bind the agent to this node or to a verified relay's origin.
+pub(crate) fn role_confirmed(conn: &Connection, agent_id: &str, program: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM events e JOIN agents a ON a.agent_id = ?1
+             WHERE e.node_id = a.node_id AND e.kind = 'agent.registered'
+               AND json_extract(e.payload, '$.agent_id') = ?1
+               AND json_extract(e.payload, '$.program') = ?2
+               AND json_extract(e.payload, '$.role_confirmed') = 1
+               AND NOT EXISTS (
+                 SELECT 1 FROM events changed
+                 WHERE changed.node_id = a.node_id AND changed.kind = 'agent.registered'
+                   AND json_extract(changed.payload, '$.agent_id') = ?1
+                   AND json_extract(changed.payload, '$.program') != ?2
+                   AND changed.seq > e.seq
+               )
+             LIMIT 1",
+            params![agent_id, program],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// Register (or refresh) an agent inside a write transaction (not a confirmed role).
+pub(crate) fn register_tx(tx: &Tx<'_>, input: &RegisterAgent) -> Result<Agent> {
+    register_with_tx(tx, input, false)
+}
+
+/// [`register_tx`]; `trusted` marks a registration the person made, which confirms a
+/// privileged program (see [`role_confirmed`]).
+pub(crate) fn register_with_tx(tx: &Tx<'_>, input: &RegisterAgent, trusted: bool) -> Result<Agent> {
+    validate_name(&input.name)?;
+    let project = match &input.project {
+        Some(path) => Some(ensure_project_tx(tx, &input.name, path)?),
+        None => None,
+    };
+    let project_id = project.as_ref().map(|p| p.project_id.clone());
+    let slug = project.as_ref().map(|p| p.slug.as_str());
+    let addr = address(&input.name, slug);
+    let existing: Option<String> = tx
+        .query_row(
+            "SELECT agent_id FROM agents
+             WHERE node_id = ?1 AND name = ?2 AND ifnull(project_id, '') = ifnull(?3, '')",
+            params![tx.node_id, input.name, project_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let agent_id = existing.clone().unwrap_or_else(new_id);
+    let event_id = tx.emit(
+        &addr,
+        "agent.registered",
+        json!({
+            "agent_id": agent_id,
+            "name": input.name,
+            "project_id": project_id,
+            "program": input.program.as_str(),
+            "model": input.model,
+            "description": input.description,
+            "new": existing.is_none(),
+            "role_confirmed": trusted
+                && matches!(input.program, Program::GrokBot | Program::Human),
+        }),
+    )?;
+    if existing.is_some() {
+        tx.execute(
+            "UPDATE agents SET program = ?2, model = ?3, description = ?4,
+               status = 'active', updated_at = ?5, last_seen_at = ?5, event_id = ?6,
+               address = ?7
+             WHERE agent_id = ?1",
+            params![
+                agent_id,
+                input.program.as_str(),
+                input.model,
+                input.description,
+                tx.now,
+                event_id,
+                addr
+            ],
+        )?;
+    } else {
+        tx.execute(
+            "INSERT INTO agents (agent_id, node_id, project_id, name, program, model,
+               description, status, created_at, updated_at, last_seen_at, event_id, address)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', ?8, ?8, ?8, ?9, ?10)",
+            params![
+                agent_id,
+                tx.node_id,
+                project_id,
+                input.name,
+                input.program.as_str(),
+                input.model,
+                input.description,
+                tx.now,
+                event_id,
+                addr
+            ],
+        )?;
+    }
+    get_agent(tx, &agent_id)
+}
+
+impl Store {
     /// Look up one agent by address (`name`, `name@project`, or `name@project@node`).
     pub fn agent(&self, who: &str) -> Result<Agent> {
         self.read(|conn| {

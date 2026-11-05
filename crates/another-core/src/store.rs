@@ -20,6 +20,8 @@ pub const DB_FILE: &str = "another.db";
 pub enum Clock {
     System,
     Manual(Arc<AtomicI64>),
+    #[cfg(test)]
+    Ticking(Arc<AtomicI64>),
 }
 
 impl Clock {
@@ -33,6 +35,8 @@ impl Clock {
         match self {
             Clock::System => now_ms(),
             Clock::Manual(t) => t.load(Ordering::SeqCst),
+            #[cfg(test)]
+            Clock::Ticking(t) => t.fetch_add(1, Ordering::SeqCst),
         }
     }
 }
@@ -615,6 +619,47 @@ CREATE TABLE webhook_deliveries (
 CREATE INDEX webhook_deliveries_due ON webhook_deliveries(status, next_attempt_at);
 
 ALTER TABLE resource_leases ADD COLUMN expiry_warned_at INTEGER;
+"#,
+    r#"
+ALTER TABLE requests ADD COLUMN kind TEXT NOT NULL DEFAULT 'task';
+
+CREATE TABLE node_settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE decisions (
+    decision_id       TEXT PRIMARY KEY,
+    node_id           TEXT NOT NULL REFERENCES nodes(node_id),
+    project_id        TEXT NOT NULL REFERENCES projects(project_id),
+    lane_id           TEXT REFERENCES lanes(lane_id),
+    asker_id          TEXT NOT NULL REFERENCES agents(agent_id),
+    human_id          TEXT NOT NULL REFERENCES agents(agent_id),
+    question          TEXT NOT NULL,
+    options           TEXT NOT NULL,
+    allow_free_text   INTEGER NOT NULL DEFAULT 0,
+    context_links     TEXT NOT NULL DEFAULT '[]',
+    deadline_at       INTEGER,
+    on_timeout        TEXT NOT NULL,
+    default_value     TEXT,
+    status            TEXT NOT NULL,
+    answer_value      TEXT,
+    answer_text       TEXT,
+    answered_by       TEXT,
+    relayed_by        TEXT,
+    answered_at       INTEGER,
+    request_id        TEXT NOT NULL REFERENCES requests(request_id),
+    message_id        TEXT NOT NULL,
+    thread_id         TEXT NOT NULL,
+    answer_message_id TEXT,
+    overdue_at        INTEGER,
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL,
+    event_id          TEXT NOT NULL
+);
+CREATE INDEX decisions_by_status ON decisions(node_id, status, deadline_at);
+CREATE INDEX decisions_by_lane ON decisions(lane_id, status);
 "#,
 ];
 
