@@ -48,14 +48,26 @@ All notable changes to Another. Unreleased work is listed under the next version
   - Cross-lane conflicts emit `lane.hold_conflict`, which the `hold_conflict` webhook filter delivers.
   - `another holds --by-lane`, MCP `holds_by_lane`, and live holds in `lane show`.
   - Opt-in pre-edit hook for Claude Code and Codex: `another hook install --pre-edit`. It holds files before each edit and denies the edit when another lane or agent holds them.
+- **Spend ledger** ([design](docs/design/05-spend.md), [guide](docs/SPEND.md)):
+  - Accounts: `gpu_pod`, `api_credits`, `plan_reset`, `server` and `domain`, each with a unit, budget, and monthly period with a reset day (or lifetime).
+  - Spend entries; hourly leases with an owner and a cost per hour, renewed by heartbeat.
+  - Approval gate: `requires_approval` makes borrowing ask a decision first, of the account's approver or the node's decider. The borrower can't relay its own approval. Withdrawing a pending lease withdraws its decision (`spend.lease_withdrawn`).
+  - Ending a session closes the agent's spend leases.
+  - `another spend link ACCOUNT RESOURCE`: borrowing a linked resource goes through the account's approval gate and accrues cost while the resource lease lives.
+  - Scoped tokens see the remaining budget of shared accounts (read-only), but only their own projects' spend.
+  - `another spend`: a report by period, lane and agent with a phone-sized burn-down. Also MCP `spend_report` and `GET /spend`.
+  - `spend.*` events, a new `spend` activity category and a `budget` webhook filter.
+  - No real accounts are built in; the examples live in [docs/SPEND.md](docs/SPEND.md).
 - CI also runs on pull requests that target non-`main` branches, so stacked PRs are checked.
 
 ### Changed
+- Spend reports keep active leases in the count before cost accrues, including at monthly resets, while retaining their overlap with historical periods.
 - **Remote event reads are now filtered by token scope** (D38, supersedes D16). `activity_feed`, `activity_summarize` and `GET /activity` used to show every project's events to any token. They now show only events from the token's projects (and project-less events concerning its own agent). Token, peer and node events are hidden from tokens. Local callers are unaffected.
 - When reading forward, the feed's `next_since` now advances past events filtered out by `kinds` or scope.
 
 ### Database
 - Migration 6 adds the `lanes`, `lane_links` and `lane_reports` tables. It is additive; existing databases upgrade in place.
+- Migration 10 adds the `spend_accounts`, `spend_entries` and `spend_leases` tables, and a nullable `resources.spend_account_id`. It is additive.
 - Migration 9 adds `holds.lane_id` (nullable). It is additive.
 - Migration 8 adds the `decisions` table and `requests.kind` (default `task`). It is additive.
 - Migration 7 adds the `webhooks` and `webhook_deliveries` tables and a nullable `resource_leases.expiry_warned_at` column. It is additive.

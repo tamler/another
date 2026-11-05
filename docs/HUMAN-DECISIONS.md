@@ -86,6 +86,8 @@ The manager then relays the answer. Any of these works:
 
 The asking agent receives a high-importance reply, `[decision] answered: ship (<id>)`, with the value, the label, any text, and who answered and relayed it in the body. Decision mail subjects carry ids, names and values only (they show in the activity feed); the question, labels and text are in the bodies. The request closes, and the lane is released.
 
+Borrowing from a [spend account](SPEND.md) that requires approval asks a decision with the options `approve` and `deny`. Answering `approve` starts the lease.
+
 ## Reading
 
 | Surface | Read |

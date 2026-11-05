@@ -553,6 +553,8 @@ pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
     let expired_leases = crate::resources::expire_leases_tx(tx)?;
     crate::resources::warn_expiring_leases_tx(tx)?;
     crate::decisions::expire_decisions_tx(tx)?;
+    crate::spend::expire_spend_leases_tx(tx)?;
+    crate::spend::reconcile_resource_spend_tx(tx)?;
     Ok(SweepReport {
         expired_holds: expired.len(),
         stale_requests,
@@ -1067,6 +1069,15 @@ impl Store {
             let (renewed, released, status) = if phase == SessionPhase::End {
                 let ids: Vec<String> = owned.into_iter().map(|(id, _)| id).collect();
                 release_tx(tx, &me.address, &ids, "session_end")?;
+                if release_leases {
+                    // Spend leases close with the session (kept with --keep-resources, like
+                    // the resource leases they pay for).
+                    crate::spend::end_agent_leases_tx(tx, &me.id, "session_end")?;
+                } else {
+                    // --keep-resources renews the resource leases; renew the spend leases
+                    // too, or charging would stop while the resource stays held.
+                    crate::spend::renew_spend_leases_tx(tx, &me.id)?;
+                }
                 tx.emit(&me.address, "session.ended", session_payload())?;
                 tx.execute(
                     "UPDATE agents SET status = 'offline', last_seen_at = ?2 WHERE agent_id = ?1",
@@ -1078,6 +1089,7 @@ impl Store {
                     tx.emit(&me.address, "session.started", session_payload())?;
                 }
                 renew_tx(tx, &me.address, &owned)?;
+                crate::spend::renew_spend_leases_tx(tx, &me.id)?;
                 touch(tx, &me.id)?;
                 let ids: Vec<String> = owned.into_iter().map(|(id, _)| id).collect();
                 (holds_by_id(tx, &ids)?, Vec::new(), "active")

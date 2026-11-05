@@ -17,6 +17,7 @@ mod mail;
 mod requests;
 mod resources;
 mod settings;
+mod spend;
 mod store;
 mod time;
 mod tokens;
@@ -58,6 +59,12 @@ pub use resources::{
     MAX_LEASE_TTL_SECONDS, MIN_LEASE_TTL_SECONDS,
 };
 pub use settings::{Setting, SETTINGS};
+pub use spend::{
+    period_bounds, spend_markdown, AccountSpend, BorrowSpend, BudgetStatus, NewSpendAccount,
+    PeriodSel, RecordSpend, SpendAccount, SpendAccountUpdate, SpendEntry, SpendGroup, SpendKind,
+    SpendLease, SpendLeaseOutcome, SpendLeaseStatus, SpendPeriod, SpendQuery, SpendReport,
+    DEFAULT_SPEND_LEASE_TTL_SECONDS,
+};
 pub use store::{default_home, Clock, Event, NodeInfo, Store, DB_FILE};
 pub use time::fmt_ts;
 pub use tokens::{AuditEntry, AuditRecord, NewToken, Token, TokenScope};

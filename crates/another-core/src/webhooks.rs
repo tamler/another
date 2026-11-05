@@ -31,12 +31,14 @@ pub enum WebhookFilter {
     HoldConflict,
     /// `resource.lease_expiring`: a lease has under five minutes left.
     LeaseExpiring,
+    /// `spend.budget_threshold` (80% / 100% crossed) and `spend.approval_requested`.
+    Budget,
     /// Everything visible except mail and delivery events.
     All,
 }
 
 impl WebhookFilter {
-    pub const ALL: [WebhookFilter; 8] = [
+    pub const ALL: [WebhookFilter; 9] = [
         WebhookFilter::LaneStatus,
         WebhookFilter::LaneReport,
         WebhookFilter::NeedsDecision,
@@ -44,6 +46,7 @@ impl WebhookFilter {
         WebhookFilter::RequestAnswered,
         WebhookFilter::HoldConflict,
         WebhookFilter::LeaseExpiring,
+        WebhookFilter::Budget,
         WebhookFilter::All,
     ];
 
@@ -56,6 +59,7 @@ impl WebhookFilter {
             WebhookFilter::RequestAnswered => "request_answered",
             WebhookFilter::HoldConflict => "hold_conflict",
             WebhookFilter::LeaseExpiring => "lease_expiring",
+            WebhookFilter::Budget => "budget",
             WebhookFilter::All => "all",
         }
     }
@@ -85,6 +89,9 @@ impl WebhookFilter {
             ),
             WebhookFilter::HoldConflict => matches!(kind, "hold.conflict" | "lane.hold_conflict"),
             WebhookFilter::LeaseExpiring => kind == "resource.lease_expiring",
+            WebhookFilter::Budget => {
+                matches!(kind, "spend.budget_threshold" | "spend.approval_requested")
+            }
             WebhookFilter::All => !matches!(
                 kind.split('.').next(),
                 Some("message" | "delivery" | "token" | "peer" | "node")

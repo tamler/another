@@ -143,6 +143,9 @@ pub struct Resource {
     pub node: Option<String>,
     /// For resources on other nodes: whether this machine can connect to it.
     pub reachable: Option<bool>,
+    /// The spend account borrowing this resource is charged to (`another spend link`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spend_account: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -181,8 +184,12 @@ pub struct LeaseOutcome {
     pub resource: Resource,
     /// The caller's lease after the operation (none after a release).
     pub lease: Option<Lease>,
-    /// What happened: registered, adopted, borrowed, renewed, released, transferred, stopped.
+    /// What happened: registered, adopted, borrowed, renewed, released, transferred, stopped,
+    /// or pending_approval (the resource's spend account needs approval first).
     pub outcome: String,
+    /// With `pending_approval`: the decision to wait for. Once approved, the lease is taken.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision_id: Option<String>,
 }
 
 fn clamp_ttl(ttl: Option<i64>) -> Result<i64> {
@@ -260,6 +267,7 @@ fn resource_from_row(r: &Row<'_>) -> rusqlite::Result<Row0> {
             created_at: fmt_ts(r.get(11)?),
             node: r.get(14)?,
             reachable: None,
+            spend_account: None,
         },
         released: released_at.is_some(),
         lapsed_at,
@@ -311,6 +319,14 @@ fn hydrate(conn: &Connection, row: Row0, now: i64) -> Result<Resource> {
         .find(|(_, _, role, _)| role == "owner")
         .map(|(_, _, _, l)| l.agent.clone());
     res.refcount = leases.len() as u32;
+    res.spend_account = conn
+        .query_row(
+            "SELECT a.name FROM resources r JOIN spend_accounts a ON a.account_id = r.spend_account_id
+             WHERE r.resource_id = ?1 AND a.archived_at IS NULL",
+            [&res.resource_id],
+            |r| r.get(0),
+        )
+        .optional()?;
     res.leases = leases.into_iter().map(|(_, _, _, l)| l).collect();
     res.status = if row.released {
         "released"
@@ -344,7 +360,7 @@ pub(crate) fn get_resource(conn: &Connection, resource_id: &str, now: i64) -> Re
 }
 
 /// Resolve a reference to a resource id that is not released.
-fn resolve(conn: &Connection, node_id: &str, target: &ResourceRef) -> Result<String> {
+pub(crate) fn resolve(conn: &Connection, node_id: &str, target: &ResourceRef) -> Result<String> {
     let found: Option<String> = match target {
         ResourceRef::Id(id) => conn
             .query_row(
@@ -430,6 +446,72 @@ fn foreign_nodes_for(tx: &Tx<'_>, lease_ids: &[&String]) -> Result<Vec<String>> 
     Ok(out)
 }
 
+fn exclusive(current: &Resource) -> Error {
+    Error::Conflict(format!(
+        "{} {} is exclusive to {}",
+        current.kind.as_str(),
+        current.name,
+        current.owner.as_deref().unwrap_or("its owner")
+    ))
+}
+
+/// Take a new lease: adopt a lapsed local resource, otherwise borrow it.
+fn take_lease_tx(
+    tx: &Tx<'_>,
+    rid: &str,
+    me: &AgentRef,
+    current: &Resource,
+    ttl: i64,
+    node_field: Option<String>,
+) -> Result<&'static str> {
+    let lease_id = new_id();
+    if current.refcount == 0 && node_field.is_none() {
+        tx.emit(
+            &me.address,
+            "resource.adopted",
+            json!({ "resource_id": rid, "lease_id": lease_id, "agent_id": me.id, "ttl_seconds": ttl }),
+        )?;
+        add_lease(tx, &lease_id, rid, me, "owner", ttl)?;
+        return Ok("adopted");
+    }
+    if current.mode == LeaseMode::Exclusive {
+        return Err(exclusive(current));
+    }
+    tx.emit(
+        &me.address,
+        "resource.borrowed",
+        json!({
+            "resource_id": rid,
+            "lease_id": lease_id,
+            "agent_id": me.id,
+            "ttl_seconds": ttl,
+            "resource_node": node_field,
+        }),
+    )?;
+    add_lease(tx, &lease_id, rid, me, "borrower", ttl)?;
+    Ok("borrowed")
+}
+
+/// A spend approval for borrowing a linked resource came through: take the lease now.
+/// Fails with `conflict` / `not_found` if the resource can't be leased any more.
+pub(crate) fn grant_after_approval_tx(
+    tx: &Tx<'_>,
+    rid: &str,
+    me: &AgentRef,
+    ttl: i64,
+) -> Result<()> {
+    if my_lease(tx, rid, &me.id)?.is_some() {
+        return Ok(());
+    }
+    let current = get_resource(tx, rid, tx.now)?;
+    if current.status == "released" {
+        return Err(Error::NotFound(format!("{} was stopped", current.name)));
+    }
+    let ttl = clamp_ttl(Some(ttl))?;
+    take_lease_tx(tx, rid, me, &current, ttl, None)?;
+    Ok(())
+}
+
 /// After leases end: promote the oldest borrower if the owner is gone, and stamp
 /// `lapsed_at` when nothing is left.
 fn settle(tx: &Tx<'_>, resource_id: &str, actor: &str, when: i64) -> Result<Option<String>> {
@@ -486,6 +568,7 @@ fn outcome(tx: &Tx<'_>, resource_id: &str, agent_id: &str, what: &str) -> Result
         resource,
         lease,
         outcome: what.to_string(),
+        decision_id: None,
     })
 }
 
@@ -601,6 +684,7 @@ pub(crate) fn session_leases_tx(tx: &Tx<'_>, agent: &AgentRef, release: bool) ->
             )?;
             settle(tx, resource_id, &agent.address, tx.now)?;
         }
+        crate::spend::reconcile_resource_spend_tx(tx)?;
     } else {
         tx.emit(
             &agent.address,
@@ -655,6 +739,40 @@ impl Store {
                         existing,
                         current.owner.as_deref().unwrap_or("none")
                     )));
+                }
+                // Re-registering a lapsed resource adopts it: the same spend gate as borrowing
+                // applies, or a linked paid resource could be taken without approval or charge.
+                if let crate::spend::ResourceGate::Pending(decision_id) =
+                    crate::spend::resource_gate_tx(tx, &existing, &me, ttl)?
+                {
+                    // Approval only grants the lease, so changes would be dropped silently.
+                    let stored_project: Option<String> = tx.query_row(
+                        "SELECT project_id FROM resources WHERE resource_id = ?1",
+                        [&existing],
+                        |r| r.get(0),
+                    )?;
+                    let changes = (project_id.is_some() && project_id != stored_project)
+                        || (input.endpoint.is_some() && input.endpoint != current.endpoint)
+                        || (input.port.is_some() && input.port != current.port)
+                        || (input.pid.is_some() && input.pid != current.pid)
+                        || (input.purpose.is_some() && input.purpose != current.purpose)
+                        || input.mode != current.mode;
+                    if changes {
+                        return Err(Error::Conflict(format!(
+                            "{}:{} needs approval to adopt, and approval can't apply a new \
+                             project, endpoint, port, pid, purpose or mode; re-register with its current \
+                             values",
+                            input.kind.as_str(),
+                            input.name
+                        )));
+                    }
+                    touch(tx, &me.id)?;
+                    return Ok(LeaseOutcome {
+                        resource: get_resource(tx, &existing, tx.now)?,
+                        lease: None,
+                        outcome: "pending_approval".into(),
+                        decision_id: Some(decision_id),
+                    });
                 }
                 tx.emit(
                     &me.address,
@@ -823,6 +941,7 @@ impl Store {
                        expires_at = ?3 + ?2 * 1000 WHERE lease_id = ?1",
                     params![lease_id, ttl, tx.now],
                 )?;
+                crate::spend::renew_resource_spend_tx(tx, &rid, &me.id, ttl)?;
                 touch(tx, &me.id)?;
                 return outcome(tx, &rid, &me.id, "renewed");
             }
@@ -848,40 +967,26 @@ impl Store {
                         current.name
                     )));
                 }
-            } else if current.refcount == 0 {
-                let lease_id = new_id();
-                tx.emit(
-                    &me.address,
-                    "resource.adopted",
-                    json!({ "resource_id": rid, "lease_id": lease_id, "agent_id": me.id, "ttl_seconds": ttl }),
-                )?;
-                add_lease(tx, &lease_id, &rid, &me, "owner", ttl)?;
-                touch(tx, &me.id)?;
-                return outcome(tx, &rid, &me.id, "adopted");
             }
-            if current.mode == LeaseMode::Exclusive {
-                return Err(Error::Conflict(format!(
-                    "{} {} is exclusive to {}",
-                    current.kind.as_str(),
-                    current.name,
-                    current.owner.as_deref().unwrap_or("its owner")
-                )));
+            if current.refcount > 0 && current.mode == LeaseMode::Exclusive {
+                return Err(exclusive(&current));
             }
-            let lease_id = new_id();
-            tx.emit(
-                &me.address,
-                "resource.borrowed",
-                json!({
-                    "resource_id": rid,
-                    "lease_id": lease_id,
-                    "agent_id": me.id,
-                    "ttl_seconds": ttl,
-                    "resource_node": node_field,
-                }),
-            )?;
-            add_lease(tx, &lease_id, &rid, &me, "borrower", ttl)?;
+            if !foreign {
+                if let crate::spend::ResourceGate::Pending(decision_id) =
+                    crate::spend::resource_gate_tx(tx, &rid, &me, ttl)?
+                {
+                    touch(tx, &me.id)?;
+                    return Ok(LeaseOutcome {
+                        resource: get_resource(tx, &rid, tx.now)?,
+                        lease: None,
+                        outcome: "pending_approval".into(),
+                        decision_id: Some(decision_id),
+                    });
+                }
+            }
+            let what = take_lease_tx(tx, &rid, &me, &current, ttl, node_field)?;
             touch(tx, &me.id)?;
-            outcome(tx, &rid, &me.id, "borrowed")
+            outcome(tx, &rid, &me.id, what)
         })
     }
 
@@ -934,6 +1039,7 @@ impl Store {
                      WHERE resource_id = ?1",
                     params![rid, tx.now],
                 )?;
+                crate::spend::reconcile_resource_spend_tx(tx)?;
                 touch(tx, &me.id)?;
                 return outcome(tx, &rid, &me.id, "stopped");
             }
@@ -959,6 +1065,7 @@ impl Store {
                 params![lease_id, tx.now],
             )?;
             let promoted = settle(tx, &rid, &me.address, tx.now)?;
+            crate::spend::reconcile_resource_spend_tx(tx)?;
             touch(tx, &me.id)?;
             let what = if promoted.is_some() {
                 "transferred"
@@ -1017,12 +1124,13 @@ impl Store {
                     json!({ "lease_ids": ids, "resource_nodes": nodes }),
                 )?;
             }
-            for (lease_id, _, ttl) in &selected {
+            for (lease_id, rid, ttl) in &selected {
                 tx.execute(
                     "UPDATE resource_leases SET renewed_at = ?2, expiry_warned_at = NULL, expires_at = ?2 + ?3 * 1000
                      WHERE lease_id = ?1",
                     params![lease_id, tx.now, ttl],
                 )?;
+                crate::spend::renew_resource_spend_tx(tx, rid, &me.id, *ttl)?;
             }
             touch(tx, &me.id)?;
             selected

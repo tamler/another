@@ -309,6 +309,14 @@ pub enum Command {
     /// manager bot.
     #[command(subcommand)]
     Decision(DecisionCmd),
+    /// Spend ledger: budgets, spend entries, hourly leases with approval, burn-down report.
+    #[command(args_conflicts_with_subcommands = true)]
+    Spend {
+        #[command(subcommand)]
+        cmd: Option<SpendCmd>,
+        #[command(flatten)]
+        report: SpendReportArgs,
+    },
     /// Webhooks: signed HTTP POSTs for lane, request, hold and lease events.
     #[command(subcommand)]
     Webhook(WebhookCmd),
@@ -456,6 +464,144 @@ pub enum DecisionCmd {
         #[arg(long)]
         reason: Option<String>,
     },
+}
+
+#[derive(Debug, clap::Args)]
+pub struct SpendReportArgs {
+    /// current (default), previous, or YYYY-MM.
+    #[arg(long, default_value = "current")]
+    period: String,
+    #[arg(long)]
+    account: Option<String>,
+    #[arg(long)]
+    lane: Option<String>,
+    /// Only this agent's spend.
+    #[arg(long = "agent")]
+    agent_filter: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SpendCmd {
+    /// Manage accounts (budgets).
+    #[command(subcommand)]
+    Account(SpendAccountCmd),
+    /// Record an amount spent.
+    Record {
+        #[command(flatten)]
+        agent: AgentArg,
+        #[arg(long)]
+        account: String,
+        /// In the account's unit.
+        #[arg(long)]
+        amount: f64,
+        #[arg(long)]
+        lane: Option<String>,
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Start an hourly lease (asks for approval if the account requires it).
+    Borrow {
+        #[command(flatten)]
+        agent: AgentArg,
+        #[arg(long)]
+        account: String,
+        #[arg(long)]
+        lane: Option<String>,
+        #[arg(long)]
+        cost_per_hour: Option<f64>,
+        /// Lease seconds, renewed by heartbeat (default 3600).
+        #[arg(long)]
+        ttl: Option<i64>,
+        /// Expected hours (shown in the approval question).
+        #[arg(long)]
+        hours: Option<f64>,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// End your lease (its cost is recorded) or withdraw a pending one.
+    Release {
+        lease_id: String,
+        #[command(flatten)]
+        agent: AgentArg,
+    },
+    /// List leases (open ones unless --all).
+    Leases {
+        #[arg(long)]
+        all: bool,
+    },
+    /// Charge borrowing a registered resource to an account, e.g.
+    /// `another spend link runpod gpu_pod:a100`. Borrowers then get a spend lease (behind
+    /// the account's approval gate) that accrues while their resource lease lives.
+    Link {
+        account: String,
+        /// Resource id or kind:name.
+        resource: String,
+    },
+    /// Stop charging a resource to its account (open spend leases run to their end).
+    Unlink {
+        /// Resource id or kind:name.
+        resource: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SpendAccountCmd {
+    /// Add an account, e.g. `another spend account add claude-api --kind api_credits --unit USD --budget 200`.
+    Add {
+        name: String,
+        /// gpu_pod, api_credits, plan_reset, server, domain.
+        #[arg(long)]
+        kind: String,
+        /// USD, credits, resets, hours, ...
+        #[arg(long)]
+        unit: String,
+        /// Budget per period, in the unit.
+        #[arg(long)]
+        budget: Option<f64>,
+        /// monthly (default) or none.
+        #[arg(long, default_value = "monthly")]
+        period: String,
+        /// Day of the month the period resets (1-28).
+        #[arg(long, default_value_t = 1)]
+        reset_day: u32,
+        #[arg(long)]
+        cost_per_hour: Option<f64>,
+        /// Borrowing asks a person first (a decision).
+        #[arg(long)]
+        requires_approval: bool,
+        /// Who approves (default: the node's decider, `another config decider NAME`).
+        #[arg(long)]
+        approver: Option<String>,
+        /// Owning project; omit for a shared account.
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// List accounts.
+    List,
+    /// Change an account.
+    Update {
+        name: String,
+        #[arg(long, conflicts_with = "clear_budget")]
+        budget: Option<f64>,
+        #[arg(long)]
+        clear_budget: bool,
+        #[arg(long)]
+        reset_day: Option<u32>,
+        #[arg(long)]
+        cost_per_hour: Option<f64>,
+        #[arg(long)]
+        requires_approval: Option<bool>,
+        #[arg(long)]
+        approver: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Archive an account (hidden from reports; history kept).
+    Archive { name: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1540,6 +1686,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Lane(cmd) => lane_command(&store, json, cmd)?,
         Command::Webhook(cmd) => webhook_command(&store, json, cmd)?,
         Command::Decision(cmd) => decision_command(&store, json, cmd)?,
+        Command::Spend { cmd, report } => spend_command(&store, json, cmd, report)?,
         Command::Config { key, value } => {
             let list = match (key, value) {
                 (None, _) => store.settings()?,
@@ -1661,6 +1808,183 @@ fn hook_command(
             Ok(emit(json, &rows, |r| output::hook_status(r)))
         }
     }
+}
+
+fn spend_command(
+    store: &Store,
+    json: bool,
+    cmd: Option<SpendCmd>,
+    report: SpendReportArgs,
+) -> anyhow::Result<ExitCode> {
+    use another_core::{BorrowSpend, NewSpendAccount, RecordSpend, SpendAccountUpdate, SpendQuery};
+    Ok(match cmd {
+        None => {
+            let r = store.spend_report(
+                SpendQuery {
+                    period: report.period.parse()?,
+                    account: report.account,
+                    lane: report.lane,
+                    agent: report.agent_filter,
+                },
+                None,
+            )?;
+            emit(json, &r, |r| r.markdown.trim_end().to_string())
+        }
+        Some(SpendCmd::Account(SpendAccountCmd::Add {
+            name,
+            kind,
+            unit,
+            budget,
+            period,
+            reset_day,
+            cost_per_hour,
+            requires_approval,
+            approver,
+            project,
+            description,
+        })) => {
+            let project = match project {
+                Some(p) => Some(project_key(store, "local", Some(p))?),
+                None => None,
+            };
+            let a = store.create_spend_account(
+                NewSpendAccount {
+                    name,
+                    kind: kind.parse()?,
+                    unit,
+                    budget,
+                    period: period.parse()?,
+                    reset_day,
+                    cost_per_hour,
+                    requires_approval,
+                    approver,
+                    project,
+                    description,
+                },
+                None,
+            )?;
+            emit(json, &a, |a| {
+                output::spend_accounts(std::slice::from_ref(a))
+            })
+        }
+        Some(SpendCmd::Account(SpendAccountCmd::List)) => {
+            let list = store.spend_accounts(None)?;
+            emit(json, &list, |l| output::spend_accounts(l))
+        }
+        Some(SpendCmd::Account(SpendAccountCmd::Update {
+            name,
+            budget,
+            clear_budget,
+            reset_day,
+            cost_per_hour,
+            requires_approval,
+            approver,
+            description,
+        })) => {
+            let a = store.update_spend_account(
+                &name,
+                SpendAccountUpdate {
+                    budget,
+                    clear_budget,
+                    reset_day,
+                    cost_per_hour,
+                    requires_approval,
+                    approver,
+                    description,
+                },
+                None,
+            )?;
+            emit(json, &a, |a| {
+                output::spend_accounts(std::slice::from_ref(a))
+            })
+        }
+        Some(SpendCmd::Account(SpendAccountCmd::Archive { name })) => {
+            let a = store.archive_spend_account(&name, None)?;
+            emit(json, &a, |a| format!("archived spend account {}", a.name))
+        }
+        Some(SpendCmd::Record {
+            agent,
+            account,
+            amount,
+            lane,
+            project,
+            note,
+        }) => {
+            let e = store.record_spend(
+                RecordSpend {
+                    agent: Some(agent.agent),
+                    account,
+                    amount,
+                    lane,
+                    project,
+                    note,
+                    at: None,
+                },
+                None,
+            )?;
+            emit(json, &e, |e| {
+                format!(
+                    "recorded {} {} on {}{} [{}]",
+                    e.amount,
+                    e.unit,
+                    e.account,
+                    e.lane
+                        .as_ref()
+                        .map(|l| format!(" for lane {l}"))
+                        .unwrap_or_default(),
+                    e.entry_id
+                )
+            })
+        }
+        Some(SpendCmd::Borrow {
+            agent,
+            account,
+            lane,
+            cost_per_hour,
+            ttl,
+            hours,
+            note,
+        }) => {
+            let o = store.borrow_spend(
+                BorrowSpend {
+                    agent: agent.agent,
+                    account,
+                    lane,
+                    cost_per_hour,
+                    ttl_seconds: ttl,
+                    hours,
+                    note,
+                },
+                None,
+            )?;
+            emit(json, &o, |o| {
+                match &o.decision_id {
+                Some(d) => format!(
+                    "{} needs approval: asked decision {d}; the lease {} starts when it is approved",
+                    o.lease.account, o.lease.lease_id
+                ),
+                None => output::spend_leases(std::slice::from_ref(&o.lease)),
+            }
+            })
+        }
+        Some(SpendCmd::Release { lease_id, agent }) => {
+            let l = store.release_spend(&agent.agent, &lease_id, None)?;
+            emit(json, &l, |l| output::spend_leases(std::slice::from_ref(l)))
+        }
+        Some(SpendCmd::Leases { all }) => {
+            let list = store.spend_leases(all, None)?;
+            emit(json, &list, |l| output::spend_leases(l))
+        }
+        Some(SpendCmd::Link { account, resource }) => {
+            let r =
+                store.link_resource_spend(&ResourceRef::parse(&resource)?, Some(&account), None)?;
+            emit(json, &r, |r| output::resources(std::slice::from_ref(r)))
+        }
+        Some(SpendCmd::Unlink { resource }) => {
+            let r = store.link_resource_spend(&ResourceRef::parse(&resource)?, None, None)?;
+            emit(json, &r, |r| output::resources(std::slice::from_ref(r)))
+        }
+    })
 }
 
 fn decision_command(store: &Store, json: bool, cmd: DecisionCmd) -> anyhow::Result<ExitCode> {

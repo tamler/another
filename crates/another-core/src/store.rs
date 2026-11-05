@@ -665,6 +665,69 @@ CREATE INDEX decisions_by_lane ON decisions(lane_id, status);
 ALTER TABLE holds ADD COLUMN lane_id TEXT REFERENCES lanes(lane_id);
 CREATE INDEX holds_by_lane ON holds(lane_id, released_at);
 "#,
+    r#"
+CREATE TABLE spend_accounts (
+    account_id        TEXT PRIMARY KEY,
+    node_id           TEXT NOT NULL REFERENCES nodes(node_id),
+    name              TEXT NOT NULL,
+    kind              TEXT NOT NULL,
+    unit              TEXT NOT NULL,
+    budget            REAL,
+    period            TEXT NOT NULL DEFAULT 'monthly',
+    reset_day         INTEGER NOT NULL DEFAULT 1,
+    cost_per_hour     REAL,
+    requires_approval INTEGER NOT NULL DEFAULT 0,
+    approver          TEXT,
+    project_id        TEXT REFERENCES projects(project_id),
+    description       TEXT,
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL,
+    archived_at       INTEGER,
+    event_id          TEXT NOT NULL
+);
+CREATE UNIQUE INDEX spend_accounts_name ON spend_accounts(node_id, name) WHERE archived_at IS NULL;
+
+CREATE TABLE spend_entries (
+    entry_id   TEXT PRIMARY KEY,
+    node_id    TEXT NOT NULL REFERENCES nodes(node_id),
+    account_id TEXT NOT NULL REFERENCES spend_accounts(account_id),
+    amount     REAL NOT NULL,
+    at         INTEGER NOT NULL,
+    agent_id   TEXT REFERENCES agents(agent_id),
+    lane_id    TEXT REFERENCES lanes(lane_id),
+    project_id TEXT REFERENCES projects(project_id),
+    note       TEXT,
+    source     TEXT NOT NULL,
+    lease_id   TEXT,
+    created_at INTEGER NOT NULL,
+    event_id   TEXT NOT NULL
+);
+CREATE INDEX spend_entries_by_account ON spend_entries(account_id, at);
+
+CREATE TABLE spend_leases (
+    lease_id      TEXT PRIMARY KEY,
+    node_id       TEXT NOT NULL REFERENCES nodes(node_id),
+    account_id    TEXT NOT NULL REFERENCES spend_accounts(account_id),
+    agent_id      TEXT NOT NULL REFERENCES agents(agent_id),
+    lane_id       TEXT REFERENCES lanes(lane_id),
+    project_id    TEXT REFERENCES projects(project_id),
+    cost_per_hour REAL NOT NULL,
+    ttl_seconds   INTEGER NOT NULL,
+    status        TEXT NOT NULL,
+    requested_at  INTEGER NOT NULL,
+    started_at    INTEGER,
+    renewed_at    INTEGER,
+    expires_at    INTEGER,
+    ended_at      INTEGER,
+    decision_id   TEXT,
+    note          TEXT,
+    entry_id      TEXT,
+    resource_id   TEXT REFERENCES resources(resource_id)
+);
+CREATE INDEX spend_leases_live ON spend_leases(status, expires_at);
+CREATE INDEX spend_leases_by_resource ON spend_leases(resource_id, agent_id, status);
+ALTER TABLE resources ADD COLUMN spend_account_id TEXT REFERENCES spend_accounts(account_id);
+"#,
 ];
 
 fn migrate_to(conn: &mut Connection, limit: usize) -> Result<()> {
