@@ -580,7 +580,7 @@ impl Store {
             .timestamp_millis_opt(self.now())
             .single()
             .map(|t| *t.offset())
-            .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).expect("utc"));
+            .unwrap_or_else(|| chrono::Offset::fix(&chrono::Utc));
         self.send_scheduled_summary_at(offset)
     }
 

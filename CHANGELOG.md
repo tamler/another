@@ -90,11 +90,12 @@ All notable changes to Another. Unreleased work is listed under the next version
 - **Remote event reads are now filtered by token scope** (D38, supersedes D16). `activity_feed`, `activity_summarize` and `GET /activity` used to show every project's events to any token. They now show only events from the token's projects (and project-less events concerning its own agent). Token, peer and node events are hidden from tokens. Local callers are unaffected.
 - `activity_summarize` request counts exclude decision requests (they are reported as decisions).
 - When reading forward, the feed's `next_since` now advances past events filtered out by `kinds` or scope.
+- `spend::period_bounds` returns `Result`: an out-of-range month or `reset_day` is an `invalid` error instead of a panic. Remaining non-test `unwrap`/`expect` calls on input paths are gone; deferred work is tracked in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ### Database
 - Migration 6 adds the `lanes`, `lane_links` and `lane_reports` tables. It is additive; existing databases upgrade in place.
-- Migration 11 adds the `agent_invites`, `remote_agents` and `remote_decisions` tables, and a nullable `lanes.leaderless_at`. It is additive.
 - Migration 10 adds the `spend_accounts`, `spend_entries` and `spend_leases` tables, and a nullable `resources.spend_account_id`. It is additive.
+- Migration 11 adds the `agent_invites`, `remote_agents` and `remote_decisions` tables, and a nullable `lanes.leaderless_at`. It is additive.
 - Migration 9 adds `holds.lane_id` (nullable). It is additive.
 - Migration 8 adds the `decisions` table and `requests.kind` (default `task`). It is additive.
 - Migration 7 adds the `webhooks` and `webhook_deliveries` tables and a nullable `resource_leases.expiry_warned_at` column. It is additive.
