@@ -812,7 +812,13 @@ impl Store {
                     "delivery {delivery_id} is {status}; only dead deliveries can be retried"
                 )));
             }
-            live_hook(tx, &webhook_id)?;
+            let h = live_hook(tx, &webhook_id)?;
+            if let Some(reason) = &h.disabled_reason {
+                return Err(Error::Conflict(format!(
+                    "webhook {} is disabled ({reason}); create a new one",
+                    h.webhook_id
+                )));
+            }
             tx.execute(
                 "UPDATE webhook_deliveries SET status = 'pending', attempts = 0,
                    next_attempt_at = ?2 WHERE delivery_id = ?1",

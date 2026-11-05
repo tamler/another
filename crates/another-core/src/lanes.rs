@@ -394,7 +394,10 @@ pub(crate) fn resolve_lane_in_project(
 ) -> Result<(Lane, String)> {
     let unknown = || Error::NotFound(format!("unknown lane {:?}", key.trim()));
     let Some(project_id) = project_id else {
-        return resolve_lane_in(conn, node_id, key, scope).map_err(|_| unknown());
+        return resolve_lane_in(conn, node_id, key, scope).map_err(|e| match e {
+            Error::Ambiguous(_) => e,
+            _ => unknown(),
+        });
     };
     let slug: String = conn
         .query_row(
@@ -1249,6 +1252,13 @@ impl Store {
                 )));
             }
             check_scope(tx, scope, &project_id)?;
+            if lane.status.is_closed() {
+                return Err(Error::Conflict(format!(
+                    "lane {} is {}; create a new lane to continue",
+                    lane.name,
+                    lane.status.as_str()
+                )));
+            }
             let to = if abandon {
                 LaneStatus::Abandoned
             } else {
@@ -1334,6 +1344,18 @@ pub fn lane_markdown(d: &LaneDetail) -> String {
         out.push_str("\n## Linked\n\n");
         for k in &d.links {
             out.push_str(&format!("- {} `{}`\n", k.kind.as_str(), k.ref_id));
+        }
+    }
+    if !d.holds.is_empty() {
+        out.push_str("\n## Holds\n\n");
+        for h in &d.holds {
+            out.push_str(&format!(
+                "- `{}` by {} ({}, until {})\n",
+                h.pattern,
+                h.agent,
+                if h.exclusive { "exclusive" } else { "shared" },
+                h.expires_at
+            ));
         }
     }
     out

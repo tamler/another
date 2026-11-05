@@ -915,6 +915,21 @@ pub(crate) fn ask_tx(
 
 /// Answer a local decision inside a write transaction. `relayed` is the agent that relayed
 /// the answer (local API caller, or another node's agent for a relayed answer).
+/// `answered_by` travels in events and the feed, which carry names, not free text (D39).
+fn check_answered_by(answered_by: &str) -> Result<()> {
+    check_text("answered_by", answered_by, 64)?;
+    if answered_by
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@'))
+    {
+        Ok(())
+    } else {
+        Err(Error::Invalid(format!(
+            "answered_by {answered_by:?} must be a name: ASCII letters, digits, '-', '_', '.' or '@'"
+        )))
+    }
+}
+
 pub(crate) fn answer_tx(
     tx: &Tx<'_>,
     input: &AnswerDecision,
@@ -993,7 +1008,7 @@ pub(crate) fn answer_tx(
         .map(|a| a.trim().to_string())
         .filter(|a| !a.is_empty())
         .unwrap_or_else(|| d.human.clone());
-    check_text("answered_by", &answered_by, 64)?;
+    check_answered_by(&answered_by)?;
     if let Some(r) = &relayed {
         check_relayer(tx, r, &row.asker_id)?;
     }
@@ -1391,7 +1406,7 @@ fn relay_answer_tx(
         check_relayer(tx, r, asker.as_deref().unwrap_or(""))?;
     }
     if let Some(answered_by) = &input.answered_by {
-        check_text("answered_by", answered_by.trim(), 64)?;
+        check_answered_by(answered_by.trim())?;
     }
     // Free text never goes in an event: it travels as mail to the asking agent on the
     // decision's node (mail is routed only to its recipients' nodes), and the relay event
@@ -1689,6 +1704,22 @@ impl Store {
                 }
                 out.push(r.d);
             }
+            let mut stmt = conn.prepare(&format!("{MIRROR_SELECT} WHERE m.status = 'open'"))?;
+            let mut rows = stmt.query([])?;
+            while let Some(r) = rows.next()? {
+                let (d, project, _) = mirror_from_row(r)?;
+                let visible = match (scope, &project) {
+                    (None, _) => true,
+                    (Some(s), Some(p)) => scope_allows_project(conn, s, p)?,
+                    (Some(_), None) => false,
+                };
+                if visible {
+                    out.push(d);
+                }
+            }
+            out.sort_by(|x, y| {
+                (&x.created_at, &x.decision_id).cmp(&(&y.created_at, &y.decision_id))
+            });
             Ok(out)
         })
     }
@@ -1719,14 +1750,25 @@ impl Store {
         self.write(|tx| {
             crate::holds::sweep_tx(tx)?;
             if let Some(d) = relay_answer_tx(tx, &input, scope)? {
-                return Ok(d);
+                return Ok(Ok(d));
+            }
+            // Refusing a late answer must commit the sweep, or a due default never lands
+            // while people keep answering.
+            if let Ok(row) = load_in(tx, tx.node_id, &input.decision, scope) {
+                if row.d.status != DecisionStatus::Open {
+                    return Ok(Err(Error::Conflict(format!(
+                        "decision {} is already {}",
+                        row.d.decision_id,
+                        row.d.status.as_str()
+                    ))));
+                }
             }
             let relayed = match &input.relayed_by {
                 Some(r) => Some(resolve_agent(tx, tx.node_id, r)?),
                 None => None,
             };
-            answer_tx(tx, &input, relayed, scope)
-        })
+            answer_tx(tx, &input, relayed, scope).map(Ok)
+        })?
     }
 
     /// Withdraw an open decision (the asking agent only).
@@ -1738,27 +1780,34 @@ impl Store {
         scope: Option<&TokenScope>,
     ) -> Result<Decision> {
         self.write(|tx| {
-            // Deadlines first: a decision whose choose_default deadline has passed already has
-            // its outcome, and cancelling must not discard it.
             crate::holds::sweep_tx(tx)?;
-            let row = load_in(tx, tx.node_id, key, scope)?;
-            let me = resolve_agent(tx, tx.node_id, agent)?;
-            if me.id != row.asker_id {
-                return Err(Error::Forbidden(format!(
-                    "only {} (who asked) can cancel this decision",
-                    row.d.asker
-                )));
-            }
-            if row.d.status != DecisionStatus::Open {
-                return Err(Error::Conflict(format!(
-                    "decision {} is already {}",
-                    row.d.decision_id,
-                    row.d.status.as_str()
-                )));
-            }
+            let checked = (|| {
+                let row = load_in(tx, tx.node_id, key, scope)?;
+                let me = resolve_agent(tx, tx.node_id, agent)?;
+                if me.id != row.asker_id {
+                    return Err(Error::Forbidden(format!(
+                        "only {} (who asked) can cancel this decision",
+                        row.d.asker
+                    )));
+                }
+                if row.d.status != DecisionStatus::Open {
+                    return Err(Error::Conflict(format!(
+                        "decision {} is already {}",
+                        row.d.decision_id,
+                        row.d.status.as_str()
+                    )));
+                }
+                Ok((row, me))
+            })();
+            let (row, me) = match checked {
+                Ok(actors) => actors,
+                // Refusing cancellation must commit the sweep, while cancellation
+                // mutations below still roll back together if any of them fail.
+                Err(error) => return Ok(Err(error)),
+            };
             cancel_row_tx(tx, &me, &row, reason.as_deref())?;
-            Ok(load(tx, tx.node_id, &row.d.decision_id)?.d)
-        })
+            Ok(Ok(load(tx, tx.node_id, &row.d.decision_id)?.d))
+        })?
     }
 }
 
@@ -1826,6 +1875,72 @@ pub fn decision_markdown(d: &Decision) -> String {
 }
 
 #[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use crate::Clock;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn cancellation_cannot_discard_a_default_due_at_its_transaction_time() {
+        let deadline = 1_700_000_060_000;
+        let clock = Arc::new(AtomicI64::new(deadline - 60_000));
+        let s = Store::open_in_memory(Clock::Ticking(clock.clone())).unwrap();
+        s.ensure_project("t", "/work/shop").unwrap();
+        s.register_agent_trusted(RegisterAgent {
+            name: "coder".into(),
+            program: Program::Codex,
+            project: Some("/work/shop".into()),
+            model: None,
+            description: None,
+        })
+        .unwrap();
+        let d = s
+            .ask_decision(
+                NewDecision {
+                    agent: "coder@shop".into(),
+                    question: "Proceed?".into(),
+                    options: ["go", "wait"]
+                        .into_iter()
+                        .map(|value| DecisionOption {
+                            value: value.into(),
+                            label: value.into(),
+                            description: None,
+                        })
+                        .collect(),
+                    deadline_at: Some(deadline),
+                    on_timeout: DecisionTimeout::ChooseDefault,
+                    default_value: Some("wait".into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        // A separate sweep would run just before the deadline, and its following
+        // cancellation transaction at the deadline. The outcome must use its own time.
+        clock.store(deadline - 1, Ordering::SeqCst);
+        match s.cancel_decision("coder@shop", &d.decision_id, None, None) {
+            Ok(cancelled) => {
+                let at = chrono::DateTime::parse_from_rfc3339(&cancelled.updated_at)
+                    .unwrap()
+                    .timestamp_millis();
+                assert!(
+                    at < deadline,
+                    "cancellation at {at} discarded a due default"
+                );
+            }
+            Err(e) => {
+                assert_eq!(e.code(), "conflict", "{e}");
+                assert!(s.events(100).unwrap().iter().any(|event| {
+                    event.kind == "decision.expired"
+                        && event.payload["decision_id"] == d.decision_id
+                }));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{Clock, Program};
@@ -1878,6 +1993,52 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["MIRROR-SHOP"]
         );
+    }
+
+    /// The daily summary's read includes mirrors, in age order, and only those the caller
+    /// may see.
+    #[test]
+    fn open_decisions_for_the_summary_include_visible_mirrors() {
+        let s = Store::open_in_memory(Clock::System).unwrap();
+        let shop = s.ensure_project("t", "/work/shop").unwrap().project_id;
+        let vault = s.ensure_project("t", "/work/vault").unwrap().project_id;
+        s.register_agent_trusted(RegisterAgent {
+            name: "manager".into(),
+            program: Program::GrokBot,
+            project: None,
+            model: None,
+            description: None,
+        })
+        .unwrap();
+        s.write(|tx| {
+            for (id, project, status, at) in [
+                ("MIRROR-SHOP", &shop, "open", 1_000),
+                ("MIRROR-VAULT", &vault, "open", 2_000),
+                ("MIRROR-DONE", &shop, "answered", 3_000),
+            ] {
+                tx.execute(
+                    "INSERT INTO remote_decisions (decision_id, node_id, project_id, human,
+                       question, options, status, created_at, updated_at)
+                     VALUES (?1, 'OTHER-NODE', ?2, 'owner', 'q', '[]', ?3, ?4, ?4)",
+                    params![id, project, status, at],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let ids = |scope: Option<&TokenScope>| -> Vec<String> {
+            s.open_decisions_oldest_first(scope)
+                .unwrap()
+                .into_iter()
+                .map(|d| d.decision_id)
+                .collect()
+        };
+        assert_eq!(ids(None), ["MIRROR-SHOP", "MIRROR-VAULT"]);
+        let t = s
+            .create_token("manager", &["/work/shop".into()], None, None)
+            .unwrap();
+        let scope = s.verify_token(&t.secret).unwrap();
+        assert_eq!(ids(Some(&scope)), ["MIRROR-SHOP"]);
     }
 
     /// A signed relay names a relayer the sender doesn't own (this node's manager), or none:

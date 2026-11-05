@@ -726,6 +726,7 @@ Options:
       --json               Print machine-readable JSON
   -p, --project <PROJECT>  Project path or slug (default: current directory)
       --shared             
+      --lane <LANE>        Lane to check for (default: $ANOTHER_LANE, else the one lane you lead here) [env: ANOTHER_LANE=]
   -h, --help               Print help
 ```
 
