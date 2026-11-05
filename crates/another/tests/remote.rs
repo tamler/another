@@ -417,6 +417,11 @@ async fn completing_a_request_in_scope_shows_only_the_completers_own_mail() {
     let stale = private_mail(&srv, Some(1));
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     srv.store.sweep().unwrap();
+    // A request's title is its subject, and its project's tokens already read that on the
+    // feed, so claiming one and the Done mail's subject disclose nothing new.
+    let feed = call(&client, "activity_feed", json!({ "kinds": ["request"] })).await;
+    assert_eq!(error_code(&feed), None, "{feed:?}");
+    assert!(tool_json(&feed).to_string().contains(SECRET_SUBJECT));
     for mail in [&open, &stale] {
         let request = mail.request_id.clone().unwrap();
         for action in ["claim", "complete"] {
@@ -486,6 +491,54 @@ async fn a_request_outside_the_tokens_scope_looks_missing() {
         srv.store.request(&request).unwrap().status,
         RequestStatus::Open
     );
+    srv.ct.cancel();
+}
+
+#[tokio::test]
+async fn a_request_between_project_less_agents_looks_missing_to_others() {
+    let srv = start().await;
+    let client = cloud_client(&srv, &["/work/*".into()]).await;
+    srv.store
+        .register_agent_trusted(RegisterAgent {
+            name: "nora".into(),
+            program: Program::Claude,
+            project: None,
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    let hidden = srv
+        .store
+        .send_message(SendMessage {
+            from: "nora".into(),
+            to: vec!["grok-bot".into()],
+            subject: SECRET_SUBJECT.into(),
+            body: SECRET_BODY.into(),
+            request: Some(NewRequest {
+                due_in_seconds: None,
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+    let request = hidden.request_id.unwrap();
+    let missing = call(
+        &client,
+        "claim_request",
+        json!({ "request_id": "NO-SUCH-ID", "action": "complete" }),
+    )
+    .await;
+    let res = call(
+        &client,
+        "claim_request",
+        json!({ "request_id": request, "action": "complete" }),
+    )
+    .await;
+    let (code, message) = denial(&res);
+    let (missing_code, missing_message) = denial(&missing);
+    assert_eq!(code, missing_code);
+    assert_eq!(message.replace(&request, "NO-SUCH-ID"), missing_message);
+    let feed = call(&client, "activity_feed", json!({ "kinds": ["request"] })).await;
+    assert!(!tool_json(&feed).to_string().contains(SECRET_SUBJECT));
     srv.ct.cancel();
 }
 

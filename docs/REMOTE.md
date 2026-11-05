@@ -96,7 +96,7 @@ curl -H "Authorization: Bearer $ANOTHER_TOKEN" "https://my-laptop.my-tailnet.ts.
 |---|---|
 | `fetch_inbox`, `acknowledge`, `heartbeat`, `resource_borrow` / `release` / `heartbeat` | Must act as the token's agent; the agent is filled in when omitted |
 | `send_message` | Must act as the token's agent. `reply_to` must name a message that agent sent or received; any other id reads as missing |
-| `claim_request` | Must act as the token's agent. The request must be visible to the token, or in a thread its agent is part of; any other id reads as missing |
+| `claim_request` | Must act as the token's agent. The request must be visible to the token, or in a thread its agent is part of; any other id reads as missing. A request's title is its mail's subject, which that token's feed already shows |
 | `hold_paths` | Token's agent, and a `project` matching the token's globs (required) |
 | `ensure_project`, `resource_register` (with a project) | Project must match the token's globs |
 | `register_agent` | Only the token's own identity |
