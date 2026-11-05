@@ -68,6 +68,7 @@ async fn exposes_the_tool_surface() {
             "activity_summarize",
             "claim_request",
             "ensure_project",
+            "events_poll",
             "fetch_inbox",
             "heartbeat",
             "hold_paths",
@@ -86,7 +87,10 @@ async fn exposes_the_tool_surface() {
             "resource_register",
             "resource_release",
             "send_message",
-            "threads"
+            "threads",
+            "webhook_list",
+            "webhook_remove",
+            "webhook_subscribe"
         ]
     );
     client.cancel().await.unwrap();

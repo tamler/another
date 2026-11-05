@@ -47,7 +47,7 @@ fn remote_addr(headers: &HeaderMap, req: &Request) -> Option<String> {
         .map(|c| c.0.to_string())
 }
 
-fn bearer(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn bearer(headers: &HeaderMap) -> Option<String> {
     let v = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let (scheme, token) = v.split_once(' ')?;
     scheme
@@ -187,7 +187,11 @@ pub fn authorize(
     };
     match tool {
         "resource_reap" => Err("reaping is never available to remote peers".into()),
-        "activity_feed" | "activity_summarize" | "resource_find" => Ok(()),
+        // Event reads are filtered by the token scope inside the tools.
+        "activity_feed" | "activity_summarize" | "resource_find" | "events_poll" => Ok(()),
+        // Webhook globs are checked against the token's, and only its own webhooks are listed
+        // or removed, inside the store.
+        "webhook_subscribe" | "webhook_list" | "webhook_remove" => Ok(()),
         // Lane reads are filtered / checked against the token scope inside the tool.
         "lane_list" | "lane_show" => Ok(()),
         "lane_create" => {

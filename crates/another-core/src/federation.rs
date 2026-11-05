@@ -184,6 +184,11 @@ fn classify(kind: &str, payload: &Value, origin: &str) -> Share {
         "token" | "peer" => return Share::Never,
         _ => {}
     }
+    // Node-local signals (D38): a refused hold and an expiring lease are about this node's
+    // holds and leases; other nodes see the holds and leases themselves.
+    if matches!(kind, "hold.conflict" | "resource.lease_expiring") {
+        return Share::Never;
+    }
     match kind {
         "node.created" | "node.renamed" | "project.ensured" | "agent.registered" => {
             Share::Directory
@@ -735,7 +740,7 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
         "resource.renewed" => {
             for id in strings(p, "lease_ids") {
                 tx.execute(
-                    "UPDATE resource_leases SET renewed_at = ?2,
+                    "UPDATE resource_leases SET renewed_at = ?2, expiry_warned_at = NULL,
                        ttl_seconds = coalesce(?4, ttl_seconds),
                        expires_at = ?2 + coalesce(?4, ttl_seconds) * 1000
                      WHERE lease_id = ?1 AND node_id = ?3 AND released_at IS NULL",
@@ -1373,6 +1378,12 @@ mod tests {
         assert_eq!(
             classify("resource.borrowed", &json!({ "resource_node": "B" }), o),
             Share::Feed(vec!["B".into()])
+        );
+        // Node-local signals never leave their node (D38).
+        assert_eq!(classify("hold.conflict", &json!({}), o), Share::Never);
+        assert_eq!(
+            classify("resource.lease_expiring", &json!({}), o),
+            Share::Never
         );
     }
 

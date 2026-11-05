@@ -31,7 +31,7 @@ impl AnotherMcp {
     pub fn new(store: Store) -> Self {
         Self {
             store,
-            tool_router: Self::tool_router() + Self::lane_router(),
+            tool_router: Self::tool_router() + Self::lane_router() + Self::push_router(),
         }
     }
 

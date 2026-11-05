@@ -12,6 +12,7 @@ use crate::identity::address;
 use crate::store::Store;
 use crate::time::fmt_ts;
 use crate::tokens::{scope_allows_project, TokenScope};
+use crate::visibility::{agent_visible, event_visible, request_visible};
 
 /// Coarse activity categories, derived from event kinds.
 #[derive(
@@ -192,7 +193,7 @@ const MAX_LIMIT: u32 = 500;
 const HIGHLIGHTS: usize = 8;
 
 /// Render one event as a feed item, looking up names the payload only references by id.
-fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
+pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
     let p: Value = serde_json::from_str(&row.payload).unwrap_or(Value::Null);
     let s = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     let list = |k: &str| {
@@ -316,6 +317,28 @@ fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
                 json!({ "hold_ids": p.get("hold_ids") }),
             )
         }
+        "hold.conflict" => {
+            let project = project_slug(conn, &s("project_id"))?;
+            (
+                format!(
+                    "{actor} was refused a hold on {project}:{} (held by {})",
+                    list("paths"),
+                    list("holders")
+                ),
+                json!({ "hold_ids": p.get("hold_ids"), "project_id": s("project_id"), "lane_id": p.get("lane_id") }),
+            )
+        }
+        "resource.lease_expiring" => {
+            let who = agent_address(conn, &s("agent_id"))?;
+            let rid = s("resource_id");
+            (
+                format!(
+                    "lease on {} by {who} expires in under 5 minutes",
+                    resource_label(conn, &rid)?
+                ),
+                json!({ "lease_id": s("lease_id"), "resource_id": rid }),
+            )
+        }
         "hold.expired" => {
             let who = agent_address(conn, &s("agent_id"))?;
             (
@@ -324,15 +347,12 @@ fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             )
         }
         "resource.registered" => (
+            // The purpose is free text: it stays in the registry (`resource_find`).
             format!(
-                "{actor} registered {} {} ({}){}",
+                "{actor} registered {} {} ({})",
                 s("kind"),
                 s("name"),
-                s("mode"),
-                p.get("purpose")
-                    .and_then(Value::as_str)
-                    .map(|x| format!(" for {x}"))
-                    .unwrap_or_default()
+                s("mode")
             ),
             json!({ "resource_id": s("resource_id") }),
         ),
@@ -393,11 +413,8 @@ fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             )
         }
         "resource.reap_requested" => (
-            format!(
-                "{actor} asked a human to reap {}: {}",
-                s("target"),
-                s("reason")
-            ),
+            // The reason is free text; the person reads it with the reap request.
+            format!("{actor} asked a human to reap {}", s("target")),
             json!({ "target": s("target") }),
         ),
         "resource.reaped" => (
@@ -567,13 +584,13 @@ fn agent_address(conn: &Connection, id: &str) -> Result<String> {
         .unwrap_or_else(|| id.to_string()))
 }
 
-struct EventRow {
-    event_id: String,
-    node_id: String,
-    ts: i64,
-    actor: String,
-    kind: String,
-    payload: String,
+pub(crate) struct EventRow {
+    pub event_id: String,
+    pub node_id: String,
+    pub ts: i64,
+    pub actor: String,
+    pub kind: String,
+    pub payload: String,
 }
 
 fn kind_matches(kinds: &[ActivityKind], kind: &str) -> bool {
@@ -587,7 +604,7 @@ fn read_events(
     kinds: &[ActivityKind],
     limit: u32,
     scope: Option<&TokenScope>,
-) -> Result<Vec<EventRow>> {
+) -> Result<(Vec<EventRow>, Option<String>)> {
     let after_seq: Option<i64> = match since {
         Some(Since::After(id)) => Some(
             conn.query_row("SELECT seq FROM events WHERE event_id = ?1", [id], |r| {
@@ -612,8 +629,12 @@ fn read_events(
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query(params![after_seq, since_ts])?;
     let mut out = Vec::new();
+    let mut scanned: Option<String> = None;
     while let Some(r) = rows.next()? {
         let kind: String = r.get(4)?;
+        if !newest_first {
+            scanned = Some(r.get(0)?);
+        }
         if !kind_matches(kinds, &kind) {
             continue;
         }
@@ -626,7 +647,14 @@ fn read_events(
             payload: r.get(5)?,
         };
         if let Some(scope) = scope {
-            if !lane_event_visible(conn, scope, &row)? {
+            if !event_visible(
+                conn,
+                scope,
+                &row.node_id,
+                &row.actor,
+                &row.kind,
+                &row.payload,
+            )? {
                 continue;
             }
         }
@@ -638,20 +666,7 @@ fn read_events(
     if newest_first {
         out.reverse();
     }
-    Ok(out)
-}
-
-/// Lane events belong to their lane's project: a token only sees those of its projects.
-/// (Other event kinds keep the node-wide awareness rule, D16, until push scoping.)
-fn lane_event_visible(conn: &Connection, scope: &TokenScope, row: &EventRow) -> Result<bool> {
-    if !row.kind.starts_with("lane.") {
-        return Ok(true);
-    }
-    let p: Value = serde_json::from_str(&row.payload).unwrap_or(Value::Null);
-    match p.get("project_id").and_then(Value::as_str) {
-        Some(project_id) => scope_allows_project(conn, scope, project_id),
-        None => Ok(false),
-    }
+    Ok((out, scanned))
 }
 
 impl Store {
@@ -672,14 +687,16 @@ impl Store {
         };
         self.sweep()?;
         self.read(|conn| {
-            let rows = read_events(conn, query.since.as_ref(), &query.kinds, limit, scope)?;
+            let (rows, scanned) =
+                read_events(conn, query.since.as_ref(), &query.kinds, limit, scope)?;
             let items = rows
                 .into_iter()
                 .map(|r| item(conn, r))
                 .collect::<Result<Vec<_>>>()?;
-            let next_since = items
-                .last()
-                .map(|i| i.event_id.clone())
+            // Reading forward, the cursor moves past events the filters left out too, so they
+            // are never re-scanned; reading the newest page, it is the last item.
+            let next_since = scanned
+                .or_else(|| items.last().map(|i| i.event_id.clone()))
                 .or(match &query.since {
                     Some(Since::After(id)) => Some(id.clone()),
                     _ => None,
@@ -712,7 +729,7 @@ impl Store {
                     .optional()?
                     .ok_or_else(|| Error::NotFound(format!("unknown event id {id:?}")))?,
             };
-            let rows = read_events(conn, Some(&since), &[], u32::MAX, scope)?;
+            let (rows, _) = read_events(conn, Some(&since), &[], u32::MAX, scope)?;
             let mut counts: BTreeMap<String, u32> = BTreeMap::new();
             for r in &rows {
                 *counts
@@ -736,43 +753,71 @@ impl Store {
                 .collect::<Result<Vec<_>>>()?;
 
             let mut stmt = conn.prepare(
-                "SELECT a.address, NULL, a.program, a.status, a.last_seen_at FROM agents a
+                "SELECT a.address, NULL, a.program, a.status, a.last_seen_at, a.agent_id FROM agents a
                  LEFT JOIN projects p ON p.project_id = a.project_id
                  WHERE a.node_id = ?1 AND (a.status = 'active' OR a.last_seen_at >= ?2)
                  ORDER BY a.last_seen_at DESC",
             )?;
-            let agents = stmt
+            let rows_agents = stmt
                 .query_map(params![self.node_id(), since_ms], |r| {
-                    Ok(AgentPresence {
-                        agent: address(
-                            &r.get::<_, String>(0)?,
-                            r.get::<_, Option<String>>(1)?.as_deref(),
-                        ),
-                        program: r.get(2)?,
-                        status: r.get(3)?,
-                        last_seen_at: r.get::<_, Option<i64>>(4)?.map(fmt_ts),
-                    })
+                    Ok((
+                        AgentPresence {
+                            agent: address(
+                                &r.get::<_, String>(0)?,
+                                r.get::<_, Option<String>>(1)?.as_deref(),
+                            ),
+                            program: r.get(2)?,
+                            status: r.get(3)?,
+                            last_seen_at: r.get::<_, Option<i64>>(4)?.map(fmt_ts),
+                        },
+                        r.get::<_, String>(5)?,
+                    ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            let requests = conn.query_row(
-                "SELECT count(*) FILTER (WHERE status = 'open'),
-                        count(*) FILTER (WHERE status = 'claimed'),
-                        count(*) FILTER (WHERE status = 'stale')
-                 FROM requests WHERE node_id = ?1",
-                [self.node_id()],
-                |r| {
-                    Ok(RequestCounts {
-                        open: r.get(0)?,
-                        claimed: r.get(1)?,
-                        stale: r.get(2)?,
-                    })
-                },
+            let mut agents = Vec::new();
+            for (presence, agent_id) in rows_agents {
+                if scope.is_none_or(|sc| agent_visible(conn, sc, &agent_id).unwrap_or(false)) {
+                    agents.push(presence);
+                }
+            }
+            let mut requests = RequestCounts {
+                open: 0,
+                claimed: 0,
+                stale: 0,
+            };
+            let mut stmt = conn.prepare(
+                "SELECT request_id, status FROM requests
+                 WHERE node_id = ?1 AND status IN ('open', 'claimed', 'stale')",
             )?;
-            let live_holds: u32 = conn.query_row(
-                "SELECT count(*) FROM holds WHERE node_id = ?1 AND released_at IS NULL",
-                [self.node_id()],
-                |r| r.get(0),
+            let open_requests = stmt
+                .query_map([self.node_id()], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (id, status) in open_requests {
+                if let Some(sc) = scope {
+                    if !request_visible(conn, sc, &id)? {
+                        continue;
+                    }
+                }
+                match status.as_str() {
+                    "open" => requests.open += 1,
+                    "claimed" => requests.claimed += 1,
+                    _ => requests.stale += 1,
+                }
+            }
+            let mut stmt = conn.prepare(
+                "SELECT project_id FROM holds WHERE node_id = ?1 AND released_at IS NULL",
             )?;
+            let hold_projects = stmt
+                .query_map([self.node_id()], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut live_holds: u32 = 0;
+            for p in hold_projects {
+                if scope.is_none_or(|sc| scope_allows_project(conn, sc, &p).unwrap_or(false)) {
+                    live_holds += 1;
+                }
+            }
 
             let active: Vec<&str> = agents
                 .iter()

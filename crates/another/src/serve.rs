@@ -18,7 +18,7 @@ pub const DEFAULT_BIND: &str = "127.0.0.1:7466";
 /// HTTP serving options.
 #[derive(Debug, Clone, Default)]
 pub struct HttpOptions {
-    /// Require bearer tokens on `/mcp` and `/activity`.
+    /// Require bearer tokens on `/mcp`, `/activity` and `/events/*`.
     pub auth: bool,
     /// Explicitly allow a non-loopback bind (only together with `auth`).
     pub allow_remote_bind: bool,
@@ -83,6 +83,7 @@ pub fn spawn_sweeper(store: Store, every: Duration, ct: CancellationToken) {
 pub async fn serve_stdio(store: Store, sweep_every: Duration) -> Result<()> {
     let ct = CancellationToken::new();
     spawn_sweeper(store.clone(), sweep_every, ct.clone());
+    crate::push::spawn_delivery_worker(store.clone(), ct.clone());
     tracing::info!(node_id = store.node_id(), "serving MCP on stdio");
     let service = AnotherMcp::new(store)
         .serve(rmcp::transport::stdio())
@@ -93,8 +94,9 @@ pub async fn serve_stdio(store: Store, sweep_every: Duration) -> Result<()> {
     Ok(())
 }
 
-/// Build the HTTP app: MCP at `/mcp`, the activity feed at `GET /activity`, and
-/// `GET /health`. With `auth`, `/mcp` and `/activity` require a bearer token.
+/// Build the HTTP app: MCP at `/mcp`, the activity feed at `GET /activity`, push at
+/// `GET /events/poll` and `GET /events/stream`, and `GET /health`. With `auth`, everything
+/// but `/health` requires a bearer token.
 pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> axum::Router {
     let factory_store = store.clone();
     let mut config =
@@ -112,6 +114,8 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
     let protected = axum::Router::new()
         .nest_service("/mcp", mcp)
         .route("/activity", axum::routing::get(crate::remote::activity))
+        .route("/events/poll", axum::routing::get(crate::push::poll))
+        .route("/events/stream", axum::routing::get(crate::push::stream))
         .with_state(store.clone());
     let protected = if opts.auth {
         protected.layer(axum::middleware::from_fn_with_state(
@@ -153,6 +157,7 @@ pub async fn serve_http(
     }
     let ct = CancellationToken::new();
     spawn_sweeper(store.clone(), sweep_every, ct.clone());
+    crate::push::spawn_delivery_worker(store.clone(), ct.clone());
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding {addr}"))?;

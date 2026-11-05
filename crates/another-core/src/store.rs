@@ -218,6 +218,19 @@ impl Store {
         })
     }
 
+    /// Id of the newest event in the log (a cursor meaning "from now on").
+    pub fn latest_event_id(&self) -> Result<Option<String>> {
+        self.read(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT event_id FROM events ORDER BY seq DESC LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?)
+        })
+    }
+
     /// Run a read-only closure against the connection.
     pub(crate) fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         let conn = self.lock();
@@ -564,6 +577,44 @@ CREATE TABLE lane_reports (
     event_id   TEXT NOT NULL
 );
 CREATE INDEX lane_reports_by_lane ON lane_reports(lane_id, created_at);
+"#,
+    r#"
+CREATE TABLE webhooks (
+    webhook_id    TEXT PRIMARY KEY,
+    node_id       TEXT NOT NULL REFERENCES nodes(node_id),
+    url           TEXT NOT NULL,
+    secret        TEXT NOT NULL,
+    filters       TEXT NOT NULL,
+    project_globs TEXT,
+    description   TEXT,
+    token_id      TEXT,
+    created_by    TEXT,
+    created_at    INTEGER NOT NULL,
+    cursor_seq    INTEGER NOT NULL,
+    removed_at    INTEGER,
+    disabled_at   INTEGER,
+    disabled_reason TEXT
+);
+
+CREATE TABLE webhook_deliveries (
+    delivery_id     TEXT PRIMARY KEY,
+    webhook_id      TEXT NOT NULL REFERENCES webhooks(webhook_id),
+    event_id        TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    filter          TEXT NOT NULL,
+    body            TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at INTEGER NOT NULL,
+    last_error      TEXT,
+    last_status     INTEGER,
+    created_at      INTEGER NOT NULL,
+    delivered_at    INTEGER,
+    UNIQUE (webhook_id, event_id)
+);
+CREATE INDEX webhook_deliveries_due ON webhook_deliveries(status, next_attempt_at);
+
+ALTER TABLE resource_leases ADD COLUMN expiry_warned_at INTEGER;
 "#,
 ];
 

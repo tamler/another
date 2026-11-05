@@ -5,7 +5,7 @@ use std::fmt::Write;
 use another_core::{
     ActivityFeed, Agent, AuditEntry, Event, HeartbeatReport, Hold, HoldConflict, HoldReport, Inbox,
     Lane, LaneDetail, LaneReport, LeaseOutcome, Message, NodeInfo, Peer, Project, Request,
-    Resource, Thread, ThreadSummary, Token, WakeTarget,
+    Resource, Thread, ThreadSummary, Token, WakeTarget, Webhook, WebhookCreated, WebhookDelivery,
 };
 use serde::Serialize;
 
@@ -570,4 +570,76 @@ pub fn lane_report(r: &LaneReport) -> String {
             .unwrap_or_default(),
         r.summary.lines().next().unwrap_or_default()
     )
+}
+
+pub fn webhook_created(c: &WebhookCreated) -> String {
+    let mut out = webhooks(std::slice::from_ref(&c.webhook));
+    let _ = writeln!(out, "signing secret (shown once): {}", c.secret);
+    out.push_str(
+        "verify: X-Another-Signature = sha256=hex(HMAC-SHA256(secret, X-Another-Timestamp + \".\" + body))\n",
+    );
+    out
+}
+
+pub fn webhooks(hs: &[Webhook]) -> String {
+    if hs.is_empty() {
+        return "no webhooks".to_string();
+    }
+    let mut out = String::new();
+    for h in hs {
+        let filters: Vec<&str> = h.filters.iter().map(|f| f.as_str()).collect();
+        let projects = h
+            .project_globs
+            .as_ref()
+            .map_or_else(|| "all projects".to_string(), |g| g.join(", "));
+        let _ = writeln!(
+            out,
+            "{} {}\n  events: {}; projects: {}; {} pending, {} delivered, {} dead{}{}",
+            h.webhook_id,
+            h.url,
+            filters.join(","),
+            projects,
+            h.pending,
+            h.delivered,
+            h.dead,
+            h.disabled_reason
+                .as_ref()
+                .map(|r| format!("; disabled: {r}"))
+                .unwrap_or_default(),
+            h.description
+                .as_ref()
+                .map(|d| format!("; {d}"))
+                .unwrap_or_default()
+        );
+    }
+    out
+}
+
+pub fn deliveries(ds: &[WebhookDelivery]) -> String {
+    if ds.is_empty() {
+        return "no deliveries".to_string();
+    }
+    let mut out = String::new();
+    for d in ds {
+        let result = match (&d.last_status, &d.last_error) {
+            (_, Some(e)) => e.clone(),
+            (Some(s), None) => format!("HTTP {s}"),
+            _ => "not sent yet".to_string(),
+        };
+        let _ = writeln!(
+            out,
+            "{} {:<9} {} via {} ({} attempt(s)): {}{}",
+            d.delivery_id,
+            d.status.as_str(),
+            d.kind,
+            d.filter,
+            d.attempts,
+            result,
+            d.next_attempt_at
+                .as_ref()
+                .map(|t| format!("; next {t}"))
+                .unwrap_or_default()
+        );
+    }
+    out
 }
