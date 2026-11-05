@@ -7,7 +7,7 @@ Source and draft changes only, stacked on `launch/seo3`. Nothing here was deploy
 | Gap | Fix |
 |---|---|
 | No `/guides/` page, although every guide's breadcrumb said "/ guides" | New hub with canonical, sitemap and llms entries |
-| Guides absent from the main nav; getting started, install and compare had no link to them | Guides added to the main nav on every page, with a "Task guides" link on those three pages and on the 404 |
+| Guides absent from the main nav; getting started, install and compare had no link to them | Guides added to the main nav on every page, including the 404, with a "Task guides" link on those three pages |
 | Guide breadcrumb was plain text, with no structured trail | Breadcrumb links to the hub; `BreadcrumbList` JSON-LD on the hub and guides |
 | Three guide titles at 58 to 66 characters, with mixed separators | All three shortened and given one format; every title is now at most 60 characters |
 

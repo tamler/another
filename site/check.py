@@ -32,6 +32,7 @@ class Page(HTMLParser):
     def __init__(self, path):
         super().__init__(convert_charrefs=True)
         self.path, self.ids, self.links = path, set(), []
+        self.in_main_nav, self.main_nav_links = False, set()
         self.meta, self.canonicals, self.structured = {}, [], []
         self.title, self.in_title, self.in_script, self.script_data = "", False, False, ""
         self.text = ""
@@ -62,6 +63,10 @@ class Page(HTMLParser):
             self.ids.add(attrs["id"])
         self.headings += tag == "h1"
         self.mains += tag == "main"
+        if tag == "nav" and attrs.get("aria-label") == "Main":
+            self.in_main_nav = True
+        if tag == "a" and self.in_main_nav:
+            self.main_nav_links.add(attrs.get("href"))
         for key in ("href", "src"):
             if key in attrs:
                 self.links.append(attrs[key])
@@ -72,6 +77,8 @@ class Page(HTMLParser):
             assert attrs.get("href", "").startswith("/") and not attrs["href"].startswith("//"), f"{self.path}: external asset"
 
     def handle_endtag(self, tag):
+        if tag == "nav":
+            self.in_main_nav = False
         if tag == "title":
             self.in_title = False
         if tag == "script":
@@ -111,7 +118,7 @@ for path, page in pages.items():
 
 titles, descriptions, canonical_urls = set(), set(), set()
 for path, page in pages.items():
-    assert "/guides/" in page.links, f"{path}: must link to the guides hub"
+    assert "/guides/" in page.main_nav_links, f"{path}: main nav must link to the guides hub"
     if path.name == "404.html":
         assert page.meta.get("robots") == "noindex" and not page.canonicals
         continue
