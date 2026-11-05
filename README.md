@@ -221,6 +221,7 @@ Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green
 
 | Doc | What it covers |
 |---|---|
+| [examples/](examples/) | Four runnable, peer-only scenarios: lanes and holds, a decision answered over HTTP, spend approval, a remote invite across two nodes |
 | [docs/PEER-WALKTHROUGH.md](docs/PEER-WALKTHROUGH.md) | Two peer agents and a person, no manager: lanes, holds, a conflict, a decision (run verbatim in CI) |
 | [docs/CLI.md](docs/CLI.md), [docs/MCP.md](docs/MCP.md), [docs/HTTP.md](docs/HTTP.md) | Reference: every subcommand (generated from `--help`), every MCP tool (generated from `tools/list`), every HTTP endpoint |
 | [docs/HOOKS.md](docs/HOOKS.md) | Hook packs for each client; trust steps; the digest |
