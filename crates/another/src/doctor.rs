@@ -428,7 +428,30 @@ fn check_hooks(opts: &DoctorOptions) -> Vec<Check> {
             })
             .map(Path::to_path_buf)
             .unwrap_or_else(|| path.clone());
-        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let repair = Some(format!(
+            "repair the file (or restore the `{}.another-backup-*` copy the installer made), then run `another hook install --client {}`",
+            path.display(),
+            c.as_str()
+        ));
+        // Only a missing file means not installed. The installer refuses a file it can't
+        // read, so sending the person there would go in a circle.
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                out.push(check(
+                    &area,
+                    Level::Fail,
+                    format!(
+                        "{} hook config {} can't be read ({e})",
+                        client_name(c),
+                        path.display()
+                    ),
+                    repair,
+                ));
+                continue;
+            }
+        };
         if !text.contains(MARKER) {
             if !client_dir.exists() {
                 out.push(check(
@@ -471,11 +494,7 @@ fn check_hooks(opts: &DoctorOptions) -> Vec<Check> {
                 &area,
                 Level::Fail,
                 format!("{} hook config {} {why}", client_name(c), path.display()),
-                Some(format!(
-                    "repair the file (or restore the `{}.another-backup-*` copy the installer made), then run `another hook install --client {}`",
-                    path.display(),
-                    c.as_str()
-                )),
+                repair,
             ));
             continue;
         }
@@ -501,12 +520,33 @@ fn check_hooks(opts: &DoctorOptions) -> Vec<Check> {
             ));
             continue;
         }
-        out.push(check(
-            &area,
-            Level::Pass,
-            format!("{} hooks installed ({})", client_name(c), path.display()),
-            None,
-        ));
+        // Commands doctor can't check are reported, never dropped. Their text stays out of
+        // the report: a person's own hook command may hold a secret.
+        let unchecked = parsed
+            .as_ref()
+            .map_or(0, |v| unchecked_commands(v, &commands));
+        out.push(if unchecked > 0 {
+            check(
+                &area,
+                Level::Warn,
+                format!(
+                    "{} hooks installed, but doctor can't check {unchecked} other command(s) that mention {MARKER} ({})",
+                    client_name(c),
+                    path.display()
+                ),
+                Some(format!(
+                    "in that file, make each command run the wrapper by its absolute path as the first word, inside a hook group's `hooks` list, or remove it; `another hook install --client {}` doesn't rewrite every such command",
+                    c.as_str()
+                )),
+            )
+        } else {
+            check(
+                &area,
+                Level::Pass,
+                format!("{} hooks installed ({})", client_name(c), path.display()),
+                None,
+            )
+        });
         if c == Client::Codex {
             out.push(codex_trust(&home, &path, &text));
         }
@@ -536,6 +576,34 @@ fn our_commands(v: &Value, out: &mut Vec<String>) {
             }
         }
     }
+}
+
+/// Every `command` string anywhere in the JSON that mentions the wrapper.
+fn marker_commands<'a>(v: &'a Value, out: &mut Vec<&'a str>) {
+    match v {
+        Value::Array(items) => items.iter().for_each(|i| marker_commands(i, out)),
+        Value::Object(map) => {
+            for (key, value) in map {
+                match value.as_str() {
+                    Some(s) if key == "command" && s.contains(MARKER) => out.push(s),
+                    _ => marker_commands(value, out),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// How many commands mention the wrapper beyond those [`our_commands`] located.
+fn unchecked_commands(v: &Value, located: &[String]) -> usize {
+    let mut mentions = Vec::new();
+    marker_commands(v, &mut mentions);
+    for command in located {
+        if let Some(i) = mentions.iter().position(|m| m == command) {
+            mentions.swap_remove(i);
+        }
+    }
+    mentions.len()
 }
 
 /// Decode the installer's `sh_quote` form or a plain absolute first word, without
@@ -688,7 +756,17 @@ fn codex_trust(home: &Path, hooks_json: &Path, hooks_text: &str) -> Check {
             .to_string(),
     );
     let path = hooks_json.display();
-    if missing.is_empty() {
+    if ours.is_empty() {
+        check(
+            "hooks:codex-trust",
+            Level::Warn,
+            format!("found none of Another's hooks in {path} to check for Codex trust"),
+            Some(format!(
+                "reinstall them, then trust them under `/hooks`: `another hook install --client {}`",
+                Client::Codex.as_str()
+            )),
+        )
+    } else if missing.is_empty() {
         check(
             "hooks:codex-trust",
             Level::Pass,
@@ -748,4 +826,18 @@ pub fn render(r: &Report) -> String {
         format!("{} failed, {} warning(s).", r.failed, r.warnings)
     });
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_trust_with_no_hooks_to_check_is_not_a_pass() {
+        let home = tempfile::tempdir().unwrap();
+        let hooks = home.path().join(".codex/hooks.json");
+        let c = codex_trust(home.path(), &hooks, r#"{"hooks":{}}"#);
+        assert!(matches!(c.level, Level::Warn), "{c:?}");
+        assert!(!c.detail.contains("for all 0"), "{c:?}");
+    }
 }

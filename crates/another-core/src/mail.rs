@@ -440,6 +440,22 @@ impl Store {
 
     /// Messages delivered to `who`, newest first, plus counters and relevant requests.
     pub fn inbox(&self, who: &str, query: InboxQuery) -> Result<Inbox> {
+        self.read_inbox(who, query, false)
+    }
+
+    /// Unread messages for `who`: urgent, then high, then the rest, newest first within each.
+    /// Only the `limit` messages returned are loaded, however large the backlog; the counters
+    /// and requests are the same as [`Store::inbox`].
+    pub fn inbox_priority_first(&self, who: &str, limit: u32) -> Result<Inbox> {
+        let query = InboxQuery {
+            unread_only: true,
+            urgent_only: false,
+            limit,
+        };
+        self.read_inbox(who, query, true)
+    }
+
+    fn read_inbox(&self, who: &str, query: InboxQuery, priority_first: bool) -> Result<Inbox> {
         // Expire stale requests/holds first so the digest is current even without a daemon.
         self.sweep()?;
         self.read(|conn| {
@@ -461,12 +477,24 @@ impl Store {
                  WHERE d.agent_id = ?1
                    AND (?2 = 0 OR d.read_at IS NULL)
                    AND (?3 = 0 OR m.importance IN ('high', 'urgent'))
-                 ORDER BY m.created_at DESC, m.message_id DESC
+                 ORDER BY CASE
+                            WHEN ?5 = 0 THEN 0
+                            WHEN m.importance = 'urgent' THEN 0
+                            WHEN m.importance = 'high' THEN 1
+                            ELSE 2
+                          END,
+                          m.created_at DESC, m.message_id DESC
                  LIMIT ?4",
             )?;
             let rows = stmt
                 .query_map(
-                    params![me.id, query.unread_only, query.urgent_only, limit],
+                    params![
+                        me.id,
+                        query.unread_only,
+                        query.urgent_only,
+                        limit,
+                        priority_first
+                    ],
                     |r| {
                         Ok((
                             r.get::<_, String>(0)?,

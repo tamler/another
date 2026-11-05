@@ -519,8 +519,12 @@ pub fn parse_hhmm(v: &str) -> Result<u32> {
         ))
     };
     let (h, m) = v.trim().split_once(':').ok_or_else(bad)?;
+    let two_digits = |s: &str| s.len() == 2 && s.bytes().all(|b| b.is_ascii_digit());
+    if !two_digits(h) || !two_digits(m) {
+        return Err(bad());
+    }
     let (h, m): (u32, u32) = (h.parse().map_err(|_| bad())?, m.parse().map_err(|_| bad())?);
-    if h > 23 || m > 59 || v.trim().len() != 5 {
+    if h > 23 || m > 59 {
         return Err(bad());
     }
     Ok(h * 60 + m)
@@ -538,6 +542,7 @@ pub struct SummarySchedule {
 
 const LAST_SENT_MS: &str = "summary_last_sent_ms";
 const LAST_SENT_DAY: &str = "summary_last_sent_day";
+pub(crate) const LAST_FAILED_DAY: &str = "summary_last_failed_day";
 
 impl Store {
     pub fn summary_schedule(&self) -> Result<SummarySchedule> {
@@ -564,10 +569,13 @@ impl Store {
         daily_at: Option<&str>,
         to: Option<&str>,
     ) -> Result<SummarySchedule> {
+        // Checked first: a refused time must not leave the new recipient behind.
+        let daily_at = daily_at.unwrap_or("").trim();
+        crate::settings::validate("summary_daily", daily_at)?;
         if let Some(to) = to {
             self.set_setting("summary_to", to)?;
         }
-        self.set_setting("summary_daily", daily_at.unwrap_or(""))?;
+        self.set_setting("summary_daily", daily_at)?;
         self.summary_schedule()
     }
 
@@ -601,20 +609,23 @@ impl Store {
         if local.hour() * 60 + local.minute() < due_min {
             return Ok(None);
         }
-        let (last_day, last_ms): (Option<String>, Option<i64>) = self.read(|conn| {
-            let get = |k: &str| -> Result<Option<String>> {
-                Ok(conn
-                    .query_row("SELECT value FROM node_settings WHERE key = ?1", [k], |r| {
-                        r.get(0)
-                    })
-                    .optional()?)
-            };
-            Ok((
-                get(LAST_SENT_DAY)?,
-                get(LAST_SENT_MS)?.and_then(|v| v.parse().ok()),
-            ))
-        })?;
-        if last_day.as_deref() == Some(day.as_str()) {
+        let (last_day, last_failed, last_ms): (Option<String>, Option<String>, Option<i64>) = self
+            .read(|conn| {
+                let get = |k: &str| -> Result<Option<String>> {
+                    Ok(conn
+                        .query_row("SELECT value FROM node_settings WHERE key = ?1", [k], |r| {
+                            r.get(0)
+                        })
+                        .optional()?)
+                };
+                Ok((
+                    get(LAST_SENT_DAY)?,
+                    get(LAST_FAILED_DAY)?,
+                    get(LAST_SENT_MS)?.and_then(|v| v.parse().ok()),
+                ))
+            })?;
+        if last_day.as_deref() == Some(day.as_str()) || last_failed.as_deref() == Some(day.as_str())
+        {
             return Ok(None);
         }
         let since = last_ms
@@ -622,7 +633,7 @@ impl Store {
             .unwrap_or(now - 86_400_000);
         let summary = self.daily_summary(Some(Since::Time(since)), None)?;
         let to = sched.to.clone();
-        let sent = self.write(|tx| {
+        let result = self.write(|tx| {
             // The claim: writes are serialized (BEGIN IMMEDIATE), so of several sweepers
             // sharing this home (an HTTP server plus stdio MCP servers), only the first to
             // get here sends today's rollup; the others see the marker and stop.
@@ -674,7 +685,26 @@ impl Store {
                 )?;
             }
             Ok(true)
-        })?;
+        });
+        let sent = match result {
+            Ok(sent) => sent,
+            // Database and file errors may pass, so the next sweep tries again.
+            Err(e @ (Error::Db(_) | Error::Io(_))) => return Err(e),
+            // Anything else (the person can't be resolved) will fail the same way on every
+            // sweep: report it once and try again tomorrow. If the marker can't be written,
+            // the next sweep just reports it again.
+            Err(e) => {
+                let _ = self.write(|tx| {
+                    tx.execute(
+                        "INSERT INTO node_settings (key, value, updated_at) VALUES (?1, ?2, ?3)
+                         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                        params![LAST_FAILED_DAY, day, tx.now],
+                    )?;
+                    Ok(())
+                });
+                return Err(e);
+            }
+        };
         Ok(sent.then_some(to))
     }
 }

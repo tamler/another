@@ -755,14 +755,7 @@ fn hook_agent(store: &Store, client: Client, root: &Path) -> Result<String> {
 
 /// Inbox + activity digest for session start, capped at [`MAX_DIGEST_CHARS`].
 pub fn session_digest(store: &Store, agent: &str) -> Result<String> {
-    let inbox = store.inbox(
-        agent,
-        InboxQuery {
-            unread_only: true,
-            urgent_only: false,
-            limit: 5,
-        },
-    )?;
+    let inbox = store.inbox_priority_first(agent, 5)?;
     let mut out = format!(
         "Another: {} has {} unread ({} urgent), {} awaiting ack, {} open request(s).",
         inbox.agent,

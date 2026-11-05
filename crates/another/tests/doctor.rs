@@ -442,3 +442,138 @@ async fn installed_hook_commands_are_required_for_each_client() {
         assert!(levels(&broken, "hooks:codex-trust").is_empty());
     }
 }
+
+/// Temporary homes with Another's Codex hooks installed; `another_dir` may hold odd characters.
+fn codex_homes(another_dir: &str) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let (ah, home) = (dir.path().join(another_dir), dir.path().join("home"));
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    Store::open(&ah).unwrap();
+    let install = Command::new(env!("CARGO_BIN_EXE_another"))
+        .args(["hook", "install", "--client", "codex"])
+        .env("ANOTHER_HOME", &ah)
+        .env("HOME", &home)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(install.status.success(), "{install:?}");
+    (dir, ah, home)
+}
+
+const NO_SERVER: &str = "http://127.0.0.1:9";
+
+#[test]
+fn a_missing_wrapper_fails_when_the_path_has_an_apostrophe() {
+    let (_dir, ah, home) = codex_homes("o'brien");
+    let (_, healthy) = doctor(&ah, &home, NO_SERVER);
+    assert_eq!(levels(&healthy, "hooks:codex"), ["pass"], "{healthy}");
+    std::fs::remove_file(ah.join("hooks/another-hook.sh")).unwrap();
+    let (ok, r) = doctor(&ah, &home, NO_SERVER);
+    assert!(!ok);
+    assert!(find(&r, "hooks:codex", "fail")["detail"]
+        .as_str()
+        .unwrap()
+        .contains("missing or not executable"));
+}
+
+#[test]
+fn a_wrapper_that_is_not_the_first_word_is_not_reported_as_installed() {
+    let (_dir, ah, home) = codex_homes("another");
+    let v = serde_json::json!({ "hooks": { "SessionStart": [{ "hooks": [
+        { "type": "command", "command": "/bin/sh '/gone/another-hook.sh' session-start" }
+    ] }] } });
+    std::fs::write(home.join(".codex/hooks.json"), v.to_string()).unwrap();
+    let (_, r) = doctor(&ah, &home, NO_SERVER);
+    assert_eq!(levels(&r, "hooks:codex"), ["fail"], "{r}");
+}
+
+#[test]
+fn a_command_doctor_cannot_check_beside_a_healthy_hook_is_a_warning() {
+    let (_dir, ah, home) = codex_homes("another");
+    let path = home.join(".codex/hooks.json");
+    let installed: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let secret = "/bin/sh '/gone/another-hook.sh' --token sekrit";
+    let unchecked = serde_json::json!({ "type": "command", "command": secret });
+
+    // In a group beside the installer's hooks, and directly under an event.
+    let mut in_group = installed.clone();
+    in_group["hooks"]["SessionStart"][0]["hooks"]
+        .as_array_mut()
+        .unwrap()
+        .push(unchecked.clone());
+    let mut under_event = installed.clone();
+    under_event["hooks"]["SessionStart"]
+        .as_array_mut()
+        .unwrap()
+        .push(unchecked);
+    for config in [in_group, under_event] {
+        std::fs::write(&path, config.to_string()).unwrap();
+        let (_, r) = doctor(&ah, &home, NO_SERVER);
+        assert_eq!(levels(&r, "hooks:codex"), ["warn"], "{r}");
+        let w = find(&r, "hooks:codex", "warn");
+        assert!(w["detail"].as_str().unwrap().contains("can't check"), "{w}");
+        assert!(!r.to_string().contains("sekrit"), "no command text: {r}");
+        assert_eq!(
+            levels(&r, "hooks:codex-trust").len(),
+            1,
+            "the hooks it could check still get a trust verdict: {r}"
+        );
+    }
+
+    // A broken wrapper still outranks the warning.
+    std::fs::remove_file(ah.join("hooks/another-hook.sh")).unwrap();
+    let (_, r) = doctor(&ah, &home, NO_SERVER);
+    assert_eq!(levels(&r, "hooks:codex"), ["fail"], "{r}");
+}
+
+#[test]
+fn hooks_outside_a_group_get_no_codex_trust_verdict() {
+    let (_dir, ah, home) = codex_homes("another");
+    let wrapper = ah.join("hooks/another-hook.sh");
+    let v = serde_json::json!({ "hooks": { "SessionStart": [
+        { "type": "command", "command": format!("'{}' session-start", wrapper.display()) }
+    ] } });
+    std::fs::write(home.join(".codex/hooks.json"), v.to_string()).unwrap();
+    let (_, r) = doctor(&ah, &home, NO_SERVER);
+    assert_eq!(levels(&r, "hooks:codex"), ["fail"], "{r}");
+    assert!(levels(&r, "hooks:codex-trust").is_empty(), "{r}");
+}
+
+#[test]
+fn a_hook_config_that_cannot_be_read_is_broken_not_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ah, home) = (dir.path().join("another"), dir.path().join("home"));
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    Store::open(&ah).unwrap();
+    let path = home.join(".codex/hooks.json");
+
+    let assert_broken = |r: &Value| {
+        let f = find(r, "hooks:codex", "fail");
+        assert!(
+            f["detail"].as_str().unwrap().contains("can't be read"),
+            "{f}"
+        );
+        assert!(f["fix"].as_str().unwrap().starts_with("repair"), "{f}");
+        assert!(levels(r, "hooks:codex-trust").is_empty(), "{r}");
+    };
+    // Not UTF-8, with and without the wrapper's name in it. Reinstalling refuses both.
+    for bytes in [&b"another-hook.sh \xff"[..], &b"\xff\xfe"[..]] {
+        std::fs::write(&path, bytes).unwrap();
+        let (ok, r) = doctor(&ah, &home, NO_SERVER);
+        assert!(!ok);
+        assert_broken(&r);
+    }
+    // A directory where the file should be.
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let (_, r) = doctor(&ah, &home, NO_SERVER);
+    assert_broken(&r);
+
+    // A missing file is still just not installed.
+    std::fs::remove_dir(&path).unwrap();
+    let (_, r) = doctor(&ah, &home, NO_SERVER);
+    assert!(find(&r, "hooks:codex", "warn")["detail"]
+        .as_str()
+        .unwrap()
+        .contains("hooks not installed"));
+}
