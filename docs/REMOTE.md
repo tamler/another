@@ -94,11 +94,13 @@ curl -H "Authorization: Bearer $ANOTHER_TOKEN" "https://my-laptop.my-tailnet.ts.
 
 | Tools | Rule |
 |---|---|
-| `fetch_inbox`, `acknowledge`, `claim_request`, `heartbeat`, `send_message` (`from`), `resource_borrow` / `release` / `heartbeat` | Must act as the token's agent; the agent is filled in when omitted |
+| `fetch_inbox`, `acknowledge`, `heartbeat`, `resource_borrow` / `release` / `heartbeat` | Must act as the token's agent; the agent is filled in when omitted |
+| `send_message` | Must act as the token's agent. `reply_to` must name a message that agent sent or received; any other id reads as missing |
+| `claim_request` | Must act as the token's agent. The request must be visible to the token, or in a thread its agent is part of; any other id reads as missing |
 | `hold_paths` | Token's agent, and a `project` matching the token's globs (required) |
 | `ensure_project`, `resource_register` (with a project) | Project must match the token's globs |
 | `register_agent` | Only the token's own identity |
-| `threads` | Only threads the token's agent sent or received in |
+| `threads` | Only threads the token's agent sent or received in, and within them only the messages it sent or received (D45). An agent added midway reads earlier messages only if a party forwards them |
 | `activity_feed`, `activity_summarize`, `events_poll` | Only events from the token's projects (or, for project-less events, its own agent's); no message bodies |
 | `resource_find` | Node-wide, read-only awareness (kept by decision, D38) |
 | `webhook_subscribe` | Project globs default to the token's and may only be narrowed; `all_projects` is refused |

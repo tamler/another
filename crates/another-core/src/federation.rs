@@ -567,6 +567,15 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
             if !agent_exists(tx, &sender)? {
                 return Err(Error::NotFound(format!("unknown sender agent {sender}")));
             }
+            // A node sends only as its own agents: inboxes show this row's sender as written.
+            let senders_own: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM agents WHERE agent_id = ?1 AND node_id = ?2)",
+                params![sender, origin],
+                |r| r.get(0),
+            )?;
+            if !senders_own {
+                return Ok(());
+            }
             let reply_to = s("reply_to").filter(|id| {
                 tx.query_row("SELECT 1 FROM messages WHERE message_id = ?1", [id], |_| {
                     Ok(())

@@ -628,9 +628,121 @@ impl Store {
         })
     }
 
+    /// The messages of a thread that the agent sent or received, oldest first. Being a party
+    /// to a thread is easy (anyone holding its id can reply into it), so over a token that
+    /// grants no access to the messages of others.
+    pub fn thread_for(&self, agent_id: &str, thread_id: &str) -> Result<Thread> {
+        self.read(|conn| {
+            let own = own_message("m", "?2");
+            let sql = format!(
+                "SELECT m.message_id FROM messages m WHERE m.thread_id = ?1 AND {own}
+                 ORDER BY m.created_at, m.message_id"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let ids = stmt
+                .query_map(params![thread_id, agent_id], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if ids.is_empty() {
+                return Err(Error::NotFound(format!("unknown thread {thread_id:?}")));
+            }
+            let messages = ids
+                .iter()
+                .map(|id| load_message(conn, id))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Thread {
+                thread_id: thread_id.to_string(),
+                messages,
+            })
+        })
+    }
+
+    /// Like [`Store::threads`], with every field computed from what [`Store::thread_for`]
+    /// shows `who`.
+    pub fn threads_for(&self, who: &str, limit: u32) -> Result<Vec<ThreadSummary>> {
+        self.read(|conn| {
+            let me = resolve_agent(conn, self.node_id(), who)?;
+            let limit = if limit == 0 { 50 } else { limit };
+            let first_subject = own_message("f", "?1");
+            let own = own_message("m", "?1");
+            let sql = format!(
+                "SELECT m.thread_id, count(*), max(m.created_at),
+                   (SELECT count(*) FROM deliveries d JOIN messages m2 ON m2.message_id = d.message_id
+                     WHERE m2.thread_id = m.thread_id AND d.agent_id = ?1 AND d.read_at IS NULL),
+                   (SELECT f.subject FROM messages f WHERE f.thread_id = m.thread_id AND {first_subject}
+                     ORDER BY f.created_at, f.message_id LIMIT 1)
+                 FROM messages m
+                 WHERE {own}
+                 GROUP BY m.thread_id
+                 ORDER BY max(m.created_at) DESC
+                 LIMIT ?2"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt
+                .query_map(params![me.id, limit], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, u32>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, u32>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows.into_iter()
+                .map(|(thread_id, messages, last_at, unread, subject)| {
+                    let participants = own_participants(conn, &me.id, &thread_id)?;
+                    Ok(ThreadSummary {
+                        subject: subject.unwrap_or_default(),
+                        thread_id,
+                        messages,
+                        unread,
+                        participants,
+                        last_at: fmt_ts(last_at),
+                    })
+                })
+                .collect()
+        })
+    }
+
+    /// Whether the agent sent or received this message. A missing message is simply not.
+    pub fn message_visible_to(&self, agent_id: &str, message_id: &str) -> Result<bool> {
+        self.read(|conn| {
+            let own = own_message("m", "?2");
+            let sql = format!(
+                "SELECT EXISTS (SELECT 1 FROM messages m WHERE m.message_id = ?1 AND {own})"
+            );
+            Ok(conn.query_row(&sql, params![message_id, agent_id], |r| r.get(0))?)
+        })
+    }
+
     pub fn message(&self, message_id: &str) -> Result<Message> {
         self.read(|conn| load_message(conn, message_id))
     }
+}
+
+/// SQL: the message aliased `m` was sent or received by the agent bound to `agent`.
+fn own_message(m: &str, agent: &str) -> String {
+    format!(
+        "({m}.sender_id = {agent} OR EXISTS (SELECT 1 FROM deliveries od
+           WHERE od.message_id = {m}.message_id AND od.agent_id = {agent}))"
+    )
+}
+
+/// Everyone on the messages of a thread that `agent_id` sent or received.
+fn own_participants(conn: &Connection, agent_id: &str, thread_id: &str) -> Result<Vec<String>> {
+    let own = own_message("m", "?2");
+    let sql = format!(
+        "SELECT DISTINCT a.address FROM agents a
+         WHERE a.agent_id IN (
+           SELECT m.sender_id FROM messages m WHERE m.thread_id = ?1 AND {own}
+           UNION
+           SELECT d.agent_id FROM deliveries d JOIN messages m ON m.message_id = d.message_id
+            WHERE m.thread_id = ?1 AND {own})
+         ORDER BY a.address"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![thread_id, agent_id], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 fn thread_participants(conn: &Connection, thread_id: &str) -> Result<Vec<String>> {

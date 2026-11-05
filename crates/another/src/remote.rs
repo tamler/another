@@ -243,9 +243,33 @@ pub fn authorize(
                 _ => Err(format!("this token can only register {}", scope.agent)),
             }
         }
-        "send_message" => acting(args, "from"),
-        "fetch_inbox" | "acknowledge" | "claim_request" | "heartbeat" | "resource_borrow"
-        | "resource_release" | "resource_heartbeat" => acting(args, "agent"),
+        "send_message" => {
+            acting(args, "from")?;
+            // Replying reads the parent's subject and recipients, so the parent must be the
+            // agent's own. A hidden message reads the same as a missing one.
+            match s(args, "reply_to") {
+                Some(parent)
+                    if !store
+                        .message_visible_to(&scope.agent_id, parent)
+                        .map_err(err)? =>
+                {
+                    Err(format!("unknown message {parent:?}"))
+                }
+                _ => Ok(()),
+            }
+        }
+        "claim_request" => {
+            acting(args, "agent")?;
+            // Claiming returns the request's title. A hidden request reads as a missing one.
+            match s(args, "request_id") {
+                Some(id) if !store.request_visible_to(scope, id).map_err(err)? => {
+                    Err(format!("unknown request {id:?}"))
+                }
+                _ => Ok(()),
+            }
+        }
+        "fetch_inbox" | "acknowledge" | "heartbeat" | "resource_borrow" | "resource_release"
+        | "resource_heartbeat" => acting(args, "agent"),
         "hold_paths" => {
             acting(args, "agent")?;
             project(s(args, "project"), true)

@@ -120,7 +120,7 @@ pub struct FetchInboxArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ThreadsArgs {
-    /// Return every message in this thread.
+    /// Return this thread's messages (over a token, only the agent's own).
     pub thread_id: Option<String>,
     /// Otherwise list threads this agent is part of.
     pub agent: Option<String>,
@@ -437,18 +437,29 @@ impl AnotherMcp {
     }
 
     #[tool(
-        description = "Read a whole thread by thread_id, or list the threads an agent is part of."
+        description = "Read a thread by thread_id, or list the threads an agent is part of. \
+        Over a token, both show only the messages the token's agent sent or received."
     )]
     async fn threads(&self, Parameters(a): Parameters<ThreadsArgs>) -> ToolResult<ThreadsOut> {
+        let scope = crate::remote::current_scope();
         self.run(move |s| match (a.thread_id, a.agent) {
             (Some(id), _) => Ok(ThreadsOut {
-                thread: Some(s.thread(&id)?),
+                thread: Some(match &scope {
+                    Some(scope) => s.thread_for(&scope.agent_id, &id)?,
+                    None => s.thread(&id)?,
+                }),
                 threads: None,
             }),
-            (None, Some(agent)) => Ok(ThreadsOut {
-                thread: None,
-                threads: Some(s.threads(&agent, a.limit.unwrap_or(20))?),
-            }),
+            (None, Some(agent)) => {
+                let limit = a.limit.unwrap_or(20);
+                Ok(ThreadsOut {
+                    thread: None,
+                    threads: Some(match &scope {
+                        Some(_) => s.threads_for(&agent, limit)?,
+                        None => s.threads(&agent, limit)?,
+                    }),
+                })
+            }
             (None, None) => Err(another_core::Error::Invalid(
                 "give thread_id or agent".into(),
             )),

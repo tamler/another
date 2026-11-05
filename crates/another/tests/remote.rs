@@ -3,7 +3,10 @@
 use std::net::SocketAddr;
 
 use another::serve::{http_router, HttpOptions};
-use another_core::{Program, RegisterAgent, SendMessage, Store};
+use another_core::{
+    LaneReportInput, Message, NewLane, NewRequest, Program, RegisterAgent, ReportKind,
+    RequestStatus, SendMessage, Store,
+};
 use rmcp::model::{CallToolRequestParams, CallToolResult, ClientConfig};
 use rmcp::service::RunningService;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -297,6 +300,374 @@ async fn expired_and_unscoped_tokens() {
     assert!(srv.store.verify_token("not-a-token").is_err());
     let tampered = format!("{}x", token.secret);
     assert!(srv.store.verify_token(&tampered).is_err());
+    srv.ct.cancel();
+}
+
+const SECRET_SUBJECT: &str = "secret subject";
+const SECRET_BODY: &str = "TOP SECRET BODY";
+
+/// Registers bob and cloud in the shop, and returns a client for cloud's token.
+async fn cloud_client(srv: &Server, globs: &[String]) -> Client {
+    for name in ["bob", "cloud"] {
+        srv.store
+            .register_agent_trusted(RegisterAgent {
+                name: name.into(),
+                program: Program::Claude,
+                project: Some("/work/shop".into()),
+                model: None,
+                description: None,
+            })
+            .unwrap();
+    }
+    let token = srv
+        .store
+        .create_token("cloud@shop", globs, None, None)
+        .unwrap();
+    connect(&srv.base, &token.secret).await
+}
+
+/// A request between alice and bob; cloud is not a party to it.
+fn private_mail(srv: &Server, due_in_seconds: Option<i64>) -> Message {
+    srv.store
+        .send_message(SendMessage {
+            from: "alice@shop".into(),
+            to: vec!["bob@shop".into()],
+            subject: SECRET_SUBJECT.into(),
+            body: SECRET_BODY.into(),
+            request: Some(NewRequest { due_in_seconds }),
+            ..Default::default()
+        })
+        .unwrap()
+}
+
+fn tool_json(res: &CallToolResult) -> Value {
+    let text = serde_json::to_value(&res.content).unwrap()[0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    serde_json::from_str(&text).unwrap()
+}
+
+fn denial(res: &CallToolResult) -> (Option<String>, String) {
+    let v = tool_json(res);
+    (
+        error_code(res),
+        v["error"]["message"].as_str().unwrap().to_string(),
+    )
+}
+
+/// What cloud reads of a thread, by id and in its thread list. Neither may hold the secret.
+async fn cloud_reads(client: &Client, thread_id: &str) -> (Value, Value) {
+    let by_id = call(client, "threads", json!({ "thread_id": thread_id })).await;
+    assert_eq!(error_code(&by_id), None, "{by_id:?}");
+    let list = call(client, "threads", json!({})).await;
+    assert_eq!(error_code(&list), None, "{list:?}");
+    let (by_id, list) = (tool_json(&by_id), tool_json(&list));
+    assert!(!by_id.to_string().contains(SECRET_BODY), "{by_id}");
+    assert!(!list.to_string().contains(SECRET_BODY), "{list}");
+    (by_id, list)
+}
+
+#[tokio::test]
+async fn a_token_cannot_reply_to_a_message_it_cannot_see() {
+    let srv = start().await;
+    let client = cloud_client(&srv, &["/work/*".into()]).await;
+    let private = private_mail(&srv, None);
+    let missing = call(
+        &client,
+        "send_message",
+        json!({ "reply_to": "NO-SUCH-ID", "body": "hello" }),
+    )
+    .await;
+    assert_eq!(error_code(&missing).as_deref(), Some("forbidden"));
+    for args in [
+        json!({ "reply_to": private.message_id, "body": "hello" }),
+        json!({ "reply_to": private.message_id, "to": ["cloud@shop"], "body": "hello" }),
+    ] {
+        let res = call(&client, "send_message", args).await;
+        let (code, message) = denial(&res);
+        let (missing_code, missing_message) = denial(&missing);
+        assert_eq!(code, missing_code);
+        assert_eq!(
+            message.replace(&private.message_id, "NO-SUCH-ID"),
+            missing_message
+        );
+    }
+    assert_eq!(
+        srv.store.thread(&private.thread_id).unwrap().messages.len(),
+        1
+    );
+    // An unjoined thread and a missing one are denied alike.
+    let hidden = call(
+        &client,
+        "threads",
+        json!({ "thread_id": private.thread_id }),
+    )
+    .await;
+    let absent = call(&client, "threads", json!({ "thread_id": "NO-SUCH-ID" })).await;
+    assert_eq!(denial(&hidden), denial(&absent));
+    srv.ct.cancel();
+}
+
+#[tokio::test]
+async fn completing_a_request_in_scope_shows_only_the_completers_own_mail() {
+    let srv = start().await;
+    let client = cloud_client(&srv, &["/work/*".into()]).await;
+    let open = private_mail(&srv, None);
+    let stale = private_mail(&srv, Some(1));
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    srv.store.sweep().unwrap();
+    for mail in [&open, &stale] {
+        let request = mail.request_id.clone().unwrap();
+        for action in ["claim", "complete"] {
+            let res = call(
+                &client,
+                "claim_request",
+                json!({ "request_id": request, "action": action, "note": "finished" }),
+            )
+            .await;
+            assert_eq!(error_code(&res), None, "{res:?}");
+        }
+        let (by_id, _) = cloud_reads(&client, &mail.thread_id).await;
+        let messages = by_id["thread"]["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1, "{by_id}");
+        assert_eq!(messages[0]["body"], "finished");
+        assert_eq!(srv.store.thread(&mail.thread_id).unwrap().messages.len(), 2);
+    }
+    srv.ct.cancel();
+}
+
+#[tokio::test]
+async fn a_request_outside_the_tokens_scope_looks_missing() {
+    let srv = start().await;
+    let client = cloud_client(&srv, &["/work/*".into()]).await;
+    srv.store
+        .register_agent_trusted(RegisterAgent {
+            name: "vera".into(),
+            program: Program::Claude,
+            project: Some("/secret/vault".into()),
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    let hidden = srv
+        .store
+        .send_message(SendMessage {
+            from: "vera@vault".into(),
+            to: vec!["vera@vault".into()],
+            subject: SECRET_SUBJECT.into(),
+            body: SECRET_BODY.into(),
+            request: Some(NewRequest {
+                due_in_seconds: None,
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+    let request = hidden.request_id.unwrap();
+    let missing = call(
+        &client,
+        "claim_request",
+        json!({ "request_id": "NO-SUCH-ID", "action": "complete" }),
+    )
+    .await;
+    for action in ["claim", "complete"] {
+        let res = call(
+            &client,
+            "claim_request",
+            json!({ "request_id": request, "action": action }),
+        )
+        .await;
+        let (code, message) = denial(&res);
+        let (missing_code, missing_message) = denial(&missing);
+        assert_eq!(code, missing_code);
+        assert_eq!(message.replace(&request, "NO-SUCH-ID"), missing_message);
+    }
+    assert_eq!(
+        srv.store.request(&request).unwrap().status,
+        RequestStatus::Open
+    );
+    srv.ct.cancel();
+}
+
+#[tokio::test]
+async fn a_token_with_no_project_globs_still_claims_a_request_addressed_to_it() {
+    let srv = start().await;
+    let client = cloud_client(&srv, &[]).await;
+    let mail = srv
+        .store
+        .send_message(SendMessage {
+            from: "alice@shop".into(),
+            to: vec!["cloud@shop".into()],
+            subject: "for you".into(),
+            body: "please look".into(),
+            request: Some(NewRequest {
+                due_in_seconds: None,
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+    let res = call(
+        &client,
+        "claim_request",
+        json!({ "request_id": mail.request_id.unwrap() }),
+    )
+    .await;
+    assert_eq!(error_code(&res), None, "{res:?}");
+    srv.ct.cancel();
+}
+
+#[tokio::test]
+async fn a_lane_report_does_not_open_the_lane_thread_to_the_reporter() {
+    let srv = start().await;
+    let client = cloud_client(&srv, &["/work/*".into()]).await;
+    srv.store
+        .create_lane(
+            NewLane {
+                agent: "grok-bot".into(),
+                name: "launch".into(),
+                project: "/work/shop".into(),
+                lead: "alice@shop".into(),
+                charter: "ship it".into(),
+                status: None,
+            },
+            None,
+        )
+        .unwrap();
+    let report = LaneReportInput {
+        agent: "alice@shop".into(),
+        lane: "launch".into(),
+        kind: ReportKind::Status,
+        summary: "first".into(),
+        progress: None,
+        status: None,
+        links: vec![],
+        artifacts: vec![],
+        outcome: None,
+        pr_url: None,
+    };
+    srv.store.report_lane(report, None).unwrap();
+    let thread_id = srv
+        .store
+        .lane("launch", None)
+        .unwrap()
+        .lane
+        .thread_id
+        .unwrap();
+    srv.store
+        .send_message(SendMessage {
+            from: "alice@shop".into(),
+            to: vec!["grok-bot".into()],
+            subject: SECRET_SUBJECT.into(),
+            body: SECRET_BODY.into(),
+            thread_id: Some(thread_id.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let mcp = call(
+        &client,
+        "lane_report",
+        json!({ "lane": "launch", "summary": "over mcp" }),
+    )
+    .await;
+    assert_eq!(error_code(&mcp), None, "{mcp:?}");
+    let (by_id, list) = cloud_reads(&client, &thread_id).await;
+    assert_eq!(by_id["thread"]["messages"].as_array().unwrap().len(), 1);
+    assert!(!list.to_string().contains(SECRET_SUBJECT), "{list}");
+
+    let token = srv
+        .store
+        .create_token("cloud@shop", &["/work/*".into()], None, None)
+        .unwrap();
+    let r = reqwest::Client::new()
+        .post(format!("{}/lanes/launch/report", srv.base))
+        .header("authorization", format!("Bearer {}", token.secret))
+        .json(&json!({ "summary": "over http" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let (by_id, _) = cloud_reads(&client, &thread_id).await;
+    assert_eq!(by_id["thread"]["messages"].as_array().unwrap().len(), 2);
+    srv.ct.cancel();
+}
+
+#[tokio::test]
+async fn a_party_reads_only_its_own_messages_and_every_summary_field_follows() {
+    let srv = start().await;
+    let client = cloud_client(&srv, &["/work/*".into()]).await;
+    // The root and a later message are between alice and bob; only the middle one reaches cloud.
+    let root = srv
+        .store
+        .send_message(SendMessage {
+            from: "alice@shop".into(),
+            to: vec!["bob@shop".into()],
+            subject: SECRET_SUBJECT.into(),
+            body: SECRET_BODY.into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let asked = srv
+        .store
+        .send_message(SendMessage {
+            from: "alice@shop".into(),
+            to: vec!["cloud@shop".into()],
+            subject: "for you".into(),
+            body: "please look".into(),
+            thread_id: Some(root.thread_id.clone()),
+            request: Some(NewRequest {
+                due_in_seconds: None,
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    srv.store
+        .send_message(SendMessage {
+            from: "bob@shop".into(),
+            to: vec!["alice@shop".into()],
+            subject: SECRET_SUBJECT.into(),
+            body: SECRET_BODY.into(),
+            thread_id: Some(root.thread_id.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let (by_id, list) = cloud_reads(&client, &root.thread_id).await;
+    let messages = by_id["thread"]["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["message_id"], asked.message_id);
+    let summary = &list["threads"][0];
+    assert_eq!(summary["thread_id"], root.thread_id);
+    assert_eq!(summary["subject"], "for you");
+    assert_eq!(summary["messages"], 1);
+    assert_eq!(summary["unread"], 1);
+    assert_eq!(summary["last_at"], json!(asked.created_at));
+    assert_eq!(summary["participants"], json!(["alice@shop", "cloud@shop"]));
+
+    // It can still act on what it can see.
+    for args in [
+        json!({ "reply_to": asked.message_id, "body": "on it" }),
+        json!({ "reply_to": asked.message_id, "to": ["alice@shop"], "body": "again" }),
+        json!({ "to": ["alice@shop"], "subject": "new", "body": "a new thread" }),
+    ] {
+        let res = call(&client, "send_message", args).await;
+        assert_eq!(error_code(&res), None, "{res:?}");
+    }
+    let (by_id, _) = cloud_reads(&client, &root.thread_id).await;
+    assert_eq!(by_id["thread"]["messages"].as_array().unwrap().len(), 3);
+    let request = asked.request_id.unwrap();
+    for action in ["claim", "complete"] {
+        let res = call(
+            &client,
+            "claim_request",
+            json!({ "request_id": request, "action": action }),
+        )
+        .await;
+        assert_eq!(error_code(&res), None, "{res:?}");
+    }
+    // Local readers keep the whole thread.
+    assert!(srv.store.thread(&root.thread_id).unwrap().messages.len() >= 5);
     srv.ct.cancel();
 }
 

@@ -183,8 +183,10 @@ Migration 11, additive: the `agent_invites`, `remote_agents` and `remote_decisio
   - Read and ack receipts, which apply only to that node's agents, and new recipients, which can be added only to that node's own message from the sender that wrote it.
   - Session events and re-registrations change only that node's agents, and a hold event changes only that node's holds.
   - Lead handover ranks only holds this node recorded itself, so another node's claimed hold or timestamp can't choose a lead.
+  - A message's sender, which must be that node's agent. A message naming another node's agent leaves no mail behind.
 
-  These guards apply where this phase uses the data. They don't refuse the event: other forged events are still stored, and a forged hold or mail still shows in lists until tamler/another#70 (origin checks before storing) lands. That PR's open page/sweep question concerns resource lapses only, and none of these guards depend on how it is decided.
+  These guards apply where this phase uses the data. They don't refuse the event: other forged events are still stored, and a forged hold still shows in lists, as does a forged message's event in feeds, until tamler/another#70 (origin checks before storing) lands. That PR's open page/sweep question concerns resource lapses only, and none of these guards depend on how it is decided.
+- **Threads don't grant access to other people's mail (D45).** Thread and message ids appear in feed events, and many writes put an agent in a thread: a reply, a lane report, completing a request, or a paired node's signed message. So a token reads only the messages its agent sent or received, and can reply only to those. A paired node can still add its own signed mail to a local thread whose id it learned; local readers see it there under that node's agent, and it discloses nothing.
 - **Snippet:** pinned to the hub's version and the release's checksum.
 
 ## Out of scope

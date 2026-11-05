@@ -326,6 +326,24 @@ impl Store {
         self.read(|conn| Ok(resolve_agent(conn, self.node_id(), who)?.id == scope.agent_id))
     }
 
+    /// Whether a token may act on a request: its events are visible to the token, or its agent
+    /// is in the request's thread. A missing request is neither.
+    pub fn request_visible_to(&self, scope: &TokenScope, request_id: &str) -> Result<bool> {
+        self.read(|conn| {
+            if crate::visibility::request_visible(conn, scope, request_id)? {
+                return Ok(true);
+            }
+            Ok(conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM requests r JOIN messages m ON m.thread_id = r.thread_id
+                   WHERE r.request_id = ?1 AND (m.sender_id = ?2 OR
+                     EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = m.message_id
+                             AND d.agent_id = ?2)))",
+                params![request_id, scope.agent_id],
+                |r| r.get(0),
+            )?)
+        })
+    }
+
     /// Whether the agent sent or received any message in the thread.
     pub fn in_thread(&self, agent_id: &str, thread_id: &str) -> Result<bool> {
         self.read(|conn| {

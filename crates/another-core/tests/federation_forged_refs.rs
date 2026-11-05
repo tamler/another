@@ -628,3 +628,96 @@ fn a_local_session_end_still_departs_an_ephemeral_agent() {
     assert!(s.verify_token(&joined.token).is_err());
     assert_eq!(s.remote_agents().unwrap()[0].presence, Presence::Gone);
 }
+
+#[test]
+fn a_foreign_message_cannot_be_sent_as_another_nodes_agent() {
+    let (s, _) = hub();
+    let spoke = Spoke::paired(&s);
+    let (alice, bob) = (agent_id(&s, "alice@shop"), agent_id(&s, "bob@shop"));
+    spoke.push(
+        &s,
+        "message.sent",
+        json!({ "message_id": "FORGED-FROM", "sender_id": alice, "subject": "pay this",
+                "body": "x", "recipient_nodes": [s.node_id()],
+                "recipients": [{ "agent_id": bob, "node_id": s.node_id(), "role": "to" }] }),
+    );
+    assert!(s.message("FORGED-FROM").is_err());
+    assert_eq!(unread(&s, "bob@shop"), 0);
+}
+
+#[test]
+fn a_foreign_message_in_a_learned_thread_discloses_nothing_to_its_recipient() {
+    let (s, _) = hub();
+    let spoke = Spoke::paired(&s);
+    let mail = secret_mail(&s);
+    join(&s, "cloud", None);
+    let cloud = agent_id(&s, "cloud@shop");
+    spoke.push(
+        &s,
+        "message.sent",
+        json!({ "message_id": "FORGED-JOIN", "thread_id": mail.thread_id, "sender_id": EVE,
+                "subject": "hello", "body": "hello", "recipient_nodes": [s.node_id()],
+                "recipients": [{ "agent_id": cloud, "node_id": s.node_id(), "role": "to" }] }),
+    );
+    for who in [cloud.as_str(), EVE] {
+        let visible = s.thread_for(who, &mail.thread_id).unwrap();
+        assert_eq!(visible.messages.len(), 1);
+        assert_eq!(visible.messages[0].message_id, "FORGED-JOIN");
+    }
+    let listed = s.threads_for("cloud@shop", 20).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].subject, "hello");
+    assert_eq!(listed[0].messages, 1);
+    assert!(!listed[0].participants.iter().any(|p| p == "bob@shop"));
+    // Local readers are trusted and keep the whole thread.
+    assert!(s
+        .thread(&mail.thread_id)
+        .unwrap()
+        .messages
+        .iter()
+        .any(|m| m.body == SECRET));
+}
+
+#[test]
+fn a_spoke_agents_reply_still_lands_in_the_thread_and_reads_its_own_part() {
+    let (s, _) = hub();
+    let spoke = Spoke::paired(&s);
+    let question = s
+        .send_message(SendMessage {
+            from: "alice@shop".into(),
+            to: vec![EVE_ADDRESS.into()],
+            subject: "question".into(),
+            body: "ready?".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let alice = agent_id(&s, "alice@shop");
+    spoke.push(
+        &s,
+        "message.sent",
+        json!({ "message_id": "EVE-REPLY", "thread_id": question.thread_id,
+                "reply_to": question.message_id, "sender_id": EVE, "subject": "Re: question",
+                "body": "yes", "recipient_nodes": [s.node_id()],
+                "recipients": [{ "agent_id": alice, "node_id": s.node_id(), "role": "to" }] }),
+    );
+    assert_eq!(
+        s.message("EVE-REPLY").unwrap().thread_id,
+        question.thread_id
+    );
+    assert_eq!(
+        s.thread_for(EVE, &question.thread_id)
+            .unwrap()
+            .messages
+            .len(),
+        2
+    );
+    assert!(s.message_visible_to(EVE, &question.message_id).unwrap());
+    assert!(!s
+        .message_visible_to(&agent_id(&s, "bob@shop"), &question.message_id)
+        .unwrap());
+    assert!(!s.message_visible_to(EVE, "NO-SUCH-ID").unwrap());
+    assert!(matches!(
+        s.thread_for(&agent_id(&s, "bob@shop"), &question.thread_id),
+        Err(Error::NotFound(_))
+    ));
+}
