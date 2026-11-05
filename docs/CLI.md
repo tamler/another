@@ -243,7 +243,7 @@ Options:
       --json
           Print machine-readable JSON
       --auth
-          Require bearer tokens (`another token create`) on /mcp and /activity; audit every call
+          Require bearer tokens (`another token create`) on every route except /health, /join and /fed; audit every call
       --allow-remote-bind
           Allow a non-loopback --bind (requires --auth). Prefer a tunnel instead
       --allowed-host <ALLOWED_HOSTS>
