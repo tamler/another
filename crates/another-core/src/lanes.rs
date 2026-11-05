@@ -1085,6 +1085,18 @@ pub fn lane_markdown(d: &LaneDetail) -> String {
             out.push_str(&format!("- {} `{}`\n", k.kind.as_str(), k.ref_id));
         }
     }
+    if !d.holds.is_empty() {
+        out.push_str("\n## Holds\n\n");
+        for h in &d.holds {
+            out.push_str(&format!(
+                "- `{}` by {} ({}, until {})\n",
+                h.pattern,
+                h.agent,
+                if h.exclusive { "exclusive" } else { "shared" },
+                h.expires_at
+            ));
+        }
+    }
     out
 }
 
