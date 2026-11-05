@@ -374,6 +374,88 @@ fn people_hidden_budgets_and_truncation_in_the_digest() {
 }
 
 #[test]
+fn a_long_gap_rolls_up_the_longest_window() {
+    use chrono::FixedOffset;
+    let (clock, h) = Clock::manual(NOV_21 + 10 * HOUR);
+    let s = Store::open_in_memory(clock).unwrap();
+    s.register_agent_trusted(RegisterAgent {
+        name: "owner".into(),
+        program: Program::Human,
+        project: None,
+        model: None,
+        description: None,
+    })
+    .unwrap();
+    let utc = FixedOffset::east_opt(0).unwrap();
+    s.set_summary_schedule(Some("09:00"), Some("mail:owner"))
+        .unwrap();
+
+    s.send_scheduled_summary_at(utc).unwrap().unwrap();
+    // The server is down for three days.
+    h.fetch_add(72 * HOUR, std::sync::atomic::Ordering::SeqCst);
+    s.send_scheduled_summary_at(utc).unwrap().unwrap();
+    let inbox = s
+        .inbox(
+            "owner",
+            InboxQuery {
+                limit: 50,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        inbox
+            .messages
+            .iter()
+            .any(|m| m.message.body.starts_with("**Another: last 48h**")),
+        "{:?}",
+        inbox
+            .messages
+            .iter()
+            .map(|m| m
+                .message
+                .body
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn an_opaque_cursor_does_not_reveal_a_hidden_events_time() {
+    let (clock, h) = Clock::manual(NOV_21);
+    let s = Store::open_in_memory(clock).unwrap();
+    s.ensure_project("t", "/work/shop").unwrap();
+    s.register_agent_trusted(RegisterAgent {
+        name: "manager".into(),
+        program: Program::Claude,
+        project: Some("/work/shop".into()),
+        model: None,
+        description: None,
+    })
+    .unwrap();
+    let t = s
+        .create_token("manager@shop", &["/work/shop".into()], None, None)
+        .unwrap();
+    let scope = s.verify_token(&t.secret).unwrap();
+    // Two days later, something happens in a project the token can't see.
+    h.fetch_add(48 * HOUR, std::sync::atomic::Ordering::SeqCst);
+    s.ensure_project("t", "/work/vault").unwrap();
+
+    let summary = s
+        .daily_summary(Some(Since::After("@1000000".into())), Some(&scope))
+        .unwrap();
+    assert!(summary.since.starts_with("2026-11-21"), "{}", summary.since);
+    // Local callers see everything, so the position still resolves to the newest event.
+    let local = s
+        .daily_summary(Some(Since::After("@1000000".into())), None)
+        .unwrap();
+    assert!(local.since.starts_with("2026-11-23"), "{}", local.since);
+}
+
+#[test]
 fn scheduled_summary_by_mail_and_webhook() {
     use chrono::FixedOffset;
     // 2026-11-21 08:00 UTC.

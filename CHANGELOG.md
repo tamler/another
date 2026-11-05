@@ -55,7 +55,7 @@ The first release. It contains the local core built in milestones 1–6 and the 
     - MCP: `decision_ask`, `decision_list`, `decision_show`, `decision_answer`, `decision_cancel`.
     - HTTP: `GET /decisions`, `GET /decisions/{id}`, `POST /decisions/{id}/answer`.
     - CLI: `another decision ask|list|show|answer|cancel`.
-  - Events: `decision.created|answered|expired|overdue|cancelled`.
+  - Events: `decision.created|answered|expired|overdue|cancelled`. `decision.cancelled` carries a `has_reason` flag, never the reason's text, which stays in the mail and the request's note.
   - Requests gain a `kind` field (`task` or `decision`).
 - **Lane-aware holds** ([design](docs/design/04-lane-holds.md)):
   - Holds carry a lane (explicit `lane`, else `$ANOTHER_LANE`, else the single open lane the agent leads in that project), looked up in the hold's project only. Overlaps inside one lane are warnings, except two exclusive holds, which still block.
@@ -107,7 +107,7 @@ The first release. It contains the local core built in milestones 1–6 and the 
   - `stop` leaves the service installed: it starts again at the next login (launchd) or the next time the user manager starts (systemd). `uninstall` removes it; if it can't stop the service, it fails and keeps the definition so you can retry.
 - **`another doctor`**: checks the store (writable, schema), the local server (reachable, Another, same home), tokens (expired, expiring, matching no project), client hooks for Claude Code, Codex and Grok (and whether Codex has recorded trust for them), and port and resource conflicts. PASS / WARN / FAIL / SKIP with a fix per problem; machine-readable with the global `--json`; exit 1 on any FAIL. A hook config it can't read is a FAIL. Without an explicit `--server` or `ANOTHER_SERVER`, it checks the background service's address when the service uses this home, and reports a stopped service, a missing binary, a service on another home or an unreadable definition.
 - **Release installs:** tagged releases also publish one `SHA256SUMS` and `install.sh`. One-line install: `curl -fsSL https://github.com/tamler/another/releases/latest/download/install.sh | sh`. It verifies the archive before installing (`ANOTHER_VERSION`, `ANOTHER_INSTALL_DIR` to pin or relocate).
-- README quickstart rewritten as a 90-second demo script (install, start, two agents, a hold, a port claim, doctor).
+- README quickstart rewritten as a 90-second demo script (install, start, two agents, a hold, a port claim, doctor). It installs from source until a release exists; the install script is labelled for after v0.1.0.
 
 ### Changed
 - Doctor rejects wrapper mentions outside executable hook commands and preserves recognition of installer paths containing spaces or apostrophes.
