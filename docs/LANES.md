@@ -45,7 +45,7 @@ another lane update billing --agent manager --link-thread <thread-id> --link-req
 another lane close billing --agent manager --abandon --outcome "superseded by billing-v2"
 ```
 
-Every report is stored on the lane and also **mailed** to the lane's counterpart: the creator when the lead reports, the lead otherwise. The mail goes into the lane's thread with a subject like `[lane billing] needs_decision: Need a call on currency rounding`. Blocked and needs-decision reports are sent as high importance, so they appear in digests and `another wake`.
+Every report is stored on the lane and also **mailed** to the lane's counterpart: the creator when the lead reports, the lead otherwise. The mail goes into the lane's thread with a subject like `[lane billing] needs_decision: status report by manager@shop`; the summary is in the body. Blocked and needs-decision reports are sent as high importance, so they appear in digests and `another wake`.
 
 ## Path holds and lanes
 
@@ -79,7 +79,7 @@ This writes `billing-STATUS.md`, and `DONE-billing.md` as well once the lane is 
 
 `lane_create`, `lane_list`, `lane_show`, `lane_update` (status, charter, lead, links), `lane_report` (`kind`: `status` or `done`), and `lane_close`.
 
-Over remote MCP (`serve --auth`), a token only sees and changes lanes whose project matches its globs, and acts as its own agent. A lead it names is looked up among the agents it may see (its projects, plus project-less agents), so a hidden agent is the same `not_found` as a missing one. Out-of-scope lanes return `forbidden`, and `lane_list` leaves them out.
+Over remote MCP (`serve --auth`), a token only sees and changes lanes whose project matches its globs, and acts as its own agent. A lead it names is looked up among the agents it may see (its projects, plus project-less agents), so a hidden agent is the same `not_found` as a missing one. Out-of-scope lanes return `not_found`, the same as missing ones, and `lane_list` leaves them out.
 
 ## Reporting automatically from Claude Code and Codex
 
