@@ -199,6 +199,20 @@ async fn doctor_reports_each_problem_with_a_fix() {
     let (ok, r) = check(url.clone()).await.unwrap();
     assert_eq!(levels(&r, "hooks:codex-trust"), ["pass"], "{r}");
     assert!(ok, "warnings don't fail: {r}");
+    // A command that only mentions the wrapper isn't one of Another's hooks, so it needs no trust.
+    let saved_hooks = std::fs::read_to_string(&hooks_path).unwrap();
+    for ev in &events {
+        hj["hooks"][ev]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "hooks": [{ "type": "command", "command": "echo another-hook.sh" }]
+            }));
+    }
+    std::fs::write(&hooks_path, hj.to_string()).unwrap();
+    let (_, r) = check(url.clone()).await.unwrap();
+    assert_eq!(levels(&r, "hooks:codex-trust"), ["pass"], "{r}");
+    std::fs::write(&hooks_path, saved_hooks).unwrap();
     // A missing wrapper fails, even though the config still names it.
     let wrapper = ah.join("hooks").join("another-hook.sh");
     let saved = std::fs::read(&wrapper).unwrap();
@@ -301,6 +315,18 @@ async fn doctor_reports_each_problem_with_a_fix() {
         .as_str()
         .unwrap()
         .contains("not Another"));
+    // Other programs' health checks also say ok; Another's always names its node.
+    let (bare_url, bare_stop) = serve(axum::Router::new().route(
+        "/health",
+        axum::routing::get(|| async { axum::Json(serde_json::json!({ "ok": true })) }),
+    ))
+    .await;
+    let (_, r) = check(bare_url).await.unwrap();
+    assert!(find(&r, "server", "fail")["detail"]
+        .as_str()
+        .unwrap()
+        .contains("not Another"));
+    bare_stop.cancel();
     let other_dir = tempfile::tempdir().unwrap();
     let other_store = Store::open(other_dir.path()).unwrap();
     let (theirs, their_stop) = another_server(&other_store).await;
