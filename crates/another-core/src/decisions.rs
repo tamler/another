@@ -36,6 +36,19 @@ pub(crate) fn decider_tx(conn: &Connection) -> Result<String> {
     crate::settings::get(conn, "decider")
 }
 
+fn check_answered_by(value: &str) -> Result<()> {
+    if !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_.@".contains(&c))
+    {
+        Ok(())
+    } else {
+        Err(Error::Invalid("answered_by must be a name or address of 1-64 ASCII letters, digits, '-', '_', '.' or '@'".into()))
+    }
+}
+
 impl Store {
     fn write_decision<T>(&self, mutate: impl FnOnce(&Tx<'_>) -> Result<T>) -> Result<T> {
         self.write(|tx| {
@@ -940,20 +953,6 @@ pub(crate) fn ask_tx(
 /// Answer a local decision inside a write transaction. `relayed` is the agent that relayed
 /// the answer (local API caller, or another node's agent for a relayed answer).
 /// `answered_by` travels in events and the feed, which carry names, not free text (D39).
-fn check_answered_by(answered_by: &str) -> Result<()> {
-    check_text("answered_by", answered_by, 64)?;
-    if answered_by
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@'))
-    {
-        Ok(())
-    } else {
-        Err(Error::Invalid(format!(
-            "answered_by {answered_by:?} must be a name: ASCII letters, digits, '-', '_', '.' or '@'"
-        )))
-    }
-}
-
 pub(crate) fn answer_tx(
     tx: &Tx<'_>,
     input: &AnswerDecision,
