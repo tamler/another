@@ -71,6 +71,10 @@ pub enum Command {
         /// Extra Host header to accept, e.g. a tunnel hostname (repeatable; requires --auth).
         #[arg(long = "allowed-host", requires = "auth")]
         allowed_hosts: Vec<String>,
+        /// Header your local tunnel sets with the client address, for the /join limit and the
+        /// audit log (requires --auth). Without it, forwarding headers are ignored.
+        #[arg(long, value_enum, requires = "auth")]
+        trusted_proxy_header: Option<crate::remote::ForwardedHeader>,
         /// Act as a federation hub: serve /fed/* for paired spokes (node-signed requests).
         #[arg(long)]
         federation: bool,
@@ -1269,6 +1273,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         auth,
         allow_remote_bind,
         allowed_hosts,
+        trusted_proxy_header,
         federation,
         sweep_secs,
     } = &cli.command
@@ -1286,6 +1291,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     auth: *auth,
                     allow_remote_bind: *allow_remote_bind,
                     allowed_hosts: allowed_hosts.clone(),
+                    trusted_proxy_header: *trusted_proxy_header,
                     federation: *federation,
                 };
                 crate::serve::serve_http(store, bind, opts, every).await

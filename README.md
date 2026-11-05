@@ -129,6 +129,8 @@ another doctor
 
 - **By hand:** each [release](https://github.com/tamler/another/releases) has `another-<version>-<target>.tar.gz` for `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, a `.sha256` per archive, one `SHA256SUMS` and `install.sh`. Check with `sha256sum -c SHA256SUMS --ignore-missing` (or `shasum -a 256 -c`).
 
+**What the checksum proves:** `SHA256SUMS` is unsigned and comes from the same release as the archive. A match shows the download is intact (integrity). It doesn't show who built it (authenticity): someone who can change the release or the GitHub account can replace both files. The release's security rests on HTTPS and on that account. To reduce that trust, build from source at a commit you've reviewed.
+
 On macOS, when replacing an existing `another`, **remove the old binary first** (`rm "$(command -v another)"`) or use the install script, which moves a fresh file into place. Copying over the old file in place leaves a stale code signature cached, and macOS kills the new binary on launch. A binary downloaded with a browser may need `xattr -d com.apple.quarantine ./another`; `curl` downloads don't.
 
 ### Hooks and MCP in more detail
@@ -184,7 +186,7 @@ Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green
 
 | Area | Tools |
 |---|---|
-| Identity | `ensure_project`, `register_agent`, `heartbeat` (`start` / `end` record sessions), `agent_kick` (manager agents only) |
+| Identity | `ensure_project`, `register_agent`, `heartbeat` (`start` / `end` record sessions), `agent_kick` (manager agents, local MCP only) |
 | Mail | `send_message` (with `reply_to`, `create_request`), `fetch_inbox`, `threads`, `acknowledge` |
 | Requests | `claim_request` (`claim` / `release` / `complete` / `cancel`) |
 | Decisions | `decision_ask`, `decision_list`, `decision_show`, `decision_answer`, `decision_cancel` |

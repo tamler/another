@@ -88,7 +88,7 @@ Everything is limited to the invite's project globs: lanes, events, stream, webh
 
 **Kicking:**
 - `another agent kick NAME [--reason …]` does all of that immediately, for any agent, and revokes all of its tokens.
-- A manager bot (program `grok_bot`) can do the same over MCP with `agent_kick`, but only for agents in its token's projects, and never for people. Its kick revokes all of the agent's tokens, but releases only holds and leases in the manager's projects, and only tells those lanes.
+- A manager agent (program `grok_bot`) can do the same over **local** MCP with `agent_kick`, never for people. Tokens can't call it: a remote manager gets `forbidden` ("tool is not available to remote peers"). Removing an agent remotely means asking the person to run `another agent kick` on the machine.
 - The reason is kept with the agent's membership record, not in events.
 
 **Presence:** any authenticated call through the agent's token, reads included, counts as being seen.

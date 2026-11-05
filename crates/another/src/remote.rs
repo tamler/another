@@ -36,15 +36,56 @@ pub struct RemotePeer {
     pub remote: Option<String>,
 }
 
-pub(crate) fn remote_addr(headers: &HeaderMap, req: &Request) -> Option<String> {
-    for h in ["cf-connecting-ip", "x-forwarded-for", "x-real-ip"] {
-        if let Some(v) = headers.get(h).and_then(|v| v.to_str().ok()) {
-            return Some(format!("{h}: {}", v.split(',').next().unwrap_or(v).trim()));
+/// The header a local tunnel or proxy sets with the real client address
+/// (`another serve --trusted-proxy-header`). Without one, forwarding headers are ignored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ForwardedHeader {
+    CfConnectingIp,
+    XForwardedFor,
+    XRealIp,
+}
+
+impl ForwardedHeader {
+    fn name(self) -> &'static str {
+        match self {
+            Self::CfConnectingIp => "cf-connecting-ip",
+            Self::XForwardedFor => "x-forwarded-for",
+            Self::XRealIp => "x-real-ip",
         }
     }
-    req.extensions()
+}
+
+/// The client address for the `/join` limit and the audit log: the TCP peer, unless the server
+/// names a trusted header and the peer is on this machine (so it is the tunnel). Only the
+/// last value counts, the one the tunnel added; earlier ones are whatever the client sent. A
+/// value that isn't an IP address is ignored.
+fn client_addr(
+    headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
+    trusted: Option<ForwardedHeader>,
+) -> Option<String> {
+    let forwarded = trusted
+        .filter(|_| peer.is_some_and(|p| p.ip().to_canonical().is_loopback()))
+        .and_then(|h| {
+            let value = headers
+                .get_all(h.name())
+                .iter()
+                .next_back()?
+                .to_str()
+                .ok()?;
+            let ip: std::net::IpAddr = value.rsplit(',').next()?.trim().parse().ok()?;
+            Some(format!("{}: {ip}", h.name()))
+        });
+    forwarded.or_else(|| peer.map(|p| p.to_string()))
+}
+
+pub(crate) fn remote_addr(headers: &HeaderMap, req: &Request) -> Option<String> {
+    let peer = req
+        .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|c| c.0.to_string())
+        .map(|c| c.0);
+    let trusted = req.extensions().get::<ForwardedHeader>().copied();
+    client_addr(headers, peer, trusted)
 }
 
 pub(crate) fn bearer(headers: &HeaderMap) -> Option<String> {
@@ -346,6 +387,34 @@ pub async fn activity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forwarding_headers_count_only_from_a_local_peer_and_only_when_named() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            "198.51.100.1, 203.0.113.9".parse().unwrap(),
+        );
+        let addr =
+            |peer: &str, trusted| client_addr(&headers, Some(peer.parse().unwrap()), trusted);
+        let xff = Some(ForwardedHeader::XForwardedFor);
+        let via_tunnel = Some("x-forwarded-for: 203.0.113.9".to_string());
+
+        assert_eq!(addr("127.0.0.1:5000", xff), via_tunnel);
+        assert_eq!(addr("[::1]:5000", xff), via_tunnel);
+        assert_eq!(addr("[::ffff:127.0.0.1]:5000", xff), via_tunnel);
+        // Not named, or a peer on another machine (--allow-remote-bind): the TCP peer.
+        assert_eq!(addr("127.0.0.1:5000", None).unwrap(), "127.0.0.1:5000");
+        assert_eq!(addr("192.0.2.7:5000", xff).unwrap(), "192.0.2.7:5000");
+        // The tunnel's value can arrive as a second header line.
+        headers.append("x-forwarded-for", "203.0.113.10".parse().unwrap());
+        let last_line = client_addr(&headers, Some("127.0.0.1:5000".parse().unwrap()), xff);
+        assert_eq!(last_line.unwrap(), "x-forwarded-for: 203.0.113.10");
+        // A value that isn't an address never reaches the limit or the audit log.
+        headers.insert("x-forwarded-for", "<script>".parse().unwrap());
+        let garbage = client_addr(&headers, Some("127.0.0.1:5000".parse().unwrap()), xff);
+        assert_eq!(garbage.unwrap(), "127.0.0.1:5000");
+    }
 
     #[test]
     fn redacts_bodies_and_long_strings() {

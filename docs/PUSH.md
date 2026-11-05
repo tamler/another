@@ -91,8 +91,13 @@ another webhook remove <webhook-id>
 | `budget` | `spend.budget_threshold` (an account crossed 80% or 100% of its budget) and `spend.approval_requested` ([spend](SPEND.md)) |
 | `all` | every visible event except mail and delivery events |
 
+<a id="remote-mcp-subscriptions"></a>
+
 **Remote (MCP) subscriptions:**
 - `webhook_subscribe` defaults to the token's project globs. It can narrow them to a subset (compared as strings) but never widen them.
+- **A token's webhook can't target the hub itself.** Loopback, unspecified, link-local and cloud metadata addresses are refused in every spelling (`127.1`, `0x7f000001`, `[::ffff:127.0.0.1]`, `localhost.`), including a DNS name that resolves to one: that delivery fails and retries like any other, then goes dead. Private LAN and tailnet addresses are still allowed over https.
+  - A token's deliveries connect directly and ignore `HTTP(S)_PROXY`, because a proxy would resolve the name out of reach of this check.
+  - A manager with a token and a receiver on the same machine needs the person to run `another config remote_webhook_private_hosts on`. That also restores the proxy. Turning it off applies to existing webhooks at their next delivery. Webhooks created with the local CLI are not affected.
 - `all_projects` is refused for tokens.
 - **A webhook stops when its token does.** If the token that created it is revoked or expires, the webhook is disabled: it never fires again, its pending deliveries become dead, and `another webhook list` shows `disabled: token revoked` (or `token expired`). Create a new one with a new token.
 - A token can only list and remove the webhooks it created.
@@ -122,7 +127,7 @@ X-Another-Signature: sha256=5f1c...
 
 ### Verifying signatures
 
-Compute HMAC-SHA256 with the secret as the key over `"<X-Another-Timestamp>.<raw body>"`, hex-encode it, and compare it with the part of `X-Another-Signature` after `sha256=` using a constant-time comparison. Reject requests whose timestamp is more than a few minutes old.
+Compute HMAC-SHA256 with the secret as the key over `"<X-Another-Timestamp>.<raw body>"`, hex-encode it, and compare it with the part of `X-Another-Signature` after `sha256=` using a constant-time comparison. Reject requests whose timestamp is more than a few minutes old. Each retry is signed again with a new timestamp but keeps its `X-Another-Delivery` id, so dedupe on that id.
 
 ```python
 import hmac, hashlib, time

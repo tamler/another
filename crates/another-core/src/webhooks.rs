@@ -2,6 +2,8 @@
 //! named filters, a delivery queue fed from the event log, HMAC-SHA256 signatures, retries
 //! with backoff and a dead-letter list.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -225,6 +227,9 @@ pub struct OutboundDelivery {
     pub kind: String,
     pub body: String,
     pub attempt: u32,
+    /// A token created this webhook and private hosts aren't allowed: the sender must check
+    /// the host, and every address it resolves to, before connecting.
+    pub restricted: bool,
 }
 
 impl OutboundDelivery {
@@ -261,6 +266,22 @@ const CLAIM_MS: i64 = 60_000;
 /// Events considered per webhook per queueing pass.
 const QUEUE_BATCH: u32 = 500;
 
+/// Node setting: may webhooks a token creates target hub-local addresses? (`on` / `off`)
+pub const REMOTE_PRIVATE_HOSTS: &str = "remote_webhook_private_hosts";
+/// Names of cloud metadata services (addresses are in `METADATA_V4` / `METADATA_V6`).
+const METADATA_NAMES: [&str; 3] = [
+    "metadata.google.internal",
+    "metadata.goog",
+    "instance-data.ec2.internal",
+];
+/// Metadata addresses outside link-local: Alibaba Cloud, Azure's wire server.
+const METADATA_V4: [[u8; 4]; 2] = [[100, 100, 100, 200], [168, 63, 129, 16]];
+/// IPv6 metadata addresses: AWS's `fd00:ec2::254`, Google's `fd20:ce::254`.
+const METADATA_V6: [[u16; 8]; 2] = [
+    [0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254],
+    [0xfd20, 0xce, 0, 0, 0, 0, 0, 0x254],
+];
+
 /// Check a webhook URL: `https://`, or `http://` to loopback only.
 pub fn validate_webhook_url(url: &str) -> Result<()> {
     let url = url.trim();
@@ -273,11 +294,7 @@ pub fn validate_webhook_url(url: &str) -> Result<()> {
     if authority.is_empty() || authority.contains('@') || url.chars().any(char::is_whitespace) {
         return bad("expected https://host/path (no credentials in the URL)");
     }
-    let host = if let Some(v6) = authority.strip_prefix('[') {
-        v6.split(']').next().unwrap_or_default()
-    } else {
-        authority.split(':').next().unwrap_or_default()
-    };
+    let host = authority_host(authority);
     match scheme.to_ascii_lowercase().as_str() {
         "https" => Ok(()),
         "http"
@@ -290,6 +307,126 @@ pub fn validate_webhook_url(url: &str) -> Result<()> {
         }
         "http" => bad("plain http is only allowed to loopback (127.0.0.1, localhost, [::1])"),
         _ => bad("scheme must be https"),
+    }
+}
+
+/// The host of a URL authority: without a port, and without the brackets of an IPv6 literal.
+fn authority_host(authority: &str) -> &str {
+    if let Some(v6) = authority.strip_prefix('[') {
+        v6.split(']').next().unwrap_or_default()
+    } else {
+        authority.split(':').next().unwrap_or_default()
+    }
+}
+
+/// Check the host of a webhook a token created: not this machine, and not a link-local or
+/// metadata address (docs/security-review-v0.1.0.md, finding 3). Names are checked here;
+/// what a name resolves to is checked when the delivery is sent.
+pub fn validate_remote_webhook_host(url: &str) -> Result<()> {
+    let url = url.trim();
+    let authority = url
+        .split_once("://")
+        .map_or("", |(_, rest)| rest)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    if host_is_refused(&authority_host(authority).to_ascii_lowercase()) {
+        return Err(Error::Invalid(format!(
+            "webhook url {url:?}: this host is not allowed for a webhook a token creates \
+             (loopback, link-local and metadata addresses are refused; the person can allow \
+             them with `another config {REMOTE_PRIVATE_HOSTS} on`)"
+        )));
+    }
+    Ok(())
+}
+
+/// Whether a lowercased URL host is refused for token webhooks. Anything that is not plainly
+/// a DNS name or an address is refused, so no spelling reaches the system resolver unchecked.
+fn host_is_refused(host: &str) -> bool {
+    if host.contains(':') {
+        return host
+            .parse::<Ipv6Addr>()
+            .map_or(true, |ip| is_refused_webhook_ip(IpAddr::V6(ip)));
+    }
+    let name = host.trim_end_matches('.');
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'))
+    {
+        return true;
+    }
+    if name == "localhost" || name.ends_with(".localhost") || METADATA_NAMES.contains(&name) {
+        return true;
+    }
+    // A numeric last label makes the whole host an IPv4 address to the system resolver.
+    let last = name.rsplit('.').next().unwrap_or_default();
+    let numeric = match last.strip_prefix("0x") {
+        Some(hex) => hex.chars().all(|c| c.is_ascii_hexdigit()),
+        None => last.chars().all(|c| c.is_ascii_digit()),
+    };
+    numeric && parse_loose_ipv4(name).is_none_or(|ip| is_refused_webhook_ip(IpAddr::V4(ip)))
+}
+
+/// Parse the IPv4 forms `inet_aton` accepts: one to four parts in decimal, `0x` hex or `0`
+/// octal, the last part filling the remaining bytes (`127.1`, `0x7f000001`, `0177.0.0.1`).
+fn parse_loose_ipv4(host: &str) -> Option<Ipv4Addr> {
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() > 4 {
+        return None;
+    }
+    let mut addr: u64 = 0;
+    for (i, part) in parts.iter().enumerate() {
+        let n = if let Some(hex) = part.strip_prefix("0x") {
+            if hex.is_empty() {
+                0
+            } else {
+                u64::from_str_radix(hex, 16).ok()?
+            }
+        } else if part.len() > 1 && part.starts_with('0') {
+            u64::from_str_radix(&part[1..], 8).ok()?
+        } else {
+            part.parse().ok()?
+        };
+        let bytes = if i + 1 == parts.len() { 4 - i } else { 1 };
+        if n >= 1u64 << (8 * bytes) {
+            return None;
+        }
+        addr |= n << (8 * (4 - i - bytes));
+    }
+    Some(Ipv4Addr::from(addr as u32))
+}
+
+/// Addresses a token's webhook may not reach: this machine (loopback, unspecified), link-local
+/// and cloud metadata, also when an IPv4 address is embedded in an IPv6 one. Private LAN
+/// ranges are not in the list (finding 3 in the security review says why).
+pub fn is_refused_webhook_ip(ip: IpAddr) -> bool {
+    fn v4_refused(ip: Ipv4Addr) -> bool {
+        ip.octets()[0] == 0
+            || ip.is_loopback()
+            || ip.is_link_local()
+            || METADATA_V4.contains(&ip.octets())
+    }
+    match ip {
+        IpAddr::V4(v4) => v4_refused(v4),
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            let joined = |hi: u16, lo: u16| Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo));
+            let embedded = if let Some(v4) = v6.to_ipv4() {
+                Some(v4)
+            } else if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                Some(joined(s[6], s[7])) // NAT64
+            } else if s[0] == 0x2002 {
+                Some(joined(s[1], s[2])) // 6to4
+            } else {
+                None
+            };
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (s[0] & 0xffc0) == 0xfe80
+                || METADATA_V6.contains(&s)
+                || embedded.is_some_and(v4_refused)
+        }
     }
 }
 
@@ -525,6 +662,9 @@ impl Store {
         scope: Option<&TokenScope>,
     ) -> Result<WebhookCreated> {
         validate_webhook_url(&input.url)?;
+        if scope.is_some() && self.setting(REMOTE_PRIVATE_HOSTS)?.value != "on" {
+            validate_remote_webhook_host(&input.url)?;
+        }
         if input.filters.is_empty() {
             return Err(Error::Invalid(format!(
                 "choose at least one event filter: {}",
@@ -825,6 +965,8 @@ impl Store {
                 [&h.webhook_id],
                 |r| r.get(0),
             )?;
+            let restricted =
+                h.token_id.is_some() && crate::settings::get(tx, REMOTE_PRIVATE_HOSTS)? != "on";
             Ok(OutboundDelivery {
                 delivery_id: delivery_id.clone(),
                 webhook_id: h.webhook_id,
@@ -833,6 +975,7 @@ impl Store {
                 kind: "webhook.test".into(),
                 body,
                 attempt: 1,
+                restricted,
             })
         })
     }
@@ -841,8 +984,10 @@ impl Store {
     /// minute, so another process running a delivery worker will not send them too.
     pub fn claim_due_deliveries(&self, limit: u32) -> Result<Vec<OutboundDelivery>> {
         self.write(|tx| {
+            let private_hosts = crate::settings::get(tx, REMOTE_PRIVATE_HOSTS)? == "on";
             let mut stmt = tx.prepare(
-                "SELECT d.delivery_id, d.webhook_id, w.url, w.secret, d.kind, d.body, d.attempts
+                "SELECT d.delivery_id, d.webhook_id, w.url, w.secret, d.kind, d.body, d.attempts,
+                        w.token_id
                  FROM webhook_deliveries d JOIN webhooks w ON w.webhook_id = d.webhook_id
                  WHERE d.status = 'pending' AND d.next_attempt_at <= ?1 AND w.removed_at IS NULL
                    AND w.disabled_at IS NULL
@@ -858,6 +1003,7 @@ impl Store {
                         kind: r.get(4)?,
                         body: r.get(5)?,
                         attempt: r.get::<_, u32>(6)? + 1,
+                        restricted: r.get::<_, Option<String>>(7)?.is_some() && !private_hosts,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
