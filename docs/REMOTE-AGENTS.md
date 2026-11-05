@@ -17,7 +17,7 @@ Let an agent running somewhere else join your Another hub in one step: a cloud C
 
 ## Invites
 
-```bash
+```text
 another invite create --agent NAME --program claude|codex|grok|grok_bot|cursor|other \
   --project GLOB [--project GLOB …] [--expires 24h] [--uses 1] [--lane LANE] \
   [--idle-hours 4] [--persistent] [--token-ttl 7d] [--print-snippet --hub-url URL]

@@ -114,6 +114,6 @@ Any client that can run a command at session start / prompt / end can use Anothe
 another hook run session-start --client claude < event.json
 ```
 
-- stdin may carry the client's JSON event; Another reads `cwd` (or `workspaceRoot` / `workspace_roots[0]`) and `session_id` (or `sessionId` / `conversation_id`) when present.
+- stdin may carry the client's JSON event, for example `{"cwd": "/path/to/repo", "session_id": "s1"}`; Another reads `cwd` (or `workspaceRoot` / `workspace_roots[0]`) and `session_id` (or `sessionId` / `conversation_id`) when present.
 - Exit status is always 0; on any error nothing is printed.
 - Scripts that prefer explicit calls can use `another --json heartbeat --agent NAME --start|--end`, `another --json inbox --agent NAME --unread`, and `another --json activity --summary`.

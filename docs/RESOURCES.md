@@ -17,6 +17,8 @@ A resource is addressed by its id or by `kind:name`, e.g. `model_server:ollama@1
 
 ## Lifecycle
 
+Ask first, borrow it if it exists, and otherwise register it. The agents must be registered already (`another agent register`):
+
 ```bash
 another resources -q ollama
 ```
