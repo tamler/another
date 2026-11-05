@@ -33,6 +33,11 @@ jobs:
       - name: cargo test
         run: cargo test --all-features
 
+      - name: install script
+        run: |
+          sh -n scripts/install.sh
+          shellcheck -S warning scripts/install.sh
+
   msrv:
     name: msrv (Rust 1.88)
     runs-on: ubuntu-latest

@@ -1,6 +1,7 @@
 //! Another daemon and CLI: MCP tools over the core store, served on stdio or loopback HTTP.
 
 pub mod cli;
+pub mod doctor;
 pub mod fed;
 pub mod hooks;
 mod http_decisions;
