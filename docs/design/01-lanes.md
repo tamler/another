@@ -41,7 +41,7 @@ A `done` report sets the lane status to `done`, records `outcome` and `pr_url`, 
 Every report is also **delivered as mail**, so it shows up in inboxes, digests and wakes:
 - Reports go to the lane's counterpart: the creator when the lead reports, and the lead when anyone else reports.
 - Mail goes into the lane thread.
-- The subject is `[lane <name>] <status>: <summary>`.
+- The subject is `[lane <name>] <status>: <kind> report by <agent>`.
 - The body is a short rendering of the structured fields, plus `report <id>`.
 
 Delivery reuses `send_message`, so federation, hooks and wake all work unchanged.
@@ -88,7 +88,7 @@ The acting agent comes from `--agent` / `$ANOTHER_AGENT`, as everywhere else.
 
 - Acting tools (`lane_create`, `lane_update`, `lane_report`, `lane_close`) must act as the token's agent; the agent is filled in when omitted.
 - `lane_create` needs a project inside the token's globs.
-- `lane_show`, `lane_update`, `lane_report` and `lane_close` check the **lane's** project against the globs; out-of-scope lanes are reported as "forbidden".
+- `lane_show`, `lane_update`, `lane_report` and `lane_close` check the **lane's** project against the globs; out-of-scope lanes are reported as `not_found`, the same as missing ones.
 - `lane_list` is **filtered** to lanes whose project matches the globs. A scoped token never sees another project's lanes.
 - Every call is audited by the existing `call_tool` wrapper.
 
