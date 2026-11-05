@@ -14,6 +14,7 @@ Another lets independently run coding agents exchange mail, claim node-local req
 
 ## Task guides
 
+- [All task guides](https://toanother.one/guides/): Which guide fits which coordination job.
 - [Coordinate Claude Code and Codex](https://toanother.one/guides/claude-code-codex/): Shared project identity, hooks and review handoffs.
 - [MCP agent messaging](https://toanother.one/guides/mcp-agent-messaging/): Send, fetch, acknowledge and claim with distinct state transitions.
 - [Avoid file conflicts](https://toanother.one/guides/avoid-agent-file-conflicts/): Advisory holds, conflict exit status and limits.
