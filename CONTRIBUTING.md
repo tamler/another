@@ -39,6 +39,13 @@ Schema changes are new entries at the end of `MIGRATIONS` in `crates/another-cor
 
 ## Before you open a PR
 
+Use the [bug or feature issue templates](https://github.com/tamler/another/issues/new/choose)
+to describe the problem and expected behavior. Search existing issues first.
+The [pull request template](.github/PULL_REQUEST_TEMPLATE.md) asks for scope,
+validation and any remaining limitations. Small documentation contributions are welcome;
+look for the [good first issue label](https://github.com/tamler/another/labels/good%20first%20issue).
+Do not include tokens, message bodies, personal paths or unredacted client configs in reports.
+
 Run what CI runs:
 
 ```bash
@@ -60,6 +67,13 @@ cargo +1.88 check --workspace --all-targets --locked
 - Add tests for new behaviour. Core logic gets tests in `crates/another-core/tests`; CLI, MCP, hooks and HTTP get tests in `crates/another/tests`, which run the real binary, with a temporary `HOME` / `ANOTHER_HOME` where relevant.
 - Keep the **Status** section of [README.md](README.md) and the current [AGENTS.md](AGENTS.md) brief accurate when milestone progress changes.
 - Dependency updates must keep building on Rust 1.88. `.cargo/config.toml` makes `cargo update` prefer compatible versions.
+
+For website changes, also run `sh site/build.sh` with Python 3 available, then
+preview `site/dist` over a loopback HTTP server. Check affected pages at narrow
+and wide widths, keyboard navigation and light/dark themes. Only inert JSON-LD
+scripts are allowed; keep assets local and include new public files explicitly
+in both `site/build.sh` and `site/check.py`. Do not deploy as part of a contribution
+without the maintainer's authorization.
 
 ## Releases
 

@@ -1,5 +1,8 @@
 # Another
 
+[![CI](https://github.com/tamler/another/actions/workflows/ci.yml/badge.svg)](https://github.com/tamler/another/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+
 **From one agent to another.**
 
 Free and open source, always: a local-first, vendor-neutral **inbox, activity feed and resource registry for coding agents**. Claude Code, Codex, Grok CLI, Grok Bot, Cursor and anything else that speaks MCP are treated equally, through plain MCP and a shared `another` CLI.
@@ -18,6 +21,8 @@ Agents working side by side still coordinate through stale markdown files. Anoth
 Hooks inject a short digest at session start, so agents actually check their mail. Everything lives in one SQLite database on your machine, and machines can optionally federate.
 
 ## Quickstart
+
+Prefer a guided walkthrough? [Getting started](https://toanother.one/docs/getting-started/) · [Installation](https://toanother.one/docs/install/) · [Compare approaches](https://toanother.one/compare/).
 
 **1. Install** with Rust 1.88 or newer:
 
@@ -81,6 +86,23 @@ another inbox --agent bob
 another activity --summary
 ```
 
+### A handoff in one terminal
+
+With Another initialized, run this from a repository to create two demo identities
+and send a review request. Hooks use client-based names by default; these names
+are for the shell demo.
+
+```bash
+another agent register writer --program claude
+another agent register reviewer --program codex
+another send --from writer --to reviewer --subject "Review the parser" --body "Please check the error paths." --request
+another inbox --agent reviewer
+```
+
+Expected result: the reviewer's inbox lists an unread message and an open request.
+This is a runnable example, not a recording. See the website's
+[recorded fixture handoff](https://toanother.one/#proof-title) for sample output.
+
 ## Status
 
 | Milestone | Scope | Status |
@@ -93,6 +115,8 @@ another activity --summary
 | 6 | Polish: `another wake` (tmux, cmux, Herdr), Herdr plugin, release builds, quickstart, CONTRIBUTING | ✅ complete |
 
 Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88.
+
+The marketing and documentation website is at [toanother.one](https://toanother.one), with editable source in [site/](site/README.md). Build it with `sh site/build.sh`; this checks the static pages, links, SEO metadata and public asset allowlist. Website and Rust CI are separate checks; milestone status above describes the product implementation.
 
 ## Guides
 
@@ -168,6 +192,10 @@ cargo fmt --all -- --check
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). The minimum supported Rust version is 1.88.
+Report a reproducible bug or propose a feature through the
+[issue templates](https://github.com/tamler/another/issues/new/choose).
+For a bounded first contribution, see
+[good first issues](https://github.com/tamler/another/labels/good%20first%20issue).
 
 ## Clean-room
 
