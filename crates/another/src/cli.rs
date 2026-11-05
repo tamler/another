@@ -1542,11 +1542,13 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 lane.as_deref(),
             )?;
             let conflicted = !conflicts.is_empty();
-            emit(json, &conflicts, |c| {
-                let mut out = if c.is_empty() {
+            // JSON lists both; `same_lane: true` marks the overlaps that don't block.
+            let all: Vec<_> = conflicts.iter().chain(&warnings).collect();
+            emit(json, &all, |_| {
+                let mut out = if conflicts.is_empty() {
                     "no conflicts\n".to_string()
                 } else {
-                    output::conflicts(c)
+                    output::conflicts(&conflicts)
                 };
                 out.push_str(&output::hold_warnings(&warnings));
                 out.trim_end().to_string()
