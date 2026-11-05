@@ -6,6 +6,8 @@
 
 SHOP="$WORK/shop"
 mkdir -p "$SHOP/src/checkout" "$SHOP/src/search"
+# Commands run here see the physical path, so register that one (macOS: /var is a symlink).
+SHOP=$(cd "$SHOP" && pwd -P)
 cd "$SHOP"
 
 step "A node and two peer agents in one repository"
