@@ -33,6 +33,15 @@ jobs:
       - name: cargo test
         run: cargo test --all-features
 
+      # Local-time code can pass at UTC and fail elsewhere. At UTC-1 the fixed test clock
+      # falls on the previous local date, which UTC can't show.
+      - name: cargo test (UTC-1)
+        env:
+          TZ: Atlantic/Cape_Verde
+        run: |
+          test "$(date +%z)" = "-0100"
+          cargo test --all-features
+
       - name: install script
         run: |
           sh -n scripts/install.sh
