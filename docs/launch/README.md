@@ -2,7 +2,7 @@
 
 Everything in this directory is a draft for human review. No distribution, account creation, tags or release publication is authorized by these files. Public voice: Another; no personal names. Repository issues and a draft PR are separate, explicitly authorized maintenance actions.
 
-Start with [ORDER.md](ORDER.md) and the [readiness checklist](READINESS.md). Channel drafts include their own eligibility gates. [SOURCES.md](SOURCES.md) records rule checks and product authorities; recheck rules on the day of submission.
+Start with [ORDER.md](ORDER.md) and the [readiness checklist](READINESS.md). Channel drafts include their own eligibility gates. [COPY-REFRESH.md](COPY-REFRESH.md) holds the latest wording for channels that allow model-assisted drafts. [SOURCES.md](SOURCES.md) records rule checks and product authorities; recheck rules on the day of submission.
 
 HN, DEV and Lobsters files are human-authorship preparation notes, not generated ready-to-submit posts. Hashnode retains the separate disclosed model-assisted tutorial. These restrictions also apply when adapting content for a different channel.
 

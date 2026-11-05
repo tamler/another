@@ -2,7 +2,7 @@
 
 Authorized destination: tamler/another only. Before creation, check all existing issues for duplicate work. Labels already exist: `documentation`, `good first issue`. These are bounded documentation follow-ups, not product defects or promises. Published issue URLs are recorded in the lane STATUS/DONE, not invented here.
 
-Round-two note for the issue owner: #26–#28 remain newcomer work; no glossary, ambiguity walkthrough or checksum recipe is implemented here. The release-preparation stack changes per-archive .sha256 files to SHA256SUMS. Before accepting #28, reconcile its filename assumptions with the workflow actually selected for release. This note does not edit the live issue or close it.
+Note for the issue owner: #26 and #27 remain newcomer work; no glossary or ambiguity walkthrough is implemented here. The launch/polish branch adds a checksum recipe to the install page that covers #28's platforms, filename assumptions and failure behavior, for both the per-archive .sha256 files and the release-preparation stack's additional SHA256SUMS. Decide whether to close #28 once that reaches `main`, or keep it open for a newcomer to extend. This note does not edit the live issue or close it.
 
 ## 1. Docs: add a glossary for requests, path holds and resource leases
 
