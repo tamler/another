@@ -1154,6 +1154,9 @@ pub enum HoldCmd {
         paths: Vec<String>,
         #[arg(long)]
         shared: bool,
+        /// Lane to check for (default: $ANOTHER_LANE, else the one lane you lead here).
+        #[arg(long, env = "ANOTHER_LANE")]
+        lane: Option<String>,
     },
     /// Renew your holds (all, or the given ids).
     Renew {
@@ -1555,16 +1558,26 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             project,
             paths,
             shared,
+            lane,
         }) => {
             let project = project_key(&store, &agent.agent, project.project)?;
-            let conflicts = store.check_holds(&agent.agent, &project, &paths, !shared)?;
+            let lane = lane.filter(|l| !l.trim().is_empty());
+            let (conflicts, warnings) = store.check_holds_in_lane(
+                &agent.agent,
+                &project,
+                &paths,
+                !shared,
+                lane.as_deref(),
+            )?;
             let conflicted = !conflicts.is_empty();
             emit(json, &conflicts, |c| {
-                if c.is_empty() {
-                    "no conflicts".to_string()
+                let mut out = if c.is_empty() {
+                    "no conflicts\n".to_string()
                 } else {
                     output::conflicts(c)
-                }
+                };
+                out.push_str(&output::hold_warnings(&warnings));
+                out.trim_end().to_string()
             });
             if conflicted {
                 ExitCode::from(EXIT_CONFLICT)
