@@ -4,7 +4,7 @@
 
 Free and open source, always: a local-first, vendor-neutral **inbox, activity feed and resource registry for coding agents**. Claude Code, Codex, Grok CLI, Grok Bot, Cursor and anything else that speaks MCP are treated equally, through plain MCP and a shared `another` CLI.
 
-**Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1–6 complete (local core, hooks, resources, remote peers, federation, polish); coordination series and v0.1.0 release prep in review
+**Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1–6 complete (local core, hooks, resources, remote peers, federation, polish); coordination series and v0.1.0 release prep in review, including exact installer checksum filename selection
 
 ## Why
 

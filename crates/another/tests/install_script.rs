@@ -57,6 +57,7 @@ fn release(dir: &Path, version: &str, target: &str, tamper: bool) {
         ))
         .output()
         .unwrap();
+    assert!(sum.status.success(), "could not checksum test archive");
     let mut line = String::from_utf8_lossy(&sum.stdout).to_string();
     if tamper {
         line = format!("{}{}", "0".repeat(64), &line[64..]);
@@ -126,8 +127,8 @@ fn tools_path(dir: &Path, checker: &str) -> Option<std::path::PathBuf> {
         (out.status.success() && path.starts_with('/')).then_some(path)
     };
     for tool in [
-        "curl", "uname", "mktemp", "rm", "grep", "cut", "wc", "mkdir", "cp", "chmod", "mv", "gzip",
-        checker,
+        "curl", "uname", "mktemp", "rm", "awk", "grep", "cut", "wc", "mkdir", "cp", "chmod", "mv",
+        "gzip", checker,
     ] {
         std::os::unix::fs::symlink(find(tool)?, bin.join(tool)).unwrap();
     }
@@ -222,6 +223,90 @@ fn refuses_a_malformed_checksum_line_with_either_checker() {
     if ran == 0 {
         eprintln!("skipping: needs sha256sum or shasum");
     }
+}
+
+/// Filename selection must be literal, independently of the digest check, for either tool.
+#[test]
+fn enforces_the_selected_filename_before_unpack_with_either_checker() {
+    let Some(target) = target() else { return };
+    let mut failures = Vec::new();
+    for checker in ["sha256sum", "shasum"] {
+        for version in ["0.1.0", "0.1.0-rc.1", "0.1.0+build1"] {
+            let dir = tempfile::tempdir().unwrap();
+            let Some(path) = tools_path(dir.path(), checker) else {
+                eprintln!("skipping {checker}: it or another needed tool is missing");
+                break;
+            };
+            release(dir.path(), version, target, false);
+            let archive = format!("another-{version}-{target}.tar.gz");
+            let sums_path = dir.path().join("rel/SHA256SUMS");
+            let original = std::fs::read_to_string(&sums_path).unwrap();
+            let digest = original.split_whitespace().next().unwrap();
+            let wrong_name = archive.replace('.', "x");
+            // Every entry has the downloaded bytes' correct digest. A wrong filename must
+            // therefore fail at selection, before either checksum mismatch or unpacking.
+            for (what, sums, accepted) in [
+                ("exact text entry", format!("{digest}  {archive}\n"), true),
+                ("exact binary entry", format!("{digest} *{archive}\n"), true),
+                ("no final newline", format!("{digest}  {archive}"), true),
+                (
+                    "unrelated and exact entry",
+                    format!("{digest}  {wrong_name}\n{digest}  {archive}\n"),
+                    true,
+                ),
+                (
+                    "regex-similar wrong filename",
+                    format!("{digest}  {wrong_name}\n"),
+                    false,
+                ),
+                (
+                    "filename suffix",
+                    format!("{digest}  {archive}.other\n"),
+                    false,
+                ),
+                (
+                    "leading space with correct digest",
+                    format!(" {digest}  {archive}\n"),
+                    false,
+                ),
+                ("extra separator", format!("{digest}   {archive}\n"), false),
+                (
+                    "duplicate exact entries",
+                    format!("{digest}  {archive}\n{digest} *{archive}\n"),
+                    false,
+                ),
+            ] {
+                std::fs::write(&sums_path, sums).unwrap();
+                let out = install_with(dir.path(), version, &path);
+                let err = String::from_utf8_lossy(&out.stderr);
+                let bin = dir.path().join("bin/another");
+                let tar_log = dir.path().join("tar.log");
+                let message = if what == "duplicate exact entries" {
+                    "listed more than once"
+                } else {
+                    "not listed"
+                };
+                let valid = if accepted {
+                    out.status.success() && bin.exists() && tar_log.exists()
+                } else {
+                    !out.status.success()
+                        && !bin.exists()
+                        && !tar_log.exists()
+                        && err.contains(message)
+                };
+                if !valid {
+                    failures.push(format!("{checker}, {version}, {what}: {err}"));
+                }
+                for file in [bin, tar_log] {
+                    if file.exists() {
+                        std::fs::remove_file(file).unwrap();
+                    }
+                }
+            }
+        }
+    }
+    // Aggregate so a regression in the first checker cannot prevent testing the second.
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]
