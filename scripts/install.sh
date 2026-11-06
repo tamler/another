@@ -50,15 +50,21 @@ main() {
   curl -fsSL -o "$TMP/$ARCHIVE" "$BASE/$ARCHIVE" || fail "download failed: $BASE/$ARCHIVE"
   curl -fsSL -o "$TMP/SHA256SUMS" "$BASE/SHA256SUMS" || fail "download failed: $BASE/SHA256SUMS"
 
-  # Verify before unpacking anything: the archive must be listed and must match.
-  grep " $ARCHIVE\$" "$TMP/SHA256SUMS" > "$TMP/expected" || fail "$ARCHIVE is not listed in SHA256SUMS"
+  # Verify before unpacking anything: the archive must be listed once, as "<sha256>  <archive>",
+  # and must match. The digests are compared here rather than with `-c`, because some
+  # `sha256sum -c` builds skip a line they can't parse and still exit 0.
+  grep -E "^[0-9a-f]{64} [ *]$ARCHIVE\$" "$TMP/SHA256SUMS" > "$TMP/expected" ||
+    fail "$ARCHIVE is not listed in SHA256SUMS as \"<sha256>  $ARCHIVE\""
+  [ "$(wc -l < "$TMP/expected")" -eq 1 ] || fail "$ARCHIVE is listed more than once in SHA256SUMS"
+  want=$(cut -c1-64 "$TMP/expected")
   if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$TMP" && sha256sum -c expected >/dev/null 2>&1) || fail "checksum mismatch for $ARCHIVE; not installing"
+    got=$(cd "$TMP" && sha256sum "$ARCHIVE") || fail "could not checksum $ARCHIVE"
   elif command -v shasum >/dev/null 2>&1; then
-    (cd "$TMP" && shasum -a 256 -c expected >/dev/null 2>&1) || fail "checksum mismatch for $ARCHIVE; not installing"
+    got=$(cd "$TMP" && shasum -a 256 "$ARCHIVE") || fail "could not checksum $ARCHIVE"
   else
     fail "need sha256sum or shasum to verify the download"
   fi
+  [ "${got%% *}" = "$want" ] || fail "checksum mismatch for $ARCHIVE; not installing"
 
   tar -xzf "$TMP/$ARCHIVE" -C "$TMP"
   mkdir -p "$DIR"

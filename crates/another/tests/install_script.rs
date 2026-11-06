@@ -112,6 +112,118 @@ fn installs_verified_archives_only() {
     assert!(!bin.exists());
 }
 
+/// A PATH holding only what the script needs, with `checker` as the one checksum tool, and a
+/// `tar` that logs each call to `tar.log` before running the real one.
+fn tools_path(dir: &Path, checker: &str) -> Option<std::path::PathBuf> {
+    let bin = dir.join("tools");
+    std::fs::create_dir_all(&bin).unwrap();
+    let find = |tool: &str| {
+        let out = Command::new("sh")
+            .args(["-c", &format!("command -v {tool}")])
+            .output()
+            .ok()?;
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (out.status.success() && path.starts_with('/')).then_some(path)
+    };
+    for tool in [
+        "curl", "uname", "mktemp", "rm", "grep", "cut", "wc", "mkdir", "cp", "chmod", "mv", "gzip",
+        checker,
+    ] {
+        std::os::unix::fs::symlink(find(tool)?, bin.join(tool)).unwrap();
+    }
+    let tar = find("tar")?;
+    let shim = bin.join("tar");
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\nexec '{tar}' \"$@\"\n",
+            dir.join("tar.log").display()
+        ),
+    )
+    .unwrap();
+    let ok = Command::new("chmod")
+        .arg("0755")
+        .arg(&shim)
+        .status()
+        .unwrap();
+    assert!(ok.success());
+    Some(bin)
+}
+
+fn install_with(dir: &Path, version: &str, path: &Path) -> std::process::Output {
+    // Absolute, since the child's PATH has no sh.
+    Command::new("/bin/sh")
+        .arg(script())
+        .env("PATH", path)
+        .env("ANOTHER_VERSION", version)
+        .env(
+            "ANOTHER_DOWNLOAD_BASE",
+            format!("file://{}", dir.join("rel").display()),
+        )
+        .env("ANOTHER_INSTALL_DIR", dir.join("bin"))
+        .env("HOME", dir)
+        .output()
+        .unwrap()
+}
+
+/// Some `sha256sum -c` builds skip a line they can't parse (a leading space, say) and still
+/// exit 0, so a SHA256SUMS line that names the archive but is malformed must be refused, with
+/// either checker, before anything is unpacked.
+#[test]
+fn refuses_a_malformed_checksum_line_with_either_checker() {
+    let Some(target) = target() else { return };
+    let mut ran = 0;
+    for checker in ["sha256sum", "shasum"] {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(path) = have(checker)
+            .then(|| tools_path(dir.path(), checker))
+            .flatten()
+        else {
+            eprintln!("skipping {checker}: it or another needed tool is missing");
+            continue;
+        };
+        ran += 1;
+        let archive = format!("another-0.0.0-test-{target}.tar.gz");
+
+        // The restricted PATH is enough to install a good release with this checker.
+        release(dir.path(), "0.0.0-test", target, false);
+        let out = install_with(dir.path(), "0.0.0-test", &path);
+        assert!(
+            out.status.success(),
+            "{checker}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::remove_file(dir.path().join("bin/another")).unwrap();
+        std::fs::remove_file(dir.path().join("tar.log")).unwrap();
+
+        for (what, sums) in [
+            (
+                "leading space, wrong digest",
+                format!(" {}  {archive}\n", "0".repeat(64)),
+            ),
+            ("short digest", format!("{}  {archive}\n", "0".repeat(63))),
+            ("no separator", format!("{}{archive}\n", "0".repeat(64))),
+        ] {
+            std::fs::write(dir.path().join("rel/SHA256SUMS"), sums).unwrap();
+            let out = install_with(dir.path(), "0.0.0-test", &path);
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(!out.status.success(), "{checker}, {what}: installed: {err}");
+            assert!(err.contains("not listed"), "{checker}, {what}: {err}");
+            assert!(
+                !dir.path().join("tar.log").exists(),
+                "{checker}, {what}: unpacked before refusing"
+            );
+            assert!(
+                !dir.path().join("bin/another").exists(),
+                "{checker}, {what}"
+            );
+        }
+    }
+    if ran == 0 {
+        eprintln!("skipping: needs sha256sum or shasum");
+    }
+}
+
 #[test]
 fn the_install_script_parses() {
     let ok = Command::new("sh").arg("-n").arg(script()).status().unwrap();
