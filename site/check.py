@@ -195,8 +195,7 @@ for path, page in pages.items():
     assert set(graph) == expected_types, f"{path}: JSON-LD types"
     own = graph[own_type]
     assert own.get("author") == {"@type": "Organization", "name": "The Another Authors"}, f"{path}: {own_type} author"
-    if own_type != "FAQPage":
-        assert own["url"] == canonical, f"{path}: {own_type} url"
+    assert own.get("url") == canonical, f"{path}: {own_type} url"
     if own_type in {"TechArticle", "CollectionPage"}:
         heading = " ".join(page.h1.split())
         assert own["headline" if own_type == "TechArticle" else "name"] == heading, f"{path}: {own_type} must name the visible h1"
