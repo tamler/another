@@ -909,10 +909,11 @@ mod tests {
     fn the_snippet_stops_when_the_verified_archive_will_not_unpack() {
         let Some(target) = target() else { return };
         let dir = tempfile::tempdir().unwrap();
-        let Some(path) = ["sha256sum", "shasum"]
+        // Picked before tools_path, which leaves symlinks behind when it returns None.
+        let checker = ["sha256sum", "shasum"]
             .into_iter()
-            .find_map(|checker| tools_path(dir.path(), checker))
-        else {
+            .find(|checker| find(checker).is_some());
+        let Some(path) = checker.and_then(|checker| tools_path(dir.path(), checker)) else {
             eprintln!("skipping: needs sha256sum or shasum");
             return;
         };
