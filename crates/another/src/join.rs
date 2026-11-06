@@ -82,7 +82,8 @@ if ! command -v another >/dev/null 2>&1; then
     # The archive must match the release's published checksum; never install it otherwise.
     # $A.sha256 must be one "<sha256>  $A" line. The digests are compared here rather than
     # with `-c`, because some `sha256sum -c` builds skip a line they can't parse and exit 0.
-    if [ "$(wc -l < "$TMP/$A.sha256")" -ne 1 ] || ! grep -qE "^[0-9a-f]{{64}} [ *]$A\$" "$TMP/$A.sha256"; then
+    if [ "$(wc -l < "$TMP/$A.sha256")" -ne 1 ] || ! grep -qE '^[0-9a-f]{{64}} [ *]' "$TMP/$A.sha256" ||
+      [ "$(cut -c67- "$TMP/$A.sha256")" != "$A" ]; then
       echo "another $VERSION: $A.sha256 is not one \"<sha256>  $A\" line, not installing" >&2; rm -rf "$TMP"; exit 1
     fi
     WANT=$(cut -c1-64 "$TMP/$A.sha256")
@@ -833,7 +834,8 @@ mod tests {
                 continue;
             };
             ran += 1;
-            let version = "0.0.0-test";
+            // A `+` and dots in the archive name must be matched literally.
+            let version = "0.0.0-test+b.1";
             let (archive, good) = release(dir.path(), version, target);
             let sums = dir.path().join(format!("rel/{archive}.sha256"));
             let installed = dir.path().join("home/.local/bin/another");
@@ -860,6 +862,10 @@ mod tests {
                 ("short digest", format!("{}  {archive}\n", "0".repeat(63))),
                 ("no separator", format!("{zeros}{archive}\n")),
                 ("other archive", format!("{}  other.tar.gz\n", &good[..64])),
+                (
+                    "dots as wildcards",
+                    format!("{}  {}\n", &good[..64], archive.replace('.', "X")),
+                ),
                 ("two lines", format!("{good}{good}")),
                 ("empty", String::new()),
             ] {
