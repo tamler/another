@@ -196,10 +196,10 @@ for path, page in pages.items():
     own = graph[own_type]
     assert own.get("author") == {"@type": "Organization", "name": "The Another Authors"}, f"{path}: {own_type} author"
     assert own.get("url") == canonical, f"{path}: {own_type} url"
+    assert own.get("description") == description, f"{path}: {own_type} description"
     if own_type in {"TechArticle", "CollectionPage"}:
         heading = " ".join(page.h1.split())
         assert own["headline" if own_type == "TechArticle" else "name"] == heading, f"{path}: {own_type} must name the visible h1"
-        assert own["description"] == description, f"{path}: {own_type} description"
         assert own["about"] == {"@id": ORIGIN + "/#application"}, f"{path}: {own_type} about"
     assert graph["SoftwareApplication"]["name"] == "Another"
     assert graph["SoftwareSourceCode"]["codeRepository"] == "https://github.com/tamler/another"
