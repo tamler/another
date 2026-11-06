@@ -170,14 +170,16 @@ for path, page in pages.items():
     assert "noindex" not in page.meta.get("robots", ""), f"{path}: unexpectedly noindex"
     required = {
         "og:type": "website", "og:site_name": "Another", "og:title": page.title,
+        "og:description": description,
         "og:url": canonical, "og:image": ORIGIN + "/og.png",
         "og:image:width": "1200", "og:image:height": "630",
         "twitter:card": "summary_large_image", "twitter:title": page.title,
+        "twitter:description": description,
         "twitter:image": ORIGIN + "/twitter.png",
     }
     for key, value in required.items():
         assert page.meta.get(key) == value, f"{path}: {key}"
-    for key in ("og:description", "twitter:description", "og:image:alt", "twitter:image:alt"):
+    for key in ("og:image:alt", "twitter:image:alt"):
         assert page.meta.get(key), f"{path}: missing {key}"
     assert len(page.structured) == 1, f"{path}: one JSON-LD graph"
     data = page.structured[0]
