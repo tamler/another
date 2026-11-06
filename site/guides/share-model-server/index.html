@@ -59,8 +59,9 @@ another borrow model_server:ollama@11434 --agent codex</code></pre>
       <pre class="code-block shell" tabindex="0" aria-label="Release a lease"><code>another release model_server:ollama@11434 --agent codex
 another release model_server:ollama@11434 --agent claude</code></pre>
       <p>Releasing ends a lease and does not stop the server. If the owner leaves while others borrow, the oldest borrower becomes the owner. Once the last lease ends, the resource shows as <code>lapsed</code>, and the next agent to borrow it adopts it as owner, so check that it is still answering first. After you really shut it down, the owner runs <code>another release</code> with <code>--stopped</code>.</p>
-      <p>The session-end hook releases an agent's leases. If your server should outlive the session, end the session by hand with <code>--keep</code>, which holds on to the lease:</p>
+      <p>The session-end hook releases an agent's leases. You can keep the current leases for a manual end call with <code>--keep</code>:</p>
       <pre class="code-block shell" tabindex="0" aria-label="End a session and keep leases"><code>another heartbeat --agent claude --end --keep</code></pre>
+      <p>A later session-end hook for the same agent releases those leases. This command does not make a hooked client's normal shutdown preserve them, and retained leases still expire unless renewed.</p>
       <p><a href="https://github.com/tamler/another/blob/main/docs/RESOURCES.md">The resource reference</a> has the details.</p>
     </section>
     <section class="guide-section" aria-labelledby="orphans">
