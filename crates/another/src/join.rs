@@ -95,7 +95,10 @@ if ! command -v another >/dev/null 2>&1; then
     if [ "${{GOT%% *}}" != "$WANT" ]; then
       echo "another $VERSION: checksum mismatch, not installing" >&2; rm -rf "$TMP"; exit 1
     fi
-    tar -xzf "$TMP/$A" -C "$TMP" && cp "$TMP/another-$VERSION-$T/another" "$BIN/another"
+    # `set -e` does not stop on a failure before `&&`, so each step is checked here.
+    if ! tar -xzf "$TMP/$A" -C "$TMP" || ! cp "$TMP/another-$VERSION-$T/another" "$BIN/another"; then
+      echo "another $VERSION: could not unpack $A, not installing" >&2; rm -rf "$TMP"; exit 1
+    fi
   else
     # No prebuilt archive for this platform or version: build the same tag from source.
     cargo install --locked --git https://github.com/tamler/another --tag "v$VERSION" another
@@ -782,6 +785,13 @@ mod tests {
             .status()
             .unwrap();
         assert!(ok.success());
+        let line = checksum_line(&rel, &archive);
+        (archive, line)
+    }
+
+    /// The `<sha256>  <archive>` line for `rel/<archive>` as it is now.
+    #[cfg(unix)]
+    fn checksum_line(rel: &std::path::Path, archive: &str) -> String {
         let sum = std::process::Command::new("sh")
             .arg("-c")
             .arg(format!(
@@ -792,7 +802,7 @@ mod tests {
             .unwrap();
         let line = String::from_utf8_lossy(&sum.stdout).to_string();
         assert!(line.len() > 64, "could not checksum {archive}");
-        (archive, line)
+        line
     }
 
     #[cfg(unix)]
@@ -889,5 +899,48 @@ mod tests {
         if ran == 0 {
             eprintln!("skipping: needs sha256sum or shasum");
         }
+    }
+
+    /// Under `set -eu`, a failing command before `&&` does not stop the script. An archive that
+    /// matches its checksum but will not unpack must stop it there, before `another join` can
+    /// run some other `another` that the extended PATH finds, such as one in ~/.cargo/bin.
+    #[cfg(unix)]
+    #[test]
+    fn the_snippet_stops_when_the_verified_archive_will_not_unpack() {
+        let Some(target) = target() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        // Picked before tools_path, which leaves symlinks behind when it returns None.
+        let checker = ["sha256sum", "shasum"]
+            .into_iter()
+            .find(|checker| find(checker).is_some());
+        let Some(path) = checker.and_then(|checker| tools_path(dir.path(), checker)) else {
+            eprintln!("skipping: needs sha256sum or shasum");
+            return;
+        };
+        let version = "0.0.0-test";
+        let (archive, _) = release(dir.path(), version, target);
+        let rel = dir.path().join("rel");
+        std::fs::write(rel.join(&archive), "not a gzip archive\n").unwrap();
+        let line = checksum_line(&rel, &archive);
+        std::fs::write(rel.join(format!("{archive}.sha256")), line).unwrap();
+        // An older `another` that is not on the caller's PATH, so the snippet installs.
+        let stale = dir.path().join("home/.cargo/bin");
+        std::fs::create_dir_all(&stale).unwrap();
+        let ran = dir.path().join("stale-ran");
+        write_exec(
+            &stale.join("another"),
+            &format!("#!/bin/sh\n: > '{}'\n", ran.display()),
+        );
+
+        let out = run_snippet(dir.path(), version, &path);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            dir.path().join("tar.log").exists(),
+            "never reached tar: {err}"
+        );
+        assert!(!out.status.success(), "the script succeeded: {err}");
+        assert!(err.contains("not installing"), "{err}");
+        assert!(!ran.exists(), "ran the stale another: {err}");
+        assert!(!dir.path().join("home/.local/bin/another").exists());
     }
 }
