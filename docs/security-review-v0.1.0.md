@@ -117,6 +117,8 @@ Not fixed here. Any fix changes how every local client connects.
 
 README.md's install section now says this.
 
+**Follow-up (2026-11-06, fixed):** the script used to pick the archive's line with a loose `grep` and then trust `sha256sum -c`. macOS's `/sbin/sha256sum` skips a line it can't parse, such as one with a leading space, and still exits 0, so a wrong digest on such a line installed the archive. The script now accepts only one well-formed `<sha256>  <archive>` line, computes the digest itself and compares the two, with either checker. `tests/install_script.rs::refuses_a_malformed_checksum_line_with_either_checker` runs a good install and three malformed lines with each checker alone on `PATH`, and asserts each one is refused before `tar` runs. Before the fix it installed the leading-space, all-zero line.
+
 **Recommendation (still open):**
 - Sign `SHA256SUMS` (minisign or cosign) or publish GitHub artifact attestations, and verify in the script when the tool is available.
 - Pass `--proto '=https' --proto-redir '=https'` to `curl` when `ANOTHER_DOWNLOAD_BASE` is not overridden. Tests and mirrors use `file://`.
@@ -203,6 +205,6 @@ Each attempt is signed with a new `X-Another-Timestamp`, so a receiver with a re
 - Tokens see other projects' accounts read-only.
 
 **`install.sh`:**
-- Checks the archive against `SHA256SUMS` before unpacking, refuses a mismatch or a missing line, and needs `sha256sum` or `shasum`.
+- Checks the archive against `SHA256SUMS` before unpacking, refuses a mismatch or a missing or malformed line, and needs `sha256sum` or `shasum`.
 - Installs through a temporary file and `mv`, with `set -eu`.
 - Cleans up its temporary files with `trap`.
