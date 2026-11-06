@@ -65,7 +65,7 @@ another invite revoke <invite-id>
 
 `invite create --print-snippet --hub-url URL` prints a POSIX `sh` block for a cloud session:
 
-1. **Get the binary.** Uses `another` if it is on `PATH`. Otherwise it downloads the release archive of **the hub's own version** (`v<version>`, pinned in the snippet; never "latest") for the platform, and installs it to `~/.local/bin` only if it matches the release's published `.sha256`. A checksum mismatch stops the script. With no archive for the platform, it builds that same tag: `cargo install --locked --git … --tag v<version> another`.
+1. **Get the binary.** Uses `another` if it is on `PATH`. Otherwise it downloads the release archive of **the hub's own version** (`v<version>`, pinned in the snippet; never "latest") for the platform, and installs it to `~/.local/bin` only if it matches the release's published `.sha256`. That file must be one `<sha256>  <archive>` line. The script computes the archive's digest and compares it with that line itself; it does not use `-c`, because some `sha256sum -c` builds skip a line they can't parse and still exit 0. A malformed file or a mismatch stops the script before anything is unpacked. With no archive for the platform, it builds that same tag: `cargo install --locked --git … --tag v<version> another`.
 2. **Join:** `another join "$HUB" "$CODE" --write-mcp auto --hello`.
    - The token is saved to `$ANOTHER_HOME/remote.json` (`0600`), and the env exports go to `$ANOTHER_HOME/remote.env` (`0600`).
    - The MCP config is written: `claude mcp add --scope user …` when `claude` is on `PATH`, and the Codex table when `~/.codex` exists. For Codex, `ANOTHER_TOKEN` must be in its environment: source `remote.env`.
