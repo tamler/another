@@ -4,6 +4,9 @@ All notable changes to Another. Unreleased work is listed under the next version
 
 ## Unreleased
 
+### Fixed
+- Release installer compares the selected archive filename literally in `SHA256SUMS`, rejecting regex-similar wrong filenames before unpacking and accepting exact filenames with build metadata such as `+build1`. Strict digest syntax and duplicate-entry checks remain enforced with either `sha256sum` or `shasum`.
+
 ### Added
 - **`another doctor`**: checks the store (writable, schema), the local server (reachable, Another, same home), tokens (expired, expiring, matching no project), client hooks for Claude Code, Codex and Grok (and whether Codex has recorded trust for them), and port and resource conflicts. PASS / WARN / FAIL / SKIP with a fix per problem; `--json`; exit 1 on any FAIL.
 - **Release installs:** tagged releases also publish one `SHA256SUMS` and `install.sh`. One-line install: `curl -fsSL https://github.com/tamler/another/releases/latest/download/install.sh | sh`. It verifies the archive before installing (`ANOTHER_VERSION`, `ANOTHER_INSTALL_DIR` to pin or relocate).

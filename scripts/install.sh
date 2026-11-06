@@ -53,7 +53,9 @@ main() {
   # Verify before unpacking anything: the archive must be listed once, as "<sha256>  <archive>",
   # and must match. The digests are compared here rather than with `-c`, because some
   # `sha256sum -c` builds skip a line they can't parse and still exit 0.
-  grep -E "^[0-9a-f]{64} [ *]$ARCHIVE\$" "$TMP/SHA256SUMS" > "$TMP/expected" ||
+  # Compare the filename literally: version dots and build-metadata '+' are not regex syntax.
+  ANOTHER_ARCHIVE="$ARCHIVE" awk 'substr($0, 67) == ENVIRON["ANOTHER_ARCHIVE"]' "$TMP/SHA256SUMS" |
+    grep -E '^[0-9a-f]{64} [ *]' > "$TMP/expected" ||
     fail "$ARCHIVE is not listed in SHA256SUMS as \"<sha256>  $ARCHIVE\""
   [ "$(wc -l < "$TMP/expected")" -eq 1 ] || fail "$ARCHIVE is listed more than once in SHA256SUMS"
   want=$(cut -c1-64 "$TMP/expected")
