@@ -82,8 +82,9 @@ if ! command -v another >/dev/null 2>&1; then
     # The archive must match the release's published checksum; never install it otherwise.
     # $A.sha256 must be one "<sha256>  $A" line. The digests are compared here rather than
     # with `-c`, because some `sha256sum -c` builds skip a line they can't parse and exit 0.
-    if [ "$(wc -l < "$TMP/$A.sha256")" -ne 1 ] || ! grep -qE '^[0-9a-f]{{64}} [ *]' "$TMP/$A.sha256" ||
-      [ "$(cut -c67- "$TMP/$A.sha256")" != "$A" ]; then
+    # The byte count catches what command substitution drops, such as a NUL.
+    if [ "$(wc -l < "$TMP/$A.sha256")" -ne 1 ] || [ "$(wc -c < "$TMP/$A.sha256")" -ne $((67 + ${{#A}})) ] ||
+      ! grep -qE '^[0-9a-f]{{64}} [ *]' "$TMP/$A.sha256" || [ "$(cut -c67- "$TMP/$A.sha256")" != "$A" ]; then
       echo "another $VERSION: $A.sha256 is not one \"<sha256>  $A\" line, not installing" >&2; rm -rf "$TMP"; exit 1
     fi
     WANT=$(cut -c1-64 "$TMP/$A.sha256")
@@ -865,6 +866,10 @@ mod tests {
                 (
                     "dots as wildcards",
                     format!("{}  {}\n", &good[..64], archive.replace('.', "X")),
+                ),
+                (
+                    "NUL in name",
+                    format!("{}  {}\0{}\n", &good[..64], &archive[..9], &archive[9..]),
                 ),
                 ("two lines", format!("{good}{good}")),
                 ("empty", String::new()),
