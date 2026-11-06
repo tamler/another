@@ -105,7 +105,7 @@ The website has editable source in [site/](site/README.md). Build it with `sh si
 
 For first use: [Getting started](https://toanother.one/docs/getting-started/), [Installation](https://toanother.one/docs/install/) and [Compare approaches](https://toanother.one/compare/). The website includes a [recorded fixture handoff](https://toanother.one/#proof-title), separate from the runnable shell exchange above.
 
-Preview task guides: [Claude Code + Codex](site/guides/claude-code-codex/index.html), [MCP messaging](site/guides/mcp-agent-messaging/index.html), [file holds](site/guides/avoid-agent-file-conflicts/index.html) and a [local inbox](site/guides/local-agent-inbox/index.html).
+Preview task guides, all listed on the [guides hub](site/guides/index.html): [Claude Code + Codex](site/guides/claude-code-codex/index.html), [multiple Claude Code sessions](site/guides/multiple-claude-code-sessions/index.html), [MCP messaging](site/guides/mcp-agent-messaging/index.html), [file holds](site/guides/avoid-agent-file-conflicts/index.html), [git worktrees](site/guides/git-worktrees/index.html), [task handoffs](site/guides/hand-off-tasks/index.html), [a shared model server](site/guides/share-model-server/index.html), [waking idle agents](site/guides/wake-idle-agents/index.html), [agents on two machines](site/guides/agents-on-two-machines/index.html) and a [local inbox](site/guides/local-agent-inbox/index.html).
 
 | Doc | What it covers |
 |---|---|
