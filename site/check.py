@@ -22,6 +22,8 @@ ROUTES = {
 GUIDES = {route for route in ROUTES if route.startswith("/guides/") and route != "/guides/"}
 # Nested pages outside /guides/ carry an explicit trail from the home page.
 TRAILS = {
+    "/docs/getting-started/": ["/", "/docs/", "/docs/getting-started/"],
+    "/docs/install/": ["/", "/docs/", "/docs/install/"],
     "/docs/install/macos/": ["/", "/docs/", "/docs/install/", "/docs/install/macos/"],
     "/docs/install/linux/": ["/", "/docs/", "/docs/install/", "/docs/install/linux/"],
     "/docs/install/windows/": ["/", "/docs/", "/docs/install/", "/docs/install/windows/"],
