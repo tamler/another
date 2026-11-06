@@ -80,7 +80,19 @@ if ! command -v another >/dev/null 2>&1; then
   URL="https://github.com/tamler/another/releases/download/v$VERSION"
   if [ -n "$T" ] && curl -fsSL -o "$TMP/$A" "$URL/$A" && curl -fsSL -o "$TMP/$A.sha256" "$URL/$A.sha256"; then
     # The archive must match the release's published checksum; never install it otherwise.
-    if ! (cd "$TMP" && (sha256sum -c "$A.sha256" 2>/dev/null || shasum -a 256 -c "$A.sha256")); then
+    # $A.sha256 must be one "<sha256>  $A" line. The digests are compared here rather than
+    # with `-c`, because some `sha256sum -c` builds skip a line they can't parse and exit 0.
+    # The byte count catches what command substitution drops, such as a NUL.
+    if [ "$(wc -l < "$TMP/$A.sha256")" -ne 1 ] || [ "$(wc -c < "$TMP/$A.sha256")" -ne $((67 + ${{#A}})) ] ||
+      ! grep -qE '^[0-9a-f]{{64}} [ *]' "$TMP/$A.sha256" || [ "$(cut -c67- "$TMP/$A.sha256")" != "$A" ]; then
+      echo "another $VERSION: $A.sha256 is not one \"<sha256>  $A\" line, not installing" >&2; rm -rf "$TMP"; exit 1
+    fi
+    WANT=$(cut -c1-64 "$TMP/$A.sha256")
+    if command -v sha256sum >/dev/null 2>&1; then GOT=$(cd "$TMP" && sha256sum "$A") || GOT=
+    elif command -v shasum >/dev/null 2>&1; then GOT=$(cd "$TMP" && shasum -a 256 "$A") || GOT=
+    else echo "another $VERSION: need sha256sum or shasum to verify, not installing" >&2; rm -rf "$TMP"; exit 1
+    fi
+    if [ "${{GOT%% *}}" != "$WANT" ]; then
       echo "another $VERSION: checksum mismatch, not installing" >&2; rm -rf "$TMP"; exit 1
     fi
     tar -xzf "$TMP/$A" -C "$TMP" && cp "$TMP/another-$VERSION-$T/another" "$BIN/another"
@@ -684,9 +696,198 @@ mod tests {
         );
         assert!(s.contains("checksum mismatch, not installing"));
         // A checksum failure stops the script instead of falling back.
-        let check = s.find("sha256sum -c").unwrap();
+        let check = s.find("checksum mismatch").unwrap();
         let exit = s[check..].find("exit 1").unwrap();
         let fallback = s[check..].find("cargo install").unwrap();
         assert!(exit < fallback);
+    }
+
+    #[cfg(unix)]
+    fn target() -> Option<&'static str> {
+        match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("linux", "x86_64") => Some("x86_64-unknown-linux-musl"),
+            ("linux", "aarch64") => Some("aarch64-unknown-linux-musl"),
+            ("macos", "aarch64") => Some("aarch64-apple-darwin"),
+            ("macos", "x86_64") => Some("x86_64-apple-darwin"),
+            _ => None,
+        }
+    }
+
+    #[cfg(unix)]
+    fn find(tool: &str) -> Option<String> {
+        let out = std::process::Command::new("sh")
+            .args(["-c", &format!("command -v {tool}")])
+            .output()
+            .ok()?;
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (out.status.success() && path.starts_with('/')).then_some(path)
+    }
+
+    #[cfg(unix)]
+    fn write_exec(path: &std::path::Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A PATH holding only what the snippet needs, with `checker` as the one checksum tool, a
+    /// `curl` that serves files from `rel/` by name, and a `tar` that logs each call to
+    /// `tar.log` before running the real one. None when a tool is missing.
+    #[cfg(unix)]
+    fn tools_path(dir: &std::path::Path, checker: &str) -> Option<std::path::PathBuf> {
+        let bin = dir.join("tools");
+        std::fs::create_dir_all(&bin).unwrap();
+        for tool in [
+            "uname", "mkdir", "mktemp", "rm", "cp", "grep", "cut", "wc", "gzip", checker,
+        ] {
+            std::os::unix::fs::symlink(find(tool)?, bin.join(tool)).unwrap();
+        }
+        let cp = find("cp")?;
+        let tar = find("tar")?;
+        // Called as `curl -fsSL -o OUT URL`.
+        write_exec(
+            &bin.join("curl"),
+            &format!(
+                "#!/bin/sh\nout=$3; url=$4\nf='{}'/\"${{url##*/}}\"\n[ -f \"$f\" ] || exit 22\nexec '{cp}' \"$f\" \"$out\"\n",
+                dir.join("rel").display()
+            ),
+        );
+        write_exec(
+            &bin.join("tar"),
+            &format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\nexec '{tar}' \"$@\"\n",
+                dir.join("tar.log").display()
+            ),
+        );
+        Some(bin)
+    }
+
+    /// Writes `rel/` with one release archive holding a stub `another`, and returns the
+    /// archive's name and its real `<sha256>  <archive>` line.
+    #[cfg(unix)]
+    fn release(dir: &std::path::Path, version: &str, target: &str) -> (String, String) {
+        let name = format!("another-{version}-{target}");
+        let pkg = dir.join("pkg").join(&name);
+        std::fs::create_dir_all(&pkg).unwrap();
+        write_exec(&pkg.join("another"), "#!/bin/sh\nexit 0\n");
+        let rel = dir.join("rel");
+        std::fs::create_dir_all(&rel).unwrap();
+        let archive = format!("{name}.tar.gz");
+        let ok = std::process::Command::new("tar")
+            .arg("-czf")
+            .arg(rel.join(&archive))
+            .arg("-C")
+            .arg(dir.join("pkg"))
+            .arg(&name)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let sum = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "cd '{}' && (sha256sum '{archive}' 2>/dev/null || shasum -a 256 '{archive}')",
+                rel.display()
+            ))
+            .output()
+            .unwrap();
+        let line = String::from_utf8_lossy(&sum.stdout).to_string();
+        assert!(line.len() > 64, "could not checksum {archive}");
+        (archive, line)
+    }
+
+    #[cfg(unix)]
+    fn run_snippet(
+        dir: &std::path::Path,
+        version: &str,
+        path: &std::path::Path,
+    ) -> std::process::Output {
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join(".another")).unwrap();
+        std::fs::write(home.join(".another/remote.env"), "").unwrap();
+        let script = dir.join("join.sh");
+        std::fs::write(
+            &script,
+            super::snippet_for_version("https://hub.example", "anj_X_y", "tomorrow", version),
+        )
+        .unwrap();
+        // Absolute, since the child's PATH has no sh.
+        std::process::Command::new("/bin/sh")
+            .arg(&script)
+            .env_clear()
+            .env("PATH", path)
+            .env("HOME", &home)
+            .output()
+            .unwrap()
+    }
+
+    /// Some `sha256sum -c` builds (macOS's /sbin/sha256sum) skip a line they can't parse and
+    /// still exit 0, so a `.sha256` file that names the archive but is malformed must be
+    /// refused, with either checker, before anything is unpacked.
+    #[cfg(unix)]
+    #[test]
+    fn the_snippet_refuses_a_malformed_checksum_line_with_either_checker() {
+        let Some(target) = target() else { return };
+        let mut ran = 0;
+        for checker in ["sha256sum", "shasum"] {
+            let dir = tempfile::tempdir().unwrap();
+            let Some(path) = tools_path(dir.path(), checker) else {
+                eprintln!("skipping {checker}: it or another needed tool is missing");
+                continue;
+            };
+            ran += 1;
+            // A `+` and dots in the archive name must be matched literally.
+            let version = "0.0.0-test+b.1";
+            let (archive, good) = release(dir.path(), version, target);
+            let sums = dir.path().join(format!("rel/{archive}.sha256"));
+            let installed = dir.path().join("home/.local/bin/another");
+
+            // The restricted PATH is enough to install a good release with this checker.
+            std::fs::write(&sums, &good).unwrap();
+            let out = run_snippet(dir.path(), version, &path);
+            assert!(
+                out.status.success(),
+                "{checker}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(installed.exists(), "{checker}: not installed");
+            std::fs::remove_file(&installed).unwrap();
+            std::fs::remove_file(dir.path().join("tar.log")).unwrap();
+
+            let zeros = "0".repeat(64);
+            for (what, line) in [
+                (
+                    "leading space, wrong digest",
+                    format!(" {zeros}  {archive}\n"),
+                ),
+                ("wrong digest", format!("{zeros}  {archive}\n")),
+                ("short digest", format!("{}  {archive}\n", "0".repeat(63))),
+                ("no separator", format!("{zeros}{archive}\n")),
+                ("other archive", format!("{}  other.tar.gz\n", &good[..64])),
+                (
+                    "dots as wildcards",
+                    format!("{}  {}\n", &good[..64], archive.replace('.', "X")),
+                ),
+                (
+                    "NUL in name",
+                    format!("{}  {}\0{}\n", &good[..64], &archive[..9], &archive[9..]),
+                ),
+                ("two lines", format!("{good}{good}")),
+                ("empty", String::new()),
+            ] {
+                std::fs::write(&sums, line).unwrap();
+                let out = run_snippet(dir.path(), version, &path);
+                let err = String::from_utf8_lossy(&out.stderr);
+                assert!(!out.status.success(), "{checker}, {what}: installed: {err}");
+                assert!(err.contains("not installing"), "{checker}, {what}: {err}");
+                assert!(
+                    !dir.path().join("tar.log").exists(),
+                    "{checker}, {what}: unpacked before refusing"
+                );
+                assert!(!installed.exists(), "{checker}, {what}");
+            }
+        }
+        if ran == 0 {
+            eprintln!("skipping: needs sha256sum or shasum");
+        }
     }
 }
