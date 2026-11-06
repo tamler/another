@@ -125,7 +125,7 @@ another doctor
   cargo install --locked --git https://github.com/tamler/another another
   ```
 
-- **By hand:** each [release](https://github.com/tamler/another/releases) has `another-<version>-<target>.tar.gz` for `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, a `.sha256` per archive, one `SHA256SUMS` and `install.sh`. Check with `sha256sum -c SHA256SUMS --ignore-missing` (or `shasum -a 256 -c`).
+- **By hand:** each [release](https://github.com/tamler/another/releases) has `another-<version>-<target>.tar.gz` for `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, a `.sha256` per archive, one `SHA256SUMS` and `install.sh`. Check the archive with [the recipe on the install page](https://toanother.one/docs/install/#verify).
 
 **What the checksum proves:** `SHA256SUMS` is unsigned and comes from the same release as the archive. A match shows the download is intact (integrity). It doesn't show who built it (authenticity): someone who can change the release or the GitHub account can replace both files. The release's security rests on HTTPS and on that account. To reduce that trust, build from source at a commit you've reviewed.
 
