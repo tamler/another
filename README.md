@@ -124,6 +124,8 @@ Tool errors are `{"error": {"code", "message"}}` with codes `not_found`, `invali
 
 Every command takes `--json`. `--agent` and `--from` default to `$ANOTHER_AGENT`, and `--project` defaults to the current directory.
 
+Logs go to stderr: `info` and above for `another serve`, `warn` and above for every other command. Set `$ANOTHER_LOG` to a [tracing filter](https://docs.rs/tracing-subscriber/0.3/tracing_subscriber/filter/struct.EnvFilter.html#directives) such as `debug` or `another::serve=warn` to change this; a value that does not parse is ignored.
+
 | Task | Commands |
 |---|---|
 | Node | `another init`, `another status`, `another node show`, `another node name [<name>]` (no name prints the current one), `another events` |
