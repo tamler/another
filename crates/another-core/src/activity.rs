@@ -1,7 +1,7 @@
 //! Activity feed: a readable projection of the event log so every peer can see who is
 //! doing what. Items carry one-line summaries and ids, never message bodies.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,8 @@ use crate::error::{Error, Result};
 use crate::identity::address;
 use crate::store::Store;
 use crate::time::fmt_ts;
+use crate::tokens::{scope_allows_project, TokenScope};
+use crate::visibility::{agent_visible, event_visible, request_visible};
 
 /// Coarse activity categories, derived from event kinds.
 #[derive(
@@ -25,10 +27,12 @@ pub enum ActivityKind {
     Session,
     System,
     Federation,
+    Lane,
+    Spend,
 }
 
 impl ActivityKind {
-    pub const ALL: [ActivityKind; 7] = [
+    pub const ALL: [ActivityKind; 9] = [
         ActivityKind::Mail,
         ActivityKind::Request,
         ActivityKind::Hold,
@@ -36,6 +40,8 @@ impl ActivityKind {
         ActivityKind::Session,
         ActivityKind::System,
         ActivityKind::Federation,
+        ActivityKind::Lane,
+        ActivityKind::Spend,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -47,6 +53,8 @@ impl ActivityKind {
             ActivityKind::Session => "session",
             ActivityKind::System => "system",
             ActivityKind::Federation => "federation",
+            ActivityKind::Lane => "lane",
+            ActivityKind::Spend => "spend",
         }
     }
 
@@ -58,6 +66,9 @@ impl ActivityKind {
             "hold" => ActivityKind::Hold,
             "resource" | "orphan" => ActivityKind::Resource,
             "session" | "agent" => ActivityKind::Session,
+            "lane" => ActivityKind::Lane,
+            "decision" => ActivityKind::Request,
+            "spend" => ActivityKind::Spend,
             "peer" | "sync" | "pair" | "federation" => ActivityKind::Federation,
             _ => ActivityKind::System,
         }
@@ -72,7 +83,7 @@ impl std::str::FromStr for ActivityKind {
             .find(|k| k.as_str() == s)
             .ok_or_else(|| {
                 Error::Invalid(format!(
-                    "unknown activity kind {s:?}; expected mail, request, hold, resource, session, system or federation"
+                    "unknown activity kind {s:?}; expected mail, request, hold, resource, session, system, federation, lane or spend"
                 ))
             })
     }
@@ -100,13 +111,17 @@ impl Since {
         if raw.len() == 26 && ulid::Ulid::from_string(raw).is_ok() {
             return Ok(Since::After(raw.to_ascii_uppercase()));
         }
+        // A position cursor from `next_since` (`@<seq>`).
+        if raw.len() > 1 && raw.starts_with('@') && raw[1..].chars().all(|c| c.is_ascii_digit()) {
+            return Ok(Since::After(raw.to_string()));
+        }
         Err(Error::Invalid(format!(
             "invalid since {raw:?}: use a duration like 30m or 2h, an RFC 3339 time, or an event id"
         )))
     }
 }
 
-fn parse_duration_ms(raw: &str) -> Option<i64> {
+pub(crate) fn parse_duration_ms(raw: &str) -> Option<i64> {
     let (num, unit) = raw.split_at(raw.find(|c: char| !c.is_ascii_digit())?);
     let n: i64 = num.parse().ok()?;
     let secs = match unit {
@@ -187,7 +202,7 @@ const MAX_LIMIT: u32 = 500;
 const HIGHLIGHTS: usize = 8;
 
 /// Render one event as a feed item, looking up names the payload only references by id.
-fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
+pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
     let p: Value = serde_json::from_str(&row.payload).unwrap_or(Value::Null);
     let s = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     let list = |k: &str| {
@@ -311,6 +326,228 @@ fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
                 json!({ "hold_ids": p.get("hold_ids") }),
             )
         }
+        "decision.created" => (
+            format!("{actor} asked for a decision ({})", s("decision_id")),
+            json!({ "decision_id": s("decision_id"), "request_id": s("request_id"), "lane_id": p.get("lane_id") }),
+        ),
+        "decision.answered" => {
+            let how = p
+                .get("value")
+                .and_then(Value::as_str)
+                .map_or_else(|| "free text".to_string(), |v| format!("`{v}`"));
+            (
+                format!(
+                    "{} answered decision {} with {how}{}",
+                    s("answered_by"),
+                    s("decision_id"),
+                    p.get("relayed_by")
+                        .and_then(Value::as_str)
+                        .map(|r| format!(" (via {r})"))
+                        .unwrap_or_default()
+                ),
+                json!({ "decision_id": s("decision_id"), "lane_id": p.get("lane_id") }),
+            )
+        }
+        "decision.expired" => (
+            match p.get("value").and_then(Value::as_str) {
+                Some(v) => format!(
+                    "decision {} timed out; default `{v}` applies",
+                    s("decision_id")
+                ),
+                None => format!("decision {} timed out and was cancelled", s("decision_id")),
+            },
+            json!({ "decision_id": s("decision_id"), "lane_id": p.get("lane_id") }),
+        ),
+        // The relayed answer's free text stays out of the feed.
+        "decision.answer_relayed" => (
+            format!(
+                "{actor} relayed an answer to decision {} on another node",
+                s("decision_id")
+            ),
+            json!({ "decision_id": s("decision_id"), "decision_node": s("decision_node") }),
+        ),
+        "decision.answer_ignored" => (
+            format!(
+                "a relayed answer to decision {} was ignored (already {})",
+                s("decision_id"),
+                s("status")
+            ),
+            json!({ "decision_id": s("decision_id") }),
+        ),
+        "decision.overdue" => (
+            format!(
+                "decision {} is past its deadline, still waiting",
+                s("decision_id")
+            ),
+            json!({ "decision_id": s("decision_id"), "lane_id": p.get("lane_id") }),
+        ),
+        "decision.cancelled" => (
+            format!("{actor} withdrew decision {}", s("decision_id")),
+            json!({ "decision_id": s("decision_id"), "lane_id": p.get("lane_id") }),
+        ),
+        "spend.recorded" => (
+            format!(
+                "{actor} spent {} {} on {}{}",
+                p.get("amount").and_then(Value::as_f64).unwrap_or_default(),
+                s("unit"),
+                s("account"),
+                if s("source") == "lease" {
+                    " (lease)"
+                } else {
+                    ""
+                }
+            ),
+            json!({ "entry_id": s("entry_id"), "account_id": s("account_id"), "lane_id": p.get("lane_id") }),
+        ),
+        "spend.lease_started" => (
+            format!(
+                "{actor} started using {} at {} {}/h",
+                s("account"),
+                p.get("cost_per_hour")
+                    .and_then(Value::as_f64)
+                    .unwrap_or_default(),
+                s("unit")
+            ),
+            json!({ "lease_id": s("lease_id"), "account_id": s("account_id") }),
+        ),
+        "spend.lease_ended" => (
+            format!(
+                "lease on {} ended ({}): {} {}",
+                s("account"),
+                s("reason"),
+                p.get("cost").and_then(Value::as_f64).unwrap_or_default(),
+                s("unit")
+            ),
+            json!({ "lease_id": s("lease_id"), "account_id": s("account_id") }),
+        ),
+        "spend.lease_denied" => (
+            format!("borrowing request {} was denied", s("lease_id")),
+            json!({ "lease_id": s("lease_id"), "decision_id": s("decision_id") }),
+        ),
+        "spend.resource_linked" => (
+            if p.get("account_id").is_some_and(|v| !v.is_null()) {
+                format!("resource {} linked to a spend account", s("resource_id"))
+            } else {
+                format!(
+                    "resource {} unlinked from its spend account",
+                    s("resource_id")
+                )
+            },
+            json!({ "resource_id": s("resource_id"), "account_id": p.get("account_id") }),
+        ),
+        "summary.daily" => (
+            format!(
+                "daily summary: {} item(s) need attention",
+                p.get("attention_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default()
+            ),
+            json!({ "since": s("since"), "until": s("until") }),
+        ),
+        "spend.lease_withdrawn" => (
+            format!(
+                "{actor} withdrew borrowing request {} on {}",
+                s("lease_id"),
+                s("account")
+            ),
+            json!({ "lease_id": s("lease_id"), "decision_id": s("decision_id") }),
+        ),
+        "spend.approval_requested" => (
+            format!("{actor} asked to borrow {} (approval needed)", s("account")),
+            json!({ "lease_id": s("lease_id"), "decision_id": s("decision_id") }),
+        ),
+        "spend.budget_threshold" => (
+            format!(
+                "{} reached {}% of its budget ({} / {} {})",
+                s("account"),
+                p.get("pct").and_then(Value::as_f64).unwrap_or_default(),
+                p.get("spent").and_then(Value::as_f64).unwrap_or_default(),
+                p.get("budget").and_then(Value::as_f64).unwrap_or_default(),
+                s("unit")
+            ),
+            json!({ "account_id": s("account_id") }),
+        ),
+        "spend.account_created" | "spend.account_updated" => (
+            format!(
+                "spend account {} {}",
+                s("name"),
+                if row.kind == "spend.account_created" {
+                    "added"
+                } else {
+                    "updated"
+                }
+            ),
+            json!({ "account_id": s("account_id") }),
+        ),
+        "agent.joined" => (
+            format!("{actor} joined from an invite ({})", s("program")),
+            json!({ "agent_id": s("agent_id"), "lane_id": p.get("lane_id") }),
+        ),
+        "agent.gone" | "agent.kicked" => {
+            let who = agent_address(conn, &s("agent_id"))?;
+            let verb = if row.kind == "agent.kicked" {
+                "was kicked"
+            } else {
+                "left"
+            };
+            (
+                format!("{who} {verb} ({})", s("reason")),
+                json!({ "agent_id": s("agent_id") }),
+            )
+        }
+        "lane.agent_joined" => (
+            format!("{actor} joined lane {}", s("name")),
+            json!({ "lane_id": s("lane_id"), "agent_id": s("agent_id") }),
+        ),
+        "lane.agent_left" => {
+            let who = agent_address(conn, &s("agent_id"))?;
+            (
+                format!("{who} left lane {} ({})", s("name"), s("reason")),
+                json!({ "lane_id": s("lane_id"), "agent_id": s("agent_id") }),
+            )
+        }
+        "lane.hold_conflict" => {
+            let lane_name = |id: &str| -> Result<String> {
+                Ok(conn
+                    .query_row("SELECT name FROM lanes WHERE lane_id = ?1", [id], |r| {
+                        r.get(0)
+                    })
+                    .optional()?
+                    .unwrap_or_else(|| id.to_string()))
+            };
+            (
+                format!(
+                    "lane {} ran into lane {} on {} (held by {})",
+                    lane_name(&s("lane_id"))?,
+                    lane_name(&s("other_lane_id"))?,
+                    list("paths"),
+                    list("holders")
+                ),
+                json!({ "lane_id": s("lane_id"), "other_lane_id": s("other_lane_id"), "project_id": s("project_id") }),
+            )
+        }
+        "hold.conflict" => {
+            let project = project_slug(conn, &s("project_id"))?;
+            (
+                format!(
+                    "{actor} was refused a hold on {project}:{} (held by {})",
+                    list("paths"),
+                    list("holders")
+                ),
+                json!({ "hold_ids": p.get("hold_ids"), "project_id": s("project_id"), "lane_id": p.get("lane_id") }),
+            )
+        }
+        "resource.lease_expiring" => {
+            let who = agent_address(conn, &s("agent_id"))?;
+            let rid = s("resource_id");
+            (
+                format!(
+                    "lease on {} by {who} expires in under 5 minutes",
+                    resource_label(conn, &rid)?
+                ),
+                json!({ "lease_id": s("lease_id"), "resource_id": rid }),
+            )
+        }
         "hold.expired" => {
             let who = agent_address(conn, &s("agent_id"))?;
             (
@@ -319,15 +556,12 @@ fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             )
         }
         "resource.registered" => (
+            // The purpose is free text: it stays in the registry (`resource_find`).
             format!(
-                "{actor} registered {} {} ({}){}",
+                "{actor} registered {} {} ({})",
                 s("kind"),
                 s("name"),
-                s("mode"),
-                p.get("purpose")
-                    .and_then(Value::as_str)
-                    .map(|x| format!(" for {x}"))
-                    .unwrap_or_default()
+                s("mode")
             ),
             json!({ "resource_id": s("resource_id") }),
         ),
@@ -388,11 +622,8 @@ fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             )
         }
         "resource.reap_requested" => (
-            format!(
-                "{actor} asked a human to reap {}: {}",
-                s("target"),
-                s("reason")
-            ),
+            // The reason is free text; the person reads it with the reap request.
+            format!("{actor} asked a human to reap {}", s("target")),
             json!({ "target": s("target") }),
         ),
         "resource.reaped" => (
@@ -421,6 +652,72 @@ fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
         "peer.revoked" => (
             format!("unpaired node {}", s("node_id")),
             json!({ "node_id": s("node_id") }),
+        ),
+        "lane.created" => (
+            format!("{actor} created lane {} ({})", s("name"), s("status")),
+            json!({ "lane_id": s("lane_id") }),
+        ),
+        "lane.report_proposed" => (
+            format!(
+                "{actor} proposed a report for lane {} (applied by its node)",
+                s("name")
+            ),
+            json!({ "lane_id": s("lane_id"), "proposal_id": s("proposal_id") }),
+        ),
+        "lane.proposal_ignored" => (
+            format!(
+                "a proposed report for lane {} was not applied ({})",
+                s("lane_id"),
+                s("reason")
+            ),
+            json!({ "lane_id": s("lane_id"), "proposal_id": s("proposal_id") }),
+        ),
+        "lane.leaderless" => (
+            format!("lane {} has no lead (its lead left)", s("name")),
+            json!({ "lane_id": s("lane_id") }),
+        ),
+        "lane.updated" => (
+            format!("{actor} updated lane {}", s("name")),
+            json!({ "lane_id": s("lane_id") }),
+        ),
+        "lane.status_changed" => (
+            format!(
+                "lane {}: {} -> {} (by {actor})",
+                s("name"),
+                s("from"),
+                s("to")
+            ),
+            json!({ "lane_id": s("lane_id") }),
+        ),
+        "lane.linked" => (
+            format!(
+                "{actor} linked {} {} to lane {}",
+                s("kind"),
+                s("ref_id"),
+                s("name")
+            ),
+            json!({ "lane_id": s("lane_id"), "ref_id": s("ref_id") }),
+        ),
+        // Report summaries, charters and links stay in the lane tables (`lane_show`); the
+        // feed carries names, statuses and ids only.
+        "lane.reported" => {
+            let status = p
+                .get("status")
+                .and_then(Value::as_str)
+                .map(|x| format!(", {x}"))
+                .unwrap_or_default();
+            (
+                format!(
+                    "{actor} reported on lane {} ({}{status})",
+                    s("name"),
+                    s("kind")
+                ),
+                json!({ "lane_id": s("lane_id"), "report_id": s("report_id") }),
+            )
+        }
+        "lane.closed" => (
+            format!("lane {} closed as {}", s("name"), s("status")),
+            json!({ "lane_id": s("lane_id") }),
         ),
         other => (format!("{actor}: {other}"), p.clone()),
     };
@@ -515,17 +812,63 @@ fn agent_address(conn: &Connection, id: &str) -> Result<String> {
         .unwrap_or_else(|| id.to_string()))
 }
 
-struct EventRow {
-    event_id: String,
-    node_id: String,
-    ts: i64,
-    actor: String,
-    kind: String,
-    payload: String,
+pub(crate) struct EventRow {
+    pub event_id: String,
+    pub node_id: String,
+    pub ts: i64,
+    pub actor: String,
+    pub kind: String,
+    pub payload: String,
 }
 
 fn kind_matches(kinds: &[ActivityKind], kind: &str) -> bool {
     kinds.is_empty() || kinds.contains(&ActivityKind::of_event(kind))
+}
+
+/// Resolve an event-id cursor as `scope` sees it: `(seq, ts)` of the event. An event the
+/// caller can't see is the same `not_found` (same message) as one that doesn't exist. Every
+/// scoped read (feed, `activity_summarize`, the daily summary) resolves cursors here.
+pub(crate) fn resolve_cursor(
+    conn: &Connection,
+    id: &str,
+    scope: Option<&TokenScope>,
+) -> Result<(i64, i64)> {
+    let unknown = || Error::NotFound(format!("unknown event id {id:?}"));
+    // `@<seq>`: an opaque position handed out as `next_since` when the last event a read
+    // scanned is one the caller can't see (it names no event).
+    if let Some(seq) = id.strip_prefix('@').and_then(|n| n.parse::<i64>().ok()) {
+        let ts: Option<i64> = conn
+            .query_row(
+                "SELECT ts FROM events WHERE seq <= ?1 ORDER BY seq DESC LIMIT 1",
+                [seq],
+                |r| r.get(0),
+            )
+            .optional()?;
+        return Ok((seq, ts.unwrap_or(0)));
+    }
+    let row: Option<(i64, i64, String, String, String, String)> = conn
+        .query_row(
+            "SELECT seq, ts, node_id, actor, kind, payload FROM events WHERE event_id = ?1",
+            [id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let (seq, ts, node, actor, kind, payload) = row.ok_or_else(unknown)?;
+    if let Some(s) = scope {
+        if !crate::visibility::event_visible(conn, s, &node, &actor, &kind, &payload)? {
+            return Err(unknown());
+        }
+    }
+    Ok((seq, ts))
 }
 
 /// Events after `since`, oldest first; without `since`, the newest `limit` events.
@@ -534,15 +877,29 @@ fn read_events(
     since: Option<&Since>,
     kinds: &[ActivityKind],
     limit: u32,
-) -> Result<Vec<EventRow>> {
+    scope: Option<&TokenScope>,
+) -> Result<(Vec<EventRow>, Option<String>)> {
+    let mut out = Vec::new();
+    let scanned = visit_events(conn, since, kinds, limit, scope, |row| out.push(row))?;
+    if since.is_none() {
+        out.reverse();
+    }
+    Ok((out, scanned))
+}
+
+/// Hand each matching event to `visit` as it is read: after `since` oldest first, otherwise
+/// newest first, up to `limit`. Returns the cursor position. Payloads can hold message bodies,
+/// so a caller that keeps only some rows stays bounded by what it keeps.
+fn visit_events(
+    conn: &Connection,
+    since: Option<&Since>,
+    kinds: &[ActivityKind],
+    limit: u32,
+    scope: Option<&TokenScope>,
+    mut visit: impl FnMut(EventRow),
+) -> Result<Option<String>> {
     let after_seq: Option<i64> = match since {
-        Some(Since::After(id)) => Some(
-            conn.query_row("SELECT seq FROM events WHERE event_id = ?1", [id], |r| {
-                r.get(0)
-            })
-            .optional()?
-            .ok_or_else(|| Error::NotFound(format!("unknown event id {id:?}")))?,
-        ),
+        Some(Since::After(id)) => Some(resolve_cursor(conn, id, scope)?.0),
         _ => None,
     };
     let since_ts = match since {
@@ -551,54 +908,98 @@ fn read_events(
     };
     let newest_first = since.is_none();
     let sql = format!(
-        "SELECT event_id, node_id, ts, actor, kind, payload FROM events
+        "SELECT event_id, node_id, ts, actor, kind, payload, seq FROM events
          WHERE (?1 IS NULL OR seq > ?1) AND (?2 IS NULL OR ts >= ?2)
          ORDER BY seq {}",
         if newest_first { "DESC" } else { "ASC" }
     );
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query(params![after_seq, since_ts])?;
-    let mut out = Vec::new();
+    let mut visited = 0u32;
+    let mut scanned: Option<String> = None;
+    let mut scanned_at: Option<(i64, bool)> = None;
     while let Some(r) = rows.next()? {
         let kind: String = r.get(4)?;
+        if !newest_first {
+            scanned = Some(r.get(0)?);
+            scanned_at = Some((r.get(6)?, false));
+        }
         if !kind_matches(kinds, &kind) {
             continue;
         }
-        out.push(EventRow {
+        let row = EventRow {
             event_id: r.get(0)?,
             node_id: r.get(1)?,
             ts: r.get(2)?,
             actor: r.get(3)?,
             kind,
             payload: r.get(5)?,
-        });
-        if out.len() as u32 >= limit {
+        };
+        if let Some(scope) = scope {
+            if !event_visible(
+                conn,
+                scope,
+                &row.node_id,
+                &row.actor,
+                &row.kind,
+                &row.payload,
+            )? {
+                continue;
+            }
+        }
+        if let Some((_, seen)) = scanned_at.as_mut() {
+            *seen = true;
+        }
+        visit(row);
+        visited += 1;
+        if visited >= limit {
             break;
         }
     }
-    if newest_first {
-        out.reverse();
+    // Never hand a scoped caller the id of an event it can't see as its cursor: past a
+    // hidden (or filtered) last event, the cursor is an opaque position instead.
+    if let (Some(_), Some((seq, seen))) = (scope, scanned_at) {
+        if !seen {
+            let visible = match &scanned {
+                Some(id) => resolve_cursor(conn, id, scope).is_ok(),
+                None => false,
+            };
+            if !visible {
+                scanned = Some(format!("@{seq}"));
+            }
+        }
     }
-    Ok(out)
+    Ok(scanned)
 }
 
 impl Store {
     /// Read the activity feed.
     pub fn activity(&self, query: ActivityQuery) -> Result<ActivityFeed> {
+        self.activity_scoped(query, None)
+    }
+
+    /// Read the activity feed as a token scope sees it (`None` = everything).
+    pub fn activity_scoped(
+        &self,
+        query: ActivityQuery,
+        scope: Option<&TokenScope>,
+    ) -> Result<ActivityFeed> {
         let limit = match query.limit {
             0 => 50,
             n => n.min(MAX_LIMIT),
         };
         self.sweep()?;
         self.read(|conn| {
-            let rows = read_events(conn, query.since.as_ref(), &query.kinds, limit)?;
+            let (rows, scanned) =
+                read_events(conn, query.since.as_ref(), &query.kinds, limit, scope)?;
             let items = rows
                 .into_iter()
                 .map(|r| item(conn, r))
                 .collect::<Result<Vec<_>>>()?;
-            let next_since = items
-                .last()
-                .map(|i| i.event_id.clone())
+            // Reading forward, the cursor moves past events the filters left out too, so they
+            // are never re-scanned; reading the newest page, it is the last item.
+            let next_since = scanned
+                .or_else(|| items.last().map(|i| i.event_id.clone()))
                 .or(match &query.since {
                     Some(Since::After(id)) => Some(id.clone()),
                     _ => None,
@@ -609,80 +1010,110 @@ impl Store {
 
     /// Summarize activity since a point in time (default: the last hour).
     pub fn activity_summary(&self, since: Option<Since>) -> Result<ActivitySummary> {
+        self.activity_summary_scoped(since, None)
+    }
+
+    /// Summarize activity as a token scope sees it (`None` = everything).
+    pub fn activity_summary_scoped(
+        &self,
+        since: Option<Since>,
+        scope: Option<&TokenScope>,
+    ) -> Result<ActivitySummary> {
         let now = self.now();
         let since = since.unwrap_or(Since::Time(now - 3_600_000));
         self.sweep()?;
         self.read(|conn| {
             let since_ms = match &since {
                 Since::Time(t) => *t,
-                Since::After(id) => conn
-                    .query_row("SELECT ts FROM events WHERE event_id = ?1", [id], |r| {
-                        r.get(0)
-                    })
-                    .optional()?
-                    .ok_or_else(|| Error::NotFound(format!("unknown event id {id:?}")))?,
+                Since::After(id) => resolve_cursor(conn, id, scope)?.1,
             };
-            let rows = read_events(conn, Some(&since), &[], u32::MAX)?;
             let mut counts: BTreeMap<String, u32> = BTreeMap::new();
-            for r in &rows {
+            let mut notable: VecDeque<EventRow> = VecDeque::with_capacity(HIGHLIGHTS + 1);
+            visit_events(conn, Some(&since), &[], u32::MAX, scope, |r| {
                 *counts
                     .entry(ActivityKind::of_event(&r.kind).as_str().to_string())
                     .or_default() += 1;
-            }
-            let notable: Vec<EventRow> = rows
-                .into_iter()
-                .filter(|r| {
-                    !matches!(
-                        r.kind.as_str(),
-                        "delivery.read" | "delivery.acked" | "hold.renewed" | "resource.renewed"
-                    )
-                })
-                .collect();
-            let skip = notable.len().saturating_sub(HIGHLIGHTS);
+                if !matches!(
+                    r.kind.as_str(),
+                    "delivery.read" | "delivery.acked" | "hold.renewed" | "resource.renewed"
+                ) {
+                    notable.push_back(r);
+                    if notable.len() > HIGHLIGHTS {
+                        notable.pop_front();
+                    }
+                }
+            })?;
             let highlights = notable
                 .into_iter()
-                .skip(skip)
                 .map(|r| item(conn, r).map(|i| i.summary))
                 .collect::<Result<Vec<_>>>()?;
 
             let mut stmt = conn.prepare(
-                "SELECT a.address, NULL, a.program, a.status, a.last_seen_at FROM agents a
+                "SELECT a.address, NULL, a.program, a.status, a.last_seen_at, a.agent_id FROM agents a
                  LEFT JOIN projects p ON p.project_id = a.project_id
                  WHERE a.node_id = ?1 AND (a.status = 'active' OR a.last_seen_at >= ?2)
                  ORDER BY a.last_seen_at DESC",
             )?;
-            let agents = stmt
+            let rows_agents = stmt
                 .query_map(params![self.node_id(), since_ms], |r| {
-                    Ok(AgentPresence {
-                        agent: address(
-                            &r.get::<_, String>(0)?,
-                            r.get::<_, Option<String>>(1)?.as_deref(),
-                        ),
-                        program: r.get(2)?,
-                        status: r.get(3)?,
-                        last_seen_at: r.get::<_, Option<i64>>(4)?.map(fmt_ts),
-                    })
+                    Ok((
+                        AgentPresence {
+                            agent: address(
+                                &r.get::<_, String>(0)?,
+                                r.get::<_, Option<String>>(1)?.as_deref(),
+                            ),
+                            program: r.get(2)?,
+                            status: r.get(3)?,
+                            last_seen_at: r.get::<_, Option<i64>>(4)?.map(fmt_ts),
+                        },
+                        r.get::<_, String>(5)?,
+                    ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            let requests = conn.query_row(
-                "SELECT count(*) FILTER (WHERE status = 'open'),
-                        count(*) FILTER (WHERE status = 'claimed'),
-                        count(*) FILTER (WHERE status = 'stale')
-                 FROM requests WHERE node_id = ?1",
-                [self.node_id()],
-                |r| {
-                    Ok(RequestCounts {
-                        open: r.get(0)?,
-                        claimed: r.get(1)?,
-                        stale: r.get(2)?,
-                    })
-                },
+            let mut agents = Vec::new();
+            for (presence, agent_id) in rows_agents {
+                if scope.is_none_or(|sc| agent_visible(conn, sc, &agent_id).unwrap_or(false)) {
+                    agents.push(presence);
+                }
+            }
+            let mut requests = RequestCounts {
+                open: 0,
+                claimed: 0,
+                stale: 0,
+            };
+            let mut stmt = conn.prepare(
+                "SELECT request_id, status FROM requests
+                 WHERE node_id = ?1 AND status IN ('open', 'claimed', 'stale') AND kind = 'task'",
             )?;
-            let live_holds: u32 = conn.query_row(
-                "SELECT count(*) FROM holds WHERE node_id = ?1 AND released_at IS NULL",
-                [self.node_id()],
-                |r| r.get(0),
+            let open_requests = stmt
+                .query_map([self.node_id()], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (id, status) in open_requests {
+                if let Some(sc) = scope {
+                    if !request_visible(conn, sc, &id)? {
+                        continue;
+                    }
+                }
+                match status.as_str() {
+                    "open" => requests.open += 1,
+                    "claimed" => requests.claimed += 1,
+                    _ => requests.stale += 1,
+                }
+            }
+            let mut stmt = conn.prepare(
+                "SELECT project_id FROM holds WHERE node_id = ?1 AND released_at IS NULL",
             )?;
+            let hold_projects = stmt
+                .query_map([self.node_id()], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut live_holds: u32 = 0;
+            for p in hold_projects {
+                if scope.is_none_or(|sc| scope_allows_project(conn, sc, &p).unwrap_or(false)) {
+                    live_holds += 1;
+                }
+            }
 
             let active: Vec<&str> = agents
                 .iter()

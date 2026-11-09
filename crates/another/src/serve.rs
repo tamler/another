@@ -18,7 +18,7 @@ pub const DEFAULT_BIND: &str = "127.0.0.1:7466";
 /// HTTP serving options.
 #[derive(Debug, Clone, Default)]
 pub struct HttpOptions {
-    /// Require bearer tokens on `/mcp` and `/activity`.
+    /// Require bearer tokens on `/mcp`, `/activity` and `/events/*`.
     pub auth: bool,
     /// Explicitly allow a non-loopback bind (only together with `auth`).
     pub allow_remote_bind: bool,
@@ -63,8 +63,8 @@ pub fn spawn_sweeper(store: Store, every: Duration, ct: CancellationToken) {
             tokio::select! {
                 _ = ct.cancelled() => break,
                 _ = tick.tick() => {
-                    let store = store.clone();
-                    match tokio::task::spawn_blocking(move || store.sweep()).await {
+                    let st = store.clone();
+                    match tokio::task::spawn_blocking(move || st.sweep()).await {
                         Ok(Ok(r)) if r.expired_holds + r.stale_requests > 0 => tracing::info!(
                             expired_holds = r.expired_holds,
                             stale_requests = r.stale_requests,
@@ -73,6 +73,14 @@ pub fn spawn_sweeper(store: Store, every: Duration, ct: CancellationToken) {
                         Ok(Ok(_)) => {}
                         Ok(Err(e)) => tracing::warn!(error = %e, "sweep failed"),
                         Err(e) => tracing::warn!(error = %e, "sweep task failed"),
+                    }
+                    // The opt-in daily rollup (`another summary schedule`).
+                    let st = store.clone();
+                    match tokio::task::spawn_blocking(move || st.send_scheduled_summary()).await {
+                        Ok(Ok(Some(to))) => tracing::info!(to = %to, "daily summary sent"),
+                        Ok(Ok(None)) => {}
+                        Ok(Err(e)) => tracing::warn!(error = %e, "daily summary failed"),
+                        Err(e) => tracing::warn!(error = %e, "daily summary task failed"),
                     }
                 }
             }
@@ -83,6 +91,7 @@ pub fn spawn_sweeper(store: Store, every: Duration, ct: CancellationToken) {
 pub async fn serve_stdio(store: Store, sweep_every: Duration) -> Result<()> {
     let ct = CancellationToken::new();
     spawn_sweeper(store.clone(), sweep_every, ct.clone());
+    crate::push::spawn_delivery_worker(store.clone(), ct.clone());
     tracing::info!(node_id = store.node_id(), "serving MCP on stdio");
     let service = AnotherMcp::new(store)
         .serve(rmcp::transport::stdio())
@@ -93,8 +102,9 @@ pub async fn serve_stdio(store: Store, sweep_every: Duration) -> Result<()> {
     Ok(())
 }
 
-/// Build the HTTP app: MCP at `/mcp`, the activity feed at `GET /activity`, and
-/// `GET /health`. With `auth`, `/mcp` and `/activity` require a bearer token.
+/// Build the HTTP app: MCP at `/mcp`, the activity feed at `GET /activity`, push at
+/// `GET /events/poll` and `GET /events/stream`, and `GET /health`. With `auth`, everything
+/// but `/health` requires a bearer token.
 pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> axum::Router {
     let factory_store = store.clone();
     let mut config =
@@ -112,6 +122,35 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
     let protected = axum::Router::new()
         .nest_service("/mcp", mcp)
         .route("/activity", axum::routing::get(crate::remote::activity))
+        .route("/events/poll", axum::routing::get(crate::push::poll))
+        .route("/events/stream", axum::routing::get(crate::push::stream))
+        .route("/spend", axum::routing::get(crate::http_decisions::spend))
+        .route(
+            "/summary",
+            axum::routing::get(crate::http_decisions::summary),
+        )
+        .route(
+            "/decisions",
+            axum::routing::get(crate::http_decisions::list),
+        )
+        .route(
+            "/decisions/{id}",
+            axum::routing::get(crate::http_decisions::show),
+        )
+        .route(
+            "/decisions/{id}/answer",
+            axum::routing::post(crate::http_decisions::answer),
+        )
+        .route(
+            "/agent/heartbeat",
+            axum::routing::post(crate::join::heartbeat),
+        )
+        .route("/agent/leave", axum::routing::post(crate::join::leave))
+        .route("/lanes", axum::routing::get(crate::join::lanes))
+        .route(
+            "/lanes/{lane}/report",
+            axum::routing::post(crate::join::lane_report),
+        )
         .with_state(store.clone());
     let protected = if opts.auth {
         protected.layer(axum::middleware::from_fn_with_state(
@@ -123,6 +162,16 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
     };
     let protected = if opts.federation {
         protected.merge(crate::fed::router(store.clone()))
+    } else {
+        protected
+    };
+    // Redeeming an invite is the one unauthenticated route besides /health: the code is the
+    // credential. Only with --auth, since issued tokens need it.
+    let protected = if opts.auth {
+        protected.route(
+            "/join",
+            axum::routing::post(crate::join::join_handler).with_state(store.clone()),
+        )
     } else {
         protected
     };
@@ -153,6 +202,7 @@ pub async fn serve_http(
     }
     let ct = CancellationToken::new();
     spawn_sweeper(store.clone(), sweep_every, ct.clone());
+    crate::push::spawn_delivery_worker(store.clone(), ct.clone());
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding {addr}"))?;

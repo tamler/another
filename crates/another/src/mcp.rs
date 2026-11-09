@@ -21,22 +21,26 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
 pub struct AnotherMcp {
-    store: Store,
+    pub(crate) store: Store,
     tool_router: ToolRouter<Self>,
 }
 
-type ToolResult<T> = Result<Json<T>, String>;
+pub(crate) type ToolResult<T> = Result<Json<T>, String>;
 
 impl AnotherMcp {
     pub fn new(store: Store) -> Self {
         Self {
             store,
-            tool_router: Self::tool_router(),
+            tool_router: Self::tool_router()
+                + Self::lane_router()
+                + Self::push_router()
+                + Self::decision_router()
+                + Self::spend_router(),
         }
     }
 
     /// Run a store call off the async runtime; errors become structured tool errors.
-    async fn run<T, F>(&self, f: F) -> ToolResult<T>
+    pub(crate) async fn run<T, F>(&self, f: F) -> ToolResult<T>
     where
         T: Send + 'static,
         F: FnOnce(&Store) -> another_core::Result<T> + Send + 'static,
@@ -181,6 +185,9 @@ pub struct HoldPathsArgs {
     /// Exclusive holds (default) conflict with any overlapping hold; shared ones only with exclusive.
     pub exclusive: Option<bool>,
     pub reason: Option<String>,
+    /// Lane id or name the holds are for (acquire). Default: the one open lane you lead in
+    /// this project. Overlaps with holds in the same lane do not block (they are warnings).
+    pub lane: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, JsonSchema)]
@@ -206,6 +213,16 @@ pub struct HeartbeatArgs {
     /// Session is ending: release all holds and mark the agent offline.
     #[serde(default)]
     pub end: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AgentKickArgs {
+    /// The acting manager agent (program grok_bot; remote callers: the token's agent).
+    pub agent: String,
+    /// The agent to remove (name or name@project).
+    pub target: String,
+    /// Why (kept on the agent's membership record, not in events).
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -361,40 +378,48 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<SendMessageArgs>,
     ) -> ToolResult<Message> {
-        self.run(move |s| match (&a.reply_to, a.to.is_empty()) {
-            (Some(parent), true) if !a.create_request => s.reply(Reply {
-                from: a.from,
-                message_id: parent.clone(),
-                body: a.body,
-                all: a.reply_all,
-                importance: a.importance,
-                ack_required: a.ack_required,
-            }),
-            _ => {
-                let subject = match (a.subject, &a.reply_to) {
-                    (Some(sub), _) => sub,
-                    (None, Some(parent)) => {
-                        let original = s.message(parent)?;
-                        format!("Re: {}", original.subject.trim_start_matches("Re: "))
-                    }
-                    (None, None) => {
-                        return Err(another_core::Error::Invalid("subject is required".into()))
-                    }
-                };
-                s.send_message(SendMessage {
+        let scope = crate::remote::current_scope();
+        self.run(move |s| {
+            // Remote callers reply only in threads the token's agent is already in, checked
+            // before the parent is read for a subject or recipients.
+            if let (Some(scope), Some(parent)) = (&scope, &a.reply_to) {
+                s.check_reply_access(scope, parent)?;
+            }
+            match (&a.reply_to, a.to.is_empty()) {
+                (Some(parent), true) if !a.create_request => s.reply(Reply {
                     from: a.from,
-                    to: a.to,
-                    cc: a.cc,
-                    subject,
+                    message_id: parent.clone(),
                     body: a.body,
-                    importance: a.importance.unwrap_or_default(),
+                    all: a.reply_all,
+                    importance: a.importance,
                     ack_required: a.ack_required,
-                    reply_to: a.reply_to,
-                    thread_id: None,
-                    request: a.create_request.then_some(NewRequest {
-                        due_in_seconds: a.due_in_seconds,
-                    }),
-                })
+                }),
+                _ => {
+                    let subject = match (a.subject, &a.reply_to) {
+                        (Some(sub), _) => sub,
+                        (None, Some(parent)) => {
+                            let original = s.message(parent)?;
+                            format!("Re: {}", original.subject.trim_start_matches("Re: "))
+                        }
+                        (None, None) => {
+                            return Err(another_core::Error::Invalid("subject is required".into()))
+                        }
+                    };
+                    s.send_message(SendMessage {
+                        from: a.from,
+                        to: a.to,
+                        cc: a.cc,
+                        subject,
+                        body: a.body,
+                        importance: a.importance.unwrap_or_default(),
+                        ack_required: a.ack_required,
+                        reply_to: a.reply_to,
+                        thread_id: None,
+                        request: a.create_request.then_some(NewRequest {
+                            due_in_seconds: a.due_in_seconds,
+                        }),
+                    })
+                }
             }
         })
         .await
@@ -455,14 +480,18 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<ClaimRequestArgs>,
     ) -> ToolResult<Request> {
+        let scope = crate::remote::current_scope();
         self.run(move |s| {
-            s.update_request(RequestUpdate {
-                agent: a.agent,
-                request_id: a.request_id,
-                action: a.action.unwrap_or(RequestAction::Claim),
-                note: a.note,
-                due_in_seconds: a.due_in_seconds,
-            })
+            s.update_request_scoped(
+                RequestUpdate {
+                    agent: a.agent,
+                    request_id: a.request_id,
+                    action: a.action.unwrap_or(RequestAction::Claim),
+                    note: a.note,
+                    due_in_seconds: a.due_in_seconds,
+                },
+                scope.as_ref(),
+            )
         })
         .await
     }
@@ -476,6 +505,7 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<HoldPathsArgs>,
     ) -> ToolResult<HoldPathsOut> {
+        let scope = crate::remote::current_scope();
         self.run(move |s| {
             let need_project = || {
                 a.project.clone().ok_or_else(|| {
@@ -492,6 +522,7 @@ impl AnotherMcp {
                         ttl_seconds: a.ttl_seconds,
                         exclusive: a.exclusive.unwrap_or(true),
                         reason: a.reason.clone(),
+                        lane: a.lane.clone(),
                     })?;
                     out.granted = report.granted;
                     out.conflicts = report.conflicts;
@@ -505,8 +536,13 @@ impl AnotherMcp {
                         a.exclusive.unwrap_or(true),
                     )?;
                 }
-                HoldAction::Renew => out.renewed = s.renew_holds(&a.agent, &a.hold_ids)?,
-                HoldAction::Release => out.released = s.release_holds(&a.agent, &a.hold_ids)?,
+                // Remote callers: only holds inside the token's projects.
+                HoldAction::Renew => {
+                    out.renewed = s.renew_holds_scoped(&a.agent, &a.hold_ids, scope.as_ref())?
+                }
+                HoldAction::Release => {
+                    out.released = s.release_holds_scoped(&a.agent, &a.hold_ids, scope.as_ref())?
+                }
                 HoldAction::List => {
                     out.holds = s.holds(HoldFilter {
                         project: a.project.clone(),
@@ -527,6 +563,7 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<HeartbeatArgs>,
     ) -> ToolResult<HeartbeatReport> {
+        let scope = crate::remote::current_scope();
         self.run(move |s| {
             let phase = if a.end {
                 SessionPhase::End
@@ -535,16 +572,32 @@ impl AnotherMcp {
             } else {
                 SessionPhase::Beat
             };
-            s.session(
+            // Remote callers: only holds and leases inside the token's projects.
+            s.session_scoped(
                 &a.agent,
                 phase,
                 SessionInfo {
                     keep_resources: a.keep_resources,
                     ..Default::default()
                 },
+                scope.as_ref(),
             )
         })
         .await
+    }
+
+    #[tool(
+        description = "Remove an agent now (manager agents only): revoke all its tokens, release \
+        its holds and leases, and tell its lanes (a lane it led gets a new lead). Remote \
+        managers can only kick agents in their token's projects; people can't be kicked."
+    )]
+    async fn agent_kick(
+        &self,
+        Parameters(a): Parameters<AgentKickArgs>,
+    ) -> ToolResult<another_core::Departure> {
+        let scope = crate::remote::current_scope();
+        self.run(move |s| s.kick_agent_as(&a.agent, &a.target, a.reason.as_deref(), scope.as_ref()))
+            .await
     }
 
     #[tool(
@@ -690,13 +743,17 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<ActivityFeedArgs>,
     ) -> ToolResult<ActivityFeed> {
+        let scope = crate::remote::current_scope();
         self.run(move |s| {
             let since = a.since.map(|v| Since::parse(&v, s.now())).transpose()?;
-            s.activity(ActivityQuery {
-                since,
-                limit: a.limit.unwrap_or(50),
-                kinds: a.kinds,
-            })
+            s.activity_scoped(
+                ActivityQuery {
+                    since,
+                    limit: a.limit.unwrap_or(50),
+                    kinds: a.kinds,
+                },
+                scope.as_ref(),
+            )
         })
         .await
     }
@@ -709,9 +766,10 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<ActivitySummarizeArgs>,
     ) -> ToolResult<ActivitySummary> {
+        let scope = crate::remote::current_scope();
         self.run(move |s| {
             let since = a.since.map(|v| Since::parse(&v, s.now())).transpose()?;
-            s.activity_summary(since)
+            s.activity_summary_scoped(since, scope.as_ref())
         })
         .await
     }
@@ -751,6 +809,7 @@ impl ServerHandler for AnotherMcp {
         };
         let store = self.store.clone();
         let mut args = request.arguments.take().unwrap_or_default();
+        let scope = peer.scope.clone();
         let checked = tokio::task::spawn_blocking(move || {
             remote::authorize(&store, &peer.scope, &tool, &mut args).map(|_| args)
         })
@@ -772,10 +831,12 @@ impl ServerHandler for AnotherMcp {
                 );
             }
         }
-        let result = self
-            .tool_router
-            .call(ToolCallContext::new(self, request, context))
-            .await;
+        let result = remote::with_scope(
+            Some(scope),
+            self.tool_router
+                .call(ToolCallContext::new(self, request, context)),
+        )
+        .await;
         let failed = match &result {
             Ok(CallToolResponse::Complete(r)) => r.is_error == Some(true),
             Ok(_) => false,

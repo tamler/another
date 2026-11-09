@@ -66,11 +66,26 @@ async fn exposes_the_tool_surface() {
             "acknowledge",
             "activity_feed",
             "activity_summarize",
+            "agent_kick",
             "claim_request",
+            "daily_summary",
+            "decision_answer",
+            "decision_ask",
+            "decision_cancel",
+            "decision_list",
+            "decision_show",
             "ensure_project",
+            "events_poll",
             "fetch_inbox",
             "heartbeat",
             "hold_paths",
+            "holds_by_lane",
+            "lane_close",
+            "lane_create",
+            "lane_list",
+            "lane_report",
+            "lane_show",
+            "lane_update",
             "orphans_list",
             "register_agent",
             "resource_borrow",
@@ -80,7 +95,17 @@ async fn exposes_the_tool_surface() {
             "resource_register",
             "resource_release",
             "send_message",
-            "threads"
+            "spend_account_upsert",
+            "spend_accounts",
+            "spend_borrow",
+            "spend_leases",
+            "spend_record",
+            "spend_release",
+            "spend_report",
+            "threads",
+            "webhook_list",
+            "webhook_remove",
+            "webhook_subscribe"
         ]
     );
     client.cancel().await.unwrap();
@@ -291,12 +316,21 @@ async fn streamable_http_on_loopback() {
     let agent = call_ok(
         &client,
         "register_agent",
+        json!({ "name": "web-agent", "program": "claude", "project": "/work/site" }),
+    )
+    .await;
+    assert_eq!(agent["address"], "web-agent@site");
+    // Written through HTTP, visible to any other connection on the same database.
+    assert_eq!(store.agent("web-agent").unwrap().program, "claude");
+    // MCP can't mint a manager (or a person), even under a new name.
+    let r = call(
+        &client,
+        "register_agent",
         json!({ "name": "grok-bot", "program": "grok_bot", "project": "/work/site" }),
     )
     .await;
-    assert_eq!(agent["address"], "grok-bot@site");
-    // Written through HTTP, visible to any other connection on the same database.
-    assert_eq!(store.agent("grok-bot").unwrap().program, "grok_bot");
+    assert_eq!(r.is_error, Some(true));
+    assert!(store.agent("grok-bot").is_err());
 
     client.cancel().await.unwrap();
     ct.cancel();

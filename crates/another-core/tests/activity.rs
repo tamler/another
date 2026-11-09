@@ -11,7 +11,7 @@ fn setup() -> (Store, std::sync::Arc<std::sync::atomic::AtomicI64>) {
     let store = Store::open_in_memory(clock).unwrap();
     for (name, program) in [("alice", Program::Claude), ("bob", Program::Grok)] {
         store
-            .register_agent(RegisterAgent {
+            .register_agent_trusted(RegisterAgent {
                 name: name.into(),
                 program,
                 project: Some("/work/app".into()),
@@ -61,6 +61,7 @@ fn feed_summarizes_without_bodies() {
             ttl_seconds: None,
             exclusive: true,
             reason: None,
+            lane: None,
         })
         .unwrap();
     store.heartbeat("bob", true).unwrap();
@@ -192,6 +193,7 @@ fn summary_counts_and_digest() {
             ttl_seconds: None,
             exclusive: false,
             reason: None,
+            lane: None,
         })
         .unwrap();
     let sum = store.activity_summary(None).unwrap();

@@ -4,7 +4,9 @@
 
 Free and open source, always: a local-first, vendor-neutral **inbox, activity feed and resource registry for coding agents**. Claude Code, Codex, Grok CLI, Grok Bot, Cursor and anything else that speaks MCP are treated equally, through plain MCP and a shared `another` CLI.
 
-**Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1–6 complete (local core, hooks, resources, remote peers, federation, polish)
+**Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1–6 complete (local core, hooks, resources, remote peers, federation, polish); coordination series and v0.1.0 release prep in review
+
+The coordination series is in progress. Decision cancellation preserves a due default even when the deadline passes as cancellation begins.
 
 ## Why
 
@@ -17,69 +19,122 @@ Agents working side by side still coordinate through stale markdown files. Anoth
 
 Hooks inject a short digest at session start, so agents actually check their mail. Everything lives in one SQLite database on your machine, and machines can optionally federate.
 
-## Quickstart
+## Quickstart: two agents, one hold, one port claim (90 seconds)
 
-**1. Install** with Rust 1.88 or newer:
+This doubles as the script for a 90-second demo recording: one terminal, a project folder, two agents. Timings are cues for narration; the commands themselves finish in about a second.
 
-```bash
-cargo install --git https://github.com/tamler/another another
-```
-
-Or build from a checkout (the binary ends up at `target/release/another`):
+**0:00 · Install** (macOS arm64/x86_64, Linux x86_64/arm64). The script downloads the release archive, checks it against the release's `SHA256SUMS`, and refuses to install anything that doesn't match:
 
 ```bash
-git clone https://github.com/tamler/another && cd another && cargo build --release
+curl -fsSL https://github.com/tamler/another/releases/latest/download/install.sh | sh
 ```
 
-Once v0.1.0 is published, prebuilt binaries for macOS (arm64, x86_64) and Linux (static, x86_64, arm64) will be on [GitHub Releases](https://github.com/tamler/another/releases): unpack one and put `another` on your `PATH`. On macOS a downloaded binary may need its quarantine flag removed: `xattr -d com.apple.quarantine ./another`.
+*Say:* "One static binary, no services to sign up for. Everything lives in one SQLite file on this machine."
 
-On macOS, when replacing an existing `another` with a new build, **remove the old binary first** (`rm "$(command -v another)"`) and then copy the new one in. Copying over the old file in place leaves a stale code signature cached, and macOS kills the new binary on launch. `cargo install` replaces it safely.
-
-**2. Create the local node** (`~/.another`, or `$ANOTHER_HOME`):
+**0:10 · Start the local node and its server**, in your project folder (here `~/demo/shop`):
 
 ```bash
 another init
 ```
 
-**3. Let agents check mail automatically** (Claude Code, Codex, Grok CLI, Cursor). This installs **user-global** hooks in each client's home-directory config (e.g. `~/.claude/settings.json`, `~/.codex/hooks.json`), not per project. It is idempotent, backs up the files it changes, keeps their permissions (a `0600` settings file stays `0600`), and never overwrites your existing hooks:
-
 ```bash
-another hook install --client all
+another serve &
 ```
 
-**4. Give agents the MCP tools.** Add Another as a stdio MCP server in each client:
-
-```json
-{ "mcpServers": { "another": { "command": "another", "args": ["serve", "--stdio"] } } }
-```
-
-Or run one loopback daemon and point clients at `http://127.0.0.1:7466/mcp`:
+**0:20 · Connect two agents.** Install the hooks for Claude Code and Codex, with the optional pre-edit hold:
 
 ```bash
-another serve
+another hook install --client claude,codex --pre-edit
 ```
 
-**5. Try it from the shell:**
+The installer ends with a note to keep: Codex only runs hooks you have trusted. Open Codex once, interactively, and trust them under `/hooks`. `codex exec` can't ask, so it skips untrusted hooks, and holds aren't enforced there until you do.
+
+Then give each agent its MCP tools (`claude mcp add another -- another serve --stdio`; for Codex, the same command under `[mcp_servers.another]` in `~/.codex/config.toml`). For the recording, register the two agents from the shell instead:
 
 ```bash
-another agent register alice --program claude
+another agent register claude --program claude --project .
 ```
 
 ```bash
-another agent register bob --program codex
+another agent register codex --program codex --project .
+```
+
+*Say:* "Two agents, one repository. Each one gets an inbox, holds and the resource registry."
+
+**0:35 · A hold.** Claude takes the file it is refactoring. Codex tries the same file and is refused, with exit code 3, and nothing is granted:
+
+```bash
+another hold acquire --agent claude@shop src/app.rs --reason "refactor checkout"
 ```
 
 ```bash
-another send --from alice --to bob --subject "Review PR 12" --body "please" --request
+another hold acquire --agent codex@shop src/app.rs
+```
+
+```
+nothing acquired
+conflict: src/app.rs is held by claude@shop (src/app.rs, exclusive until 2026-11-04T05:12:55Z)
+```
+
+With the pre-edit hook installed, the same check happens automatically before each edit, and the client denies the edit with that reason.
+
+**0:55 · A port claim.** Claude registers the dev server it started on 5173. Codex finds it and borrows it instead of starting a second one on another port:
+
+```bash
+another resource register dev_server vite@5173 --agent claude@shop --endpoint http://127.0.0.1:5173 --purpose "shop UI"
 ```
 
 ```bash
-another inbox --agent bob
+another borrow dev_server:vite@5173 --agent codex@shop
 ```
 
-```bash
-another activity --summary
 ```
+borrowed dev_server vite@5173 as borrower until …
+live     dev_server   vite@5173   shared   claude@shop +1 borrower(s)   http://127.0.0.1:5173
+```
+
+**1:15 · Check the setup:**
+
+```bash
+another doctor
+```
+
+```
+  PASS  store              ~/.another is writable; schema 11
+  PASS  server             http://127.0.0.1:7466 is up
+  PASS  ports              1 claimed port(s), no conflicts
+  PASS  hooks:claude       Claude Code hooks installed (~/.claude/settings.json)
+  PASS  hooks:codex        Codex hooks installed (~/.codex/hooks.json)
+  WARN  hooks:codex-trust  no Codex trust recorded for ~/.codex/hooks.json: Codex will skip Another's 4 hook(s)
+        fix: open Codex interactively and trust them under `/hooks` …
+```
+
+*Say:* "Every problem comes with the fix. Here it is the Codex trust step from earlier." Doctor exits 1 if anything fails, so it also works in scripts.
+
+**1:30 · End.**
+
+### Other ways to install
+
+- **Pin a version, or install somewhere else:**
+
+  ```bash
+  curl -fsSL https://github.com/tamler/another/releases/latest/download/install.sh | ANOTHER_VERSION=0.1.0 ANOTHER_INSTALL_DIR=/usr/local/bin sh
+  ```
+
+- **From source**, with Rust 1.88 or newer:
+
+  ```bash
+  cargo install --locked --git https://github.com/tamler/another another
+  ```
+
+- **By hand:** each [release](https://github.com/tamler/another/releases) has `another-<version>-<target>.tar.gz` for `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, a `.sha256` per archive, one `SHA256SUMS` and `install.sh`. Check with `sha256sum -c SHA256SUMS --ignore-missing` (or `shasum -a 256 -c`).
+
+On macOS, when replacing an existing `another`, **remove the old binary first** (`rm "$(command -v another)"`) or use the install script, which moves a fresh file into place. Copying over the old file in place leaves a stale code signature cached, and macOS kills the new binary on launch. A binary downloaded with a browser may need `xattr -d com.apple.quarantine ./another`; `curl` downloads don't.
+
+### Hooks and MCP in more detail
+
+- `another hook install --client all` installs **user-global** hooks in each client's home-directory config (e.g. `~/.claude/settings.json`, `~/.codex/hooks.json`). It is idempotent, backs up the files it changes, keeps their permissions, and never overwrites your existing hooks. See [docs/HOOKS.md](docs/HOOKS.md).
+- Stdio MCP for any client: `{ "mcpServers": { "another": { "command": "another", "args": ["serve", "--stdio"] } } }`. Or point clients at the loopback daemon: `http://127.0.0.1:7466/mcp`.
 
 ## Status
 
@@ -91,6 +146,18 @@ another activity --summary
 | 4 | Authenticated remote peer (Grok Bot): scoped bearer tokens, audit log, `GET /activity` | ✅ tamler/another#4 |
 | 5 | Federation (v2): signed event logs, pairing, hub-and-spoke sync, cross-node mail | ✅ tamler/another#5 |
 | 6 | Polish: `another wake` (tmux, cmux, Herdr), Herdr plugin, release builds, quickstart, CONTRIBUTING | ✅ complete |
+| Coordination 1 | Lanes: charters, leads, statuses, structured reports, lane-scoped remote access | 🔄 tamler/another#10 |
+| Coordination 2 | Push: scoped SSE / long-poll, signed webhooks | 🔄 tamler/another#11 |
+| Coordination 3 | Human decisions: structured questions answered by phone, HTTP or CLI | 🔄 tamler/another#12 |
+| Coordination 4 | Lane-aware holds and the pre-edit hook | 🔄 tamler/another#13 |
+| Coordination 5 | Spend ledger: budgets, hourly leases, approval gate, linked resources | 🔄 tamler/another#14 |
+| Coordination 6 | Daily summary: pull (CLI, MCP, HTTP) or an opt-in daily rollup by mail or webhook | 🔄 tamler/another#15 |
+| Coordination 7 | First-class remote agents: invites, join, presence, kick, federation tie-in | 🔄 tamler/another#16 |
+| v0.1.0 prep | Release installs (`install.sh`, `SHA256SUMS`), `another doctor`, 90-second quickstart | 🔄 tamler/another#17 |
+
+Doctor recognizes installed hooks by their executable wrapper commands in hook entries, including installer paths containing spaces or apostrophes.
+
+Spend reports count active leases before any cost accrues and across monthly resets.
 
 Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88.
 
@@ -102,6 +169,12 @@ Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green
 | [docs/RESOURCES.md](docs/RESOURCES.md) | Resource registry, orphans, human-approved reaping |
 | [docs/REMOTE.md](docs/REMOTE.md) | Remote peers (Grok Bot): tokens, `--auth`, tunnels, audit log |
 | [docs/FEDERATION.md](docs/FEDERATION.md) | Several machines: node keys, pairing, sync, permissions |
+| [docs/LANES.md](docs/LANES.md) | Lanes: units of work for a manager bot and coding agents; reports, export, hooks |
+| [docs/HUMAN-DECISIONS.md](docs/HUMAN-DECISIONS.md) | Structured questions from agents to a person, answered by phone (via the manager), HTTP or CLI |
+| [docs/REMOTE-AGENTS.md](docs/REMOTE-AGENTS.md) | Remote agents: invites, one-step join, presence and kick, how a cloud agent reaches the hub |
+| [docs/MANAGER-BOT.md](docs/MANAGER-BOT.md) | Running a manager bot: token, webhooks to subscribe, which MCP tools to call, the daily summary |
+| [docs/SPEND.md](docs/SPEND.md) | Spend ledger: budgets, monthly resets, hourly leases with approval, burn-down by lane and agent |
+| [docs/PUSH.md](docs/PUSH.md) | Push: SSE stream, long-poll and signed webhooks, all filtered by token scope |
 | [docs/WAKE.md](docs/WAKE.md) | `another wake` adapters (tmux, cmux, Herdr) and the Herdr plugin |
 | [docs/SPEC.md](docs/SPEC.md) | Research and product spec |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | Locked defaults and every design decision made while building |
@@ -111,11 +184,15 @@ Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green
 
 | Area | Tools |
 |---|---|
-| Identity | `ensure_project`, `register_agent`, `heartbeat` (`start` / `end` record sessions) |
+| Identity | `ensure_project`, `register_agent`, `heartbeat` (`start` / `end` record sessions), `agent_kick` (manager agents only) |
 | Mail | `send_message` (with `reply_to`, `create_request`), `fetch_inbox`, `threads`, `acknowledge` |
 | Requests | `claim_request` (`claim` / `release` / `complete` / `cancel`) |
-| Path holds | `hold_paths` (`acquire` / `check` / `renew` / `release` / `list`) |
-| Awareness | `activity_feed`, `activity_summarize` (summaries and ids, never message bodies) |
+| Decisions | `decision_ask`, `decision_list`, `decision_show`, `decision_answer`, `decision_cancel` |
+| Lanes | `lane_create`, `lane_list`, `lane_show`, `lane_update`, `lane_report` (`status` / `done`), `lane_close` |
+| Path holds | `hold_paths` (`acquire` / `check` / `renew` / `release` / `list`; optional `lane`), `holds_by_lane` |
+| Awareness | `activity_feed`, `activity_summarize` (summaries and ids, never message bodies), `daily_summary` (JSON plus phone markdown) |
+| Spend | `spend_report`, `spend_accounts`, `spend_record`, `spend_borrow`, `spend_release`, `spend_leases`, `spend_account_upsert` (local only) |
+| Push | `events_poll` (long-poll), `webhook_subscribe`, `webhook_list`, `webhook_remove` |
 | Resources | `resource_find`, `resource_register`, `resource_borrow`, `resource_release`, `resource_heartbeat`, `orphans_list`, `resource_reap` (plan and request only) |
 
 Tool errors are `{"error": {"code", "message"}}` with codes `not_found`, `invalid`, `conflict`, `ambiguous`, `forbidden`.
@@ -126,14 +203,19 @@ Every command takes `--json`. `--agent` and `--from` default to `$ANOTHER_AGENT`
 
 | Task | Commands |
 |---|---|
-| Node | `another init`, `another status`, `another node show`, `another node name [<name>]` (no name prints the current one), `another events` |
+| Node | `another init`, `another status`, `another doctor [--server URL]` (PASS/WARN/FAIL with a fix each; exit 1 on FAIL), `another node show`, `another node name [<name>]` (no name prints the current one), `another events` |
 | Agents | `another agent register <name> --program claude\|codex\|grok\|cursor\|grok_bot\|other [--project PATH]`, `another agent list` |
 | Mail | `another send`, `another inbox`, `another reply <message-id>`, `another ack <message-id>`, `another threads`, `another thread <id>` (there is no `another mail` command) |
 | Requests | `another requests`, `another request claim\|release\|complete\|cancel <id>` |
-| Holds | `another hold acquire\|check\|renew\|release`, `another holds` (conflicts exit with status 3) |
-| Sessions and feed | `another heartbeat [--start\|--end [--keep]]`, `another activity [--since 1h] [--kinds mail,request] [--summary]` |
-| Hooks | `another hook install\|uninstall --client <c>\|all [--dry-run]`, `another hook status` |
+| Lanes | `another lane create\|list\|show\|update\|report\|done\|close\|export` |
+| Decisions | `another decision ask\|list\|show\|answer\|cancel` |
+| Holds | `another hold acquire\|check\|renew\|release [--lane L]`, `another holds [--by-lane]` (conflicts exit with status 3) |
+| Sessions and feed | `another heartbeat [--start\|--end [--keep]]`, `another activity [--since 1h] [--kinds mail,request] [--summary]`, `another summary [--since 24h]`, `another summary schedule --daily 08:30 --to mail:NAME` |
+| Hooks | `another hook install\|uninstall --client <c>\|all [--dry-run] [--lane-reports] [--pre-edit]`, `another hook status` |
 | Resources | `another resources`, `another resource register`, `another borrow`, `another release`, `another orphans`, `another reap <target> [--confirm]` |
+| Spend | `another spend [--period previous\|YYYY-MM] [--lane L] [--agent A]`, `another spend account add\|list\|update\|archive`, `another spend record\|borrow\|release\|leases` |
+| Webhooks | `another webhook add --url URL --events lane_status,needs_decision --project GLOB`, `another webhook list\|remove\|test\|dead\|deliveries\|retry` |
+| Remote agents | `another invite create\|list\|revoke`, `another join <hub> <code>`, `another remote status\|lanes\|report\|decisions\|answer\|leave`, `another agent remotes`, `another agent kick NAME` |
 | Remote peers | `another serve --auth`, `another token create\|list\|revoke`, `another audit` |
 | Federation | `another pair invite\|join\|revoke`, `another peers`, `another sync [--watch]`, `another serve --federation` |
 | Wake | `another wake [--agent X\|--all]`, `another wake set\|clear\|list` |

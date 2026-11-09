@@ -22,7 +22,7 @@ fn node(name: &str) -> Node {
 
 fn register(store: &Store, name: &str, program: Program, project: Option<&str>) {
     store
-        .register_agent(RegisterAgent {
+        .register_agent_trusted(RegisterAgent {
             name: name.into(),
             program,
             project: project.map(Into::into),
@@ -362,6 +362,7 @@ fn mail_feed_resources_and_holds_across_nodes() {
             ttl_seconds: Some(3600),
             exclusive: true,
             reason: None,
+            lane: None,
         })
         .unwrap();
     sync(&laptop);
@@ -374,6 +375,7 @@ fn mail_feed_resources_and_holds_across_nodes() {
             ttl_seconds: None,
             exclusive: true,
             reason: None,
+            lane: None,
         })
         .unwrap();
     assert_eq!(mine.granted.len(), 1);

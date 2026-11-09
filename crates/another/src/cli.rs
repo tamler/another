@@ -47,6 +47,13 @@ pub enum Command {
     Init,
     /// Show the local node, database location and registered agents.
     Status,
+    /// Check the setup: store, server, tokens, client hooks (and Codex hook trust), ports
+    /// and resources. Prints PASS / WARN / FAIL with a fix for each problem; exits 1 on FAIL.
+    Doctor {
+        /// The `another serve` HTTP address to check.
+        #[arg(long, default_value = "http://127.0.0.1:7466", env = "ANOTHER_SERVER")]
+        server: String,
+    },
     /// Run the daemon: MCP over loopback streamable HTTP (default) or stdio.
     Serve {
         /// Serve MCP on stdin/stdout instead of HTTP (for MCP client configs).
@@ -189,6 +196,9 @@ pub enum Command {
         project: Option<String>,
         #[arg(long)]
         agent: Option<String>,
+        /// Group by lane.
+        #[arg(long)]
+        by_lane: bool,
     },
     /// Session heartbeat: renew holds; with --end release them and go offline.
     Heartbeat {
@@ -293,6 +303,58 @@ pub enum Command {
         #[command(flatten)]
         run: WakeRun,
     },
+    /// Lanes: named units of work with a charter, lead, status and structured reports.
+    #[command(subcommand)]
+    Lane(LaneCmd),
+    /// Node settings: `another config` lists them, `another config KEY` shows one,
+    /// `another config KEY VALUE` sets it (e.g. `another config decider owner`).
+    Config {
+        key: Option<String>,
+        value: Option<String>,
+    },
+    /// Decisions: structured questions from agents to a person, answered here or by the
+    /// manager bot.
+    #[command(subcommand)]
+    Decision(DecisionCmd),
+    /// Invites for remote agents: single-use codes that admit an agent with a scoped token.
+    #[command(subcommand)]
+    Invite(InviteCmd),
+    /// Join a hub as a remote agent with an invite code (saves a profile, writes MCP config).
+    Join {
+        /// The hub's URL, e.g. https://my-laptop.my-tailnet.ts.net
+        hub: String,
+        /// The invite code (anj_…).
+        code: String,
+        /// Write MCP client config: auto, claude, codex, both or none.
+        #[arg(long, value_enum, default_value = "none")]
+        write_mcp: crate::join::WriteMcp,
+        /// Send a session-start heartbeat and a "joined" report to the invite's lane.
+        #[arg(long)]
+        hello: bool,
+    },
+    /// Act on the hub you joined (uses the profile `another join` saved).
+    #[command(subcommand)]
+    Remote(RemoteCmd),
+    /// Daily summary: what needs you, lanes, decisions, requests, holds, spend, agents.
+    #[command(args_conflicts_with_subcommands = true)]
+    Summary {
+        #[command(subcommand)]
+        cmd: Option<SummaryCmd>,
+        /// Duration (24h), RFC 3339 time, or event id.
+        #[arg(long, default_value = "24h")]
+        since: String,
+    },
+    /// Spend ledger: budgets, spend entries, hourly leases with approval, burn-down report.
+    #[command(args_conflicts_with_subcommands = true)]
+    Spend {
+        #[command(subcommand)]
+        cmd: Option<SpendCmd>,
+        #[command(flatten)]
+        report: SpendReportArgs,
+    },
+    /// Webhooks: signed HTTP POSTs for lane, request, hold and lease events.
+    #[command(subcommand)]
+    Webhook(WebhookCmd),
     /// Show the activity feed (who is doing what), or a summary of it.
     Activity {
         /// Start point: a duration (30m, 2h, 1d), an RFC 3339 time, or an event id cursor.
@@ -363,6 +425,476 @@ pub enum WakeCmd {
     },
     /// List stored wake targets.
     List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum InviteCmd {
+    /// Mint an invite. Prints the code once (and, with --print-snippet, a join script).
+    Create {
+        /// Name the joining agent gets.
+        #[arg(long)]
+        agent: String,
+        /// claude | codex | grok | grok_bot | cursor | other
+        #[arg(long, default_value = "other")]
+        program: String,
+        /// Project path or slug glob the agent may touch (repeatable, required).
+        #[arg(long = "project", short = 'p', required = true)]
+        projects: Vec<String>,
+        /// How long the code is valid (default 24h, at most 30d).
+        #[arg(long, default_value = "24h")]
+        expires: String,
+        /// How many times it can be redeemed (each use gets its own token).
+        #[arg(long, default_value_t = 1)]
+        uses: u32,
+        /// Lane the agent joins (id, name or name@project).
+        #[arg(long)]
+        lane: Option<String>,
+        /// Ephemeral agents leave after this many hours unseen (default: the node's
+        /// `remote_idle_hours` setting, 4 unless changed with `another config`).
+        #[arg(long)]
+        idle_hours: Option<u32>,
+        /// Keep the agent after its session ends or it goes idle.
+        #[arg(long)]
+        persistent: bool,
+        /// Expiry of issued tokens (default: none).
+        #[arg(long)]
+        token_ttl: Option<String>,
+        /// Also print a shell snippet for a cloud session (needs --hub-url).
+        #[arg(long, requires = "hub_url")]
+        print_snippet: bool,
+        /// The hub URL the remote agent will use.
+        #[arg(long)]
+        hub_url: Option<String>,
+    },
+    /// List invites and their status.
+    List,
+    /// Stop an invite from being redeemed.
+    Revoke { invite_id: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RemoteCmd {
+    /// Show the saved profile and send a heartbeat.
+    Status,
+    /// Heartbeat (renews holds and leases); --end ends the session.
+    Heartbeat {
+        #[arg(long)]
+        end: bool,
+    },
+    /// Lanes in your scope on the hub.
+    Lanes,
+    /// Post a status report to a lane (default: the invite's lane).
+    Report {
+        #[arg(long)]
+        lane: Option<String>,
+        #[arg(long)]
+        summary: String,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        progress: Option<u8>,
+    },
+    /// Open decisions in your scope.
+    Decisions,
+    /// Answer a decision on the hub (as the relaying agent).
+    Answer {
+        decision: String,
+        value: Option<String>,
+        #[arg(long)]
+        text: Option<String>,
+        /// The person who decided.
+        #[arg(long = "as")]
+        answered_by: Option<String>,
+    },
+    /// Leave the hub (ephemeral agents: token revoked, holds released) and forget the profile.
+    Leave,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DecisionCmd {
+    /// Ask a person (default: `another config decider`, else owner) a question with 2-6 options.
+    Ask {
+        #[command(flatten)]
+        agent: AgentArg,
+        #[arg(long, short = 'q')]
+        question: String,
+        /// `value=Label` (repeat 2-6 times), e.g. `--option ship="Ship behind a flag"`.
+        #[arg(long = "option", short = 'o', required = true)]
+        options: Vec<String>,
+        /// Accept a free-text answer too.
+        #[arg(long)]
+        free_text: bool,
+        /// Context link (repeatable).
+        #[arg(long = "link")]
+        links: Vec<String>,
+        /// Duration (2h) or RFC 3339 time.
+        #[arg(long)]
+        deadline: Option<String>,
+        /// choose_default, cancel or keep_open (default).
+        #[arg(long)]
+        on_timeout: Option<String>,
+        /// Option value applied by choose_default.
+        #[arg(long)]
+        default: Option<String>,
+        /// Who to ask.
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        #[arg(long)]
+        lane: Option<String>,
+    },
+    /// List decisions (open ones unless --status or --all).
+    List {
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        #[arg(long)]
+        lane: Option<String>,
+        /// Only decisions for this person.
+        #[arg(long = "for")]
+        human: Option<String>,
+    },
+    /// Show a decision; --markdown prints the short phone-readable form.
+    Show {
+        decision: String,
+        #[arg(long)]
+        markdown: bool,
+    },
+    /// Answer a decision: an option value (or its number), and/or --text if allowed.
+    Answer {
+        decision: String,
+        value: Option<String>,
+        #[arg(long)]
+        text: Option<String>,
+        /// Who is answering (default: the person asked).
+        #[arg(long = "as")]
+        answered_by: Option<String>,
+        /// The manager or person on this node relaying the answer (needed for another node's
+        /// decision, unless --as names a person registered here).
+        #[arg(long)]
+        relayed_by: Option<String>,
+    },
+    /// Withdraw a decision you asked.
+    Cancel {
+        decision: String,
+        #[command(flatten)]
+        agent: AgentArg,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+}
+
+#[derive(Debug, clap::Args)]
+pub struct SpendReportArgs {
+    /// current (default), previous, or YYYY-MM.
+    #[arg(long, default_value = "current")]
+    period: String,
+    #[arg(long)]
+    account: Option<String>,
+    #[arg(long)]
+    lane: Option<String>,
+    /// Only this agent's spend.
+    #[arg(long = "agent")]
+    agent_filter: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SpendCmd {
+    /// Manage accounts (budgets).
+    #[command(subcommand)]
+    Account(SpendAccountCmd),
+    /// Record an amount spent.
+    Record {
+        #[command(flatten)]
+        agent: AgentArg,
+        #[arg(long)]
+        account: String,
+        /// In the account's unit.
+        #[arg(long)]
+        amount: f64,
+        #[arg(long)]
+        lane: Option<String>,
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Start an hourly lease (asks for approval if the account requires it).
+    Borrow {
+        #[command(flatten)]
+        agent: AgentArg,
+        #[arg(long)]
+        account: String,
+        #[arg(long)]
+        lane: Option<String>,
+        #[arg(long)]
+        cost_per_hour: Option<f64>,
+        /// Lease seconds, renewed by heartbeat (default 3600).
+        #[arg(long)]
+        ttl: Option<i64>,
+        /// Expected hours (shown in the approval question).
+        #[arg(long)]
+        hours: Option<f64>,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// End your lease (its cost is recorded) or withdraw a pending one.
+    Release {
+        lease_id: String,
+        #[command(flatten)]
+        agent: AgentArg,
+    },
+    /// List leases (open ones unless --all).
+    Leases {
+        #[arg(long)]
+        all: bool,
+    },
+    /// Charge borrowing a registered resource to an account, e.g.
+    /// `another spend link runpod gpu_pod:a100`. Borrowers then get a spend lease (behind
+    /// the account's approval gate) that accrues while their resource lease lives.
+    Link {
+        account: String,
+        /// Resource id or kind:name.
+        resource: String,
+    },
+    /// Stop charging a resource to its account (open spend leases run to their end).
+    Unlink {
+        /// Resource id or kind:name.
+        resource: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SummaryCmd {
+    /// Opt-in daily rollup sent by `another serve`, e.g.
+    /// `another summary schedule --daily 08:30 --to mail:owner`. Without flags, shows it.
+    Schedule {
+        /// Local time, HH:MM (24-hour).
+        #[arg(long, conflicts_with = "off")]
+        daily: Option<String>,
+        /// `webhook` (local webhooks with the daily_summary filter) or `mail:NAME`.
+        #[arg(long, conflicts_with = "off")]
+        to: Option<String>,
+        /// Turn the rollup off.
+        #[arg(long)]
+        off: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SpendAccountCmd {
+    /// Add an account, e.g. `another spend account add claude-api --kind api_credits --unit USD --budget 200`.
+    Add {
+        name: String,
+        /// gpu_pod, api_credits, plan_reset, server, domain.
+        #[arg(long)]
+        kind: String,
+        /// USD, credits, resets, hours, ...
+        #[arg(long)]
+        unit: String,
+        /// Budget per period, in the unit.
+        #[arg(long)]
+        budget: Option<f64>,
+        /// monthly (default) or none.
+        #[arg(long, default_value = "monthly")]
+        period: String,
+        /// Day of the month the period resets (1-28).
+        #[arg(long, default_value_t = 1)]
+        reset_day: u32,
+        #[arg(long)]
+        cost_per_hour: Option<f64>,
+        /// Borrowing asks a person first (a decision).
+        #[arg(long)]
+        requires_approval: bool,
+        /// Who approves (default: the node's decider, `another config decider NAME`).
+        #[arg(long)]
+        approver: Option<String>,
+        /// Owning project; omit for a shared account.
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// List accounts.
+    List,
+    /// Change an account.
+    Update {
+        name: String,
+        #[arg(long, conflicts_with = "clear_budget")]
+        budget: Option<f64>,
+        #[arg(long)]
+        clear_budget: bool,
+        #[arg(long)]
+        reset_day: Option<u32>,
+        #[arg(long)]
+        cost_per_hour: Option<f64>,
+        #[arg(long)]
+        requires_approval: Option<bool>,
+        #[arg(long)]
+        approver: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Archive an account (hidden from reports; history kept).
+    Archive { name: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WebhookCmd {
+    /// Subscribe a URL. Prints the signing secret once.
+    Add {
+        /// `https://` URL (plain http only to 127.0.0.1, localhost or [::1]).
+        #[arg(long)]
+        url: String,
+        /// Comma-separated filters: lane_status, lane_report, needs_decision,
+        /// request_created, request_answered, hold_conflict, lease_expiring, budget,
+        /// daily_summary (with --all-projects only), all.
+        #[arg(long, value_delimiter = ',', required = true)]
+        events: Vec<String>,
+        /// Project path or slug glob (repeatable). Required unless --all-projects.
+        #[arg(long = "project", short = 'p')]
+        projects: Vec<String>,
+        /// Every project on this node.
+        #[arg(long, conflicts_with = "projects")]
+        all_projects: bool,
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// List subscriptions with delivery counts (secrets are never shown).
+    List,
+    /// Remove a subscription; pending deliveries are dropped.
+    Remove { webhook_id: String },
+    /// Send a signed test delivery now and show the result.
+    Test { webhook_id: String },
+    /// Show dead deliveries (gave up after 7 attempts), newest first.
+    Dead {
+        #[arg(long)]
+        webhook: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
+    /// Show recent deliveries of any status.
+    Deliveries {
+        #[arg(long)]
+        webhook: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
+    /// Re-queue a dead delivery.
+    Retry { delivery_id: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LaneCmd {
+    /// Create a lane (status starts at planned).
+    Create {
+        name: String,
+        #[command(flatten)]
+        agent: AgentArg,
+        /// Project path or slug.
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        /// Agent that leads the work.
+        #[arg(long)]
+        lead: String,
+        /// The brief; `-` reads stdin.
+        #[arg(long, default_value = "")]
+        charter: String,
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// List lanes (open ones unless --all or --status).
+    List {
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        #[arg(long)]
+        lead: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show a lane with links and recent reports.
+    Show {
+        lane: String,
+        /// Print as markdown (like the old STATUS files).
+        #[arg(long)]
+        markdown: bool,
+    },
+    /// Change status, charter or lead, or link threads / requests / holds / messages.
+    Update {
+        lane: String,
+        #[command(flatten)]
+        agent: AgentArg,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        charter: Option<String>,
+        #[arg(long)]
+        lead: Option<String>,
+        #[arg(long = "link-thread")]
+        link_threads: Vec<String>,
+        #[arg(long = "link-request")]
+        link_requests: Vec<String>,
+        #[arg(long = "link-hold")]
+        link_holds: Vec<String>,
+        #[arg(long = "link-message")]
+        link_messages: Vec<String>,
+    },
+    /// Post a status report (also mailed to the lane's counterpart).
+    Report {
+        lane: String,
+        #[command(flatten)]
+        agent: AgentArg,
+        /// `-` reads stdin.
+        #[arg(long, short = 's')]
+        summary: String,
+        #[arg(long)]
+        progress: Option<u8>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long = "link")]
+        links: Vec<String>,
+        #[arg(long = "artifact")]
+        artifacts: Vec<String>,
+    },
+    /// Post the DONE report: outcome and optional PR link; closes the lane.
+    Done {
+        lane: String,
+        #[command(flatten)]
+        agent: AgentArg,
+        #[arg(long)]
+        outcome: String,
+        #[arg(long)]
+        pr: Option<String>,
+        #[arg(long, short = 's')]
+        summary: Option<String>,
+        #[arg(long = "artifact")]
+        artifacts: Vec<String>,
+    },
+    /// Close a lane without a report (done, or abandoned with --abandon).
+    Close {
+        lane: String,
+        #[command(flatten)]
+        agent: AgentArg,
+        #[arg(long)]
+        abandon: bool,
+        #[arg(long)]
+        outcome: Option<String>,
+    },
+    /// Write a lane as markdown: to stdout, --out FILE, or --dir DIR (<name>-STATUS.md, plus
+    /// DONE-<name>.md when done).
+    Export {
+        lane: String,
+        #[arg(long, conflicts_with = "dir")]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -517,6 +1049,15 @@ pub enum HookCmd {
         /// Show what would change without writing anything.
         #[arg(long)]
         dry_run: bool,
+        /// Also install a Stop hook that posts an automatic report into the agent's lane
+        /// (debounced to one every 15 minutes). Installing without it removes that hook.
+        #[arg(long)]
+        lane_reports: bool,
+        /// Also install a pre-edit hook (Claude Code, Codex) that holds files before they are
+        /// edited and denies the edit if another lane or agent holds them. Installing without
+        /// it removes that hook.
+        #[arg(long)]
+        pre_edit: bool,
     },
     /// Remove Another hooks from client configs, leaving other hooks untouched.
     Uninstall {
@@ -564,6 +1105,14 @@ pub enum AgentCmd {
     Show {
         name: String,
     },
+    /// Remove an agent now: revoke all its tokens, release its holds and leases, tell its lanes.
+    Kick {
+        name: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Agents that joined through invites, with presence (online, idle, gone).
+    Remotes,
 }
 
 #[derive(Debug, Args)]
@@ -591,6 +1140,9 @@ pub enum HoldCmd {
         shared: bool,
         #[arg(long)]
         reason: Option<String>,
+        /// Lane the holds are for (default: $ANOTHER_LANE, else the one lane you lead here).
+        #[arg(long, env = "ANOTHER_LANE")]
+        lane: Option<String>,
     },
     /// Report conflicts for paths without acquiring (exit code 3 on conflict).
     Check {
@@ -751,10 +1303,59 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     if let Command::Hook(cmd) = &cli.command {
         return hook_command(cmd, json, another_home);
     }
+    if let Command::Doctor { server } = &cli.command {
+        // Before opening the store, so a broken store is reported, not fatal.
+        let report = crate::doctor::run(&crate::doctor::DoctorOptions {
+            another_home: another_home()?,
+            user_home: std::env::var_os("HOME")
+                .filter(|h| !h.is_empty())
+                .map(PathBuf::from),
+            server: server.clone(),
+        });
+        let failed = report.failed > 0;
+        emit(json, &report, crate::doctor::render);
+        return Ok(if failed {
+            ExitCode::from(1)
+        } else {
+            ExitCode::SUCCESS
+        });
+    }
+    if let Command::Join {
+        hub,
+        code,
+        write_mcp,
+        hello,
+    } = &cli.command
+    {
+        let home = another_home()?;
+        let user_home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.clone());
+        let out = crate::join::join(&home, &user_home, hub, code, *write_mcp, *hello)?;
+        return Ok(emit(json, &out, output::joined));
+    }
+    if let Command::Remote(cmd) = &cli.command {
+        return remote_command(&another_home()?, json, cmd);
+    }
 
     let store = open(home)?;
     let code = match cli.command {
-        Command::Serve { .. } | Command::Hook(_) => unreachable!("handled above"),
+        Command::Serve { .. }
+        | Command::Hook(_)
+        | Command::Join { .. }
+        | Command::Remote(_)
+        | Command::Doctor { .. } => {
+            unreachable!("handled above")
+        }
+        Command::Invite(cmd) => invite_command(&store, json, cmd)?,
+        Command::Agent(AgentCmd::Kick { name, reason }) => {
+            let d = store.kick_agent(&name, reason.as_deref())?;
+            emit(json, &d, output::departure)
+        }
+        Command::Agent(AgentCmd::Remotes) => {
+            let list = store.remote_agents()?;
+            emit(json, &list, |l| output::remote_agents(l))
+        }
         Command::Init | Command::Status => {
             let status = output::Status {
                 node: store.node()?,
@@ -791,7 +1392,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             description,
         }) => {
             let project = project.as_deref().map(abs).transpose()?;
-            let a = store.register_agent(RegisterAgent {
+            let a = store.register_agent_trusted(RegisterAgent {
                 name,
                 program: program.parse::<Program>()?,
                 project,
@@ -929,6 +1530,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             ttl,
             shared,
             reason,
+            lane,
         }) => {
             let project = project_key(&store, &agent.agent, project.project)?;
             let report = store.acquire_holds(AcquireHolds {
@@ -938,6 +1540,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 ttl_seconds: ttl,
                 exclusive: !shared,
                 reason,
+                lane: lane.filter(|l| !l.trim().is_empty()),
             })?;
             let conflicted = !report.conflicts.is_empty();
             emit(json, &report, output::hold_report);
@@ -977,7 +1580,15 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let ids = store.release_holds(&agent.agent, &hold_ids)?;
             emit(json, &ids, |ids| format!("released {} hold(s)", ids.len()))
         }
-        Command::Holds { project, agent } => {
+        Command::Holds {
+            project,
+            agent,
+            by_lane: true,
+        } => {
+            let groups = store.holds_by_lane(HoldFilter { project, agent }, None)?;
+            emit(json, &groups, |g| output::lane_holds(g))
+        }
+        Command::Holds { project, agent, .. } => {
             let holds = store.holds(HoldFilter { project, agent })?;
             emit(json, &holds, |h| output::holds(h))
         }
@@ -1254,6 +1865,64 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             };
             emit(json, &plans, |p| output::wake_plans(p))
         }
+        Command::Lane(cmd) => lane_command(&store, json, cmd)?,
+        Command::Webhook(cmd) => webhook_command(&store, json, cmd)?,
+        Command::Decision(cmd) => decision_command(&store, json, cmd)?,
+        Command::Spend { cmd, report } => spend_command(&store, json, cmd, report)?,
+        Command::Summary {
+            cmd: Some(SummaryCmd::Schedule { daily, to, off }),
+            ..
+        } => {
+            let s = if off {
+                store.set_summary_schedule(None, None)?
+            } else if daily.is_some() || to.is_some() {
+                let at = match daily {
+                    Some(d) => Some(d),
+                    None => store.summary_schedule()?.daily_at,
+                };
+                if at.is_none() {
+                    anyhow::bail!("give --daily HH:MM to turn the daily summary on");
+                }
+                store.set_summary_schedule(at.as_deref(), to.as_deref())?
+            } else {
+                store.summary_schedule()?
+            };
+            emit(json, &s, |s| {
+                match &s.daily_at {
+                Some(at) => format!(
+                    "daily summary at {at} (local time) to {}; last sent {}\nSent while `another serve` runs.",
+                    s.to,
+                    s.last_sent_at.as_deref().unwrap_or("never")
+                ),
+                None => "daily summary: off (pull it with `another summary`)".to_string(),
+            }
+            })
+        }
+        Command::Summary { since, cmd: None } => {
+            let since = another_core::Since::parse(&since, store.now())?;
+            let s = store.daily_summary(Some(since), None)?;
+            emit(json, &s, |s| s.markdown.trim_end().to_string())
+        }
+        Command::Config { key, value } => {
+            let list = match (key, value) {
+                (None, _) => store.settings()?,
+                (Some(k), None) => vec![store.setting(&k)?],
+                (Some(k), Some(v)) => vec![store.set_setting(&k, &v)?],
+            };
+            emit(json, &list, |l| {
+                l.iter()
+                    .map(|s| {
+                        format!(
+                            "{} = {}{}  # {}\n",
+                            s.key,
+                            s.value,
+                            if s.default { " (default)" } else { "" },
+                            s.help
+                        )
+                    })
+                    .collect()
+            })
+        }
         Command::Audit { limit } => {
             let entries = store.audit_log(limit)?;
             emit(json, &entries, |e| output::audit(e))
@@ -1313,10 +1982,29 @@ fn hook_command(
             }
             Ok(ExitCode::SUCCESS)
         }
-        HookCmd::Install { client, dry_run } | HookCmd::Uninstall { client, dry_run } => {
-            let install = matches!(cmd, HookCmd::Install { .. });
+        HookCmd::Install {
+            client,
+            dry_run,
+            lane_reports,
+            pre_edit,
+        } => {
             let env = HookEnv::detect(another_home()?)?;
-            let report = hooks::install(&env, &clients(client), install, *dry_run)?;
+            let opts = hooks::HookOptions {
+                lane_reports: *lane_reports,
+                pre_edit: *pre_edit,
+            };
+            let report = hooks::install(&env, &clients(client), true, *dry_run, opts)?;
+            Ok(emit(json, &report, output::hook_report))
+        }
+        HookCmd::Uninstall { client, dry_run } => {
+            let env = HookEnv::detect(another_home()?)?;
+            let report = hooks::install(
+                &env,
+                &clients(client),
+                false,
+                *dry_run,
+                hooks::HookOptions::default(),
+            )?;
             Ok(emit(json, &report, output::hook_report))
         }
         HookCmd::Status => {
@@ -1336,4 +2024,716 @@ fn hook_command(
             Ok(emit(json, &rows, |r| output::hook_status(r)))
         }
     }
+}
+
+fn spend_command(
+    store: &Store,
+    json: bool,
+    cmd: Option<SpendCmd>,
+    report: SpendReportArgs,
+) -> anyhow::Result<ExitCode> {
+    use another_core::{BorrowSpend, NewSpendAccount, RecordSpend, SpendAccountUpdate, SpendQuery};
+    Ok(match cmd {
+        None => {
+            let r = store.spend_report(
+                SpendQuery {
+                    period: report.period.parse()?,
+                    account: report.account,
+                    lane: report.lane,
+                    agent: report.agent_filter,
+                },
+                None,
+            )?;
+            emit(json, &r, |r| r.markdown.trim_end().to_string())
+        }
+        Some(SpendCmd::Account(SpendAccountCmd::Add {
+            name,
+            kind,
+            unit,
+            budget,
+            period,
+            reset_day,
+            cost_per_hour,
+            requires_approval,
+            approver,
+            project,
+            description,
+        })) => {
+            let project = match project {
+                Some(p) => Some(project_key(store, "local", Some(p))?),
+                None => None,
+            };
+            let a = store.create_spend_account(
+                NewSpendAccount {
+                    name,
+                    kind: kind.parse()?,
+                    unit,
+                    budget,
+                    period: period.parse()?,
+                    reset_day,
+                    cost_per_hour,
+                    requires_approval,
+                    approver,
+                    project,
+                    description,
+                },
+                None,
+            )?;
+            emit(json, &a, |a| {
+                output::spend_accounts(std::slice::from_ref(a))
+            })
+        }
+        Some(SpendCmd::Account(SpendAccountCmd::List)) => {
+            let list = store.spend_accounts(None)?;
+            emit(json, &list, |l| output::spend_accounts(l))
+        }
+        Some(SpendCmd::Account(SpendAccountCmd::Update {
+            name,
+            budget,
+            clear_budget,
+            reset_day,
+            cost_per_hour,
+            requires_approval,
+            approver,
+            description,
+        })) => {
+            let a = store.update_spend_account(
+                &name,
+                SpendAccountUpdate {
+                    budget,
+                    clear_budget,
+                    reset_day,
+                    cost_per_hour,
+                    requires_approval,
+                    approver,
+                    description,
+                },
+                None,
+            )?;
+            emit(json, &a, |a| {
+                output::spend_accounts(std::slice::from_ref(a))
+            })
+        }
+        Some(SpendCmd::Account(SpendAccountCmd::Archive { name })) => {
+            let a = store.archive_spend_account(&name, None)?;
+            emit(json, &a, |a| format!("archived spend account {}", a.name))
+        }
+        Some(SpendCmd::Record {
+            agent,
+            account,
+            amount,
+            lane,
+            project,
+            note,
+        }) => {
+            let e = store.record_spend(
+                RecordSpend {
+                    agent: Some(agent.agent),
+                    account,
+                    amount,
+                    lane,
+                    project,
+                    note,
+                    at: None,
+                },
+                None,
+            )?;
+            emit(json, &e, |e| {
+                format!(
+                    "recorded {} {} on {}{} [{}]",
+                    e.amount,
+                    e.unit,
+                    e.account,
+                    e.lane
+                        .as_ref()
+                        .map(|l| format!(" for lane {l}"))
+                        .unwrap_or_default(),
+                    e.entry_id
+                )
+            })
+        }
+        Some(SpendCmd::Borrow {
+            agent,
+            account,
+            lane,
+            cost_per_hour,
+            ttl,
+            hours,
+            note,
+        }) => {
+            let o = store.borrow_spend(
+                BorrowSpend {
+                    agent: agent.agent,
+                    account,
+                    lane,
+                    cost_per_hour,
+                    ttl_seconds: ttl,
+                    hours,
+                    note,
+                },
+                None,
+            )?;
+            emit(json, &o, |o| {
+                match &o.decision_id {
+                Some(d) => format!(
+                    "{} needs approval: asked decision {d}; the lease {} starts when it is approved",
+                    o.lease.account, o.lease.lease_id
+                ),
+                None => output::spend_leases(std::slice::from_ref(&o.lease)),
+            }
+            })
+        }
+        Some(SpendCmd::Release { lease_id, agent }) => {
+            let l = store.release_spend(&agent.agent, &lease_id, None)?;
+            emit(json, &l, |l| output::spend_leases(std::slice::from_ref(l)))
+        }
+        Some(SpendCmd::Leases { all }) => {
+            let list = store.spend_leases(all, None)?;
+            emit(json, &list, |l| output::spend_leases(l))
+        }
+        Some(SpendCmd::Link { account, resource }) => {
+            let r =
+                store.link_resource_spend(&ResourceRef::parse(&resource)?, Some(&account), None)?;
+            emit(json, &r, |r| output::resources(std::slice::from_ref(r)))
+        }
+        Some(SpendCmd::Unlink { resource }) => {
+            let r = store.link_resource_spend(&ResourceRef::parse(&resource)?, None, None)?;
+            emit(json, &r, |r| output::resources(std::slice::from_ref(r)))
+        }
+    })
+}
+
+fn invite_command(store: &Store, json: bool, cmd: InviteCmd) -> anyhow::Result<ExitCode> {
+    Ok(match cmd {
+        InviteCmd::Create {
+            agent,
+            program,
+            projects,
+            expires,
+            uses,
+            lane,
+            idle_hours,
+            persistent,
+            token_ttl,
+            print_snippet,
+            hub_url,
+        } => {
+            let created = store.create_agent_invite(another_core::NewAgentInvite {
+                agent,
+                program: program.parse()?,
+                project_globs: projects,
+                lane,
+                expires_in_seconds: Some(parse_secs(&expires)?),
+                max_uses: Some(uses),
+                ephemeral: !persistent,
+                idle_hours,
+                token_ttl_seconds: token_ttl.as_deref().map(parse_secs).transpose()?,
+            })?;
+            let snippet = if print_snippet {
+                Some(crate::join::snippet(
+                    hub_url.as_deref().unwrap_or_default(),
+                    &created.code,
+                    &created.invite.expires_at,
+                ))
+            } else {
+                None
+            };
+            let out = serde_json::json!({ "invite": created.invite, "code": created.code, "snippet": snippet });
+            emit(json, &out, |o| {
+                let mut s = output::invites(std::slice::from_ref(&created.invite));
+                s.push_str(&format!(
+                    "code (single use, shown once): {}\n",
+                    o["code"].as_str().unwrap_or_default()
+                ));
+                match o["snippet"].as_str() {
+                    Some(sn) => s.push_str(&format!("\n{sn}")),
+                    None => s.push_str(
+                        "join with: another join <hub-url> <code>   (or POST <hub>/join)\n",
+                    ),
+                }
+                s
+            })
+        }
+        InviteCmd::List => {
+            let list = store.agent_invites()?;
+            emit(json, &list, |l| output::invites(l))
+        }
+        InviteCmd::Revoke { invite_id } => {
+            let i = store.revoke_agent_invite(&invite_id)?;
+            emit(json, &i, |i| {
+                format!("revoked invite {} ({})", i.invite_id, i.agent)
+            })
+        }
+    })
+}
+
+fn remote_command(home: &Path, json: bool, cmd: &RemoteCmd) -> anyhow::Result<ExitCode> {
+    use crate::join::{call, forget, load_profile};
+    use serde_json::json as j;
+    let p = load_profile(home)?;
+    let out = match cmd {
+        RemoteCmd::Status => {
+            let hb = call(
+                &p,
+                "POST",
+                "/agent/heartbeat",
+                Some(j!({ "phase": "beat" })),
+            )?;
+            j!({ "hub": p.hub, "agent": p.agent, "lane": p.lane, "project_globs": p.project_globs, "heartbeat": hb })
+        }
+        RemoteCmd::Heartbeat { end } => call(
+            &p,
+            "POST",
+            "/agent/heartbeat",
+            Some(j!({ "phase": if *end { "end" } else { "beat" } })),
+        )?,
+        RemoteCmd::Lanes => call(&p, "GET", "/lanes", None)?,
+        RemoteCmd::Report {
+            lane,
+            summary,
+            status,
+            progress,
+        } => {
+            let lane = lane
+                .clone()
+                .or(p.lane.clone())
+                .ok_or_else(|| anyhow::anyhow!("no lane: pass --lane"))?;
+            call(
+                &p,
+                "POST",
+                &format!("/lanes/{lane}/report"),
+                Some(j!({ "summary": summary, "status": status, "progress": progress })),
+            )?
+        }
+        RemoteCmd::Decisions => call(&p, "GET", "/decisions", None)?,
+        RemoteCmd::Answer {
+            decision,
+            value,
+            text,
+            answered_by,
+        } => call(
+            &p,
+            "POST",
+            &format!("/decisions/{decision}/answer"),
+            Some(j!({ "value": value, "text": text, "answered_by": answered_by })),
+        )?,
+        RemoteCmd::Leave => {
+            let v = call(&p, "POST", "/agent/leave", None)?;
+            forget(home)?;
+            v
+        }
+    };
+    Ok(emit(json, &out, |v| output::remote(cmd_name(cmd), v)))
+}
+
+fn cmd_name(cmd: &RemoteCmd) -> &'static str {
+    match cmd {
+        RemoteCmd::Status => "status",
+        RemoteCmd::Heartbeat { .. } => "heartbeat",
+        RemoteCmd::Lanes => "lanes",
+        RemoteCmd::Report { .. } => "report",
+        RemoteCmd::Decisions => "decisions",
+        RemoteCmd::Answer { .. } => "answer",
+        RemoteCmd::Leave => "leave",
+    }
+}
+
+fn decision_command(store: &Store, json: bool, cmd: DecisionCmd) -> anyhow::Result<ExitCode> {
+    use another_core::{
+        decision_markdown, parse_deadline, AnswerDecision, DecisionFilter, DecisionOption,
+        DecisionStatus, DecisionTimeout, NewDecision,
+    };
+    Ok(match cmd {
+        DecisionCmd::Ask {
+            agent,
+            question,
+            options,
+            free_text,
+            links,
+            deadline,
+            on_timeout,
+            default,
+            to,
+            project,
+            lane,
+        } => {
+            let options = options
+                .iter()
+                .map(|o| {
+                    let (value, label) = o.split_once('=').unwrap_or((o, o));
+                    DecisionOption {
+                        value: value.trim().to_string(),
+                        label: label.trim().to_string(),
+                        description: None,
+                    }
+                })
+                .collect();
+            // Project: explicit, else the lane's, else the agent's own, else the cwd.
+            let project = match (project, &lane) {
+                (Some(p), _) => Some(project_key(store, &agent.agent, Some(p))?),
+                (None, Some(_)) => None,
+                (None, None) => match store.agent(&agent.agent)?.project {
+                    Some(_) => None,
+                    None => Some(project_key(store, &agent.agent, None)?),
+                },
+            };
+            let d = store.ask_decision(
+                NewDecision {
+                    agent: agent.agent,
+                    question,
+                    options,
+                    allow_free_text: free_text,
+                    context_links: links,
+                    deadline_at: deadline
+                        .as_deref()
+                        .map(|d| parse_deadline(d, store.now()))
+                        .transpose()?,
+                    on_timeout: on_timeout
+                        .as_deref()
+                        .map(str::parse::<DecisionTimeout>)
+                        .transpose()?
+                        .unwrap_or_default(),
+                    default_value: default,
+                    human: to,
+                    project,
+                    lane,
+                },
+                None,
+            )?;
+            emit(json, &d, |d| {
+                format!(
+                    "asked {} (decision {})\n{}",
+                    d.human,
+                    d.decision_id,
+                    decision_markdown(d)
+                )
+            })
+        }
+        DecisionCmd::List {
+            status,
+            all,
+            project,
+            lane,
+            human,
+        } => {
+            let list = store.decisions(
+                DecisionFilter {
+                    status: status
+                        .as_deref()
+                        .map(str::parse::<DecisionStatus>)
+                        .transpose()?,
+                    all,
+                    project,
+                    lane,
+                    human,
+                    limit: 100,
+                },
+                None,
+            )?;
+            emit(json, &list, |l| output::decisions(l))
+        }
+        DecisionCmd::Show { decision, markdown } => {
+            let d = store.decision(&decision, None)?;
+            if markdown && !json {
+                println!("{}", decision_markdown(&d).trim_end());
+                ExitCode::SUCCESS
+            } else {
+                emit(json, &d, decision_markdown)
+            }
+        }
+        DecisionCmd::Answer {
+            decision,
+            value,
+            text,
+            answered_by,
+            relayed_by,
+        } => {
+            let d = store.answer_decision(
+                AnswerDecision {
+                    decision,
+                    value,
+                    text,
+                    answered_by,
+                    relayed_by,
+                },
+                None,
+            )?;
+            let woke = crate::wake::wake_if_targeted(store, &d.asker).is_some_and(|p| p.sent);
+            emit(json, &d, |d| {
+                let a = d.answer.as_ref();
+                format!(
+                    "answered decision {}: {}; mailed to {}{}",
+                    d.decision_id,
+                    a.and_then(|a| a.label.clone().or(a.value.clone()))
+                        .unwrap_or_else(|| "free text".into()),
+                    d.asker,
+                    if woke { " (woken)" } else { "" }
+                )
+            })
+        }
+        DecisionCmd::Cancel {
+            decision,
+            agent,
+            reason,
+        } => {
+            let d = store.cancel_decision(&agent.agent, &decision, reason, None)?;
+            emit(json, &d, |d| format!("withdrew decision {}", d.decision_id))
+        }
+    })
+}
+
+fn webhook_command(store: &Store, json: bool, cmd: WebhookCmd) -> anyhow::Result<ExitCode> {
+    use another_core::{DeliveryStatus, NewWebhook, WebhookFilter};
+    Ok(match cmd {
+        WebhookCmd::Add {
+            url,
+            events,
+            projects,
+            all_projects,
+            description,
+        } => {
+            if projects.is_empty() && !all_projects {
+                anyhow::bail!("give --project GLOB (repeatable) or --all-projects");
+            }
+            let filters = events
+                .iter()
+                .map(|e| e.parse::<WebhookFilter>())
+                .collect::<another_core::Result<Vec<_>>>()?;
+            let created = store.create_webhook(
+                NewWebhook {
+                    url,
+                    filters,
+                    project_globs: (!all_projects).then_some(projects),
+                    description,
+                },
+                None,
+            )?;
+            emit(json, &created, output::webhook_created)
+        }
+        WebhookCmd::List => {
+            let hooks = store.webhooks(None)?;
+            emit(json, &hooks, |h| output::webhooks(h))
+        }
+        WebhookCmd::Remove { webhook_id } => {
+            let h = store.remove_webhook(&webhook_id, None)?;
+            emit(json, &h, |h| {
+                format!("removed webhook {} ({})", h.webhook_id, h.url)
+            })
+        }
+        WebhookCmd::Test { webhook_id } => {
+            let d = store.queue_test_delivery(&webhook_id)?;
+            let result = crate::push::deliver(store, &d)?;
+            let ok = result.status == DeliveryStatus::Delivered;
+            let code = emit(json, &result, |r| {
+                output::deliveries(std::slice::from_ref(r))
+            });
+            if ok {
+                code
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        WebhookCmd::Dead { webhook, limit } => {
+            let list =
+                store.webhook_deliveries(webhook.as_deref(), Some(DeliveryStatus::Dead), limit)?;
+            emit(json, &list, |l| output::deliveries(l))
+        }
+        WebhookCmd::Deliveries { webhook, limit } => {
+            let list = store.webhook_deliveries(webhook.as_deref(), None, limit)?;
+            emit(json, &list, |l| output::deliveries(l))
+        }
+        WebhookCmd::Retry { delivery_id } => {
+            let d = store.retry_delivery(&delivery_id)?;
+            emit(json, &d, |d| {
+                format!(
+                    "re-queued delivery {}; the next `another serve` delivery pass sends it",
+                    d.delivery_id
+                )
+            })
+        }
+    })
+}
+
+fn lane_command(store: &Store, json: bool, cmd: LaneCmd) -> anyhow::Result<ExitCode> {
+    use another_core::{
+        lane_markdown, LaneFilter, LaneLinkKind, LaneReportInput, LaneStatus, LaneUpdate, NewLane,
+        ReportKind,
+    };
+    let status = |s: Option<String>| -> anyhow::Result<Option<LaneStatus>> {
+        Ok(s.map(|v| v.parse::<LaneStatus>()).transpose()?)
+    };
+    Ok(match cmd {
+        LaneCmd::Create {
+            name,
+            agent,
+            project,
+            lead,
+            charter,
+            status: st,
+        } => {
+            let project = project_key(store, &agent.agent, project)?;
+            let d = store.create_lane(
+                NewLane {
+                    agent: agent.agent,
+                    name,
+                    project,
+                    lead,
+                    charter: body_arg(charter)?,
+                    status: status(st)?,
+                },
+                None,
+            )?;
+            emit(json, &d, output::lane_detail)
+        }
+        LaneCmd::List {
+            status: st,
+            project,
+            lead,
+            all,
+        } => {
+            let lanes = store.lanes(
+                LaneFilter {
+                    status: status(st)?,
+                    project,
+                    lead,
+                    include_closed: all,
+                },
+                None,
+            )?;
+            emit(json, &lanes, |l| output::lanes(l))
+        }
+        LaneCmd::Show { lane, markdown } => {
+            let d = store.lane(&lane, None)?;
+            if markdown && !json {
+                println!("{}", lane_markdown(&d).trim_end());
+                ExitCode::SUCCESS
+            } else {
+                emit(json, &d, output::lane_detail)
+            }
+        }
+        LaneCmd::Update {
+            lane,
+            agent,
+            status: st,
+            charter,
+            lead,
+            link_threads,
+            link_requests,
+            link_holds,
+            link_messages,
+        } => {
+            let mut links = Vec::new();
+            links.extend(link_threads.into_iter().map(|i| (LaneLinkKind::Thread, i)));
+            links.extend(
+                link_requests
+                    .into_iter()
+                    .map(|i| (LaneLinkKind::Request, i)),
+            );
+            links.extend(link_holds.into_iter().map(|i| (LaneLinkKind::Hold, i)));
+            links.extend(
+                link_messages
+                    .into_iter()
+                    .map(|i| (LaneLinkKind::Message, i)),
+            );
+            let d = store.update_lane(
+                LaneUpdate {
+                    agent: agent.agent,
+                    lane,
+                    status: status(st)?,
+                    charter,
+                    lead,
+                    links,
+                },
+                None,
+            )?;
+            emit(json, &d, output::lane_detail)
+        }
+        LaneCmd::Report {
+            lane,
+            agent,
+            summary,
+            progress,
+            status: st,
+            links,
+            artifacts,
+        } => {
+            let r = store.report_lane(
+                LaneReportInput {
+                    agent: agent.agent,
+                    lane,
+                    kind: ReportKind::Status,
+                    summary: body_arg(summary)?,
+                    progress,
+                    status: status(st)?,
+                    links,
+                    artifacts,
+                    outcome: None,
+                    pr_url: None,
+                },
+                None,
+            )?;
+            emit(json, &r, output::lane_report)
+        }
+        LaneCmd::Done {
+            lane,
+            agent,
+            outcome,
+            pr,
+            summary,
+            artifacts,
+        } => {
+            let r = store.report_lane(
+                LaneReportInput {
+                    agent: agent.agent,
+                    lane,
+                    kind: ReportKind::Done,
+                    summary: summary.unwrap_or_else(|| outcome.clone()),
+                    progress: Some(100),
+                    status: None,
+                    links: vec![],
+                    artifacts,
+                    outcome: Some(outcome),
+                    pr_url: pr,
+                },
+                None,
+            )?;
+            emit(json, &r, output::lane_report)
+        }
+        LaneCmd::Close {
+            lane,
+            agent,
+            abandon,
+            outcome,
+        } => {
+            let d = store.close_lane(&agent.agent, &lane, abandon, outcome, None)?;
+            emit(json, &d, output::lane_detail)
+        }
+        LaneCmd::Export { lane, out, dir } => {
+            let d = store.lane(&lane, None)?;
+            let md = lane_markdown(&d);
+            let mut written = Vec::new();
+            match (out, dir) {
+                (Some(path), _) => {
+                    std::fs::write(&path, &md)?;
+                    written.push(path.display().to_string());
+                }
+                (None, Some(dir)) => {
+                    std::fs::create_dir_all(&dir)?;
+                    let status = dir.join(format!("{}-STATUS.md", d.lane.name));
+                    std::fs::write(&status, &md)?;
+                    written.push(status.display().to_string());
+                    if d.lane.status == LaneStatus::Done {
+                        let done = dir.join(format!("DONE-{}.md", d.lane.name));
+                        std::fs::write(&done, &md)?;
+                        written.push(done.display().to_string());
+                    }
+                }
+                (None, None) => {
+                    print!("{md}");
+                    return Ok(ExitCode::SUCCESS);
+                }
+            }
+            emit(json, &written, |w| format!("wrote {}", w.join(", ")))
+        }
+    })
 }

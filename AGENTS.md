@@ -1,41 +1,123 @@
-# AGENTS.md — build brief (Milestone 6: polish)
+# AGENTS.md — build brief (coordination series)
 
-**Read this before writing code.** Product vision lives in [docs/SPEC.md](docs/SPEC.md); locked defaults and every milestone decision in [docs/DECISIONS.md](docs/DECISIONS.md); contributor rules in [CONTRIBUTING.md](CONTRIBUTING.md). This file is the scope for the current coding milestone.
+**Read this before writing code.** Product vision lives in [docs/SPEC.md](docs/SPEC.md); locked defaults and every decision in [docs/DECISIONS.md](docs/DECISIONS.md); contributor rules in [CONTRIBUTING.md](CONTRIBUTING.md). This file is the scope for the current work: the **coordination series**, which turns Another from a shared inbox into the coordination layer between a manager (often a remote bot relaying a person on their phone) and coding agents.
 
 ## Status
 
-Milestone 6: **complete** (definition of done met). Earlier: M1 local core (tamler/another#1), M2 mail checking + activity feed (tamler/another#2), M3 resource registry (tamler/another#3), M4 authenticated remote peer (tamler/another#4), M5 federation (tamler/another#5). Keep the [README.md](README.md) status current in every PR.
+Milestones 1–6 are complete (tamler/another#1–#8). The coordination series is in progress. It is a stack of PRs, one per phase, each based on the previous one:
+
+| Phase | Scope | Design | PR |
+|---|---|---|---|
+| 1 | Lanes: units of work with charter, lead, status, structured reports | [01-lanes](docs/design/01-lanes.md) | tamler/another#10 |
+| 2 | Push: scope-filtered SSE / long-poll, signed webhooks | [02-push](docs/design/02-push.md) | tamler/another#11 |
+| 3 | Human decisions: structured questions answered by phone/HTTP/CLI | [03-decisions](docs/design/03-decisions.md) | tamler/another#12 |
+| 4 | Lane-aware holds, pre-edit hook | [04-lane-holds](docs/design/04-lane-holds.md) | tamler/another#13 |
+| 5 | Spend ledger, approval gate | [05-spend](docs/design/05-spend.md) | tamler/another#14 |
+| 6 | Daily summary | [06-summary](docs/design/06-summary.md) | tamler/another#15 |
+| 7 | First-class remote agents: invites, join, lifecycle, federation tie-in | [07-remote-agents](docs/design/07-remote-agents.md) | tamler/another#16 |
+
+Keep the [README.md](README.md) status and [CHANGELOG.md](CHANGELOG.md) (Unreleased) current in every PR.
+
+## How each phase is built
+
+1. **Design note first**: `docs/design/NN-*.md`, committed before any code. Record decisions in DECISIONS.md (next free D-number).
+2. **Migrations are additive**: new tables or nullable columns, an upgrade test from the previous schema (`Store::open_at_schema`). Unreleased migrations in an open PR may be edited in place; released ones never.
+3. **Don't break existing CLI/MCP behaviour**: deprecate rather than remove; new behaviour is opt-in or additive.
+4. **Every remote surface** (MCP tool, HTTP route) sits behind `--auth`, respects token project globs via `remote::current_scope()` / store `scope` arguments, and is audited.
+5. **Scoping rules**:
+   - Out-of-scope objects look exactly like missing ones (same `not_found` error, same message shape). Filters on list tools are matched against what the caller may see; they never resolve names node-wide (no `ambiguous` errors naming hidden objects).
+   - Events carry ids, names and statuses, never bodies (charters, summaries, report text, links).
+   - A security test proves a token scoped to project A can't read project B's data through every new surface.
+6. **Checks**: `cargo test --workspace`, `cargo +stable clippy --all-targets --all-features -- -D warnings`, `cargo fmt --check`, `cargo +1.88 check --workspace --all-targets --locked`.
+7. **Testing never touches live data**: use a temporary `ANOTHER_HOME` and ephemeral or non-default ports. Never `~/.another`, never `127.0.0.1:7466`.
+8. **Open the PR and stop**: no merges, no tags, no DNS, domain or deploy changes.
+
+## Push surfaces (phase 2)
+
+Every way events leave the node applies the same visibility rule (D38). When adding an event kind or a push surface, keep these true:
+
+| Surface | Auth | Rule |
+|---|---|---|
+| `activity_feed`, `activity_summarize`, `GET /activity` | bearer token with `--auth` | scoped |
+| `GET /events/stream` (SSE), `GET /events/poll`, MCP `events_poll` | bearer token with `--auth`, audited once per request | scoped; the stream re-checks its token every 30 s |
+| Webhooks (`webhook_subscribe`, `another webhook add`) | token or local CLI | the webhook's globs (a token's subset), plus the creating token's own-agent rule; disabled when that token is revoked or expires |
+
+- **Visibility:**
+  - An event with projects is visible when one of them matches the globs.
+  - A project-less event is visible when it concerns the token's agent, **matched by agent id**, never by name.
+  - `token.*`, `peer.*`, `node.*` and `invite.*` events are never visible to tokens.
+- **Object scope:** a lane, hold or resource event is scoped by that object's project only, never by the projects of the agents it mentions.
+- **Payloads** carry ids, names and statuses, never bodies; webhook `data` is filtered through an allowlist (`webhooks::webhook_data`), so new free-text fields can't leak. A new event kind needs an activity summary that doesn't echo its payload.
+- **Node-local events:** `hold.conflict` and `resource.lease_expiring` are never federated. Classify new purely local signals as `Share::Never`.
+- **`resource_find` stays node-wide** (decision recorded in D38).
+
+## Decisions (phase 3)
+
+- **Who is asked:** the person is an agent with program `human`. The default is the `decider` node setting (`another config decider NAME`); never add an environment variable for it.
+- **Who may answer:** only a manager bot (`grok_bot`) or a person (`human`) may relay an answer, and never the agent that asked. Those roles come only from the local CLI (`Store::register_agent_trusted`); `register_agent` (MCP, hooks) can't grant them, even to a new name. Relaying also needs the role confirmed by such a registration (`identity::role_confirmed`); people created on demand by `decision_ask` aren't. Tests that need a manager or person use `register_agent_trusted`.
+- **Content:** `decision.*` events and decision mail subjects carry ids, names and values only. Hidden decisions are `not_found`, never `forbidden`. That covers spend approvals too. MCP `decision_answer` must name its relaying agent.
+- **Automatic mail** (timeouts, reminders) comes from the reserved system agent `another` (`SYSTEM_AGENT`), never in a person's name.
+- **Lookups:** projects are resolved and scope-checked first; lanes are then looked up within that project only. Hidden and missing objects get the same error.
+
+## Lane-aware holds (phase 4)
+
+- **Lane lookup:** a hold's lane is looked up in the hold's project only (`lanes::resolve_lane_in_project`). Never resolve a user-supplied lane name node-wide.
+- **Same lane:** exclusive vs exclusive blocks even inside a lane; otherwise same-lane overlaps are warnings.
+- **Cross-lane conflicts:** emit `lane.hold_conflict` (node-local) and mail the holding lane's lead from the system agent, debounced.
+- **Hooks fail open, visibly:** a problem with the agent's lane degrades to an unlaned hold plus a warning, never to no hold and never to a blocked edit.
+- **NO_LANE:** a hook's fallback after a bad `$ANOTHER_LANE` passes `NO_LANE` (`-`), never `None`, so it can't slip into another lane the agent leads.
+- **Scoped filters:** remote `holds_by_lane` filters are matched against visible holds, never resolved node-wide.
+- **Codex (verified by Fleshapron on 0.166.0):** `bearer_token_env_var` works, and `another hook run pre-edit` denies a foreign exclusive hold. Codex runs the hooks only once they are trusted under `/hooks`, so untrusted hooks are skipped by `codex exec`, and HOOKS.md says enforcement there isn't guaranteed. Never write Codex's trust state yourself.
+
+## Spend (phase 5)
+
+- **Record, never act:** the ledger never fetches usage, stops or reaps anything.
+- **Approval:** the approver is the account's, else the `decider` node setting. The borrower can never relay its own approval (`check_relayer`).
+- **Lease lifecycle:** withdrawing a pending lease withdraws its decision and emits `spend.lease_withdrawn`. Ending a session closes the agent's spend leases. Spend leases tied to a resource (`resource_id`) end with that resource lease (`reconcile_resource_spend_tx`).
+- **Shared accounts seen by tokens:** the budget figures are for the whole account (read-only), but spent, accrued and the groupings count only the token's projects. Never put other projects' names or amounts in their lines.
+
+## Daily summary (phase 6)
+
+- **Built from scoped reads only.** Never query tables directly for a remote caller; a cursor (`since` event id) resolves through the scoped feed.
+- **The scheduled rollup is node-wide:** `summary.daily` is node-local and invisible to tokens, so only local all-project webhooks (filter `daily_summary`) or mail from the system agent carry it.
+- **People are not agents:** list program `human` separately, and never count the system agent as active.
+
+## Remote agents (phase 7)
+
+- **No free text in events:** answer text, notes, report summaries and kick reasons travel as mail or stay in rows; events and webhook payloads carry ids and status only.
+- **Token-scoped lifecycle:** heartbeats, leave and departures through a token touch only holds and leases in its projects.
+- **One writer per lane:** never write to a mirror (`lane.node` set). Reports become proposals for the owner, and decisions can't use a mirrored lane.
+- **Identity is never taken over:** invites can't reuse a registered name.
+- **Leads:** a departing lead hands over to the longest-active member, else the lane is flagged leaderless. Never auto-block.
+
+## Review routing rule
+
+Every PR gets a review from a **different model family** than the one that wrote it:
+
+| Author | Reviewer | How to request |
+|---|---|---|
+| Claude | Codex | Comment `@codex review` on the PR |
+| Codex | Claude | Ask in the PR, or open a Claude Code review session |
+| Grok | Claude or Codex | As above |
+
+If no reviewer from another family is available or responds, the author writes a **self-review** in the PR description: risks, trade-offs, what was not tested. Open product questions go under **NEEDS DECISION** in the PR description, and the work continues.
 
 ## Clean-room rules (mandatory)
 
-- Implement from **this repository's docs** and public docs of integrated tools (tmux, cmux, Herdr, GitHub Actions) only.
-- **Do not** copy code, schemas, SQL, phrasing, or distinctive APIs from `mcp_agent_mail*`, forks, or any project with a non-permissive license rider.
+- Implement from **this repository's docs** and the public docs of integrated tools (tmux, cmux, Herdr, GitHub Actions, client hook docs) only.
+- **Do not** copy code, schemas, SQL, phrasing or distinctive APIs from `mcp_agent_mail*`, its forks, or any project with a non-permissive license rider.
 - cmux is GPL: call its CLI as a separate process only; never link or vendor it.
 
 ## Locked defaults
 
-Apache-2.0; agent names unique per project; hooks-first (wake adapters are optional extras); free and open source always; loopback-only without auth; never reap without human approval; never remote reap; MSRV 1.88.
-
-## Milestone 6 — in scope
-
-1. **`another wake`** — nudge idle agents with unread mail through optional adapters: `tmux` (send-keys), `cmux` (`send --surface` or `notify`), `herdr` (`agent prompt`). Stored per-agent targets (`another wake set|clear|list`), auto-captured by session hooks from `$TMUX_PANE` / `$CMUX_SURFACE_ID` (never replacing manual targets); `--all`, `--dry-run`, `--force`, `--message`. Argv only, no shell; skip when nothing is waiting.
-2. **Herdr plugin (optional)** — [integrations/herdr](integrations/herdr): `herdr-plugin.toml` with wake + summary actions and a live activity pane; POSIX `sh` helper.
-3. **Release builds** — `.github/workflows/release.yml`: macOS arm64 + x86_64, Linux static musl x86_64 + arm64; smoke tests; SHA-256 sums; GitHub Release on `v*` tags; build-only on PRs touching the workflow.
-4. **Docs** — clean README quickstart, [CONTRIBUTING.md](CONTRIBUTING.md), [docs/WAKE.md](docs/WAKE.md).
-
-### Definition of done (Milestone 6)
-
-- [x] `another wake` with tmux / cmux / Herdr adapters, stored + auto-captured targets, tests with fake adapter binaries
-- [x] Optional Herdr plugin (manifest + helper), validated in tests
-- [x] Release workflow for macOS (arm64, x86_64) and Linux, verified by a PR build
-- [x] README quickstart + CONTRIBUTING.md + docs/WAKE.md
-- [x] CI green: test + clippy (`-D warnings`) + fmt + MSRV 1.88
-- [x] README status updated
+- Apache-2.0; free and open source, always.
+- Agent names unique per project; lane names unique per project.
+- Hooks first; wake adapters are optional extras.
+- Loopback only without auth. Token auth on everything remote. No new hosted dependencies.
+- Never reap without human approval; never reap remotely.
+- Never commit secrets, tokens, emails, phone numbers or machine-specific absolute paths.
+- MSRV 1.88.
 
 ## Explicitly OUT of scope
 
-- Web UI / TUI, auto-reap policies, pre-commit hold guard, mesh federation, end-to-end mail encryption (future milestones; see SPEC "Later")
-
-## Keep the README status current
-
-Whenever you complete a definition-of-done item or open a PR that changes milestone progress, update the **Status** section in [README.md](README.md) in the same PR.
+Web UI / TUI, auto-reap policies, mesh federation, end-to-end mail encryption, and bundling network software such as Tailscale into the binary. See SPEC "Later".

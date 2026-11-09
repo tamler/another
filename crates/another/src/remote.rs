@@ -13,6 +13,22 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+tokio::task_local! {
+    /// The verified token scope of the remote caller whose tool call is running.
+    static SCOPE: Option<TokenScope>;
+}
+
+/// The scope of the remote caller for the tool call in progress (`None` for local callers).
+/// Read it before moving work to a blocking thread: task-locals do not follow.
+pub fn current_scope() -> Option<TokenScope> {
+    SCOPE.try_with(|s| s.clone()).ok().flatten()
+}
+
+/// Run `fut` with `scope` visible to [`current_scope`].
+pub async fn with_scope<F: std::future::Future>(scope: Option<TokenScope>, fut: F) -> F::Output {
+    SCOPE.scope(scope, fut).await
+}
+
 /// The authenticated caller, attached to the request by [`require_token`].
 #[derive(Debug, Clone)]
 pub struct RemotePeer {
@@ -20,7 +36,7 @@ pub struct RemotePeer {
     pub remote: Option<String>,
 }
 
-fn remote_addr(headers: &HeaderMap, req: &Request) -> Option<String> {
+pub(crate) fn remote_addr(headers: &HeaderMap, req: &Request) -> Option<String> {
     for h in ["cf-connecting-ip", "x-forwarded-for", "x-real-ip"] {
         if let Some(v) = headers.get(h).and_then(|v| v.to_str().ok()) {
             return Some(format!("{h}: {}", v.split(',').next().unwrap_or(v).trim()));
@@ -31,7 +47,7 @@ fn remote_addr(headers: &HeaderMap, req: &Request) -> Option<String> {
         .map(|c| c.0.to_string())
 }
 
-fn bearer(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn bearer(headers: &HeaderMap) -> Option<String> {
     let v = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let (scheme, token) = v.split_once(' ')?;
     scheme
@@ -171,7 +187,32 @@ pub fn authorize(
     };
     match tool {
         "resource_reap" => Err("reaping is never available to remote peers".into()),
-        "activity_feed" | "activity_summarize" | "resource_find" => Ok(()),
+        // Event reads are filtered by the token scope inside the tools.
+        "activity_feed" | "activity_summarize" | "resource_find" | "events_poll" => Ok(()),
+        // Webhook globs are checked against the token's, and only its own webhooks are listed
+        // or removed, inside the store.
+        "webhook_subscribe" | "webhook_list" | "webhook_remove" => Ok(()),
+        // Built from scoped reads only.
+        "daily_summary" => Ok(()),
+        // Lane reads are filtered / checked against the token scope inside the tool.
+        "lane_list" | "lane_show" | "holds_by_lane" => Ok(()),
+        "lane_create" => {
+            acting(args, "agent")?;
+            project(s(args, "project"), true)
+        }
+        "lane_update" | "lane_report" | "lane_close" => acting(args, "agent"),
+        // Decisions: the store checks the decision's project against the token scope.
+        "decision_list" | "decision_show" => Ok(()),
+        "decision_ask" | "decision_cancel" => acting(args, "agent"),
+        // The token's agent is always recorded as the relaying agent.
+        "decision_answer" => acting(args, "relayed_by"),
+        // Spend: reads are scoped in the store; writes act as the token's agent and must be
+        // attributed to its projects; accounts are configured locally only.
+        "spend_report" | "spend_accounts" | "spend_leases" => Ok(()),
+        "spend_record" | "spend_borrow" | "spend_release" => acting(args, "agent"),
+        "spend_account_upsert" => {
+            Err("spend accounts are configured locally, not by remote peers".into())
+        }
         "orphans_list" => {
             // Remote peers see lapsed registrations only, never a process scan.
             args.insert("scan".into(), Value::Bool(false));
@@ -242,6 +283,7 @@ pub async fn activity(
     Query(params): Query<ActivityParams>,
 ) -> Response {
     let peer = peer.map(|p| p.0);
+    let scope = peer.as_ref().map(|p| p.scope.clone());
     let query_store = store.clone();
     let detail = format!(
         "since={:?} limit={:?} kinds={:?}",
@@ -261,11 +303,14 @@ pub async fn activity(
             .filter(|k| !k.trim().is_empty())
             .map(|k| k.trim().parse::<ActivityKind>())
             .collect::<another_core::Result<Vec<_>>>()?;
-        query_store.activity(ActivityQuery {
-            since,
-            limit: params.limit.unwrap_or(50),
-            kinds,
-        })
+        query_store.activity_scoped(
+            ActivityQuery {
+                since,
+                limit: params.limit.unwrap_or(50),
+                kinds,
+            },
+            scope.as_ref(),
+        )
     })
     .await;
     let (status, body, outcome) = match result {

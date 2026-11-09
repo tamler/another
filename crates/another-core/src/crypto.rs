@@ -15,6 +15,28 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// HMAC-SHA256 (RFC 2104), hex-encoded. Used to sign outbound webhook deliveries.
+pub fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
+    const BLOCK: usize = 64;
+    let mut k = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        k[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut inner = Sha256::new();
+    inner.update(k.map(|b| b ^ 0x36));
+    inner.update(message);
+    let mut outer = Sha256::new();
+    outer.update(k.map(|b| b ^ 0x5c));
+    outer.update(inner.finalize());
+    outer
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 pub fn b64(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
@@ -102,6 +124,15 @@ pub fn verify(public_b64: &str, message: &[u8], signature_b64: &str) -> bool {
     key.verify(message, &sig).is_ok()
 }
 
+/// Compare two secrets (or their digests) in time that depends only on their lengths.
+pub(crate) fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,5 +152,22 @@ mod tests {
         let round = decode_secret(&b64(key.as_bytes())).unwrap();
         assert_eq!(public_of(&round), public);
         assert_eq!(fingerprint(&public).len(), 19);
+    }
+
+    #[test]
+    fn hmac_matches_rfc_4231() {
+        // Test case 2.
+        assert_eq!(
+            hmac_sha256_hex(b"Jefe", b"what do ya want for nothing?"),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        // Test case 6: a key longer than the block size is hashed first.
+        assert_eq!(
+            hmac_sha256_hex(
+                &[0xaa; 131],
+                b"Test Using Larger Than Block-Size Key - Hash Key First"
+            ),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
     }
 }

@@ -39,12 +39,46 @@ another hook uninstall --client all
 
 Uninstall removes only entries that reference `another-hook.sh`, and deletes the wrapper once no client uses it. Both install and uninstall also clean up entries left by development builds from before the project was renamed (they referenced `wyres-hook.sh`, and Grok's file was `~/.grok/hooks/wyres.json`): install replaces them with current entries, and uninstall removes them.
 
+## Optional: lane reports at the end of each turn
+
+`another hook install --client <c> --lane-reports` also installs a **Stop** hook (`stop` for Cursor). It posts an automatic report into the agent's lane: `$ANOTHER_LANE`, or the single open lane the agent leads in that project. Reports are debounced to one every 15 minutes. Installing again without the flag removes the Stop hook. See [LANES.md](LANES.md).
+
+> **Warning: the Stop hook stores what your agent last said.** The report summary is the client's last reply, truncated to 300 characters, and it is stored in the lane and mailed to the lane's counterpart (who may be a remote manager bot). Before anything is stored or mailed, the hook redacts likely secrets, including ones next to punctuation (a full stop, comma, bracket, quote, or a `-`, `_`, `/` or `+` hugging them): `ano_`, `sk-`, `ghp_`/`github_pat_`, `glpat-`, Slack `xox*-`, `hf_`, AWS `AKIA…`, `whsec_` tokens, and long hex or base64 runs. This is a best-effort filter, not a guarantee. Don't enable `--lane-reports` for agents that routinely print credentials, and keep secrets out of agent transcripts.
+
+## Optional: hold files before they are edited
+
+`another hook install --client claude,codex --pre-edit` adds a **PreToolUse** hook:
+- Claude Code: matcher `Edit|Write|MultiEdit|NotebookEdit`.
+- Codex: matcher `apply_patch`. File names come from the patch's `*** Add/Update/Delete File:` and `*** Move to:` header lines (at the start of a line; an indented context line that only looks like one is ignored), wherever Codex puts the patch (`tool_input.patch`, `tool_input.command` or a plain string).
+
+**Before each edit**, the hook takes an exclusive hold on the files, with reason `pre-edit`:
+- The hold is for the agent's lane: `$ANOTHER_LANE`, else the one lane it leads there. See [lane-aware holds](LANES.md#path-holds-and-lanes).
+- **If another agent or lane holds a file, the edit is denied** with the standard `permissionDecision: "deny"` output. The reason names the holder, their lane and when the hold expires, so the agent can coordinate or move on.
+- Holds by agents in the same lane never block, unless both holds are exclusive (the hook's are).
+- Files outside the project are ignored. File names are held literally: glob characters in a name are escaped (`notes[.md` is held as `notes[[].md`), so they never break the hold.
+
+**Otherwise** the hook prints nothing, and the client's normal permission flow applies. The hook never approves anything.
+
+**Codex: trust the hooks, and mind `codex exec`.** Codex runs a hook it doesn't manage only after you trust it, and trust is tied to the hook's hash, so it is needed again after reinstalling. To trust them, open Codex **interactively** and review them under `/hooks`. `another hook install` prints this caveat, and `another doctor` warns while no trust is recorded for Another's hooks. Doctor reads Codex's `[hooks.state."<hooks.json>:<event>:<group>:<hook>"]` entries in `~/.codex/config.toml` and matches them to Another's own entries (your other hooks' trust doesn't count). That layout isn't formally documented, so it can't check the hash itself, and it never writes Codex's trust. It also fails a client whose hook config can't be parsed (or mentions the wrapper outside any hook command), and one whose config points at a wrapper (`another-hook.sh`) that is missing or not executable, for example after moving the Another home; reinstall the hooks to fix it.
+- `codex exec` (non-interactive) can't ask, so untrusted hooks are skipped silently and **edits are not held or blocked**. This was checked on Codex 0.166.0: `another hook run pre-edit` denied the edit correctly, but under `codex exec` the hook never ran and a patch went through over a live hold.
+- Trusting the hooks once in an interactive session in the same environment makes `codex exec` run them too.
+- For one-off automation whose hook sources you already vet, `codex exec --dangerously-bypass-hook-trust …` runs enabled hooks without stored trust.
+- Otherwise, **hold enforcement under `codex exec` isn't guaranteed**. Have such runs take their holds explicitly (`another hold acquire`), or check `another holds` first.
+
+**Lifetime:** holds taken this way expire after 30 minutes unless renewed. The prompt hook's heartbeat renews them, and session end releases them.
+
+**Failing open, visibly:** if `$ANOTHER_LANE` names a closed lane or one from another project, the files are still held (without a lane), and the hook shows a warning (`systemMessage`, also on stderr). If Another itself is unavailable, the hook prints nothing and the edit goes ahead.
+
+**Lane-mates:** two agents in the same lane can't both hold the same file for editing. The pre-edit hook takes exclusive holds, and exclusive holds block each other even inside a lane.
+
+Installing without the flag removes the hook. Your own `PreToolUse` entries are never touched. Grok and Cursor have no equivalent pre-tool hook.
+
 ## Per client
 
 | Client | Config written | Events | Notes |
 |---|---|---|---|
 | Claude Code | `~/.claude/settings.json` | `SessionStart`, `UserPromptSubmit`, `SessionEnd` | Plain stdout is added to context. |
-| Codex CLI | `~/.codex/hooks.json` | `SessionStart`, `UserPromptSubmit`, `SessionEnd` | New hooks run only after you trust them: open Codex and review them under `/hooks`. |
+| Codex CLI | `~/.codex/hooks.json` | `SessionStart`, `UserPromptSubmit`, `SessionEnd` | New hooks run only after you trust them: open Codex interactively and review them under `/hooks`. Untrusted hooks are skipped by `codex exec` (see [above](#optional-hold-files-before-they-are-edited)). |
 | Grok CLI | `~/.grok/hooks/another.json` | `SessionStart`, `UserPromptSubmit`, `SessionEnd` | User-level hooks need no trust step (`/hooks-trust` applies to project hooks). See "Grok and shared hook files" below. |
 | Cursor (best effort) | `~/.cursor/hooks.json` | `sessionStart`, `beforeSubmitPrompt`, `sessionEnd` | Context is injected only at session start (`additional_context`); the prompt hook just renews holds and lets the prompt through. |
 
@@ -69,6 +103,8 @@ Last hour: 7 event(s) since 2026-10-28T08:00:00.000Z; active agents: codex@shop;
 - codex@shop holds shop:src/api/** (exclusive)
 The Another MCP tools fetch_inbox, acknowledge and claim_request (or `another inbox --agent claude@shop`) show details.
 ```
+
+The session-start digest lists up to five unread messages: urgent first, then high, then the newest of the rest, newest first within each. The header counts all of them.
 
 Message bodies are never included in digests or the activity feed.
 

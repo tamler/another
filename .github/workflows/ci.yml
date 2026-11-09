@@ -3,8 +3,8 @@ name: ci
 on:
   push:
     branches: [main]
+  # Every pull request, including stacked ones that target another branch.
   pull_request:
-    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -32,6 +32,11 @@ jobs:
 
       - name: cargo test
         run: cargo test --all-features
+
+      - name: install script
+        run: |
+          sh -n scripts/install.sh
+          shellcheck -S warning scripts/install.sh
 
   msrv:
     name: msrv (Rust 1.88)

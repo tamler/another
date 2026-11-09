@@ -646,3 +646,101 @@ fn install_and_uninstall_clean_up_pre_rename_hooks() {
     assert!(v["hooks"].get("UserPromptSubmit").is_none());
     assert!(!env.home.join(".grok/hooks/wyres.json").exists());
 }
+
+/// A store with `claude@shop` receiving mail from `codex@shop`, one minute apart.
+fn digest_inbox(mail: &[(&str, another_core::Importance)]) -> String {
+    use another_core::{Clock, Program, RegisterAgent, SendMessage, Store};
+    let (clock, h) = Clock::manual(1_795_219_200_000);
+    let store = Store::open_in_memory(clock).unwrap();
+    store.ensure_project("t", "/work/shop").unwrap();
+    for (name, program) in [("claude", Program::Claude), ("codex", Program::Codex)] {
+        store
+            .register_agent_trusted(RegisterAgent {
+                name: name.into(),
+                program,
+                project: Some("/work/shop".into()),
+                model: None,
+                description: None,
+            })
+            .unwrap();
+    }
+    for (subject, importance) in mail {
+        h.fetch_add(60_000, std::sync::atomic::Ordering::SeqCst);
+        store
+            .send_message(SendMessage {
+                from: "codex@shop".into(),
+                to: vec!["claude@shop".into()],
+                subject: (*subject).into(),
+                body: "body".into(),
+                importance: *importance,
+                ..Default::default()
+            })
+            .unwrap();
+    }
+    another::hooks::session_digest(&store, "claude@shop").unwrap()
+}
+
+/// The subjects the digest lists, in order.
+fn listed(digest: &str) -> Vec<&str> {
+    digest
+        .lines()
+        .filter(|l| l.contains(" (message "))
+        .map(|l| l.split('"').nth(1).unwrap())
+        .collect()
+}
+
+#[test]
+fn the_session_digest_lists_urgent_mail_before_newer_ordinary_mail() {
+    use another_core::Importance::{High, Normal, Urgent};
+    let digest = digest_inbox(&[
+        ("Prod is down", Urgent),
+        ("Review soon", High),
+        ("n1", Normal),
+        ("n2", Normal),
+        ("n3", Normal),
+        ("n4", Normal),
+        ("n5", Normal),
+        ("n6", Normal),
+    ]);
+    assert!(digest.contains("8 unread (2 urgent)"), "{digest}");
+    assert_eq!(
+        listed(&digest),
+        ["Prod is down", "Review soon", "n6", "n5", "n4"],
+        "{digest}"
+    );
+}
+
+#[test]
+fn the_session_digest_lists_urgent_mail_before_newer_high_mail() {
+    use another_core::Importance::{High, Normal, Urgent};
+    let digest = digest_inbox(&[
+        ("Prod is down", Urgent),
+        ("h1", High),
+        ("h2", High),
+        ("h3", High),
+        ("h4", High),
+        ("h5", High),
+        ("h6", High),
+        ("n1", Normal),
+    ]);
+    assert!(digest.contains("8 unread (7 urgent)"), "{digest}");
+    assert_eq!(
+        listed(&digest),
+        ["Prod is down", "h6", "h5", "h4", "h3"],
+        "{digest}"
+    );
+}
+
+#[test]
+fn the_session_digest_keeps_newest_first_without_urgent_mail() {
+    use another_core::Importance::Normal;
+    let digest = digest_inbox(&[
+        ("n1", Normal),
+        ("n2", Normal),
+        ("n3", Normal),
+        ("n4", Normal),
+        ("n5", Normal),
+        ("n6", Normal),
+    ]);
+    assert_eq!(listed(&digest), ["n6", "n5", "n4", "n3", "n2"], "{digest}");
+}

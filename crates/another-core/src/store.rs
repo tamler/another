@@ -20,6 +20,8 @@ pub const DB_FILE: &str = "another.db";
 pub enum Clock {
     System,
     Manual(Arc<AtomicI64>),
+    #[cfg(test)]
+    Ticking(Arc<AtomicI64>),
 }
 
 impl Clock {
@@ -33,6 +35,8 @@ impl Clock {
         match self {
             Clock::System => now_ms(),
             Clock::Manual(t) => t.load(Ordering::SeqCst),
+            #[cfg(test)]
+            Clock::Ticking(t) => t.fetch_add(1, Ordering::SeqCst),
         }
     }
 }
@@ -106,18 +110,44 @@ impl Store {
         let conn = Connection::open(&path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        Self::init(conn, clock, Some(path))
+        Self::init(conn, clock, Some(path), MIGRATIONS.len())
+    }
+
+    /// Open a database migrated only up to schema `version` (for upgrade tests: seed data
+    /// the way an older build would have, then reopen with [`Store::open`]).
+    #[doc(hidden)]
+    pub fn open_at_schema(home: &Path, version: usize) -> Result<Store> {
+        std::fs::create_dir_all(home)?;
+        let path = home.join(DB_FILE);
+        let conn = Connection::open(&path)?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        Self::init(
+            conn,
+            Clock::System,
+            Some(path),
+            version.min(MIGRATIONS.len()),
+        )
+    }
+
+    /// Number of schema migrations this build knows.
+    pub fn schema_version() -> usize {
+        MIGRATIONS.len()
     }
 
     /// An in-memory store (tests and experiments).
     pub fn open_in_memory(clock: Clock) -> Result<Store> {
-        Self::init(Connection::open_in_memory()?, clock, None)
+        Self::init(Connection::open_in_memory()?, clock, None, MIGRATIONS.len())
     }
 
-    fn init(mut conn: Connection, clock: Clock, path: Option<PathBuf>) -> Result<Store> {
+    fn init(
+        mut conn: Connection,
+        clock: Clock,
+        path: Option<PathBuf>,
+        schema: usize,
+    ) -> Result<Store> {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        migrate(&mut conn)?;
+        migrate_to(&mut conn, schema)?;
         let (node_id, key) = ensure_local_node(&mut conn, clock.now())?;
         Ok(Store {
             inner: Arc::new(Inner {
@@ -189,6 +219,31 @@ impl Store {
                 })
             })?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// Id of the newest event in the log (a cursor meaning "from now on").
+    pub fn latest_event_id(&self) -> Result<Option<String>> {
+        self.read(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT event_id FROM events ORDER BY seq DESC LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?)
+        })
+    }
+
+    /// A cursor at the end of the log, usable by any caller: an opaque position (`@<seq>`)
+    /// rather than the newest event's id, which a scoped caller may not be allowed to see.
+    pub fn end_cursor(&self) -> Result<Option<String>> {
+        self.read(|conn| {
+            let seq: Option<i64> = conn
+                .query_row("SELECT MAX(seq) FROM events", [], |r| r.get(0))
+                .optional()?
+                .flatten();
+            Ok(seq.map(|n| format!("@{n}")))
         })
     }
 
@@ -491,9 +546,261 @@ CREATE TABLE wake_targets (
     updated_at INTEGER NOT NULL
 );
 "#,
+    r#"
+CREATE TABLE lanes (
+    lane_id    TEXT PRIMARY KEY,
+    node_id    TEXT NOT NULL REFERENCES nodes(node_id),
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    name       TEXT NOT NULL,
+    charter    TEXT NOT NULL,
+    lead_id    TEXT NOT NULL REFERENCES agents(agent_id),
+    created_by TEXT NOT NULL REFERENCES agents(agent_id),
+    status     TEXT NOT NULL,
+    thread_id  TEXT,
+    outcome    TEXT,
+    pr_url     TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    closed_at  INTEGER,
+    event_id   TEXT NOT NULL
+);
+CREATE UNIQUE INDEX lanes_open_name ON lanes(node_id, project_id, name) WHERE closed_at IS NULL;
+CREATE INDEX lanes_by_project ON lanes(project_id, status);
+
+CREATE TABLE lane_links (
+    lane_id    TEXT NOT NULL REFERENCES lanes(lane_id),
+    kind       TEXT NOT NULL,
+    ref_id     TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (lane_id, kind, ref_id)
+);
+
+CREATE TABLE lane_reports (
+    report_id  TEXT PRIMARY KEY,
+    lane_id    TEXT NOT NULL REFERENCES lanes(lane_id),
+    node_id    TEXT NOT NULL REFERENCES nodes(node_id),
+    agent_id   TEXT NOT NULL REFERENCES agents(agent_id),
+    kind       TEXT NOT NULL,
+    summary    TEXT NOT NULL,
+    progress   INTEGER,
+    status     TEXT,
+    links      TEXT NOT NULL DEFAULT '[]',
+    artifacts  TEXT NOT NULL DEFAULT '[]',
+    outcome    TEXT,
+    pr_url     TEXT,
+    message_id TEXT,
+    created_at INTEGER NOT NULL,
+    event_id   TEXT NOT NULL
+);
+CREATE INDEX lane_reports_by_lane ON lane_reports(lane_id, created_at);
+"#,
+    r#"
+CREATE TABLE webhooks (
+    webhook_id    TEXT PRIMARY KEY,
+    node_id       TEXT NOT NULL REFERENCES nodes(node_id),
+    url           TEXT NOT NULL,
+    secret        TEXT NOT NULL,
+    filters       TEXT NOT NULL,
+    project_globs TEXT,
+    description   TEXT,
+    token_id      TEXT,
+    created_by    TEXT,
+    created_at    INTEGER NOT NULL,
+    cursor_seq    INTEGER NOT NULL,
+    removed_at    INTEGER,
+    disabled_at   INTEGER,
+    disabled_reason TEXT
+);
+
+CREATE TABLE webhook_deliveries (
+    delivery_id     TEXT PRIMARY KEY,
+    webhook_id      TEXT NOT NULL REFERENCES webhooks(webhook_id),
+    event_id        TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    filter          TEXT NOT NULL,
+    body            TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at INTEGER NOT NULL,
+    last_error      TEXT,
+    last_status     INTEGER,
+    created_at      INTEGER NOT NULL,
+    delivered_at    INTEGER,
+    UNIQUE (webhook_id, event_id)
+);
+CREATE INDEX webhook_deliveries_due ON webhook_deliveries(status, next_attempt_at);
+
+ALTER TABLE resource_leases ADD COLUMN expiry_warned_at INTEGER;
+"#,
+    r#"
+ALTER TABLE requests ADD COLUMN kind TEXT NOT NULL DEFAULT 'task';
+
+CREATE TABLE node_settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE decisions (
+    decision_id       TEXT PRIMARY KEY,
+    node_id           TEXT NOT NULL REFERENCES nodes(node_id),
+    project_id        TEXT NOT NULL REFERENCES projects(project_id),
+    lane_id           TEXT REFERENCES lanes(lane_id),
+    asker_id          TEXT NOT NULL REFERENCES agents(agent_id),
+    human_id          TEXT NOT NULL REFERENCES agents(agent_id),
+    question          TEXT NOT NULL,
+    options           TEXT NOT NULL,
+    allow_free_text   INTEGER NOT NULL DEFAULT 0,
+    context_links     TEXT NOT NULL DEFAULT '[]',
+    deadline_at       INTEGER,
+    on_timeout        TEXT NOT NULL,
+    default_value     TEXT,
+    status            TEXT NOT NULL,
+    answer_value      TEXT,
+    answer_text       TEXT,
+    answered_by       TEXT,
+    relayed_by        TEXT,
+    answered_at       INTEGER,
+    request_id        TEXT NOT NULL REFERENCES requests(request_id),
+    message_id        TEXT NOT NULL,
+    thread_id         TEXT NOT NULL,
+    answer_message_id TEXT,
+    overdue_at        INTEGER,
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL,
+    event_id          TEXT NOT NULL
+);
+CREATE INDEX decisions_by_status ON decisions(node_id, status, deadline_at);
+CREATE INDEX decisions_by_lane ON decisions(lane_id, status);
+"#,
+    r#"
+ALTER TABLE holds ADD COLUMN lane_id TEXT REFERENCES lanes(lane_id);
+CREATE INDEX holds_by_lane ON holds(lane_id, released_at);
+"#,
+    r#"
+CREATE TABLE spend_accounts (
+    account_id        TEXT PRIMARY KEY,
+    node_id           TEXT NOT NULL REFERENCES nodes(node_id),
+    name              TEXT NOT NULL,
+    kind              TEXT NOT NULL,
+    unit              TEXT NOT NULL,
+    budget            REAL,
+    period            TEXT NOT NULL DEFAULT 'monthly',
+    reset_day         INTEGER NOT NULL DEFAULT 1,
+    cost_per_hour     REAL,
+    requires_approval INTEGER NOT NULL DEFAULT 0,
+    approver          TEXT,
+    project_id        TEXT REFERENCES projects(project_id),
+    description       TEXT,
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL,
+    archived_at       INTEGER,
+    event_id          TEXT NOT NULL
+);
+CREATE UNIQUE INDEX spend_accounts_name ON spend_accounts(node_id, name) WHERE archived_at IS NULL;
+
+CREATE TABLE spend_entries (
+    entry_id   TEXT PRIMARY KEY,
+    node_id    TEXT NOT NULL REFERENCES nodes(node_id),
+    account_id TEXT NOT NULL REFERENCES spend_accounts(account_id),
+    amount     REAL NOT NULL,
+    at         INTEGER NOT NULL,
+    agent_id   TEXT REFERENCES agents(agent_id),
+    lane_id    TEXT REFERENCES lanes(lane_id),
+    project_id TEXT REFERENCES projects(project_id),
+    note       TEXT,
+    source     TEXT NOT NULL,
+    lease_id   TEXT,
+    created_at INTEGER NOT NULL,
+    event_id   TEXT NOT NULL
+);
+CREATE INDEX spend_entries_by_account ON spend_entries(account_id, at);
+
+CREATE TABLE spend_leases (
+    lease_id      TEXT PRIMARY KEY,
+    node_id       TEXT NOT NULL REFERENCES nodes(node_id),
+    account_id    TEXT NOT NULL REFERENCES spend_accounts(account_id),
+    agent_id      TEXT NOT NULL REFERENCES agents(agent_id),
+    lane_id       TEXT REFERENCES lanes(lane_id),
+    project_id    TEXT REFERENCES projects(project_id),
+    cost_per_hour REAL NOT NULL,
+    ttl_seconds   INTEGER NOT NULL,
+    status        TEXT NOT NULL,
+    requested_at  INTEGER NOT NULL,
+    started_at    INTEGER,
+    renewed_at    INTEGER,
+    expires_at    INTEGER,
+    ended_at      INTEGER,
+    decision_id   TEXT,
+    note          TEXT,
+    entry_id      TEXT,
+    resource_id   TEXT REFERENCES resources(resource_id)
+);
+CREATE INDEX spend_leases_live ON spend_leases(status, expires_at);
+CREATE INDEX spend_leases_by_resource ON spend_leases(resource_id, agent_id, status);
+ALTER TABLE resources ADD COLUMN spend_account_id TEXT REFERENCES spend_accounts(account_id);
+"#,
+    r#"
+ALTER TABLE lanes ADD COLUMN leaderless_at INTEGER;
+CREATE TABLE agent_invites (
+    invite_id      TEXT PRIMARY KEY,
+    node_id        TEXT NOT NULL REFERENCES nodes(node_id),
+    code_hash      TEXT NOT NULL,
+    agent_name     TEXT NOT NULL,
+    program        TEXT NOT NULL,
+    project_globs  TEXT NOT NULL,
+    lane_id        TEXT REFERENCES lanes(lane_id),
+    max_uses       INTEGER NOT NULL,
+    uses           INTEGER NOT NULL DEFAULT 0,
+    ephemeral      INTEGER NOT NULL DEFAULT 1,
+    idle_hours     INTEGER,
+    token_ttl      INTEGER,
+    created_at     INTEGER NOT NULL,
+    expires_at     INTEGER NOT NULL,
+    revoked_at     INTEGER
+);
+
+CREATE TABLE remote_agents (
+    membership_id   TEXT PRIMARY KEY,
+    node_id         TEXT NOT NULL REFERENCES nodes(node_id),
+    agent_id        TEXT NOT NULL REFERENCES agents(agent_id),
+    invite_id       TEXT NOT NULL REFERENCES agent_invites(invite_id),
+    token_id        TEXT NOT NULL REFERENCES tokens(token_id),
+    lane_id         TEXT REFERENCES lanes(lane_id),
+    ephemeral       INTEGER NOT NULL,
+    idle_hours      INTEGER,
+    client_hostname TEXT,
+    client_version  TEXT,
+    joined_at       INTEGER NOT NULL,
+    state           TEXT NOT NULL,
+    left_at         INTEGER,
+    left_reason     TEXT
+);
+CREATE INDEX remote_agents_by_agent ON remote_agents(agent_id, state);
+
+CREATE TABLE remote_decisions (
+    decision_id     TEXT PRIMARY KEY,
+    node_id         TEXT NOT NULL,
+    project_id      TEXT,
+    lane_id         TEXT,
+    asker_id        TEXT,
+    human           TEXT NOT NULL,
+    question        TEXT NOT NULL,
+    options         TEXT NOT NULL,
+    allow_free_text INTEGER NOT NULL DEFAULT 0,
+    deadline_at     INTEGER,
+    status          TEXT NOT NULL,
+    answer_value    TEXT,
+    answered_by     TEXT,
+    relayed_by      TEXT,
+    answered_at     INTEGER,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL
+);
+"#,
 ];
 
-fn migrate(conn: &mut Connection) -> Result<()> {
+fn migrate_to(conn: &mut Connection, limit: usize) -> Result<()> {
     let current: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     let current = usize::try_from(current).unwrap_or(0);
     if current > MIGRATIONS.len() {
@@ -502,7 +809,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             MIGRATIONS.len()
         )));
     }
-    for (i, sql) in MIGRATIONS.iter().enumerate().skip(current) {
+    for (i, sql) in MIGRATIONS.iter().enumerate().take(limit).skip(current) {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(sql)?;
         tx.pragma_update(None, "user_version", (i + 1) as i64)?;
