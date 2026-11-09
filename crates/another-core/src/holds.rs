@@ -556,7 +556,7 @@ pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
     crate::resources::warn_expiring_leases_tx(tx)?;
     crate::decisions::expire_decisions_tx(tx)?;
     crate::spend::expire_spend_leases_tx(tx)?;
-    crate::remote_agents::expire_remote_agents_tx(tx)?;
+    crate::remote_agents::expire_remote_agents_tx(tx, None)?;
     crate::spend::reconcile_resource_spend_tx(tx)?;
     Ok(SweepReport {
         expired_holds: expired.len(),
@@ -603,21 +603,46 @@ fn renew_tx(tx: &Tx<'_>, actor: &str, holds: &[(String, i64)]) -> Result<()> {
     Ok(())
 }
 
-/// Live holds owned by `agent_id`, optionally limited to `only` ids (error on unknown ids).
+/// All of [`owned_holds`] in projects `scope` may see (all of them locally).
+pub(crate) fn owned_holds_in(
+    tx: &Tx<'_>,
+    agent_id: &str,
+    scope: Option<&TokenScope>,
+) -> Result<Vec<(String, i64)>> {
+    owned_holds(tx, agent_id, &[], scope)
+}
+
+/// Live holds owned by `agent_id` in projects `scope` may see (all of them locally),
+/// optionally limited to `only` ids (error on unknown ids; one outside the scope is unknown).
 pub(crate) fn owned_holds(
     tx: &Tx<'_>,
     agent_id: &str,
     only: &[String],
+    scope: Option<&TokenScope>,
 ) -> Result<Vec<(String, i64)>> {
     let mut stmt = tx.prepare(
-        "SELECT hold_id, ttl_seconds FROM holds
+        "SELECT hold_id, ttl_seconds, project_id FROM holds
          WHERE agent_id = ?1 AND released_at IS NULL ORDER BY created_at",
     )?;
-    let owned = stmt
+    let rows = stmt
         .query_map([agent_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut owned = Vec::new();
+    for (id, ttl, project) in rows {
+        let visible = match scope {
+            Some(s) => crate::tokens::scope_allows_project(tx, s, &project)?,
+            None => true,
+        };
+        if visible {
+            owned.push((id, ttl));
+        }
+    }
     if only.is_empty() {
         return Ok(owned);
     }
@@ -630,30 +655,6 @@ pub(crate) fn owned_holds(
                 .ok_or_else(|| Error::NotFound(format!("no live hold {id:?} owned by this agent")))
         })
         .collect()
-}
-
-/// [`owned_holds`] limited to holds in projects `scope` may see (all of them locally).
-pub(crate) fn owned_holds_in(
-    tx: &Tx<'_>,
-    agent_id: &str,
-    scope: Option<&TokenScope>,
-) -> Result<Vec<(String, i64)>> {
-    let owned = owned_holds(tx, agent_id, &[])?;
-    let Some(scope) = scope else {
-        return Ok(owned);
-    };
-    let mut out = Vec::new();
-    for (id, ttl) in owned {
-        let project: String = tx.query_row(
-            "SELECT project_id FROM holds WHERE hold_id = ?1",
-            [&id],
-            |r| r.get(0),
-        )?;
-        if crate::tokens::scope_allows_project(tx, scope, &project)? {
-            out.push((id, ttl));
-        }
-    }
-    Ok(out)
 }
 
 fn holds_by_id(conn: &Connection, ids: &[String]) -> Result<Vec<Hold>> {
@@ -872,10 +873,21 @@ impl Store {
 
     /// Extend the agent's live holds (all, or just `hold_ids`) by their TTL from now.
     pub fn renew_holds(&self, agent: &str, hold_ids: &[String]) -> Result<Vec<Hold>> {
+        self.renew_holds_scoped(agent, hold_ids, None)
+    }
+
+    /// [`Store::renew_holds`] for a remote caller: only holds in projects the token may see
+    /// (the agent may hold others locally).
+    pub fn renew_holds_scoped(
+        &self,
+        agent: &str,
+        hold_ids: &[String],
+        scope: Option<&TokenScope>,
+    ) -> Result<Vec<Hold>> {
         self.write(|tx| {
             sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, agent)?;
-            let owned = owned_holds(tx, &me.id, hold_ids)?;
+            let owned = owned_holds(tx, &me.id, hold_ids, scope)?;
             renew_tx(tx, &me.address, &owned)?;
             touch(tx, &me.id)?;
             let ids: Vec<String> = owned.into_iter().map(|(id, _)| id).collect();
@@ -885,10 +897,21 @@ impl Store {
 
     /// Release the agent's live holds (all, or just `hold_ids`). Returns the released ids.
     pub fn release_holds(&self, agent: &str, hold_ids: &[String]) -> Result<Vec<String>> {
+        self.release_holds_scoped(agent, hold_ids, None)
+    }
+
+    /// [`Store::release_holds`] for a remote caller: only holds in projects the token may see
+    /// (the agent may hold others locally).
+    pub fn release_holds_scoped(
+        &self,
+        agent: &str,
+        hold_ids: &[String],
+        scope: Option<&TokenScope>,
+    ) -> Result<Vec<String>> {
         self.write(|tx| {
             sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, agent)?;
-            let ids: Vec<String> = owned_holds(tx, &me.id, hold_ids)?
+            let ids: Vec<String> = owned_holds(tx, &me.id, hold_ids, scope)?
                 .into_iter()
                 .map(|(id, _)| id)
                 .collect();
@@ -1109,8 +1132,9 @@ impl Store {
                     "UPDATE agents SET status = 'offline', last_seen_at = ?2 WHERE agent_id = ?1",
                     params![me.id, tx.now],
                 )?;
-                // An ephemeral remote agent whose session ended leaves now.
-                crate::remote_agents::expire_remote_agents_tx(tx)?;
+                // An ephemeral remote agent whose session ended leaves now, cleaning up no
+                // more than the token that ended it may reach.
+                crate::remote_agents::expire_remote_agents_tx(tx, scope)?;
                 (Vec::new(), ids, "offline")
             } else {
                 if phase == SessionPhase::Start {

@@ -504,8 +504,35 @@ fn membership_scope(tx: &Tx<'_>, agent: &AgentRef) -> Result<TokenScope> {
     })
 }
 
+/// The projects both scopes allow, as a scope of exact slugs (slugs are unique per node and
+/// contain no glob metacharacters).
+fn narrow_scope(tx: &Tx<'_>, wide: &TokenScope, caller: &TokenScope) -> Result<TokenScope> {
+    let mut stmt = tx.prepare("SELECT abs_path, slug FROM projects WHERE node_id = ?1")?;
+    let projects = stmt
+        .query_map([tx.node_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let project_globs = projects
+        .into_iter()
+        .filter(|(path, slug)| {
+            let candidates = [path.clone(), slug.clone()];
+            glob_allows(&wide.project_globs, &candidates)
+                && glob_allows(&caller.project_globs, &candidates)
+        })
+        .map(|(_, slug)| slug)
+        .collect();
+    Ok(TokenScope {
+        project_globs,
+        ..wide.clone()
+    })
+}
+
 /// Ephemeral agents that ended their session or went unseen too long leave (sweeper).
-pub(crate) fn expire_remote_agents_tx(tx: &Tx<'_>) -> Result<usize> {
+///
+/// `caller` is the token that ended its agent's session, if one did: that agent's departure
+/// then cleans up only what both its invites and that token reach.
+pub(crate) fn expire_remote_agents_tx(tx: &Tx<'_>, caller: Option<&TokenScope>) -> Result<usize> {
     let mut stmt = tx.prepare(&format!(
         "SELECT DISTINCT r.agent_id,
            CASE WHEN a.status = 'offline' THEN 'session_ended' ELSE 'idle' END
@@ -523,7 +550,10 @@ pub(crate) fn expire_remote_agents_tx(tx: &Tx<'_>) -> Result<usize> {
         let a = agent_by_id(tx, agent_id)?;
         // Only what the agent did through its invites' tokens is cleaned up: holds and
         // leases it has in other projects (locally) are left alone.
-        let scope = membership_scope(tx, &a)?;
+        let mut scope = membership_scope(tx, &a)?;
+        if let Some(c) = caller.filter(|c| c.agent_id == a.id) {
+            scope = narrow_scope(tx, &scope, c)?;
+        }
         depart_tx(tx, &a, reason, false, Some(&scope))?;
     }
     Ok(due.len())

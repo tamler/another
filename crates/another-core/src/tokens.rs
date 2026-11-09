@@ -10,7 +10,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
-use crate::identity::{address, resolve_agent};
+use crate::identity::{address, normalize_project_path, resolve_agent};
 use crate::store::{new_id, Store};
 use crate::time::{fmt_opt, fmt_ts};
 
@@ -107,6 +107,21 @@ pub(crate) fn scope_allows_project(
         Some((path, slug)) => glob_allows(&scope.project_globs, &[path, slug]),
         None => false,
     })
+}
+
+/// Whether the agent sent or received any message in the thread.
+fn in_thread(conn: &Connection, agent_id: &str, thread_id: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM messages m WHERE m.thread_id = ?1 AND (m.sender_id = ?2 OR
+               EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = m.message_id
+                       AND d.agent_id = ?2))
+             LIMIT 1",
+            params![thread_id, agent_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
 }
 
 /// Whether `candidate` matches any of the token's project globs.
@@ -327,10 +342,19 @@ impl Store {
         })
     }
 
-    /// Whether a token may act on `project` (an absolute path or slug, existing or new).
+    /// Whether a token may act on `project` (an absolute path or slug, existing or new). An
+    /// absolute path is judged as the store will use it: normalized, so `..` cannot escape.
     pub fn project_allowed(&self, scope: &TokenScope, project: &str) -> Result<bool> {
+        let key = if std::path::Path::new(project).is_absolute() {
+            match normalize_project_path(project) {
+                Ok(path) => path,
+                Err(_) => return Ok(false),
+            }
+        } else {
+            project.trim_end_matches('/').to_string()
+        };
         self.read(|conn| {
-            let mut candidates = vec![project.trim_end_matches('/').to_string()];
+            let mut candidates = vec![key];
             let known: Option<(String, String)> = conn
                 .query_row(
                     "SELECT abs_path, slug FROM projects
@@ -354,18 +378,24 @@ impl Store {
 
     /// Whether the agent sent or received any message in the thread.
     pub fn in_thread(&self, agent_id: &str, thread_id: &str) -> Result<bool> {
+        self.read(|conn| in_thread(conn, agent_id, thread_id))
+    }
+
+    /// A remote peer may reply to `message_id` only if the token's agent is already in its
+    /// thread; any other message looks missing, exactly as an unknown id does.
+    pub fn check_reply_access(&self, scope: &TokenScope, message_id: &str) -> Result<()> {
         self.read(|conn| {
-            Ok(conn
+            let thread: Option<String> = conn
                 .query_row(
-                    "SELECT 1 FROM messages m WHERE m.thread_id = ?1 AND (m.sender_id = ?2 OR
-                       EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = m.message_id
-                               AND d.agent_id = ?2))
-                     LIMIT 1",
-                    params![thread_id, agent_id],
-                    |_| Ok(()),
+                    "SELECT thread_id FROM messages WHERE message_id = ?1",
+                    [message_id],
+                    |r| r.get(0),
                 )
-                .optional()?
-                .is_some())
+                .optional()?;
+            match thread {
+                Some(t) if in_thread(conn, &scope.agent_id, &t)? => Ok(()),
+                _ => Err(Error::NotFound(format!("unknown message {message_id:?}"))),
+            }
         })
     }
 

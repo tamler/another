@@ -163,7 +163,7 @@ pub(crate) fn validate_name(name: &str) -> Result<()> {
 }
 
 /// Normalize an absolute project path: no trailing slash, no `.`/`..` components.
-fn normalize_project_path(raw: &str) -> Result<String> {
+pub(crate) fn normalize_project_path(raw: &str) -> Result<String> {
     let path = Path::new(raw);
     if !path.is_absolute() {
         return Err(Error::Invalid(format!(
