@@ -68,3 +68,76 @@ fn bh2_concurrent_first_open_succeeds() {
         assert_eq!(ids.len(), 1, "round {round}: one local node, got {ids:?}");
     }
 }
+
+/// BH-5. Durations were multiplied to milliseconds unchecked: a panic in debug builds and a
+/// wrapped, wrong deadline in release builds.
+#[test]
+fn bh5_absurd_durations_are_refused() {
+    let (clock, _) = Clock::manual(1_795_219_200_000);
+    let s = Store::open_in_memory(clock).unwrap();
+    for name in ["a", "b"] {
+        s.register_agent(RegisterAgent {
+            name: name.into(),
+            program: Program::Claude,
+            project: None,
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    }
+    let invalid = |r: Result<()>, what: &str| match r {
+        Err(Error::Invalid(_)) => {}
+        other => panic!("{what}: expected Invalid, got {other:?}"),
+    };
+    for secs in [i64::MAX, i64::MAX / 1000, 9_223_372_036_854_775] {
+        invalid(
+            s.create_token("a", &[], None, Some(secs)).map(|_| ()),
+            "token expiry",
+        );
+        invalid(
+            s.send_message(SendMessage {
+                from: "a".into(),
+                to: vec!["b".into()],
+                subject: "s".into(),
+                request: Some(NewRequest {
+                    due_in_seconds: Some(secs),
+                }),
+                ..Default::default()
+            })
+            .map(|_| ()),
+            "request due",
+        );
+    }
+    // Sane values still work, up to a century out.
+    s.create_token("a", &[], None, Some(100 * 365 * 86_400))
+        .unwrap();
+    let m = s
+        .send_message(SendMessage {
+            from: "a".into(),
+            to: vec!["b".into()],
+            subject: "s".into(),
+            request: Some(NewRequest {
+                due_in_seconds: Some(3600),
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+    let id = m.request_id.expect("request opened");
+    invalid(
+        s.update_request(RequestUpdate {
+            agent: "b".into(),
+            request_id: id,
+            action: RequestAction::Claim,
+            note: None,
+            due_in_seconds: Some(i64::MAX),
+        })
+        .map(|_| ()),
+        "claim due",
+    );
+    s.set_node_name("hub").unwrap();
+    invalid(
+        s.create_invite("https://hub.example", &[], i64::MAX)
+            .map(|_| ()),
+        "invite expiry",
+    );
+}

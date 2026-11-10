@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use crate::identity::{address, resolve_agent, AgentRef};
 use crate::mail::{send_tx, touch, Importance, SendMessage};
 use crate::store::{Store, Tx};
-use crate::time::{fmt_opt, fmt_ts};
+use crate::time::{after_secs, fmt_opt, fmt_ts};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -157,7 +157,7 @@ pub(crate) fn get_request(conn: &Connection, request_id: &str) -> Result<Request
 fn due_from(now: i64, secs: Option<i64>) -> Result<Option<i64>> {
     match secs {
         None => Ok(None),
-        Some(s) if s > 0 => Ok(Some(now + s * 1000)),
+        Some(s) if s > 0 => after_secs(now, s, "due time").map(Some),
         Some(_) => Err(Error::Invalid("due_in_seconds must be positive".into())),
     }
 }
