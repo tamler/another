@@ -886,7 +886,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
 
     let store = open(home)?;
     let code = match cli.command {
-        Command::Serve { .. } | Command::Dashboard { .. } | Command::Hook(_) | Command::Remote(_) => {
+        Command::Serve { .. }
+        | Command::Dashboard { .. }
+        | Command::Hook(_)
+        | Command::Remote(_) => {
             unreachable!("handled above")
         }
         Command::Init | Command::Status => {

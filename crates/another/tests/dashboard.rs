@@ -64,6 +64,7 @@ async fn serve(opts: HttpOptions) -> Running {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let mut opts = opts;
+    opts.bound_port = addr.port();
     opts.dashboard_bound = Some(addr);
     let app = http_router(store.clone(), ct.clone(), &opts);
     let stop = ct.clone();
@@ -498,6 +499,79 @@ async fn auth_server_hides_the_dashboard_unless_explicit() {
         401
     );
     redacted.ct.cancel();
+}
+
+#[tokio::test]
+async fn auth_dashboard_keeps_loopback_host_when_a_tunnel_host_is_allowed() {
+    let srv = serve(HttpOptions {
+        auth: true,
+        dashboard: DashboardMode::Redacted,
+        allowed_hosts: vec!["tunnel.example".into()],
+        oauth: Some(another::oauth_http::parse_public_url("https://tunnel.example").unwrap()),
+        ..Default::default()
+    })
+    .await;
+    let authority = srv.base.trim_start_matches("http://");
+    let health = raw_status(
+        authority,
+        "GET /health HTTP/1.1\r\nHost: tunnel.example\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(
+        health, 200,
+        "the tunnel host is allowed on the rest of the server"
+    );
+    for path in ["/ui", "/api/dash", "/api/dash/stream"] {
+        let status = raw_status(
+            authority,
+            &format!("GET {path} HTTP/1.1\r\nHost: tunnel.example\r\nConnection: close\r\n\r\n"),
+        )
+        .await;
+        assert_eq!(status, 403, "{path} must refuse the tunnel host");
+    }
+    let page = raw_status(
+        authority,
+        &format!("GET /ui HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"),
+    )
+    .await;
+    assert_eq!(page, 200);
+    let origin = raw_status(
+        authority,
+        &format!(
+            "POST /api/dash/holds/nope/release HTTP/1.1\r\nHost: {authority}\r\nOrigin: https://tunnel.example\r\nContent-Type: application/json\r\nContent-Length: 16\r\nX-Another-Confirm: 1\r\nConnection: close\r\n\r\n{{\"confirm\":true}}"
+        ),
+    )
+    .await;
+    assert_eq!(origin, 403, "the public origin is not a dashboard origin");
+    srv.ct.cancel();
+
+    // Actions exist only without `--auth`. The public origin still must not
+    // pass, even though the edge guard accepts it for the rest of the server.
+    let local = serve(HttpOptions {
+        dashboard: DashboardMode::Local,
+        allowed_hosts: vec!["tunnel.example".into()],
+        oauth: Some(another::oauth_http::parse_public_url("https://tunnel.example").unwrap()),
+        ..Default::default()
+    })
+    .await;
+    let local_authority = local.base.trim_start_matches("http://");
+    let public_origin = raw_status(
+        local_authority,
+        &format!(
+            "POST /api/dash/holds/nope/release HTTP/1.1\r\nHost: {local_authority}\r\nOrigin: https://tunnel.example\r\nContent-Type: application/json\r\nContent-Length: 16\r\nX-Another-Confirm: 1\r\nConnection: close\r\n\r\n{{\"confirm\":true}}"
+        ),
+    )
+    .await;
+    assert_eq!(public_origin, 403);
+    let bound_origin = raw_status(
+        local_authority,
+        &format!(
+            "POST /api/dash/holds/nope/release HTTP/1.1\r\nHost: {local_authority}\r\nOrigin: http://{local_authority}\r\nContent-Type: application/json\r\nContent-Length: 16\r\nX-Another-Confirm: 1\r\nConnection: close\r\n\r\n{{\"confirm\":true}}"
+        ),
+    )
+    .await;
+    assert_eq!(bound_origin, 404, "the exact bound origin is accepted");
+    local.ct.cancel();
 }
 
 #[test]

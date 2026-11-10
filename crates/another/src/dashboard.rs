@@ -151,6 +151,11 @@ fn request_host(request: &Request) -> Option<String> {
 }
 
 /// `127.0.0.1`, `localhost`, and `[::1]`, with or without a port, or the exact bound address.
+///
+/// Parsing goes through [`crate::oauth_http::split_host_header`], so `+80` and
+/// `0080` fail here the same way they fail the server-wide check. The allow
+/// list is still only loopback: a tunnel host that the edge guard accepts is
+/// not a dashboard host.
 fn loopback_host(host: &str, bound: Option<&SocketAddr>) -> bool {
     let host = host.trim();
     if host.is_empty() || host.len() > 255 {
@@ -161,51 +166,10 @@ fn loopback_host(host: &str, bound: Option<&SocketAddr>) -> bool {
             return true;
         }
     }
-    let Some((name, port)) = split_host(host) else {
+    let Some((name, _)) = crate::oauth_http::split_host_header(host) else {
         return false;
     };
-    if let Some(port) = port {
-        if !valid_port(port) {
-            return false;
-        }
-    }
-    name == "127.0.0.1" || name.eq_ignore_ascii_case("localhost") || name == "::1"
-}
-
-fn split_host(host: &str) -> Option<(&str, Option<&str>)> {
-    if let Some(rest) = host.strip_prefix('[') {
-        let (name, after) = rest.split_once(']')?;
-        if name.is_empty() || name.contains(['/', ' ', '@']) {
-            return None;
-        }
-        let port = if after.is_empty() {
-            None
-        } else {
-            Some(after.strip_prefix(':')?.trim())
-        };
-        if port.is_some_and(str::is_empty) {
-            return None;
-        }
-        return Some((name, port));
-    }
-    if let Some((name, port)) = host.rsplit_once(':') {
-        if name.is_empty() || name.contains(':') || port.is_empty() {
-            return None;
-        }
-        return Some((name, Some(port)));
-    }
-    Some((host, None))
-}
-
-fn valid_port(port: &str) -> bool {
-    // `+80` and `0080` are not the same port as `80`.
-    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
-        return false;
-    }
-    if port.len() > 1 && port.starts_with('0') {
-        return false;
-    }
-    matches!(port.parse::<u16>(), Ok(n) if n > 0)
+    name == "127.0.0.1" || name == "localhost" || name == "::1"
 }
 
 /// `http://` plus a loopback host on the exact bound port.
@@ -228,13 +192,10 @@ fn loopback_origin(origin: &str, bound: Option<&SocketAddr>) -> bool {
     if host.is_empty() || host.contains(['/', '?', '#', '@', '\\', ' ']) {
         return false;
     }
-    let Some((name, port)) = split_host(host) else {
+    let Some((name, port)) = crate::oauth_http::split_host_header(host) else {
         return false;
     };
-    let Some(port) = port else {
-        return false;
-    };
-    if !valid_port(port) || port != bound.port().to_string() {
+    if port != Some(bound.port()) {
         return false;
     }
     host.eq_ignore_ascii_case(&bound.to_string())

@@ -65,7 +65,12 @@ pub struct RateLimiter {
 struct Bucket {
     tokens: u32,
     updated: Instant,
+    capacity: u32,
+    every: Duration,
 }
+
+/// Stop a flood of one-off addresses from wiping buckets that are still in use.
+const RATE_LIMIT_CAP: usize = 4096;
 
 /// Host, origin, and (when OAuth is on) rate-limit policy for one server.
 #[derive(Clone)]
@@ -205,13 +210,26 @@ impl Default for RateLimiter {
 impl RateLimiter {
     fn take(&self, key: &str, capacity: u32, every: Duration) -> Result<(), u64> {
         let mut map = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        if map.len() > 4096 {
-            map.clear();
-        }
         let now = Instant::now();
+        // A bucket is stale once it has refilled and gone quiet. Drop those
+        // first. A full clear would also forget clients who are still limited.
+        map.retain(|existing, bucket| existing == key || !bucket.is_stale(now));
+        if !map.contains_key(key) && map.len() >= RATE_LIMIT_CAP {
+            let mut oldest: Vec<(Instant, String)> = map
+                .iter()
+                .map(|(k, bucket)| (bucket.updated, k.clone()))
+                .collect();
+            oldest.sort_by_key(|(updated, _)| *updated);
+            let overflow = map.len() + 1 - RATE_LIMIT_CAP;
+            for (_, stale_key) in oldest.into_iter().take(overflow) {
+                map.remove(&stale_key);
+            }
+        }
         let bucket = map.entry(key.to_string()).or_insert(Bucket {
             tokens: capacity,
             updated: now,
+            capacity,
+            every,
         });
         let elapsed = now.saturating_duration_since(bucket.updated);
         let steps = elapsed.as_nanos() / every.as_nanos().max(1);
@@ -226,6 +244,19 @@ impl RateLimiter {
         }
         bucket.tokens -= 1;
         Ok(())
+    }
+}
+
+impl Bucket {
+    /// Fully refilled, and last touched at least one refill interval ago.
+    fn is_stale(&self, now: Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.updated);
+        if elapsed < self.every {
+            return false;
+        }
+        let steps = elapsed.as_nanos() / self.every.as_nanos().max(1);
+        let add = u32::try_from(steps).unwrap_or(u32::MAX);
+        self.tokens.saturating_add(add) >= self.capacity
     }
 }
 
@@ -358,7 +389,11 @@ fn normalize_host(host: &str) -> String {
     host.trim_matches(['[', ']']).to_ascii_lowercase()
 }
 
-fn split_host_header(header: &str) -> Option<(String, Option<u16>)> {
+/// Split a `Host` header into a lowercase host and an optional port.
+///
+/// `+80` and `0080` are rejected. `Authority` would otherwise read `0080` as
+/// port 80, which would let a non-canonical port match the bound port.
+pub(crate) fn split_host_header(header: &str) -> Option<(String, Option<u16>)> {
     let header = header.trim();
     if header.is_empty()
         || header.len() > 512
@@ -373,7 +408,14 @@ fn split_host_header(header: &str) -> Option<(String, Option<u16>)> {
         if host.is_empty() {
             return None;
         }
-        return Some((host, authority.port_u16()));
+        let port = authority.port_u16();
+        if let Some(port) = port {
+            let raw = header.rsplit_once(':').map(|(_, text)| text).unwrap_or("");
+            if raw != port.to_string() {
+                return None;
+            }
+        }
+        return Some((host, port));
     }
     if header.contains(':') {
         return None;
@@ -947,7 +989,7 @@ async fn wait_page(
     res.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
         header::HeaderValue::from_static(
-            "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'",
+            "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         ),
     );
     res.headers_mut().insert(
@@ -1391,6 +1433,14 @@ mod tests {
         assert!(!policy.allows("evil.example"));
         assert!(!policy.allows("evil.example:7466"));
         assert!(!policy.allows(""));
+        assert!(!policy.allows("127.0.0.1:0080"));
+        assert!(!policy.allows("127.0.0.1:+80"));
+        assert!(!policy.allows("localhost:07466"));
+        let eighty = HostPolicy::for_bind(80, ["unused.example"]);
+        assert!(eighty.allows("127.0.0.1:80"));
+        assert!(eighty.allows("localhost:80"));
+        assert!(!eighty.allows("127.0.0.1:0080"));
+        assert!(!eighty.allows("localhost:+80"));
     }
 
     #[test]
@@ -1425,6 +1475,26 @@ mod tests {
         assert!(limits.allow("register", ip).is_ok());
         let other: IpAddr = "203.0.113.6".parse().unwrap();
         assert!(limits.allow("token", other).is_ok());
+    }
+
+    #[test]
+    fn rate_limiter_evicts_stale_buckets_without_clearing_live_ones() {
+        let limits = RateLimiter::new();
+        for i in 0..RATE_LIMIT_CAP {
+            assert!(limits
+                .take(&format!("old|{i}"), 1, Duration::from_millis(1))
+                .is_ok());
+        }
+        assert!(limits.take("live", 1, Duration::from_secs(60)).is_ok());
+        assert!(limits.take("live", 1, Duration::from_secs(60)).is_err());
+        std::thread::sleep(Duration::from_millis(20));
+        // The quiet one-token buckets have refilled. The live one has not.
+        assert!(limits.take("live", 1, Duration::from_secs(60)).is_err());
+        assert!(limits.take("fresh", 1, Duration::from_secs(60)).is_ok());
+        let map = limits.inner.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(map.len() <= RATE_LIMIT_CAP);
+        assert!(map.contains_key("live"));
+        assert_eq!(map["live"].tokens, 0);
     }
 
     #[test]
