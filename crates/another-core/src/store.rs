@@ -104,7 +104,7 @@ impl Store {
         }
         let path = home.join(DB_FILE);
         let conn = Connection::open(&path)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        enable_wal(&conn)?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         Self::init(conn, clock, Some(path))
     }
@@ -493,22 +493,43 @@ CREATE TABLE wake_targets (
 "#,
 ];
 
-fn migrate(conn: &mut Connection) -> Result<()> {
-    let current: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    let current = usize::try_from(current).unwrap_or(0);
-    if current > MIGRATIONS.len() {
-        return Err(Error::Invalid(format!(
-            "database schema v{current} is newer than this another build supports (v{}); upgrade another",
-            MIGRATIONS.len()
-        )));
+/// Switch to WAL. While several connections convert a new database at once, SQLite answers
+/// busy without calling the busy handler, so retry for up to the usual busy timeout.
+fn enable_wal(conn: &Connection) -> Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match conn.pragma_update(None, "journal_mode", "WAL") {
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::DatabaseBusy
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            other => return Ok(other?),
+        }
     }
-    for (i, sql) in MIGRATIONS.iter().enumerate().skip(current) {
+}
+
+fn migrate(conn: &mut Connection) -> Result<()> {
+    // Read the version inside each write transaction: another process may have applied a
+    // step while this one waited for the lock (several sessions opening a new home at once).
+    loop {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let current = usize::try_from(current).unwrap_or(0);
+        if current > MIGRATIONS.len() {
+            return Err(Error::Invalid(format!(
+                "database schema v{current} is newer than this another build supports (v{}); upgrade another",
+                MIGRATIONS.len()
+            )));
+        }
+        let Some(sql) = MIGRATIONS.get(current) else {
+            return Ok(());
+        };
         tx.execute_batch(sql)?;
-        tx.pragma_update(None, "user_version", (i + 1) as i64)?;
+        tx.pragma_update(None, "user_version", (current + 1) as i64)?;
         tx.commit()?;
     }
-    Ok(())
 }
 
 fn ensure_local_node(

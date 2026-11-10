@@ -38,3 +38,33 @@ fn bh1_project_allowed_judges_the_path_the_store_will_use() {
     // A path that stays inside after normalizing is still fine.
     assert!(s.project_allowed(&sandbox, "/sandbox/w/x/../y").unwrap());
 }
+
+/// BH-2. Several processes opening a new home at once each ran the migrations, because the
+/// schema version was read once, before waiting for the write lock.
+#[test]
+fn bh2_concurrent_first_open_succeeds() {
+    use std::sync::{Arc, Barrier};
+    const OPENERS: usize = 8;
+    for round in 0..10 {
+        let home = tempfile::tempdir().unwrap();
+        let barrier = Arc::new(Barrier::new(OPENERS));
+        let handles: Vec<_> = (0..OPENERS)
+            .map(|_| {
+                let path = home.path().to_path_buf();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    Store::open(&path).map(|s| s.node_id().to_string())
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let errors: Vec<String> = results
+            .iter()
+            .filter_map(|r| r.as_ref().err().map(|e| e.to_string()))
+            .collect();
+        assert!(errors.is_empty(), "round {round}: {errors:?}");
+        let ids: std::collections::BTreeSet<_> = results.into_iter().map(Result::unwrap).collect();
+        assert_eq!(ids.len(), 1, "round {round}: one local node, got {ids:?}");
+    }
+}
