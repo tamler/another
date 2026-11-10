@@ -17,6 +17,7 @@ use crate::mail::touch;
 use crate::requests::stale_overdue_tx;
 use crate::store::{new_id, Store, Tx};
 use crate::time::fmt_ts;
+use crate::tokens::TokenScope;
 
 pub const DEFAULT_HOLD_TTL_SECONDS: i64 = 30 * 60;
 pub const MIN_HOLD_TTL_SECONDS: i64 = 60;
@@ -384,17 +385,37 @@ fn renew_tx(tx: &Tx<'_>, actor: &str, holds: &[(String, i64)]) -> Result<()> {
     Ok(())
 }
 
-/// Live holds owned by `agent_id`, optionally limited to `only` ids (error on unknown ids).
-fn owned_holds(tx: &Tx<'_>, agent_id: &str, only: &[String]) -> Result<Vec<(String, i64)>> {
+/// Live holds owned by `agent_id` in projects `scope` may see (all of them locally),
+/// optionally limited to `only` ids (error on unknown ids; one outside the scope is unknown).
+fn owned_holds(
+    tx: &Tx<'_>,
+    agent_id: &str,
+    only: &[String],
+    scope: Option<&TokenScope>,
+) -> Result<Vec<(String, i64)>> {
     let mut stmt = tx.prepare(
-        "SELECT hold_id, ttl_seconds FROM holds
+        "SELECT hold_id, ttl_seconds, project_id FROM holds
          WHERE agent_id = ?1 AND released_at IS NULL ORDER BY created_at",
     )?;
-    let owned = stmt
+    let rows = stmt
         .query_map([agent_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut owned = Vec::new();
+    for (id, ttl, project) in rows {
+        let visible = match scope {
+            Some(s) => crate::tokens::scope_allows_project(tx, s, &project)?,
+            None => true,
+        };
+        if visible {
+            owned.push((id, ttl));
+        }
+    }
     if only.is_empty() {
         return Ok(owned);
     }
@@ -547,10 +568,21 @@ impl Store {
 
     /// Extend the agent's live holds (all, or just `hold_ids`) by their TTL from now.
     pub fn renew_holds(&self, agent: &str, hold_ids: &[String]) -> Result<Vec<Hold>> {
+        self.renew_holds_scoped(agent, hold_ids, None)
+    }
+
+    /// [`Store::renew_holds`] for a remote caller: only holds in projects the token may see
+    /// (the agent may hold others locally).
+    pub fn renew_holds_scoped(
+        &self,
+        agent: &str,
+        hold_ids: &[String],
+        scope: Option<&TokenScope>,
+    ) -> Result<Vec<Hold>> {
         self.write(|tx| {
             sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, agent)?;
-            let owned = owned_holds(tx, &me.id, hold_ids)?;
+            let owned = owned_holds(tx, &me.id, hold_ids, scope)?;
             renew_tx(tx, &me.address, &owned)?;
             touch(tx, &me.id)?;
             let ids: Vec<String> = owned.into_iter().map(|(id, _)| id).collect();
@@ -560,10 +592,21 @@ impl Store {
 
     /// Release the agent's live holds (all, or just `hold_ids`). Returns the released ids.
     pub fn release_holds(&self, agent: &str, hold_ids: &[String]) -> Result<Vec<String>> {
+        self.release_holds_scoped(agent, hold_ids, None)
+    }
+
+    /// [`Store::release_holds`] for a remote caller: only holds in projects the token may see
+    /// (the agent may hold others locally).
+    pub fn release_holds_scoped(
+        &self,
+        agent: &str,
+        hold_ids: &[String],
+        scope: Option<&TokenScope>,
+    ) -> Result<Vec<String>> {
         self.write(|tx| {
             sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, agent)?;
-            let ids: Vec<String> = owned_holds(tx, &me.id, hold_ids)?
+            let ids: Vec<String> = owned_holds(tx, &me.id, hold_ids, scope)?
                 .into_iter()
                 .map(|(id, _)| id)
                 .collect();
@@ -612,10 +655,22 @@ impl Store {
         phase: SessionPhase,
         info: SessionInfo,
     ) -> Result<HeartbeatReport> {
+        self.session_scoped(agent, phase, info, None)
+    }
+
+    /// [`Store::session`] for a remote caller: only holds and resource leases in projects the
+    /// token may see are renewed or released (the agent may hold others locally).
+    pub fn session_scoped(
+        &self,
+        agent: &str,
+        phase: SessionPhase,
+        info: SessionInfo,
+        scope: Option<&TokenScope>,
+    ) -> Result<HeartbeatReport> {
         self.write(|tx| {
             sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, agent)?;
-            let owned = owned_holds(tx, &me.id, &[])?;
+            let owned = owned_holds(tx, &me.id, &[], scope)?;
             let session_payload = || {
                 json!({
                     "agent_id": me.id,
@@ -624,7 +679,8 @@ impl Store {
                 })
             };
             let release_leases = phase == SessionPhase::End && !info.keep_resources;
-            let resource_leases = crate::resources::session_leases_tx(tx, &me, release_leases)?;
+            let resource_leases =
+                crate::resources::session_leases_tx(tx, &me, release_leases, scope)?;
             let (renewed, released, status) = if phase == SessionPhase::End {
                 let ids: Vec<String> = owned.into_iter().map(|(id, _)| id).collect();
                 release_tx(tx, &me.address, &ids, "session_end")?;

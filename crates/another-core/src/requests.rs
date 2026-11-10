@@ -263,9 +263,20 @@ impl Store {
 
     /// Claim, release, complete or cancel a request.
     pub fn update_request(&self, input: RequestUpdate) -> Result<Request> {
+        self.update_request_scoped(input, None)
+    }
+
+    /// [`Store::update_request`] for a remote caller: only a request the token's agent
+    /// created, received or owns; any other looks missing, exactly as an unknown id does.
+    pub fn update_request_scoped(
+        &self,
+        input: RequestUpdate,
+        scope: Option<&crate::tokens::TokenScope>,
+    ) -> Result<Request> {
         self.write(|tx| {
             stale_overdue_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, &input.agent)?;
+            let unknown = || Error::NotFound(format!("unknown request {:?}", input.request_id));
             let (status, owner_id, creator_id, title, thread_id, message_id): (
                 String,
                 Option<String>,
@@ -281,9 +292,22 @@ impl Store {
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
                 )
                 .optional()?
-                .ok_or_else(|| {
-                    Error::NotFound(format!("unknown request {:?}", input.request_id))
-                })?;
+                .ok_or_else(unknown)?;
+            if let Some(scope) = scope {
+                let agent_id = &scope.agent_id;
+                let recipient = tx
+                    .query_row(
+                        "SELECT 1 FROM deliveries WHERE message_id = ?1 AND agent_id = ?2",
+                        params![message_id, agent_id],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some();
+                if creator_id != *agent_id && owner_id.as_ref() != Some(agent_id) && !recipient
+                {
+                    return Err(unknown());
+                }
+            }
             let status: RequestStatus = status.parse()?;
             let owned_by_me = owner_id.as_deref() == Some(me.id.as_str());
             let owner_name = || -> Result<String> {
