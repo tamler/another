@@ -175,6 +175,16 @@ for path, page in pages.items():
     assert "/guides/" in page.main_nav_links, f"{path}: main nav must link to the guides hub"
     if path.name == "404.html":
         assert page.meta.get("robots") == "noindex" and not page.canonicals
+        for key, value in {
+            "og:image": ORIGIN + "/og.png",
+            "og:image:width": "1200",
+            "og:image:height": "630",
+            "twitter:card": "summary_large_image",
+            "twitter:image": ORIGIN + "/twitter.png",
+        }.items():
+            assert page.meta.get(key) == value, f"{path}: {key}"
+        for key in ("og:image:alt", "twitter:image:alt"):
+            assert page.meta.get(key) == IMAGE_ALT, f"{path}: {key}"
         continue
     route = "/" + path.relative_to(ROOT).as_posix().removesuffix("index.html")
     canonical = ORIGIN + route
