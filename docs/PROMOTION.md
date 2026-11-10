@@ -2,7 +2,7 @@
 
 Nothing in this file has been posted. Do not post it from CI, from a pull request, or from any account except the personal X account **@JTamler**. There is no Another account. Do not mention other products, companies, or accounts.
 
-Refresh any number the day you post. The figures below were looked up on 10 Nov 2026 at `github.com/tamler/another`: **0 stars, 1 fork, no GitHub Release**. Milestones 1 through 6 are on main. OAuth for hosted MCP clients (ChatGPT, Claude.ai) is not merged. A local web dashboard is not merged. If a draft below is no longer true, edit it before it goes out. Do not ask for stars, upvotes, reposts, or comments-as-a-favor.
+Refresh any number the day you post. The figures below were looked up on 10 Nov 2026 at `github.com/tamler/another`: **0 stars, 1 fork, no GitHub Release**. Milestones 1 through 6 are on main. OAuth for hosted MCP clients (ChatGPT, Claude.ai) is not merged. The local dashboard is loopback only (`another dashboard`). If a draft below is no longer true, edit it before it goes out. Do not ask for stars, upvotes, reposts, or comments-as-a-favor.
 
 `python3 scripts/check-copy.py` lints this file and `site/`.
 
@@ -36,7 +36,7 @@ Unread mail sat there until the hook existed. `another hook install --client all
 
 ### 7. What is not shipped
 
-No web dashboard in this release. ChatGPT and Claude.ai cannot connect yet. OAuth for those hosted clients is not merged. Today it is `another serve --stdio`, on the machine where the agent already runs.
+The dashboard is loopback only: `another dashboard`. ChatGPT and Claude.ai cannot connect yet. OAuth for those hosted clients is not merged. Agents still use `another serve --stdio` on the machine where they run.
 
 ### 8. Wake, mis-aimed
 
@@ -77,7 +77,7 @@ Skeleton for the first comment, to rewrite by hand:
 ```
 I run Claude Code and Codex on the same repo. They edited the same files and I was pasting messages between them. Another is a local SQLite inbox: mail, requests with an owner, path holds that expire, an activity feed, and a registry for ports and model servers. Apache-2.0. Rust 1.88. cargo install --locked --git https://github.com/tamler/another another
 
-Holds do not block writes. another hold check exits 3 on overlap. Reaping needs --confirm on that machine and cannot be done remotely. No telemetry. No release binary yet. OAuth for ChatGPT or Claude.ai is not merged, and there is no web dashboard. Loopback by default.
+Holds do not block writes. another hold check exits 3 on overlap. Reaping needs --confirm on that machine and cannot be done remotely. No telemetry. No release binary yet. OAuth for ChatGPT or Claude.ai is not merged. The dashboard is loopback only. Loopback by default.
 
 Repo: https://github.com/tamler/another
 ```
@@ -104,7 +104,7 @@ First comment draft (edit it; do not leave it sounding like a brochure):
 ```
 I got tired of being the clipboard between Claude Code and Codex. Another is one SQLite database on the machine: mail, an owner on a request, path holds that expire, and a way to borrow a model server that is already running. It does not start the agents.
 
-Install is cargo from the git repo. Rust 1.88. No account. Holds do not lock the file. There is no dashboard yet and hosted clients like ChatGPT need OAuth that is not merged. https://toanother.one
+Install is cargo from the git repo. Rust 1.88. No account. Holds do not lock the file. The dashboard is loopback only (`another dashboard`). Hosted clients like ChatGPT need OAuth that is not merged. https://toanother.one
 ```
 
 ## Reddit
@@ -163,7 +163,7 @@ The hold does not lock the file. another hold check exits 3 on overlap. I had th
 
 Install, if you want to try the command and not the pitch: cargo install --locked --git https://github.com/tamler/another another
 
-No dashboard in this release. Hosted clients such as ChatGPT need OAuth that is not on main. 0 GitHub stars on 10 Nov 2026. That number is real and it will be stale, so check it before you repeat it.
+The dashboard is loopback only (`another dashboard`). Hosted clients such as ChatGPT need OAuth that is not on main. 0 GitHub stars on 10 Nov 2026. That number is real and it will be stale, so check it before you repeat it.
 ```
 
 ## Bluesky
@@ -177,7 +177,7 @@ I do not have a verified channel list for the Anthropic, OpenAI, or Cursor serve
 ## What I will not do
 
 - Post any of this before the site you intend to send people to is actually deployed.
-- Announce the dashboard or OAuth as available.
+- Announce OAuth as available before it is merged.
 - Invent a star count, a download count, or teams using it.
 - Buy votes, ask friends to pile on, or coordinate a launch thread.
 - Mention other products or companies in the same post.

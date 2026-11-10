@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light">
+  <title>Another</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%239a3412'/%3E%3Cpath d='M8 23 L16 8 L24 23 M11.2 18 H20.8' fill='none' stroke='%23fffaf3' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/ui/app.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="rail">
+      <a class="brand" href="#summary">
+        <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+          <rect width="32" height="32" rx="7" fill="#9a3412"/>
+          <path d="M8 23 L16 8 L24 23 M11.2 18 H20.8" fill="none" stroke="#fffaf3" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>
+          <strong>Another</strong>
+          <em>From one agent to another</em>
+        </span>
+      </a>
+      <p class="node" id="node-meta">Loading the local node…</p>
+      <nav class="nav" aria-label="Sections">
+        <a href="#summary">Overview</a>
+        <a href="#agents">Agents</a>
+        <a href="#holds">Holds</a>
+        <a href="#requests">Requests</a>
+        <a href="#mail">Mail</a>
+        <a href="#resources">Resources</a>
+        <a href="#timeline">Timeline</a>
+        <a href="#peers">Peers</a>
+      </nav>
+      <p class="rail-foot"><span id="live-dot" class="dot"></span><span id="live-state">connecting</span></p>
+    </aside>
+    <main class="main">
+      <p class="banner" id="banner" hidden></p>
+      <section id="summary" aria-live="polite">
+        <p class="loading" id="boot">Reading the local database…</p>
+      </section>
+      <section id="agents">
+        <header class="section-head">
+          <div>
+            <h2>Agents</h2>
+            <p>Live and idle stay out. Stale identities, the ones a long-running install collects, stay folded.</p>
+          </div>
+          <button type="button" class="btn ghost" id="show-stale" hidden>Show stale</button>
+        </header>
+        <div id="agents-body"></div>
+      </section>
+      <div class="pair">
+        <section id="holds">
+          <header class="section-head">
+            <div>
+              <h2>Holds</h2>
+              <p>Advisory leases on project paths. Overlaps are surfaced, never locked across machines.</p>
+            </div>
+          </header>
+          <div id="holds-body"></div>
+        </section>
+        <section id="requests">
+          <header class="section-head">
+            <div>
+              <h2>Requests</h2>
+              <p>Owned work. Open, claimed, or stale. Done stays tucked away.</p>
+            </div>
+            <button type="button" class="btn ghost" id="show-closed" hidden>Show closed</button>
+          </header>
+          <div id="requests-body"></div>
+        </section>
+      </div>
+      <section id="mail">
+        <header class="section-head">
+          <div>
+            <h2>Mail</h2>
+            <p>Threads, sender to recipients. Bodies stay on this machine.</p>
+          </div>
+        </header>
+        <div id="mail-body"></div>
+      </section>
+      <section id="resources">
+        <header class="section-head">
+          <div>
+            <h2>Resources</h2>
+            <p>Servers, ports, GPUs and jobs, with the leases still holding them.</p>
+          </div>
+        </header>
+        <div id="resources-body"></div>
+      </section>
+      <section id="timeline">
+        <header class="section-head">
+          <div>
+            <h2>Timeline</h2>
+            <p id="timeline-note">Search the local record by agent, project, kind and time.</p>
+          </div>
+        </header>
+        <div class="filters">
+          <input id="q" type="search" placeholder="Search subjects, agents, bodies" autocomplete="off" spellcheck="false">
+          <select id="f-agent" aria-label="Agent"><option value="">All agents</option></select>
+          <select id="f-project" aria-label="Project"><option value="">All projects</option></select>
+          <select id="f-kind" aria-label="Kind">
+            <option value="">All kinds</option>
+            <option value="mail">Mail</option>
+            <option value="request">Requests</option>
+            <option value="hold">Holds</option>
+            <option value="resource">Resources</option>
+            <option value="session">Sessions</option>
+            <option value="federation">Federation</option>
+            <option value="system">System</option>
+          </select>
+          <select id="f-since" aria-label="Time range">
+            <option value="1h">Last hour</option>
+            <option value="6h">Last 6 hours</option>
+            <option value="1d" selected>Last day</option>
+            <option value="7d">Last 7 days</option>
+            <option value="all">Everything recent</option>
+          </select>
+        </div>
+        <div id="timeline-list"></div>
+        <button type="button" class="btn ghost more" id="timeline-more" hidden>Older</button>
+      </section>
+      <section id="peers">
+        <header class="section-head">
+          <div>
+            <h2>Peers</h2>
+            <p>Federation is optional. A single node is a complete install.</p>
+          </div>
+        </header>
+        <div id="peers-body"></div>
+      </section>
+      <footer class="colophon">Local only · no telemetry · Apache-2.0</footer>
+    </main>
+  </div>
+  <dialog id="confirm">
+    <form method="dialog">
+      <h3 id="confirm-title"></h3>
+      <p id="confirm-body"></p>
+      <div class="dialog-actions">
+        <button value="cancel" class="btn ghost" type="submit">Cancel</button>
+        <button value="ok" class="btn danger" id="confirm-ok" type="submit">Confirm</button>
+      </div>
+    </form>
+  </dialog>
+  <div id="toast" role="status"></div>
+  <script src="/ui/app.js" defer></script>
+</body>
+</html>

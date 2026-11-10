@@ -55,7 +55,9 @@ Apache-2.0; agent names unique per project; hooks-first (wake adapters are optio
 
 ## Explicitly OUT of scope
 
-- Web UI / TUI, auto-reap policies, pre-commit hold guard, mesh federation, end-to-end mail encryption (future milestones; see SPEC "Later")
+- TUI, auto-reap policies, pre-commit hold guard, mesh federation, end-to-end mail encryption (future work; see SPEC "Later")
+
+A loopback dashboard shipped after this milestone. It is not part of the M6 brief above. See [docs/DASHBOARD.md](docs/DASHBOARD.md) and decisions D36-D40.
 
 ## Keep the README status current
 

@@ -32,6 +32,10 @@ pub struct HttpOptions {
     pub bound_port: u16,
     /// Serve the federation hub endpoints (`/fed/*`), authenticated by node signatures.
     pub federation: bool,
+    /// `Some(true)` is `--dashboard`, `Some(false)` is `--no-dashboard`, `None` is the default.
+    pub dashboard_flag: Option<bool>,
+    /// Effective dashboard mode. [`serve_http`] sets this from the bind and [`dashboard_flag`].
+    pub dashboard: crate::dashboard::DashboardMode,
 }
 
 /// Resolve a bind address and refuse anything that is not loopback.
@@ -137,12 +141,19 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
     };
     let node_id = store.node_id().to_string();
     let auth = opts.auth;
+    let dashboard = opts.dashboard.as_str().to_string();
     let mut app = protected.route(
         "/health",
         axum::routing::get(move || {
             let node_id = node_id.clone();
+            let dashboard = dashboard.clone();
             async move {
-                axum::Json(serde_json::json!({ "ok": true, "node_id": node_id, "auth": auth }))
+                axum::Json(serde_json::json!({
+                    "ok": true,
+                    "node_id": node_id,
+                    "auth": auth,
+                    "dashboard": dashboard,
+                }))
             }
         }),
     );
@@ -151,9 +162,16 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
             oauth: opts.oauth.clone(),
         };
         if opts.oauth.is_some() {
-            app = app.merge(crate::oauth_http::router().with_state(store));
+            app = app.merge(crate::oauth_http::router().with_state(store.clone()));
         }
         app = app.layer(axum::Extension(ctx));
+    }
+    // Mounted after the auth layer, same as /health, so a token is never required.
+    // Actions and message bodies are still withheld unless the mode is local.
+    // The edge guard below still applies. The dashboard router adds its own
+    // loopback Host and bound-port Origin checks on top of that.
+    if opts.dashboard.enabled() {
+        app = app.merge(crate::dashboard::router(store, opts.dashboard));
     }
     // DNS-rebinding checks run for unauthenticated loopback too, not only `--auth`.
     let guard = crate::oauth_http::EdgeGuard::from_http(
@@ -264,6 +282,11 @@ pub async fn serve_http(
 ) -> Result<()> {
     let addr = check_bind(bind, &opts)?;
     let mut opts = opts;
+    opts.dashboard = crate::dashboard::resolve_dashboard(
+        addr.ip().is_loopback(),
+        opts.auth,
+        opts.dashboard_flag,
+    )?;
     let ct = CancellationToken::new();
     spawn_sweeper(store.clone(), sweep_every, ct.clone());
     let listener = tokio::net::TcpListener::bind(addr)
@@ -294,6 +317,18 @@ pub async fn serve_http(
     } else if opts.auth {
         eprintln!(
             "another: OAuth is off. Pass --public-url (the tunnel origin) so ChatGPT and Claude can connect. Bearer tokens still work."
+        );
+    }
+    if opts.dashboard.enabled() {
+        eprintln!(
+            "another: dashboard at http://{local}/ui ({})",
+            opts.dashboard.as_str()
+        );
+    }
+    if opts.dashboard == crate::dashboard::DashboardMode::Redacted {
+        eprintln!(
+            "another: warning: --dashboard on an --auth server is read-only and omits message \
+             bodies. A tunnel pointed at this port exposes that view. Actions stay off."
         );
     }
     let app = http_router(store, ct.clone(), &opts);
