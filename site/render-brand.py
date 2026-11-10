@@ -55,24 +55,11 @@ CAP = 0.73
 DESC = 0.30
 
 
-def write_png(path: Path, width: int, height: int, rgba: bytes) -> None:
-    if len(rgba) != width * height * 4:
-        raise SystemExit(f"png buffer {path} is {len(rgba)} bytes, expected {width * height * 4}")
-    raw = bytearray()
-    stride = width * 4
-    for y in range(height):
-        raw.append(0)
-        raw += rgba[y * stride : (y + 1) * stride]
-    compressed = zlib.compress(bytes(raw), 9)
-
-    def chunk(tag: bytes, data: bytes) -> bytes:
-        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
-
-    ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
-    path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", compressed) + chunk(b"IEND", b""))
-
-
-def png_bytes(width: int, height: int, rgba: bytes) -> bytes:
+def png_bytes(width: int, height: int, rgba: bytes, *, source: str = "") -> bytes:
+    expected = width * height * 4
+    if len(rgba) != expected:
+        where = f"{source} " if source else ""
+        raise SystemExit(f"png buffer {where}is {len(rgba)} bytes, expected {expected}")
     raw = bytearray()
     stride = width * 4
     for y in range(height):
@@ -85,6 +72,10 @@ def png_bytes(width: int, height: int, rgba: bytes) -> bytes:
 
     ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
     return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", compressed) + chunk(b"IEND", b"")
+
+
+def write_png(path: Path, width: int, height: int, rgba: bytes) -> None:
+    path.write_bytes(png_bytes(width, height, rgba, source=str(path)))
 
 
 def write_ico(path: Path, images: list[tuple[int, int, bytes]]) -> None:

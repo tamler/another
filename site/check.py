@@ -310,4 +310,5 @@ for asset in re.findall(r"url\([\"']?([^\"')]+)", css):
     assert asset.startswith("/") and not asset.startswith("//") and (ROOT / asset.lstrip("/")).is_file()
 headers = (ROOT / "_headers").read_text()
 assert "default-src 'none'" in headers and "script-src" not in headers, "executable scripts must stay blocked"
+assert "manifest-src 'self'" in headers, "the web app manifest must be allowed from this site"
 print(f"PASS: {len(EXPECTED)} allowed public files; {len(pages)} HTML pages; {len(ROUTES)} unique canonical/metadata/JSON-LD records; links/anchors; sitemap/robots/llms; icons and 1200x630 social images; no executable scripts or external assets.")
