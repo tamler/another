@@ -1185,3 +1185,104 @@ fn a_descendant_holding_stdout_does_not_outlast_the_deadline() {
         "the adapter's background process was stopped with it"
     );
 }
+
+#[test]
+fn a_dangling_link_after_a_missing_directory_and_dot_dot_is_followed() {
+    let env = Env::new();
+    env.start("claude", &env.main, &[]);
+    env.start("codex", &env.wt, &[]);
+    let out = env.hook(
+        "pre-edit",
+        "claude",
+        &tool(
+            &env.main,
+            "Write",
+            json!({ "file_path": env.main.join("src/new.rs") }),
+        ),
+    );
+    assert_eq!(out, "");
+    std::os::unix::fs::symlink(env.wt.join("src/new.rs"), env.wt.join("dangle.rs")).unwrap();
+    // `nope` does not exist; a client that creates parent directories before writing
+    // ends up writing through `dangle.rs`.
+    let out = env.hook(
+        "pre-edit",
+        "codex",
+        &tool(
+            &env.wt,
+            "Write",
+            json!({ "file_path": env.wt.join("nope/../dangle.rs") }),
+        ),
+    );
+    assert!(
+        denial(&out).contains("src/new.rs is held by claude@shop"),
+        "{out}"
+    );
+}
+
+/// Whether the volume holding `dir` treats `a` and `A` as one name, found by writing.
+fn volume_folds_case(dir: &Path) -> bool {
+    let probe = dir.join("case-probe");
+    std::fs::write(&probe, "").unwrap();
+    let folds = dir.join("CASE-PROBE").exists();
+    std::fs::remove_file(probe).unwrap();
+    folds
+}
+
+#[test]
+fn a_new_file_in_another_letter_case_matches_only_where_the_volume_folds_case() {
+    let env = Env::new();
+    env.start("claude", &env.main, &[]);
+    env.start("codex", &env.wt, &[]);
+    let out = env.hook(
+        "pre-edit",
+        "claude",
+        &tool(
+            &env.main,
+            "Write",
+            json!({ "file_path": env.main.join("src/new.rs") }),
+        ),
+    );
+    assert_eq!(out, "");
+    let out = env.hook(
+        "pre-edit",
+        "codex",
+        &tool(
+            &env.wt,
+            "Write",
+            json!({ "file_path": env.wt.join("src/NEW.RS") }),
+        ),
+    );
+    if volume_folds_case(&env.wt) {
+        assert!(
+            denial(&out).contains("src/NEW.RS is held by claude@shop"),
+            "{out}"
+        );
+    } else {
+        assert_eq!(out, "", "two different files on a case-sensitive volume");
+    }
+}
+
+#[test]
+fn a_symlink_loop_does_not_register_a_second_project() {
+    let env = Env::new();
+    env.start("codex", &env.wt, &[]);
+    std::os::unix::fs::symlink(env.wt.join("loop2"), env.wt.join("loop1")).unwrap();
+    std::os::unix::fs::symlink(env.wt.join("loop1"), env.wt.join("loop2")).unwrap();
+    // Spell the worktree through a symlinked parent, so a fallback to the raw path
+    // would name a directory that is not the registered one.
+    let alias = env.root.join("alias");
+    std::os::unix::fs::symlink(env.wt.parent().unwrap(), &alias).unwrap();
+    let raw = alias.join(env.wt.file_name().unwrap()).join("loop1/x.rs");
+    let out = env.hook(
+        "pre-edit",
+        "codex",
+        &tool(&env.wt, "Write", json!({ "file_path": raw })),
+    );
+    assert_eq!(out, "");
+    let projects: Vec<String> = env
+        .holds()
+        .iter()
+        .map(|h| h["project"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(projects.iter().all(|p| p == "shop-review"), "{projects:?}");
+}

@@ -66,7 +66,7 @@ Each message is announced once, by whichever channel claims it first: a mid-task
 
 ## The edit guard
 
-`pre-edit` runs before each file edit. For every file the tool is about to change it resolves the path the way the filesystem does (symlinks are followed before any `..` after them; a new file is resolved through its existing parent directories; a dangling link is followed to the file it would create; when the file is itself a link, both the link and the file it points at are checked; see [HOLDS.md](HOLDS.md)), works out the file's project from that real path (the deeper of its git checkout and the closest registered project; files in neither, such as scratch space, are left alone), then in one transaction:
+`pre-edit` runs before each file edit. For every file the tool is about to change it resolves the path the way the filesystem does (symlinks are followed before any `..` after them; a new file is resolved through its existing parent directories; a dangling link is followed to the file it would create; when the file is itself a link, both the link and the file it points at are checked; on a volume that ignores letter case, a new file matches holds spelled in any case; see [HOLDS.md](HOLDS.md)), works out the file's project from that real path (the deeper of its git checkout and the closest registered project; files in neither, such as scratch space, are left alone), then in one transaction:
 
 - if another agent holds an overlapping path, nothing is taken and the edit is denied with a message like this one:
 

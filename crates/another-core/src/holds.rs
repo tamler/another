@@ -288,6 +288,48 @@ pub fn patterns_overlap(a: &str, b: &str) -> bool {
     }
 }
 
+/// Whether the volume holding the existing directory `dir` treats names that differ only
+/// in letter case as the same entry (APFS and NTFS by default, ext4 not). Found without
+/// writing: the last name of `dir` with letters is respelled in the other case, and the
+/// result counts only if it is the very same directory. Unknown counts as case-sensitive.
+fn folds_case(dir: &Path) -> bool {
+    let Ok(real) = std::fs::metadata(dir) else {
+        return false;
+    };
+    let mut cur = dir;
+    let mut tail = Vec::new();
+    while let (Some(name), Some(parent)) = (cur.file_name(), cur.parent()) {
+        let name = name.to_string_lossy();
+        let upper = name.to_uppercase();
+        let other = if upper != name {
+            upper
+        } else {
+            name.to_lowercase()
+        };
+        if other != name {
+            let mut probe = parent.join(other);
+            for t in tail.iter().rev() {
+                probe.push(t);
+            }
+            return std::fs::metadata(&probe).is_ok_and(|m| same_entry(&real, &m));
+        }
+        tail.push(name.into_owned());
+        cur = parent;
+    }
+    false
+}
+
+#[cfg(unix)]
+fn same_entry(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+#[cfg(not(unix))]
+fn same_entry(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    a.is_dir() && b.is_dir()
+}
+
 fn matches(glob: &str, path: &str) -> bool {
     // Patterns are validated on the way in; treat an unparsable one as overlapping.
     compile(glob).map(|m| m.is_match(path)).unwrap_or(true)
@@ -370,6 +412,16 @@ fn conflicts_for(
             },
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    // On a volume that ignores letter case, `src/new.rs` and `src/NEW.RS` are one file.
+    // Existing files already arrive in their on-disk case; this catches new ones.
+    let fold = folds_case(Path::new(&project.abs_path));
+    let overlaps = |a: &str, b: &str| {
+        if fold {
+            patterns_overlap(&a.to_lowercase(), &b.to_lowercase())
+        } else {
+            patterns_overlap(a, b)
+        }
+    };
     let mut conflicts = Vec::new();
     for (requested, pattern) in patterns {
         for (held, held_project, held_prefix) in &others {
@@ -377,10 +429,10 @@ fn conflicts_for(
                 continue;
             }
             let overlap = if *held_project == project.project_id {
-                patterns_overlap(pattern, &held.pattern)
+                overlaps(pattern, &held.pattern)
             } else {
                 // Compare as paths from the repository's top level.
-                patterns_overlap(
+                overlaps(
                     &crate::repo::in_repo(&my_prefix, pattern),
                     &crate::repo::in_repo(held_prefix, &held.pattern),
                 )

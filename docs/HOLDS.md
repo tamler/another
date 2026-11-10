@@ -39,10 +39,18 @@ A path given to `another hold acquire` or `hold check`, and every file the edit 
 
 - `alias/a.rs` (with `alias -> src`) is `src/a.rs`;
 - `..` applies after the symlink before it, so `link/../a.rs` is the parent of where `link` points, then `a.rs`;
+- `..` out of a directory that does not exist yet goes back to following links, so `nope/../dangle.rs` is checked where `dangle.rs` points;
 - a dangling link to a file that does not exist yet is checked at the file it would create;
-- for a glob, its literal directories are resolved and the pattern is kept, so `alias/**` is held as `src/**`.
+- for a glob, its literal directories are resolved and the pattern is kept, so `alias/**` is held as `src/**`. A wildcard is not expanded, so a glob whose wildcard covers a link's own name (`al*/a.rs`) is held as written and does not protect `src/a.rs`. Hold the real directory instead;
+- a path through a symlink loop cannot be opened, so it is checked as written, with only its existing directories resolved.
 
 A path whose real location is outside the project is passed on as given. Hard links cannot be seen from a path: an edit through a second hard link to a held file is not stopped.
+
+## Letter case
+
+An existing file is always checked under its on-disk spelling, so `SRC/A.RS` is `src/a.rs` wherever the volume treats them as one file.
+
+A file that does not exist yet has no on-disk spelling. On a volume that ignores letter case (APFS and NTFS by default), holds in that project are compared without regard to case, so a held new `src/new.rs` also stops `src/NEW.RS`. Another tells by looking up the project directory under a different spelling, which writes nothing. On a case-sensitive volume (ext4, or APFS formatted case-sensitive) `src/new.rs` and `src/NEW.RS` are different files and do not collide. Letters are compared with Unicode lowercasing, which can differ from the volume's own rules for a few non-ASCII letters.
 
 ## Whole-project holds
 
