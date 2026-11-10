@@ -7,12 +7,14 @@
 //! server and require an explicit confirm.
 
 use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use another_core::{ActivityKind, DashActivityQuery, DashboardView, Since, Store};
 use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::Next;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -92,10 +94,13 @@ pub fn resolve_dashboard(
 struct DashState {
     store: Store,
     mode: DashboardMode,
+    /// The address this process bound, when known. Its exact `Host` form is allowed
+    /// in addition to `127.0.0.1`, `localhost`, and `[::1]`.
+    bound: Option<SocketAddr>,
 }
 
-pub fn router(store: Store, mode: DashboardMode) -> Router {
-    let state = DashState { store, mode };
+pub fn router(store: Store, mode: DashboardMode, bound: Option<SocketAddr>) -> Router {
+    let state = DashState { store, mode, bound };
     Router::new()
         .route("/ui", get(index))
         .route("/ui/", get(index))
@@ -107,7 +112,103 @@ pub fn router(store: Store, mode: DashboardMode) -> Router {
         .route("/api/dash/stream", get(stream))
         .route("/api/dash/holds/{id}/release", post(release_hold))
         .route("/api/dash/requests/{id}/expire", post(expire_request))
-        .with_state(state)
+        .with_state(state.clone())
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            require_loopback_host,
+        ))
+}
+
+/// DNS rebinding sends a non-loopback `Host` to a loopback socket. Refuse it
+/// before any dashboard byte, including the page, the read APIs, and SSE.
+async fn require_loopback_host(
+    State(state): State<DashState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let host = request_host(&request);
+    if loopback_host(host.as_deref().unwrap_or(""), state.bound.as_ref()) {
+        next.run(request).await
+    } else {
+        forbidden("dashboard requests must use a loopback Host")
+    }
+}
+
+fn request_host(request: &Request) -> Option<String> {
+    if let Some(value) = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+    {
+        return Some(value.to_string());
+    }
+    request.uri().authority().map(|a| a.as_str().to_string())
+}
+
+/// `127.0.0.1`, `localhost`, and `[::1]`, with or without a port, or the exact bound address.
+fn loopback_host(host: &str, bound: Option<&SocketAddr>) -> bool {
+    let host = host.trim();
+    if host.is_empty() || host.len() > 255 {
+        return false;
+    }
+    if let Some(addr) = bound {
+        if host.eq_ignore_ascii_case(&addr.to_string()) {
+            return true;
+        }
+    }
+    let Some((name, port)) = split_host(host) else {
+        return false;
+    };
+    if let Some(port) = port {
+        if !valid_port(port) {
+            return false;
+        }
+    }
+    name == "127.0.0.1" || name.eq_ignore_ascii_case("localhost") || name == "::1"
+}
+
+fn split_host(host: &str) -> Option<(&str, Option<&str>)> {
+    if let Some(rest) = host.strip_prefix('[') {
+        let (name, after) = rest.split_once(']')?;
+        if name.is_empty() || name.contains(['/', ' ', '@']) {
+            return None;
+        }
+        let port = if after.is_empty() {
+            None
+        } else {
+            Some(after.strip_prefix(':')?.trim())
+        };
+        if port.is_some_and(str::is_empty) {
+            return None;
+        }
+        return Some((name, port));
+    }
+    if let Some((name, port)) = host.rsplit_once(':') {
+        if name.is_empty() || name.contains(':') || port.is_empty() {
+            return None;
+        }
+        return Some((name, Some(port)));
+    }
+    Some((host, None))
+}
+
+fn valid_port(port: &str) -> bool {
+    matches!(port.parse::<u16>(), Ok(n) if n > 0)
+}
+
+/// `http://` plus an allowed loopback host. No suffix match, no other scheme, no path.
+fn loopback_origin(origin: &str, bound: Option<&SocketAddr>) -> bool {
+    let origin = origin.trim();
+    let Some((scheme, host)) = origin.split_once("://") else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("http") {
+        return false;
+    }
+    if host.is_empty() || host.contains(['/', '?', '#', '@', '\\', ' ']) {
+        return false;
+    }
+    loopback_host(host, bound)
 }
 
 /// Dashboard-only server used by `another dashboard`. Always local, always loopback.
@@ -135,7 +236,7 @@ pub async fn serve_standalone(
     if open {
         open_browser(&url);
     }
-    let app = router(store, DashboardMode::Local).route(
+    let app = router(store, DashboardMode::Local, Some(local)).route(
         "/health",
         get(|| async { Json(json!({ "ok": true, "dashboard": "local" })) }),
     );
@@ -344,7 +445,7 @@ async fn release_hold(
     if let Err(resp) = ensure_actions(&state) {
         return *resp;
     }
-    if let Err(resp) = confirmed(&headers, &body) {
+    if let Err(resp) = confirmed(&state, &headers, &body) {
         return *resp;
     }
     let store = state.store.clone();
@@ -364,7 +465,7 @@ async fn expire_request(
     if let Err(resp) = ensure_actions(&state) {
         return *resp;
     }
-    if let Err(resp) = confirmed(&headers, &body) {
+    if let Err(resp) = confirmed(&state, &headers, &body) {
         return *resp;
     }
     let store = state.store.clone();
@@ -384,7 +485,7 @@ fn ensure_actions(state: &DashState) -> Result<(), Box<Response>> {
     }
 }
 
-fn confirmed(headers: &HeaderMap, body: &Bytes) -> Result<(), Box<Response>> {
+fn confirmed(state: &DashState, headers: &HeaderMap, body: &Bytes) -> Result<(), Box<Response>> {
     if headers
         .get("x-another-confirm")
         .and_then(|v| v.to_str().ok())
@@ -394,17 +495,14 @@ fn confirmed(headers: &HeaderMap, body: &Bytes) -> Result<(), Box<Response>> {
             "set header X-Another-Confirm: 1 and send {\"confirm\": true}",
         )));
     }
-    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
-        let host = headers
-            .get(header::HOST)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let expected = format!("//{host}");
-        if host.is_empty() || !origin.ends_with(&expected) {
-            return Err(Box::new(forbidden(
-                "cross-origin dashboard actions are refused",
-            )));
-        }
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !loopback_origin(origin, state.bound.as_ref()) {
+        return Err(Box::new(forbidden(
+            "dashboard actions require an exact loopback Origin",
+        )));
     }
     let parsed: ConfirmBody = match serde_json::from_slice(body) {
         Ok(body) => body,
@@ -485,5 +583,32 @@ mod tests {
         );
         assert!(resolve_dashboard(false, true, Some(true)).is_err());
         assert!(resolve_dashboard(false, false, Some(true)).is_err());
+    }
+
+    #[test]
+    fn host_and_origin_allow_only_exact_loopback() {
+        let bound: SocketAddr = "127.0.0.2:7468".parse().unwrap();
+        assert!(loopback_host("127.0.0.1", None));
+        assert!(loopback_host("127.0.0.1:7466", None));
+        assert!(loopback_host("localhost", None));
+        assert!(loopback_host("LOCALHOST:80", None));
+        assert!(loopback_host("[::1]", None));
+        assert!(loopback_host("[::1]:7466", None));
+        assert!(loopback_host("127.0.0.2:7468", Some(&bound)));
+        assert!(!loopback_host("evil.example", None));
+        assert!(!loopback_host("evil.example:80", None));
+        assert!(!loopback_host("127.0.0.1.evil.example", None));
+        assert!(!loopback_host("127.0.0.1:7466:1", None));
+        assert!(!loopback_host("::1", None));
+        assert!(!loopback_host("", None));
+
+        assert!(loopback_origin("http://127.0.0.1:7466", None));
+        assert!(loopback_origin("http://localhost", None));
+        assert!(loopback_origin("http://[::1]:7466", None));
+        assert!(!loopback_origin("http://evil.example", None));
+        assert!(!loopback_origin("http://127.0.0.1.evil.example", None));
+        assert!(!loopback_origin("https://127.0.0.1", None));
+        assert!(!loopback_origin("http://127.0.0.1/ui", None));
+        assert!(!loopback_origin("", None));
     }
 }

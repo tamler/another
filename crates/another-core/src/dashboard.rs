@@ -424,12 +424,12 @@ impl Store {
                 });
             }
             let agent = by_address.get(hold.agent.as_str());
+            // A cross-node clash is only a warning. Releasing still requires the
+            // local owner to be away or stale, even when the hold also overlaps locally.
             let owner_away = agent
-                .map(|a| away(&a.status, a.last_seen_at.as_deref(), now))
+                .map(|a| a.stale || away(&a.status, a.last_seen_at.as_deref(), now))
                 .unwrap_or(true);
-            dash_holds[i].releasable = owner_away
-                || !dash_holds[i].conflicts.is_empty()
-                || !dash_holds[i].remote_warnings.is_empty();
+            dash_holds[i].releasable = owner_away;
         }
 
         let mut request_counts = BTreeMap::<String, u32>::new();
@@ -628,7 +628,8 @@ impl Store {
         })
     }
 
-    /// Release one live hold on this node because its owner is away or it conflicts.
+    /// Release one live hold on this node because its owner is away or stale.
+    /// A conflict, including a cross-node clash, is not enough while the owner is here.
     /// The event names the owner and records the reason `dashboard`.
     pub fn release_hold_from_dashboard(&self, hold_id: &str) -> Result<()> {
         self.write(|tx| {
@@ -639,12 +640,12 @@ impl Store {
                     "holds are released on their owning node".into(),
                 ));
             }
-            let conflict = local_conflict(tx, tx.now, &row)?;
-            let warning = remote_warning(tx, tx.now, &row)?;
-            if !away(&row.status, row.last_seen_at.as_deref(), tx.now) && !conflict && !warning {
+            // Stale (offline for more than a day) is included: `away` is true for every
+            // offline owner, and for an idle owner quiet for at least 30 minutes.
+            if !away(&row.status, row.last_seen_at.as_deref(), tx.now) {
                 return Err(Error::Conflict(
-                    "this hold is still in use; the dashboard releases a hold when its owner \
-                     has been away, or when it conflicts with another hold"
+                    "this hold is still in use; the dashboard releases a hold only when its \
+                     owner is away or stale"
                         .into(),
                 ));
             }
@@ -963,77 +964,29 @@ fn message_body(
 
 struct HoldRow {
     node_id: String,
-    project_id: String,
-    agent_id: String,
-    pattern: String,
-    exclusive: bool,
     address: String,
     status: String,
     last_seen_at: Option<String>,
-    slug: String,
 }
 
 fn hold_row(conn: &Connection, hold_id: &str) -> Result<HoldRow> {
     conn.query_row(
-        "SELECT h.node_id, h.project_id, h.agent_id, h.pattern, h.exclusive,
-                a.address, a.status, a.last_seen_at, p.slug
+        "SELECT h.node_id, a.address, a.status, a.last_seen_at
          FROM holds h
          JOIN agents a ON a.agent_id = h.agent_id
-         JOIN projects p ON p.project_id = h.project_id
          WHERE h.hold_id = ?1 AND h.released_at IS NULL",
         [hold_id],
         |r| {
             Ok(HoldRow {
                 node_id: r.get(0)?,
-                project_id: r.get(1)?,
-                agent_id: r.get(2)?,
-                pattern: r.get(3)?,
-                exclusive: r.get(4)?,
-                address: r.get(5)?,
-                status: r.get(6)?,
-                last_seen_at: r.get::<_, Option<i64>>(7)?.map(fmt_ts),
-                slug: r.get(8)?,
+                address: r.get(1)?,
+                status: r.get(2)?,
+                last_seen_at: r.get::<_, Option<i64>>(3)?.map(fmt_ts),
             })
         },
     )
     .optional()?
     .ok_or_else(|| Error::NotFound(format!("no live hold {hold_id}")))
-}
-
-fn local_conflict(conn: &Connection, now: i64, row: &HoldRow) -> Result<bool> {
-    let mut stmt = conn.prepare(
-        "SELECT h.pattern, h.exclusive FROM holds h
-         WHERE h.released_at IS NULL AND h.expires_at > ?1 AND h.project_id = ?2
-           AND h.agent_id != ?3 AND h.node_id = ?4",
-    )?;
-    let rows = stmt.query_map(
-        params![now, row.project_id, row.agent_id, row.node_id],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)),
-    )?;
-    for other in rows {
-        let (pattern, exclusive) = other?;
-        if (row.exclusive || exclusive) && patterns_overlap(&row.pattern, &pattern) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn remote_warning(conn: &Connection, now: i64, row: &HoldRow) -> Result<bool> {
-    let mut stmt = conn.prepare(
-        "SELECT h.pattern FROM holds h
-         JOIN projects p ON p.project_id = h.project_id
-         WHERE h.released_at IS NULL AND h.expires_at > ?1 AND h.node_id != ?2 AND p.slug = ?3",
-    )?;
-    let rows = stmt.query_map(params![now, row.node_id, row.slug], |r| {
-        r.get::<_, String>(0)
-    })?;
-    for pattern in rows {
-        if patterns_overlap(&row.pattern, &pattern?) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 #[cfg(test)]
@@ -1098,8 +1051,15 @@ mod overlap_tests {
         }
         let snap = store.dashboard_snapshot(DashboardView::LOCAL).unwrap();
         assert_eq!(snap.counts.conflicts, 1);
-        assert!(snap.holds.iter().all(|h| h.releasable));
         assert!(snap.holds.iter().all(|h| h.conflicts.len() == 1));
+        assert!(
+            snap.holds.iter().all(|h| !h.releasable),
+            "a live owner is not released just because the hold overlaps"
+        );
+        let err = store
+            .release_hold_from_dashboard(&snap.holds[0].hold.hold_id)
+            .unwrap_err();
+        assert_eq!(err.code(), "conflict");
     }
 
     const T0_TEST: i64 = 1_800_000_000_000;

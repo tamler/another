@@ -832,6 +832,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     federation: *federation,
                     dashboard_flag,
                     dashboard: crate::dashboard::DashboardMode::Off,
+                    dashboard_bound: None,
                 };
                 crate::serve::serve_http(store, bind, opts, every).await
             }

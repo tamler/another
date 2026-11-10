@@ -36,6 +36,9 @@ pub struct HttpOptions {
     pub dashboard_flag: Option<bool>,
     /// Effective dashboard mode. [`serve_http`] sets this from the bind and [`dashboard_flag`].
     pub dashboard: crate::dashboard::DashboardMode,
+    /// Address actually bound, so the dashboard can accept that exact `Host`.
+    /// `127.0.0.1`, `localhost`, and `[::1]` are always allowed as well.
+    pub dashboard_bound: Option<SocketAddr>,
 }
 
 /// Resolve a bind address and refuse anything that is not loopback.
@@ -171,7 +174,11 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
     // The edge guard below still applies. The dashboard router adds its own
     // loopback Host and bound-port Origin checks on top of that.
     if opts.dashboard.enabled() {
-        app = app.merge(crate::dashboard::router(store, opts.dashboard));
+        app = app.merge(crate::dashboard::router(
+            store,
+            opts.dashboard,
+            opts.dashboard_bound,
+        ));
     }
     // DNS-rebinding checks run for unauthenticated loopback too, not only `--auth`.
     let guard = crate::oauth_http::EdgeGuard::from_http(
@@ -294,6 +301,7 @@ pub async fn serve_http(
         .with_context(|| format!("binding {addr}"))?;
     let local = listener.local_addr()?;
     opts.bound_port = local.port();
+    opts.dashboard_bound = Some(local);
     if !local.ip().is_loopback() {
         // Accept requests addressed to the bound IP itself, on this port only.
         opts.allowed_hosts.push(socket_host(local));

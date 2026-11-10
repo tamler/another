@@ -86,6 +86,102 @@ fn client() -> reqwest::Client {
     reqwest::Client::new()
 }
 
+async fn raw_status(authority: &str, request: &str) -> u16 {
+    let authority = authority.to_string();
+    let request = request.to_string();
+    tokio::task::spawn_blocking(move || raw_status_blocking(&authority, &request))
+        .await
+        .unwrap()
+}
+
+fn raw_status_blocking(authority: &str, request: &str) -> u16 {
+    use std::io::{Read, Write};
+    let mut sock = std::net::TcpStream::connect(authority).unwrap();
+    sock.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .unwrap();
+    sock.set_write_timeout(Some(std::time::Duration::from_secs(2)))
+        .unwrap();
+    sock.write_all(request.as_bytes()).unwrap();
+    let _ = sock.flush();
+    let mut buf = Vec::new();
+    let read = sock.read_to_end(&mut buf);
+    let text = String::from_utf8_lossy(&buf);
+    let status = text
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("0")
+        .parse()
+        .unwrap_or(0);
+    assert!(
+        status != 0,
+        "no status from {authority}: read={read:?} body={text:?} req={request:?}"
+    );
+    status
+}
+
+#[tokio::test]
+async fn foreign_host_is_refused_on_every_dashboard_route() {
+    let srv = serve(HttpOptions {
+        dashboard: DashboardMode::Local,
+        ..Default::default()
+    })
+    .await;
+    let authority = srv.base.trim_start_matches("http://");
+    let gets = [
+        "/ui",
+        "/ui/",
+        "/ui/app.css",
+        "/ui/app.js",
+        "/api/dash",
+        "/api/dash/activity",
+        "/api/dash/revision",
+        "/api/dash/stream",
+    ];
+    for path in gets {
+        let status = raw_status(
+            authority,
+            &format!("GET {path} HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n"),
+        )
+        .await;
+        assert_eq!(status, 403, "{path}");
+    }
+    let posts = [
+        "/api/dash/holds/nope/release",
+        "/api/dash/requests/nope/expire",
+    ];
+    for path in posts {
+        let status = raw_status(
+            authority,
+            &format!(
+                "POST {path} HTTP/1.1\r\nHost: evil.example\r\nContent-Type: application/json\r\nContent-Length: 16\r\nX-Another-Confirm: 1\r\nConnection: close\r\n\r\n{{\"confirm\":true}}"
+            ),
+        )
+        .await;
+        assert_eq!(status, 403, "{path} with a foreign Host");
+        let status = raw_status(
+            authority,
+            &format!(
+                "POST {path} HTTP/1.1\r\nHost: evil.example\r\nOrigin: http://evil.example\r\nContent-Type: application/json\r\nContent-Length: 16\r\nX-Another-Confirm: 1\r\nConnection: close\r\n\r\n{{\"confirm\":true}}"
+            ),
+        )
+        .await;
+        assert_eq!(
+            status, 403,
+            "{path} with Host evil.example and Origin http://evil.example"
+        );
+    }
+    // A loopback Host with an Origin that only looks similar must still fail.
+    let disguised = raw_status(
+        authority,
+        &format!(
+            "POST /api/dash/requests/nope/expire HTTP/1.1\r\nHost: {authority}\r\nOrigin: http://127.0.0.1.evil.example\r\nContent-Type: application/json\r\nContent-Length: 16\r\nX-Another-Confirm: 1\r\nConnection: close\r\n\r\n{{\"confirm\":true}}"
+        ),
+    )
+    .await;
+    assert_eq!(disguised, 403);
+    srv.ct.cancel();
+}
+
 #[tokio::test]
 async fn local_dashboard_shows_bodies_and_requires_confirm() {
     let srv = serve(HttpOptions {
@@ -217,6 +313,7 @@ async fn local_dashboard_shows_bodies_and_requires_confirm() {
             ))
             .header("content-type", "application/json")
             .header("x-another-confirm", "1")
+            .header("origin", &srv.base)
             .body(r#"{"confirm":true}"#)
             .send()
             .await
@@ -232,6 +329,7 @@ async fn local_dashboard_shows_bodies_and_requires_confirm() {
         .post(format!("{}/api/dash/holds/{hold_id}/release", srv.base))
         .header("content-type", "application/json")
         .header("x-another-confirm", "1")
+        .header("origin", &srv.base)
         .body(r#"{"confirm":true}"#)
         .send()
         .await
@@ -457,6 +555,19 @@ async fn dashboard_command_refuses_remote_bind_and_serves_loopback() {
     let url = info["url"].as_str().unwrap().to_string();
     assert!(url.starts_with("http://127.0.0.1:"));
     assert!(url.ends_with("/ui"));
+    let authority = url.trim_start_matches("http://").trim_end_matches("/ui");
+    let foreign = raw_status(
+        authority,
+        "GET /ui HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(foreign, 403, "another dashboard refuses a foreign Host");
+    let rebound = raw_status(
+        authority,
+        "POST /api/dash/requests/nope/expire HTTP/1.1\r\nHost: evil.example\r\nOrigin: http://evil.example\r\nContent-Type: application/json\r\nContent-Length: 16\r\nX-Another-Confirm: 1\r\nConnection: close\r\n\r\n{\"confirm\":true}",
+    )
+    .await;
+    assert_eq!(rebound, 403, "another dashboard refuses a rebinding Origin");
     let page = client().get(&url).send().await.unwrap();
     assert_eq!(page.status(), 200);
     assert!(page.text().await.unwrap().contains("Another"));

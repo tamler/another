@@ -462,7 +462,7 @@ document.body.addEventListener("click", (event) => {
     const who = hold ? hold.agent + " · " + hold.pattern : id;
     confirmAction(
       "Release this hold?",
-      who + ". This only runs on this machine, and only because the owner is away or the hold conflicts.",
+      who + ". This only runs on this machine, and only when that owner is away or stale.",
       "Release hold",
       "/api/dash/holds/" + encodeURIComponent(id) + "/release"
     );

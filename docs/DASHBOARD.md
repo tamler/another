@@ -39,10 +39,10 @@ The dashboard is read-only except for two actions, and only on the unauthenticat
 
 | Action | When |
 |---|---|
-| **Release hold** | The owner is offline, or idle for at least 30 minutes, or the hold overlaps another hold |
+| **Release hold** | The owner is offline, stale, or idle for at least 30 minutes. A clash with another hold is not enough while that owner is still here |
 | **Expire request** | The request is open or claimed. It becomes `stale` and can still be claimed |
 
-Each one asks for a confirm in the page. The request is a JSON body `{"confirm": true}` plus the header `X-Another-Confirm: 1`. A browser page on another origin cannot submit it. The event log records the reason `dashboard`.
+Each one asks for a confirm in the page. The request is a JSON body `{"confirm": true}` plus the header `X-Another-Confirm: 1`, and `Origin` must be exactly `http://` plus a loopback host (`127.0.0.1`, `localhost`, or `[::1]`, with or without the port). The page, the read APIs, and the live stream also refuse a `Host` that is not one of those. A browser page on another name cannot read or submit them, including after DNS rebinding. The event log records the reason `dashboard`.
 
 Holds and requests that belong to another node are not yours to release or expire.
 
