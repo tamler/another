@@ -24,7 +24,9 @@ herdr plugin link ./integrations/herdr
 
 ## Pointing Another at Herdr agents
 
-Herdr addresses agents by name. Tell Another which Herdr agent an Another agent runs in:
+You usually do not need to. When an agent's session starts inside a Herdr pane, the Another session hook records that pane (`$HERDR_PANE_ID`) as its wake target, and forgets it at session end. With the background daemon running (`another daemon install`, see [docs/DAEMON.md](../../docs/DAEMON.md)), an idle agent is prompted in its pane when new mail arrives, without this plugin's action.
+
+To set a target by hand, give the Herdr agent name or pane id:
 
 ```bash
 another wake set --agent codex@shop --via herdr --target reviewer

@@ -82,7 +82,17 @@ pub enum Command {
         /// Seconds between sweeps that expire holds and stale requests.
         #[arg(long, default_value_t = 30)]
         sweep_secs: u64,
+        /// Do not wake idle Herdr agents when new mail arrives.
+        /// (Push delivery runs only on a loopback server without --auth.)
+        #[arg(long)]
+        no_wake: bool,
+        /// Seconds between checks for new mail to push to idle Herdr agents.
+        #[arg(long, default_value_t = 2)]
+        wake_secs: u64,
     },
+    /// Keep `another serve` running in the background (macOS launchd LaunchAgent).
+    #[command(subcommand)]
+    Daemon(DaemonCmd),
     /// Register projects or list them.
     #[command(subcommand)]
     Project(ProjectCmd),
@@ -338,6 +348,13 @@ pub enum Command {
         #[arg(long)]
         summary: bool,
     },
+    /// Count coordination evidence: edits stopped by a hold, holds the edit hook took, mail
+    /// pushed into running sessions and whether it was acted on, requests claimed and done.
+    Stats {
+        /// Start point: a duration (30m, 48h, 2d), an RFC 3339 time, or an event id.
+        #[arg(long, default_value = "24h")]
+        since: String,
+    },
     /// Install, remove or run client hook packs.
     #[command(subcommand)]
     Hook(HookCmd),
@@ -394,6 +411,55 @@ pub enum WakeCmd {
     },
     /// List stored wake targets.
     List,
+    /// Drop automatically captured targets whose pane is gone or whose agent has left
+    /// (session ended, or not seen for a day). Targets set by hand are kept.
+    Prune {
+        /// Show what would be dropped without dropping it.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct DaemonArgs {
+    /// launchd label (change it only to run a second, separate daemon).
+    #[arg(long, default_value = crate::daemon::DEFAULT_LABEL)]
+    label: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DaemonCmd {
+    /// Write the LaunchAgent and load it: `another serve` on loopback, restarted if it exits.
+    Install {
+        #[command(flatten)]
+        args: DaemonArgs,
+        /// Loopback address to serve on.
+        #[arg(long, default_value = crate::serve::DEFAULT_BIND)]
+        bind: String,
+        /// Write the plist but do not load it.
+        #[arg(long)]
+        no_load: bool,
+        /// Show what would change without writing or loading anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Unload the LaunchAgent and remove its plist.
+    Uninstall {
+        #[command(flatten)]
+        args: DaemonArgs,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show whether the daemon is installed, loaded, running and answering.
+    Status {
+        #[command(flatten)]
+        args: DaemonArgs,
+    },
+    /// Restart the daemon (`launchctl kickstart -k`).
+    Restart {
+        #[command(flatten)]
+        args: DaemonArgs,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -665,6 +731,10 @@ pub enum HoldCmd {
         shared: bool,
         #[arg(long)]
         reason: Option<String>,
+        /// Allow a pattern that covers the whole project (`**`, `.`, `**/*.rs`).
+        /// Refused without this flag because it blocks every other agent in the repository.
+        #[arg(long)]
+        repo_wide: bool,
     },
     /// Report conflicts for paths without acquiring (exit code 3 on conflict).
     Check {
@@ -725,9 +795,12 @@ fn init_tracing(serving: bool) {
     let default = if serving { "info" } else { "warn" };
     let filter = tracing_subscriber::EnvFilter::try_from_env("ANOTHER_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default));
+    // Colour only on a terminal: the daemon's log is a file under launchd.
+    use std::io::IsTerminal;
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
         .try_init();
 }
 
@@ -770,6 +843,35 @@ fn project_key(store: &Store, actor: &str, project: Option<String>) -> anyhow::R
     }
 }
 
+/// Literal hold paths resolved through symlinks to the project-relative path they reach,
+/// so a hold taken through an alias covers the real file, as the edit guard sees it.
+/// Globs, and paths that resolve outside the project, are passed on as given.
+fn resolve_hold_paths(store: &Store, project: &str, paths: Vec<String>) -> Vec<String> {
+    let Ok(p) = store.project(project) else {
+        return paths;
+    };
+    let root = Path::new(&p.abs_path);
+    let real_root = hooks::resolve_existing(root);
+    paths
+        .into_iter()
+        .map(|raw| {
+            if raw.contains(['*', '?', '[', '{']) {
+                return raw;
+            }
+            let full = if Path::new(&raw).is_absolute() {
+                PathBuf::from(&raw)
+            } else {
+                root.join(&raw)
+            };
+            let real = hooks::resolve_existing(&full);
+            match real.strip_prefix(&real_root) {
+                Ok(rel) if !rel.as_os_str().is_empty() => rel.to_string_lossy().into_owned(),
+                _ => raw,
+            }
+        })
+        .collect()
+}
+
 fn emit<T: Serialize>(json: bool, value: &T, human: impl FnOnce(&T) -> String) -> ExitCode {
     if json {
         println!(
@@ -799,6 +901,8 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         dashboard,
         no_dashboard,
         sweep_secs,
+        no_wake,
+        wake_secs,
     } = &cli.command
     {
         let store = open(home)?;
@@ -818,7 +922,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         if *stdio && *dashboard {
             eprintln!("another: --dashboard needs the HTTP server; stdio has no dashboard");
         }
-        rt.block_on(async {
+        let result = rt.block_on(async {
             if *stdio {
                 crate::serve::serve_stdio(store, every).await
             } else {
@@ -833,10 +937,17 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     dashboard_flag,
                     dashboard: crate::dashboard::DashboardMode::Off,
                     dashboard_bound: None,
+                    // Push belongs to the local daemon, not to a server published for
+                    // remote peers (`--auth`), so two servers never wake the same agent.
+                    push_every: (!*auth && !*no_wake)
+                        .then(|| Duration::from_secs((*wake_secs).max(1))),
                 };
                 crate::serve::serve_http(store, bind, opts, every).await
             }
-        })?;
+        });
+        // Background passes are told to stop on shutdown; never wait on one for long.
+        rt.shutdown_timeout(Duration::from_secs(3));
+        result?;
         return Ok(ExitCode::SUCCESS);
     }
     if let Command::Remote(RemoteCmd::Up {
@@ -883,12 +994,16 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     if let Command::Hook(cmd) = &cli.command {
         return hook_command(cmd, json, another_home);
     }
+    if let Command::Daemon(cmd) = &cli.command {
+        return daemon_command(cmd, json, another_home()?);
+    }
 
     let store = open(home)?;
     let code = match cli.command {
         Command::Serve { .. }
         | Command::Dashboard { .. }
         | Command::Hook(_)
+        | Command::Daemon(_)
         | Command::Remote(_) => {
             unreachable!("handled above")
         }
@@ -1066,8 +1181,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             ttl,
             shared,
             reason,
+            repo_wide,
         }) => {
             let project = project_key(&store, &agent.agent, project.project)?;
+            let paths = resolve_hold_paths(&store, &project, paths);
             let report = store.acquire_holds(AcquireHolds {
                 agent: agent.agent,
                 project,
@@ -1075,6 +1192,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 ttl_seconds: ttl,
                 exclusive: !shared,
                 reason,
+                repo_wide,
             })?;
             let conflicted = !report.conflicts.is_empty();
             emit(json, &report, output::hold_report);
@@ -1091,6 +1209,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             shared,
         }) => {
             let project = project_key(&store, &agent.agent, project.project)?;
+            let paths = resolve_hold_paths(&store, &project, paths);
             let conflicts = store.check_holds(&agent.agent, &project, &paths, !shared)?;
             let conflicted = !conflicts.is_empty();
             emit(json, &conflicts, |c| {
@@ -1465,6 +1584,13 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let ts = store.wake_targets()?;
             emit(json, &ts, |ts| output::wake_targets(ts))
         }
+        Command::Wake {
+            cmd: Some(WakeCmd::Prune { dry_run }),
+            ..
+        } => {
+            let rows = crate::wake::prune(&store, dry_run)?;
+            emit(json, &rows, |rows| output::prune_rows(rows, dry_run))
+        }
         Command::Wake { cmd: None, run } => {
             let opts = crate::wake::WakeOptions {
                 via: run.via.as_deref().map(str::parse).transpose()?,
@@ -1472,6 +1598,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 message: run.message,
                 force: run.force,
                 dry_run: run.dry_run,
+                cancel: None,
             };
             let plans = if run.all {
                 crate::wake::wake_all(&store, &opts)?
@@ -1509,6 +1636,11 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 emit(json, &feed, output::activity)
             }
         }
+        Command::Stats { since } => {
+            let since = Since::parse(&since, store.now())?;
+            let stats = store.trial_stats(Some(since))?;
+            emit(json, &stats, output::trial_stats)
+        }
         Command::Sweep => {
             let r = store.sweep()?;
             emit(json, &r, |r| {
@@ -1526,6 +1658,40 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     Ok(code)
 }
 
+fn daemon_command(cmd: &DaemonCmd, json: bool, another_home: PathBuf) -> anyhow::Result<ExitCode> {
+    use crate::daemon::{self, DaemonEnv};
+    let env = |args: &DaemonArgs, bind: &str| {
+        DaemonEnv::detect(another_home.clone(), args.label.clone(), bind.to_string())
+    };
+    match cmd {
+        DaemonCmd::Install {
+            args,
+            bind,
+            no_load,
+            dry_run,
+        } => {
+            let report = daemon::install(&env(args, bind)?, !*no_load, *dry_run)?;
+            Ok(emit(json, &report, output::daemon_report))
+        }
+        DaemonCmd::Uninstall { args, dry_run } => {
+            let report = daemon::uninstall(&env(args, crate::serve::DEFAULT_BIND)?, *dry_run)?;
+            Ok(emit(json, &report, output::daemon_report))
+        }
+        DaemonCmd::Status { args } => {
+            let status = daemon::status(&env(args, crate::serve::DEFAULT_BIND)?)?;
+            Ok(emit(json, &status, output::daemon_status))
+        }
+        DaemonCmd::Restart { args } => {
+            daemon::restart(&env(args, crate::serve::DEFAULT_BIND)?)?;
+            Ok(emit(
+                json,
+                &serde_json::json!({ "restarted": args.label }),
+                |_| format!("restarted {}", args.label),
+            ))
+        }
+    }
+}
+
 fn hook_command(
     cmd: &HookCmd,
     json: bool,
@@ -1534,9 +1700,18 @@ fn hook_command(
     match cmd {
         HookCmd::Run { event, client } => {
             // Fail open: whatever happens, print what we have and exit 0.
-            let store = another_home().and_then(|h| Ok(Store::open(&h)?));
+            let home = another_home().ok();
+            // Tool hooks run on every tool call: open without migrating, with a short lock
+            // wait, so a busy or missing database costs milliseconds, not seconds.
+            let store = match &home {
+                Some(h) if event.is_tool_event() => {
+                    Store::open_quick(h, event.busy_timeout()).map_err(anyhow::Error::from)
+                }
+                Some(h) => Store::open(h).map_err(anyhow::Error::from),
+                None => Err(anyhow::anyhow!("no Another home directory")),
+            };
             let env = another_home().and_then(HookEnv::detect);
-            let text = hooks::run_fail_open(store, env, *event, *client);
+            let text = hooks::run_fail_open(store, env, home.as_deref(), *event, *client);
             if !text.is_empty() {
                 println!("{text}");
             }

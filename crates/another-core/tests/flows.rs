@@ -65,6 +65,7 @@ impl Fixture {
                 ttl_seconds: Some(ttl),
                 exclusive,
                 reason: Some("editing".into()),
+                repo_wide: false,
             })
             .unwrap()
     }

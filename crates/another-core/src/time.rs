@@ -24,6 +24,13 @@ pub fn fmt_ts(ms: i64) -> String {
         .unwrap_or_else(|| ms.to_string())
 }
 
+/// Milliseconds since the epoch for an RFC 3339 time such as [`fmt_ts`] produces.
+pub fn parse_ts(text: &str) -> Option<i64> {
+    DateTime::parse_from_rfc3339(text.trim())
+        .ok()
+        .map(|t| t.timestamp_millis())
+}
+
 pub fn fmt_opt(ms: Option<i64>) -> Option<String> {
     ms.map(fmt_ts)
 }

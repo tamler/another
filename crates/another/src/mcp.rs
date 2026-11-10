@@ -217,6 +217,10 @@ pub struct HoldPathsArgs {
     /// Exclusive holds (default) conflict with any overlapping hold; shared ones only with exclusive.
     pub exclusive: Option<bool>,
     pub reason: Option<String>,
+    /// Allow a pattern covering the whole project (`**`, the project root, `**/*.rs`).
+    /// Refused by default because it blocks every other agent in the repository.
+    #[serde(default)]
+    pub repo_wide: bool,
 }
 
 #[derive(Debug, Default, Serialize, JsonSchema)]
@@ -540,6 +544,7 @@ impl AnotherMcp {
                         ttl_seconds: a.ttl_seconds,
                         exclusive: a.exclusive.unwrap_or(true),
                         reason: a.reason.clone(),
+                        repo_wide: a.repo_wide,
                     })?;
                     out.granted = report.granted;
                     out.conflicts = report.conflicts;

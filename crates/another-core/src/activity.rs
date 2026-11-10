@@ -55,7 +55,7 @@ impl ActivityKind {
     /// Category of an event kind such as `message.sent` or `hold.expired`.
     pub fn of_event(kind: &str) -> ActivityKind {
         match kind.split('.').next().unwrap_or_default() {
-            "message" | "delivery" => ActivityKind::Mail,
+            "message" | "delivery" | "push" => ActivityKind::Mail,
             "request" => ActivityKind::Request,
             "hold" => ActivityKind::Hold,
             "resource" | "orphan" => ActivityKind::Resource,
@@ -334,8 +334,13 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
                 "shared"
             };
             let project = project_slug(conn, &s("project_id"))?;
+            let by = if p.get("auto").and_then(Value::as_bool) == Some(true) {
+                ", taken by the edit hook"
+            } else {
+                ""
+            };
             (
-                format!("{actor} holds {project}:{} ({mode})", s("pattern")),
+                format!("{actor} holds {project}:{} ({mode}{by})", s("pattern")),
                 json!({ "hold_id": s("hold_id"), "project_id": s("project_id") }),
             )
         }
@@ -357,6 +362,56 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             (
                 format!("{actor} {verb} {n} hold(s){why}"),
                 json!({ "hold_ids": p.get("hold_ids") }),
+            )
+        }
+        "hold.blocked" => {
+            let first = p
+                .get("conflicts")
+                .and_then(Value::as_array)
+                .and_then(|a| a.first())
+                .cloned()
+                .unwrap_or(Value::Null);
+            let c = |k: &str| {
+                first
+                    .get(k)
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            };
+            (
+                format!(
+                    "{actor} was stopped editing {}:{} (held by {})",
+                    s("project"),
+                    c("path"),
+                    c("holder")
+                ),
+                json!({ "project_id": s("project_id"), "hold_id": c("hold_id") }),
+            )
+        }
+        "push.notified" => {
+            let n = p
+                .get("message_ids")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            let when = if s("channel") == "post_tool" {
+                "mid-task"
+            } else {
+                "at a prompt"
+            };
+            (
+                format!("{actor} was told about {n} new message(s) {when}"),
+                json!({ "message_ids": p.get("message_ids") }),
+            )
+        }
+        "push.woke" => {
+            let what = if s("outcome") == "sent" {
+                "woke"
+            } else {
+                "could not wake"
+            };
+            (
+                format!("{what} {actor} in {} {}", s("via"), s("target")),
+                json!({ "message_ids": p.get("message_ids") }),
             )
         }
         "hold.expired" => {
@@ -682,7 +737,11 @@ impl Store {
                 .filter(|r| {
                     !matches!(
                         r.kind.as_str(),
-                        "delivery.read" | "delivery.acked" | "hold.renewed" | "resource.renewed"
+                        "delivery.read"
+                            | "delivery.acked"
+                            | "hold.renewed"
+                            | "resource.renewed"
+                            | "push.notified"
                     )
                 })
                 .collect();
@@ -832,6 +891,7 @@ impl Store {
                         | "delivery.acked"
                         | "hold.renewed"
                         | "resource.renewed"
+                        | "push.notified"
                         | "token.created"
                         | "token.revoked"
                 )

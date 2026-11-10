@@ -1,6 +1,6 @@
 # Waking idle agents (optional adapters)
 
-Hooks are the primary way agents learn about mail: a digest at session start and a notice on the next prompt (see [HOOKS.md](HOOKS.md)). An agent sitting idle at its prompt only sees new mail when something types into its terminal. `another wake` does that through optional adapters. Nothing in Another requires them.
+Hooks are the primary way agents learn about mail: a digest at session start, a notice after the next tool call, and a notice on the next prompt (see [HOOKS.md](HOOKS.md)). An agent sitting idle at its prompt only sees new mail when something types into its terminal. `another wake` does that through optional adapters, and the background daemon does it by itself for idle Herdr agents (see [DAEMON.md](DAEMON.md)). Nothing in Another requires them.
 
 | Adapter | What it runs |
 |---|---|
@@ -26,7 +26,7 @@ another wake list
 another wake clear --agent codex@shop
 ```
 
-When an Another session hook runs inside tmux (`$TMUX_PANE`) or cmux (`$CMUX_SURFACE_ID`), it records that pane automatically. Automatic captures never replace a target you set by hand. Herdr agents default to the Another agent's bare name when no target is stored.
+When an Another session hook runs inside Herdr (`$HERDR_PANE_ID`), tmux (`$TMUX_PANE`) or cmux (`$CMUX_SURFACE_ID`), it records that pane automatically; with nested multiplexers, `TERM_PROGRAM` picks the innermost. The session-end hook forgets the capture again if it still points at that pane, and `another wake prune` drops captures whose pane is gone or whose agent has left. Automatic captures never replace a target you set by hand, and pruning never removes one. Herdr agents default to the Another agent's bare name when no target is stored.
 
 ## Waking
 

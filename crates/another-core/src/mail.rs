@@ -122,6 +122,30 @@ pub struct InboxQuery {
     pub limit: u32,
 }
 
+/// An unread message as a notice shows it: sender and subject, never the body.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct UnreadItem {
+    pub message_id: String,
+    pub from: String,
+    pub subject: String,
+    pub importance: Importance,
+    pub created_at: String,
+    /// The request this message opened, if any.
+    pub request_id: Option<String>,
+}
+
+/// Result of [`Store::unannounced`].
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct UnreadAfter {
+    pub agent: String,
+    /// Unread messages newer than the cursor (all of them, not only `items`).
+    pub count: u32,
+    /// How many of those are high or urgent.
+    pub urgent: u32,
+    /// Newest first, at most the requested limit.
+    pub items: Vec<UnreadItem>,
+}
+
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Inbox {
     pub agent: String,
@@ -496,6 +520,60 @@ impl Store {
                 awaiting_ack,
                 messages,
                 requests,
+            })
+        })
+    }
+
+    /// Unread messages for `who` that no channel has announced yet (see
+    /// [`Store::claim_announcement`]), newest first, with ids after `floor` (ULIDs sort by
+    /// time; an empty floor means no floor). Read only (no sweep, no presence update), so a
+    /// hook can afford it on every tool call.
+    pub fn unannounced(&self, who: &str, floor: &str, limit: u32) -> Result<UnreadAfter> {
+        self.read(|conn| {
+            let me = resolve_agent(conn, self.node_id(), who)?;
+            let (count, urgent): (u32, u32) = conn.query_row(
+                "SELECT count(*), count(*) FILTER (WHERE m.importance IN ('high', 'urgent'))
+                 FROM deliveries d JOIN messages m ON m.message_id = d.message_id
+                 WHERE d.agent_id = ?1 AND d.read_at IS NULL AND d.message_id > ?2
+                   AND NOT EXISTS (SELECT 1 FROM announcements a
+                                   WHERE a.agent_id = d.agent_id AND a.message_id = d.message_id)",
+                params![me.id, floor],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            let mut items = Vec::new();
+            if count > 0 {
+                let mut stmt = conn.prepare(
+                    "SELECT m.message_id, coalesce(s.address, s.name), m.subject, m.importance,
+                       m.created_at,
+                       (SELECT r.request_id FROM requests r WHERE r.message_id = m.message_id
+                        LIMIT 1)
+                     FROM deliveries d JOIN messages m ON m.message_id = d.message_id
+                     JOIN agents s ON s.agent_id = m.sender_id
+                     WHERE d.agent_id = ?1 AND d.read_at IS NULL AND d.message_id > ?2
+                       AND NOT EXISTS (SELECT 1 FROM announcements a
+                                       WHERE a.agent_id = d.agent_id
+                                         AND a.message_id = d.message_id)
+                     ORDER BY d.message_id DESC LIMIT ?3",
+                )?;
+                items = stmt
+                    .query_map(params![me.id, floor, limit.max(1)], |r| {
+                        let importance: String = r.get(3)?;
+                        Ok(UnreadItem {
+                            message_id: r.get(0)?,
+                            from: r.get(1)?,
+                            subject: r.get(2)?,
+                            importance: importance.parse().unwrap_or_default(),
+                            created_at: fmt_ts(r.get(4)?),
+                            request_id: r.get(5)?,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+            }
+            Ok(UnreadAfter {
+                agent: me.address,
+                count,
+                urgent,
+                items,
             })
         })
     }

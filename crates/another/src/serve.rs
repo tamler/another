@@ -39,6 +39,9 @@ pub struct HttpOptions {
     /// Address actually bound, so the dashboard can accept that exact `Host`.
     /// `127.0.0.1`, `localhost`, and `[::1]` are always allowed as well.
     pub dashboard_bound: Option<SocketAddr>,
+    /// Run the push waker this often (wake idle Herdr agents with unannounced mail).
+    /// `None` turns it off; only the local loopback daemon should run one.
+    pub push_every: Option<Duration>,
 }
 
 /// Resolve a bind address and refuse anything that is not loopback.
@@ -91,6 +94,95 @@ pub fn spawn_sweeper(store: Store, every: Duration, ct: CancellationToken) {
             }
         }
     });
+}
+
+/// How often the waker also drops wake targets that can no longer be reached.
+const PRUNE_EVERY: Duration = Duration::from_secs(600);
+
+/// Run the push waker (see [`crate::wake::Waker`]) and periodic target pruning until
+/// cancelled. Each pass runs on the blocking pool, since it touches SQLite and may start
+/// a `herdr` process.
+pub fn spawn_waker(store: Store, every: Duration, ct: CancellationToken) {
+    let first = crate::wake::Waker::new();
+    // On shutdown, tell a pass in progress to stop its adapter commands now; the blocking
+    // pass then returns within moments instead of waiting out a stuck adapter.
+    let cancel = first.cancel.clone();
+    let stop = ct.clone();
+    tokio::spawn(async move {
+        stop.cancelled().await;
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    tokio::spawn(async move {
+        let mut waker = Some(first);
+        let mut tick = tokio::time::interval(every);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut prune_tick = tokio::time::interval(PRUNE_EVERY);
+        loop {
+            tokio::select! {
+                _ = ct.cancelled() => break,
+                _ = tick.tick() => {
+                    let Some(mut w) = waker.take() else { break };
+                    let store = store.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        let out = w.tick(&store);
+                        (w, out)
+                    })
+                    .await
+                    {
+                        Ok((w, out)) => {
+                            waker = Some(w);
+                            match out {
+                                Ok(events) => {
+                                    for e in events {
+                                        tracing::info!(
+                                            agent = %e.agent,
+                                            target = %e.target,
+                                            action = %e.action,
+                                            detail = %e.detail,
+                                            "push"
+                                        );
+                                    }
+                                }
+                                Err(e) => tracing::warn!(error = %format!("{e:#}"), "push pass failed"),
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "push task failed; push delivery stopped");
+                            break;
+                        }
+                    }
+                }
+                _ = prune_tick.tick() => {
+                    let store = store.clone();
+                    match tokio::task::spawn_blocking(move || crate::wake::prune(&store, false)).await {
+                        Ok(Ok(rows)) => {
+                            for r in rows.iter().filter(|r| r.pruned) {
+                                tracing::info!(agent = %r.agent, target = %r.target, reason = %r.reason, "wake target pruned");
+                            }
+                        }
+                        Ok(Err(e)) => tracing::warn!(error = %format!("{e:#}"), "prune failed"),
+                        Err(e) => tracing::warn!(error = %e, "prune task failed"),
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Resolves on Ctrl-C, or on SIGTERM (what launchd and systemd send to stop a service).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 pub async fn serve_stdio(store: Store, sweep_every: Duration) -> Result<()> {
@@ -295,10 +387,19 @@ pub async fn serve_http(
         opts.dashboard_flag,
     )?;
     let ct = CancellationToken::new();
-    spawn_sweeper(store.clone(), sweep_every, ct.clone());
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding {addr}"))?;
+    // Background work starts only once the port is ours, so a second daemon that fails to
+    // bind never sweeps or wakes alongside the first.
+    spawn_sweeper(store.clone(), sweep_every, ct.clone());
+    if let Some(every) = opts.push_every {
+        spawn_waker(store.clone(), every, ct.clone());
+        eprintln!(
+            "another: push delivery on: idle Herdr agents with new mail are woken (every {}s)",
+            every.as_secs().max(1)
+        );
+    }
     let local = listener.local_addr()?;
     opts.bound_port = local.port();
     opts.dashboard_bound = Some(local);
@@ -345,7 +446,7 @@ pub async fn serve_http(
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-        let _ = tokio::signal::ctrl_c().await;
+        shutdown_signal().await;
         ct.cancel();
     })
     .await?;

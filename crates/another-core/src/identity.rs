@@ -229,6 +229,7 @@ pub(crate) fn ensure_project_tx(tx: &Tx<'_>, actor: &str, raw_path: &str) -> Res
         )
         .optional()?;
     if let Some(p) = existing {
+        crate::repo::refresh_link(tx, &p)?;
         return Ok(p);
     }
     let base = slug_base(&abs_path);
@@ -257,13 +258,15 @@ pub(crate) fn ensure_project_tx(tx: &Tx<'_>, actor: &str, raw_path: &str) -> Res
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![project_id, tx.node_id, abs_path, slug, tx.now, event_id],
     )?;
-    Ok(Project {
+    let project = Project {
         project_id,
         node_id: tx.node_id.to_string(),
         abs_path,
         slug,
         created_at: fmt_ts(tx.now),
-    })
+    };
+    crate::repo::refresh_link(tx, &project)?;
+    Ok(project)
 }
 
 /// Find a project by absolute path or slug.
@@ -411,6 +414,27 @@ impl Store {
     /// Register an absolute project path (idempotent).
     pub fn ensure_project(&self, actor: &str, abs_path: &str) -> Result<Project> {
         self.write(|tx| ensure_project_tx(tx, actor, abs_path))
+    }
+
+    /// Look up a local project by absolute path or slug (read only).
+    pub fn project(&self, key: &str) -> Result<Project> {
+        self.read(|conn| find_project(conn, self.node_id(), key))
+    }
+
+    /// The registered local project whose directory most closely contains `path`.
+    pub fn project_containing(&self, path: &str) -> Result<Option<Project>> {
+        let path = normalize_project_path(path)?;
+        Ok(self
+            .projects()?
+            .into_iter()
+            .filter(|p| {
+                let root = p.abs_path.trim_end_matches(['/', '\\']);
+                path == p.abs_path
+                    || path
+                        .strip_prefix(root)
+                        .is_some_and(|rest| rest.starts_with(['/', '\\']))
+            })
+            .max_by_key(|p| p.abs_path.len()))
     }
 
     pub fn projects(&self) -> Result<Vec<Project>> {

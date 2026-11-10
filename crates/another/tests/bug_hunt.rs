@@ -476,6 +476,7 @@ fn acquire(store: &Store, agent: &str, project: &str, path: &str) -> String {
             exclusive: true,
             ttl_seconds: Some(600),
             reason: None,
+            repo_wide: false,
         })
         .unwrap()
         .granted[0]
