@@ -158,7 +158,7 @@ pub async fn serve_http(
         .with_context(|| format!("binding {addr}"))?;
     let local = listener.local_addr()?;
     eprintln!(
-        "another: MCP (streamable HTTP) on http://{local}/mcp{} — node {}",
+        "another: MCP (streamable HTTP) on http://{local}/mcp{}, node {}",
         if opts.auth {
             " (bearer token required)"
         } else {

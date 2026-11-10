@@ -60,6 +60,7 @@ cargo +1.88 check --workspace --all-targets --locked
 - Add tests for new behaviour. Core logic gets tests in `crates/another-core/tests`; CLI, MCP, hooks and HTTP get tests in `crates/another/tests`, which run the real binary, with a temporary `HOME` / `ANOTHER_HOME` where relevant.
 - Keep the **Status** section of [README.md](README.md) and the current [AGENTS.md](AGENTS.md) brief accurate when milestone progress changes.
 - Dependency updates must keep building on Rust 1.88. `resolver = "3"` in `Cargo.toml` makes `cargo update` prefer compatible versions.
+- Website edits: `sh site/build.sh` with Python 3. That regenerates `site/dist`, checks links and SEO metadata, and runs `scripts/check-copy.py` (em dashes, en dashes, banned phrases in `site/` and `docs/PROMOTION.md`). Deploying the site is a maintainer action.
 
 ## Releases
 

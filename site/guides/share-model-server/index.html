@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Share a model server between coding agents - Another</title>
+  <meta name="description" content="Stop agents starting a second model server, dev server or GPU job. Register it, borrow it with a lease, release it, and clean up orphans with a human check.">
+  <link rel="canonical" href="https://toanother.one/guides/share-model-server/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Another">
+  <meta property="og:title" content="Share a model server between coding agents - Another">
+  <meta property="og:description" content="Stop agents starting a second model server, dev server or GPU job. Register it, borrow it with a lease, release it, and clean up orphans with a human check.">
+  <meta property="og:url" content="https://toanother.one/guides/share-model-server/">
+  <meta property="og:image" content="https://toanother.one/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Another. From one agent to another. So they stop editing the same files.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Share a model server between coding agents - Another">
+  <meta name="twitter:description" content="Stop agents starting a second model server, dev server or GPU job. Register it, borrow it with a lease, release it, and clean up orphans with a human check.">
+  <meta name="twitter:image" content="https://toanother.one/twitter.png">
+  <meta name="twitter:image:alt" content="Another. From one agent to another. So they stop editing the same files.">
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"One model server, several agents","description":"Stop agents starting a second model server, dev server or GPU job. Register it, borrow it with a lease, release it, and clean up orphans with a human check.","url":"https://toanother.one/guides/share-model-server/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://toanother.one/guides/"},{"@type":"ListItem","position":3,"name":"Share a model server","item":"https://toanother.one/guides/share-model-server/"}]}]}</script>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="preload" href="/fonts/FragmentMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="masthead wrap with-route">
+    <div class="breadcrumb"><a class="wordmark" href="/" aria-label="Another home">another</a> <span class="route">/ <a href="/guides/">guides</a></span></div>
+    <nav aria-label="Main"><a href="/docs/getting-started/">Get started</a> <a href="/docs/">Docs</a> <a href="/guides/">Guides</a> <a href="/compare/">Compare</a> <a href="/changelog/">Changelog</a></nav>
+  </header>
+  <main class="wrap" id="main" tabindex="-1">
+    <div class="guide-hero"><h1>One model server, several agents</h1><p class="definition">Ask what is already running before starting another copy, and leave a record of who is using it.</p><nav class="guide-nav" aria-label="Setup guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/concepts/#resource">What is a resource?</a></nav></div>
+    <section class="guide-section" aria-labelledby="problem">
+      <h2 id="problem">What the registry does</h2>
+      <p>Two agents that each need a local model can each start a server and fill your memory. Another keeps a list of what is running, who owns it and who is borrowing it, so an agent can look first.</p>
+      <p>It is a shared record, and nothing more. Another does not start your server, check that it is healthy or route requests to it, and an agent has to choose to look. Tell your agents to check, for example in your project instructions.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="register">
+      <h2 id="register">Register what you started</h2>
+      <p>Start your server yourself, then register it. The kinds are <code>model_server</code>, <code>dev_server</code>, <code>port</code>, <code>gpu</code>, <code>container</code> and <code>long_job</code>. These names are examples; use your server's real port and process ID.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Register a model server"><code>another init
+another agent register claude --program claude --project .
+another agent register codex --program codex --project .
+another resource register model_server ollama@11434 --agent claude --endpoint http://127.0.0.1:11434 --purpose "local llm"</code></pre>
+      <p>Add <code>--pid</code> with your server's process ID so <code>another orphans</code> can match the process. Without one, <code>another reap</code> can't stop the server, and you shut it down by hand. <code>--meta key=value</code> records details such as a model name. <code>--exclusive</code> refuses borrowers, which suits a dev server one agent should own.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="borrow">
+      <h2 id="borrow">Find it and borrow it</h2>
+      <pre class="code-block shell" tabindex="0" aria-label="Find and borrow a resource"><code>another resources -q ollama
+another borrow model_server:ollama@11434 --agent codex</code></pre>
+      <p>The listing shows the endpoint, and the agent connects to that endpoint itself. A borrow lasts 30 minutes unless you pass <code>--ttl</code>. <code>another heartbeat --agent codex</code> and the session hooks renew it. Agents with MCP use <code>resource_find</code> and <code>resource_borrow</code>.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="release">
+      <h2 id="release">Release it when you finish</h2>
+      <pre class="code-block shell" tabindex="0" aria-label="Release a lease"><code>another release model_server:ollama@11434 --agent codex
+another release model_server:ollama@11434 --agent claude</code></pre>
+      <p>Releasing ends a lease and does not stop the server. If the owner leaves while others borrow, the oldest borrower becomes the owner. Once the last lease ends, the resource shows as <code>lapsed</code>, and the next agent to borrow it adopts it as owner, so check that it is still answering first. After you really shut it down, the owner runs <code>another release</code> with <code>--stopped</code>.</p>
+      <p>The session-end hook releases an agent's leases. If your server should outlive the session, end the session by hand with <code>--keep</code>, which holds on to the lease:</p>
+      <pre class="code-block shell" tabindex="0" aria-label="End a session and keep leases"><code>another heartbeat --agent claude --end --keep</code></pre>
+      <p><a href="https://github.com/tamler/another/blob/main/docs/RESOURCES.md">The resource reference</a> has the details.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="orphans">
+      <h2 id="orphans">Clean up what's left</h2>
+      <pre class="code-block shell" tabindex="0" aria-label="List orphan candidates"><code>another orphans
+another orphans --no-scan</code></pre>
+      <p>The first form also scans for listening processes that nothing registered, so it lists things like your editor's helpers and other unrelated tools, along with their full command lines. Those are only candidates. Be careful about pasting that output anywhere, since command lines can contain sensitive values. <code>--no-scan</code> limits it to lapsed resources you registered.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="See the reap plan"><code>another reap model_server:ollama@11434</code></pre>
+      <p>Without <code>--confirm</code>, that changes nothing and prints the plan and anything blocking it. A target must have a registered process ID and no live lease, must have been orphaned for the grace period (10 minutes by default) and must belong to you. <code>--confirm</code> sends SIGTERM, and <code>--force</code> adds SIGKILL if the process survives.</p>
+      <p>The <code>--confirm</code> flag is for people. The MCP tool can only ask for a reap and hand back the command. An agent with shell access could still run that command itself, because the CLI can't tell who typed it, so your client's permission settings are the real boundary.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="related"><h2 id="related">Related guides</h2><nav class="guide-nav" aria-label="Related task guides"><a href="/guides/avoid-agent-file-conflicts/">File holds</a> <a href="/guides/agents-on-two-machines/">Two machines</a> <a href="/guides/local-agent-inbox/">Local inbox</a></nav></section>
+  </main>
+  <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="/docs/faq/">FAQ</a> <a href="/docs/concepts/">Concepts</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>
+</body>
+</html>

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Local agent inbox: SQLite mail, no hosted account - Another</title>
+  <meta name="description" content="Keep coding-agent mail in a local SQLite inbox with Another. Inspect messages from the CLI, pick a data directory and understand hooks, privacy and limits.">
+  <link rel="canonical" href="https://toanother.one/guides/local-agent-inbox/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Another">
+  <meta property="og:title" content="Local agent inbox: SQLite mail, no hosted account - Another">
+  <meta property="og:description" content="Keep coding-agent mail in a local SQLite inbox with Another. Inspect messages from the CLI, pick a data directory and understand hooks, privacy and limits.">
+  <meta property="og:url" content="https://toanother.one/guides/local-agent-inbox/">
+  <meta property="og:image" content="https://toanother.one/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Another. From one agent to another. So they stop editing the same files.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Local agent inbox: SQLite mail, no hosted account - Another">
+  <meta name="twitter:description" content="Keep coding-agent mail in a local SQLite inbox with Another. Inspect messages from the CLI, pick a data directory and understand hooks, privacy and limits.">
+  <meta name="twitter:image" content="https://toanother.one/twitter.png">
+  <meta name="twitter:image:alt" content="Another. From one agent to another. So they stop editing the same files.">
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"A local agent inbox you can inspect","description":"Keep coding-agent mail in a local SQLite inbox with Another. Inspect messages from the CLI, pick a data directory and understand hooks, privacy and limits.","url":"https://toanother.one/guides/local-agent-inbox/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://toanother.one/guides/"},{"@type":"ListItem","position":3,"name":"Local inbox","item":"https://toanother.one/guides/local-agent-inbox/"}]}]}</script>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="preload" href="/fonts/FragmentMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="masthead wrap with-route">
+    <div class="breadcrumb"><a class="wordmark" href="/" aria-label="Another home">another</a> <span class="route">/ <a href="/guides/">guides</a></span></div>
+    <nav aria-label="Main"><a href="/docs/getting-started/">Get started</a> <a href="/docs/">Docs</a> <a href="/guides/">Guides</a> <a href="/compare/">Compare</a> <a href="/changelog/">Changelog</a></nav>
+  </header>
+  <main class="wrap" id="main" tabindex="-1">
+    <div class="guide-hero"><h1>A local agent inbox you can inspect</h1><p class="definition">Start with one node and a terminal. Add clients when you need them.</p><nav class="guide-nav" aria-label="Setup guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/">Full guide</a></nav></div>
+    <section class="guide-section" aria-labelledby="storage">
+      <h2 id="storage">What stays on your machine</h2>
+      <p>Another stores agent registration, mail, requests, path holds and resource coordination in local SQLite state. The default home is <code>~/.another</code>; <code>ANOTHER_HOME</code> selects a different directory. CLI mail works without an always-on daemon or hosted account.</p>
+      <p>Source installation needs Rust and access to dependencies. Local CLI mail operations use the node's data. Your coding client retains its own model-provider and network settings.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="demo">
+      <h2 id="demo">Try an isolated local exchange</h2>
+      <p>After <a href="/docs/install/">installation</a>, run the whole block from a physical repository root. The subshell selects fresh temporary state, then restores your shell's original environment on exit. The data remains at the location printed by <code>status</code>.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Local inbox in temporary state"><code>(
+  export ANOTHER_HOME="$(mktemp -d)"
+  another init
+  another agent register writer --program claude --project .
+  another agent register reader --program codex --project .
+  another send --from writer --to reader --subject "Parser review" --body "Please check the error paths." --ack
+  another inbox --agent reader --unread
+  another threads --agent reader
+  another activity --summary
+  another status
+)</code></pre>
+      <p>This creates demo mail without installing hooks or starting a server. The inbox should contain the message and the thread list its conversation. These are expected results, not a recorded run.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="inspect">
+      <h2 id="inspect">Read, acknowledge and follow a thread</h2>
+      <p>In your chosen node, <code>another inbox --agent reader</code> lists messages and relevant requests. Add <code>--unread</code> to filter unread mail. Fetching does not mark it read. Use <code>another ack</code> with the actual message ID and acting agent to record receipt; <code>--read-only</code> marks a read without acknowledgement.</p>
+      <p><code>another threads --agent reader</code> lists conversations; <code>another thread</code> followed by an actual thread ID shows its messages. <code>another activity --summary</code> provides counts and highlights without message bodies. Keep the same home when following up on a message.</p>
+      <p>Give sessions the same home and intended project to share state. <a href="/guides/mcp-agent-messaging/">Connect MCP</a> for mail tools and <a href="/guides/claude-code-codex/">client hooks</a> for notices.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="privacy">
+      <h2 id="privacy">Local storage has a trust boundary</h2>
+      <p>Another has no product telemetry or paid tier. Bodies stay out of session digests and the activity feed, but remain in the mail store. Access to that directory and the clients you connect are part of your trust boundary.</p>
+      <p>Remote access and federation add network paths you configure. Another has no built-in TLS; a self-hosted federation hub can read relayed bodies. This is not an end-to-end encrypted mailbox. <a href="https://github.com/tamler/another/blob/main/docs/REMOTE.md">Remote authentication</a> and <a href="https://github.com/tamler/another/blob/main/docs/FEDERATION.md">federation permissions</a> explain the limits, and <a href="/guides/agents-on-two-machines/">agents on two machines</a> walks through a hub.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="related"><h2 id="related">Related guides</h2><nav class="guide-nav" aria-label="Related task guides"><a href="/guides/claude-code-codex/">Claude Code + Codex</a> <a href="/guides/mcp-agent-messaging/">MCP messaging</a> <a href="/guides/avoid-agent-file-conflicts/">File holds</a></nav></section>
+  </main>
+  <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="/docs/faq/">FAQ</a> <a href="/docs/concepts/">Concepts</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>
+</body>
+</html>

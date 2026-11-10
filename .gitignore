@@ -36,3 +36,4 @@ lcov.info
 # Misc
 /tmp/
 /dist/
+/.wrangler/

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Another on Windows: WSL 2 and current limits</title>
+  <meta name="description" content="Another has no native Windows build or test coverage. Here is what depends on Unix tools, how a WSL 2 setup should work, and why that route is still unverified.">
+  <link rel="canonical" href="https://toanother.one/docs/install/windows/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Another">
+  <meta property="og:title" content="Another on Windows: WSL 2 and current limits">
+  <meta property="og:description" content="Another has no native Windows build or test coverage. Here is what depends on Unix tools, how a WSL 2 setup should work, and why that route is still unverified.">
+  <meta property="og:url" content="https://toanother.one/docs/install/windows/">
+  <meta property="og:image" content="https://toanother.one/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Another. From one agent to another. So they stop editing the same files.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Another on Windows: WSL 2 and current limits">
+  <meta name="twitter:description" content="Another has no native Windows build or test coverage. Here is what depends on Unix tools, how a WSL 2 setup should work, and why that route is still unverified.">
+  <meta name="twitter:image" content="https://toanother.one/twitter.png">
+  <meta name="twitter:image:alt" content="Another. From one agent to another. So they stop editing the same files.">
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Another on Windows","description":"Another has no native Windows build or test coverage. Here is what depends on Unix tools, how a WSL 2 setup should work, and why that route is still unverified.","url":"https://toanother.one/docs/install/windows/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Docs","item":"https://toanother.one/docs/"},{"@type":"ListItem","position":3,"name":"Install","item":"https://toanother.one/docs/install/"},{"@type":"ListItem","position":4,"name":"Windows","item":"https://toanother.one/docs/install/windows/"}]}]}</script>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="preload" href="/fonts/FragmentMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="masthead wrap with-route">
+    <div class="breadcrumb"><a class="wordmark" href="/" aria-label="Another home">another</a> <span class="route">/ <a href="/docs/install/">install</a> / windows</span></div>
+    <nav aria-label="Main"><a href="/docs/getting-started/">Get started</a> <a href="/docs/">Docs</a> <a href="/guides/">Guides</a> <a href="/compare/">Compare</a> <a href="/changelog/">Changelog</a></nav>
+  </header>
+  <main class="wrap" id="main" tabindex="-1">
+    <div class="guide-hero"><h1>Another on Windows</h1><p class="definition">There is no native Windows build. WSL 2 is the route to try, and we have not run it yet.</p><nav class="guide-nav" aria-label="Install by system"><a href="/docs/install/macos/">macOS</a> <a href="/docs/install/linux/">Linux</a> <a href="/docs/install/windows/" aria-current="page">Windows</a> <a href="/docs/install/">All install options</a></nav></div>
+    <section class="guide-section" aria-labelledby="native-title">
+      <h2 id="native-title">Why not native Windows</h2>
+      <p>Nothing in the project builds or tests on Windows. The planned release targets are macOS and Linux, and CI does not run on Windows. Parts of the product also assume a Unix system:</p>
+      <dl class="clients">
+        <div class="client"><dt>Hooks</dt><dd>The client hook wrapper is a <code>/bin/sh</code> script.</dd></div>
+        <div class="client"><dt>Orphan scan</dt><dd>Finding listening processes uses <code>lsof</code> or <code>ss</code>.</dd></div>
+        <div class="client"><dt>Reaping</dt><dd>Stopping an orphan calls <code>kill</code>.</dd></div>
+        <div class="client"><dt>Wake</dt><dd>The adapters drive tmux, cmux or Herdr.</dd></div>
+      </dl>
+      <p>Whether the mail and MCP parts compile on Windows is unknown, because no one has tried. Treat native Windows as unsupported, and if you test it, <a href="https://github.com/tamler/another/issues/new/choose">open an issue</a> with what happened.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="wsl-title">
+      <h2 id="wsl-title">The WSL 2 route</h2>
+      <p>WSL runs a Linux distribution on Windows, so Another should behave as it does on Linux. In an administrator PowerShell, Microsoft's <a href="https://learn.microsoft.com/en-us/windows/wsl/install">install command</a> sets up WSL 2 with Ubuntu on Windows 10 version 2004 or later and on Windows 11. Restart when it finishes.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Install WSL from PowerShell"><code>wsl --install</code></pre>
+      <p>Open the Ubuntu terminal and follow the <a href="/docs/install/linux/">Linux install page</a> from there.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="same-side-title">
+      <h2 id="same-side-title">Keep everything on the Linux side</h2>
+      <p>Another's state, its hooks and its MCP server all need to be where your coding client runs. Run the client inside WSL too, and start it from your project in the WSL file system.</p>
+      <ul>
+        <li>A Windows-side client would look for its config and hooks in your Windows profile, not your WSL home, where <code>another hook install</code> writes them.</li>
+        <li>Keep repositories in your Linux home, such as <code>~/projects/shop</code>, rather than under <code>/mnt/c</code>. <a href="https://learn.microsoft.com/en-us/windows/wsl/filesystems">Microsoft recommends</a> the WSL file system when you work from a Linux command line.</li>
+        <li>Leave <code>~/.another</code> in the default place. It holds a SQLite database, and it has not been tested on a mounted Windows drive.</li>
+      </ul>
+    </section>
+    <section class="guide-section" aria-labelledby="tested-title">
+      <h2 id="tested-title">What this page rests on</h2>
+      <p>The list of Unix dependencies comes from Another's source and workflows. The WSL commands come from Microsoft's documentation. The Linux steps ran in a clean Ubuntu container, which is not WSL. No one has yet run Another on Windows or in WSL for this page, so a report in either direction would help. <a href="/docs/faq/">The FAQ</a> covers other platform questions.</p>
+    </section>
+  </main>
+  <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="/docs/faq/">FAQ</a> <a href="/docs/concepts/">Concepts</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>
+</body>
+</html>

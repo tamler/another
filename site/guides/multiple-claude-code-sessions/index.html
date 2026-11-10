@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Run multiple Claude Code sessions in one repo - Another</title>
+  <meta name="description" content="Two Claude Code sessions in one repository share one Another identity by default. Ending either releases both sessions' holds. Give each its own name.">
+  <link rel="canonical" href="https://toanother.one/guides/multiple-claude-code-sessions/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Another">
+  <meta property="og:title" content="Run multiple Claude Code sessions in one repo - Another">
+  <meta property="og:description" content="Two Claude Code sessions in one repository share one Another identity by default. Ending either releases both sessions' holds. Give each its own name.">
+  <meta property="og:url" content="https://toanother.one/guides/multiple-claude-code-sessions/">
+  <meta property="og:image" content="https://toanother.one/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Another. From one agent to another. So they stop editing the same files.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Run multiple Claude Code sessions in one repo - Another">
+  <meta name="twitter:description" content="Two Claude Code sessions in one repository share one Another identity by default. Ending either releases both sessions' holds. Give each its own name.">
+  <meta name="twitter:image" content="https://toanother.one/twitter.png">
+  <meta name="twitter:image:alt" content="Another. From one agent to another. So they stop editing the same files.">
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Multiple Claude Code sessions, one repository","description":"Two Claude Code sessions in one repository share one Another identity by default. Ending either releases both sessions' holds. Give each its own name.","url":"https://toanother.one/guides/multiple-claude-code-sessions/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://toanother.one/guides/"},{"@type":"ListItem","position":3,"name":"Multiple Claude Code sessions","item":"https://toanother.one/guides/multiple-claude-code-sessions/"}]}]}</script>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="preload" href="/fonts/FragmentMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="masthead wrap with-route">
+    <div class="breadcrumb"><a class="wordmark" href="/" aria-label="Another home">another</a> <span class="route">/ <a href="/guides/">guides</a></span></div>
+    <nav aria-label="Main"><a href="/docs/getting-started/">Get started</a> <a href="/docs/">Docs</a> <a href="/guides/">Guides</a> <a href="/compare/">Compare</a> <a href="/changelog/">Changelog</a></nav>
+  </header>
+  <main class="wrap" id="main" tabindex="-1">
+    <div class="guide-hero"><h1>Multiple Claude Code sessions, one repository</h1><p class="definition">Running the same client in parallel takes one extra step: by default, Another can't tell the sessions apart.</p><nav class="guide-nav" aria-label="Setup guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/concepts/#agent">What is an agent?</a></nav></div>
+    <section class="guide-section" aria-labelledby="catch">
+      <h2 id="catch">The catch: one identity per client and project</h2>
+      <p>A session hook acts as the client name within its project, so two Claude Code sessions started in the same checkout are both <code>claude@shop</code>. The same rule applies to Codex, Grok CLI and Cursor. Sharing an identity has three effects:</p>
+      <ul>
+        <li><strong>Holds don't separate them.</strong> A hold conflicts with other agents, so one session's check passes against the other's hold, and overlapping acquires both succeed.</li>
+        <li><strong>The first session to end ends the agent.</strong> Its session-end hook releases every hold, including any the other session took, and marks <code>claude@shop</code> offline until the other session's next prompt.</li>
+        <li><strong>A new-mail notice appears once.</strong> Whichever session has the next prompt gets it, and the other session hears nothing about that message. Cursor gets no prompt notices at all.</li>
+      </ul>
+    </section>
+    <section class="guide-section" aria-labelledby="names">
+      <h2 id="names">Give each session its own name</h2>
+      <p>Register one identity per session, from the root of the repository. The names here are examples; pick ones that describe the work. Each line prints the agent's full address, such as <code>parser@shop</code> in a project with the slug <code>shop</code>, and the rest of this page uses those addresses.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Register two identities for one client"><code>another init
+another agent register parser --program claude --project .
+another agent register ui --program claude --project .</code></pre>
+      <p>Then start each session with its name in the environment. Run these in separate terminals:</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Start two sessions with distinct identities"><code>ANOTHER_AGENT=parser@shop claude
+ANOTHER_AGENT=ui@shop claude</code></pre>
+      <p>Hooks use that name in place of the default. The agent has to be registered first. A bare name such as <code>parser</code> stops resolving once another project registers the same name. With an unknown or ambiguous name, the hook fails open and the session gets no digest. The first line of the session-start digest names the identity, such as <code>parser@shop</code>, so check it in each session.</p>
+      <p>MCP tools take the identity as an argument, so a session passes its own name, such as <code>{"agent": "parser@shop"}</code> to <code>fetch_inbox</code>. <a href="/guides/mcp-agent-messaging/">MCP messaging</a> lists the arguments.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="coordinate">
+      <h2 id="coordinate">Mail and holds between the two</h2>
+      <p>With distinct names, these work as they do between different clients:</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Send mail and check a hold between two sessions"><code>another send --from parser@shop --to ui@shop --subject "API change" --body "Renamed fetch_user."
+another inbox --agent ui@shop
+another hold acquire --agent parser@shop --project . 'src/parser/**'
+another hold check --agent ui@shop --project . 'src/parser/lex.rs'</code></pre>
+      <p>The check exits with status 3 on a conflict. When <code>ui</code> ends its session, <code>parser</code> keeps its hold. Holds are still <a href="/guides/avoid-agent-file-conflicts/">advisory</a>: they show intent, and nothing stops a session writing to a held file.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="worktrees">
+      <h2 id="worktrees">Or use a worktree per session</h2>
+      <p>Sessions in separate <a href="/guides/git-worktrees/">git worktrees</a> get separate names without <code>ANOTHER_AGENT</code>, such as <code>claude@shop</code> and <code>claude@shop-ui</code>, because each worktree is its own project. They also get separate files. The trade-off is that holds no longer conflict across worktrees unless you share a project scope.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="tested">
+      <h2 id="tested">What this page rests on</h2>
+      <p>We ran the <code>another</code> commands above in temporary state: <code>init</code>, <code>agent register</code>, <code>send</code>, <code>inbox</code>, <code>hold acquire</code> and <code>hold check</code>. We also fed session events to <code>another hook run</code>, the command the installed hooks call, with and without <code>ANOTHER_AGENT</code> set, and called <code>fetch_inbox</code> over <code>another serve --stdio</code>, with <code>parser</code> also registered in a second project. That is where the shared-identity effects and the digest line come from. We did not run the two <code>claude</code> start lines, so <code>ANOTHER_AGENT</code> reaching the hooks through the client's environment comes from the <a href="https://github.com/tamler/another/blob/main/docs/HOOKS.md">hook documentation</a>, not from a client run. Another also does not start, supervise or assign work to these sessions; see <a href="/compare/">how that differs from an orchestrator</a>.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="related"><h2 id="related">Related guides</h2><nav class="guide-nav" aria-label="Related task guides"><a href="/guides/claude-code-codex/">Claude Code + Codex</a> <a href="/guides/git-worktrees/">Git worktrees</a> <a href="/guides/hand-off-tasks/">Hand off a task</a></nav></section>
+  </main>
+  <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="/docs/faq/">FAQ</a> <a href="/docs/concepts/">Concepts</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>
+</body>
+</html>

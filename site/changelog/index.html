@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>What shipped in Another, and what has not</title>
+  <meta name="description" content="Milestones 1 to 6 are on main. No GitHub Release as of 10 Nov 2026, when I looked. Hosted OAuth and a local dashboard are not in this release.">
+  <link rel="canonical" href="https://toanother.one/changelog/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Another">
+  <meta property="og:title" content="What shipped in Another, and what has not">
+  <meta property="og:description" content="Milestones 1 to 6 are on main. No GitHub Release as of 10 Nov 2026, when I looked. Hosted OAuth and a local dashboard are not in this release.">
+  <meta property="og:url" content="https://toanother.one/changelog/">
+  <meta property="og:image" content="https://toanother.one/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Another. From one agent to another. So they stop editing the same files.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="What shipped in Another, and what has not">
+  <meta name="twitter:description" content="Milestones 1 to 6 are on main. No GitHub Release as of 10 Nov 2026, when I looked. Hosted OAuth and a local dashboard are not in this release.">
+  <meta name="twitter:image" content="https://toanother.one/twitter.png">
+  <meta name="twitter:image:alt" content="Another. From one agent to another. So they stop editing the same files.">
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"What shipped","description":"Milestones 1 to 6 are on main. No GitHub Release as of 10 Nov 2026, when I looked. Hosted OAuth and a local dashboard are not in this release.","url":"https://toanother.one/changelog/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}}]}</script>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="preload" href="/fonts/FragmentMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="masthead wrap with-route">
+    <div class="breadcrumb"><a class="wordmark" href="/" aria-label="Another home">another</a> <span class="route">/ changelog</span></div>
+    <nav aria-label="Main"><a href="/docs/getting-started/">Get started</a> <a href="/docs/">Docs</a> <a href="/guides/">Guides</a> <a href="/compare/">Compare</a> <a href="/changelog/" aria-current="page">Changelog</a></nav>
+  </header>
+  <main class="wrap" id="main" tabindex="-1">
+    <div class="guide-hero">
+      <h1>What shipped</h1>
+      <p class="definition">On main as of 10 Nov 2026. I checked the repo that day: 0 stars, 1 fork, and no GitHub Release. If those numbers move, this page should move with them.</p>
+      <p>Install is still <code>cargo install --locked --git https://github.com/tamler/another another</code> with Rust 1.88 or newer. The release workflow can build macOS and static Linux binaries when a <code>v*</code> tag exists. None has been published.</p>
+    </div>
+    <section class="guide-section" aria-labelledby="shipped-title">
+      <h2 id="shipped-title">On main</h2>
+      <dl class="clients">
+        <div class="client"><dt>1. Local core</dt><dd>SQLite event log, agents, mail, requests, path holds, MCP over stdio and loopback HTTP, CLI. <a href="https://github.com/tamler/another/pull/1">PR 1</a>.</dd></div>
+        <div class="client"><dt>2. Hooks and the feed</dt><dd>Activity summary, session events, hook packs, <code>another hook install</code>. <a href="https://github.com/tamler/another/pull/2">PR 2</a>.</dd></div>
+        <div class="client"><dt>3. Resources</dt><dd>Shared and exclusive leases, an orphan scan, reap only after a person passes <code>--confirm</code>. <a href="https://github.com/tamler/another/pull/3">PR 3</a>.</dd></div>
+        <div class="client"><dt>4. Remote peer</dt><dd>Scoped bearer tokens, an audit log, <code>GET /activity</code>. Loopback unless you opt into a remote bind. <a href="https://github.com/tamler/another/pull/4">PR 4</a>.</dd></div>
+        <div class="client"><dt>5. Federation</dt><dd>Signed event logs, pairing, hub-and-spoke sync, cross-node mail. Requests stay on one node. <a href="https://github.com/tamler/another/pull/5">PR 5</a>.</dd></div>
+        <div class="client"><dt>6. Wake and release builds</dt><dd><code>another wake</code> for tmux, cmux, and Herdr. Optional Herdr plugin. Release workflow, quickstart, contributing notes. <a href="https://github.com/tamler/another/pull/6">PR 6</a>.</dd></div>
+      </dl>
+      <p>The project was renamed to Another in <a href="https://github.com/tamler/another/pull/8">PR 8</a>. <a href="https://github.com/tamler/another/pull/95">PR 95</a> closed token-scope bugs (a remote token could reach outside the projects it was minted for). That fix is on main.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="not-title">
+      <h2 id="not-title">In progress, not merged</h2>
+      <p>I am not going to describe these as if you can turn them on.</p>
+      <dl class="clients">
+        <div class="client"><dt>Hosted MCP OAuth</dt><dd>ChatGPT and Claude.ai need OAuth to attach a remote MCP server. That work is underway in other branches. It is not on main.</dd></div>
+        <div class="client"><dt>Local web dashboard</dt><dd>A browser view of the inbox, holds, and resources. Also not merged. The CLI and the MCP tools are the interface.</dd></div>
+      </dl>
+    </section>
+    <section class="guide-section" aria-labelledby="later-title">
+      <h2 id="later-title">Later, not started here</h2>
+      <p>From the spec, still out of scope for the code on main: a pre-commit hold guard, auto-reap policies, mesh federation, end-to-end mail encryption. Holds stay advisory until a guard exists. Reaping stays a human confirm on the owning machine. I would rather ship those late than pretend a hold is a lock.</p>
+      <p><a href="/building/">How I run the agent team on this repo</a>. <a href="/docs/getting-started/">Getting started</a> if you want the commands first.</p>
+    </section>
+  </main>
+  <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="/docs/faq/">FAQ</a> <a href="/building/">How I use it</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>
+</body>
+</html>
