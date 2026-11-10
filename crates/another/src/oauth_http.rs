@@ -5,9 +5,13 @@
 //! `another oauth approve` runs on the machine that holds the database.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use ureq::unversioned::resolver::{ResolvedSocketAddrs, Resolver};
+use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 
 use another_core::{
     canonical_resource, error_redirect, redirect_matches, validate_cimd, AuthorizeInput,
@@ -454,7 +458,10 @@ async fn authorize(
                  another oauth approve {} --agent NAME --project '/path/*'",
                 pending.client_name, pending.redirect_host, pending.user_code
             );
-            let loc = format!("/oauth/wait/{}", pending.request_id);
+            let loc = format!(
+                "/oauth/wait/{}?rt={}",
+                pending.request_id, pending.redirect_token
+            );
             no_store(Redirect::to(&loc).into_response())
         }
         Ok(Err(e)) => fail(e),
@@ -500,25 +507,69 @@ async fn fetch_cimd(cfg: &OAuthConfig, url: &str) -> Result<ClientProfile, Strin
         .map_err(|e| e.to_string())?;
     let (profile, ttl) = fetched?;
     if ttl > Duration::ZERO {
-        if let Ok(mut guard) = cfg.cimd.lock() {
-            guard.insert(
-                profile.client_id.clone(),
-                CachedCimd {
-                    profile: profile.clone(),
-                    expires: Instant::now() + ttl,
-                },
-            );
-        }
+        remember_cimd(
+            &cfg.cimd,
+            profile.client_id.clone(),
+            profile.clone(),
+            Instant::now() + ttl,
+        );
     }
     Ok(profile)
+}
+
+const CIMD_CACHE_MAX: usize = 32;
+const CIMD_BODY_MAX: usize = 64 * 1024;
+
+fn remember_cimd(
+    cache: &Mutex<HashMap<String, CachedCimd>>,
+    key: String,
+    profile: ClientProfile,
+    expires: Instant,
+) {
+    let Ok(mut guard) = cache.lock() else {
+        return;
+    };
+    let now = Instant::now();
+    guard.retain(|_, entry| entry.expires > now);
+    if !guard.contains_key(&key) && guard.len() >= CIMD_CACHE_MAX {
+        if let Some(oldest) = guard
+            .iter()
+            .min_by_key(|(_, entry)| entry.expires)
+            .map(|(k, _)| k.clone())
+        {
+            guard.remove(&oldest);
+        }
+    }
+    guard.insert(key, CachedCimd { profile, expires });
+}
+
+/// Connects only to an address resolved before the request, so a DNS change between
+/// the check and the connect cannot retarget the fetch. TLS SNI and the Host header
+/// stay the URL's hostname because the request URI is unchanged.
+#[derive(Debug)]
+struct PinnedResolver {
+    addr: SocketAddr,
+}
+
+impl Resolver for PinnedResolver {
+    fn resolve(
+        &self,
+        _uri: &ureq::http::Uri,
+        _config: &ureq::config::Config,
+        _timeout: NextTimeout,
+    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        let mut addrs = self.empty();
+        addrs.push(self.addr);
+        Ok(addrs)
+    }
 }
 
 fn load_cimd_document(
     url: &str,
     allow_loopback: bool,
 ) -> Result<(ClientProfile, Duration), String> {
-    let (scheme, host) = cimd_target(url, allow_loopback)?;
-    assert_public_destination(&host, allow_loopback)?;
+    let (scheme, host, port) = cimd_target(url, allow_loopback)?;
+    let pinned = pin_public_address(&host, port, allow_loopback)?;
     let mut config = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs(5)))
@@ -526,7 +577,11 @@ fn load_cimd_document(
     if scheme == "https" {
         config = config.https_only(true);
     }
-    let agent = ureq::Agent::new_with_config(config.build());
+    let agent = ureq::Agent::with_parts(
+        config.build(),
+        DefaultConnector::default(),
+        PinnedResolver { addr: pinned },
+    );
     let mut resp = agent
         .get(url)
         .header("user-agent", "another-oauth")
@@ -541,20 +596,34 @@ fn load_cimd_document(
             .get("cache-control")
             .and_then(|v| v.to_str().ok()),
     );
-    let text = resp
-        .body_mut()
-        .read_to_string()
-        .map_err(|_| "client metadata document could not be read".to_string())?;
-    if text.len() > 64 * 1024 {
-        return Err("client metadata document is too large".into());
-    }
+    let bytes = read_capped(&mut resp.body_mut().as_reader(), CIMD_BODY_MAX)?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| "client metadata document is not UTF-8".to_string())?;
     let doc: Value = serde_json::from_str(&text)
         .map_err(|_| "client metadata document is not JSON".to_string())?;
     let profile = validate_cimd(url, &doc)?;
     Ok((profile, ttl))
 }
 
-fn cimd_target(url: &str, allow_loopback: bool) -> Result<(String, String), String> {
+fn read_capped(mut reader: impl Read, max: usize) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    let mut buf = [0u8; 2048];
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .map_err(|_| "client metadata document could not be read".to_string())?;
+        if n == 0 {
+            break;
+        }
+        if out.len().saturating_add(n) > max {
+            return Err("client metadata document is too large".into());
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+    Ok(out)
+}
+
+fn cimd_target(url: &str, allow_loopback: bool) -> Result<(String, String, u16), String> {
     let (scheme, rest) = url
         .split_once("://")
         .ok_or("client_id must be an https URL with a path")?;
@@ -568,17 +637,18 @@ fn cimd_target(url: &str, allow_loopback: bool) -> Result<(String, String), Stri
     if path.is_empty() {
         return Err("client_id URL must contain a path".into());
     }
-    let (host, _) = split_authority(authority).map_err(|e| e.to_string())?;
+    let (host, explicit_port) = split_authority(authority).map_err(|e| e.to_string())?;
     let https = scheme == "https";
     let loopback_http = scheme == "http" && allow_loopback && is_loopback_name(&host);
     if !https && !loopback_http {
         return Err("client_id must be an https URL".into());
     }
-    Ok((scheme, host))
+    let port = explicit_port.unwrap_or(if https { 443 } else { 80 });
+    Ok((scheme, host, port))
 }
 
-fn assert_public_destination(host: &str, allow_loopback: bool) -> Result<(), String> {
-    let addrs: Vec<SocketAddr> = (host, 443)
+fn pin_public_address(host: &str, port: u16, allow_loopback: bool) -> Result<SocketAddr, String> {
+    let addrs: Vec<SocketAddr> = (host, port)
         .to_socket_addrs()
         .map_err(|_| "client metadata host could not be resolved".to_string())?
         .collect();
@@ -588,7 +658,7 @@ fn assert_public_destination(host: &str, allow_loopback: bool) -> Result<(), Str
     if addrs.iter().any(|a| !ip_allowed(a.ip(), allow_loopback)) {
         return Err("client metadata host is not a public address".into());
     }
-    Ok(())
+    Ok(addrs[0])
 }
 
 /// Carrier-grade NAT, 100.64.0.0/10. Not covered by `Ipv4Addr::is_private` on Rust 1.88.
@@ -649,10 +719,16 @@ fn cache_ttl(header: Option<&str>) -> Duration {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct RedirectTokenQuery {
+    rt: Option<String>,
+}
+
 async fn wait_page(
     State(store): State<Store>,
     Extension(ctx): Extension<AuthContext>,
     Path(request_id): Path<String>,
+    Query(q): Query<RedirectTokenQuery>,
 ) -> Response {
     let Some(cfg) = cfg(&ctx) else {
         return StatusCode::NOT_FOUND.into_response();
@@ -660,8 +736,10 @@ async fn wait_page(
     let store2 = store.clone();
     let id = request_id.clone();
     let issuer = cfg.issuer.clone();
+    let rt = q.rt.unwrap_or_default();
     let status =
-        tokio::task::spawn_blocking(move || store2.authorization_status(&id, &issuer)).await;
+        tokio::task::spawn_blocking(move || store2.authorization_status(&id, &rt, &issuer, false))
+            .await;
     let Ok(Ok(status)) = status else {
         return fail_page(&OAuthFail::InvalidRequest("unknown authorization".into()));
     };
@@ -688,7 +766,7 @@ fn wait_html(request_id: &str, status: &str) -> String {
     format!(
         r#"<!doctype html>
 <meta charset="utf-8">
-<title>Approve this client — Another</title>
+<title>Approve this client - Another</title>
 <style>
   body {{ font: 16px/1.45 system-ui, sans-serif; max-width: 38rem; margin: 3rem auto; padding: 0 1rem; color: #1c1917; }}
   code, pre {{ font-family: ui-monospace, monospace; }}
@@ -703,9 +781,10 @@ fn wait_html(request_id: &str, status: &str) -> String {
 <noscript><p>After you approve, reload this page. The app continues when the browser is sent back.</p></noscript>
 <script>
 const id = {id_json};
+const rt = new URLSearchParams(location.search).get('rt') || '';
 const state = document.getElementById('state');
 async function poll() {{
-  const res = await fetch('/oauth/pending/' + id, {{ headers: {{ accept: 'application/json' }} }});
+  const res = await fetch('/oauth/pending/' + id + '?rt=' + encodeURIComponent(rt), {{ headers: {{ accept: 'application/json' }} }});
   if (!res.ok) {{ state.textContent = 'this request is not valid'; return; }}
   const body = await res.json();
   state.textContent = body.status;
@@ -731,6 +810,7 @@ async fn pending(
     State(store): State<Store>,
     Extension(ctx): Extension<AuthContext>,
     Path(request_id): Path<String>,
+    Query(q): Query<RedirectTokenQuery>,
 ) -> Response {
     let Some(cfg) = cfg(&ctx) else {
         return StatusCode::NOT_FOUND.into_response();
@@ -738,8 +818,10 @@ async fn pending(
     let store2 = store.clone();
     let issuer = cfg.issuer.clone();
     let id = request_id.clone();
+    let rt = q.rt.unwrap_or_default();
     let status =
-        tokio::task::spawn_blocking(move || store2.authorization_status(&id, &issuer)).await;
+        tokio::task::spawn_blocking(move || store2.authorization_status(&id, &rt, &issuer, true))
+            .await;
     let Ok(Ok(status)) = status else {
         return no_store(
             (
@@ -1111,5 +1193,91 @@ mod tests {
         assert!(cimd_target("http://127.0.0.1:9/client.json", false).is_err());
         assert!(cimd_target("http://127.0.0.1:9/client.json", true).is_ok());
         assert!(cimd_target("https://chatgpt.com", false).is_err());
+        assert_eq!(
+            cimd_target("https://example.com:8443/client.json", false)
+                .unwrap()
+                .2,
+            8443
+        );
+        assert_eq!(
+            cimd_target("https://example.com/client.json", false)
+                .unwrap()
+                .2,
+            443
+        );
+        assert_eq!(
+            cimd_target("http://127.0.0.1:9/client.json", true)
+                .unwrap()
+                .2,
+            9
+        );
+    }
+
+    #[test]
+    fn pinned_resolver_does_not_look_up_the_url_again() {
+        let addr: SocketAddr = "203.0.113.10:8443".parse().unwrap();
+        let resolver = PinnedResolver { addr };
+        let uri: ureq::http::Uri = "https://moved.example/client.json".parse().unwrap();
+        let got = Resolver::resolve(
+            &resolver,
+            &uri,
+            &ureq::Agent::config_builder().build(),
+            NextTimeout::default(),
+        )
+        .unwrap();
+        assert_eq!(got[0], addr);
+        assert_eq!(got.len(), 1);
+    }
+
+    #[test]
+    fn metadata_body_stops_at_64_kib_and_cache_is_capped() {
+        let mut big = vec![b'x'; CIMD_BODY_MAX + 1];
+        assert!(read_capped(big.as_slice(), CIMD_BODY_MAX).is_err());
+        big.pop();
+        assert_eq!(
+            read_capped(big.as_slice(), CIMD_BODY_MAX).unwrap().len(),
+            CIMD_BODY_MAX
+        );
+
+        let cache = Mutex::new(HashMap::new());
+        let profile = ClientProfile {
+            client_id: "https://example.com/c.json".into(),
+            client_name: "C".into(),
+            redirect_uris: vec!["https://example.com/cb".into()],
+        };
+        for i in 0..CIMD_CACHE_MAX + 8 {
+            remember_cimd(
+                &cache,
+                format!("https://example.com/{i}.json"),
+                profile.clone(),
+                Instant::now() + Duration::from_secs(60 + i as u64),
+            );
+        }
+        assert_eq!(cache.lock().unwrap().len(), CIMD_CACHE_MAX);
+    }
+
+    #[test]
+    fn metadata_fetch_connects_to_the_resolved_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/client.json");
+        let body = format!(
+            r#"{{"client_id":"{url}","client_name":"Loop","redirect_uris":["http://127.0.0.1/callback"],"token_endpoint_auth_method":"none"}}"#
+        );
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = std::io::Read::read(&mut sock, &mut buf);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = std::io::Write::write_all(&mut sock, resp.as_bytes());
+        });
+        let (profile, _) = load_cimd_document(&url, true).unwrap();
+        assert_eq!(profile.client_name, "Loop");
+        // Port 443 on this host is not our server. A fetch that ignored the URL port
+        // would not get this document.
+        assert_ne!(addr.port(), 443);
     }
 }

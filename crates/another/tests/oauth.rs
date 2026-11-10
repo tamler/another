@@ -303,6 +303,7 @@ async fn oauth_pkce_then_mcp_client_and_bearer_still_works() {
     assert_eq!(auth.status(), 303);
     let wait = auth.headers().get("location").unwrap().to_str().unwrap();
     assert!(wait.starts_with("/oauth/wait/"));
+    assert!(wait.contains("rt="));
     let page = http
         .get(format!("{}{wait}", srv.base))
         .send()
@@ -314,9 +315,13 @@ async fn oauth_pkce_then_mcp_client_and_bearer_still_works() {
     assert!(page.contains("cannot grant"));
     assert!(!page.to_ascii_lowercase().contains("<form"));
 
-    let request_id = wait.rsplit('/').next().unwrap();
+    let pending_url = format!(
+        "{}{}",
+        srv.base,
+        wait.replacen("/oauth/wait/", "/oauth/pending/", 1)
+    );
     let pending: Value = http
-        .get(format!("{}/oauth/pending/{request_id}", srv.base))
+        .get(&pending_url)
         .send()
         .await
         .unwrap()
@@ -345,7 +350,7 @@ async fn oauth_pkce_then_mcp_client_and_bearer_still_works() {
         })
         .unwrap();
     let decided: Value = http
-        .get(format!("{}/oauth/pending/{request_id}", srv.base))
+        .get(&pending_url)
         .send()
         .await
         .unwrap()

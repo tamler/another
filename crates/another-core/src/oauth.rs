@@ -6,9 +6,11 @@
 //! globs, the same rule as a bearer token. Access tokens are short-lived. Refresh tokens
 //! rotate, and presenting a replaced refresh token revokes the whole grant.
 //!
-//! Secrets (authorization codes, access tokens, refresh tokens, PKCE verifiers) are stored
-//! only as SHA-256 hashes, except the authorization code itself, which is kept until the
-//! browser picks it up and then cleared. Nothing here is written to the event log.
+//! Access tokens, refresh tokens, PKCE verifiers, and authorization codes are stored only
+//! as SHA-256 hashes. The authorization code is created in the server process the first
+//! time the browser polls with a one-time redirect token (also stored only as a hash),
+//! returned once in that redirect, and is not written to the database. Nothing here is
+//! written to the event log.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -85,6 +87,9 @@ pub struct PendingAuthorization {
     pub redirect_host: String,
     pub loopback_redirect: bool,
     pub expires_at: String,
+    /// Presented once in the browser URL. Only its hash is stored.
+    #[serde(skip)]
+    pub redirect_token: String,
 }
 
 /// A waiting request, without the PKCE challenge or authorization code.
@@ -670,7 +675,7 @@ struct RequestRow {
     code_challenge_method: String,
     status: String,
     grant_id: Option<String>,
-    code: Option<String>,
+    redirect_token_hash: String,
     code_hash: Option<String>,
     expires_at: i64,
     code_expires_at: Option<i64>,
@@ -679,8 +684,8 @@ struct RequestRow {
 fn load_request(tx: &Tx<'_>, request_id: &str) -> Result<Option<RequestRow>> {
     tx.query_row(
         "SELECT request_id, client_id, client_name, redirect_uri, state, scope, resource,
-                code_challenge, code_challenge_method, status, grant_id, code, code_hash,
-                expires_at, code_expires_at
+                code_challenge, code_challenge_method, status, grant_id, redirect_token_hash,
+                code_hash, expires_at, code_expires_at
          FROM oauth_requests WHERE request_id = ?1 AND node_id = ?2",
         params![request_id, tx.node_id],
         |r| {
@@ -696,7 +701,7 @@ fn load_request(tx: &Tx<'_>, request_id: &str) -> Result<Option<RequestRow>> {
                 code_challenge_method: r.get(8)?,
                 status: r.get(9)?,
                 grant_id: r.get(10)?,
-                code: r.get(11)?,
+                redirect_token_hash: r.get(11)?,
                 code_hash: r.get(12)?,
                 expires_at: r.get(13)?,
                 code_expires_at: r.get(14)?,
@@ -828,29 +833,38 @@ fn with_iss<'a>(
     pairs
 }
 
+fn success_redirect(req: &RequestRow, code: &str, issuer: &str) -> String {
+    redirect_back(
+        &req.redirect_uri,
+        &with_iss(vec![("code", code)], &req.state, issuer),
+    )
+}
+
+fn error_back(req: &RequestRow, error: &str, description: &str, issuer: &str) -> String {
+    redirect_back(
+        &req.redirect_uri,
+        &with_iss(
+            vec![("error", error), ("error_description", description)],
+            &req.state,
+            issuer,
+        ),
+    )
+}
+
 fn auth_redirect(req: &RequestRow, status: &str, now: i64, issuer: &str) -> Option<String> {
     match status {
         "approved" => {
-            let fresh = req.code_expires_at.is_some_and(|t| t > now);
-            match (fresh, req.code.as_deref()) {
-                (true, Some(code)) => Some(redirect_back(
-                    &req.redirect_uri,
-                    &with_iss(vec![("code", code)], &req.state, issuer),
-                )),
-                _ => Some(redirect_back(
-                    &req.redirect_uri,
-                    &with_iss(
-                        vec![
-                            ("error", "invalid_request"),
-                            (
-                                "error_description",
-                                "the approval expired before the app collected it; connect again",
-                            ),
-                        ],
-                        &req.state,
-                        issuer,
-                    ),
-                )),
+            // The code is minted once, later, and is not stored. An approved request
+            // whose code was already issued does not get another copy.
+            if req.code_hash.is_some() && req.code_expires_at.is_some_and(|t| t <= now) {
+                Some(error_back(
+                    req,
+                    "invalid_request",
+                    "the approval expired before the app collected it; connect again",
+                    issuer,
+                ))
+            } else {
+                None
             }
         }
         "denied" => Some(redirect_back(
@@ -1011,6 +1025,8 @@ impl Store {
         let resource = canonical_resource(&input.resource).map_err(OAuthFail::InvalidTarget)?;
         let request_id = random_hex(32)?;
         let user_code = user_code()?;
+        let redirect_token = random_hex(32)?;
+        let redirect_token_hash = hash_secret(&redirect_token);
         let remote = input.remote.clone();
         let client_name = input.client.client_name.clone();
         let redirect_host = redirect_host(&input.redirect_uri);
@@ -1032,8 +1048,8 @@ impl Store {
             tx.execute(
                 "INSERT INTO oauth_requests (request_id, node_id, client_id, client_name,
                     redirect_uri, state, scope, resource, code_challenge, code_challenge_method,
-                    user_code, status, created_at, expires_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'pending', ?12, ?13)",
+                    user_code, status, redirect_token_hash, created_at, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'pending', ?12, ?13, ?14)",
                 params![
                     stored_id,
                     tx.node_id,
@@ -1046,6 +1062,7 @@ impl Store {
                     input.code_challenge,
                     input.code_challenge_method,
                     stored_code,
+                    redirect_token_hash,
                     tx.now,
                     expires_at
                 ],
@@ -1075,6 +1092,7 @@ impl Store {
             redirect_host,
             loopback_redirect: redirect_is_loopback(&input.redirect_uri),
             expires_at: fmt_ts(expires_at),
+            redirect_token,
         })
     }
 
@@ -1115,9 +1133,6 @@ impl Store {
             }
             let req = load_request(tx, &request_id)?.expect("request exists");
             let grant_id = new_id();
-            let secret = random_hex(32)?;
-            let code = format!("{CODE_PREFIX}{request_id}_{secret}");
-            let code_expires = tx.now + (CODE_TTL_SECS as i64) * 1000;
             tx.execute(
                 "INSERT INTO oauth_grants (grant_id, node_id, client_id, client_name, agent_id,
                     project_globs, label, resource, scope, created_at)
@@ -1137,10 +1152,9 @@ impl Store {
             )?;
             tx.execute(
                 "UPDATE oauth_requests
-                 SET status = 'approved', grant_id = ?2, code = ?3, code_hash = ?4,
-                     code_expires_at = ?5
+                 SET status = 'approved', grant_id = ?2, code_hash = NULL, code_expires_at = NULL
                  WHERE request_id = ?1",
-                params![request_id, grant_id, code, hash_secret(&code), code_expires],
+                params![request_id, grant_id],
             )?;
             insert_audit(
                 tx,
@@ -1292,30 +1306,59 @@ impl Store {
         })
     }
 
-    /// Browser poll. Returns a redirect only after a local decision, and only to the
-    /// redirect URI stored with the request.
+    /// Browser poll. `redirect_token` is the one-time secret from the wait-page URL.
+    /// When `issue` is set and the request is approved but no code exists yet, this mints
+    /// the authorization code, stores only its hash, and returns it in the redirect once.
     pub fn authorization_status(
         &self,
         request_id: &str,
+        redirect_token: &str,
         issuer: &str,
+        issue: bool,
     ) -> std::result::Result<AuthorizationStatus, OAuthFail> {
         if request_id.len() != 64 || !request_id.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(OAuthFail::InvalidRequest("unknown authorization".into()));
         }
+        let presented = hash_secret(redirect_token);
         self.write(|tx| {
             let Some(req) = load_request(tx, request_id)? else {
                 return Err(Error::NotFound("unknown authorization".into()));
             };
-            let status = if req.status == "pending" && req.expires_at <= tx.now {
+            if !secrets_eq(&req.redirect_token_hash, &presented) {
+                return Err(Error::NotFound("unknown authorization".into()));
+            }
+            let mut status = if req.status == "pending" && req.expires_at <= tx.now {
                 tx.execute(
-                    "UPDATE oauth_requests SET status = 'expired' WHERE request_id = ?1",
+                    "UPDATE oauth_requests SET status = 'expired', code_hash = NULL,
+                        code_expires_at = NULL
+                     WHERE request_id = ?1",
                     [&req.request_id],
                 )?;
                 "expired".to_string()
             } else {
                 req.status.clone()
             };
-            let redirect = auth_redirect(&req, &status, tx.now, issuer);
+            if status == "approved" && req.expires_at <= tx.now && req.code_hash.is_none() {
+                tx.execute(
+                    "UPDATE oauth_requests SET status = 'expired' WHERE request_id = ?1",
+                    [&req.request_id],
+                )?;
+                status = "expired".to_string();
+            }
+            let mut redirect = auth_redirect(&req, &status, tx.now, issuer);
+            if issue && status == "approved" && req.code_hash.is_none() {
+                let secret = random_hex(32)?;
+                let code = format!("{CODE_PREFIX}{}_{secret}", req.request_id);
+                let code_expires = tx.now + (CODE_TTL_SECS as i64) * 1000;
+                let updated = tx.execute(
+                    "UPDATE oauth_requests SET code_hash = ?2, code_expires_at = ?3
+                     WHERE request_id = ?1 AND status = 'approved' AND code_hash IS NULL",
+                    params![req.request_id, hash_secret(&code), code_expires],
+                )?;
+                if updated == 1 {
+                    redirect = Some(success_redirect(&req, &code, issuer));
+                }
+            }
             Ok(AuthorizationStatus { status, redirect })
         })
         .map_err(|e| match e {
@@ -1348,7 +1391,8 @@ impl Store {
                 .as_deref()
                 .is_some_and(|h| secrets_eq(h, &hash_secret(&exchange.code)));
             // A wrong secret must not revoke the grant. Only a second presentation of the
-            // real code does (the hash still matches after the code column is cleared).
+            // real code does. The hash stays after the code is consumed so that replay
+            // can still be recognized. The plaintext code is never stored.
             if !hash_ok {
                 return Err(Error::Forbidden(
                     "invalid, expired or already used authorization code".into(),
@@ -1388,7 +1432,7 @@ impl Store {
                 ));
             }
             tx.execute(
-                "UPDATE oauth_requests SET status = 'consumed', code = NULL WHERE request_id = ?1",
+                "UPDATE oauth_requests SET status = 'consumed' WHERE request_id = ?1",
                 [&request_id],
             )?;
             let issued = issue_pair(tx, &grant_id, &resource, &req.scope)?;
@@ -1780,9 +1824,27 @@ mod tests {
         assert_eq!(grant.agent, "chatgpt");
         assert_eq!(grant.project_globs, vec!["/work/*".to_string()]);
         let status = store
-            .authorization_status(&pending.request_id, "https://another.example.com")
+            .authorization_status(
+                &pending.request_id,
+                &pending.redirect_token,
+                "https://another.example.com",
+                true,
+            )
             .unwrap();
         let redirect = status.redirect.unwrap();
+        let again = store
+            .authorization_status(
+                &pending.request_id,
+                &pending.redirect_token,
+                "https://another.example.com",
+                true,
+            )
+            .unwrap();
+        let second = again.redirect.unwrap_or_default();
+        assert!(
+            !second.contains("code="),
+            "the authorization code is returned once"
+        );
         assert!(redirect.contains("iss=https%3A%2F%2Fanother.example.com"));
         assert!(redirect.contains("state=xyz"));
         let code = redirect
@@ -1877,6 +1939,39 @@ mod tests {
         assert!(!blob.contains("anort_"));
         assert!(!blob.contains("anoac_"));
         assert!(!blob.contains("dBjftJeZ4CVP"));
+    }
+
+    #[test]
+    fn accepts_chatgpt_desktop_codex_client_metadata() {
+        // The document ChatGPT desktop / Codex fetches when the authorization server
+        // advertises issuer identification. Captured from
+        // https://chatgpt.com/oauth/codex/client.json
+        let url = "https://chatgpt.com/oauth/codex/client.json";
+        let doc = serde_json::json!({
+            "client_id": url,
+            "client_uri": "https://chatgpt.com/codex",
+            "application_type": "native",
+            "redirect_uris": ["http://127.0.0.1/callback", "http://localhost/callback"],
+            "token_endpoint_auth_method": "none",
+            "token_endpoint_auth_methods_supported": ["none"],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "client_name": "Codex"
+        });
+        let profile = validate_cimd(url, &doc).unwrap();
+        assert_eq!(profile.client_name, "Codex");
+        assert!(redirect_matches(
+            &profile.redirect_uris,
+            "http://127.0.0.1:54321/callback"
+        ));
+        assert!(redirect_matches(
+            &profile.redirect_uris,
+            "http://localhost:9/callback"
+        ));
+        assert!(!redirect_matches(
+            &profile.redirect_uris,
+            "http://127.0.0.1:54321/other"
+        ));
     }
 
     #[test]

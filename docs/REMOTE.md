@@ -1,9 +1,58 @@
 # Remote peers
 
-A remote agent joins as a first-class peer through **authenticated streamable HTTP MCP**. Two ways in:
+## ChatGPT desktop app (this Mac): local, no tunnel
 
-- **Bearer token** — for a client that can send `Authorization: Bearer …` (Grok Bot, a script, anything you configure by hand).
-- **OAuth 2.1** — for a hosted app that adds a connector by URL and signs in with OAuth. ChatGPT custom connectors and Claude (claude.ai, Desktop, and the other hosted surfaces) work this way. Many of those UIs cannot send a static Authorization header.
+The ChatGPT desktop app can run Another **on this computer**. OpenAI's MCP guide says the desktop app, the Codex CLI, and the IDE extension share one local MCP configuration (`~/.codex/config.toml` by default). A server configured there is started or dialed by the app, not by OpenAI's cloud.
+
+Source: [Model Context Protocol, ChatGPT Learn](https://learn.chatgpt.com/docs/extend/mcp) (sections "Connect an existing MCP server", "Configure in the ChatGPT desktop app", and "STDIO servers" / "Streamable HTTP servers"). The page's own example of a local URL is `http://localhost:3000/mcp`.
+
+Preferred setup, stdio:
+
+1. Install `another` so the app can find it (`which another`).
+2. In the ChatGPT desktop app, open **Settings → MCP servers → Add server**.
+3. Name it `another`. Choose **STDIO**. Command `another`, arguments `serve` and `--stdio`.
+4. Save, then **Restart**. In the composer, `/mcp` lists connected servers.
+
+The same configuration in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.another]
+command = "another"
+args = ["serve", "--stdio"]
+```
+
+Or one loopback daemon, no bearer token and no OAuth, because the only client is on this machine:
+
+```bash
+another serve
+```
+
+```toml
+[mcp_servers.another]
+url = "http://127.0.0.1:7466/mcp"
+```
+
+In the app that is **Streamable HTTP** and the URL above. Logs stay on stderr, so stdio framing is not mixed with them.
+
+This local client does **not** apply to a hosted ChatGPT conversation. The same guide says ChatGPT on the web does not read `~/.codex/config.toml`, and that a hosted Work chat uses plugins and remote MCP tools. A thread that runs in OpenAI's cloud, including one you open inside the desktop app, will not call `localhost`. Local computer access with Work Cloud can also leave local MCP transports unavailable; the guide says to check that separately.
+
+### What is not a local connection
+
+| Surface | Who calls the server | How you add it |
+|---|---|---|
+| Desktop app → Settings → MCP servers, and Codex CLI / IDE | The app on this Mac (stdio process, or HTTP to a URL this Mac can open, including `127.0.0.1`) | Steps above. [learn.chatgpt.com/docs/extend/mcp](https://learn.chatgpt.com/docs/extend/mcp) |
+| ChatGPT plugins / developer mode → Add custom MCP server | OpenAI's cloud. The official page says to use ChatGPT on the web. Localhost is not a connection option | A public `https://…/mcp` URL, or **Tunnel** (Secure MCP Tunnel). [Add custom MCP server](https://developers.openai.com/api/docs/guides/custom-mcp-server), [Connect and test your plugin](https://developers.openai.com/plugins/deploy/connect-chatgpt) |
+| Secure MCP Tunnel | OpenAI queues the call; `tunnel-client` on your machine pulls it and forwards to local stdio or HTTP. The MCP server is not listening on the public internet, but the caller is still OpenAI | [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) |
+| Desktop-only plugin (Apps SDK) | The desktop app, stdio, threads that run locally. Publishing one requires an OpenAI partner allowlist | [Submit desktop-only plugins](https://developers.openai.com/plugins/deploy/desktop-only) |
+
+You do not submit a plugin to use Settings → MCP servers. That screen is the local path. Use the OAuth tunnel below only for a hosted ChatGPT or Claude chat that cannot see this machine.
+
+If you point the desktop app's **Authenticate** button at an `--auth` server, Codex speaks OAuth with PKCE and the loopback callback `http://127.0.0.1/callback` (any port). Its client metadata is [https://chatgpt.com/oauth/codex/client.json](https://chatgpt.com/oauth/codex/client.json) when the server advertises `iss`, which Another does. Approve that client locally the same way as any other OAuth client. For the desktop app, stdio or plain loopback HTTP is enough; skip `--auth` unless you want a bearer token (`bearer_token_env_var` in `config.toml`) or that OAuth login.
+
+A remote agent joins as a first-class peer through **authenticated streamable HTTP MCP**. Two ways in for clients that are **not** on this machine:
+
+- **Bearer token**, for a client that can send `Authorization: Bearer ...` (Grok Bot, a script, anything you configure by hand).
+- **OAuth 2.1**, for a hosted app that adds a connector by URL and signs in with OAuth. ChatGPT custom connectors and Claude (claude.ai, Desktop, and the other hosted surfaces) work this way. Many of those UIs cannot send a static Authorization header.
 
 Both kinds of credential act as **exactly one agent**, may only touch projects matching their globs, and every call is recorded in the audit log. Reaping is never available remotely. Nothing here is a hosted relay: the server is still your machine, and TLS stops at a tunnel you run.
 
@@ -243,7 +292,9 @@ curl -H "Authorization: Bearer $ANOTHER_TOKEN" "https://another.example.com/acti
 
 ## Audit log
 
-Every authenticated or rejected remote request is recorded with time, token or grant id, agent, operation, outcome (`ok`, `error`, `denied`), redacted arguments (message bodies and notes are replaced by their size) and the forwarding header or peer address. OAuth events (`oauth.register`, `oauth.authorize`, `oauth.approve`, `oauth.deny`, `oauth.token`, `oauth.refresh`, `oauth.revoke`) are recorded the same way. Authorization codes, access tokens, refresh tokens and PKCE verifiers are not written there; only their hashes are stored.
+Every authenticated or rejected remote request is recorded with time, token or grant id, agent, operation, outcome (`ok`, `error`, `denied`), redacted arguments (message bodies and notes are replaced by their size) and the forwarding header or peer address. OAuth events (`oauth.register`, `oauth.authorize`, `oauth.approve`, `oauth.deny`, `oauth.token`, `oauth.refresh`, `oauth.revoke`) are recorded the same way. The audit log does not contain authorization codes, redirect tokens, access tokens, refresh tokens, or PKCE verifiers.
+
+The database stores only SHA-256 hashes of those secrets. The authorization code is not a column. The server mints it in memory on the first poll after `another oauth approve`, after checking the one-time redirect token from the browser URL (also stored only as a hash), and puts it in that one redirect. A later poll does not return it again.
 
 ```bash
 another audit --limit 50

@@ -530,7 +530,7 @@ CREATE TABLE oauth_requests (
     user_code             TEXT NOT NULL UNIQUE,
     status                TEXT NOT NULL,
     grant_id              TEXT,
-    code                  TEXT,
+    redirect_token_hash   TEXT NOT NULL,
     code_hash             TEXT,
     created_at            INTEGER NOT NULL,
     expires_at            INTEGER NOT NULL,

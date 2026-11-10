@@ -26,7 +26,7 @@ What they get instead:
 
 Hooks put a short digest in at session start. That is why the agents look. State is one SQLite database on the machine (`~/.another`, or `$ANOTHER_HOME`). A second machine can federate through a hub you host. The hub can read mail it relays.
 
-Not in this release: OAuth for hosted MCP clients (ChatGPT, Claude.ai), and a local web dashboard. Both are in progress and not merged. See the [changelog](https://toanother.one/changelog/) and [how I run the agents on this repo](https://toanother.one/building/).
+A local web dashboard is not in this release. OAuth for hosted MCP clients (ChatGPT, Claude.ai) is. See the [changelog](https://toanother.one/changelog/) and [how I run the agents on this repo](https://toanother.one/building/).
 
 The website source lives in [site/](site/README.md). `sh site/build.sh` checks the pages, and `python3 scripts/check-copy.py` rejects em dashes and a banned-phrase list.
 
@@ -72,6 +72,8 @@ Or run one loopback daemon and point clients at `http://127.0.0.1:7466/mcp`:
 another serve
 ```
 
+**ChatGPT desktop on this Mac** uses that same local server. In the app: Settings → MCP servers → Add server → STDIO, command `another`, arguments `serve --stdio`, then Restart. Or Streamable HTTP with the URL `http://127.0.0.1:7466/mcp` while `another serve` is running. No tunnel and no OAuth. The app writes this to `~/.codex/config.toml`, which Codex shares. A cloud ChatGPT chat, including developer-mode plugins, does not use that file; those connectors are called from OpenAI and need a public URL or OpenAI's Secure MCP Tunnel. Details and links: [docs/REMOTE.md](docs/REMOTE.md).
+
 **5. Try it from the shell:**
 
 ```bash
@@ -104,10 +106,9 @@ another activity --summary
 | 4 | Authenticated remote peer (Grok Bot): scoped bearer tokens, audit log, `GET /activity` | ✅ tamler/another#4 |
 | 5 | Federation (v2): signed event logs, pairing, hub-and-spoke sync, cross-node mail | ✅ tamler/another#5 |
 | 6 | Polish: `another wake` (tmux, cmux, Herdr), Herdr plugin, release builds, quickstart, CONTRIBUTING | ✅ complete |
+| 7 | Hosted connectors: OAuth 2.1 on the authenticated server, local approval, `another remote up`, `whats_new`, ChatGPT desktop local MCP | this PR |
 
-Hosted connectors are in the tree on top of milestone 4's authenticated server: OAuth 2.1 (PKCE, metadata, local approval), `another remote up`, and a `whats_new` tool. Bearer tokens are unchanged.
-
-Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88.
+Current brief: [AGENTS.md](AGENTS.md). Milestone 7 is the connectors work. Bearer tokens from milestone 4 still work. Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88, copy lint.
 
 ## Guides
 
