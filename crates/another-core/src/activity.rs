@@ -231,7 +231,7 @@ const MAX_LIMIT: u32 = 500;
 const HIGHLIGHTS: usize = 8;
 
 /// Render one event as a feed item, looking up names the payload only references by id.
-fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
+pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
     let p: Value = serde_json::from_str(&row.payload).unwrap_or(Value::Null);
     let s = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     let list = |k: &str| {
@@ -320,6 +320,9 @@ fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
                 "request.released" => format!("{actor} released request: {title}"),
                 "request.completed" => format!("{actor} completed request: {title}"),
                 "request.cancelled" => format!("{actor} cancelled request: {title}"),
+                _ if s("reason") == "dashboard" => {
+                    format!("request went stale from the local dashboard: {title}")
+                }
                 _ => format!("request went stale (past due): {title}"),
             };
             (text, json!({ "request_id": rid }))
@@ -348,6 +351,7 @@ fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             };
             let why = match s("reason").as_str() {
                 "session_end" => " at session end",
+                "dashboard" => " from the local dashboard",
                 _ => "",
             };
             (
@@ -559,13 +563,13 @@ fn agent_address(conn: &Connection, id: &str) -> Result<String> {
         .unwrap_or_else(|| id.to_string()))
 }
 
-struct EventRow {
-    event_id: String,
-    node_id: String,
-    ts: i64,
-    actor: String,
-    kind: String,
-    payload: String,
+pub(crate) struct EventRow {
+    pub(crate) event_id: String,
+    pub(crate) node_id: String,
+    pub(crate) ts: i64,
+    pub(crate) actor: String,
+    pub(crate) kind: String,
+    pub(crate) payload: String,
 }
 
 fn kind_matches(kinds: &[ActivityKind], kind: &str) -> bool {

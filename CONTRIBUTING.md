@@ -33,7 +33,7 @@ The workspace has two crates:
 | Crate | What lives there |
 |---|---|
 | `crates/another-core` | SQLite store, event log and signatures, agents, mail, requests, holds, activity, resources, tokens, federation logic. No async, no networking beyond reachability checks. |
-| `crates/another` | The `another` binary and library: CLI, MCP server (`rmcp`), HTTP serving and auth, hook packs, orphan scanner and reaping, federation transport, wake adapters. |
+| `crates/another` | The `another` binary and library: CLI, MCP server (`rmcp`), HTTP serving and auth, the loopback dashboard, hook packs, orphan scanner and reaping, federation transport, wake adapters. |
 
 Schema changes are new entries at the end of `MIGRATIONS` in `crates/another-core/src/store.rs`; never edit an existing migration. Every mutation appends an event first, then updates projections in the same transaction.
 

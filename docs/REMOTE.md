@@ -90,6 +90,10 @@ another serve --auth --bind 127.0.0.1:7467
 
 With `--auth`, `/mcp` and `GET /activity` require `Authorization: Bearer <token>`; `GET /health` stays open. Add `--public-url` (below) when you also want OAuth. Without it, bearer tokens work and the OAuth discovery routes are not served.
 
+The local dashboard is not part of this server by default. It stays on the unauthenticated loopback `another serve` (or `another dashboard`). `--dashboard` on an `--auth` server is an explicit exception: a read-only view with message bodies omitted, and no buttons that change anything. It is refused on a non-loopback bind. Even then its `Host` must be loopback on the bound port, not the tunnel name. See [DASHBOARD.md](DASHBOARD.md).
+
+Tunnels usually forward the public hostname in the `Host` header. Another rejects unknown hosts (DNS-rebinding protection), so name each tunnel hostname with `--allowed-host`.
+
 ## OAuth for hosted apps
 
 `another serve --auth --public-url https://your-tunnel.example` is the authorization server as well as the MCP server. It implements the [MCP authorization spec (2026-07-28)](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization):

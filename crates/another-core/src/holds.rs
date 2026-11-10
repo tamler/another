@@ -352,7 +352,12 @@ pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
     })
 }
 
-fn release_tx(tx: &Tx<'_>, actor: &str, hold_ids: &[String], reason: &str) -> Result<()> {
+pub(crate) fn release_tx(
+    tx: &Tx<'_>,
+    actor: &str,
+    hold_ids: &[String],
+    reason: &str,
+) -> Result<()> {
     if hold_ids.is_empty() {
         return Ok(());
     }

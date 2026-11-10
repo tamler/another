@@ -7,6 +7,7 @@
 
 mod activity;
 pub mod crypto;
+mod dashboard;
 mod error;
 mod federation;
 mod holds;
@@ -23,6 +24,11 @@ mod wake;
 pub use activity::{
     ActivityFeed, ActivityItem, ActivityKind, ActivityQuery, ActivitySummary, AgentPresence,
     DigestMessage, DigestRequest, RequestCounts, Since, WhatsNew,
+};
+pub use dashboard::{
+    DashAccess, DashActivityItem, DashActivityPage, DashActivityQuery, DashAgent, DashClash,
+    DashCounts, DashHold, DashMessage, DashProject, DashRequest, DashThread, DashboardSnapshot,
+    DashboardView,
 };
 pub use error::{Error, ErrorBody, Result};
 pub use federation::{

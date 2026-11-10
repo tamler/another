@@ -21,7 +21,7 @@ use crate::output;
 #[command(
     name = "another",
     version,
-    about = "Local-first inbox, requests and path holds for coding agents"
+    about = "Local-first inbox, activity feed and resource registry for coding agents"
 )]
 pub struct Cli {
     /// Data directory (default: $ANOTHER_HOME, else ~/.another).
@@ -71,6 +71,14 @@ pub enum Command {
         /// Act as a federation hub: serve /fed/* for paired spokes (node-signed requests).
         #[arg(long)]
         federation: bool,
+        /// Serve the local dashboard at /ui.
+        /// On by default for a loopback server without --auth.
+        /// With --auth it is read-only and omits message bodies. Refused on a non-loopback bind.
+        #[arg(long, conflicts_with = "no_dashboard")]
+        dashboard: bool,
+        /// Do not serve the dashboard.
+        #[arg(long)]
+        no_dashboard: bool,
         /// Seconds between sweeps that expire holds and stale requests.
         #[arg(long, default_value_t = 30)]
         sweep_secs: u64,
@@ -302,6 +310,19 @@ pub enum Command {
         cmd: Option<WakeCmd>,
         #[command(flatten)]
         run: WakeRun,
+    },
+    /// Open the local dashboard in a browser (loopback only).
+    ///
+    /// Useful when agents talk to Another over stdio and `another serve` is not running.
+    /// A loopback `another serve` without `--auth` already serves the same UI at `/ui`.
+    Dashboard {
+        /// HTTP bind address. Loopback only. Defaults beside `another serve` (7466)
+        /// and the usual `--auth` example (7467).
+        #[arg(long, default_value = "127.0.0.1:7468")]
+        bind: String,
+        /// Do not open a browser; print the URL instead.
+        #[arg(long)]
+        no_open: bool,
     },
     /// Show the activity feed (who is doing what), or a summary of it.
     Activity {
@@ -675,7 +696,10 @@ pub const EXIT_CONFLICT: u8 = 3;
 
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
-    init_tracing(matches!(cli.command, Command::Serve { .. }));
+    init_tracing(matches!(
+        cli.command,
+        Command::Serve { .. } | Command::Dashboard { .. }
+    ));
     let json = cli.json;
     match run(cli) {
         Ok(code) => code,
@@ -772,6 +796,8 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         allowed_hosts,
         public_url,
         federation,
+        dashboard,
+        no_dashboard,
         sweep_secs,
     } = &cli.command
     {
@@ -784,6 +810,14 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
+        let dashboard_flag = match (*dashboard, *no_dashboard) {
+            (true, _) => Some(true),
+            (_, true) => Some(false),
+            _ => None,
+        };
+        if *stdio && *dashboard {
+            eprintln!("another: --dashboard needs the HTTP server; stdio has no dashboard");
+        }
         rt.block_on(async {
             if *stdio {
                 crate::serve::serve_stdio(store, every).await
@@ -796,6 +830,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     // `serve_http` replaces this with the port it actually bound.
                     bound_port: 0,
                     federation: *federation,
+                    dashboard_flag,
+                    dashboard: crate::dashboard::DashboardMode::Off,
+                    dashboard_bound: None,
                 };
                 crate::serve::serve_http(store, bind, opts, every).await
             }
@@ -821,6 +858,21 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         ))?;
         return Ok(ExitCode::SUCCESS);
     }
+    if let Command::Dashboard { bind, no_open } = &cli.command {
+        let store = open(home)?;
+        let bind = bind.clone();
+        let open_browser = !*no_open && !json;
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(crate::dashboard::serve_standalone(
+            store,
+            &bind,
+            open_browser,
+            json,
+        ))?;
+        return Ok(ExitCode::SUCCESS);
+    }
 
     let another_home = || -> anyhow::Result<PathBuf> {
         Ok(match home {
@@ -834,7 +886,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
 
     let store = open(home)?;
     let code = match cli.command {
-        Command::Serve { .. } | Command::Hook(_) | Command::Remote(_) => {
+        Command::Serve { .. }
+        | Command::Dashboard { .. }
+        | Command::Hook(_)
+        | Command::Remote(_) => {
             unreachable!("handled above")
         }
         Command::Init | Command::Status => {
