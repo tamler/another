@@ -843,31 +843,48 @@ fn project_key(store: &Store, actor: &str, project: Option<String>) -> anyhow::R
     }
 }
 
-/// Literal hold paths resolved through symlinks to the project-relative path they reach,
-/// so a hold taken through an alias covers the real file, as the edit guard sees it.
-/// Globs, and paths that resolve outside the project, are passed on as given.
+/// Hold paths resolved through symlinks to the project-relative path they reach, so a hold
+/// taken through an alias covers the real files, as the edit guard sees them. For a glob,
+/// its literal directory part is resolved and the pattern kept (`alias/**` with
+/// `alias -> src` becomes `src/**`). Paths that resolve outside the project are passed on
+/// as given.
 fn resolve_hold_paths(store: &Store, project: &str, paths: Vec<String>) -> Vec<String> {
     let Ok(p) = store.project(project) else {
         return paths;
     };
     let root = Path::new(&p.abs_path);
     let real_root = hooks::resolve_existing(root);
+    // Project-relative form of a literal path ("" for the root), or None if outside.
+    let relative = |literal: &str| -> Option<String> {
+        let full = if Path::new(literal).is_absolute() {
+            PathBuf::from(literal)
+        } else {
+            root.join(literal)
+        };
+        let real = hooks::resolve_existing(&full);
+        real.strip_prefix(&real_root)
+            .ok()
+            .map(|rel| rel.to_string_lossy().into_owned())
+    };
     paths
         .into_iter()
-        .map(|raw| {
-            if raw.contains(['*', '?', '[', '{']) {
-                return raw;
+        .map(|raw| match raw.find(['*', '?', '[', '{']) {
+            Some(meta) => {
+                // The literal directories before the first wildcard, if any.
+                let Some(slash) = raw[..meta].rfind('/') else {
+                    return raw;
+                };
+                let (dir, pattern) = (&raw[..slash], &raw[slash + 1..]);
+                match relative(dir) {
+                    Some(rel) if rel.is_empty() => pattern.to_string(),
+                    Some(rel) => format!("{rel}/{pattern}"),
+                    None => raw,
+                }
             }
-            let full = if Path::new(&raw).is_absolute() {
-                PathBuf::from(&raw)
-            } else {
-                root.join(&raw)
-            };
-            let real = hooks::resolve_existing(&full);
-            match real.strip_prefix(&real_root) {
-                Ok(rel) if !rel.as_os_str().is_empty() => rel.to_string_lossy().into_owned(),
+            None => match relative(&raw) {
+                Some(rel) if !rel.is_empty() => rel,
                 _ => raw,
-            }
+            },
         })
         .collect()
 }

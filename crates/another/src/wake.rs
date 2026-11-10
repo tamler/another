@@ -186,50 +186,89 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Longest an adapter prompt (`herdr agent prompt`, `tmux send-keys`, ...) may take.
 pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// After the adapter exits, how long to keep collecting what it already wrote. The pipe
+/// may stay open when the adapter left a background process holding it; that process is
+/// not waited for.
+const OUTPUT_GRACE: Duration = Duration::from_millis(250);
+
 /// Run an adapter command with a deadline. Returns its exit status and stdout, or `None`
 /// when it ran past `timeout` or `cancel` was set (daemon shutdown); the command is then
-/// stopped: SIGTERM first, and a hard stop if it is still running half a second later.
-/// A stuck adapter therefore cannot hold up the waker or a clean shutdown.
+/// stopped: SIGTERM to its process group (so anything it started stops too), and a hard
+/// stop of the command if it is still running half a second later. A stuck adapter, or
+/// one that leaves a process behind on its stdout, cannot hold up the waker or a clean
+/// shutdown past the deadline.
 pub fn run_bounded(
     cmd: &mut Command,
     timeout: Duration,
     cancel: Option<&AtomicBool>,
 ) -> std::io::Result<Option<(ExitStatus, Vec<u8>)>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Its own process group, so a timeout can stop what the adapter started.
+        cmd.process_group(0);
+    }
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
-    // Read stdout on the side so a chatty adapter cannot fill the pipe and stall.
-    let reader = child.stdout.take().map(|mut out| {
+    // Read stdout on the side and pass chunks back, so a chatty adapter cannot fill the
+    // pipe, and a lingering holder of the pipe cannot block the caller.
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    if let Some(mut stdout) = child.stdout.take() {
         std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = out.read_to_end(&mut buf);
-            buf
-        })
-    });
+            let mut buf = [0u8; 4096];
+            loop {
+                match stdout.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            // Dropping `tx` tells the caller the pipe reached end of file.
+        });
+    }
     let deadline = Instant::now() + timeout;
+    let mut out = Vec::new();
     loop {
+        while let Ok(chunk) = rx.try_recv() {
+            out.extend(chunk);
+        }
         if let Some(status) = child.try_wait()? {
-            let out = reader
-                .map(|r| r.join().unwrap_or_default())
-                .unwrap_or_default();
+            let until = (Instant::now() + OUTPUT_GRACE).min(deadline.max(Instant::now()));
+            loop {
+                let left = until.saturating_duration_since(Instant::now());
+                match rx.recv_timeout(left) {
+                    Ok(chunk) => out.extend(chunk),
+                    // End of file, or something it left behind still holds the pipe.
+                    Err(_) => break,
+                }
+            }
             return Ok(Some((status, out)));
         }
         let cancelled = cancel.is_some_and(|c| c.load(Ordering::SeqCst));
         if cancelled || Instant::now() >= deadline {
             stop_child(&mut child);
-            // The reader thread ends when the pipe closes; it is not waited for.
             return Ok(None);
         }
         std::thread::sleep(Duration::from_millis(20));
     }
 }
 
-/// Stop a child this process started: SIGTERM, then a hard stop if it ignores it.
+/// Stop a child this process started: SIGTERM to its process group (it was started as a
+/// group leader), then a hard stop of the child itself if it ignores that.
 fn stop_child(child: &mut std::process::Child) {
+    let group = if cfg!(unix) {
+        format!("-{}", child.id())
+    } else {
+        child.id().to_string()
+    };
     let _ = Command::new("kill")
-        .args(["-TERM", &child.id().to_string()])
+        .args(["-TERM", "--", &group])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

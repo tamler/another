@@ -1020,30 +1020,67 @@ fn post_tool(store: &Store, env: &HookEnv, client: Client, dir: &Path) -> Result
     })
 }
 
-/// `path` made absolute against `base`, with `.` and `..` resolved lexically.
-fn absolute(base: &Path, path: &str) -> PathBuf {
-    let joined = if Path::new(path).is_absolute() {
-        PathBuf::from(path)
-    } else {
-        base.join(path)
-    };
-    let mut out = PathBuf::new();
-    for comp in joined.components() {
-        match comp {
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::CurDir => {}
-            other => out.push(other.as_os_str()),
-        }
+/// Symlinks followed while resolving one path before giving up (a loop).
+const MAX_SYMLINKS: usize = 40;
+
+/// `path` as the filesystem resolves it, the way `open` follows it:
+///
+/// - components are taken left to right and each symlink is followed before any later
+///   `..` is applied, so `link/../a` is "the parent of where `link` points, then `a`",
+///   not the lexical `a`;
+/// - a dangling symlink is read and followed to its (not yet existing) target;
+/// - once a component does not exist, the rest is applied lexically, since a missing
+///   directory cannot be a link;
+/// - the existing part is then canonicalized, which also restores on-disk letter case.
+///
+/// A symlink loop falls back to `path` as given. `path` should be absolute.
+pub fn resolve_existing(path: &Path) -> PathBuf {
+    let mut budget = MAX_SYMLINKS;
+    match follow_links(path, &mut budget) {
+        Some(resolved) => canonical_prefix(&resolved),
+        None => path.to_path_buf(),
     }
-    out
 }
 
-/// `path` with every existing component resolved through symlinks (and `..`). The part
-/// that does not exist yet (a file about to be created) is kept as written on top of its
-/// deepest existing ancestor, resolved.
-pub fn resolve_existing(path: &Path) -> PathBuf {
+fn follow_links(path: &Path, budget: &mut usize) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    let mut missing = false;
+    for comp in path.components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir => out.push(comp.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // `out` is fully resolved (or a missing, so link-free, tail): its parent is
+                // the physical parent.
+                out.pop();
+            }
+            Component::Normal(name) => {
+                let next = out.join(name);
+                if missing {
+                    out = next;
+                    continue;
+                }
+                match std::fs::symlink_metadata(&next) {
+                    Err(_) => {
+                        missing = true;
+                        out = next;
+                    }
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        *budget = budget.checked_sub(1)?;
+                        let target = std::fs::read_link(&next).ok()?;
+                        out = follow_links(&out.join(target), budget)?;
+                        missing = std::fs::symlink_metadata(&out).is_err();
+                    }
+                    Ok(_) => out = next,
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Canonicalize the deepest existing ancestor of a link-free path and keep the rest.
+fn canonical_prefix(path: &Path) -> PathBuf {
     let mut tail = Vec::new();
     let mut cur = path.to_path_buf();
     loop {
@@ -1064,9 +1101,10 @@ pub fn resolve_existing(path: &Path) -> PathBuf {
     }
 }
 
-/// What an edit of `file` can touch: the file reached through every symlink, and, when the
-/// file is itself a symlink (an operation may replace the link instead of following it),
-/// the link inside its resolved directory. Usually both are the same path.
+/// What an edit of `file` can touch: the file reached through every symlink (a dangling
+/// link included), and, when the file is itself a symlink (an operation may replace the
+/// link instead of following it), the link inside its resolved directory. Usually both
+/// are the same path. `..` is never applied before the symlinks it follows are resolved.
 fn edit_targets(file: &Path) -> Vec<PathBuf> {
     let mut out = vec![resolve_existing(file)];
     if let (Some(parent), Some(name)) = (file.parent(), file.file_name()) {
@@ -1154,7 +1192,8 @@ fn pre_edit(store: &Store, client: Client, dir: &Path, input: &HookInput) -> Res
     // space, /tmp) are not held.
     let mut groups: Vec<(String, Vec<String>)> = Vec::new();
     for raw in &paths {
-        for target in edit_targets(&absolute(dir, raw)) {
+        // Not normalized lexically: `..` must apply after symlinks (review N1).
+        for target in edit_targets(&dir.join(raw)) {
             let git = git_root_above(&target);
             let registered = projects
                 .iter()

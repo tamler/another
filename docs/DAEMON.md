@@ -71,7 +71,7 @@ Mail reaches a working agent through its `post-tool` hook at the next tool call 
 4. It claims the mail only after Herdr has answered, so a hook that announced it meanwhile wins and no prompt is sent. A wake that cannot be delivered gives the claim back.
 5. After a wake it leaves that agent alone for 60 seconds.
 
-Every adapter command has a deadline: 3 seconds for `herdr agent get` (and the tmux probe), 10 seconds for a prompt. A command that runs past it, or is still running when the daemon is told to stop, gets SIGTERM, then a hard stop half a second later, so a stuck adapter can neither hold up the other agents nor a clean shutdown.
+Every adapter command has a deadline: 3 seconds for `herdr agent get` (and the tmux probe), 10 seconds for a prompt. Each command runs in its own process group. A command that runs past its deadline, or is still running when the daemon is told to stop, gets SIGTERM for its whole group (so a process it started stops too), then a hard stop half a second later. Once a command has exited, its output is collected for at most a quarter of a second more, so a background process it left holding the output cannot stall the daemon either. A stuck adapter can neither hold up the other agents nor a clean shutdown.
 
 The summary carries subjects and counts, never bodies. Herdr stays headless: Another only calls `herdr agent get` and `herdr agent prompt`, never bare `herdr`, and never focuses a pane.
 

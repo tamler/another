@@ -309,18 +309,20 @@ fn glob_touches_literal(glob: &str, literal: &str) -> bool {
     comps.len() > lit.len() && matches(&comps[..lit.len()].join("/"), literal)
 }
 
-/// Link local projects that hold live holds but were registered before repository links
-/// existed, so their holds count across the repository straight away.
+/// Link local projects that hold live holds but have no current repository link: never
+/// linked (registered before links existed), or linked under older key rules (see
+/// `repo::KEY_VERSION`). Their holds then count across the repository straight away.
 fn link_unlinked(tx: &Tx<'_>) -> Result<()> {
     let mut stmt = tx.prepare(
         "SELECT DISTINCT p.project_id, p.node_id, p.abs_path, p.slug, p.created_at
          FROM holds h JOIN projects p ON p.project_id = h.project_id
          LEFT JOIN project_repos pr ON pr.project_id = p.project_id
          WHERE h.released_at IS NULL AND h.expires_at > ?1 AND p.node_id = ?2
-           AND pr.project_id IS NULL",
+           AND (pr.project_id IS NULL
+                OR (pr.repo_key != '' AND substr(pr.repo_key, 1, length(?3)) != ?3))",
     )?;
     let projects = stmt
-        .query_map(params![tx.now, tx.node_id], |r| {
+        .query_map(params![tx.now, tx.node_id, crate::repo::KEY_VERSION], |r| {
             Ok(Project {
                 project_id: r.get(0)?,
                 node_id: r.get(1)?,
@@ -345,7 +347,9 @@ fn conflicts_for(
 ) -> Result<Vec<HoldConflict>> {
     link_unlinked(tx)?;
     let (repo_key, my_prefix) = crate::repo::link_of(tx, project)?
-        .map_or((String::new(), String::new()), |l| (l.key, l.prefix));
+        .map_or((String::new(), String::new()), |l| {
+            (crate::repo::stored_key(&l.key), l.prefix)
+        });
     // This project's holds, plus holds in any local project of the same repository.
     let mut stmt = tx.prepare(&format!(
         "{HOLD_SELECT_REPO} WHERE h.released_at IS NULL AND h.expires_at > ?3
@@ -912,7 +916,7 @@ impl Store {
                     let project = find_project(tx, tx.node_id, p)?;
                     link_unlinked(tx)?;
                     let key = crate::repo::link_of(tx, &project)?
-                        .map(|l| l.key)
+                        .map(|l| crate::repo::stored_key(&l.key))
                         .unwrap_or_default();
                     (Some(project.project_id), key)
                 }
