@@ -37,13 +37,27 @@ another daemon uninstall
 
 ## Upgrading
 
-A running `another` keeps the code it started with, so after installing a new binary restart everything that was already running:
+A running `another` keeps the code it started with, so after installing a new binary restart everything that was already running.
 
-```bash
-another daemon restart
-```
+1. **The launchd daemon (macOS).** `another daemon restart` relaunches the binary path recorded in the plist at install time, not whatever `another` is on your `PATH` now. If the new build is at the same path, restart:
 
-Then restart each client that runs `another serve --stdio` as its MCP server, or reconnect that server from the client. Hooks start a fresh process on every call and need nothing.
+   ```bash
+   another daemon restart
+   ```
+
+   If it is at a different path (say `cargo install` put it in `~/.cargo/bin` but the plist names `~/.local/bin/another`), run the new binary's install instead, which rewrites the plist and reloads it. Pass the same `--bind` if you chose one:
+
+   ```bash
+   another daemon install
+   ```
+
+   The recorded path is the first `ProgramArguments` entry in `~/Library/LaunchAgents/one.toanother.another.plist`.
+
+2. **A daemon under another service manager.** `another daemon` is macOS only. On Linux, restart the service, e.g. `systemctl --user restart another.service`, and check that its `ExecStart` names the new binary.
+
+3. **Every other long-running server.** That covers each client that runs `another serve --stdio` as its MCP server (restart the client or reconnect the server), a remote server started with `another remote up` or `another serve --auth`, and any `another serve` started by hand. Stop each one and start it again from the new binary.
+
+Hooks start a fresh process on every call and need nothing.
 
 Skipping this is unsafe when a release changes how repository keys are cached (the `project_repos` table, see [HOLDS.md](HOLDS.md#holds-across-worktrees)). The release after #103 does: keys now carry a `v2:` prefix. The new binary treats an old key as never computed and recomputes it. An old process does not understand the new keys, rewrites the ones it touches in the old form, and then compares keys of two formats. They never match, so it misses holds in sibling worktrees and clones and lets those edits through (it fails open). The new binary never misses one: it recomputes the old keys on its next check. Once no old process is left, the keys settle in the new form.
 

@@ -1286,3 +1286,77 @@ fn a_symlink_loop_does_not_register_a_second_project() {
         .collect();
     assert!(projects.iter().all(|p| p == "shop-review"), "{projects:?}");
 }
+
+#[test]
+fn case_folding_keeps_glob_character_classes_exact() {
+    let env = Env::new();
+    env.start("claude", &env.main, &[]);
+    env.start("codex", &env.wt, &[]);
+    write(&env.wt.join("src/Upper.rs"), "");
+    write(&env.wt.join("src/a.rs"), "");
+    let main = env.main.to_string_lossy().into_owned();
+    let folds = volume_folds_case(&env.wt);
+    // (claude's glob, codex edits, denied)
+    let rows = [
+        ("src/[!a-z]*.rs", "src/Upper.rs", true),
+        ("src/[!A-Z]*.rs", "src/a.rs", true),
+        ("src/[A-Z]*.rs", "src/a.rs", false),
+        ("src/*.RS", "src/a.rs", folds),
+    ];
+    for (glob, file, denied) in rows {
+        env.json(&[
+            "hold",
+            "acquire",
+            "--agent",
+            "claude@shop",
+            "--project",
+            &main,
+            glob,
+        ]);
+        let out = env.hook(
+            "pre-edit",
+            "codex",
+            &tool(&env.wt, "Write", json!({ "file_path": env.wt.join(file) })),
+        );
+        if denied {
+            assert!(
+                out.contains("held by claude@shop"),
+                "{glob} vs {file}: {out}"
+            );
+            assert!(denial(&out).contains("held by claude@shop"));
+        } else {
+            assert_eq!(out, "", "{glob} vs {file}");
+        }
+        env.json(&["hold", "release", "--agent", "claude@shop"]);
+        env.json(&["hold", "release", "--agent", "codex@shop-review"]);
+    }
+}
+
+#[test]
+fn a_symlink_loop_then_dot_dot_does_not_register_a_second_project() {
+    let env = Env::new();
+    env.start("codex", &env.wt, &[]);
+    std::os::unix::fs::symlink(env.wt.join("loop2"), env.wt.join("loop1")).unwrap();
+    std::os::unix::fs::symlink(env.wt.join("loop1"), env.wt.join("loop2")).unwrap();
+    let alias = env.root.join("alias");
+    std::os::unix::fs::symlink(env.wt.parent().unwrap(), &alias).unwrap();
+    let raw = alias
+        .join(env.wt.file_name().unwrap())
+        .join("loop1/../src/a.rs");
+    env.hook(
+        "pre-edit",
+        "codex",
+        &tool(&env.wt, "Write", json!({ "file_path": raw })),
+    );
+    let projects = env.json(&["project", "list"]);
+    let slugs: Vec<&str> = projects
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["slug"].as_str().unwrap())
+        .collect();
+    assert!(
+        !slugs.iter().any(|s| s.starts_with("shop-review-")),
+        "{slugs:?}"
+    );
+}

@@ -52,6 +52,8 @@ An existing file is always checked under its on-disk spelling, so `SRC/A.RS` is 
 
 A file that does not exist yet has no on-disk spelling. On a volume that ignores letter case (APFS and NTFS by default), holds in that project are compared without regard to case, so a held new `src/new.rs` also stops `src/NEW.RS`. Another tells by looking up the project directory under a different spelling, which writes nothing. On a case-sensitive volume (ext4, or APFS formatted case-sensitive) `src/new.rs` and `src/NEW.RS` are different files and do not collide. Letters are compared with Unicode lowercasing, which can differ from the volume's own rules for a few non-ASCII letters.
 
+Ignoring case only adds collisions: anything that collides under exact spelling still does. A pattern with a character class, such as `src/[!a-z]*.rs`, is always compared exactly, because ignoring case would change which names the class lets in.
+
 ## Whole-project holds
 
 A hold on the whole project blocks every other agent in the repository, so it is refused unless asked for explicitly:

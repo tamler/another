@@ -288,6 +288,19 @@ pub fn patterns_overlap(a: &str, b: &str) -> bool {
     }
 }
 
+/// `patterns_overlap`, widened on a volume that ignores letter case (`fold`), where
+/// `src/new.rs` and `src/NEW.RS` are one file. Existing files already arrive in their
+/// on-disk case; this catches new ones. Folding only ever adds overlaps, and it is skipped
+/// when either pattern has a character class: lowercasing `[!a-z]` would change which
+/// names the class excludes.
+fn overlap_on_volume(a: &str, b: &str, fold: bool) -> bool {
+    patterns_overlap(a, b)
+        || (fold
+            && !a.contains('[')
+            && !b.contains('[')
+            && patterns_overlap(&a.to_lowercase(), &b.to_lowercase()))
+}
+
 /// Whether the volume holding the existing directory `dir` treats names that differ only
 /// in letter case as the same entry (APFS and NTFS by default, ext4 not). Found without
 /// writing: the last name of `dir` with letters is respelled in the other case, and the
@@ -412,16 +425,8 @@ fn conflicts_for(
             },
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    // On a volume that ignores letter case, `src/new.rs` and `src/NEW.RS` are one file.
-    // Existing files already arrive in their on-disk case; this catches new ones.
     let fold = folds_case(Path::new(&project.abs_path));
-    let overlaps = |a: &str, b: &str| {
-        if fold {
-            patterns_overlap(&a.to_lowercase(), &b.to_lowercase())
-        } else {
-            patterns_overlap(a, b)
-        }
-    };
+    let overlaps = |a: &str, b: &str| overlap_on_volume(a, b, fold);
     let mut conflicts = Vec::new();
     for (requested, pattern) in patterns {
         for (held, held_project, held_prefix) in &others {
@@ -1092,6 +1097,19 @@ mod tests {
         assert!(patterns_overlap("src/**", "src/*.toml"));
         assert!(!patterns_overlap("docs/**", "src/**"));
         assert!(patterns_overlap("**", "anything"));
+    }
+
+    #[test]
+    fn case_folding_only_adds_overlaps_and_leaves_classes_exact() {
+        for fold in [false, true] {
+            assert!(overlap_on_volume("src/[!a-z]*.txt", "src/Upper.txt", fold));
+            assert!(overlap_on_volume("src/[!A-Z]*.txt", "src/a.txt", fold));
+            assert!(!overlap_on_volume("src/[A-Z]*.txt", "src/a.txt", fold));
+        }
+        assert!(overlap_on_volume("src/*.TXT", "src/a.txt", true));
+        assert!(!overlap_on_volume("src/*.TXT", "src/a.txt", false));
+        assert!(overlap_on_volume("src/new.txt", "SRC/NEW.TXT", true));
+        assert!(!overlap_on_volume("src/new.txt", "SRC/NEW.TXT", false));
     }
 
     #[test]
