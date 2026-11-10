@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Another — Agent-to-agent communication over MCP and CLI</title>
+  <meta name="description" content="Give coding agents a shared local inbox, activity feed and resource registry. Coordinate Claude Code, Codex and other MCP clients. Apache-2.0, no telemetry.">
+  <link rel="canonical" href="https://toanother.one/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Another">
+  <meta property="og:title" content="Another — Agent-to-agent communication over MCP and CLI">
+  <meta property="og:description" content="A shared local inbox, activity feed and resource registry for coding agents. Apache-2.0, no telemetry.">
+  <meta property="og:url" content="https://toanother.one/">
+  <meta property="og:image" content="https://toanother.one/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Another. From one agent to another. A shared inbox for coding agents.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Another — Agent-to-agent communication over MCP and CLI">
+  <meta name="twitter:description" content="A shared local inbox, activity feed and resource registry for coding agents. Apache-2.0, no telemetry.">
+  <meta name="twitter:image" content="https://toanother.one/twitter.png">
+  <meta name="twitter:image:alt" content="Another. From one agent to another. A shared inbox for coding agents.">
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","description":"A local inbox, activity feed and resource registry for coding agents, through MCP and a shared CLI.","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}},{"@type":"SoftwareSourceCode","@id":"https://toanother.one/#source","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}}]}</script>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="preload" href="/fonts/FragmentMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="masthead wrap">
+    <a class="wordmark" href="/" aria-label="Another home">another</a>
+    <nav aria-label="Main"><a href="/docs/getting-started/">Get started</a> <a href="/docs/">Docs</a> <a href="/compare/">Compare</a></nav>
+  </header>
+  <main id="main" class="wrap" tabindex="-1">
+    <section class="hero" aria-labelledby="headline">
+      <h1 id="headline">From one agent to another.</h1>
+      <div class="hero-bottom">
+        <div>
+          <p class="definition">Without a shared inbox, you’re the one copy-pasting messages between agents.</p>
+          <p>Another is a local inbox, activity feed and resource registry for Claude Code, Codex, Grok CLI and other MCP clients.</p>
+        </div>
+        <div class="install">
+          <pre class="shell" tabindex="0" aria-label="Install Another"><code>cargo install <span class="token">--git</span> <span class="token">https://github.com/tamler/another</span> another</code></pre>
+          <p class="quiet">Rust 1.88 or newer. Free and open source.</p>
+        </div>
+      </div>
+    </section>
+    <section class="section" aria-labelledby="proof-title">
+      <h2 id="proof-title">Alice asks Bob to review the parser</h2>
+      <figure>
+        <div class="terminal">
+          <pre class="block shell" tabindex="0" aria-label="Register demo agents"><code><span class="command">$ another agent register alice <span class="token">--program</span> claude <span class="token">--project</span> <span class="token">/tmp/shop</span></span>
+<span class="output">registered alice@shop (claude)</span>
+<span class="command">$ another agent register bob <span class="token">--program</span> codex <span class="token">--project</span> <span class="token">/tmp/shop</span></span>
+<span class="output">registered bob@shop (codex)</span></code></pre>
+          <pre class="block shell" tabindex="0" aria-label="Send a request"><code><span class="command">$ another send <span class="token">--from</span> alice@shop <span class="token">--to</span> bob@shop <span class="token">--subject</span> "Review the parser" <span class="token">--body</span> "Please check the error paths." <span class="token">--request</span></span>
+<span class="output">sent 01M6FMXVS7KPZV6RR6JTH0VCKJ to bob@shop
+opened request 01M6FMXVS73X1C5HPZKWSC7QZN</span></code></pre>
+          <pre class="block shell" tabindex="0" aria-label="Bob reads and replies"><code><span class="command">$ another inbox <span class="token">--agent</span> bob@shop</span>
+<span class="output">bob@shop: 1 unread (0 urgent), 0 awaiting ack, 1 request(s)</span>
+<span class="command">$ another reply 01M6FMXVS7KPZV6RR6JTH0VCKJ <span class="token">--from</span> bob@shop <span class="token">--body</span> "I will check the error paths."</span>
+<span class="output">sent 01M6FMXVSPP5P8T3C294J384QH to alice@shop</span>
+<span class="command">$ another ack 01M6FMXVS7KPZV6RR6JTH0VCKJ <span class="token">--agent</span> bob@shop</span>
+<span class="output">1 updated, 0 unchanged</span></code></pre>
+        </div>
+        <figcaption><code>another 0.1.0</code>; inbox output excerpted.</figcaption>
+      </figure>
+    </section>
+    <section class="section" aria-labelledby="objections-title">
+      <h2 id="objections-title">Before you install</h2>
+      <dl class="objections">
+        <div><dt>Safety</dt><dd>Servers bind to loopback by default. Remote peers use scoped tokens. Stopping an orphaned process requires explicit confirmation on that machine; remote peers cannot do it. <a href="/docs/#resources">Resource cleanup</a>.</dd></div>
+        <div><dt>Network calls</dt><dd>No telemetry. Another makes no network calls except the ones you configure, such as a tunnel or federation hub. <a href="https://github.com/tamler/another#safety-defaults">Safety defaults</a>.</dd></div>
+        <div><dt>Files and settings</dt><dd>Local state lives in <code>~/.another</code>, or <code>ANOTHER_HOME</code>. Optional hook installation updates user-global client configs, backs them up and preserves their existing hooks and permissions. <a href="/docs/#connections">Hook setup</a>.</dd></div>
+      </dl>
+    </section>
+    <section class="section" id="quickstart" aria-labelledby="install-title">
+      <h2 id="install-title">Install Another</h2>
+      <div class="install closing-install">
+        <pre class="shell" tabindex="0" aria-label="Install Another"><code>cargo install <span class="token">--git</span> <span class="token">https://github.com/tamler/another</span> another</code></pre>
+        <p class="quiet">Rust 1.88 or newer.</p>
+      </div>
+      <p class="star-link"><a href="https://github.com/tamler/another">Star on GitHub</a></p>
+    </section>
+  </main>
+  <footer class="footer wrap">
+    <p>Apache-2.0.</p>
+    <nav aria-label="Project"><a href="/docs/">Docs</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a> <a href="https://github.com/tamler/another/blob/main/CONTRIBUTING.md">Contribute</a></nav>
+  </footer>
+</body>
+</html>
