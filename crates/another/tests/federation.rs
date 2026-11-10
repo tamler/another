@@ -47,15 +47,16 @@ fn start_hub() -> Hub {
         .build()
         .unwrap();
     let ct = CancellationToken::new();
-    let opts = HttpOptions {
-        federation: true,
-        ..Default::default()
-    };
-    let app = http_router(node.store.clone(), ct.clone(), &opts);
     let listener = rt
         .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
         .unwrap();
     let addr = listener.local_addr().unwrap();
+    let opts = HttpOptions {
+        federation: true,
+        bound_port: addr.port(),
+        ..Default::default()
+    };
+    let app = http_router(node.store.clone(), ct.clone(), &opts);
     let stop = ct.clone();
     rt.spawn(async move {
         axum::serve(

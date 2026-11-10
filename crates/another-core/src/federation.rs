@@ -181,7 +181,7 @@ fn classify(kind: &str, payload: &Value, origin: &str) -> Share {
     let not_origin =
         |nodes: Vec<String>| -> Vec<String> { nodes.into_iter().filter(|n| n != origin).collect() };
     match kind.split('.').next().unwrap_or_default() {
-        "token" | "peer" => return Share::Never,
+        "token" | "peer" | "oauth" => return Share::Never,
         _ => {}
     }
     match kind {
@@ -1349,6 +1349,7 @@ mod tests {
     fn classification() {
         let o = "A";
         assert_eq!(classify("token.created", &json!({}), o), Share::Never);
+        assert_eq!(classify("oauth.approved", &json!({}), o), Share::Never);
         assert_eq!(
             classify("agent.registered", &json!({}), o),
             Share::Directory

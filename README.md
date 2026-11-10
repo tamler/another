@@ -6,7 +6,7 @@ Free and open source, always. I built Another because I run more than one coding
 
 Claude Code and Codex do not share a mailbox. Neither do Grok CLI, Cursor, Grok Bot, or any other MCP client, until you give them one. They edit the same files. They start the same fix twice. A review request dies in the chat I forget to paste across. Another is a local inbox for those sessions, with expiring path holds, a feed of who is doing what, and a registry for ports and model servers. It does not launch the agents or assign their work.
 
-**Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1-6 complete (local core, hooks, resources, remote peers, federation, polish)
+**Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1-6 complete. Hosted connectors (OAuth for ChatGPT, Claude, and other MCP clients) are in this tree. See [docs/REMOTE.md](docs/REMOTE.md).
 
 ## Why
 
@@ -26,7 +26,7 @@ What they get instead:
 
 Hooks put a short digest in at session start. That is why the agents look. State is one SQLite database on the machine (`~/.another`, or `$ANOTHER_HOME`). A second machine can federate through a hub you host. The hub can read mail it relays.
 
-Not in this release: OAuth for hosted MCP clients (ChatGPT, Claude.ai), and a local web dashboard. Both are in progress and not merged. See the [changelog](https://toanother.one/changelog/) and [how I run the agents on this repo](https://toanother.one/building/).
+A local web dashboard is not in this release. OAuth for hosted MCP clients (ChatGPT, Claude.ai) is. See the [changelog](https://toanother.one/changelog/) and [how I run the agents on this repo](https://toanother.one/building/).
 
 The website source lives in [site/](site/README.md). `sh site/build.sh` checks the pages, and `python3 scripts/check-copy.py` rejects em dashes and a banned-phrase list.
 
@@ -72,6 +72,8 @@ Or run one loopback daemon and point clients at `http://127.0.0.1:7466/mcp`:
 another serve
 ```
 
+**ChatGPT desktop on this Mac** uses that same local server. In the app: Settings → MCP servers → Add server → STDIO, command `another`, arguments `serve --stdio`, then Restart. Or Streamable HTTP with the URL `http://127.0.0.1:7466/mcp` while `another serve` is running. No tunnel and no OAuth. The app writes this to `~/.codex/config.toml`, which Codex shares. A cloud ChatGPT chat, including developer-mode plugins, does not use that file; those connectors are called from OpenAI and need a public URL or OpenAI's Secure MCP Tunnel. Details and links: [docs/REMOTE.md](docs/REMOTE.md).
+
 **5. Try it from the shell:**
 
 ```bash
@@ -104,8 +106,9 @@ another activity --summary
 | 4 | Authenticated remote peer (Grok Bot): scoped bearer tokens, audit log, `GET /activity` | ✅ tamler/another#4 |
 | 5 | Federation (v2): signed event logs, pairing, hub-and-spoke sync, cross-node mail | ✅ tamler/another#5 |
 | 6 | Polish: `another wake` (tmux, cmux, Herdr), Herdr plugin, release builds, quickstart, CONTRIBUTING | ✅ complete |
+| 7 | Hosted connectors: OAuth 2.1 on the authenticated server, local approval, `another remote up`, `whats_new`, ChatGPT desktop local MCP | this PR |
 
-Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88.
+Current brief: [AGENTS.md](AGENTS.md). Milestone 7 is the connectors work. Bearer tokens from milestone 4 still work. Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88, copy lint.
 
 ## Guides
 
@@ -113,7 +116,7 @@ Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green
 |---|---|
 | [docs/HOOKS.md](docs/HOOKS.md) | Hook packs for each client; trust steps; the digest |
 | [docs/RESOURCES.md](docs/RESOURCES.md) | Resource registry, orphans, human-approved reaping |
-| [docs/REMOTE.md](docs/REMOTE.md) | Remote peers (Grok Bot): tokens, `--auth`, tunnels, audit log |
+| [docs/REMOTE.md](docs/REMOTE.md) | Remote peers: bearer tokens, OAuth for ChatGPT and Claude, tunnels, audit log |
 | [docs/FEDERATION.md](docs/FEDERATION.md) | Several machines: node keys, pairing, sync, permissions |
 | [docs/WAKE.md](docs/WAKE.md) | `another wake` adapters (tmux, cmux, Herdr) and the Herdr plugin |
 | [docs/SPEC.md](docs/SPEC.md) | Research and product spec |
@@ -128,10 +131,10 @@ Current brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green
 | Mail | `send_message` (with `reply_to`, `create_request`), `fetch_inbox`, `threads`, `acknowledge` |
 | Requests | `claim_request` (`claim` / `release` / `complete` / `cancel`) |
 | Path holds | `hold_paths` (`acquire` / `check` / `renew` / `release` / `list`) |
-| Awareness | `activity_feed`, `activity_summarize` (summaries and ids, never message bodies) |
+| Awareness | `whats_new` (one-call catch-up: unread subjects, open requests, recent activity), `activity_feed`, `activity_summarize` (summaries and ids, never message bodies) |
 | Resources | `resource_find`, `resource_register`, `resource_borrow`, `resource_release`, `resource_heartbeat`, `orphans_list`, `resource_reap` (plan and request only) |
 
-Tool errors are `{"error": {"code", "message"}}` with codes `not_found`, `invalid`, `conflict`, `ambiguous`, `forbidden`.
+Tool errors are `{"error": {"code", "message", "hint?"}}` with codes `not_found`, `invalid`, `conflict`, `ambiguous`, `forbidden`. `hint`, when present, says the next call to make.
 
 ## CLI at a glance
 
@@ -149,7 +152,7 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 | Sessions and feed | `another heartbeat [--start\|--end [--keep]]`, `another activity [--since 1h] [--kinds mail,request] [--summary]` |
 | Hooks | `another hook install\|uninstall --client <c>\|all [--dry-run]`, `another hook status` |
 | Resources | `another resources`, `another resource register`, `another borrow`, `another release`, `another orphans`, `another reap <target> [--confirm]` |
-| Remote peers | `another serve --auth`, `another token create\|list\|revoke`, `another audit` |
+| Remote peers | `another serve --auth`, `another remote up`, `another token create\|list\|revoke`, `another oauth approve\|deny\|list\|revoke`, `another audit` |
 | Federation | `another pair invite\|join\|revoke`, `another peers`, `another sync [--watch]`, `another serve --federation` |
 | Wake | `another wake [--agent X\|--all]`, `another wake set\|clear\|list` |
 
@@ -164,7 +167,7 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 ## Safety defaults
 
 - Binds to loopback only, unless you pass `--auth` and `--allow-remote-bind`.
-- Remote tokens act as a single agent within project globs; every remote call is audited.
+- Remote tokens and OAuth grants each act as a single agent within project globs. A hosted client is approved on this machine; it is never approved by an HTTP request. Every remote call is audited.
 - Nothing is ever killed without a grace period and an explicit human `--confirm`.
 - No telemetry, no paid tier, and no network calls except the ones you configure (tunnels, a federation hub).
 

@@ -80,7 +80,8 @@ async fn exposes_the_tool_surface() {
             "resource_register",
             "resource_release",
             "send_message",
-            "threads"
+            "threads",
+            "whats_new"
         ]
     );
     client.cancel().await.unwrap();
@@ -270,10 +271,16 @@ async fn streamable_http_on_loopback() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let ct = CancellationToken::new();
-    let app = another::serve::http_router(store.clone(), ct.clone(), &Default::default());
-    let addr = another::serve::local_bind("127.0.0.1:0").unwrap();
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let app = another::serve::http_router(
+        store.clone(),
+        ct.clone(),
+        &another::serve::HttpOptions {
+            bound_port: addr.port(),
+            ..Default::default()
+        },
+    );
     let server = tokio::spawn({
         let ct = ct.clone();
         async move {

@@ -41,13 +41,14 @@ async fn start() -> Server {
             .unwrap();
     }
     let ct = CancellationToken::new();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
     let opts = HttpOptions {
         auth: true,
+        bound_port: addr.port(),
         ..Default::default()
     };
     let app = http_router(store.clone(), ct.clone(), &opts);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
     let stop = ct.clone();
     tokio::spawn(async move {
         axum::serve(

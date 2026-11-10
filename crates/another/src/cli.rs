@@ -64,6 +64,10 @@ pub enum Command {
         /// Extra Host header to accept, e.g. a tunnel hostname (repeatable; requires --auth).
         #[arg(long = "allowed-host", requires = "auth")]
         allowed_hosts: Vec<String>,
+        /// Public origin for OAuth, e.g. https://another.example.com (no path; requires --auth).
+        /// Hosted apps such as ChatGPT and Claude connect to `<origin>/mcp`.
+        #[arg(long, requires = "auth")]
+        public_url: Option<String>,
         /// Act as a federation hub: serve /fed/* for paired spokes (node-signed requests).
         #[arg(long)]
         federation: bool,
@@ -264,6 +268,12 @@ pub enum Command {
     /// Create, list or revoke bearer tokens for remote peers.
     #[command(subcommand)]
     Token(TokenCmd),
+    /// Approve, deny, list or revoke OAuth grants for hosted apps.
+    #[command(subcommand)]
+    Oauth(OauthCmd),
+    /// Publish the authenticated server for ChatGPT, Claude and other hosted MCP clients.
+    #[command(subcommand)]
+    Remote(RemoteCmd),
     /// Show the audit log of remote (token-authenticated) calls.
     Audit {
         #[arg(long, default_value_t = 50)]
@@ -419,6 +429,48 @@ pub enum TokenCmd {
     /// Revoke a token by id (takes effect on the next request).
     Revoke {
         token_id: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OauthCmd {
+    /// Show clients waiting for a local approval.
+    Pending,
+    /// Approve one waiting client and bind it to a single agent. This is the only approval path.
+    Approve {
+        /// Code shown on the consent page and by `another oauth pending` (for example abcd-efgh).
+        user_code: String,
+        /// The agent this grant acts as. Register it first.
+        #[arg(long, short = 'a')]
+        agent: String,
+        /// Project path or slug glob this grant may touch (repeatable). Omit for mailbox and feed only.
+        #[arg(long = "project", short = 'p')]
+        projects: Vec<String>,
+        /// A note to recognise the grant by.
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Reject a waiting client.
+    Deny { user_code: String },
+    /// List grants (each one is a single agent).
+    List,
+    /// Revoke a grant and every token issued for it.
+    Revoke { grant_id: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RemoteCmd {
+    /// Run an authenticated server and print the URL to paste into ChatGPT or Claude.
+    Up {
+        /// Loopback address the tunnel forwards to.
+        #[arg(long, default_value = "127.0.0.1:7467")]
+        bind: String,
+        /// Origin the tunnel already serves, such as https://another.example.com.
+        /// Without this, `cloudflared` is started and its quick-tunnel URL is used.
+        #[arg(long)]
+        public_url: Option<String>,
+        #[arg(long, default_value_t = 30)]
+        sweep_secs: u64,
     },
 }
 
@@ -718,12 +770,17 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         auth,
         allow_remote_bind,
         allowed_hosts,
+        public_url,
         federation,
         sweep_secs,
     } = &cli.command
     {
         let store = open(home)?;
         let every = Duration::from_secs((*sweep_secs).max(1));
+        let oauth = match public_url {
+            Some(url) => Some(crate::oauth_http::parse_public_url(url)?),
+            None => None,
+        };
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
@@ -735,11 +792,33 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     auth: *auth,
                     allow_remote_bind: *allow_remote_bind,
                     allowed_hosts: allowed_hosts.clone(),
+                    oauth,
+                    // `serve_http` replaces this with the port it actually bound.
+                    bound_port: 0,
                     federation: *federation,
                 };
                 crate::serve::serve_http(store, bind, opts, every).await
             }
         })?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let Command::Remote(RemoteCmd::Up {
+        bind,
+        public_url,
+        sweep_secs,
+    }) = &cli.command
+    {
+        let store = open(home)?;
+        let every = Duration::from_secs((*sweep_secs).max(1));
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(crate::publish::remote_up(
+            store,
+            bind,
+            public_url.as_deref(),
+            every,
+        ))?;
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -755,7 +834,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
 
     let store = open(home)?;
     let code = match cli.command {
-        Command::Serve { .. } | Command::Hook(_) => unreachable!("handled above"),
+        Command::Serve { .. } | Command::Hook(_) | Command::Remote(_) => {
+            unreachable!("handled above")
+        }
         Command::Init | Command::Status => {
             let status = output::Status {
                 node: store.node()?,
@@ -1131,6 +1212,98 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let t = store.revoke_token(&token_id)?;
             emit(json, &t, |t| {
                 format!("revoked token {} ({})", t.token_id, t.agent)
+            })
+        }
+        Command::Oauth(OauthCmd::Pending) => {
+            let rows = store.oauth_pending()?;
+            emit(json, &rows, |rows| {
+                if rows.is_empty() {
+                    "no clients are waiting. Connect the app, then approve the code it shows."
+                        .into()
+                } else {
+                    rows.iter()
+                        .map(|r| {
+                            format!(
+                                "{}  {}  redirect host {}  expires {}",
+                                r.user_code, r.client_name, r.redirect_host, r.expires_at
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+            })
+        }
+        Command::Oauth(OauthCmd::Approve {
+            user_code,
+            agent,
+            projects,
+            label,
+        }) => {
+            let grant = store.approve_oauth(another_core::Approval {
+                user_code,
+                agent,
+                project_globs: projects,
+                label,
+            })?;
+            emit(json, &grant, |g| {
+                format!(
+                    "approved {} (redirect host from the request) as {}\nprojects: {}\ngrant {}",
+                    g.client_name,
+                    g.agent,
+                    if g.project_globs.is_empty() {
+                        "none: mailbox, heartbeat and the activity feed only".into()
+                    } else {
+                        g.project_globs.join(", ")
+                    },
+                    g.grant_id
+                )
+            })
+        }
+        Command::Oauth(OauthCmd::Deny { user_code }) => {
+            let row = store.deny_oauth(&user_code)?;
+            emit(json, &row, |r| {
+                format!("denied {} ({})", r.user_code, r.client_name)
+            })
+        }
+        Command::Oauth(OauthCmd::List) => {
+            let grants = store.oauth_grants()?;
+            emit(json, &grants, |grants| {
+                if grants.is_empty() {
+                    "no OAuth grants".into()
+                } else {
+                    grants
+                        .iter()
+                        .map(|g| {
+                            let state = if g.revoked_at.is_some() {
+                                "revoked"
+                            } else {
+                                "active"
+                            };
+                            format!(
+                                "{}  {}  {}  {}  projects {}",
+                                g.grant_id,
+                                state,
+                                g.client_name,
+                                g.agent,
+                                if g.project_globs.is_empty() {
+                                    "none".into()
+                                } else {
+                                    g.project_globs.join(",")
+                                }
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+            })
+        }
+        Command::Oauth(OauthCmd::Revoke { grant_id }) => {
+            let g = store.revoke_oauth_grant(&grant_id)?;
+            emit(json, &g, |g| {
+                format!(
+                    "revoked grant {} ({}, {})",
+                    g.grant_id, g.client_name, g.agent
+                )
             })
         }
         Command::Node(NodeCmd::Show) => {

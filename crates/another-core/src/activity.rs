@@ -9,6 +9,8 @@ use serde_json::{json, Value};
 
 use crate::error::{Error, Result};
 use crate::identity::address;
+use crate::mail::{Importance, InboxQuery};
+use crate::requests::RequestStatus;
 use crate::store::Store;
 use crate::time::fmt_ts;
 
@@ -142,6 +144,48 @@ pub struct ActivityItem {
     pub summary: String,
     /// Ids of the objects involved (message_id, request_id, hold_id, ...).
     pub refs: Value,
+}
+
+/// One unread message in a digest: subject and ids, never the body.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct DigestMessage {
+    pub message_id: String,
+    pub thread_id: String,
+    pub from: String,
+    pub subject: String,
+    pub importance: Importance,
+    pub created_at: String,
+    /// Set when this message opened a request.
+    pub request_id: Option<String>,
+}
+
+/// A request the agent should claim or finish. Notes are omitted.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct DigestRequest {
+    pub request_id: String,
+    pub title: String,
+    pub status: RequestStatus,
+    pub owner: Option<String>,
+    pub due_at: Option<String>,
+}
+
+/// One-call catch-up for a hosted chat app: unread subjects, open requests, recent activity.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct WhatsNew {
+    pub agent: String,
+    pub unread: u32,
+    pub urgent_unread: u32,
+    pub awaiting_ack: u32,
+    /// Unread messages, newest first. Bodies are not included.
+    pub messages: Vec<DigestMessage>,
+    /// Open, stale and claimed requests this agent should act on.
+    pub requests: Vec<DigestRequest>,
+    /// Recent activity, oldest first, without routine renewals.
+    pub activity: Vec<ActivityItem>,
+    /// Pass back as `since` to continue the activity list.
+    pub next_since: Option<String>,
+    /// What to do next. When nothing is waiting, stop after reading this.
+    pub next: String,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -715,6 +759,127 @@ impl Store {
             })
         })
     }
+
+    /// Compact catch-up for one agent. Message bodies and request notes are left out.
+    pub fn whats_new(&self, agent: &str, since: Option<Since>, limit: u32) -> Result<WhatsNew> {
+        let limit = match limit {
+            0 => 10,
+            n => n.min(20),
+        };
+        let since = since.unwrap_or_else(|| Since::Time(self.now() - 86_400_000));
+        let inbox = self.inbox(
+            agent,
+            InboxQuery {
+                unread_only: true,
+                urgent_only: false,
+                limit,
+            },
+        )?;
+        let feed = self.activity(ActivityQuery {
+            since: Some(since),
+            limit,
+            kinds: vec![
+                ActivityKind::Mail,
+                ActivityKind::Request,
+                ActivityKind::Hold,
+                ActivityKind::Resource,
+                ActivityKind::Session,
+            ],
+        })?;
+        let messages = inbox
+            .messages
+            .iter()
+            .map(|item| DigestMessage {
+                message_id: item.message.message_id.clone(),
+                thread_id: item.message.thread_id.clone(),
+                from: item.message.from.clone(),
+                subject: item.message.subject.clone(),
+                importance: item.message.importance,
+                created_at: item.message.created_at.clone(),
+                request_id: item.message.request_id.clone(),
+            })
+            .collect::<Vec<_>>();
+        let requests = inbox
+            .requests
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.status,
+                    RequestStatus::Open | RequestStatus::Stale | RequestStatus::Claimed
+                )
+            })
+            .take(limit as usize)
+            .map(|r| DigestRequest {
+                request_id: r.request_id.clone(),
+                title: r.title.clone(),
+                status: r.status,
+                owner: r.owner.clone(),
+                due_at: r.due_at.clone(),
+            })
+            .collect::<Vec<_>>();
+        let next_since = feed.next_since.clone();
+        let activity = feed
+            .items
+            .into_iter()
+            .filter(|item| {
+                !matches!(
+                    item.kind.as_str(),
+                    "delivery.read"
+                        | "delivery.acked"
+                        | "hold.renewed"
+                        | "resource.renewed"
+                        | "token.created"
+                        | "token.revoked"
+                )
+            })
+            .collect::<Vec<_>>();
+        let next = digest_next(
+            &inbox.agent,
+            inbox.unread,
+            inbox.urgent_unread,
+            requests.len(),
+        );
+        Ok(WhatsNew {
+            agent: inbox.agent,
+            unread: inbox.unread,
+            urgent_unread: inbox.urgent_unread,
+            awaiting_ack: inbox.awaiting_ack,
+            messages,
+            requests,
+            next_since,
+            activity,
+            next,
+        })
+    }
+}
+
+fn digest_next(agent: &str, unread: u32, urgent: u32, requests: usize) -> String {
+    if unread == 0 && requests == 0 {
+        return format!(
+            "Nothing is waiting for {agent}. Stop here unless the user asked for a specific action."
+        );
+    }
+    let mut parts = Vec::new();
+    if unread > 0 {
+        let urgent = if urgent > 0 {
+            format!(", {urgent} urgent")
+        } else {
+            String::new()
+        };
+        parts.push(format!(
+            "{unread} unread message(s){urgent}. Handle each one, then call acknowledge with its message_id. Reply with send_message and reply_to."
+        ));
+    }
+    if requests > 0 {
+        parts.push(format!(
+            "{requests} request(s) need an owner. Call claim_request before starting one, then complete_request when it is done."
+        ));
+    }
+    parts.push(
+        "Use this digest instead of fetching full inboxes. Do not paste it back to the user."
+            .into(),
+    );
+    parts.join(" ")
 }
 
 #[cfg(test)]

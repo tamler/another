@@ -491,6 +491,68 @@ CREATE TABLE wake_targets (
     updated_at INTEGER NOT NULL
 );
 "#,
+    r#"
+CREATE TABLE oauth_clients (
+    client_id      TEXT PRIMARY KEY,
+    node_id        TEXT NOT NULL REFERENCES nodes(node_id),
+    client_name    TEXT NOT NULL,
+    redirect_uris  TEXT NOT NULL,
+    application_type TEXT NOT NULL,
+    created_at     INTEGER NOT NULL
+);
+
+CREATE TABLE oauth_grants (
+    grant_id      TEXT PRIMARY KEY,
+    node_id       TEXT NOT NULL REFERENCES nodes(node_id),
+    client_id     TEXT NOT NULL,
+    client_name   TEXT NOT NULL,
+    agent_id      TEXT NOT NULL REFERENCES agents(agent_id),
+    project_globs TEXT NOT NULL,
+    label         TEXT,
+    resource      TEXT NOT NULL,
+    scope         TEXT NOT NULL,
+    created_at    INTEGER NOT NULL,
+    revoked_at    INTEGER,
+    last_used_at  INTEGER
+);
+
+CREATE TABLE oauth_requests (
+    request_id            TEXT PRIMARY KEY,
+    node_id               TEXT NOT NULL REFERENCES nodes(node_id),
+    client_id             TEXT NOT NULL,
+    client_name           TEXT NOT NULL,
+    redirect_uri          TEXT NOT NULL,
+    state                 TEXT,
+    scope                 TEXT NOT NULL,
+    resource              TEXT NOT NULL,
+    code_challenge        TEXT NOT NULL,
+    code_challenge_method TEXT NOT NULL,
+    user_code             TEXT NOT NULL UNIQUE,
+    status                TEXT NOT NULL,
+    grant_id              TEXT,
+    redirect_token_hash   TEXT NOT NULL,
+    code_hash             TEXT,
+    created_at            INTEGER NOT NULL,
+    expires_at            INTEGER NOT NULL,
+    code_expires_at       INTEGER
+);
+
+CREATE TABLE oauth_tokens (
+    token_id     TEXT PRIMARY KEY,
+    node_id      TEXT NOT NULL REFERENCES nodes(node_id),
+    grant_id     TEXT NOT NULL REFERENCES oauth_grants(grant_id),
+    kind         TEXT NOT NULL,
+    secret_hash  TEXT NOT NULL,
+    resource     TEXT NOT NULL,
+    scope        TEXT NOT NULL,
+    expires_at   INTEGER NOT NULL,
+    revoked_at   INTEGER,
+    replaced_by  TEXT,
+    created_at   INTEGER NOT NULL,
+    last_used_at INTEGER
+);
+CREATE INDEX oauth_tokens_by_grant ON oauth_tokens(grant_id);
+"#,
 ];
 
 /// Switch to WAL. While several connections convert a new database at once, SQLite answers

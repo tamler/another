@@ -30,7 +30,7 @@ another resource register model_server ollama@11434 --agent claude@shop --endpoi
 ```
 
 - **Leases**: the registering agent holds the **owner** lease; others take **borrower** leases (shared resources only; `--exclusive` refuses borrowers). `refcount` is the number of live leases.
-- **TTL**: default 30 minutes, clamped to 1 minute – 24 hours. `another heartbeat` (and the session hooks) renew every lease the agent holds; `another resource heartbeat` renews just resources.
+- **TTL**: default 30 minutes, clamped to 1 minute-24 hours. `another heartbeat` (and the session hooks) renew every lease the agent holds; `another resource heartbeat` renews just resources.
 - **Release**: `another release <target> --agent X`. If the owner leaves while others borrow, the oldest borrower becomes owner. After shutting a resource down, the owner runs `another release <target> --agent X --stopped`.
 - **Session end**: `another heartbeat --end` (and the session-end hook) releases the agent's holds and resource leases. Add `--keep` to keep resource leases for a server meant to outlive the session.
 - **Lapse**: when the last lease expires or is released, the resource becomes `lapsed`. It stays listed, and registering or borrowing it again **adopts** it.
