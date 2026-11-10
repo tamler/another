@@ -795,9 +795,12 @@ fn init_tracing(serving: bool) {
     let default = if serving { "info" } else { "warn" };
     let filter = tracing_subscriber::EnvFilter::try_from_env("ANOTHER_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default));
+    // Colour only on a terminal: the daemon's log is a file under launchd.
+    use std::io::IsTerminal;
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
         .try_init();
 }
 
