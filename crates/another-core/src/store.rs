@@ -104,7 +104,7 @@ impl Store {
         }
         let path = home.join(DB_FILE);
         let conn = Connection::open(&path)?;
-        enable_wal(&conn)?;
+        use_wal(&conn)?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         Self::init(conn, clock, Some(path))
     }
@@ -495,7 +495,7 @@ CREATE TABLE wake_targets (
 
 /// Switch to WAL. While several connections convert a new database at once, SQLite answers
 /// busy without calling the busy handler, so retry for up to the usual busy timeout.
-fn enable_wal(conn: &Connection) -> Result<()> {
+fn use_wal(conn: &Connection) -> Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         match conn.pragma_update(None, "journal_mode", "WAL") {
