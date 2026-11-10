@@ -146,10 +146,7 @@ ICON_LINKS = (
     ("apple-touch-icon", "/apple-touch-icon.png"),
     ("manifest", "/site.webmanifest"),
 )
-IMAGE_ALT = (
-    "Another. Local coordination for coding agents: messages, handoffs, "
-    "and path holds so agents stop editing the same files."
-)
+IMAGE_ALT = "Another. One inbox for coding agents."
 for path, page in pages.items():
     for rel, href in ICON_LINKS:
         assert (rel, href) in page.relations, f"{path}: missing link rel={rel} href={href}"

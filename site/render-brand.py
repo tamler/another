@@ -43,11 +43,11 @@ TILE = 16
 TILE_RADIUS = 2
 
 WORDMARK = "another"
-HEADLINE = ("Local coordination", "for coding agents.")
-DETAIL = (
-    "Messages, handoffs, and path holds",
-    "so agents stop editing the same files.",
-)
+# Short on purpose. At feed size a long line becomes unreadably small.
+HEADLINE = "One inbox"
+DETAIL = "for coding agents."
+# Fragment Mono is a single weight. The cards draw a heavier stroke over it.
+TEXT_WEIGHT = 0.034
 
 # Fragment Mono's advance is 618/1000 for every glyph, including the space.
 UPM = 1000
@@ -315,6 +315,7 @@ def load_font():
         size: float,
         tracking: float,
         samples: int = 4,
+        weight: float = 0.0,
     ) -> None:
         if not text:
             return
@@ -331,10 +332,12 @@ def load_font():
         ys = [py for poly in polygons for _px, py in poly]
         if not xs:
             return
-        x0 = max(0, int(math.floor(min(xs))) - 1)
-        y0 = max(0, int(math.floor(min(ys))) - 1)
-        x1 = min(canvas.width, int(math.ceil(max(xs))) + 2)
-        y1 = min(canvas.height, int(math.ceil(max(ys))) + 2)
+        # Room for the heavier stroke, which is a dilation of the filled outlines.
+        pad = int(math.ceil(size * weight)) + 2
+        x0 = max(0, int(math.floor(min(xs))) - pad)
+        y0 = max(0, int(math.floor(min(ys))) - pad)
+        x1 = min(canvas.width, int(math.ceil(max(xs))) + pad)
+        y1 = min(canvas.height, int(math.ceil(max(ys))) + pad)
         width = x1 - x0
         height = y1 - y0
         if width <= 0 or height <= 0:
@@ -380,6 +383,9 @@ def load_font():
                             coverage[row + left : row + right] = b"\x01" * (right - left)
                     winding += direction
                     previous = hit_x
+        radius = int(round(size * weight * samples))
+        if radius > 0:
+            coverage = _dilate(coverage, sw, sh, radius)
         area = samples * samples
         for y in range(height):
             for x in range(width):
@@ -391,6 +397,39 @@ def load_font():
                     canvas.blend(x0 + x, y0 + y, INK, (total * 255 + area // 2) // area)
 
     return text_width, draw_text
+
+
+def _dilate(mask: bytearray, width: int, height: int, radius: int) -> bytearray:
+    """Square dilation. Expands filled samples so the one Regular weight reads heavier."""
+    horizontal = bytearray(width * height)
+    for y in range(height):
+        row = y * width
+        x = 0
+        while x < width:
+            if mask[row + x]:
+                start = x
+                while x < width and mask[row + x]:
+                    x += 1
+                left = max(0, start - radius)
+                right = min(width, x + radius)
+                horizontal[row + left : row + right] = b"\x01" * (right - left)
+            else:
+                x += 1
+    out = bytearray(width * height)
+    for x in range(width):
+        y = 0
+        while y < height:
+            if horizontal[y * width + x]:
+                start = y
+                while y < height and horizontal[y * width + x]:
+                    y += 1
+                top = max(0, start - radius)
+                bottom = min(height, y + radius)
+                for yy in range(top, bottom):
+                    out[yy * width + x] = 1
+            else:
+                y += 1
+    return out
 
 
 def favicon_svg() -> str:
@@ -462,79 +501,94 @@ DESC = 250 / UPM
 X_CENTER = (524 / UPM) / 2
 
 
-def draw_block(draw_text, canvas: Canvas, lines: tuple[str, ...], x: float, top: float, size: float, leading: float, tracking: float) -> float:
-    """Draw lines whose cap-height starts at `top`. Returns the descender bottom."""
-    baseline = top + CAP * size
-    for index, line in enumerate(lines):
-        draw_text(canvas, line, x, baseline, size, tracking)
-        if index != len(lines) - 1:
-            baseline += size * leading
-    return baseline + DESC * size
+def _line_height(size: float) -> float:
+    return (CAP + DESC) * size
+
+
+def _draw_line(draw_text, canvas: Canvas, text: str, x: float, top: float, size: float, tracking: float) -> float:
+    draw_text(canvas, text, x, top + CAP * size, size, tracking, weight=TEXT_WEIGHT)
+    return top + _line_height(size)
 
 
 def build_card(text_width, draw_text, kind: str) -> Canvas:
+    """1200x630 cards. Twitter center-crops this frame to 2:1 (1200x600).
+
+    Every mark and letter sits inside that band, and inside a wider margin,
+    so a center crop does not cut a word. The headline is at least half the
+    frame wide. Text is ink on paper, drawn heavier than Fragment Mono Regular.
+    """
     width, height = 1200, 630
     canvas = Canvas(width, height, PAPER, alpha=255)
+    # Visible band after a centered 2:1 crop, plus a pad so strokes are not on the cut.
+    crop_top = (height - width // 2) // 2
+    crop_bottom = height - crop_top
     if kind == "og":
-        # Poster layout, left aligned like the site. The mark and the wordmark
-        # share the top row. The claim sits below, then the plain description.
-        left = 92
-        mark = 120
-        grid_x = left - (2 / TILE) * mark
-        grid_y = 58
-        paint_mark(canvas, grid_x, grid_y, mark, tile=False)
-        mark_center = grid_y + mark / 2
-        word_size = 46
-        word_x = left + (12 / TILE) * mark + 28
-        draw_text(canvas, WORDMARK, word_x, mark_center + X_CENTER * word_size, word_size, -0.04)
-        bars_bottom = grid_y + (13 / TILE) * mark
-        headline_size = 74
-        detail_size = 40
-        headline_bottom = draw_block(
-            draw_text, canvas, HEADLINE, left, bars_bottom + 64, headline_size, 1.18, -0.025
+        mark = 112
+        word_size, headline_size, detail_size = 52, 164, 86
+        gap_mark, gap_word, gap_head = 18, 36, 20
+        headline_w = text_width(HEADLINE, headline_size, 0)
+        detail_w = text_width(DETAIL, detail_size, 0)
+        if headline_w < width * 0.5:
+            raise SystemExit(f"headline is only {headline_w:.0f}px wide")
+        block = (
+            mark + gap_mark + _line_height(word_size) + gap_word
+            + _line_height(headline_size) + gap_head + _line_height(detail_size)
         )
-        draw_block(draw_text, canvas, DETAIL, left, headline_bottom + 40, detail_size, 1.34, -0.015)
-        limit = width - left - 88
-        _require_width(text_width, HEADLINE, headline_size, -0.025, limit)
-        _require_width(text_width, DETAIL, detail_size, -0.015, limit)
+        top = (height - block) / 2
+        grid_x = (width - mark) / 2
+        paint_mark(canvas, grid_x, top, mark, tile=False)
+        y = top + mark + gap_mark
+        word_w = text_width(WORDMARK, word_size, -0.03)
+        y = _draw_line(draw_text, canvas, WORDMARK, (width - word_w) / 2, y, word_size, -0.03)
+        y += gap_word
+        y = _draw_line(draw_text, canvas, HEADLINE, (width - headline_w) / 2, y, headline_size, 0)
+        y += gap_head
+        _draw_line(draw_text, canvas, DETAIL, (width - detail_w) / 2, y, detail_size, 0)
     elif kind == "twitter":
-        # Same words, with the mark beside the text so a narrow unfurl still
-        # has a large claim and a description that clears the line above it.
-        left = 72
-        mark = 176
-        text_x = left + (12 / TILE) * mark + 44
-        max_width = width - text_x - 68
-        word_size = 34
-        headline_size = 62
-        detail_size = 36
-        _require_width(text_width, (WORDMARK,), word_size, -0.04, max_width)
-        _require_width(text_width, HEADLINE, headline_size, -0.025, max_width)
-        _require_width(text_width, DETAIL, detail_size, -0.015, max_width)
-        word_gap = 28
-        detail_gap = 34
-        word_h = (CAP + DESC) * word_size
-        headline_h = CAP * headline_size + headline_size * 1.16 + DESC * headline_size
-        detail_h = CAP * detail_size + detail_size * 1.32 + DESC * detail_size
-        block_h = word_h + word_gap + headline_h + detail_gap + detail_h
-        text_top = (height - block_h) / 2
-        draw_text(canvas, WORDMARK, text_x, text_top + CAP * word_size, word_size, -0.04)
-        headline_top = text_top + word_h + word_gap
-        headline_bottom = draw_block(
-            draw_text, canvas, HEADLINE, text_x, headline_top, headline_size, 1.16, -0.025
-        )
-        draw_block(draw_text, canvas, DETAIL, text_x, headline_bottom + detail_gap, detail_size, 1.32, -0.015)
-        grid_y = (height - mark) / 2
-        paint_mark(canvas, left - (2 / TILE) * mark, grid_y, mark, tile=False)
+        # Same words, mark beside them, the whole lockup centered in the frame.
+        mark = 128
+        word_size, headline_size, detail_size = 48, 148, 76
+        gap_word, gap_head = 22, 16
+        gap_mark = 40
+        headline_w = text_width(HEADLINE, headline_size, 0)
+        detail_w = text_width(DETAIL, detail_size, 0)
+        word_w = text_width(WORDMARK, word_size, -0.03)
+        if headline_w < width * 0.5:
+            raise SystemExit(f"headline is only {headline_w:.0f}px wide")
+        text_w = max(word_w, headline_w, detail_w)
+        bars_w = (12 / TILE) * mark
+        block_w = bars_w + gap_mark + text_w
+        block_h = _line_height(word_size) + gap_word + _line_height(headline_size) + gap_head + _line_height(detail_size)
+        left = (width - block_w) / 2
+        top = (height - block_h) / 2
+        grid_x = left - (2 / TILE) * mark
+        grid_y = top + (block_h - mark) / 2
+        paint_mark(canvas, grid_x, grid_y, mark, tile=False)
+        text_x = left + bars_w + gap_mark
+        y = top
+        y = _draw_line(draw_text, canvas, WORDMARK, text_x, y, word_size, -0.03)
+        y += gap_word
+        y = _draw_line(draw_text, canvas, HEADLINE, text_x, y, headline_size, 0)
+        y += gap_head
+        _draw_line(draw_text, canvas, DETAIL, text_x, y, detail_size, 0)
     else:
         raise SystemExit(f"unknown card {kind}")
+    _assert_crop_safe(canvas, crop_top + 8, crop_bottom - 8)
     return canvas
 
 
-def _require_width(text_width, lines: tuple[str, ...], size: float, tracking: float, limit: float) -> None:
-    for line in lines:
-        width = text_width(line, size, tracking)
-        if width > limit:
-            raise SystemExit(f"{line!r} is {width:.1f}px at {size}px, limit {limit:.1f}px")
+def _assert_crop_safe(canvas: Canvas, top: int, bottom: int) -> None:
+    """Non-paper pixels must survive a centered 2:1 crop and stay off the side edges."""
+    side = 36
+    paper = bytes(PAPER)
+    for y in range(canvas.height):
+        row = y * canvas.width * 4
+        for x in range(canvas.width):
+            i = row + x * 4
+            if canvas.buf[i : i + 3] == paper:
+                continue
+            if y < top or y >= bottom or x < side or x >= canvas.width - side:
+                raise SystemExit(f"mark or text would be cropped at {x},{y}")
 
 
 def nearest(canvas: Canvas, scale: int) -> Canvas:
