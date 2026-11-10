@@ -33,6 +33,9 @@ dir='@DIR@'
 printf '%s\n' "$*" >> "$dir/calls.log"
 case "$1 $2" in
   "agent get")
+    # Test controls: `hang` never answers; `slow` holds the answer until it is removed.
+    if [ -f "$dir/hang" ]; then exec sleep 30; fi
+    while [ -f "$dir/slow" ]; do sleep 0.05; done
     if [ -f "$dir/panes/$3" ]; then
       read st prog < "$dir/panes/$3"
       printf '{"result":{"agent":{"agent":"%s","agent_status":"%s","pane_id":"%s"}}}\n' "$prog" "$st" "$3"
@@ -472,12 +475,13 @@ fn tool_hooks_fail_open_fast_when_the_database_is_missing_or_locked() {
     env.start("codex", &env.wt, &[]);
     env.send("codex@shop-review", "claude@shop", "While locked", false);
 
-    // A writer holding the lock does not stop readers: the notice still arrives.
+    // A writer holding the lock: announcing needs the claim write, so the notice waits for
+    // the next tool call instead of risking a duplicate. Quiet and quick, never lost.
     let db = rusqlite::Connection::open(env.another_home.join("another.db")).unwrap();
     db.execute_batch("BEGIN IMMEDIATE").unwrap();
     let after = tool(&env.main, "Bash", json!({}));
     let (out, took) = env.hook_timed("post-tool", "claude", &after, &[]);
-    assert!(context(&out).contains("While locked"));
+    assert_eq!(out, "");
     assert!(took < Duration::from_secs(2), "{took:?}");
     // The edit guard cannot write: it lets the edit through and logs why.
     let (out, took) = env.hook_timed("pre-edit", "claude", &edit, &[]);
@@ -485,6 +489,11 @@ fn tool_hooks_fail_open_fast_when_the_database_is_missing_or_locked() {
     assert!(took < Duration::from_secs(3), "{took:?}");
     db.execute_batch("ROLLBACK").unwrap();
     drop(db);
+    let (out, _) = env.hook_timed("post-tool", "claude", &after, &[]);
+    assert!(
+        context(&out).contains("While locked"),
+        "delivered once the lock is gone"
+    );
 
     // A connection that takes the whole database exclusively blocks even reads.
     let db = rusqlite::Connection::open(env.another_home.join("another.db")).unwrap();
@@ -756,4 +765,230 @@ fn daemon_wakes_idle_herdr_agents_and_leaves_working_ones_to_hooks() {
     assert_eq!(stats["wakes"][0]["agent"], "claude@shop");
     assert_eq!(stats["wakes"][0]["target"], "w7:p2");
     assert_eq!(stats["wakes"][0]["outcome"], "sent");
+}
+
+// ---------------------------------------------------------------------------
+// Regressions for the PR #103 review (REVIEW-another-pr103-codex.md).
+
+/// F1: an edit through a symlink is checked against the file it really reaches.
+#[test]
+fn symlinked_paths_do_not_bypass_a_hold() {
+    let env = Env::new();
+    env.start("claude", &env.main, &[]);
+    env.start("codex", &env.wt, &[]);
+    std::fs::write(env.wt.join("src/a.rs"), "x").unwrap();
+    let held = env.hook(
+        "pre-edit",
+        "claude",
+        &tool(
+            &env.main,
+            "Edit",
+            json!({ "file_path": env.main.join("src/a.rs") }),
+        ),
+    );
+    assert_eq!(held, "");
+
+    // An alias inside the worktree pointing at its src/.
+    std::os::unix::fs::symlink(env.wt.join("src"), env.wt.join("alias")).unwrap();
+    let out = env.hook(
+        "pre-edit",
+        "codex",
+        &tool(
+            &env.wt,
+            "Edit",
+            json!({ "file_path": env.wt.join("alias/a.rs") }),
+        ),
+    );
+    let reason = denial(&out);
+    assert!(
+        reason.starts_with("Another stopped this edit: src/a.rs is held by claude@shop"),
+        "{reason}"
+    );
+    // An alias outside any checkout pointing into it.
+    let outside = env.root.join("outside-link");
+    std::os::unix::fs::symlink(env.wt.join("src"), &outside).unwrap();
+    let out = env.hook(
+        "pre-edit",
+        "codex",
+        &tool(
+            &env.wt,
+            "Write",
+            json!({ "file_path": outside.join("a.rs") }),
+        ),
+    );
+    assert!(denial(&out).contains("held by claude@shop"));
+    // A file that is itself a symlink to the held file.
+    std::os::unix::fs::symlink(env.wt.join("src/a.rs"), env.wt.join("src/link.rs")).unwrap();
+    let out = env.hook(
+        "pre-edit",
+        "codex",
+        &tool(
+            &env.wt,
+            "Edit",
+            json!({ "file_path": env.wt.join("src/link.rs") }),
+        ),
+    );
+    assert!(denial(&out).contains("held by claude@shop"));
+    // No alias hold was taken by the stopped agent.
+    assert!(!env
+        .holds()
+        .iter()
+        .any(|h| h["agent"] == "codex@shop-review"));
+
+    // Manual holds resolve aliases too: a hold taken through `alias/` covers src/.
+    let wt = env.wt.to_string_lossy().into_owned();
+    let out = env
+        .cmd(&[
+            "hold",
+            "acquire",
+            "--agent",
+            "codex@shop-review",
+            "--project",
+            &wt,
+            "alias/a.rs",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "conflicts with claude's src/a.rs"
+    );
+}
+
+/// F2: concurrent hooks announce one message once.
+#[test]
+fn concurrent_hooks_announce_a_message_once() {
+    let env = Env::new();
+    env.start("claude", &env.main, &[]);
+    env.start("codex", &env.wt, &[]);
+    let after = tool(&env.main, "Bash", json!({}));
+    for round in 0..5 {
+        env.send(
+            "codex@shop-review",
+            "claude@shop",
+            &format!("round {round}"),
+            false,
+        );
+        let outs: Vec<String> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| s.spawn(|| env.hook("post-tool", "claude", &after)))
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let shown = outs.iter().filter(|o| !o.is_empty()).count();
+        assert_eq!(shown, 1, "round {round}: {outs:?}");
+    }
+    let stats = env.json(&["stats", "--since", "1h"]);
+    assert_eq!(stats["notices_mid_task"], 5);
+    assert_eq!(stats["messages_pushed"], 5);
+}
+
+/// F2: a hook that announces while the daemon is probing Herdr wins; no second prompt.
+#[test]
+fn daemon_does_not_wake_for_mail_a_hook_announced_during_the_probe() {
+    let env = Env::new();
+    env.start("claude", &env.main, &[("HERDR_PANE_ID", "w7:p2")]);
+    env.start("codex", &env.wt, &[]);
+    env.set_pane("w7:p2", Some("idle claude"));
+    std::fs::write(env.herdr_dir.join("slow"), "").unwrap();
+    let daemon = Daemon::start(&env);
+    env.send("codex@shop-review", "claude@shop", "Race me", false);
+    // The daemon has picked the message and is waiting on Herdr.
+    assert!(wait_for(Duration::from_secs(15), || env
+        .herdr_calls()
+        .iter()
+        .any(|c| c == "agent get w7:p2")));
+    let notice = env.hook("post-tool", "claude", &tool(&env.main, "Bash", json!({})));
+    assert!(context(&notice).contains("Race me"));
+    std::fs::remove_file(env.herdr_dir.join("slow")).unwrap();
+    std::thread::sleep(Duration::from_secs(4));
+    assert!(
+        !env.herdr_calls()
+            .iter()
+            .any(|c| c.starts_with("agent prompt")),
+        "{:?}",
+        env.herdr_calls()
+    );
+    assert!(daemon.stop().success());
+    let stats = env.json(&["stats", "--since", "1h"]);
+    assert_eq!(stats["wakes_sent"], 0);
+    assert_eq!(stats["notices_mid_task"], 1);
+}
+
+/// F3: a burst larger than one notice's preview is announced and counted in full.
+#[test]
+fn a_large_burst_is_counted_in_full() {
+    let env = Env::new();
+    env.start("claude", &env.main, &[]);
+    env.start("codex", &env.wt, &[]);
+    let after = tool(&env.main, "Bash", json!({}));
+    env.send("codex@shop-review", "claude@shop", "warmup", false);
+    assert!(!env.hook("post-tool", "claude", &after).is_empty());
+    for i in 0..120 {
+        env.send(
+            "codex@shop-review",
+            "claude@shop",
+            &format!("burst {i}"),
+            false,
+        );
+    }
+    let notice = context(&env.hook("post-tool", "claude", &after));
+    assert!(notice.contains("120 new message(s)"), "{notice}");
+    assert_eq!(env.hook("post-tool", "claude", &after), "");
+    let stats = env.json(&["stats", "--since", "1h"]);
+    assert_eq!(stats["messages_pushed"], 121, "warmup plus all 120");
+}
+
+/// F5: an adapter that never answers cannot stall the daemon's shutdown.
+#[test]
+fn a_hung_adapter_does_not_block_sigterm() {
+    let env = Env::new();
+    env.start("claude", &env.main, &[("HERDR_PANE_ID", "w7:p2")]);
+    env.start("codex", &env.wt, &[]);
+    std::fs::write(env.herdr_dir.join("hang"), "").unwrap();
+    let daemon = Daemon::start(&env);
+    env.send("codex@shop-review", "claude@shop", "Anyone there?", false);
+    assert!(wait_for(Duration::from_secs(15), || env
+        .herdr_calls()
+        .iter()
+        .any(|c| c == "agent get w7:p2")));
+    std::thread::sleep(Duration::from_millis(300));
+    let started = Instant::now();
+    let status = daemon.stop();
+    let took = started.elapsed();
+    assert!(status.success(), "{status:?}");
+    assert!(took < Duration::from_secs(5), "shutdown took {took:?}");
+}
+
+/// F5: a probe that hangs times out, and the pass moves on.
+#[test]
+fn adapter_commands_are_bounded() {
+    let started = Instant::now();
+    let mut cmd = Command::new("sleep");
+    cmd.arg("30");
+    let out = another::wake::run_bounded(&mut cmd, Duration::from_millis(300), None).unwrap();
+    assert!(out.is_none(), "timed out");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let flag = std::sync::atomic::AtomicBool::new(true);
+    let mut cmd = Command::new("sleep");
+    cmd.arg("30");
+    let started = Instant::now();
+    assert!(
+        another::wake::run_bounded(&mut cmd, Duration::from_secs(30), Some(&flag))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "cancel stops it"
+    );
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", "echo hi"]);
+    let (status, stdout) = another::wake::run_bounded(&mut cmd, Duration::from_secs(5), None)
+        .unwrap()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(stdout, b"hi\n");
 }

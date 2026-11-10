@@ -54,6 +54,10 @@ impl Repos {
     fn path(p: &Path) -> String {
         p.to_string_lossy().into_owned()
     }
+
+    fn root(&self) -> &Path {
+        self._dir.path()
+    }
 }
 
 struct Fx {
@@ -182,6 +186,44 @@ fn sibling_worktrees_and_subprojects_share_holds() {
     assert!(patterns.contains(&("shop", "src/**")), "{patterns:?}");
     assert!(patterns.contains(&("shop-wt", "docs/x.md")), "{patterns:?}");
     assert!(!patterns.iter().any(|(p, _)| *p == "blog"), "{patterns:?}");
+}
+
+#[test]
+fn remotes_differing_only_in_path_case_are_different_repositories() {
+    // Review F4: hostnames are case-insensitive, repository paths need not be.
+    let fx = Fx::new();
+    let upper = fx.repos.root().join("upper");
+    let lower = fx.repos.root().join("lower");
+    write(
+        &upper.join(".git/config"),
+        "[remote \"origin\"]\n\turl = git@example.invalid:Team/Shop.git\n",
+    );
+    write(
+        &lower.join(".git/config"),
+        "[remote \"origin\"]\n\turl = https://EXAMPLE.invalid/team/shop\n",
+    );
+    assert_eq!(
+        fx.acquire("alice", &upper, &["src/a.txt"])
+            .unwrap()
+            .granted
+            .len(),
+        1
+    );
+    let other = fx.acquire("bob", &lower, &["src/a.txt"]).unwrap();
+    assert!(other.conflicts.is_empty(), "{:?}", other.conflicts);
+    // Same path case, different host case and scheme: still one repository.
+    let same = fx.repos.root().join("same");
+    write(
+        &same.join(".git/config"),
+        "[remote \"origin\"]\n\turl = https://EXAMPLE.invalid/Team/Shop.git\n",
+    );
+    assert_eq!(
+        fx.acquire("carol", &same, &["src/a.txt"])
+            .unwrap()
+            .conflicts
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -365,7 +407,7 @@ fn keepalive_renews_only_aging_holds() {
 }
 
 #[test]
-fn unread_after_is_a_cursor() {
+fn unannounced_mail_is_claimed_once() {
     let fx = Fx::new();
     let send = |subject: &str, importance: Importance, request: bool| {
         fx.store
@@ -386,7 +428,7 @@ fn unread_after_is_a_cursor() {
     fx.advance_secs(1);
     let third = send("third", Importance::Normal, false);
 
-    let all = fx.store.unread_after("alice", "", 10).unwrap();
+    let all = fx.store.unannounced("alice", "", 10).unwrap();
     assert_eq!(all.agent, "alice");
     assert_eq!((all.count, all.urgent), (3, 1));
     let subjects: Vec<_> = all.items.iter().map(|i| i.subject.as_str()).collect();
@@ -394,23 +436,108 @@ fn unread_after_is_a_cursor() {
     assert!(all.items[1].request_id.is_some());
     assert_eq!(all.items[1].from, "bob");
 
-    let newer = fx
-        .store
-        .unread_after("alice", &first.message_id, 1)
-        .unwrap();
+    let newer = fx.store.unannounced("alice", &first.message_id, 1).unwrap();
     assert_eq!(newer.count, 2);
     assert_eq!(newer.items.len(), 1, "limit caps items, not the count");
+
+    // Review F2: a claim is exclusive. The first caller wins; a second (another hook, or
+    // the daemon) gets nothing for the same message.
+    let third_id = std::slice::from_ref(&third.message_id);
+    let won = fx
+        .store
+        .claim_announcement("alice", third_id, "post_tool", Some("claude"))
+        .unwrap();
+    assert_eq!(won, third_id);
+    assert!(fx
+        .store
+        .claim_announcement("alice", third_id, "wake", None)
+        .unwrap()
+        .is_empty());
+    assert_eq!(fx.store.unannounced("alice", "", 10).unwrap().count, 2);
+    // A released claim (a wake that failed) can be announced again.
+    fx.store.release_announcement("alice", third_id).unwrap();
+    assert_eq!(fx.store.unannounced("alice", "", 10).unwrap().count, 3);
+    // Read mail is no longer a candidate, and cannot be claimed.
+    fx.store.acknowledge("alice", third_id, false).unwrap();
+    assert_eq!(fx.store.unannounced("alice", "", 10).unwrap().count, 2);
+    assert!(fx
+        .store
+        .claim_announcement("alice", third_id, "prompt", None)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn claims_are_per_agent_even_when_names_sanitize_alike() {
+    // Inherited defect from review: `a.b` and `a_b` shared one cursor file, so a notice for
+    // one suppressed the other's older mail. Claims are keyed by agent id now.
+    let fx = Fx::new();
+    for name in ["a.b", "a_b"] {
+        fx.store
+            .register_agent(RegisterAgent {
+                name: name.into(),
+                program: Program::Claude,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+    }
+    let send = |to: &str| {
+        fx.store
+            .send_message(SendMessage {
+                from: "bob".into(),
+                to: vec![to.into()],
+                subject: format!("for {to}"),
+                body: "b".into(),
+                ..Default::default()
+            })
+            .unwrap()
+    };
+    let older = send("a.b");
+    fx.advance_secs(1);
+    let newer = send("a_b");
+    let ids = |m: &Message| vec![m.message_id.clone()];
     assert_eq!(
         fx.store
-            .unread_after("alice", &third.message_id, 10)
+            .claim_announcement("a_b", &ids(&newer), "post_tool", None)
             .unwrap()
-            .count,
-        0
+            .len(),
+        1
     );
-    fx.store
-        .acknowledge("alice", std::slice::from_ref(&third.message_id), false)
+    let left = fx.store.unannounced("a.b", "", 10).unwrap();
+    assert_eq!(left.count, 1, "a.b still has its own unannounced mail");
+    assert_eq!(left.items[0].message_id, older.message_id);
+}
+
+#[test]
+fn a_large_burst_is_claimed_in_full() {
+    // Review F3: every id of a burst is claimed and recorded, not just the first 50.
+    let fx = Fx::new();
+    let start = fx.store.now();
+    for i in 0..120 {
+        fx.store
+            .send_message(SendMessage {
+                from: "bob".into(),
+                to: vec!["alice".into()],
+                subject: format!("burst {i}"),
+                body: "b".into(),
+                ..Default::default()
+            })
+            .unwrap();
+    }
+    let unread = fx.store.unannounced("alice", "", 1000).unwrap();
+    assert_eq!(unread.items.len(), 120);
+    let ids: Vec<String> = unread.items.iter().map(|i| i.message_id.clone()).collect();
+    let claimed = fx
+        .store
+        .claim_announcement("alice", &ids, "post_tool", Some("claude"))
         .unwrap();
-    assert_eq!(fx.store.unread_after("alice", "", 10).unwrap().count, 2);
+    assert_eq!(claimed.len(), 120);
+    let s = fx.store.trial_stats(Some(Since::Time(start))).unwrap();
+    assert_eq!(s.notices_mid_task, 1);
+    assert_eq!(s.messages_pushed, 120);
+    assert_eq!(fx.store.unannounced("alice", "", 1000).unwrap().count, 0);
 }
 
 #[test]
@@ -472,11 +599,11 @@ fn stats_count_the_coordination_evidence() {
     let at_prompt = send("at prompt", false);
     fx.advance_secs(1);
     fx.store
-        .record_notice(
+        .claim_announcement(
             "alice",
+            &[read_me.message_id.clone(), ignore_me.message_id.clone()],
             "post_tool",
             Some("claude"),
-            &[read_me.message_id.clone(), ignore_me.message_id.clone()],
         )
         .unwrap();
     fx.store
@@ -500,11 +627,11 @@ fn stats_count_the_coordination_evidence() {
         )
         .unwrap();
     fx.store
-        .record_notice(
+        .claim_announcement(
             "alice",
+            std::slice::from_ref(&at_prompt.message_id),
             "prompt",
             Some("claude"),
-            std::slice::from_ref(&at_prompt.message_id),
         )
         .unwrap();
     fx.advance_secs(1);

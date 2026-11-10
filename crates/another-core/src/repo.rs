@@ -145,6 +145,12 @@ fn strip_port(host: &str) -> &str {
     host.split(':').next().unwrap_or(host)
 }
 
+/// `host/path` with the host lowercased (hostnames are case-insensitive) and the path kept
+/// as written: a Git server may treat `Team/Shop` and `team/shop` as two repositories.
+fn remote_key(host: &str, path: &str) -> String {
+    format!("{}/{}", host.to_ascii_lowercase(), clean_repo_path(path))
+}
+
 /// Reduce a git remote URL to `host/path` so every spelling of one repository matches.
 /// Credentials are always dropped; they never reach the database.
 pub fn normalize_remote(url: &str) -> Option<String> {
@@ -162,7 +168,7 @@ pub fn normalize_remote(url: &str) -> Option<String> {
         if host.is_empty() {
             return None;
         }
-        return Some(format!("{host}/{}", clean_repo_path(path)).to_ascii_lowercase());
+        return Some(remote_key(host, path));
     }
     // scp-like `user@host:path`: only when no slash comes before the first colon (git's rule);
     // a single letter before the colon is a Windows drive.
@@ -173,7 +179,7 @@ pub fn normalize_remote(url: &str) -> Option<String> {
             if host.is_empty() {
                 return None;
             }
-            Some(format!("{host}/{}", clean_repo_path(&url[colon + 1..])).to_ascii_lowercase())
+            Some(remote_key(host, &url[colon + 1..]))
         }
         _ => local(url),
     }
@@ -244,7 +250,7 @@ mod tests {
         for url in [
             "git@github.com:tamler/another.git",
             "https://github.com/tamler/another",
-            "https://github.com/Tamler/Another.git/",
+            "https://GitHub.com/tamler/another.git/",
             "ssh://git@github.com:22/tamler/another.git",
             "git+ssh://git@github.com/tamler/another",
             "github.com:tamler/another",
@@ -255,6 +261,16 @@ mod tests {
         let with_token =
             normalize_remote("https://x-access-token:SECRET@github.com/tamler/another.git");
         assert_eq!(with_token, want);
+        // Review F4: only the host is case-insensitive. Path case is kept, so two repos
+        // whose paths differ only in case on a case-sensitive server stay distinct.
+        assert_eq!(
+            normalize_remote("git@Example.invalid:Team/Shop.git").as_deref(),
+            Some("example.invalid/Team/Shop")
+        );
+        assert_ne!(
+            normalize_remote("git@example.invalid:Team/Shop.git"),
+            normalize_remote("https://example.invalid/team/shop")
+        );
         assert_eq!(
             normalize_remote("/srv/git/shop.git"),
             Some("file:/srv/git/shop".into())

@@ -27,11 +27,15 @@ conflict: src/api/routes.rs is held by codex@shop-review (shop-review:src/api/**
 
 Another works out the repository from files, without running git:
 
-- the key is the `origin` remote with the scheme, user name, password or token, port and `.git` suffix removed, so `git@github.com:team/shop.git` and `https://github.com/team/shop` match. Credentials are never stored;
+- the key is the `origin` remote with the scheme, user name, password or token, port and `.git` suffix removed, and the host lowercased, so `git@GitHub.com:team/shop.git` and `https://github.com/team/shop` match. The path keeps its case: a Git server may treat `Team/Shop` and `team/shop` as two repositories. Credentials are never stored;
 - with no `origin`, the key is the repository's shared git directory, which every worktree of it points at;
 - a project registered at a subdirectory of a repository compares paths from the repository's top level, so a hold on `api/**` in a project at `src` overlaps `src/api/x.rs` in the top-level project.
 
 The link is a node-local cache, refreshed whenever a project is used. Projects registered before this existed are linked the first time their holds are checked. `another holds --project X` lists holds in sibling checkouts too, since those are the ones that will conflict. Holds on other machines are still matched by project name and reported as warnings, never conflicts (D26).
+
+## Symlinks
+
+A literal path given to `another hold acquire` or `hold check`, and every file the edit guard sees, is resolved through symlinks first, so `alias/a.rs` (with `alias -> src`) is held, and checked, as `src/a.rs`. Globs are matched as written. A path whose real location is outside the project is passed on as given.
 
 ## Whole-project holds
 

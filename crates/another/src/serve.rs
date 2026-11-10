@@ -2,7 +2,6 @@
 //! runs the sweeper that expires lapsed holds and marks overdue requests stale.
 
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use std::path::PathBuf;
 use std::time::Duration;
 
 use another_core::Store;
@@ -103,9 +102,18 @@ const PRUNE_EVERY: Duration = Duration::from_secs(600);
 /// Run the push waker (see [`crate::wake::Waker`]) and periodic target pruning until
 /// cancelled. Each pass runs on the blocking pool, since it touches SQLite and may start
 /// a `herdr` process.
-pub fn spawn_waker(store: Store, another_home: PathBuf, every: Duration, ct: CancellationToken) {
+pub fn spawn_waker(store: Store, every: Duration, ct: CancellationToken) {
+    let first = crate::wake::Waker::new();
+    // On shutdown, tell a pass in progress to stop its adapter commands now; the blocking
+    // pass then returns within moments instead of waiting out a stuck adapter.
+    let cancel = first.cancel.clone();
+    let stop = ct.clone();
     tokio::spawn(async move {
-        let mut waker = Some(crate::wake::Waker::new(another_home));
+        stop.cancelled().await;
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    tokio::spawn(async move {
+        let mut waker = Some(first);
         let mut tick = tokio::time::interval(every);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut prune_tick = tokio::time::interval(PRUNE_EVERY);
@@ -385,12 +393,8 @@ pub async fn serve_http(
     // Background work starts only once the port is ours, so a second daemon that fails to
     // bind never sweeps or wakes alongside the first.
     spawn_sweeper(store.clone(), sweep_every, ct.clone());
-    let another_home = store
-        .db_path()
-        .and_then(std::path::Path::parent)
-        .map(std::path::Path::to_path_buf);
-    if let (Some(every), Some(home)) = (opts.push_every, another_home) {
-        spawn_waker(store.clone(), home, every, ct.clone());
+    if let Some(every) = opts.push_every {
+        spawn_waker(store.clone(), every, ct.clone());
         eprintln!(
             "another: push delivery on: idle Herdr agents with new mail are woken (every {}s)",
             every.as_secs().max(1)

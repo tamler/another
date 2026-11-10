@@ -843,6 +843,35 @@ fn project_key(store: &Store, actor: &str, project: Option<String>) -> anyhow::R
     }
 }
 
+/// Literal hold paths resolved through symlinks to the project-relative path they reach,
+/// so a hold taken through an alias covers the real file, as the edit guard sees it.
+/// Globs, and paths that resolve outside the project, are passed on as given.
+fn resolve_hold_paths(store: &Store, project: &str, paths: Vec<String>) -> Vec<String> {
+    let Ok(p) = store.project(project) else {
+        return paths;
+    };
+    let root = Path::new(&p.abs_path);
+    let real_root = hooks::resolve_existing(root);
+    paths
+        .into_iter()
+        .map(|raw| {
+            if raw.contains(['*', '?', '[', '{']) {
+                return raw;
+            }
+            let full = if Path::new(&raw).is_absolute() {
+                PathBuf::from(&raw)
+            } else {
+                root.join(&raw)
+            };
+            let real = hooks::resolve_existing(&full);
+            match real.strip_prefix(&real_root) {
+                Ok(rel) if !rel.as_os_str().is_empty() => rel.to_string_lossy().into_owned(),
+                _ => raw,
+            }
+        })
+        .collect()
+}
+
 fn emit<T: Serialize>(json: bool, value: &T, human: impl FnOnce(&T) -> String) -> ExitCode {
     if json {
         println!(
@@ -893,7 +922,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         if *stdio && *dashboard {
             eprintln!("another: --dashboard needs the HTTP server; stdio has no dashboard");
         }
-        rt.block_on(async {
+        let result = rt.block_on(async {
             if *stdio {
                 crate::serve::serve_stdio(store, every).await
             } else {
@@ -915,7 +944,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 };
                 crate::serve::serve_http(store, bind, opts, every).await
             }
-        })?;
+        });
+        // Background passes are told to stop on shutdown; never wait on one for long.
+        rt.shutdown_timeout(Duration::from_secs(3));
+        result?;
         return Ok(ExitCode::SUCCESS);
     }
     if let Command::Remote(RemoteCmd::Up {
@@ -1152,6 +1184,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             repo_wide,
         }) => {
             let project = project_key(&store, &agent.agent, project.project)?;
+            let paths = resolve_hold_paths(&store, &project, paths);
             let report = store.acquire_holds(AcquireHolds {
                 agent: agent.agent,
                 project,
@@ -1176,6 +1209,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             shared,
         }) => {
             let project = project_key(&store, &agent.agent, project.project)?;
+            let paths = resolve_hold_paths(&store, &project, paths);
             let conflicts = store.check_holds(&agent.agent, &project, &paths, !shared)?;
             let conflicted = !conflicts.is_empty();
             emit(json, &conflicts, |c| {
@@ -1564,6 +1598,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 message: run.message,
                 force: run.force,
                 dry_run: run.dry_run,
+                cancel: None,
             };
             let plans = if run.all {
                 crate::wake::wake_all(&store, &opts)?

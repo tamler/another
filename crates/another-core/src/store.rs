@@ -606,6 +606,19 @@ CREATE TABLE project_repos (
 );
 CREATE INDEX project_repos_by_key ON project_repos(repo_key);
 "#,
+    // Which messages have been announced to which agent (prompt or mid-task notice, or a
+    // daemon wake). One row per (agent, message) is the claim that makes "announced once"
+    // hold across concurrent hooks and the daemon. Node-local; the evidence is the
+    // `push.notified` / `push.woke` event written in the same transaction.
+    r#"
+CREATE TABLE announcements (
+    agent_id     TEXT NOT NULL REFERENCES agents(agent_id),
+    message_id   TEXT NOT NULL REFERENCES messages(message_id),
+    channel      TEXT NOT NULL,
+    announced_at INTEGER NOT NULL,
+    PRIMARY KEY (agent_id, message_id)
+);
+"#,
 ];
 
 /// Switch to WAL. While several connections convert a new database at once, SQLite answers

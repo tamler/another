@@ -860,39 +860,21 @@ pub fn session_digest(store: &Store, agent: &str) -> Result<String> {
     Ok(truncate(out, MAX_DIGEST_CHARS))
 }
 
+/// A per-agent state file. The name encodes every character outside `[A-Za-z0-9-]` as
+/// `_XX` hex, so distinct agent addresses (`a.b`, `a_b`) never share a file.
 fn state_path(another_home: &Path, agent: &str, ext: &str) -> PathBuf {
-    let safe: String = agent
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
+    let mut safe = String::new();
+    for b in agent.bytes() {
+        if b.is_ascii_alphanumeric() || b == b'-' {
+            safe.push(b as char);
+        } else {
+            safe.push_str(&format!("_{b:02x}"));
+        }
+    }
     another_home
         .join("hooks")
         .join("state")
         .join(format!("{safe}.{ext}"))
-}
-
-/// The id of the newest message already announced to `agent` (empty if none).
-pub fn announced_cursor(another_home: &Path, agent: &str) -> String {
-    std::fs::read_to_string(state_path(another_home, agent, "last"))
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
-}
-
-/// Record that mail up to `message_id` has been announced to `agent`, by any channel
-/// (prompt notice, mid-task notice, or a wake), so it is not announced twice.
-pub fn mark_announced(another_home: &Path, agent: &str, message_id: &str) -> Result<()> {
-    let state = state_path(another_home, agent, "last");
-    if let Some(dir) = state.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(&state, message_id)?;
-    Ok(())
 }
 
 /// A notice and the messages it announced.
@@ -902,19 +884,46 @@ pub struct Notice {
     pub message_ids: Vec<String>,
 }
 
-/// Messages a notice records as announced (for `another stats`); it lists three by subject.
-const NOTICE_IDS: u32 = 50;
+/// Most messages one announcement claims. A larger burst is announced in batches on the
+/// following calls, so every message is announced, and counted, exactly once.
+pub const NOTICE_BATCH: u32 = 1000;
 
-/// One line about unread mail that arrived since the previous notice (or nothing).
-/// Read only against the database; the announced cursor lives in a small state file.
-pub fn prompt_notice(store: &Store, another_home: &Path, agent: &str) -> Result<Option<Notice>> {
-    let unread = store.unread_after(agent, &announced_cursor(another_home, agent), NOTICE_IDS)?;
-    let Some(newest) = unread.items.first() else {
+/// One line about unread mail no channel has announced yet (or nothing).
+///
+/// Candidates are read without writing; the caller then claims them in one transaction
+/// ([`Store::claim_announcement`]) and shows only what it won, so concurrent hooks and the
+/// daemon announce each message once. `channel` is `post_tool`, `prompt` or
+/// `session_start`.
+pub fn prompt_notice(
+    store: &Store,
+    agent: &str,
+    channel: &str,
+    client: Client,
+) -> Result<Option<Notice>> {
+    let unread = store.unannounced(agent, "", NOTICE_BATCH)?;
+    if unread.items.is_empty() {
         return Ok(None);
-    };
-    mark_announced(another_home, agent, &newest.message_id)?;
-    let subjects: Vec<String> = unread
+    }
+    let ids: Vec<String> = unread.items.iter().map(|i| i.message_id.clone()).collect();
+    let claimed = store.claim_announcement(agent, &ids, channel, Some(client.as_str()))?;
+    if claimed.is_empty() {
+        return Ok(None);
+    }
+    let items: Vec<_> = unread
         .items
+        .iter()
+        .filter(|i| claimed.contains(&i.message_id))
+        .collect();
+    let urgent = items
+        .iter()
+        .filter(|i| {
+            matches!(
+                i.importance,
+                another_core::Importance::High | another_core::Importance::Urgent
+            )
+        })
+        .count();
+    let subjects: Vec<String> = items
         .iter()
         .take(3)
         .map(|i| {
@@ -928,41 +937,16 @@ pub fn prompt_notice(store: &Store, another_home: &Path, agent: &str) -> Result<
         .collect();
     let line = format!(
         "Another: {} new message(s) for {} ({} urgent): {}. Read them with fetch_inbox (or `another inbox --agent {} --unread`).",
-        unread.count,
+        claimed.len(),
         unread.agent,
-        unread.urgent,
+        urgent,
         subjects.join(", "),
         unread.agent,
     );
     Ok(Some(Notice {
         text: truncate(line, 500),
-        message_ids: unread.items.iter().map(|i| i.message_id.clone()).collect(),
+        message_ids: claimed,
     }))
-}
-
-/// Record a shown notice as evidence for `another stats`. Best effort: the notice is
-/// shown either way, and a failure to record it is logged.
-fn record_notice(
-    store: &Store,
-    another_home: &Path,
-    event: HookEvent,
-    client: Client,
-    agent: &str,
-    notice: &Notice,
-) {
-    let channel = match event {
-        HookEvent::PostTool => "post_tool",
-        _ => "prompt",
-    };
-    if let Err(e) = store.record_notice(agent, channel, Some(client.as_str()), &notice.message_ids)
-    {
-        log_hook_error(
-            another_home,
-            event,
-            client,
-            &format!("notice shown but not recorded for stats: {e}"),
-        );
-    }
 }
 
 /// The registered agent a hook acts for, without registering anything: `None` when the
@@ -1019,17 +1003,11 @@ fn post_tool(store: &Store, env: &HookEnv, client: Client, dir: &Path) -> Result
         return Ok(String::new());
     };
     keepalive_throttled(store, &env.another_home, &agent);
-    let Some(notice) = prompt_notice(store, &env.another_home, &agent)? else {
+    // The claim and its `push.notified` evidence are one transaction: a notice is shown
+    // only if it was recorded, and only by the one caller that won it.
+    let Some(notice) = prompt_notice(store, &agent, "post_tool", client)? else {
         return Ok(String::new());
     };
-    record_notice(
-        store,
-        &env.another_home,
-        HookEvent::PostTool,
-        client,
-        &agent,
-        &notice,
-    );
     Ok(match client {
         Client::Cursor => json!({ "additional_context": notice.text }).to_string(),
         _ => json!({
@@ -1057,6 +1035,44 @@ fn absolute(base: &Path, path: &str) -> PathBuf {
             }
             Component::CurDir => {}
             other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// `path` with every existing component resolved through symlinks (and `..`). The part
+/// that does not exist yet (a file about to be created) is kept as written on top of its
+/// deepest existing ancestor, resolved.
+pub fn resolve_existing(path: &Path) -> PathBuf {
+    let mut tail = Vec::new();
+    let mut cur = path.to_path_buf();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(&cur) {
+            let mut out = real;
+            for name in tail.iter().rev() {
+                out.push(name);
+            }
+            return out;
+        }
+        match (cur.file_name().map(|n| n.to_os_string()), cur.parent()) {
+            (Some(name), Some(parent)) => {
+                tail.push(name);
+                cur = parent.to_path_buf();
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+/// What an edit of `file` can touch: the file reached through every symlink, and, when the
+/// file is itself a symlink (an operation may replace the link instead of following it),
+/// the link inside its resolved directory. Usually both are the same path.
+fn edit_targets(file: &Path) -> Vec<PathBuf> {
+    let mut out = vec![resolve_existing(file)];
+    if let (Some(parent), Some(name)) = (file.parent(), file.file_name()) {
+        let link = resolve_existing(parent).join(name);
+        if !out.contains(&link) {
+            out.push(link);
         }
     }
     out
@@ -1122,26 +1138,50 @@ fn pre_edit(store: &Store, client: Client, dir: &Path, input: &HookInput) -> Res
         Some(a) => a,
         None => hook_agent(store, client, &root)?,
     };
+    // Registered projects with their directories resolved, so a project registered under a
+    // symlinked spelling (/tmp vs /private/tmp) is still recognised.
+    let projects: Vec<(String, PathBuf)> = store
+        .projects()?
+        .into_iter()
+        .map(|p| {
+            let real = resolve_existing(Path::new(&p.abs_path));
+            (p.abs_path, real)
+        })
+        .collect();
     // Group files by the project they belong to: the deeper of their git checkout and the
-    // closest registered project. Files in neither (scratch space, /tmp) are not held.
+    // closest registered project, judged on the resolved path, so an edit through a symlink
+    // is checked against the holds on the file it really reaches. Files in neither (scratch
+    // space, /tmp) are not held.
     let mut groups: Vec<(String, Vec<String>)> = Vec::new();
     for raw in &paths {
-        let file = absolute(dir, raw);
-        let git = git_root_above(&file).map(|r| r.to_string_lossy().into_owned());
-        let registered = store
-            .project_containing(&file.to_string_lossy())?
-            .map(|p| p.abs_path);
-        let project_dir = match (git, registered) {
-            (Some(g), Some(r)) => Some(if r.len() > g.len() { r } else { g }),
-            (g, r) => g.or(r),
-        };
-        let Some(project_dir) = project_dir else {
-            continue;
-        };
-        let file = file.to_string_lossy().into_owned();
-        match groups.iter_mut().find(|(p, _)| *p == project_dir) {
-            Some((_, files)) => files.push(file),
-            None => groups.push((project_dir, vec![file])),
+        for target in edit_targets(&absolute(dir, raw)) {
+            let git = git_root_above(&target);
+            let registered = projects
+                .iter()
+                .filter(|(_, real)| target.starts_with(real) && target != *real)
+                .max_by_key(|(_, real)| real.components().count());
+            let root = match (git, registered) {
+                (Some(g), Some((_, r))) if r.components().count() > g.components().count() => {
+                    r.clone()
+                }
+                (Some(g), _) => g,
+                (None, Some((_, r))) => r.clone(),
+                (None, None) => continue,
+            };
+            let Ok(rel) = target.strip_prefix(&root) else {
+                continue;
+            };
+            let rel = rel.to_string_lossy().into_owned();
+            // Use the registered spelling of that directory when there is one.
+            let key = projects.iter().find(|(_, real)| *real == root).map_or_else(
+                || root.to_string_lossy().into_owned(),
+                |(abs, _)| abs.clone(),
+            );
+            match groups.iter_mut().find(|(p, _)| *p == key) {
+                Some((_, files)) if files.contains(&rel) => {}
+                Some((_, files)) => files.push(rel),
+                None => groups.push((key, vec![rel])),
+            }
         }
     }
     let mut conflicts = Vec::new();
@@ -1202,7 +1242,7 @@ pub fn run(
             crate::wake::capture_target(store, &agent);
             let digest = session_digest(store, &agent)?;
             // New mail shown here should not be announced again on the next prompt.
-            let _ = prompt_notice(store, &env.another_home, &agent);
+            let _ = prompt_notice(store, &agent, "session_start", client);
             if client == Client::Cursor {
                 json!({ "additional_context": digest }).to_string()
             } else {
@@ -1215,20 +1255,9 @@ pub fn run(
                 // Cursor's prompt hook cannot add context; just let the prompt through.
                 json!({ "continue": true }).to_string()
             } else {
-                match prompt_notice(store, &env.another_home, &agent)? {
-                    Some(notice) => {
-                        record_notice(
-                            store,
-                            &env.another_home,
-                            HookEvent::Prompt,
-                            client,
-                            &agent,
-                            &notice,
-                        );
-                        notice.text
-                    }
-                    None => String::new(),
-                }
+                prompt_notice(store, &agent, "prompt", client)?
+                    .map(|n| n.text)
+                    .unwrap_or_default()
             }
         }
         HookEvent::SessionEnd => {

@@ -88,28 +88,67 @@ fn ids(message_ids: &[String]) -> Value {
 }
 
 impl Store {
-    /// Record that `agent` was shown a notice about `message_ids`: `channel` is `post_tool`
-    /// (mid-task) or `prompt`.
-    pub fn record_notice(
+    /// Claim the right to announce `message_ids` to `agent`. In one transaction, each id that
+    /// is an unread delivery to the agent and has not been announced by any channel yet is
+    /// marked announced; those ids are returned, in the order given. Concurrent hooks and the
+    /// daemon therefore never announce the same message twice: whoever claims it shows it.
+    ///
+    /// `channel` is `post_tool`, `prompt`, `wake` or `session_start`. For `post_tool` and
+    /// `prompt` a `push.notified` event with every claimed id is written in the same
+    /// transaction (the evidence `another stats` counts); a wake records its own event once
+    /// it knows the outcome, and the session-start digest is not a push.
+    pub fn claim_announcement(
         &self,
         agent: &str,
+        message_ids: &[String],
         channel: &str,
         client: Option<&str>,
-        message_ids: &[String],
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
+        if message_ids.is_empty() {
+            return Ok(Vec::new());
+        }
         self.write(|tx| {
             let me = resolve_agent(tx, tx.node_id, agent)?;
-            tx.emit(
-                &me.address,
-                NOTICE_EVENT,
-                json!({
-                    "agent_id": me.id,
-                    "agent": me.address,
-                    "channel": channel,
-                    "client": client,
-                    "message_ids": ids(message_ids),
-                }),
-            )?;
+            let mut claimed = Vec::new();
+            for id in message_ids {
+                let n = tx.execute(
+                    "INSERT OR IGNORE INTO announcements (agent_id, message_id, channel, announced_at)
+                     SELECT d.agent_id, d.message_id, ?3, ?4 FROM deliveries d
+                     WHERE d.agent_id = ?1 AND d.message_id = ?2 AND d.read_at IS NULL",
+                    params![me.id, id, channel, tx.now],
+                )?;
+                if n > 0 {
+                    claimed.push(id.clone());
+                }
+            }
+            if !claimed.is_empty() && matches!(channel, "post_tool" | "prompt") {
+                tx.emit(
+                    &me.address,
+                    NOTICE_EVENT,
+                    json!({
+                        "agent_id": me.id,
+                        "agent": me.address,
+                        "channel": channel,
+                        "client": client,
+                        "message_ids": ids(&claimed),
+                    }),
+                )?;
+            }
+            Ok(claimed)
+        })
+    }
+
+    /// Give back a claim (a wake that could not be delivered), so another channel can
+    /// announce those messages.
+    pub fn release_announcement(&self, agent: &str, message_ids: &[String]) -> Result<()> {
+        self.write(|tx| {
+            let me = resolve_agent(tx, tx.node_id, agent)?;
+            for id in message_ids {
+                tx.execute(
+                    "DELETE FROM announcements WHERE agent_id = ?1 AND message_id = ?2",
+                    params![me.id, id],
+                )?;
+            }
             Ok(())
         })
     }

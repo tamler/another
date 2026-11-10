@@ -62,11 +62,11 @@ Edits made through a shell command (`sed -i`, `echo >`, a script) are not seen b
 Another: 1 new message(s) for claude@shop (1 urgent): "Release src/api?" from codex@shop-review (opens request 01J...). Read them with fetch_inbox (or `another inbox --agent claude@shop --unread`).
 ```
 
-Whichever channel announces a message first (a mid-task notice, a prompt notice, or a daemon wake, see [DAEMON.md](DAEMON.md)) marks it announced for the others. At most once a minute the hook also marks the agent active and renews its holds that are past half their TTL, so a long task without prompts keeps its holds and shows as live on the dashboard.
+Each message is announced once, by whichever channel claims it first: a mid-task notice, a prompt notice, or a daemon wake (see [DAEMON.md](DAEMON.md)). The claim is a row per agent and message in the database, written in one transaction with the `push.notified` evidence, so hooks running in parallel and the daemon never announce the same message twice. A large burst is announced in full (up to 1000 messages per notice, the rest on the next call); the line lists three subjects. At most once a minute the hook also marks the agent active and renews its holds that are past half their TTL, so a long task without prompts keeps its holds and shows as live on the dashboard.
 
 ## The edit guard
 
-`pre-edit` runs before each file edit. For every file the tool is about to change it works out the file's project (the deeper of its git checkout and the closest registered project; files in neither, such as scratch space, are left alone), then in one transaction:
+`pre-edit` runs before each file edit. For every file the tool is about to change it resolves symlinks in the path (a new file is resolved through its existing parent directories; when the file is itself a link, both the link and the file it points at are checked), works out the file's project from that real path (the deeper of its git checkout and the closest registered project; files in neither, such as scratch space, are left alone), then in one transaction:
 
 - if another agent holds an overlapping path, nothing is taken and the edit is denied with a message like this one:
 
@@ -88,7 +88,7 @@ Both tool hooks open the database without creating or migrating it and wait at m
 - **Push fails open.** Missing database, old schema, locked database, unknown agent: the hook prints nothing and exits 0.
 - **The edit guard denies only a known conflict.** If it cannot check (the database is missing or locked), it lets the edit through and appends a line to `$ANOTHER_HOME/logs/hooks.log` saying why. That log is capped at 256 KB (one older copy is kept as `hooks.log.1`).
 
-A writer holding the database does not block `post-tool`: SQLite in WAL mode lets readers through, so the notice still arrives.
+With nothing new, `post-tool` only reads, and SQLite in WAL mode lets readers past a writer. Announcing needs the claim write: if another writer holds the database for longer than 50 ms, the notice is not shown on that call and arrives on the next one.
 
 The budget is about 100 ms per tool call. Measured on a laptop over 50 runs each, both hooks took about 13 to 16 ms at the 95th percentile, with or without new mail and with the daemon up or down; with the database locked outright they gave up in about 75 ms (`post-tool`) and 350 ms (`pre-edit`). The pull request that added them has the method.
 

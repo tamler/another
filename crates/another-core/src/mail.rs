@@ -134,7 +134,7 @@ pub struct UnreadItem {
     pub request_id: Option<String>,
 }
 
-/// Result of [`Store::unread_after`].
+/// Result of [`Store::unannounced`].
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct UnreadAfter {
     pub agent: String,
@@ -524,17 +524,20 @@ impl Store {
         })
     }
 
-    /// Unread messages for `who` whose ids sort after `after` (ULIDs sort by time), newest
-    /// first. Read only (no sweep, no presence update), so a hook can afford it on every
-    /// tool call. An empty `after` means every unread message.
-    pub fn unread_after(&self, who: &str, after: &str, limit: u32) -> Result<UnreadAfter> {
+    /// Unread messages for `who` that no channel has announced yet (see
+    /// [`Store::claim_announcement`]), newest first, with ids after `floor` (ULIDs sort by
+    /// time; an empty floor means no floor). Read only (no sweep, no presence update), so a
+    /// hook can afford it on every tool call.
+    pub fn unannounced(&self, who: &str, floor: &str, limit: u32) -> Result<UnreadAfter> {
         self.read(|conn| {
             let me = resolve_agent(conn, self.node_id(), who)?;
             let (count, urgent): (u32, u32) = conn.query_row(
                 "SELECT count(*), count(*) FILTER (WHERE m.importance IN ('high', 'urgent'))
                  FROM deliveries d JOIN messages m ON m.message_id = d.message_id
-                 WHERE d.agent_id = ?1 AND d.read_at IS NULL AND d.message_id > ?2",
-                params![me.id, after],
+                 WHERE d.agent_id = ?1 AND d.read_at IS NULL AND d.message_id > ?2
+                   AND NOT EXISTS (SELECT 1 FROM announcements a
+                                   WHERE a.agent_id = d.agent_id AND a.message_id = d.message_id)",
+                params![me.id, floor],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
             let mut items = Vec::new();
@@ -547,10 +550,13 @@ impl Store {
                      FROM deliveries d JOIN messages m ON m.message_id = d.message_id
                      JOIN agents s ON s.agent_id = m.sender_id
                      WHERE d.agent_id = ?1 AND d.read_at IS NULL AND d.message_id > ?2
+                       AND NOT EXISTS (SELECT 1 FROM announcements a
+                                       WHERE a.agent_id = d.agent_id
+                                         AND a.message_id = d.message_id)
                      ORDER BY d.message_id DESC LIMIT ?3",
                 )?;
                 items = stmt
-                    .query_map(params![me.id, after, limit.max(1)], |r| {
+                    .query_map(params![me.id, floor, limit.max(1)], |r| {
                         let importance: String = r.get(3)?;
                         Ok(UnreadItem {
                             message_id: r.get(0)?,

@@ -9,8 +9,10 @@
 //! called with a subcommand (`agent get`, `agent prompt`), never bare, and never to focus.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::io::Read;
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use another_core::{InboxQuery, Store, WakeVia};
@@ -40,6 +42,8 @@ pub struct WakeOptions {
     /// Wake even with nothing unread.
     pub force: bool,
     pub dry_run: bool,
+    /// Set by the daemon on shutdown; a running adapter command is then stopped.
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 /// The adapter commands for a wake.
@@ -158,16 +162,86 @@ pub fn wake(store: &Store, agent: &str, opts: &WakeOptions) -> Result<WakePlan> 
         return Ok(plan);
     }
     for argv in &plan.commands {
-        let status = Command::new(&argv[0])
-            .args(&argv[1..])
-            .status()
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..]);
+        let done = run_bounded(&mut cmd, PROMPT_TIMEOUT, opts.cancel.as_deref())
             .with_context(|| format!("running {} (is it installed?)", argv[0]))?;
+        let Some((status, _)) = done else {
+            bail!(
+                "{} did not finish within {}s (or the daemon is stopping); it was stopped",
+                argv[0],
+                PROMPT_TIMEOUT.as_secs()
+            );
+        };
         if !status.success() {
             bail!("{} exited with {status}", argv.join(" "));
         }
     }
     plan.sent = true;
     Ok(plan)
+}
+
+/// Longest a read-only adapter probe (`herdr agent get`, `tmux display-message`) may take.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Longest an adapter prompt (`herdr agent prompt`, `tmux send-keys`, ...) may take.
+pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run an adapter command with a deadline. Returns its exit status and stdout, or `None`
+/// when it ran past `timeout` or `cancel` was set (daemon shutdown); the command is then
+/// stopped: SIGTERM first, and a hard stop if it is still running half a second later.
+/// A stuck adapter therefore cannot hold up the waker or a clean shutdown.
+pub fn run_bounded(
+    cmd: &mut Command,
+    timeout: Duration,
+    cancel: Option<&AtomicBool>,
+) -> std::io::Result<Option<(ExitStatus, Vec<u8>)>> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    // Read stdout on the side so a chatty adapter cannot fill the pipe and stall.
+    let reader = child.stdout.take().map(|mut out| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = out.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let out = reader
+                .map(|r| r.join().unwrap_or_default())
+                .unwrap_or_default();
+            return Ok(Some((status, out)));
+        }
+        let cancelled = cancel.is_some_and(|c| c.load(Ordering::SeqCst));
+        if cancelled || Instant::now() >= deadline {
+            stop_child(&mut child);
+            // The reader thread ends when the pipe closes; it is not waited for.
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Stop a child this process started: SIGTERM, then a hard stop if it ignores it.
+fn stop_child(child: &mut std::process::Child) {
+    let _ = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    for _ in 0..25 {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Wake every agent with a stored target that has something waiting.
@@ -233,16 +307,24 @@ pub enum Probe {
 
 /// Ask Herdr about the agent in a pane: `herdr agent get <target>` (read only).
 pub fn probe_herdr(target: &str) -> Probe {
-    let out = match Command::new(herdr_bin())
-        .args(["agent", "get", target])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-    {
-        Ok(o) => o,
+    probe_herdr_until(target, None)
+}
+
+/// [`probe_herdr`], bounded by [`PROBE_TIMEOUT`] and stopped early when `cancel` is set.
+pub fn probe_herdr_until(target: &str, cancel: Option<&AtomicBool>) -> Probe {
+    let mut cmd = Command::new(herdr_bin());
+    cmd.args(["agent", "get", target]);
+    let (status, stdout) = match run_bounded(&mut cmd, PROBE_TIMEOUT, cancel) {
+        Ok(Some(done)) => done,
+        Ok(None) => {
+            return Probe::Unknown(format!(
+                "herdr did not answer within {}s",
+                PROBE_TIMEOUT.as_secs()
+            ))
+        }
         Err(e) => return Probe::Unknown(format!("herdr: {e}")),
     };
-    let reply: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+    let reply: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
     if let Some(agent) = reply.pointer("/result/agent") {
         let text = |k: &str| agent.get(k).and_then(Value::as_str).map(str::to_string);
         return Probe::Live {
@@ -253,24 +335,22 @@ pub fn probe_herdr(target: &str) -> Probe {
     match reply.pointer("/error/code").and_then(Value::as_str) {
         Some("agent_not_found") => Probe::Gone,
         Some(code) => Probe::Unknown(format!("herdr: {code}")),
-        None => Probe::Unknown(format!("herdr exited with {}", out.status)),
+        None => Probe::Unknown(format!("herdr exited with {status}")),
     }
 }
 
 /// Does a tmux pane exist? `tmux display-message -p -t <pane>` (read only).
 pub fn probe_tmux(target: &str) -> Probe {
-    let out = Command::new("tmux")
-        .args(["display-message", "-p", "-t", target, "#{pane_id}"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output();
-    match out {
-        Ok(o) if o.status.success() => Probe::Live {
+    let mut cmd = Command::new("tmux");
+    cmd.args(["display-message", "-p", "-t", target, "#{pane_id}"]);
+    match run_bounded(&mut cmd, PROBE_TIMEOUT, None) {
+        Ok(Some((status, _))) if status.success() => Probe::Live {
             program: None,
             status: "unknown".into(),
         },
         // tmux answers but cannot find the pane (or its server is gone with it).
-        Ok(_) => Probe::Gone,
+        Ok(Some(_)) => Probe::Gone,
+        Ok(None) => Probe::Unknown("tmux did not answer in time".into()),
         Err(e) => Probe::Unknown(format!("tmux: {e}")),
     }
 }
@@ -357,10 +437,11 @@ pub struct PushEvent {
 }
 
 /// The daemon side of push delivery: wake idle Herdr agents that have mail no hook or wake
-/// has announced yet. Holds per-agent timing in memory; the announced cursor is shared
-/// with the hooks through `$ANOTHER_HOME/hooks/state`.
+/// has announced yet. Holds per-agent timing in memory; which messages were announced is
+/// claimed in the database ([`Store::claim_announcement`]), shared with the hooks.
 pub struct Waker {
-    another_home: PathBuf,
+    /// Set on daemon shutdown: probes and prompts in flight are stopped.
+    pub cancel: Arc<AtomicBool>,
     /// A burst of mail settles for this long before one wake covers all of it.
     pub settle: Duration,
     /// After a wake (or a failed one), leave the agent alone this long.
@@ -375,10 +456,16 @@ pub struct Waker {
     last_action: HashMap<String, String>,
 }
 
+impl Default for Waker {
+    fn default() -> Waker {
+        Waker::new()
+    }
+}
+
 impl Waker {
-    pub fn new(another_home: PathBuf) -> Waker {
+    pub fn new() -> Waker {
         Waker {
-            another_home,
+            cancel: Arc::new(AtomicBool::new(false)),
             settle: Duration::from_secs(2),
             min_gap: Duration::from_secs(60),
             recheck: Duration::from_secs(5),
@@ -396,8 +483,10 @@ impl Waker {
             if t.via != WakeVia::Herdr {
                 continue;
             }
-            let cursor = crate::hooks::announced_cursor(&self.another_home, &t.agent);
-            let Ok(unread) = store.unread_after(&t.agent, &cursor, 50) else {
+            if self.cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            let Ok(unread) = store.unannounced(&t.agent, "", crate::hooks::NOTICE_BATCH) else {
                 continue;
             };
             let Some(newest) = unread.items.first() else {
@@ -446,18 +535,15 @@ impl Waker {
         t: &another_core::WakeTarget,
         message_ids: &[String],
     ) -> Result<(String, String, Duration)> {
-        let newest = message_ids.first().map(String::as_str).unwrap_or_default();
         // Evidence for `another stats`; a wake goes ahead even if it cannot be recorded.
-        let record = |outcome: &str, detail: &str| {
-            if let Err(e) =
-                store.record_wake(&t.agent, t.via, &t.target, outcome, detail, message_ids)
-            {
+        let record = |outcome: &str, detail: &str, ids: &[String]| {
+            if let Err(e) = store.record_wake(&t.agent, t.via, &t.target, outcome, detail, ids) {
                 tracing::warn!(agent = %t.agent, error = %e, "wake not recorded for stats");
             }
         };
         let program = store.agent(&t.agent).map(|a| a.program).ok();
         let out = |a: &str, d: String, w: Duration| Ok((a.to_string(), d, w));
-        match probe_herdr(&t.target) {
+        match probe_herdr_until(&t.target, Some(&self.cancel)) {
             Probe::Gone if t.auto => {
                 store.clear_auto_wake_target(&t.agent, Some((t.via, &t.target)))?;
                 out(
@@ -492,20 +578,47 @@ impl Waker {
                     );
                 }
                 match status.as_str() {
-                    "idle" | "done" => match wake(store, &t.agent, &WakeOptions::default()) {
-                        Ok(plan) if plan.sent => {
-                            crate::hooks::mark_announced(&self.another_home, &t.agent, newest)?;
-                            let detail = format!("agent was {status}");
-                            record("sent", &detail);
-                            out("woke", detail, self.min_gap)
+                    "idle" | "done" => {
+                        // Claim after the probe, not before: a hook that announced these
+                        // while Herdr was answering has already won them.
+                        let claimed =
+                            store.claim_announcement(&t.agent, message_ids, "wake", None)?;
+                        if claimed.is_empty() {
+                            return out(
+                                "skipped",
+                                "already announced by a hook".into(),
+                                self.recheck,
+                            );
                         }
-                        Ok(plan) => out("skipped", plan.skipped.unwrap_or_default(), self.min_gap),
-                        Err(e) => {
-                            let detail = format!("{e:#}");
-                            record("failed", &detail);
-                            out("failed", detail, self.min_gap)
+                        let opts = WakeOptions {
+                            cancel: Some(self.cancel.clone()),
+                            ..Default::default()
+                        };
+                        match wake(store, &t.agent, &opts) {
+                            Ok(plan) if plan.sent => {
+                                let detail = format!("agent was {status}");
+                                record("sent", &detail, &claimed);
+                                out("woke", detail, self.min_gap)
+                            }
+                            other => {
+                                // Not delivered: give the messages back to the other
+                                // channels.
+                                store.release_announcement(&t.agent, &claimed)?;
+                                match other {
+                                    Ok(plan) => out(
+                                        "skipped",
+                                        plan.skipped.unwrap_or_default(),
+                                        self.min_gap,
+                                    ),
+                                    Err(e) => {
+                                        let detail = format!("{e:#}");
+                                        record("failed", &detail, &claimed);
+                                        out("failed", detail, self.min_gap)
+                                    }
+                                }
+                            }
                         }
-                    },
+                    }
                     // A working agent gets the mail from its post-tool hook; a blocked one
                     // is waiting on a person and must not be interrupted.
                     "working" => out("working", "left to the post-tool hook".into(), self.recheck),
