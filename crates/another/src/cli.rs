@@ -793,6 +793,8 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     allow_remote_bind: *allow_remote_bind,
                     allowed_hosts: allowed_hosts.clone(),
                     oauth,
+                    // `serve_http` replaces this with the port it actually bound.
+                    bound_port: 0,
                     federation: *federation,
                 };
                 crate::serve::serve_http(store, bind, opts, every).await
@@ -1249,7 +1251,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     g.client_name,
                     g.agent,
                     if g.project_globs.is_empty() {
-                        "none — mailbox, heartbeat and the activity feed only".into()
+                        "none: mailbox, heartbeat and the activity feed only".into()
                     } else {
                         g.project_globs.join(", ")
                     },

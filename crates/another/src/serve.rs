@@ -1,7 +1,7 @@
 //! `another serve`: the local daemon. Serves MCP over stdio or loopback streamable HTTP and
 //! runs the sweeper that expires lapsed holds and marks overdue requests stale.
 
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::time::Duration;
 
 use another_core::Store;
@@ -23,10 +23,13 @@ pub struct HttpOptions {
     pub auth: bool,
     /// Explicitly allow a non-loopback bind (only together with `auth`).
     pub allow_remote_bind: bool,
-    /// Extra `Host` header values to accept (tunnel hostnames). Only with `auth`.
+    /// Extra `Host` header values to accept (tunnel hostnames).
+    /// An entry with no port matches only a `Host` header with no port.
     pub allowed_hosts: Vec<String>,
     /// Public origin for OAuth (`--public-url`). Bearer tokens work without it.
     pub oauth: Option<crate::oauth_http::OAuthConfig>,
+    /// TCP port this process bound. Loopback `Host` values are accepted only with it.
+    pub bound_port: u16,
     /// Serve the federation hub endpoints (`/fed/*`), authenticated by node signatures.
     pub federation: bool,
 }
@@ -144,31 +147,30 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
         }),
     );
     if opts.auth {
-        let mut names = opts.allowed_hosts.clone();
-        if let Some(oauth) = &opts.oauth {
-            names.push(oauth.hostname.clone());
-        }
         let ctx = crate::oauth_http::AuthContext {
             oauth: opts.oauth.clone(),
-            hosts: crate::oauth_http::HostPolicy::loopback_plus(names),
         };
         if opts.oauth.is_some() {
-            app = app.merge(crate::oauth_http::router().with_state(store.clone()));
+            app = app.merge(crate::oauth_http::router().with_state(store));
         }
-        app = app.layer(axum::Extension(ctx.clone()));
-        let hosts = ctx.hosts.clone();
-        app = app.layer(axum::middleware::from_fn(move |req, next| {
-            let hosts = hosts.clone();
-            async move { enforce_host(hosts, req, next).await }
-        }));
+        app = app.layer(axum::Extension(ctx));
     }
-    app
+    // DNS-rebinding checks run for unauthenticated loopback too, not only `--auth`.
+    let guard = crate::oauth_http::EdgeGuard::from_http(
+        opts.bound_port,
+        &opts.allowed_hosts,
+        opts.oauth.as_ref(),
+    );
+    app.layer(axum::middleware::from_fn(move |req, next| {
+        let guard = guard.clone();
+        async move { enforce_edge(guard, req, next).await }
+    }))
 }
 
-/// DNS-rebinding check for every route except federation, which authenticates with node
-/// signatures and is left to its own host handling.
-async fn enforce_host(
-    hosts: crate::oauth_http::HostPolicy,
+/// `Host` on every route, and `Origin` on state-changing requests that send one.
+/// Federation authenticates with node signatures and keeps its own checks.
+async fn enforce_edge(
+    guard: crate::oauth_http::EdgeGuard,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
@@ -176,20 +178,82 @@ async fn enforce_host(
     if path.starts_with("/fed") {
         return next.run(req).await;
     }
-    let ok = req
+    let host_ok = req
         .headers()
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|h| hosts.allows(h));
-    if ok {
-        next.run(req).await
-    } else {
-        (
+        .is_some_and(|h| guard.hosts.allows(h));
+    if !host_ok {
+        return (
             axum::http::StatusCode::FORBIDDEN,
             "host is not allowed; pass the tunnel hostname with --allowed-host or --public-url",
         )
-            .into_response()
+            .into_response();
     }
+    if changes_state(req.method()) {
+        if let Some(origin) = req
+            .headers()
+            .get(axum::http::header::ORIGIN)
+            .and_then(|v| v.to_str().ok())
+        {
+            if !guard.origins.allows(origin) {
+                return (axum::http::StatusCode::FORBIDDEN, "origin is not allowed")
+                    .into_response();
+            }
+        }
+    }
+    if let Some(limits) = &guard.limits {
+        if let Some(class) = limit_class(path) {
+            let ip = req
+                .extensions()
+                .get::<axum::extract::ConnectInfo<SocketAddr>>()
+                .map(|peer| peer.0.ip())
+                .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+            if let Err(retry_after) = limits.allow(class, ip) {
+                return too_many(retry_after);
+            }
+        }
+    }
+    next.run(req).await
+}
+
+fn changes_state(method: &axum::http::Method) -> bool {
+    matches!(
+        *method,
+        axum::http::Method::POST
+            | axum::http::Method::PUT
+            | axum::http::Method::PATCH
+            | axum::http::Method::DELETE
+    )
+}
+
+fn limit_class(path: &str) -> Option<&'static str> {
+    match path {
+        "/oauth/token" => Some("token"),
+        "/oauth/register" => Some("register"),
+        "/authorize" => Some("authorize"),
+        _ => None,
+    }
+}
+
+fn too_many(retry_after: u64) -> axum::response::Response {
+    let mut res = (
+        axum::http::StatusCode::TOO_MANY_REQUESTS,
+        axum::Json(serde_json::json!({
+            "error": "slow_down",
+            "error_description": "too many requests",
+        })),
+    )
+        .into_response();
+    if let Ok(value) = axum::http::HeaderValue::from_str(&retry_after.to_string()) {
+        res.headers_mut()
+            .insert(axum::http::header::RETRY_AFTER, value);
+    }
+    res.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    res
 }
 
 pub async fn serve_http(
@@ -200,16 +264,17 @@ pub async fn serve_http(
 ) -> Result<()> {
     let addr = check_bind(bind, &opts)?;
     let mut opts = opts;
-    if !addr.ip().is_loopback() {
-        // Accept requests addressed to the bound IP itself.
-        opts.allowed_hosts.push(addr.ip().to_string());
-    }
     let ct = CancellationToken::new();
     spawn_sweeper(store.clone(), sweep_every, ct.clone());
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding {addr}"))?;
     let local = listener.local_addr()?;
+    opts.bound_port = local.port();
+    if !local.ip().is_loopback() {
+        // Accept requests addressed to the bound IP itself, on this port only.
+        opts.allowed_hosts.push(socket_host(local));
+    }
     let auth_note = if opts.oauth.is_some() {
         " (OAuth or bearer token)"
     } else if opts.auth {
@@ -242,6 +307,13 @@ pub async fn serve_http(
     })
     .await?;
     Ok(())
+}
+
+fn socket_host(addr: SocketAddr) -> String {
+    match addr.ip() {
+        IpAddr::V4(ip) => format!("{ip}:{}", addr.port()),
+        IpAddr::V6(ip) => format!("[{ip}]:{}", addr.port()),
+    }
 }
 
 #[cfg(test)]

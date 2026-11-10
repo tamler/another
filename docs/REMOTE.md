@@ -101,7 +101,7 @@ With `--auth`, `/mcp` and `GET /activity` require `Authorization: Bearer <token>
 - RFC 9207 `iss` on every redirect, including errors
 - Client ID Metadata Documents, and dynamic client registration for clients that still use it
 - public clients only (`token_endpoint_auth_method=none`). A client secret is rejected
-- access tokens last **one hour**; refresh tokens last 30 days, rotate on every use, and reuse of an old refresh token revokes the grant
+- access tokens last **one hour**. A refresh token is issued only when the grant includes `offline_access`. Refresh tokens last 30 days, rotate on every use, and reuse of an old refresh token revokes the grant
 
 The canonical resource is `{public-url}/mcp`. That is the URL you paste into the app. `--public-url` is an origin with no path (`https://another.example.com`). `http://` is accepted only for a loopback host, so tests can run without TLS. A real connector needs HTTPS, which the tunnel provides. Another does not terminate TLS.
 
@@ -300,7 +300,7 @@ The database stores only SHA-256 hashes of those secrets. The authorization code
 another audit --limit 50
 ```
 
-Unknown `Host` values are rejected when `--auth` is on (DNS-rebinding protection), including on the OAuth routes. Loopback names are always allowed. `--allowed-host` and the `--public-url` hostname are allowed too. Federation routes (`/fed/…`) keep their own node-signature checks.
+Unknown `Host` values are rejected on every HTTP route except `/fed`, including unauthenticated loopback `another serve` (DNS-rebinding protection). Loopback names are allowed only with the port this process bound: `localhost:7466`, `127.0.0.1:7466`, and `[::1]:7466` when the bind port is 7466. `--allowed-host` and the `--public-url` host are allowed too. An allow-list entry with no port matches only a Host header that also has no port, so `example.com` does not match `example.com:8443`. A state-changing request (POST, PUT, PATCH, DELETE) that sends an `Origin` header must match an allowed origin exactly: `http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`, or the `--public-url` issuer. A longer name that merely ends with one of those is rejected. Clients that are not browsers omit `Origin` and are unaffected. `/oauth/token`, `/oauth/register`, and `/authorize` are limited per client IP; past the limit the response is `429` with `Retry-After`. Federation routes (`/fed/`) keep their own node-signature checks.
 
 ## What still needs a live check
 

@@ -76,9 +76,10 @@ pub async fn remote_up(
             "This is a quick tunnel. The URL changes every run. For a stable hostname, use a named tunnel:\n{NAMED_TUNNEL}"
         );
     }
+    let host = oauth.host_value();
     let opts = HttpOptions {
         auth: true,
-        allowed_hosts: vec![oauth.hostname.clone()],
+        allowed_hosts: vec![host],
         oauth: Some(oauth),
         ..Default::default()
     };

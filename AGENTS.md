@@ -18,7 +18,7 @@ Hosted apps (ChatGPT custom connectors, Claude.ai and Claude Desktop connectors,
 
 ### Definition of done (Milestone 7)
 
-- [x] OAuth flow, scope enforcement, revocation, refresh reuse, and Host checks covered by tests
+- [x] OAuth flow, scope enforcement, revocation, refresh reuse, Host and Origin checks, and OAuth rate limits covered by tests
 - [x] Authorization code plaintext is not stored; only the hash, issued once
 - [x] CIMD fetch pins the validated address and uses the URL port; tests cover the pin, the port, the body cap, and the cache cap
 - [x] Bearer tokens still work

@@ -786,6 +786,12 @@ fn insert_token(
     Ok(secret)
 }
 
+fn scope_has_offline_access(scope: &str) -> bool {
+    scope
+        .split_whitespace()
+        .any(|part| part == "offline_access")
+}
+
 fn issue_pair(tx: &Tx<'_>, grant_id: &str, resource: &str, scope: &str) -> Result<IssuedTokens> {
     let access = insert_token(
         tx,
@@ -796,15 +802,21 @@ fn issue_pair(tx: &Tx<'_>, grant_id: &str, resource: &str, scope: &str) -> Resul
         scope,
         ACCESS_TTL_SECS,
     )?;
-    let refresh = insert_token(
-        tx,
-        grant_id,
-        "refresh",
-        REFRESH_PREFIX,
-        resource,
-        scope,
-        REFRESH_TTL_SECS,
-    )?;
+    // A refresh token is a long-lived credential. Issue one only when the
+    // client asked for offline access.
+    let refresh = if scope_has_offline_access(scope) {
+        Some(insert_token(
+            tx,
+            grant_id,
+            "refresh",
+            REFRESH_PREFIX,
+            resource,
+            scope,
+            REFRESH_TTL_SECS,
+        )?)
+    } else {
+        None
+    };
     let agent = load_grant(tx, grant_id)?.agent;
     tx.execute(
         "UPDATE oauth_grants SET last_used_at = ?2 WHERE grant_id = ?1",
@@ -812,7 +824,7 @@ fn issue_pair(tx: &Tx<'_>, grant_id: &str, resource: &str, scope: &str) -> Resul
     )?;
     Ok(IssuedTokens {
         access_token: access,
-        refresh_token: Some(refresh),
+        refresh_token: refresh,
         expires_in: ACCESS_TTL_SECS,
         scope: scope.to_string(),
         grant_id: grant_id.to_string(),
@@ -1552,7 +1564,7 @@ impl Store {
                 "UPDATE oauth_tokens SET revoked_at = ?2, replaced_by = ?3 WHERE token_id = ?1",
                 params![token_id, tx.now, new_id],
             )?;
-            if changed != 1 || new_id.is_none() {
+            if changed != 1 || (scope_has_offline_access(&scope) && new_id.is_none()) {
                 return Err(Error::Invalid(format!(
                     "refresh rotation did not record the replacement (rows {changed})"
                 )));
@@ -1972,6 +1984,88 @@ mod tests {
             &profile.redirect_uris,
             "http://127.0.0.1:54321/other"
         ));
+    }
+
+    #[test]
+    fn refresh_token_requires_offline_access() {
+        use crate::identity::{Program, RegisterAgent};
+        use crate::store::Clock;
+
+        let (clock, _now) = Clock::manual(1_700_000_000_000);
+        let store = Store::open_in_memory(clock).unwrap();
+        store
+            .register_agent(RegisterAgent {
+                name: "chatgpt".into(),
+                program: Program::Other,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+        let client = store
+            .register_oauth_client(ClientRegistration {
+                client_name: "ChatGPT".into(),
+                redirect_uris: vec!["https://chatgpt.com/connector_platform_oauth_redirect".into()],
+                application_type: Some("web".into()),
+                remote: None,
+            })
+            .unwrap();
+        let pending = store
+            .begin_authorization(AuthorizeInput {
+                client: ClientProfile {
+                    client_id: client.client_id.clone(),
+                    client_name: client.client_name.clone(),
+                    redirect_uris: client.redirect_uris.clone(),
+                },
+                redirect_uri: client.redirect_uris[0].clone(),
+                state: None,
+                scope: Some("another".into()),
+                resource: "https://another.example.com/mcp".into(),
+                code_challenge: pkce_s256("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk").unwrap(),
+                code_challenge_method: "S256".into(),
+                remote: None,
+            })
+            .unwrap();
+        store
+            .approve_oauth(Approval {
+                user_code: pending.user_code,
+                agent: "chatgpt".into(),
+                project_globs: vec!["/work/*".into()],
+                label: None,
+            })
+            .unwrap();
+        let redirect = store
+            .authorization_status(
+                &pending.request_id,
+                &pending.redirect_token,
+                "https://another.example.com",
+                true,
+            )
+            .unwrap()
+            .redirect
+            .unwrap();
+        let code = redirect
+            .split("code=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap();
+        let issued = store
+            .exchange_code(CodeExchange {
+                code: code.to_string(),
+                client_id: client.client_id,
+                redirect_uri: client.redirect_uris[0].clone(),
+                code_verifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk".into(),
+                resource: "https://another.example.com/mcp".into(),
+                remote: None,
+            })
+            .unwrap();
+        assert_eq!(issued.scope, "another");
+        assert!(issued.refresh_token.is_none());
+        assert!(store
+            .verify_access_token(&issued.access_token, "https://another.example.com/mcp")
+            .is_ok());
     }
 
     #[test]

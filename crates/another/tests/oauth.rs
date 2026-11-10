@@ -58,6 +58,7 @@ async fn start() -> Server {
     let ct = CancellationToken::new();
     let opts = HttpOptions {
         auth: true,
+        bound_port: addr.port(),
         oauth: Some(parse_public_url(&base).unwrap()),
         ..Default::default()
     };
@@ -152,13 +153,64 @@ fn error_code(res: &CallToolResult) -> Option<String> {
 }
 
 async fn raw_status(addr: SocketAddr, host: &str, path: &str) -> u16 {
+    let (status, _) = raw_exchange(addr, "GET", host, path, None, "").await;
+    status
+}
+
+async fn raw_exchange(
+    addr: SocketAddr,
+    method: &str,
+    host: &str,
+    path: &str,
+    origin: Option<&str>,
+    body: &str,
+) -> (u16, String) {
     let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    let origin = origin
+        .map(|value| format!("Origin: {value}\r\n"))
+        .unwrap_or_default();
+    let req = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\n{origin}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
     sock.write_all(req.as_bytes()).await.unwrap();
-    let mut buf = vec![0u8; 256];
+    let mut buf = vec![0u8; 1024];
     let n = sock.read(&mut buf).await.unwrap();
-    let text = String::from_utf8_lossy(&buf[..n]);
-    text.split_whitespace().nth(1).unwrap().parse().unwrap()
+    let text = String::from_utf8_lossy(&buf[..n]).into_owned();
+    let status = text.split_whitespace().nth(1).unwrap().parse().unwrap();
+    (status, text)
+}
+
+async fn start_open(allowed_hosts: Vec<String>) -> Server {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    std::mem::forget(dir);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base = format!("http://{addr}");
+    let ct = CancellationToken::new();
+    let opts = HttpOptions {
+        bound_port: addr.port(),
+        allowed_hosts,
+        ..Default::default()
+    };
+    let app = http_router(store.clone(), ct.clone(), &opts);
+    let stop = ct.clone();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move { stop.cancelled_owned().await })
+        .await
+        .unwrap();
+    });
+    Server {
+        store,
+        base,
+        addr,
+        ct,
+    }
 }
 
 #[tokio::test]
@@ -625,6 +677,218 @@ async fn cimd_and_loopback_redirect_and_error_iss() {
     assert!(loc.contains("error=invalid_request"));
     assert!(loc.contains("iss="));
     assert!(loc.contains("state=s2"));
+
+    srv.ct.cancel();
+}
+
+#[tokio::test]
+async fn rebinding_host_and_origin_are_rejected() {
+    let open = start_open(vec!["extra.test".into()]).await;
+    let host = format!("127.0.0.1:{}", open.addr.port());
+    let origin = format!("http://{host}");
+
+    assert_eq!(raw_status(open.addr, "evil.example", "/health").await, 403);
+    assert_eq!(raw_status(open.addr, "127.0.0.1:9", "/health").await, 403);
+    assert_eq!(raw_status(open.addr, "localhost", "/health").await, 403);
+    assert_eq!(raw_status(open.addr, &host, "/health").await, 200);
+    assert_eq!(
+        raw_status(
+            open.addr,
+            &format!("localhost:{}", open.addr.port()),
+            "/health"
+        )
+        .await,
+        200
+    );
+    // A configured host with no port does not match that host on some other port.
+    assert_eq!(raw_status(open.addr, "extra.test", "/health").await, 200);
+    assert_eq!(
+        raw_status(open.addr, "extra.test:443", "/health").await,
+        403
+    );
+    assert_eq!(raw_status(open.addr, "extra.test:9", "/health").await, 403);
+
+    // GET ignores Origin. A web page's POST does not.
+    let (get_cross, _) = raw_exchange(
+        open.addr,
+        "GET",
+        &host,
+        "/health",
+        Some("http://evil.example"),
+        "",
+    )
+    .await;
+    assert_eq!(get_cross, 200);
+    let (post_cross, _) = raw_exchange(
+        open.addr,
+        "POST",
+        &host,
+        "/mcp",
+        Some("http://evil.example"),
+        "",
+    )
+    .await;
+    assert_eq!(post_cross, 403);
+    let (suffix, _) = raw_exchange(
+        open.addr,
+        "POST",
+        &host,
+        "/mcp",
+        Some(&format!("{origin}.evil.example")),
+        "",
+    )
+    .await;
+    assert_eq!(suffix, 403);
+    let (path_origin, _) = raw_exchange(
+        open.addr,
+        "POST",
+        &host,
+        "/mcp",
+        Some(&format!("{origin}/mcp")),
+        "",
+    )
+    .await;
+    assert_eq!(path_origin, 403);
+    let (same, _) = raw_exchange(open.addr, "POST", &host, "/mcp", Some(&origin), "").await;
+    assert_ne!(same, 403);
+    let (bare, _) = raw_exchange(open.addr, "POST", &host, "/mcp", None, "").await;
+    assert_ne!(bare, 403);
+
+    // The same Origin rule applies to the OAuth server, not only loopback without auth.
+    let srv = start().await;
+    let oauth_host = format!("{}", srv.addr);
+    let oauth_origin = format!("http://{oauth_host}");
+    let (evil, _) = raw_exchange(
+        srv.addr,
+        "POST",
+        &oauth_host,
+        "/oauth/token",
+        Some("https://evil.example"),
+        "",
+    )
+    .await;
+    assert_eq!(evil, 403);
+    let (evil_suffix, _) = raw_exchange(
+        srv.addr,
+        "POST",
+        &oauth_host,
+        "/oauth/token",
+        Some(&format!("{oauth_origin}.evil.example")),
+        "",
+    )
+    .await;
+    assert_eq!(evil_suffix, 403);
+    let (ok_origin, body) = raw_exchange(
+        srv.addr,
+        "POST",
+        &oauth_host,
+        "/oauth/token",
+        Some(&oauth_origin),
+        "",
+    )
+    .await;
+    assert_ne!(ok_origin, 403, "{body}");
+    assert_eq!(
+        raw_status(
+            srv.addr,
+            "evil.example",
+            "/.well-known/oauth-authorization-server"
+        )
+        .await,
+        403
+    );
+
+    open.ct.cancel();
+    srv.ct.cancel();
+}
+
+#[tokio::test]
+async fn oauth_endpoints_rate_limit_after_a_burst() {
+    let srv = start().await;
+    let http = http();
+
+    for _ in 0..another::oauth_http::REGISTER_BURST {
+        let status = http
+            .post(format!("{}/oauth/register", srv.base))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_ne!(status, 429);
+    }
+    let limited = http
+        .post(format!("{}/oauth/register", srv.base))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(limited.status(), 429);
+    let retry = limited
+        .headers()
+        .get("retry-after")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(retry.parse::<u64>().unwrap() >= 1);
+
+    for _ in 0..another::oauth_http::TOKEN_BURST {
+        let status = http
+            .post(format!("{}/oauth/token", srv.base))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body("grant_type=authorization_code")
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_ne!(status, 429);
+    }
+    let limited = http
+        .post(format!("{}/oauth/token", srv.base))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body("grant_type=authorization_code")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(limited.status(), 429);
+    assert!(
+        limited
+            .headers()
+            .get("retry-after")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            >= 1
+    );
+
+    for _ in 0..another::oauth_http::AUTHORIZE_BURST {
+        let status = http
+            .get(format!("{}/authorize", srv.base))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_ne!(status, 429);
+    }
+    let limited = http
+        .get(format!("{}/authorize", srv.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(limited.status(), 429);
+    assert!(
+        limited
+            .headers()
+            .get("retry-after")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            >= 1
+    );
 
     srv.ct.cancel();
 }

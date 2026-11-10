@@ -40,17 +40,56 @@ struct CachedCimd {
     expires: Instant,
 }
 
-/// Hostnames accepted in the `Host` header while `--auth` is on.
+/// `Host` values accepted on every HTTP route except `/fed`.
+///
+/// Loopback names are stored with the bound port. An entry with no port matches
+/// only a `Host` header that also has no port.
 #[derive(Clone, Debug)]
 pub struct HostPolicy {
     allowed: Vec<String>,
 }
 
+/// Origins accepted on state-changing requests that send an `Origin` header.
+/// Comparison is the whole origin, never a suffix.
+#[derive(Clone, Debug)]
+pub struct OriginPolicy {
+    allowed: Vec<String>,
+}
+
+/// Per-address token buckets for the OAuth write endpoints. `None` when OAuth is off.
+#[derive(Clone)]
+pub struct RateLimiter {
+    inner: Arc<Mutex<HashMap<String, Bucket>>>,
+}
+
+struct Bucket {
+    tokens: u32,
+    updated: Instant,
+}
+
+/// Host, origin, and (when OAuth is on) rate-limit policy for one server.
+#[derive(Clone)]
+pub struct EdgeGuard {
+    pub hosts: HostPolicy,
+    pub origins: OriginPolicy,
+    pub limits: Option<RateLimiter>,
+}
+
+/// How many requests one client IP may send before `/oauth/register` returns 429.
+pub const REGISTER_BURST: u32 = 8;
+/// How many requests one client IP may send before `/authorize` returns 429.
+pub const AUTHORIZE_BURST: u32 = 12;
+/// How many requests one client IP may send before `/oauth/token` returns 429.
+pub const TOKEN_BURST: u32 = 20;
+
+const REGISTER_EVERY: Duration = Duration::from_secs(6);
+const AUTHORIZE_EVERY: Duration = Duration::from_secs(3);
+const TOKEN_EVERY: Duration = Duration::from_secs(2);
+
 /// Shared by the auth middleware and the OAuth routes.
 #[derive(Clone)]
 pub struct AuthContext {
     pub oauth: Option<OAuthConfig>,
-    pub hosts: HostPolicy,
 }
 
 impl std::fmt::Debug for OAuthConfig {
@@ -68,21 +107,145 @@ impl OAuthConfig {
     pub fn metadata_url(&self) -> String {
         format!("{}/.well-known/oauth-protected-resource/mcp", self.issuer)
     }
+
+    /// `Host` header value for this origin. A non-default port is included.
+    pub fn host_value(&self) -> String {
+        self.issuer
+            .split_once("://")
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or_else(|| self.hostname.clone())
+    }
 }
 
 impl HostPolicy {
-    pub fn loopback_plus(extra: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        let mut allowed = vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];
-        allowed.extend(
-            extra
-                .into_iter()
-                .map(|h| h.into().trim().to_ascii_lowercase()),
-        );
+    /// Loopback names are accepted only on `port` (the port this process bound).
+    pub fn for_bind(port: u16, extra: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        let mut allowed = vec![
+            format!("localhost:{port}"),
+            format!("127.0.0.1:{port}"),
+            format!("[::1]:{port}"),
+        ];
+        for raw in extra {
+            let raw = raw.into().trim().to_ascii_lowercase();
+            if raw.is_empty() || allowed.iter().any(|e| e == &raw) {
+                continue;
+            }
+            allowed.push(raw);
+        }
         Self { allowed }
     }
 
     pub fn allows(&self, host_header: &str) -> bool {
-        host_allowed(host_header, &self.allowed)
+        let Some((host, port)) = split_host_header(host_header) else {
+            return false;
+        };
+        self.allowed.iter().any(|entry| {
+            split_host_header(entry).is_some_and(|(allowed_host, allowed_port)| {
+                allowed_host == host && allowed_port == port
+            })
+        })
+    }
+}
+
+impl OriginPolicy {
+    pub fn for_bind(port: u16, extra: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        let mut allowed = Vec::new();
+        for raw in [
+            format!("http://localhost:{port}"),
+            format!("http://127.0.0.1:{port}"),
+            format!("http://[::1]:{port}"),
+        ] {
+            if let Some(origin) = canonical_origin(&raw) {
+                allowed.push(origin);
+            }
+        }
+        for raw in extra {
+            if let Some(origin) = canonical_origin(&raw.into()) {
+                if !allowed.iter().any(|e| e == &origin) {
+                    allowed.push(origin);
+                }
+            }
+        }
+        Self { allowed }
+    }
+
+    pub fn allows(&self, origin: &str) -> bool {
+        let Some(origin) = canonical_origin(origin) else {
+            return false;
+        };
+        self.allowed.iter().any(|allowed| allowed == &origin)
+    }
+}
+
+impl RateLimiter {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Take one token. `Err` is the `Retry-After` delay in seconds.
+    pub fn allow(&self, class: &str, ip: IpAddr) -> Result<(), u64> {
+        let (capacity, every) = match class {
+            "register" => (REGISTER_BURST, REGISTER_EVERY),
+            "authorize" => (AUTHORIZE_BURST, AUTHORIZE_EVERY),
+            "token" => (TOKEN_BURST, TOKEN_EVERY),
+            _ => return Ok(()),
+        };
+        self.take(&format!("{class}|{ip}"), capacity, every)
+    }
+}
+
+impl Default for RateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RateLimiter {
+    fn take(&self, key: &str, capacity: u32, every: Duration) -> Result<(), u64> {
+        let mut map = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if map.len() > 4096 {
+            map.clear();
+        }
+        let now = Instant::now();
+        let bucket = map.entry(key.to_string()).or_insert(Bucket {
+            tokens: capacity,
+            updated: now,
+        });
+        let elapsed = now.saturating_duration_since(bucket.updated);
+        let steps = elapsed.as_nanos() / every.as_nanos().max(1);
+        if steps > 0 {
+            let add = u32::try_from(steps).unwrap_or(u32::MAX);
+            bucket.tokens = bucket.tokens.saturating_add(add).min(capacity);
+            bucket.updated = now;
+        }
+        if bucket.tokens == 0 {
+            let wait = every.saturating_sub(now.saturating_duration_since(bucket.updated));
+            return Err(wait.as_secs().max(1));
+        }
+        bucket.tokens -= 1;
+        Ok(())
+    }
+}
+
+impl EdgeGuard {
+    pub fn from_http(
+        bound_port: u16,
+        allowed_hosts: &[String],
+        oauth: Option<&OAuthConfig>,
+    ) -> Self {
+        let mut extra = allowed_hosts.to_vec();
+        let mut origins = Vec::new();
+        if let Some(cfg) = oauth {
+            extra.push(cfg.host_value());
+            origins.push(cfg.issuer.clone());
+        }
+        Self {
+            hosts: HostPolicy::for_bind(bound_port, extra),
+            origins: OriginPolicy::for_bind(bound_port, origins),
+            limits: oauth.map(|_| RateLimiter::new()),
+        }
     }
 }
 
@@ -195,27 +358,63 @@ fn normalize_host(host: &str) -> String {
     host.trim_matches(['[', ']']).to_ascii_lowercase()
 }
 
-fn host_allowed(header: &str, allowed: &[String]) -> bool {
+fn split_host_header(header: &str) -> Option<(String, Option<u16>)> {
     let header = header.trim();
-    if header.is_empty() {
-        return false;
+    if header.is_empty()
+        || header.len() > 512
+        || header.contains('/')
+        || header.contains(' ')
+        || header.contains(',')
+    {
+        return None;
     }
-    let (host, port) = match axum::http::uri::Authority::try_from(header) {
-        Ok(a) => (normalize_host(a.host()), a.port_u16()),
-        Err(_) => (normalize_host(header), None),
+    if let Ok(authority) = axum::http::uri::Authority::try_from(header) {
+        let host = normalize_host(authority.host());
+        if host.is_empty() {
+            return None;
+        }
+        return Some((host, authority.port_u16()));
+    }
+    if header.contains(':') {
+        return None;
+    }
+    let host = normalize_host(header);
+    if host.is_empty() {
+        None
+    } else {
+        Some((host, None))
+    }
+}
+
+/// Serialize an origin the way the browser does: lowercase scheme and host,
+/// default ports omitted, no userinfo, path, query, or fragment. Returns
+/// `None` when the value is not a single origin. Matching is equality of this
+/// string, not a suffix check.
+fn canonical_origin(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.len() > 512 || raw.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    let (scheme, rest) = raw.split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    if rest.contains('@')
+        || rest.contains('/')
+        || rest.contains('?')
+        || rest.contains('#')
+        || rest.contains('\\')
+        || rest.contains(' ')
+    {
+        return None;
+    }
+    let (host, port) = split_authority(rest).ok()?;
+    let port = match (scheme.as_str(), port) {
+        ("https", Some(443)) | ("http", Some(80)) => None,
+        (_, other) => other,
     };
-    allowed.iter().any(|entry| {
-        let entry = entry.trim();
-        let (allowed_host, allowed_port) = match axum::http::uri::Authority::try_from(entry) {
-            Ok(a) => (normalize_host(a.host()), a.port_u16()),
-            Err(_) => (normalize_host(entry), None),
-        };
-        allowed_host == host
-            && match allowed_port {
-                Some(p) => port == Some(p),
-                None => true,
-            }
-    })
+    Some(format!("{scheme}://{}", format_host(&host, port)))
 }
 
 pub fn router() -> Router<Store> {
@@ -1012,16 +1211,18 @@ async fn token(
         }
     };
     match result {
-        Ok(Ok(tok)) => no_store(
-            Json(json!({
+        Ok(Ok(tok)) => {
+            let mut body = json!({
                 "access_token": tok.access_token,
                 "token_type": "Bearer",
                 "expires_in": tok.expires_in,
-                "refresh_token": tok.refresh_token,
                 "scope": tok.scope,
-            }))
-            .into_response(),
-        ),
+            });
+            if let Some(refresh) = tok.refresh_token {
+                body["refresh_token"] = json!(refresh);
+            }
+            no_store(Json(body).into_response())
+        }
         Ok(Err(e)) => oauth_json(&e),
         Err(e) => oauth_json(&OAuthFail::Server(e.to_string())),
     }
@@ -1168,17 +1369,62 @@ mod tests {
     }
 
     #[test]
-    fn host_policy_matches_rmcp_rules() {
-        let policy = HostPolicy::loopback_plus(["another.example.com", "edge.example:8443"]);
-        assert!(policy.allows("127.0.0.1:7467"));
-        assert!(policy.allows("localhost:9"));
-        assert!(policy.allows("[::1]:7467"));
+    fn host_allow_list_is_exact_about_ports() {
+        let policy = HostPolicy::for_bind(7466, ["another.example.com", "edge.example:8443"]);
+        assert!(policy.allows("127.0.0.1:7466"));
+        assert!(policy.allows("localhost:7466"));
+        assert!(policy.allows("[::1]:7466"));
+        assert!(policy.allows("LOCALHOST:7466"));
+        assert!(!policy.allows("127.0.0.1:9"));
+        assert!(!policy.allows("localhost"));
+        assert!(!policy.allows("localhost:7467"));
+        assert!(!policy.allows("::1:7466"));
+        // A configured host with no port matches only a Host header with no port.
         assert!(policy.allows("another.example.com"));
-        assert!(policy.allows("Another.Example.com:443"));
+        assert!(policy.allows("Another.Example.com"));
+        assert!(!policy.allows("another.example.com:443"));
+        assert!(!policy.allows("another.example.com:8443"));
         assert!(policy.allows("edge.example:8443"));
         assert!(!policy.allows("edge.example"));
+        assert!(!policy.allows("edge.example:443"));
+        assert!(!policy.allows("notedge.example:8443"));
         assert!(!policy.allows("evil.example"));
+        assert!(!policy.allows("evil.example:7466"));
         assert!(!policy.allows(""));
+    }
+
+    #[test]
+    fn origin_match_is_exact_and_not_a_suffix() {
+        let policy = OriginPolicy::for_bind(7466, ["https://another.example.com"]);
+        assert!(policy.allows("http://127.0.0.1:7466"));
+        assert!(policy.allows("HTTP://Localhost:7466"));
+        assert!(policy.allows("http://[::1]:7466"));
+        assert!(policy.allows("https://another.example.com"));
+        assert!(policy.allows("https://Another.Example.com:443"));
+        assert!(!policy.allows("https://another.example.com.evil.com"));
+        assert!(!policy.allows("https://notanother.example.com"));
+        assert!(!policy.allows("http://127.0.0.1:7466.evil.example"));
+        assert!(!policy.allows("http://127.0.0.1:74660"));
+        assert!(!policy.allows("http://127.0.0.1:9"));
+        assert!(!policy.allows("https://127.0.0.1:7466"));
+        assert!(!policy.allows("http://127.0.0.1:7466/mcp"));
+        assert!(!policy.allows("http://evil.example"));
+        assert!(!policy.allows("null"));
+        assert!(!policy.allows(""));
+    }
+
+    #[test]
+    fn rate_limiter_is_per_address_and_per_endpoint() {
+        let limits = RateLimiter::new();
+        let ip: IpAddr = "203.0.113.5".parse().unwrap();
+        for _ in 0..TOKEN_BURST {
+            assert!(limits.allow("token", ip).is_ok());
+        }
+        let retry = limits.allow("token", ip).unwrap_err();
+        assert!(retry >= 1);
+        assert!(limits.allow("register", ip).is_ok());
+        let other: IpAddr = "203.0.113.6".parse().unwrap();
+        assert!(limits.allow("token", other).is_ok());
     }
 
     #[test]

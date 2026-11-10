@@ -1,6 +1,6 @@
-# Another: cross-agent inbox + resource registry — research + v1 spec
+# Another: cross-agent inbox + resource registry - research + v1 spec
 
-Clean-room research and v1 specification for **Another** ("From one agent to another"; home [toanother.one](https://toanother.one)) — a free, local, open, standalone product. Cross-agent inbox, activity feed, path holds, resource registry, and a designed-for-v2 federation model so a laptop and a remote agent box stay aware of each other. Hooks-first; Herdr/cmux/tmux optional.
+Clean-room research and v1 specification for **Another** ("From one agent to another"; home [toanother.one](https://toanother.one)) - a free, local, open, standalone product. Cross-agent inbox, activity feed, path holds, resource registry, and a designed-for-v2 federation model so a laptop and a remote agent box stay aware of each other. Hooks-first; Herdr/cmux/tmux optional.
 
 Living design Page (optional): <https://cursor.com/canvas/store-f97c4d9c-6914-4d0e-b170-0d5f5d7e2a98/f9b88a9b-d8f5-4fb6-b818-fe86475343c7>
 
@@ -14,7 +14,7 @@ Locked product defaults live in [DECISIONS.md](DECISIONS.md). Milestone build br
 - Stack = Rust + official [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk).
 - Grok Bot is a first-class peer via activity feed + authenticated remote access.
 - Federation (laptop ↔ remote box) is designed now and shipped as **v2**; v1 schema carries `node_id` + event log.
-- **Free and open source, always** — every feature, including federation, ships in the open repo. No paid tier, no paid hosted relay, no open-core upsell.
+- **Free and open source, always** - every feature, including federation, ships in the open repo. No paid tier, no paid hosted relay, no open-core upsell.
 
 ## Why build
 
@@ -30,31 +30,31 @@ Adjacent coding agents still coordinate through stale markdown files. Off-the-sh
 
 - Build + maintain a daemon, hook packs, orphan scanner, and remote-auth path
 - Clients differ on hooks; MCP resource subscribe is unreliable
-- Clean-room discipline — ideas from prior art, never their code
+- Clean-room discipline - ideas from prior art, never their code
 
 ## Brand + positioning
 
 | | |
 |---|---|
-| **Name** | Another — cross-agent inbox + resource registry |
+| **Name** | Another - cross-agent inbox + resource registry |
 | **Tagline** | From one agent to another. |
 | **Home** | [toanother.one](https://toanother.one) |
 | **Positioning** | Standalone product; free and open source always (every feature in the open repo) |
-| **CLI** | `another` — `serve`, `inbox`, `resources`, `activity`, … |
+| **CLI** | `another` - `serve`, `inbox`, `resources`, `activity`, … |
 
 ## Design principles
 
-1. **Vendor-neutral** — Plain MCP (stdio + optional HTTP). Equal first-class: Claude Code, Grok CLI, Codex CLI, Grok Bot. Cursor optional. No Herdr required for core.
-2. **Local-first + durable** — One machine daemon; SQLite source of truth; optional JSONL/Git export. No required cloud.
-3. **Mail, not chat** — Discrete messages with subject, recipients, thread id, importance. No broadcast-by-default.
-4. **Requests have owners** — `open → claimed → done | stale | cancelled`, with owner agent and due/TTL.
-5. **Holds and resources expire** — Path holds and resource leases use TTL + heartbeat; orphan detection + human-approved reap.
-6. **Shared awareness** — Activity feed so every peer (including remote Grok Bot) can see who is doing what.
-7. **Check is a product feature** — Hook packs + AGENTS.md first; Herdr/cmux/tmux adapters optional.
-8. **Free and open source, always** — Every feature — including federation — ships in the open repo. No paid tier, no paid hosted relay, no open-core upsell. Community-run or self-hosted hubs only.
-9. **Permissive license** — Apache-2.0 (patent grant; company-friendly; matches Herdr/A2A/rmcp).
+1. **Vendor-neutral** - Plain MCP (stdio + optional HTTP). Equal first-class: Claude Code, Grok CLI, Codex CLI, Grok Bot. Cursor optional. No Herdr required for core.
+2. **Local-first + durable** - One machine daemon; SQLite source of truth; optional JSONL/Git export. No required cloud.
+3. **Mail, not chat** - Discrete messages with subject, recipients, thread id, importance. No broadcast-by-default.
+4. **Requests have owners** - `open → claimed → done | stale | cancelled`, with owner agent and due/TTL.
+5. **Holds and resources expire** - Path holds and resource leases use TTL + heartbeat; orphan detection + human-approved reap.
+6. **Shared awareness** - Activity feed so every peer (including remote Grok Bot) can see who is doing what.
+7. **Check is a product feature** - Hook packs + AGENTS.md first; Herdr/cmux/tmux adapters optional.
+8. **Free and open source, always** - Every feature - including federation - ships in the open repo. No paid tier, no paid hosted relay, no open-core upsell. Community-run or self-hosted hubs only.
+9. **Permissive license** - Apache-2.0 (patent grant; company-friendly; matches Herdr/A2A/rmcp).
 
-## Prior art (ideas only — clean room)
+## Prior art (ideas only - clean room)
 
 Study features and protocols; do **not** copy code, schemas, or distinctive phrasing.
 
@@ -65,7 +65,7 @@ Study features and protocols; do **not** copy code, schemas, or distinctive phra
 | agent-bus-mcp | MIT | Simple SQLite topic bus + peer cursors | Topic-only model if we need ownership |
 | Beads / beads_rust | check LICENSE | Dependency-aware task board pairs with mail as channel | Replacing our request table in v1 |
 | A2A protocol | Apache-2.0 | Task + message + artifact vocabulary; federation later | Overbuilding federation in v1 |
-| agentmail.to | Hosted SaaS | Real email inboxes for agents — different problem | Confusing with local agent↔agent mail |
+| agentmail.to | Hosted SaaS | Real email inboxes for agents - different problem | Confusing with local agent↔agent mail |
 
 ## Data model
 
@@ -78,11 +78,11 @@ Single SQLite database (WAL) per node. **v1 ships federation-ready columns** eve
 | **Node** | `node_id` (ULID), `display_name`, `public_key?`, `paired_at`, role `home\|spoke\|relay\|peer` |
 | **Project** | `id`, `node_id`, `abs_path` (unique per node), `slug`, `created_at` |
 | **Agent** | `id`, `node_id`, `project_id?`, `name` → address `agent@project@node`, `program`, `last_seen_at`, `status` |
-| **EventLog** (append-only) | `event_id` (ULID), `node_id`, `ts`, `actor`, `kind`, `payload` JSON, `prev_id?` — source of truth; tables are projections |
+| **EventLog** (append-only) | `event_id` (ULID), `node_id`, `ts`, `actor`, `kind`, `payload` JSON, `prev_id?` - source of truth; tables are projections |
 | **Request** | status `open \| claimed \| done \| stale \| cancelled`; owner; `due_at` |
-| **Hold** (paths) | `node_id` + repo-scoped glob; never cross-node locks — `exclusive\|shared`, TTL, heartbeat |
+| **Hold** (paths) | `node_id` + repo-scoped glob; never cross-node locks - `exclusive\|shared`, TTL, heartbeat |
 | **Resource** | `node_id`, kind, endpoint/bind, owner, purpose, `exclusive\|shared`, refcount, ttl, heartbeat, reachability, metadata |
-| **ActivityEvent** | projection of EventLog — mail\|request\|hold\|resource\|session\|system\|federation |
+| **ActivityEvent** | projection of EventLog - mail\|request\|hold\|resource\|session\|system\|federation |
 
 **Agent naming (locked):** agent names are unique per project, addressed as `name@project`; a bare name resolves only when unambiguous. Federation later: `agent@project@node`.
 
@@ -90,7 +90,7 @@ Single SQLite database (WAL) per node. **v1 ships federation-ready columns** eve
 
 > Major component (after milestone 1 core mail). Before starting a model server, dev server, or GPU job, an agent asks Another whether one is already running and **borrows** it (shared-use leases + reference counts) instead of spawning a duplicate.
 
-Register running model servers, dev servers, listening ports, GPU/VRAM allocations, containers, and long jobs with an owner agent/project, a purpose, a lease/TTL, and a heartbeat. Common on Apple Silicon Macs: Ollama, llama.cpp, and MLX servers (unified memory — VRAM is not a separate pool; track process RSS / Metal footprint in metadata).
+Register running model servers, dev servers, listening ports, GPU/VRAM allocations, containers, and long jobs with an owner agent/project, a purpose, a lease/TTL, and a heartbeat. Common on Apple Silicon Macs: Ollama, llama.cpp, and MLX servers (unified memory - VRAM is not a separate pool; track process RSS / Metal footprint in metadata).
 
 ### Kinds
 
@@ -105,11 +105,11 @@ Register running model servers, dev servers, listening ports, GPU/VRAM allocatio
 
 ### Lifecycle
 
-1. **Find before start** — `resource_find` → prefer borrow over spawn.
-2. **Register or borrow** — `resource_register` / `resource_borrow` with TTL + heartbeat.
-3. **Heartbeat** — renews owned/borrowed leases; SessionEnd releases unless `--keep`.
-4. **Orphan detect** — lease lapsed or owner session ended; process scan (`lsof`/`ps`; `nvidia-smi` or macOS `powermetrics`/Activity/Metal) finds unregistered listeners.
-5. **Notify then reap** — `orphans_list` → notify human; `resource_reap` kills only after grace + **human approval by default**.
+1. **Find before start** - `resource_find` → prefer borrow over spawn.
+2. **Register or borrow** - `resource_register` / `resource_borrow` with TTL + heartbeat.
+3. **Heartbeat** - renews owned/borrowed leases; SessionEnd releases unless `--keep`.
+4. **Orphan detect** - lease lapsed or owner session ended; process scan (`lsof`/`ps`; `nvidia-smi` or macOS `powermetrics`/Activity/Metal) finds unregistered listeners.
+5. **Notify then reap** - `orphans_list` → notify human; `resource_reap` kills only after grace + **human approval by default**.
 
 ### macOS specifics
 
@@ -129,7 +129,7 @@ All systems must understand activity underway. The activity feed is a machine-re
 
 ### How Grok Bot connects
 
-1. **Preferred:** authenticated MCP over HTTPS — Streamable HTTP on loopback by default; for remote peers, terminate TLS at a tunnel (Cloudflare Tunnel, Tailscale Serve, or `ssh -R`). Clients that can set a header use a bearer token. Hosted apps that authenticate with OAuth (ChatGPT custom connectors, Claude.ai / Claude Desktop connectors) use the same server's OAuth 2.1 authorization server: a person approves each client locally, and the grant acts as one agent. Register as `program=grok_bot` or `other`.
+1. **Preferred:** authenticated MCP over HTTPS - Streamable HTTP on loopback by default; for remote peers, terminate TLS at a tunnel (Cloudflare Tunnel, Tailscale Serve, or `ssh -R`). Clients that can set a header use a bearer token. Hosted apps that authenticate with OAuth (ChatGPT custom connectors, Claude.ai / Claude Desktop connectors) use the same server's OAuth 2.1 authorization server: a person approves each client locally, and the grant acts as one agent. Register as `program=grok_bot` or `other`.
 2. **Alternative:** periodic pull of `another activity --json` and inbox via short-lived token (outbound-only).
 3. **Security:** Never bind `0.0.0.0` without auth. Token scoped to agent name + project globs. Audit log every remote tool call. No automatic `resource_reap` from remote by default. Prefer Tailscale/private network over public internet.
 
@@ -141,8 +141,8 @@ Each machine runs an Another **node** that is authoritative for its own agents, 
 
 - Owning node decides: agents, path holds, and resource leases are authored only on their home `node_id`.
 - Sync = append-only EventLog with node-scoped IDs (ULIDs preferred).
-- Receivers project remote events into local read models — they do not rewrite foreign ownership.
-- Avoid CRDTs where a single owner suffices; never merge competing exclusive leases — last authoritative event from the owner node wins; conflicts are surfaced.
+- Receivers project remote events into local read models - they do not rewrite foreign ownership.
+- Avoid CRDTs where a single owner suffices; never merge competing exclusive leases - last authoritative event from the owner node wins; conflicts are surfaced.
 
 ### Addressing + mail
 
@@ -152,7 +152,7 @@ Address agents as `agent@project@node`. Cross-node mail is **store-and-forward**
 
 | | |
 |---|---|
-| **v2 start** | Hub-and-spoke — free self-hostable home/hub node; spokes dial out (NATS leaf-node pattern) |
+| **v2 start** | Hub-and-spoke - free self-hostable home/hub node; spokes dial out (NATS leaf-node pattern) |
 | **Later** | Optional mesh once hub-and-spoke is solid (Tailscale-style peer paths) |
 | **Grok Bot** | Joins as a node or lightweight peer; same event log + scoped permissions |
 
@@ -160,12 +160,12 @@ Address agents as `agent@project@node`. Cross-node mail is **store-and-forward**
 
 - Prefer Tailscale / WireGuard private network, or mTLS over a relay.
 - Pairing exchanges per-node keys; permissions scoped: `read_feed | send_mail | borrow_resource` (and never `remote_reap` by default).
-- Kill/reap of processes stays on the **owning node** only — remote peers may request, not execute.
+- Kill/reap of processes stays on the **owning node** only - remote peers may request, not execute.
 
 ### Remote resources + holds
 
 - Resources are visible across paired nodes; borrowable only if network-reachable (annotate latency/egress in metadata).
-- File holds stay **repo/node-scoped** — never distributed locks across machines.
+- File holds stay **repo/node-scoped** - never distributed locks across machines.
 - Cross-node git-level conflicts are **surfaced** in activity/mail, not locked.
 
 ### Federation prior art (ideas only)
@@ -179,7 +179,7 @@ Address agents as `agent@project@node`. Cross-node mail is **store-and-forward**
 
 ### Self-hostable hub / community relay
 
-The hub in hub-and-spoke is simply one more Another node, free like the rest (always-on box or the laptop). Anyone can self-host a hub; community-run relays are optional and likewise free/open. No paid hosted relay and no open-core upsell — federation ships in the same open repo as local mail and the resource registry.
+The hub in hub-and-spoke is simply one more Another node, free like the rest (always-on box or the laptop). Anyone can self-host a hub; community-run relays are optional and likewise free/open. No paid hosted relay and no open-core upsell - federation ships in the same open repo as local mail and the resource registry.
 
 ## MCP tools + CLI (full vision)
 
@@ -214,18 +214,18 @@ The hub in hub-and-spoke is simply one more Another node, free like the rest (al
 
 ### CLI (`another`)
 
-- `another serve` — daemon (stdio MCP and/or authenticated HTTP)
+- `another serve` - daemon (stdio MCP and/or authenticated HTTP)
 - `another inbox | send | ack | requests | holds`
 - `another resources | borrow | release | orphans | reap`
 - `another activity`
 - `another doctor`
 - `another wake --agent NAME --via herdr|tmux|cmux` (optional adapters)
 - `another hook install --client claude|grok|codex|cursor`
-- `another pair` / `another sync` — v2 federation (stub/docs in v1)
+- `another pair` / `another sync` - v2 federation (stub/docs in v1)
 
 ## Mail-checking strategy per client
 
-> **Hooks first — not tied to Herdr.** v1 delivery guarantee is lifecycle hooks that inject a tiny inbox + activity digest. Do not rely on MCP resources/subscribe (Codex does not act on those notifications — [openai/codex#16159](https://github.com/openai/codex/issues/16159)).
+> **Hooks first - not tied to Herdr.** v1 delivery guarantee is lifecycle hooks that inject a tiny inbox + activity digest. Do not rely on MCP resources/subscribe (Codex does not act on those notifications - [openai/codex#16159](https://github.com/openai/codex/issues/16159)).
 
 | Client | Mechanism | Verified? | Recipe |
 |---|---|---|---|
@@ -240,19 +240,19 @@ The hub in hub-and-spoke is simply one more Another node, free like the rest (al
 
 ### Hook flow
 
-1. **Session start** — `another inbox --json --urgent` + short `another activity --since 1h`.
-2. **Each user prompt** — optional light check (~500 tokens).
-3. **Before spawn** — AGENTS.md: `resource_find` before starting servers (when registry ships).
-4. **Session end** — `another heartbeat --end` → release holds/exclusive resources unless `--keep`.
+1. **Session start** - `another inbox --json --urgent` + short `another activity --since 1h`.
+2. **Each user prompt** - optional light check (~500 tokens).
+3. **Before spawn** - AGENTS.md: `resource_find` before starting servers (when registry ships).
+4. **Session end** - `another heartbeat --end` → release holds/exclusive resources unless `--keep`.
 
 ## Stale-hold design
 
 Path holds are advisory leases on globs. They signal intent; they do not replace git.
 
-1. Acquire: `hold_paths(paths, ttl_seconds, exclusive?, reason?)` — fail soft with conflict list.
+1. Acquire: `hold_paths(paths, ttl_seconds, exclusive?, reason?)` - fail soft with conflict list.
 2. Heartbeat renews `expires_at` (cap max TTL).
 3. Auto-release: SessionEnd; daemon sweeper; optional git-commit PostToolUse (opt-in).
-4. Conflict escalation: after N conflicts or overdue request, mark stale and notify human — never silent-steal exclusive holds without force.
+4. Conflict escalation: after N conflicts or overdue request, mark stale and notify human - never silent-steal exclusive holds without force.
 5. Federation: holds remain node/repo-scoped; cross-node path clashes are activity warnings, not distributed locks.
 
 ## Integrations
@@ -269,7 +269,7 @@ Path holds are advisory leases on globs. They signal intent; they do not replace
 
 ## Scope
 
-### v1 (product vision; milestone 1 is a subset — see AGENTS.md)
+### v1 (product vision; milestone 1 is a subset - see AGENTS.md)
 
 - Rust daemon + rmcp (stdio + authenticated HTTP) + SQLite
 - Mail, requests, path holds+TTL; resource registry; activity feed
@@ -315,12 +315,12 @@ TS/Bun prototype tradeoff: faster to sketch tool shapes, weaker as a long-lived 
 ## Risks
 
 - Clean-room leakage: do not clone `mcp_agent_mail*`; write from this spec only.
-- Hook trust UX: Codex trusts hooks explicitly; Grok needs `/hooks-trust` — document install.
+- Hook trust UX: Codex trusts hooks explicitly; Grok needs `/hooks-trust` - document install.
 - Remote exposure: default loopback-only; require explicit enable for remote.
 - False orphan kills: never auto-kill without approval in early versions; allowlist system daemons.
 - Apple Silicon accounting: unified memory makes GPU leases approximate.
 - cmux GPL: optional external CLI only, never link into another.
-- Agents ignore digests — keep them tiny.
+- Agents ignore digests - keep them tiny.
 - Hold/resource false confidence: leases are social until commit/process guards exist.
 - Federation split-brain: owning `node_id` is law; never CRDT-merge ownership.
 - Clock skew / offline queues: document catch-up windows.
@@ -331,7 +331,7 @@ TS/Bun prototype tradeoff: faster to sketch tool shapes, weaker as a long-lived 
 
 1. [Another](https://toanother.one)
 2. [Official MCP SDKs (Rust Tier 1)](https://modelcontextprotocol.io/docs/2026-07-28/sdk)
-3. [rmcp — official Rust MCP SDK](https://github.com/modelcontextprotocol/rust-sdk)
+3. [rmcp - official Rust MCP SDK](https://github.com/modelcontextprotocol/rust-sdk)
 4. [rmcp on crates.io](https://crates.io/crates/rmcp)
 5. [Herdr](https://herdr.dev/) / [agent automation](https://herdr.dev/docs/agent-automation/)
 6. [cmux](https://cmux.com/)

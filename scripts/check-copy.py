@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Fail if site copy or docs/PROMOTION.md uses em/en dashes or banned phrases.
+"""Fail if site copy, docs, or CLI strings use em/en dashes or banned phrases.
 
 ASCII hyphens are fine. The check is the prose, not the font license.
+`docs/` and `crates/another/src/cli.rs` are included so a dash in new
+spec text or in `another` command output fails CI.
 """
 from __future__ import annotations
 
@@ -45,11 +47,19 @@ BANNED = [
 
 
 def files():
-    promo = ROOT / "docs" / "PROMOTION.md"
-    if promo.is_file():
-        yield promo
-    else:
+    docs = ROOT / "docs"
+    if not docs.is_dir():
+        raise SystemExit(f"missing {docs}")
+    promo = docs / "PROMOTION.md"
+    if not promo.is_file():
         raise SystemExit(f"missing {promo}")
+    for path in sorted(docs.rglob("*")):
+        if path.is_file() and path.suffix.lower() in TEXT_SUFFIXES:
+            yield path
+    cli = ROOT / "crates" / "another" / "src" / "cli.rs"
+    if not cli.is_file():
+        raise SystemExit(f"missing {cli}")
+    yield cli
     site = ROOT / "site"
     for path in sorted(site.rglob("*")):
         if not path.is_file():
@@ -81,7 +91,24 @@ def check_repo() -> list[str]:
     return found
 
 
+def assert_sources() -> None:
+    rels = {path.relative_to(ROOT).as_posix() for path in files()}
+    for required in (
+        "docs/SPEC.md",
+        "docs/PROMOTION.md",
+        "docs/REMOTE.md",
+        "crates/another/src/cli.rs",
+    ):
+        if required not in rels:
+            raise SystemExit(f"copy check does not scan {required}")
+    planted = 'format!("none \u2014 mailbox")\n'
+    got = scan(Path("cli.rs"), planted)
+    if not any("em dash" in item for item in got):
+        raise SystemExit(f"cli string scan missed an em dash: {got}")
+
+
 def self_test() -> None:
+    assert_sources()
     samples = [
         ("clean.md", "Local-first, Rust 1.88, milestones 1-6.\n", []),
         ("em.md", "Agents \u2014 inbox\n", ["em dash or en dash"]),
