@@ -52,7 +52,7 @@ Uninstall removes only entries that reference `another-hook.sh`, and deletes the
 | Grok CLI | `~/.grok/hooks/another.json` | Same five as Claude Code | User-level hooks need no trust step (`/hooks-trust` applies to project hooks). Grok maps `Edit`, `Write` and `MultiEdit` onto its own edit tools. See "Grok and shared hook files" below. |
 | Cursor (best effort) | `~/.cursor/hooks.json` | `sessionStart`, `beforeSubmitPrompt`, `sessionEnd`, `postToolUse` | Context is injected at session start and after tool calls (`additional_context`); the prompt hook just renews holds and lets the prompt through. No edit guard: Cursor blocks a tool call when a `preToolUse` reply is not valid JSON, and a hook that fails open prints nothing. |
 
-Edits made through a shell command (`sed -i`, `echo >`, a script) are not seen by any client's edit hook, so they are neither held nor stopped.
+Edits made through a shell command (`sed -i`, `echo >`, a script) are not seen by any client's edit hook, so they are neither held nor stopped. Neither is an edit through a hard link to a held file, since a path cannot reveal one.
 
 ## Mid-task notices
 
@@ -66,7 +66,7 @@ Each message is announced once, by whichever channel claims it first: a mid-task
 
 ## The edit guard
 
-`pre-edit` runs before each file edit. For every file the tool is about to change it resolves symlinks in the path (a new file is resolved through its existing parent directories; when the file is itself a link, both the link and the file it points at are checked), works out the file's project from that real path (the deeper of its git checkout and the closest registered project; files in neither, such as scratch space, are left alone), then in one transaction:
+`pre-edit` runs before each file edit. For every file the tool is about to change it resolves the path the way the filesystem does (symlinks are followed before any `..` after them; a new file is resolved through its existing parent directories; a dangling link is followed to the file it would create; when the file is itself a link, both the link and the file it points at are checked; see [HOLDS.md](HOLDS.md)), works out the file's project from that real path (the deeper of its git checkout and the closest registered project; files in neither, such as scratch space, are left alone), then in one transaction:
 
 - if another agent holds an overlapping path, nothing is taken and the edit is denied with a message like this one:
 

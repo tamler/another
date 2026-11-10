@@ -35,7 +35,14 @@ The link is a node-local cache, refreshed whenever a project is used. Projects r
 
 ## Symlinks
 
-A literal path given to `another hold acquire` or `hold check`, and every file the edit guard sees, is resolved through symlinks first, so `alias/a.rs` (with `alias -> src`) is held, and checked, as `src/a.rs`. Globs are matched as written. A path whose real location is outside the project is passed on as given.
+A path given to `another hold acquire` or `hold check`, and every file the edit guard sees, is resolved the way the filesystem resolves it before it is held or checked:
+
+- `alias/a.rs` (with `alias -> src`) is `src/a.rs`;
+- `..` applies after the symlink before it, so `link/../a.rs` is the parent of where `link` points, then `a.rs`;
+- a dangling link to a file that does not exist yet is checked at the file it would create;
+- for a glob, its literal directories are resolved and the pattern is kept, so `alias/**` is held as `src/**`.
+
+A path whose real location is outside the project is passed on as given. Hard links cannot be seen from a path: an edit through a second hard link to a held file is not stopped.
 
 ## Whole-project holds
 

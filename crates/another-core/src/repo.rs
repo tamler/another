@@ -185,7 +185,24 @@ pub fn normalize_remote(url: &str) -> Option<String> {
     }
 }
 
-/// The cached link: `None` when never checked, `Some(None)` when checked and not in a repo.
+/// Version of the key rules (`normalize_remote`, `link_for`), stored in front of every
+/// cached key. Bump it whenever those rules change: cached rows from an older version are
+/// then treated as never checked and recomputed on next use, so a stale key can never
+/// hide a sibling's hold. This needs no schema change, so it never blocks an installed
+/// binary from opening the database.
+pub(crate) const KEY_VERSION: &str = "v2:";
+
+/// A key as stored in `project_repos` (empty stays empty: "not in a repository").
+pub(crate) fn stored_key(key: &str) -> String {
+    if key.is_empty() {
+        String::new()
+    } else {
+        format!("{KEY_VERSION}{key}")
+    }
+}
+
+/// The cached link: `None` when never checked (or cached under older key rules),
+/// `Some(None)` when checked and not in a repo.
 fn cached(conn: &Connection, project_id: &str) -> Result<Option<Option<RepoLink>>> {
     let row: Option<(String, String)> = conn
         .query_row(
@@ -194,7 +211,16 @@ fn cached(conn: &Connection, project_id: &str) -> Result<Option<Option<RepoLink>
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    Ok(row.map(|(key, prefix)| (!key.is_empty()).then_some(RepoLink { key, prefix })))
+    Ok(match row {
+        None => None,
+        Some((key, _)) if key.is_empty() => Some(None),
+        Some((key, prefix)) => key.strip_prefix(KEY_VERSION).map(|k| {
+            Some(RepoLink {
+                key: k.to_string(),
+                prefix,
+            })
+        }),
+    })
 }
 
 /// Recompute a local project's repository link from its files and cache it (writing only
@@ -205,9 +231,9 @@ pub(crate) fn refresh_link(tx: &Tx<'_>, project: &Project) -> Result<Option<Repo
     }
     let fresh = link_for(Path::new(&project.abs_path));
     if cached(tx, &project.project_id)?.as_ref() != Some(&fresh) {
-        let (key, prefix) = fresh
-            .as_ref()
-            .map_or(("", ""), |l| (l.key.as_str(), l.prefix.as_str()));
+        let (key, prefix) = fresh.as_ref().map_or((String::new(), ""), |l| {
+            (stored_key(&l.key), l.prefix.as_str())
+        });
         tx.execute(
             "INSERT INTO project_repos (project_id, repo_key, repo_prefix, checked_at)
              VALUES (?1, ?2, ?3, ?4)

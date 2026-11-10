@@ -748,3 +748,56 @@ fn automatic_wake_targets_clear_only_when_they_match() {
         "manual target kept"
     );
 }
+
+#[test]
+fn repo_keys_cached_under_older_rules_are_recomputed() {
+    // Review r2 N3: keys cached by an older normalizer (say, the v7 all-lowercase rule)
+    // must not survive an upgrade and hide a sibling's hold.
+    let fx = Fx::new();
+    let r = &fx.repos;
+    fx.acquire("alice", &r.main, &["src/**"]).unwrap();
+    let wt = fx.project(&r.wt);
+    let stale = |key: &str| {
+        let db = rusqlite::Connection::open(r.home.join(DB_FILE)).unwrap();
+        db.execute("UPDATE project_repos SET repo_key = ?1", [key])
+            .unwrap();
+    };
+    let acquire_in_wt = |agent: &str, path: &str| {
+        fx.store
+            .acquire_holds(AcquireHolds {
+                agent: agent.into(),
+                project: wt.clone(),
+                paths: vec![path.into()],
+                ttl_seconds: None,
+                exclusive: true,
+                reason: None,
+                repo_wide: false,
+            })
+            .unwrap()
+    };
+    // Every row carries an unversioned key from older rules: both get recomputed.
+    stale("example.com/me/shop");
+    assert_eq!(acquire_in_wt("bob", "src/a.rs").conflicts.len(), 1);
+    // Rows that disagree (one stale, one current) also end up compared under one rule.
+    let db = rusqlite::Connection::open(r.home.join(DB_FILE)).unwrap();
+    let main_id: String = db
+        .query_row(
+            "SELECT project_id FROM projects WHERE slug = 'shop'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    db.execute(
+        "UPDATE project_repos SET repo_key = 'example.com/ME/SHOP-old' WHERE project_id = ?1",
+        [&main_id],
+    )
+    .unwrap();
+    drop(db);
+    assert_eq!(acquire_in_wt("carol", "src/b.rs").conflicts.len(), 1);
+    // The edit guard sees it too.
+    let g = fx
+        .store
+        .guard_edit("carol", &wt, &["src/c.rs".into()], "editing (auto)")
+        .unwrap();
+    assert_eq!(g.conflicts.len(), 1);
+}

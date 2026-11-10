@@ -992,3 +992,196 @@ fn adapter_commands_are_bounded() {
     assert!(status.success());
     assert_eq!(stdout, b"hi\n");
 }
+
+// ---------------------------------------------------------------------------
+// Regressions for the round 2 review (REVIEW-another-pr103-r2.md).
+
+/// N1: `..` after a symlink is applied where the link points, not lexically.
+#[test]
+fn dot_dot_after_a_symlink_does_not_escape_the_guard() {
+    let env = Env::new();
+    env.start("claude", &env.main, &[]);
+    env.start("codex", &env.wt, &[]);
+    std::fs::create_dir_all(env.wt.join("src/deep")).unwrap();
+    std::fs::write(env.wt.join("src/a.rs"), "x").unwrap();
+    std::os::unix::fs::symlink(env.wt.join("src/deep"), env.wt.join("deeplink")).unwrap();
+    let held = env.hook(
+        "pre-edit",
+        "claude",
+        &tool(
+            &env.main,
+            "Edit",
+            json!({ "file_path": env.main.join("src/a.rs") }),
+        ),
+    );
+    assert_eq!(held, "");
+    // Lexically `shop-review/a.rs`; physically `shop-review/src/a.rs`, the held file.
+    for path in [
+        "deeplink/../a.rs".to_string(),
+        format!("{}/deeplink/../a.rs", env.wt.display()),
+    ] {
+        let out = env.hook(
+            "pre-edit",
+            "codex",
+            &tool(&env.wt, "Edit", json!({ "file_path": path })),
+        );
+        assert!(
+            denial(&out).contains("src/a.rs is held by claude@shop"),
+            "{path}"
+        );
+    }
+    // A plain `..` with no symlink still resolves the ordinary way.
+    let out = env.hook(
+        "pre-edit",
+        "codex",
+        &tool(&env.wt, "Edit", json!({ "file_path": "src/deep/../a.rs" })),
+    );
+    assert!(denial(&out).contains("held by claude@shop"));
+}
+
+/// N2: a dangling symlink to a held, not yet existing file is checked at its target.
+#[test]
+fn a_dangling_symlink_to_a_held_new_file_is_stopped() {
+    let env = Env::new();
+    env.start("claude", &env.main, &[]);
+    env.start("codex", &env.wt, &[]);
+    let out = env.hook(
+        "pre-edit",
+        "claude",
+        &tool(
+            &env.main,
+            "Write",
+            json!({ "file_path": env.main.join("src/new.rs") }),
+        ),
+    );
+    assert_eq!(out, "");
+    assert!(!env.wt.join("src/new.rs").exists());
+    std::os::unix::fs::symlink(env.wt.join("src/new.rs"), env.wt.join("dangle.rs")).unwrap();
+    let out = env.hook(
+        "pre-edit",
+        "codex",
+        &tool(
+            &env.wt,
+            "Write",
+            json!({ "file_path": env.wt.join("dangle.rs") }),
+        ),
+    );
+    assert!(
+        denial(&out).contains("src/new.rs is held by claude@shop"),
+        "{out}"
+    );
+    assert!(!env
+        .holds()
+        .iter()
+        .any(|h| h["agent"] == "codex@shop-review"));
+    // A chain of links, and a loop, do not hang or crash the hook.
+    std::os::unix::fs::symlink(env.wt.join("dangle.rs"), env.wt.join("chain.rs")).unwrap();
+    let out = env.hook(
+        "pre-edit",
+        "codex",
+        &tool(
+            &env.wt,
+            "Write",
+            json!({ "file_path": env.wt.join("chain.rs") }),
+        ),
+    );
+    assert!(denial(&out).contains("held by claude@shop"));
+    std::os::unix::fs::symlink(env.wt.join("loop2"), env.wt.join("loop1")).unwrap();
+    std::os::unix::fs::symlink(env.wt.join("loop1"), env.wt.join("loop2")).unwrap();
+    let (out, took) = env.hook_timed(
+        "pre-edit",
+        "codex",
+        &tool(
+            &env.wt,
+            "Write",
+            json!({ "file_path": env.wt.join("loop1/x.rs") }),
+        ),
+        &[],
+    );
+    assert_eq!(out, "");
+    assert!(took < Duration::from_secs(2));
+}
+
+/// N5: a glob hold taken through a symlinked directory protects the real files.
+#[test]
+fn glob_holds_through_a_symlinked_directory_are_resolved() {
+    let env = Env::new();
+    env.start("claude", &env.main, &[]);
+    env.start("codex", &env.wt, &[]);
+    std::os::unix::fs::symlink(env.main.join("src"), env.main.join("alias")).unwrap();
+    let main = env.main.to_string_lossy().into_owned();
+    let granted = env.json(&[
+        "hold",
+        "acquire",
+        "--agent",
+        "claude@shop",
+        "--project",
+        &main,
+        "alias/**",
+    ]);
+    assert_eq!(granted["granted"][0]["pattern"], "src/**", "{granted}");
+    // An absolute glob through the alias, and a glob at the project root, as well.
+    let abs = format!("{}/alias/*.toml", env.main.display());
+    let granted = env.json(&[
+        "hold",
+        "acquire",
+        "--agent",
+        "claude@shop",
+        "--project",
+        &main,
+        &abs,
+        "*.md",
+    ]);
+    let patterns: Vec<&str> = granted["granted"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["pattern"].as_str().unwrap())
+        .collect();
+    assert_eq!(patterns, ["src/*.toml", "*.md"]);
+    // The sibling worktree's edit of a file under src/ is now stopped.
+    let out = env.hook(
+        "pre-edit",
+        "codex",
+        &tool(
+            &env.wt,
+            "Edit",
+            json!({ "file_path": env.wt.join("src/b.rs") }),
+        ),
+    );
+    assert!(denial(&out).contains("held by claude@shop"));
+}
+
+/// N4: an adapter that leaves a process behind on its stdout does not stall the caller.
+#[test]
+fn a_descendant_holding_stdout_does_not_outlast_the_deadline() {
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", "sleep 20 & echo '{\"result\":{}}'"]);
+    let started = Instant::now();
+    let (status, stdout) = another::wake::run_bounded(&mut cmd, Duration::from_secs(3), None)
+        .unwrap()
+        .expect("the adapter itself exited");
+    assert!(status.success());
+    assert_eq!(stdout, b"{\"result\":{}}\n");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "returned after {:?}",
+        started.elapsed()
+    );
+    // A stuck adapter with a stuck child: both stop at the deadline.
+    let marker = std::env::temp_dir().join(format!("another-n4-{}", std::process::id()));
+    let mut cmd = Command::new("sh");
+    cmd.args([
+        "-c",
+        &format!("(sleep 2; touch '{}') & sleep 30", marker.display()),
+    ]);
+    let started = Instant::now();
+    let out = another::wake::run_bounded(&mut cmd, Duration::from_millis(300), None).unwrap();
+    assert!(out.is_none());
+    assert!(started.elapsed() < Duration::from_secs(2));
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        !marker.exists(),
+        "the adapter's background process was stopped with it"
+    );
+}
