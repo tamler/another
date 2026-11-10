@@ -62,6 +62,11 @@ jobs:
       - name: cargo test
         run: cargo test --all-features
 
+      - name: dashboard render test
+        run: |
+          npm install --prefix "$RUNNER_TEMP/dash-ui" jsdom
+          DASH_UI_NODE_MODULES="$RUNNER_TEMP/dash-ui/node_modules" node crates/another/src/dashboard/assets/render.test.mjs
+
   msrv:
     name: msrv (Rust 1.88)
     runs-on: ubuntu-latest

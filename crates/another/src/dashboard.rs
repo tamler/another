@@ -127,11 +127,16 @@ async fn require_loopback_host(
     next: Next,
 ) -> Response {
     let host = request_host(&request);
-    if loopback_host(host.as_deref().unwrap_or(""), state.bound.as_ref()) {
+    let mut response = if loopback_host(host.as_deref().unwrap_or(""), state.bound.as_ref()) {
         next.run(request).await
     } else {
         forbidden("dashboard requests must use a loopback Host")
-    }
+    };
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    response
 }
 
 fn request_host(request: &Request) -> Option<String> {
@@ -193,11 +198,26 @@ fn split_host(host: &str) -> Option<(&str, Option<&str>)> {
 }
 
 fn valid_port(port: &str) -> bool {
+    // `+80` and `0080` are not the same port as `80`.
+    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    if port.len() > 1 && port.starts_with('0') {
+        return false;
+    }
     matches!(port.parse::<u16>(), Ok(n) if n > 0)
 }
 
-/// `http://` plus an allowed loopback host. No suffix match, no other scheme, no path.
+/// `http://` plus a loopback host on the exact bound port.
+///
+/// `127.0.0.1`, `localhost`, and `[::1]` are accepted only with that port.
+/// The bound address itself is accepted too, so a bind on `127.0.0.2:7468`
+/// allows `http://127.0.0.2:7468`. A different port, a missing port, or a
+/// lookalike host is refused. Without a recorded bind, no origin is accepted.
 fn loopback_origin(origin: &str, bound: Option<&SocketAddr>) -> bool {
+    let Some(bound) = bound else {
+        return false;
+    };
     let origin = origin.trim();
     let Some((scheme, host)) = origin.split_once("://") else {
         return false;
@@ -208,7 +228,19 @@ fn loopback_origin(origin: &str, bound: Option<&SocketAddr>) -> bool {
     if host.is_empty() || host.contains(['/', '?', '#', '@', '\\', ' ']) {
         return false;
     }
-    loopback_host(host, bound)
+    let Some((name, port)) = split_host(host) else {
+        return false;
+    };
+    let Some(port) = port else {
+        return false;
+    };
+    if !valid_port(port) || port != bound.port().to_string() {
+        return false;
+    }
+    host.eq_ignore_ascii_case(&bound.to_string())
+        || name == "127.0.0.1"
+        || name.eq_ignore_ascii_case("localhost")
+        || name == "::1"
 }
 
 /// Dashboard-only server used by `another dashboard`. Always local, always loopback.
@@ -409,6 +441,9 @@ async fn stream(
     tokio::spawn(async move {
         let mut last = i64::MIN;
         loop {
+            if tx.is_closed() {
+                break;
+            }
             let probe = store.clone();
             let seq = tokio::task::spawn_blocking(move || probe.dashboard_seq()).await;
             let Ok(Ok(seq)) = seq else { break };
@@ -421,7 +456,10 @@ async fn stream(
                     break;
                 }
             }
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::select! {
+                _ = tx.closed() => break,
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+            }
         }
     });
     Sse::new(ReceiverStream::new(rx)).keep_alive(
@@ -595,6 +633,9 @@ mod tests {
         assert!(loopback_host("[::1]", None));
         assert!(loopback_host("[::1]:7466", None));
         assert!(loopback_host("127.0.0.2:7468", Some(&bound)));
+        assert!(!loopback_host("127.0.0.1:+80", None));
+        assert!(!loopback_host("127.0.0.1:0080", None));
+        assert!(!loopback_host("localhost:0080", None));
         assert!(!loopback_host("evil.example", None));
         assert!(!loopback_host("evil.example:80", None));
         assert!(!loopback_host("127.0.0.1.evil.example", None));
@@ -602,13 +643,23 @@ mod tests {
         assert!(!loopback_host("::1", None));
         assert!(!loopback_host("", None));
 
-        assert!(loopback_origin("http://127.0.0.1:7466", None));
-        assert!(loopback_origin("http://localhost", None));
-        assert!(loopback_origin("http://[::1]:7466", None));
-        assert!(!loopback_origin("http://evil.example", None));
-        assert!(!loopback_origin("http://127.0.0.1.evil.example", None));
-        assert!(!loopback_origin("https://127.0.0.1", None));
-        assert!(!loopback_origin("http://127.0.0.1/ui", None));
-        assert!(!loopback_origin("", None));
+        let same: SocketAddr = "127.0.0.1:7466".parse().unwrap();
+        assert!(loopback_origin("http://127.0.0.1:7466", Some(&same)));
+        assert!(loopback_origin("http://localhost:7466", Some(&same)));
+        assert!(loopback_origin("http://[::1]:7466", Some(&same)));
+        assert!(loopback_origin("http://127.0.0.2:7468", Some(&bound)));
+        assert!(!loopback_origin("http://127.0.0.1:80", Some(&same)));
+        assert!(!loopback_origin("http://127.0.0.1", Some(&same)));
+        assert!(!loopback_origin("http://127.0.0.1:7466", None));
+        assert!(!loopback_origin("http://127.0.0.1:+80", Some(&same)));
+        assert!(!loopback_origin("http://127.0.0.1:0080", Some(&same)));
+        assert!(!loopback_origin("http://evil.example", Some(&same)));
+        assert!(!loopback_origin(
+            "http://127.0.0.1.evil.example",
+            Some(&same)
+        ));
+        assert!(!loopback_origin("https://127.0.0.1:7466", Some(&same)));
+        assert!(!loopback_origin("http://127.0.0.1:7466/ui", Some(&same)));
+        assert!(!loopback_origin("", Some(&same)));
     }
 }

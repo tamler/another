@@ -247,7 +247,8 @@ fn presence(status: &str, last_seen_at: Option<&str>, now: i64) -> (&'static str
     let presence = match (status, age) {
         ("active", Some(age)) if age <= LIVE_MS => "live",
         ("active", Some(age)) if age <= IDLE_MS => "idle",
-        ("active", None) => "idle",
+        // Registered, not yet seen: treat as present, not as a hold to clear.
+        ("active", None) => "live",
         _ => "offline",
     };
     let stale = presence == "offline" && age.map(|a| a > STALE_MS).unwrap_or(true);
@@ -426,9 +427,9 @@ impl Store {
             let agent = by_address.get(hold.agent.as_str());
             // A cross-node clash is only a warning. Releasing still requires the
             // local owner to be away or stale, even when the hold also overlaps locally.
-            let owner_away = agent
-                .map(|a| a.stale || away(&a.status, a.last_seen_at.as_deref(), now))
-                .unwrap_or(true);
+            // Unknown owner: do not offer Release. A live owner stays, even in a clash.
+            let owner_away =
+                agent.is_some_and(|a| a.stale || away(&a.status, a.last_seen_at.as_deref(), now));
             dash_holds[i].releasable = owner_away;
         }
 
@@ -1060,6 +1061,45 @@ mod overlap_tests {
             .release_hold_from_dashboard(&snap.holds[0].hold.hold_id)
             .unwrap_err();
         assert_eq!(err.code(), "conflict");
+    }
+
+    #[test]
+    fn active_with_no_last_seen_is_live_and_keeps_the_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .register_agent(RegisterAgent {
+                name: "alice".into(),
+                program: Program::Claude,
+                project: Some("/work/shop".into()),
+                model: None,
+                description: None,
+            })
+            .unwrap();
+        store
+            .acquire_holds(AcquireHolds {
+                agent: "alice".into(),
+                project: "shop".into(),
+                paths: vec!["src/main.rs".into()],
+                ttl_seconds: Some(3_600),
+                exclusive: true,
+                reason: None,
+            })
+            .unwrap();
+        let path = store.db_path().unwrap().to_path_buf();
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute(
+                "UPDATE agents SET last_seen_at = NULL, status = 'active' WHERE name = 'alice'",
+                [],
+            )
+            .unwrap();
+        }
+        let snap = store.dashboard_snapshot(DashboardView::LOCAL).unwrap();
+        let alice = snap.agents.iter().find(|a| a.name == "alice").unwrap();
+        assert_eq!(alice.presence, "live");
+        assert!(!alice.stale);
+        assert!(snap.holds.iter().all(|h| !h.releasable));
     }
 
     const T0_TEST: i64 = 1_800_000_000_000;

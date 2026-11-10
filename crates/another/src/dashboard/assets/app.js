@@ -96,7 +96,8 @@ function render(snap) {
     ? "Search the local record by agent, project, kind and time. Bodies of messages written on this node are included."
     : "Search summaries by agent, project, kind and time. Message bodies are not on this server.";
 
-  $("boot").hidden = true;
+  const boot = $("boot");
+  if (boot) boot.hidden = true;
   $("summary").innerHTML = summaryHtml(snap, now);
   renderAgents(snap, now);
   $("holds-body").innerHTML = holdsHtml(snap, now);
@@ -106,8 +107,12 @@ function render(snap) {
   $("peers-body").innerHTML = peersHtml(snap, now);
   fillFilters(snap);
   if (location.hash.length > 1) {
-    const target = document.querySelector(location.hash);
-    if (target) target.scrollIntoView();
+    try {
+      const target = document.querySelector(location.hash);
+      if (target && typeof target.scrollIntoView === "function") target.scrollIntoView();
+    } catch (_) {
+      // #1x is not a CSS id selector. Leave the page where it is.
+    }
   }
 }
 
@@ -423,7 +428,7 @@ function renderTimeline(scanned) {
   else more.textContent = "Older";
 }
 
-async function confirmAction(title, body, okLabel, url) {
+async function confirmAction(title, body, okLabel, url, doneText) {
   $("confirm-title").textContent = title;
   $("confirm-body").textContent = body;
   $("confirm-ok").textContent = okLabel;
@@ -447,7 +452,7 @@ async function confirmAction(title, body, okLabel, url) {
     toast((err.error && err.error.message) || "Could not apply that");
     return;
   }
-  toast(okLabel + " done");
+  toast(doneText);
   state.appended = false;
   await refresh();
 }
@@ -464,7 +469,8 @@ document.body.addEventListener("click", (event) => {
       "Release this hold?",
       who + ". This only runs on this machine, and only when that owner is away or stale.",
       "Release hold",
-      "/api/dash/holds/" + encodeURIComponent(id) + "/release"
+      "/api/dash/holds/" + encodeURIComponent(id) + "/release",
+      "Hold released"
     );
   } else if (action === "expire-request") {
     const req = state.snap.requests.find((r) => r.request_id === id);
@@ -472,7 +478,8 @@ document.body.addEventListener("click", (event) => {
       "Expire this request?",
       (req ? req.title : id) + " will be marked stale. It can still be claimed. This is local only.",
       "Expire",
-      "/api/dash/requests/" + encodeURIComponent(id) + "/expire"
+      "/api/dash/requests/" + encodeURIComponent(id) + "/expire",
+      "Request expired"
     );
   }
 });
@@ -536,9 +543,16 @@ async function poll() {
   }
 }
 
-refresh()
-  .then(() => watch())
-  .catch((err) => {
-    $("boot").textContent = "Could not read the dashboard. " + (err.message || err);
-    setLive("down", "offline");
-  });
+globalThis.__anotherDash = { render };
+
+if (!globalThis.__ANOTHER_DASH_TEST) {
+  refresh()
+    .then(() => watch())
+    .catch((err) => {
+      const bootEl = $("boot");
+      if (bootEl) {
+        bootEl.textContent = "Could not read the dashboard. " + (err.message || err);
+      }
+      setLive("down", "offline");
+    });
+}

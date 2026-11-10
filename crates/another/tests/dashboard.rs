@@ -61,9 +61,11 @@ async fn serve(opts: HttpOptions) -> Running {
         })
         .unwrap();
     let ct = CancellationToken::new();
-    let app = http_router(store.clone(), ct.clone(), &opts);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let mut opts = opts;
+    opts.dashboard_bound = Some(addr);
+    let app = http_router(store.clone(), ct.clone(), &opts);
     let stop = ct.clone();
     tokio::spawn(async move {
         axum::serve(
@@ -226,17 +228,19 @@ async fn local_dashboard_shows_bodies_and_requires_confirm() {
     assert_eq!(health["dashboard"], "local");
     assert_eq!(health["auth"], false);
 
-    let snap: Value = serde_json::from_str(
-        &http
-            .get(format!("{}/api/dash", srv.base))
-            .send()
-            .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let snap_res = http
+        .get(format!("{}/api/dash", srv.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        snap_res
+            .headers()
+            .get("x-content-type-options")
+            .and_then(|v| v.to_str().ok()),
+        Some("nosniff")
+    );
+    let snap: Value = serde_json::from_str(&snap_res.text().await.unwrap()).unwrap();
     let blob = snap.to_string();
     assert!(
         blob.contains("SECRET BODY for the local dashboard only"),
