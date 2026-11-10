@@ -129,7 +129,7 @@ All systems must understand activity underway. The activity feed is a machine-re
 
 ### How Grok Bot connects
 
-1. **Preferred (post-M1 remote path):** authenticated MCP over HTTPS — Streamable HTTP on loopback by default; for remote peers, terminate TLS at a tunnel (Cloudflare Tunnel, Tailscale Serve, or `ssh -R`) with a bearer token or mTLS. Register as `program=grok_bot`.
+1. **Preferred:** authenticated MCP over HTTPS — Streamable HTTP on loopback by default; for remote peers, terminate TLS at a tunnel (Cloudflare Tunnel, Tailscale Serve, or `ssh -R`). Clients that can set a header use a bearer token. Hosted apps that authenticate with OAuth (ChatGPT custom connectors, Claude.ai / Claude Desktop connectors) use the same server's OAuth 2.1 authorization server: a person approves each client locally, and the grant acts as one agent. Register as `program=grok_bot` or `other`.
 2. **Alternative:** periodic pull of `another activity --json` and inbox via short-lived token (outbound-only).
 3. **Security:** Never bind `0.0.0.0` without auth. Token scoped to agent name + project globs. Audit log every remote tool call. No automatic `resource_reap` from remote by default. Prefer Tailscale/private network over public internet.
 

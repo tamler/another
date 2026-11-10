@@ -80,7 +80,8 @@ async fn exposes_the_tool_surface() {
             "resource_register",
             "resource_release",
             "send_message",
-            "threads"
+            "threads",
+            "whats_new"
         ]
     );
     client.cancel().await.unwrap();

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use another_core::Store;
 use anyhow::{bail, Context, Result};
+use axum::response::IntoResponse;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::ServiceExt;
@@ -24,6 +25,8 @@ pub struct HttpOptions {
     pub allow_remote_bind: bool,
     /// Extra `Host` header values to accept (tunnel hostnames). Only with `auth`.
     pub allowed_hosts: Vec<String>,
+    /// Public origin for OAuth (`--public-url`). Bearer tokens work without it.
+    pub oauth: Option<crate::oauth_http::OAuthConfig>,
     /// Serve the federation hub endpoints (`/fed/*`), authenticated by node signatures.
     pub federation: bool,
 }
@@ -99,9 +102,12 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
     let factory_store = store.clone();
     let mut config =
         StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token());
-    if opts.auth && !opts.allowed_hosts.is_empty() {
+    if opts.auth && (!opts.allowed_hosts.is_empty() || opts.oauth.is_some()) {
         let mut hosts = config.allowed_hosts.clone();
         hosts.extend(opts.allowed_hosts.iter().cloned());
+        if let Some(oauth) = &opts.oauth {
+            hosts.push(oauth.hostname.clone());
+        }
         config = config.with_allowed_hosts(hosts);
     }
     let mcp: StreamableHttpService<AnotherMcp, LocalSessionManager> = StreamableHttpService::new(
@@ -128,7 +134,7 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
     };
     let node_id = store.node_id().to_string();
     let auth = opts.auth;
-    protected.route(
+    let mut app = protected.route(
         "/health",
         axum::routing::get(move || {
             let node_id = node_id.clone();
@@ -136,7 +142,54 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
                 axum::Json(serde_json::json!({ "ok": true, "node_id": node_id, "auth": auth }))
             }
         }),
-    )
+    );
+    if opts.auth {
+        let mut names = opts.allowed_hosts.clone();
+        if let Some(oauth) = &opts.oauth {
+            names.push(oauth.hostname.clone());
+        }
+        let ctx = crate::oauth_http::AuthContext {
+            oauth: opts.oauth.clone(),
+            hosts: crate::oauth_http::HostPolicy::loopback_plus(names),
+        };
+        if opts.oauth.is_some() {
+            app = app.merge(crate::oauth_http::router().with_state(store.clone()));
+        }
+        app = app.layer(axum::Extension(ctx.clone()));
+        let hosts = ctx.hosts.clone();
+        app = app.layer(axum::middleware::from_fn(move |req, next| {
+            let hosts = hosts.clone();
+            async move { enforce_host(hosts, req, next).await }
+        }));
+    }
+    app
+}
+
+/// DNS-rebinding check for every route except federation, which authenticates with node
+/// signatures and is left to its own host handling.
+async fn enforce_host(
+    hosts: crate::oauth_http::HostPolicy,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let path = req.uri().path();
+    if path.starts_with("/fed") {
+        return next.run(req).await;
+    }
+    let ok = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|h| hosts.allows(h));
+    if ok {
+        next.run(req).await
+    } else {
+        (
+            axum::http::StatusCode::FORBIDDEN,
+            "host is not allowed; pass the tunnel hostname with --allowed-host or --public-url",
+        )
+            .into_response()
+    }
 }
 
 pub async fn serve_http(
@@ -157,15 +210,27 @@ pub async fn serve_http(
         .await
         .with_context(|| format!("binding {addr}"))?;
     let local = listener.local_addr()?;
+    let auth_note = if opts.oauth.is_some() {
+        " (OAuth or bearer token)"
+    } else if opts.auth {
+        " (bearer token required)"
+    } else {
+        ""
+    };
     eprintln!(
-        "another: MCP (streamable HTTP) on http://{local}/mcp{}, node {}",
-        if opts.auth {
-            " (bearer token required)"
-        } else {
-            ""
-        },
+        "another: MCP (streamable HTTP) on http://{local}/mcp{auth_note}, node {}",
         store.node_id()
     );
+    if let Some(oauth) = &opts.oauth {
+        eprintln!("another: hosted apps connect to {}", oauth.resource);
+        eprintln!(
+            "another: approve a client with `another oauth approve <code> --agent NAME --project '/path/*'`"
+        );
+    } else if opts.auth {
+        eprintln!(
+            "another: OAuth is off. Pass --public-url (the tunnel origin) so ChatGPT and Claude can connect. Bearer tokens still work."
+        );
+    }
     let app = http_router(store, ct.clone(), &opts);
     axum::serve(
         listener,

@@ -5,7 +5,9 @@
 //! projects matching its globs. Every remote call is written to the audit log, and reaping
 //! is never available remotely.
 
-use another_core::{ActivityKind, ActivityQuery, AuditRecord, Since, Store, TokenScope};
+use another_core::{ActivityKind, ActivityQuery, AuditRecord, Error, Since, Store, TokenScope};
+
+use crate::oauth_http::{self, AuthContext};
 use axum::extract::{Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
@@ -65,17 +67,23 @@ pub async fn audit(store: &Store, record: AuditRecord) {
     .await;
 }
 
-fn unauthorized(message: &str) -> Response {
+fn unauthorized(message: &str, www: &str) -> Response {
     (
         StatusCode::UNAUTHORIZED,
-        [(header::WWW_AUTHENTICATE, "Bearer")],
+        [(header::WWW_AUTHENTICATE, www)],
         axum::Json(json!({ "error": { "code": "unauthorized", "message": message } })),
     )
         .into_response()
 }
 
-/// Axum middleware: verify the bearer token and attach a [`RemotePeer`].
-pub async fn require_token(State(store): State<Store>, mut req: Request, next: Next) -> Response {
+/// Axum middleware: verify a bearer token or an OAuth access token and attach a [`RemotePeer`].
+pub async fn require_token(
+    State(store): State<Store>,
+    axum::Extension(ctx): axum::Extension<AuthContext>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    let www = oauth_http::www_authenticate(ctx.oauth.as_ref());
     let operation = format!("{} {}", req.method(), req.uri().path());
     let remote = remote_addr(req.headers(), &req);
     let Some(token) = bearer(req.headers()) else {
@@ -90,10 +98,21 @@ pub async fn require_token(State(store): State<Store>, mut req: Request, next: N
             },
         )
         .await;
-        return unauthorized("missing bearer token");
+        return unauthorized("missing bearer token", &www);
     };
     let verify_store = store.clone();
-    let verified = tokio::task::spawn_blocking(move || verify_store.verify_token(&token)).await;
+    let expected = ctx.oauth.as_ref().map(|c| c.resource.clone());
+    let verified = tokio::task::spawn_blocking(move || {
+        if token.starts_with("anoat_") {
+            let Some(resource) = expected else {
+                return Err(Error::Forbidden("invalid or revoked token".into()));
+            };
+            verify_store.verify_access_token(&token, &resource)
+        } else {
+            verify_store.verify_token(&token)
+        }
+    })
+    .await;
     match verified {
         Ok(Ok(scope)) => {
             req.extensions_mut().insert(RemotePeer { scope, remote });
@@ -111,7 +130,7 @@ pub async fn require_token(State(store): State<Store>, mut req: Request, next: N
                 },
             )
             .await;
-            unauthorized("invalid or revoked token")
+            unauthorized("invalid or revoked token", &www)
         }
     }
 }
@@ -156,7 +175,10 @@ fn acting_agent(
             Ok(())
         }
         Some(who) if store.is_token_agent(scope, who).unwrap_or(false) => Ok(()),
-        Some(who) => Err(format!("this token acts as {}, not {who}", scope.agent)),
+        Some(who) => Err(format!(
+            "this connection acts as {}, not {who}. Omit {field} to act as {}, or ask the operator to approve a grant for {who}",
+            scope.agent, scope.agent
+        )),
     }
 }
 
@@ -179,7 +201,7 @@ pub fn authorize(
                     Ok(())
                 } else {
                     Err(format!(
-                        "project {p:?} is outside this token's project globs"
+                        "project {p:?} is outside this connection's project globs. Ask the operator to approve a grant that includes it"
                     ))
                 }
             }
@@ -220,7 +242,7 @@ pub fn authorize(
         }
         "send_message" => acting(args, "from"),
         "fetch_inbox" | "acknowledge" | "claim_request" | "heartbeat" | "resource_borrow"
-        | "resource_release" | "resource_heartbeat" => acting(args, "agent"),
+        | "resource_release" | "resource_heartbeat" | "whats_new" => acting(args, "agent"),
         "hold_paths" => {
             acting(args, "agent")?;
             project(s(args, "project"), true)
@@ -239,7 +261,9 @@ pub fn authorize(
             }
             None => acting(args, "agent"),
         },
-        other => Err(format!("tool {other:?} is not available to remote peers")),
+        other => Err(format!(
+            "tool {other:?} is not available on this connection. Call whats_new to catch up, or use a tool this connection is allowed to call"
+        )),
     }
 }
 

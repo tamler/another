@@ -27,6 +27,32 @@ pub struct AnotherMcp {
 
 type ToolResult<T> = Result<Json<T>, String>;
 
+fn tool_error(e: &another_core::Error) -> String {
+    let mut body = serde_json::json!({ "error": e.body() });
+    let hint = match e {
+        another_core::Error::Ambiguous(_) => {
+            Some("Pass the agent as name@project so it is unambiguous.")
+        }
+        another_core::Error::NotFound(m) if m.contains("agent") || m.contains("no client") => {
+            Some("Register the agent with register_agent, or check the name. Hosted grants are approved with `another oauth approve`.")
+        }
+        another_core::Error::Invalid(m) if m.contains("since") => {
+            Some("Pass since as a duration like 1h or 1d, an RFC 3339 time, or an event id from next_since.")
+        }
+        another_core::Error::Invalid(m) if m.contains("agent") => {
+            Some("Pass agent as name or name@project. On a hosted connection, omit agent.")
+        }
+        another_core::Error::Forbidden(_) => {
+            Some("This connection can only act as its own agent, inside its project globs.")
+        }
+        _ => None,
+    };
+    if let Some(hint) = hint {
+        body["error"]["hint"] = serde_json::json!(hint);
+    }
+    body.to_string()
+}
+
 impl AnotherMcp {
     pub fn new(store: Store) -> Self {
         Self {
@@ -44,7 +70,7 @@ impl AnotherMcp {
         let store = self.store.clone();
         match tokio::task::spawn_blocking(move || f(&store)).await {
             Ok(Ok(v)) => Ok(Json(v)),
-            Ok(Err(e)) => Err(serde_json::json!({ "error": e.body() }).to_string()),
+            Ok(Err(e)) => Err(tool_error(&e)),
             Err(e) => Err(
                 serde_json::json!({ "error": { "code": "internal", "message": e.to_string() } })
                     .to_string(),
@@ -100,6 +126,16 @@ pub struct SendMessageArgs {
     pub create_request: bool,
     /// For requests: mark stale if not done within this many seconds.
     pub due_in_seconds: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WhatsNewArgs {
+    /// Agent to catch up as (`name` or `name@project`). On a hosted connection, omit this.
+    pub agent: Option<String>,
+    /// Activity window: a duration like `1d`, an RFC 3339 time, or an event id. Default: the last day. Unread mail is included either way.
+    pub since: Option<String>,
+    /// Maximum items in each section (default 10, at most 20).
+    pub limit: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -409,8 +445,7 @@ impl AnotherMcp {
     }
 
     #[tool(
-        description = "Fetch an agent's inbox: messages (unread by default), counters, and open \
-        requests addressed to or owned by the agent."
+        description = "Fetch one agent's inbox when you need message bodies. Prefer whats_new first; it returns subjects only. Unread messages by default, plus counters and open requests addressed to or owned by the agent."
     )]
     async fn fetch_inbox(&self, Parameters(a): Parameters<FetchInboxArgs>) -> ToolResult<Inbox> {
         self.run(move |s| {
@@ -703,6 +738,31 @@ impl AnotherMcp {
     }
 
     #[tool(
+        description = "Catch up in one call. Use this first in a conversation, before fetch_inbox \
+        or activity_feed. Returns unread subjects (no message bodies), open requests, and recent \
+        activity for one agent, plus a next field that says what to do. If next says nothing is \
+        waiting, stop and do not call more tools."
+    )]
+    async fn whats_new(
+        &self,
+        Parameters(a): Parameters<WhatsNewArgs>,
+    ) -> ToolResult<another_core::WhatsNew> {
+        self.run(move |s| {
+            let agent = a.agent.ok_or_else(|| {
+                another_core::Error::Invalid(
+                    "pass agent (name or name@project). On a hosted connection, omit agent and this grant's agent is used".into(),
+                )
+            })?;
+            let since = match a.since {
+                Some(v) => Some(Since::parse(&v, s.now())?),
+                None => None,
+            };
+            s.whats_new(&agent, since, a.limit.unwrap_or(10))
+        })
+        .await
+    }
+
+    #[tool(
         description = "Read the activity feed: who is doing what (mail, requests, holds, \
         sessions), oldest first. Items have one-line summaries and ids, never message bodies. \
         Pass next_since back as since to page forward."
@@ -738,12 +798,13 @@ impl AnotherMcp {
     }
 }
 
-#[tool_handler(router = self.tool_router, name = "another", instructions = "Another is a local inbox shared by coding agents on this machine. \
-Call register_agent once per session (and heartbeat periodically), fetch_inbox at the start of \
-work, acknowledge messages you have handled, claim requests before working on them, and \
-hold_paths before editing files another agent might touch. Before starting a server or job, \
-call resource_find and borrow what is already running. Holds and leases expire unless renewed \
-by heartbeat.")]
+#[tool_handler(router = self.tool_router, name = "another", instructions = "Another is the shared inbox for the agents on this node, including hosted chat apps. \
+Call whats_new first and follow its next field; if nothing is waiting, stop. \
+Send mail with send_message, acknowledge messages you have handled, and claim_request before \
+working a request. hold_paths before editing files another agent might touch. Before starting \
+a server or job, call resource_find and borrow what is already running. A hosted connection \
+acts as exactly one agent: omit the agent field and it is filled in. Reaping is never remote. \
+Errors are {\"error\":{\"code\",\"message\",\"hint\"}}; follow hint.")]
 impl ServerHandler for AnotherMcp {
     async fn call_tool(
         &self,
@@ -787,8 +848,13 @@ impl ServerHandler for AnotherMcp {
                     record.detail.unwrap_or_default()
                 ));
                 remote::audit(&self.store, record).await;
-                let body =
-                    serde_json::json!({ "error": { "code": "forbidden", "message": reason } });
+                let body = serde_json::json!({
+                    "error": {
+                        "code": "forbidden",
+                        "message": reason,
+                        "hint": "Stay inside this connection's agent and project globs. Call whats_new to see what is waiting, or ask the operator to approve a wider grant."
+                    }
+                });
                 return Ok(
                     CallToolResult::error(vec![ContentBlock::text(body.to_string())]).into(),
                 );

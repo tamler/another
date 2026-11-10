@@ -12,6 +12,7 @@ mod federation;
 mod holds;
 mod identity;
 mod mail;
+mod oauth;
 mod requests;
 mod resources;
 mod store;
@@ -21,7 +22,7 @@ mod wake;
 
 pub use activity::{
     ActivityFeed, ActivityItem, ActivityKind, ActivityQuery, ActivitySummary, AgentPresence,
-    RequestCounts, Since,
+    DigestMessage, DigestRequest, RequestCounts, Since, WhatsNew,
 };
 pub use error::{Error, ErrorBody, Result};
 pub use federation::{
@@ -37,6 +38,12 @@ pub use identity::{Agent, Program, Project, RegisterAgent};
 pub use mail::{
     AckOutcome, Importance, Inbox, InboxItem, InboxQuery, Message, NewRequest, Reply, SendMessage,
     Thread, ThreadSummary,
+};
+pub use oauth::{
+    canonical_resource, error_redirect, redirect_host, redirect_is_loopback, redirect_matches,
+    validate_cimd, validate_redirect_uri, Approval, AuthorizationStatus, AuthorizeInput,
+    ClientProfile, ClientRegistration, CodeExchange, IssuedTokens, OAuthFail, OauthGrant,
+    PendingAuthorization, PendingView, RefreshExchange, RegisteredClient, ACCESS_TTL_SECS,
 };
 pub use requests::{Request, RequestAction, RequestFilter, RequestStatus, RequestUpdate};
 pub use resources::{
