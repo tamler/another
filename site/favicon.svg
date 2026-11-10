@@ -1,1 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="8" fill="#f8f8f4"/><text x="32" y="47" text-anchor="middle" font-family="monospace" font-size="52" fill="#292922">a</text></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+<title>Another</title>
+<rect width="16" height="16" rx="2" fill="#f8f8f4"/>
+<rect x="2" y="3" width="3" height="10" fill="#292922"/>
+<rect x="11" y="3" width="3" height="10" fill="#292922"/>
+<rect x="6" y="9" width="4" height="4" fill="#705000"/>
+</svg>

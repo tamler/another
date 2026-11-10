@@ -9,7 +9,7 @@ mkdir -p dist/guides/claude-code-codex dist/guides/mcp-agent-messaging dist/guid
 mkdir -p dist/docs/install/macos dist/docs/install/linux dist/docs/install/windows dist/docs/faq dist/docs/concepts dist/compare/alternatives
 mkdir -p dist/guides/git-worktrees dist/guides/hand-off-tasks dist/guides/share-model-server dist/guides/wake-idle-agents dist/guides/agents-on-two-machines
 mkdir -p dist/guides/multiple-claude-code-sessions dist/changelog dist/building
-cp index.html style.css 404.html _headers favicon.svg og.png twitter.png sitemap.xml robots.txt llms.txt dist/
+cp index.html style.css 404.html _headers favicon.svg favicon.ico apple-touch-icon.png icon-192.png icon-512.png site.webmanifest og.png twitter.png sitemap.xml robots.txt llms.txt dist/
 cp docs/index.html dist/docs/index.html
 cp docs/getting-started/index.html dist/docs/getting-started/index.html
 cp docs/install/index.html dist/docs/install/index.html

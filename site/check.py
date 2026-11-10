@@ -37,6 +37,7 @@ EXPECTED = {
     "docs/install/index.html", "compare/index.html", "404.html", "style.css",
     "_headers", "fonts/FragmentMono-Regular.woff2", "fonts/OFL.txt", "og.png",
     "twitter.png", "sitemap.xml", "robots.txt", "llms.txt", "favicon.svg",
+    "favicon.ico", "apple-touch-icon.png", "icon-192.png", "icon-512.png", "site.webmanifest",
     "guides/index.html", "guides/claude-code-codex/index.html", "guides/mcp-agent-messaging/index.html",
     "guides/avoid-agent-file-conflicts/index.html", "guides/local-agent-inbox/index.html",
     "docs/install/macos/index.html", "docs/install/linux/index.html", "docs/install/windows/index.html",
@@ -67,6 +68,7 @@ class Page(HTMLParser):
         self.title, self.in_title, self.in_script, self.script_data = "", False, False, ""
         self.text = ""
         self.headings = self.mains = 0
+        self.relations = []
         self.feed(path.read_text())
         self.close()
         assert not self.in_script, f"{path}: unclosed JSON-LD"
@@ -86,6 +88,8 @@ class Page(HTMLParser):
             if key:
                 assert key not in self.meta, f"{self.path}: duplicate metadata {key}"
                 self.meta[key] = attrs.get("content", "")
+        if tag == "link":
+            self.relations.append((attrs.get("rel", ""), attrs.get("href", "")))
         if tag == "link" and attrs.get("rel") == "canonical":
             self.canonicals.append(attrs.get("href"))
         if "id" in attrs:
@@ -107,7 +111,7 @@ class Page(HTMLParser):
         for key in ("src", "srcset", "poster", "data"):
             if key in attrs:
                 assert key == "src" and attrs[key].startswith("/") and not attrs[key].startswith("//"), f"{self.path}: external/unsupported asset"
-        if tag == "link" and attrs.get("rel") in {"stylesheet", "preload", "icon"}:
+        if tag == "link" and attrs.get("rel") in {"stylesheet", "preload", "icon", "apple-touch-icon", "manifest"}:
             assert attrs.get("href", "").startswith("/") and not attrs["href"].startswith("//"), f"{self.path}: external asset"
 
     def handle_endtag(self, tag):
@@ -136,6 +140,16 @@ class Page(HTMLParser):
 
 
 pages = {p: Page(p) for p in ROOT.rglob("*.html")}
+ICON_LINKS = (
+    ("icon", "/favicon.ico"),
+    ("icon", "/favicon.svg"),
+    ("apple-touch-icon", "/apple-touch-icon.png"),
+    ("manifest", "/site.webmanifest"),
+)
+IMAGE_ALT = "Another. One inbox for coding agents."
+for path, page in pages.items():
+    for rel, href in ICON_LINKS:
+        assert (rel, href) in page.relations, f"{path}: missing link rel={rel} href={href}"
 for path, page in pages.items():
     for command in re.findall(r"cargo install[^\n]*", page.text):
         if "--git" in command:
@@ -184,7 +198,7 @@ for path, page in pages.items():
     for key, value in required.items():
         assert page.meta.get(key) == value, f"{path}: {key}"
     for key in ("og:image:alt", "twitter:image:alt"):
-        assert page.meta.get(key), f"{path}: missing {key}"
+        assert page.meta.get(key) == IMAGE_ALT, f"{path}: {key}"
     assert len(page.structured) == 1, f"{path}: one JSON-LD graph"
     data = page.structured[0]
     assert data["@context"] == "https://schema.org"
@@ -257,14 +271,44 @@ for url in re.findall(r"\]\((https://[^)]+)\)", llms):
     if url.startswith(ORIGIN):
         assert url in canonical_urls, f"llms: unknown page {url}"
 assert canonical_urls <= set(re.findall(r"\]\((https://[^)]+)\)", llms))
-for name in ("og.png", "twitter.png"):
+PNG_SIZES = {
+    "og.png": (1200, 630),
+    "twitter.png": (1200, 630),
+    "apple-touch-icon.png": (180, 180),
+    "icon-192.png": (192, 192),
+    "icon-512.png": (512, 512),
+}
+for name, size in PNG_SIZES.items():
     png = (ROOT / name).read_bytes()
     assert png[:8] == b"\x89PNG\r\n\x1a\n" and png[12:16] == b"IHDR", f"{name}: PNG"
-    assert struct.unpack(">II", png[16:24]) == (1200, 630), f"{name}: dimensions"
+    assert struct.unpack(">II", png[16:24]) == size, f"{name}: dimensions"
+assert (ROOT / "og.png").read_bytes() != (ROOT / "twitter.png").read_bytes(), "social images must differ"
+ico = (ROOT / "favicon.ico").read_bytes()
+reserved, kind, count = struct.unpack_from("<HHH", ico, 0)
+assert (reserved, kind, count) == (0, 1, 3), "favicon.ico header"
+sizes = []
+for index in range(count):
+    width, height, _colors, _reserved, planes, bitcount, nbytes, offset = struct.unpack_from("<BBBBHHII", ico, 6 + 16 * index)
+    blob = ico[offset:offset + nbytes]
+    assert planes == 1 and bitcount == 32 and blob[:8] == b"\x89PNG\r\n\x1a\n", "favicon.ico entry"
+    stored = struct.unpack(">II", blob[16:24])
+    assert (width, height) == stored, "favicon.ico size"
+    sizes.append(stored)
+assert sizes == [(16, 16), (32, 32), (48, 48)], sizes
+manifest = json.loads((ROOT / "site.webmanifest").read_text())
+assert manifest["name"] == "Another" and manifest["display"] == "browser"
+assert [(item["src"], item["sizes"], item["type"]) for item in manifest["icons"]] == [
+    ("/icon-192.png", "192x192", "image/png"),
+    ("/icon-512.png", "512x512", "image/png"),
+]
+svg = (ROOT / "favicon.svg").read_text()
+assert 'fill="#f8f8f4"' in svg and 'fill="#292922"' in svg and 'fill="#705000"' in svg
+assert "<text" not in svg, "favicon.svg should be the mark, not a letter"
 css = (ROOT / "style.css").read_text()
 assert "@import" not in css
 for asset in re.findall(r"url\([\"']?([^\"')]+)", css):
     assert asset.startswith("/") and not asset.startswith("//") and (ROOT / asset.lstrip("/")).is_file()
 headers = (ROOT / "_headers").read_text()
 assert "default-src 'none'" in headers and "script-src" not in headers, "executable scripts must stay blocked"
-print(f"PASS: {len(EXPECTED)} allowed public files; {len(pages)} HTML pages; {len(ROUTES)} unique canonical/metadata/JSON-LD records; links/anchors; sitemap/robots/llms; 1200x630 PNGs; no executable scripts or external assets.")
+assert "manifest-src 'self'" in headers, "the web app manifest must be allowed from this site"
+print(f"PASS: {len(EXPECTED)} allowed public files; {len(pages)} HTML pages; {len(ROUTES)} unique canonical/metadata/JSON-LD records; links/anchors; sitemap/robots/llms; icons and 1200x630 social images; no executable scripts or external assets.")

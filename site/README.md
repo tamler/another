@@ -36,7 +36,12 @@ and disables access to camera, microphone and location.
 Canonical origin: `https://toanother.one`. The existing Pages project is
 `another-site-review`, production branch `main`. Deploy only after checks and
 independent review; domain and DNS changes need separate authorization. Source
-and capture files, including `og-source.jpg`, stay out of the public allowlist.
+and capture files, including `og-source.jpg` and `render-brand.py`, stay out of
+the public allowlist. `render-brand.py` rebuilds the icon set and the social
+images from the mark in that file. The words are JetBrains Mono ExtraBold
+(see [fonts/jetbrains/README.md](fonts/jetbrains/README.md)). It needs `fonttools`
+(`pip install fonttools`). The site build copies the
+generated files and does not run the script.
 
 `scripts/check-copy.py` rejects em dashes, en dashes, and a banned-phrase list
 in this directory and in `docs/PROMOTION.md`. Canonicals describe the public
