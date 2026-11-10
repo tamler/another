@@ -438,7 +438,7 @@ fn parse_secs(raw: &str) -> anyhow::Result<i64> {
         _ => anyhow::bail!("invalid duration {raw:?}: use s, m, h, d or w"),
     };
     n.checked_mul(mult)
-        .ok_or_else(|| anyhow::anyhow!("duration {raw:?} is too far ahead"))
+        .ok_or_else(|| anyhow::anyhow!("invalid duration {raw:?}: too large"))
 }
 
 #[derive(Debug, Subcommand)]

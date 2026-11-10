@@ -168,7 +168,10 @@ fn absurd_durations_are_errors_not_panics() {
         dir.path(),
         &["agent", "register", "alice", "--program", "claude"],
     );
-    for expires in ["100000000000000000d", "9223372036854775807"] {
+    for (expires, message) in [
+        ("100000000000000000d", "too large"),
+        ("9223372036854775807", "too far in the future"),
+    ] {
         let out = another(
             dir.path(),
             &["token", "create", "--agent", "alice", "--expires", expires],
@@ -176,7 +179,7 @@ fn absurd_durations_are_errors_not_panics() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(1), "{expires}: {stderr}");
         assert!(!stderr.contains("panicked"), "{expires}: {stderr}");
-        assert!(stderr.contains("too far ahead"), "{expires}: {stderr}");
+        assert!(stderr.contains(message), "{expires}: {stderr}");
     }
 }
 

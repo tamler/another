@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use crate::crypto;
 use crate::error::{Error, Result};
 use crate::store::{new_id, Store, Tx};
-use crate::time::{after_secs, fmt_opt, fmt_ts};
+use crate::time::{fmt_opt, fmt_ts, later_secs};
 
 /// What a paired node may do through the hub.
 #[derive(
@@ -979,7 +979,7 @@ impl Store {
             let hub = local_entry(tx)?;
             require_named(&hub)?;
             let invite_id = new_id();
-            let expires_at = after_secs(tx.now, expires_in_seconds, "invite expiry")?;
+            let expires_at = later_secs(tx.now, expires_in_seconds, "invite expiry")?;
             tx.execute(
                 "INSERT INTO invites (invite_id, secret_hash, perms, created_at, expires_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)",

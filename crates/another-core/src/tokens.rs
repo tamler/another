@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use crate::error::{Error, Result};
 use crate::identity::{address, normalize_project_path, resolve_agent};
 use crate::store::{new_id, Store};
-use crate::time::{after_secs, fmt_opt, fmt_ts};
+use crate::time::{fmt_opt, fmt_ts, later_secs};
 
 const TOKEN_PREFIX: &str = "ano_";
 
@@ -190,7 +190,7 @@ impl Store {
             let me = resolve_agent(tx, tx.node_id, agent)?;
             let token_id = new_id();
             let expires_at = expires_in_seconds
-                .map(|s| after_secs(tx.now, s, "expiry"))
+                .map(|s| later_secs(tx.now, s, "token expiry"))
                 .transpose()?;
             let secret = format!("{TOKEN_PREFIX}{token_id}_{secret_part}");
             tx.emit(
