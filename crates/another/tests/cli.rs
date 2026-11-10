@@ -160,6 +160,29 @@ fn errors_are_structured_in_json_mode() {
     assert_eq!(body["error"]["code"], "not_found");
 }
 
+/// BH-5: a duration whose unit multiplication overflows is an error, not a panic.
+#[test]
+fn absurd_durations_are_errors_not_panics() {
+    let dir = tempfile::tempdir().unwrap();
+    json(
+        dir.path(),
+        &["agent", "register", "alice", "--program", "claude"],
+    );
+    for (expires, message) in [
+        ("100000000000000000d", "too large"),
+        ("9223372036854775807", "too far in the future"),
+    ] {
+        let out = another(
+            dir.path(),
+            &["token", "create", "--agent", "alice", "--expires", expires],
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{expires}: {stderr}");
+        assert!(!stderr.contains("panicked"), "{expires}: {stderr}");
+        assert!(stderr.contains(message), "{expires}: {stderr}");
+    }
+}
+
 #[test]
 fn serve_refuses_non_loopback_binds() {
     let dir = tempfile::tempdir().unwrap();

@@ -3,6 +3,17 @@
 
 use chrono::{DateTime, SecondsFormat};
 
+use crate::error::{Error, Result};
+
+/// `now` plus `secs` seconds, in milliseconds. Refuses a result that overflows or that
+/// cannot be shown as a date, instead of wrapping around.
+pub(crate) fn later_secs(now: i64, secs: i64, what: &str) -> Result<i64> {
+    secs.checked_mul(1000)
+        .and_then(|ms| now.checked_add(ms))
+        .filter(|&t| DateTime::from_timestamp_millis(t).is_some())
+        .ok_or_else(|| Error::Invalid(format!("{what} is too far in the future")))
+}
+
 pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
