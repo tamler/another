@@ -59,6 +59,8 @@ Apache-2.0; agent names unique per project; hooks-first (wake adapters are optio
 
 A loopback dashboard shipped after this milestone. It is not part of the M6 brief above. See [docs/DASHBOARD.md](docs/DASHBOARD.md) and decisions D39-D44.
 
+Push delivery and enforced holds (mid-task notices, the edit guard, holds across worktrees, the launchd daemon, Herdr wakes, `another stats`) came after that, also outside the milestone briefs. See [docs/HOOKS.md](docs/HOOKS.md), [docs/HOLDS.md](docs/HOLDS.md), [docs/DAEMON.md](docs/DAEMON.md) and decisions D45-D53.
+
 ## Keep the README status current
 
 Whenever you complete a definition-of-done item or open a PR that changes milestone progress, update the **Status** section in [README.md](README.md) in the same PR.

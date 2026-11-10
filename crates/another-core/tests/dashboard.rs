@@ -63,6 +63,7 @@ fn setup() -> (Store, std::sync::Arc<std::sync::atomic::AtomicI64>) {
             ttl_seconds: Some(4 * 3_600),
             exclusive: true,
             reason: Some("editing the router".into()),
+            repo_wide: false,
         })
         .unwrap();
     let bob_hold = store
@@ -73,6 +74,7 @@ fn setup() -> (Store, std::sync::Arc<std::sync::atomic::AtomicI64>) {
             ttl_seconds: Some(4 * 3_600),
             exclusive: true,
             reason: Some("tests".into()),
+            repo_wide: false,
         })
         .unwrap();
     assert!(

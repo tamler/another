@@ -109,6 +109,47 @@ impl Store {
         Self::init(conn, clock, Some(path))
     }
 
+    /// Open an existing database for a hook that runs on every tool call: nothing is created,
+    /// nothing is migrated, opening writes nothing, and `busy` bounds every wait for a lock
+    /// so a busy database fails fast instead of stalling the agent. Fails when the database
+    /// is missing or its schema is not current; a normal [`Store::open`] fixes both.
+    pub fn open_quick(home: &Path, busy: std::time::Duration) -> Result<Store> {
+        use rusqlite::OpenFlags;
+        let path = home.join(DB_FILE);
+        let conn = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(busy)?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version != MIGRATIONS.len() as i64 {
+            return Err(Error::Invalid(format!(
+                "database schema is v{version}, this build expects v{}; a normal open migrates it",
+                MIGRATIONS.len()
+            )));
+        }
+        let (node_id, secret): (String, Option<String>) = conn.query_row(
+            "SELECT node_id, secret_key FROM nodes WHERE is_local = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let secret = secret
+            .ok_or_else(|| Error::Invalid("node key missing; a normal open creates it".into()))?;
+        Ok(Store {
+            inner: Arc::new(Inner {
+                conn: Mutex::new(conn),
+                node_id,
+                key: crate::crypto::decode_secret(&secret)?,
+                clock: Clock::System,
+                path: Some(path),
+            }),
+        })
+    }
+
     /// An in-memory store (tests and experiments).
     pub fn open_in_memory(clock: Clock) -> Result<Store> {
         Self::init(Connection::open_in_memory()?, clock, None)
@@ -552,6 +593,18 @@ CREATE TABLE oauth_tokens (
     last_used_at INTEGER
 );
 CREATE INDEX oauth_tokens_by_grant ON oauth_tokens(grant_id);
+"#,
+    // Node-local cache of which git repository each local project belongs to (see repo.rs).
+    // Derived from files on this machine, so it is not an event and never syncs.
+    // An empty repo_key means "checked: not in a git repository".
+    r#"
+CREATE TABLE project_repos (
+    project_id  TEXT PRIMARY KEY REFERENCES projects(project_id),
+    repo_key    TEXT NOT NULL,
+    repo_prefix TEXT NOT NULL,
+    checked_at  INTEGER NOT NULL
+);
+CREATE INDEX project_repos_by_key ON project_repos(repo_key);
 "#,
 ];
 

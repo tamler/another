@@ -55,6 +55,8 @@ impl Env {
             .env_remove("TMUX_PANE")
             .env_remove("CMUX_SURFACE_ID")
             .env_remove("HERDR_BIN_PATH")
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("TERM_PROGRAM")
             .env_remove("GROK_HOOK_EVENT")
             .stdin(Stdio::null());
         c

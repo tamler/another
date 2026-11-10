@@ -363,6 +363,7 @@ fn mail_feed_resources_and_holds_across_nodes() {
             ttl_seconds: Some(3600),
             exclusive: true,
             reason: None,
+            repo_wide: false,
         })
         .unwrap();
     sync(&laptop);
@@ -375,6 +376,7 @@ fn mail_feed_resources_and_holds_across_nodes() {
             ttl_seconds: None,
             exclusive: true,
             reason: None,
+            repo_wide: false,
         })
         .unwrap();
     assert_eq!(mine.granted.len(), 1);

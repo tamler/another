@@ -185,10 +185,12 @@ pub fn holds(hs: &[Hold]) -> String {
 pub fn conflicts(cs: &[HoldConflict]) -> String {
     cs.iter()
         .map(|c| {
+            // The project matters: the holder may be in a sibling checkout of the repository.
             format!(
-                "conflict: {} is held by {} ({}, {} until {})\n",
+                "conflict: {} is held by {} ({}:{}, {} until {})\n",
                 c.path,
                 c.held.agent,
+                c.held.project,
                 c.held.pattern,
                 if c.held.exclusive {
                     "exclusive"
@@ -470,7 +472,8 @@ pub fn sync_report(r: &crate::fed::SyncReport) -> String {
 
 pub fn wake_targets(ts: &[WakeTarget]) -> String {
     if ts.is_empty() {
-        return "no wake targets (hooks record tmux/cmux panes automatically)".to_string();
+        return "no wake targets (hooks record Herdr, tmux and cmux panes automatically)"
+            .to_string();
     }
     ts.iter()
         .map(|t| {
@@ -503,4 +506,117 @@ pub fn wake_plans(ps: &[crate::wake::WakePlan]) -> String {
             (None, false) => format!("skipped {}\n", p.agent),
         })
         .collect()
+}
+
+pub fn prune_rows(rows: &[crate::wake::PruneRow], dry_run: bool) -> String {
+    if rows.is_empty() {
+        return "no wake targets".to_string();
+    }
+    let verb = if dry_run { "would drop" } else { "dropped" };
+    rows.iter()
+        .map(|r| {
+            let what = if r.pruned { verb } else { "kept" };
+            format!(
+                "{what:<10} {:<24} {:<6} {}  ({})\n",
+                r.agent,
+                r.via.as_str(),
+                r.target,
+                r.reason
+            )
+        })
+        .collect()
+}
+
+pub fn daemon_report(r: &crate::daemon::DaemonReport) -> String {
+    let mut out = String::new();
+    let prefix = if r.dry_run { "would " } else { "" };
+    let _ = writeln!(out, "{prefix}{} {}", r.change, r.plist);
+    for c in &r.commands {
+        let _ = writeln!(out, "{prefix}run: {}", c.join(" "));
+    }
+    let _ = write!(
+        out,
+        "label {}, serving {} (loopback), log {}",
+        r.label, r.bind, r.log
+    );
+    out
+}
+
+pub fn trial_stats(s: &another_core::TrialStats) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "Another stats from {} to {}", s.since, s.until);
+    let _ = writeln!(out, "Collisions caught");
+    let _ = writeln!(
+        out,
+        "  edits stopped by a hold        {:>5}  ({} distinct collision(s))",
+        s.edits_blocked, s.collisions
+    );
+    let _ = writeln!(
+        out,
+        "  holds taken by the edit hook   {:>5}",
+        s.holds_auto_acquired
+    );
+    let _ = writeln!(out, "Mail pushed into running sessions");
+    let _ = writeln!(
+        out,
+        "  mid-task notices               {:>5}",
+        s.notices_mid_task
+    );
+    let _ = writeln!(
+        out,
+        "  Herdr wakes sent               {:>5}  ({} failed)",
+        s.wakes_sent, s.wakes_failed
+    );
+    let _ = writeln!(
+        out,
+        "  messages pushed                {:>5}  ({} then read, acknowledged or answered)",
+        s.messages_pushed, s.pushes_acted_on
+    );
+    let _ = writeln!(
+        out,
+        "  notices at a prompt            {:>5}",
+        s.notices_prompt
+    );
+    let _ = writeln!(out, "Requests");
+    let _ = writeln!(
+        out,
+        "  created {}, claimed {}, completed {}",
+        s.requests_created, s.requests_claimed, s.requests_completed
+    );
+    if !s.blocked.is_empty() {
+        let _ = writeln!(out, "Recent stopped edits");
+        for b in s.blocked.iter().take(10) {
+            let _ = writeln!(
+                out,
+                "  {} {} on {}:{}, held by {} ({}:{})",
+                b.at, b.agent, b.project, b.path, b.holder, b.holder_project, b.pattern
+            );
+        }
+    }
+    if !s.wakes.is_empty() {
+        let _ = writeln!(out, "Recent wakes");
+        for w in s.wakes.iter().take(10) {
+            let _ = writeln!(
+                out,
+                "  {} {} {} {} ({} message(s)) {}",
+                w.at, w.agent, w.via, w.target, w.messages, w.outcome
+            );
+        }
+    }
+    out
+}
+
+pub fn daemon_status(s: &crate::daemon::DaemonStatus) -> String {
+    let yes = |b: bool| if b { "yes" } else { "no" };
+    format!(
+        "label     {}\nplist     {} (installed: {})\nloaded    {}\npid       {}\nbind      {}\nhealthy   {}\nlog       {}",
+        s.label,
+        s.plist,
+        yes(s.installed),
+        yes(s.loaded),
+        s.pid.map_or("-".to_string(), |p| p.to_string()),
+        s.bind.as_deref().unwrap_or("-"),
+        yes(s.healthy),
+        s.log
+    )
 }

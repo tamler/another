@@ -58,6 +58,7 @@ async fn serve(opts: HttpOptions) -> Running {
             ttl_seconds: Some(3600),
             exclusive: true,
             reason: Some("editing".into()),
+            repo_wide: false,
         })
         .unwrap();
     let ct = CancellationToken::new();

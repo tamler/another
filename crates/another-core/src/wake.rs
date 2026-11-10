@@ -108,6 +108,25 @@ impl Store {
         })
     }
 
+    /// Forget an automatically captured target (never a manual one). With `only`, forget it
+    /// only while it still names that adapter and target, so a session ending in one pane
+    /// does not drop the capture a newer session made elsewhere.
+    pub fn clear_auto_wake_target(
+        &self,
+        agent: &str,
+        only: Option<(WakeVia, &str)>,
+    ) -> Result<bool> {
+        self.write(|tx| {
+            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let (via, target) = only.map_or((None, None), |(v, t)| (Some(v.as_str()), Some(t)));
+            Ok(tx.execute(
+                "DELETE FROM wake_targets WHERE agent_id = ?1 AND auto = 1
+                   AND (?2 IS NULL OR (via = ?2 AND target = ?3))",
+                params![me.id, via, target],
+            )? > 0)
+        })
+    }
+
     pub fn wake_target(&self, agent: &str) -> Result<Option<WakeTarget>> {
         Ok(self
             .wake_targets()?

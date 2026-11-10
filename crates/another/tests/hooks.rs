@@ -36,7 +36,13 @@ impl Env {
             .env("ANOTHER_HOME", &self.another_home)
             .env_remove("ANOTHER_AGENT")
             .env_remove("GROK_HOOK_EVENT")
-            .env_remove("ANOTHER_LOG");
+            .env_remove("ANOTHER_LOG")
+            // Tests may run inside a multiplexer; keep its pane out of captured targets.
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("HERDR_BIN_PATH")
+            .env_remove("TMUX_PANE")
+            .env_remove("CMUX_SURFACE_ID")
+            .env_remove("TERM_PROGRAM");
         c
     }
 
@@ -128,6 +134,16 @@ fn ours(v: &Value) -> usize {
         .count()
 }
 
+/// Entries Another installs in one client config: session start, prompt, session end and
+/// post-tool everywhere, plus the pre-edit guard except for Cursor.
+fn installed(rel: &str) -> usize {
+    if rel.contains(".cursor") {
+        4
+    } else {
+        5
+    }
+}
+
 #[test]
 fn claude_install_preserves_existing_config_and_is_idempotent() {
     let env = Env::new();
@@ -159,10 +175,26 @@ fn claude_install_preserves_existing_config_and_is_idempotent() {
     let after = env.read(".claude/settings.json");
     assert_eq!(after["model"], "some-model");
     assert_eq!(after["permissions"], original["permissions"]);
-    assert_eq!(
-        after["hooks"]["PreToolUse"],
-        original["hooks"]["PreToolUse"]
+    // The user's own PreToolUse group is untouched and stays first; ours is appended with
+    // a matcher for the edit tools.
+    let pre = after["hooks"]["PreToolUse"].as_array().unwrap();
+    assert_eq!(pre[0], original["hooks"]["PreToolUse"][0]);
+    assert_eq!(pre.len(), 2);
+    assert_eq!(pre[1]["matcher"], "Edit|Write|MultiEdit|NotebookEdit");
+    assert!(pre[1]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .ends_with("pre-edit --client claude"));
+    let post = after["hooks"]["PostToolUse"].as_array().unwrap();
+    assert_eq!(post.len(), 1);
+    assert!(
+        post[0].get("matcher").is_none(),
+        "post-tool runs after every tool"
     );
+    assert!(post[0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .ends_with("post-tool --client claude"));
     let start = after["hooks"]["SessionStart"].as_array().unwrap();
     assert_eq!(
         start[0]["hooks"][0]["command"], "echo mine",
@@ -170,8 +202,8 @@ fn claude_install_preserves_existing_config_and_is_idempotent() {
     );
     assert_eq!(
         ours(&after),
-        3,
-        "SessionStart, UserPromptSubmit, SessionEnd"
+        5,
+        "SessionStart, UserPromptSubmit, SessionEnd, PostToolUse, PreToolUse"
     );
     assert!(commands(&after)
         .iter()
@@ -244,27 +276,45 @@ fn installs_every_client_format() {
         .any(|n| n.as_str().unwrap().contains("/hooks")));
 
     let codex = env.read(".codex/hooks.json");
-    assert_eq!(ours(&codex), 3);
+    assert_eq!(ours(&codex), 5);
     assert!(codex["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap()
         .ends_with("prompt --client codex"));
+    // Codex edits files through apply_patch.
+    assert_eq!(
+        codex["hooks"]["PreToolUse"][0]["matcher"],
+        "apply_patch|Edit|Write"
+    );
 
     let grok = env.read(".grok/hooks/another.json");
-    assert_eq!(ours(&grok), 3);
+    assert_eq!(ours(&grok), 5);
     assert_eq!(
         grok["hooks"]["SessionEnd"][0]["hooks"][0]["type"],
         "command"
     );
+    assert_eq!(
+        grok["hooks"]["PreToolUse"][0]["matcher"],
+        "Edit|Write|MultiEdit|NotebookEdit"
+    );
 
     let cursor = env.read(".cursor/hooks.json");
     assert_eq!(cursor["version"], 1);
+    assert_eq!(ours(&cursor), 4);
     assert_eq!(cursor["hooks"]["afterFileEdit"][0]["command"], "fmt.sh");
     assert!(cursor["hooks"]["sessionStart"][0]["command"]
         .as_str()
         .unwrap()
         .ends_with("session-start --client cursor"));
     assert!(cursor["hooks"]["beforeSubmitPrompt"].is_array());
+    assert!(cursor["hooks"]["postToolUse"][0]["command"]
+        .as_str()
+        .unwrap()
+        .ends_with("post-tool --client cursor"));
+    assert!(
+        cursor["hooks"].get("preToolUse").is_none(),
+        "no edit guard for Cursor"
+    );
 
     let status: Value = serde_json::from_str(&env.ok(&["--json", "hook", "status"])).unwrap();
     assert!(status
@@ -509,7 +559,7 @@ fn install_and_uninstall_preserve_config_permissions() {
     env.ok(&["hook", "install", "--client", "all"]);
     for (rel, _, m) in &fixtures {
         let path = env.home.join(rel);
-        assert_eq!(ours(&env.read(rel)), 3, "{rel} installed");
+        assert_eq!(ours(&env.read(rel)), installed(rel), "{rel} installed");
         assert_eq!(mode(&path), *m, "{rel} keeps its mode after install");
     }
     // A config Another creates is private.
@@ -570,7 +620,7 @@ fn new_client_configs_are_private_and_symlinks_survive() {
         .is_symlink());
     let v: Value = serde_json::from_str(&std::fs::read_to_string(&real).unwrap()).unwrap();
     assert_eq!(v["theme"], "dark");
-    assert_eq!(ours(&v), 3);
+    assert_eq!(ours(&v), installed(".claude/settings.json"));
     assert_eq!(mode(&real), 0o600);
     env.ok(&["hook", "uninstall", "--client", "claude"]);
     assert!(std::fs::symlink_metadata(&link)
@@ -616,7 +666,7 @@ fn install_and_uninstall_clean_up_pre_rename_hooks() {
     ] {
         let v = env.read(rel);
         let cmds = commands(&v);
-        assert_eq!(ours(&v), 3, "{rel}: {cmds:?}");
+        assert_eq!(ours(&v), installed(rel), "{rel}: {cmds:?}");
         assert!(
             !cmds.iter().any(|c| c.contains("wyres-hook.sh")),
             "{rel}: {cmds:?}"

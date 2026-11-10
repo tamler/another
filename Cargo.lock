@@ -37,6 +37,7 @@ dependencies = [
  "clap",
  "reqwest",
  "rmcp",
+ "rusqlite",
  "schemars",
  "serde",
  "serde_json",

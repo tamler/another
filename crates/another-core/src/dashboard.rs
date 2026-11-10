@@ -1026,6 +1026,7 @@ mod overlap_tests {
                 ttl_seconds: Some(3_600),
                 exclusive: true,
                 reason: None,
+                repo_wide: false,
             })
             .unwrap();
         let granted = store
@@ -1036,6 +1037,7 @@ mod overlap_tests {
                 ttl_seconds: Some(3_600),
                 exclusive: true,
                 reason: None,
+                repo_wide: false,
             })
             .unwrap();
         assert_eq!(granted.conflicts.len(), 0);
@@ -1084,6 +1086,7 @@ mod overlap_tests {
                 ttl_seconds: Some(3_600),
                 exclusive: true,
                 reason: None,
+                repo_wide: false,
             })
             .unwrap();
         let path = store.db_path().unwrap().to_path_buf();

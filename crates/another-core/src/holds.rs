@@ -1,8 +1,12 @@
-//! Path holds: advisory, project-scoped leases on files or globs with a TTL.
+//! Path holds: advisory leases on files or globs with a TTL.
 //!
 //! Holds signal intent; they do not lock files. An exclusive hold conflicts with any
 //! overlapping hold of another agent; shared holds only conflict with exclusive ones.
 //! Holds lapse when their TTL passes without a heartbeat and are then expired by the sweeper.
+//!
+//! A hold belongs to a project, but conflicts are checked across every local project in the
+//! same git repository (see `repo.rs`), comparing repository-relative paths, so sibling
+//! worktrees and clones of one repository see each other's holds.
 
 use std::path::Path;
 
@@ -107,6 +111,24 @@ pub struct AcquireHolds {
     pub ttl_seconds: Option<i64>,
     pub exclusive: bool,
     pub reason: Option<String>,
+    /// Allow a pattern that covers the whole project (`**`, the project root, `**/*.rs`).
+    /// Refused by default: such a hold blocks every other agent in the repository.
+    pub repo_wide: bool,
+}
+
+/// What [`Store::guard_edit`] found and did.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct EditGuard {
+    pub agent: String,
+    /// Slug of the project the edited files belong to.
+    pub project: String,
+    /// Holds taken for these edits: new narrow holds, or an own hold renewed because it was
+    /// past half its TTL.
+    pub held: Vec<Hold>,
+    /// Requested paths already covered by a live exclusive hold of the agent's own.
+    pub covered: Vec<String>,
+    /// Other agents' overlapping holds. When this is not empty nothing was taken.
+    pub conflicts: Vec<HoldConflict>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -122,6 +144,16 @@ const HOLD_SELECT: &str =
      JOIN projects p ON p.project_id = h.project_id
      JOIN agents a ON a.agent_id = h.agent_id
      LEFT JOIN projects ap ON ap.project_id = a.project_id";
+
+/// [`HOLD_SELECT`] plus the hold's project id (column 10) and that project's position in its
+/// repository (column 11).
+const HOLD_SELECT_REPO: &str =
+    "SELECT h.hold_id, p.slug, a.address, NULL, h.pattern, h.exclusive, h.reason,
+       h.ttl_seconds, h.created_at, h.expires_at, h.project_id, coalesce(pr.repo_prefix, '')
+     FROM holds h
+     JOIN projects p ON p.project_id = h.project_id
+     JOIN agents a ON a.agent_id = h.agent_id
+     LEFT JOIN project_repos pr ON pr.project_id = h.project_id";
 
 fn hold_from_row(r: &Row<'_>) -> rusqlite::Result<Hold> {
     let name: String = r.get(2)?;
@@ -210,6 +242,21 @@ fn is_glob(pattern: &str) -> bool {
     pattern.contains(['*', '?', '[', '{'])
 }
 
+/// A pattern that reaches across the whole project: `**` (also what the project root
+/// normalizes to), or a glob that starts with a wildcard and contains `**`, like `**/*.rs`.
+pub fn is_repo_wide(pattern: &str) -> bool {
+    literal_prefix(pattern).is_empty() && pattern.contains("**")
+}
+
+/// An own hold `held` already covers the literal path `path`.
+fn hold_covers(held: &str, path: &str) -> bool {
+    if is_glob(held) {
+        held == "**" || matches(held, path)
+    } else {
+        covers(held, path)
+    }
+}
+
 /// The part of a pattern before its first glob metacharacter.
 fn literal_prefix(pattern: &str) -> &str {
     match pattern.find(['*', '?', '[', '{']) {
@@ -262,25 +309,79 @@ fn glob_touches_literal(glob: &str, literal: &str) -> bool {
     comps.len() > lit.len() && matches(&comps[..lit.len()].join("/"), literal)
 }
 
+/// Link local projects that hold live holds but were registered before repository links
+/// existed, so their holds count across the repository straight away.
+fn link_unlinked(tx: &Tx<'_>) -> Result<()> {
+    let mut stmt = tx.prepare(
+        "SELECT DISTINCT p.project_id, p.node_id, p.abs_path, p.slug, p.created_at
+         FROM holds h JOIN projects p ON p.project_id = h.project_id
+         LEFT JOIN project_repos pr ON pr.project_id = p.project_id
+         WHERE h.released_at IS NULL AND h.expires_at > ?1 AND p.node_id = ?2
+           AND pr.project_id IS NULL",
+    )?;
+    let projects = stmt
+        .query_map(params![tx.now, tx.node_id], |r| {
+            Ok(Project {
+                project_id: r.get(0)?,
+                node_id: r.get(1)?,
+                abs_path: r.get(2)?,
+                slug: r.get(3)?,
+                created_at: fmt_ts(r.get(4)?),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for p in &projects {
+        crate::repo::refresh_link(tx, p)?;
+    }
+    Ok(())
+}
+
 fn conflicts_for(
     tx: &Tx<'_>,
-    project_id: &str,
+    project: &Project,
     agent_id: &str,
     patterns: &[(String, String)],
     exclusive: bool,
 ) -> Result<Vec<HoldConflict>> {
+    link_unlinked(tx)?;
+    let (repo_key, my_prefix) = crate::repo::link_of(tx, project)?
+        .map_or((String::new(), String::new()), |l| (l.key, l.prefix));
+    // This project's holds, plus holds in any local project of the same repository.
     let mut stmt = tx.prepare(&format!(
-        "{HOLD_SELECT} WHERE h.released_at IS NULL AND h.expires_at > ?3
-           AND h.project_id = ?1 AND h.agent_id != ?2
+        "{HOLD_SELECT_REPO} WHERE h.released_at IS NULL AND h.expires_at > ?3
+           AND h.agent_id != ?2
+           AND (h.project_id = ?1 OR (?4 != '' AND h.project_id IN
+                (SELECT project_id FROM project_repos WHERE repo_key = ?4)))
          ORDER BY h.created_at"
     ))?;
     let others = stmt
-        .query_map(params![project_id, agent_id, tx.now], hold_from_row)?
+        .query_map(
+            params![project.project_id, agent_id, tx.now, repo_key],
+            |r| {
+                Ok((
+                    hold_from_row(r)?,
+                    r.get::<_, String>(10)?,
+                    r.get::<_, String>(11)?,
+                ))
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut conflicts = Vec::new();
     for (requested, pattern) in patterns {
-        for held in &others {
-            if (exclusive || held.exclusive) && patterns_overlap(pattern, &held.pattern) {
+        for (held, held_project, held_prefix) in &others {
+            if !(exclusive || held.exclusive) {
+                continue;
+            }
+            let overlap = if *held_project == project.project_id {
+                patterns_overlap(pattern, &held.pattern)
+            } else {
+                // Compare as paths from the repository's top level.
+                patterns_overlap(
+                    &crate::repo::in_repo(&my_prefix, pattern),
+                    &crate::repo::in_repo(held_prefix, &held.pattern),
+                )
+            };
+            if overlap {
                 conflicts.push(HoldConflict {
                     path: requested.clone(),
                     held: held.clone(),
@@ -289,6 +390,73 @@ fn conflicts_for(
         }
     }
     Ok(conflicts)
+}
+
+/// Create a hold, or update and renew the agent's existing hold on the same pattern.
+/// Returns the hold id.
+#[allow(clippy::too_many_arguments)]
+fn upsert_hold_tx(
+    tx: &Tx<'_>,
+    agent_id: &str,
+    actor: &str,
+    project_id: &str,
+    pattern: &str,
+    exclusive: bool,
+    reason: Option<&str>,
+    ttl: i64,
+    auto: bool,
+) -> Result<String> {
+    let existing: Option<String> = tx
+        .query_row(
+            "SELECT hold_id FROM holds WHERE agent_id = ?1 AND project_id = ?2
+               AND pattern = ?3 AND released_at IS NULL",
+            params![agent_id, project_id, pattern],
+            |r| r.get(0),
+        )
+        .ok();
+    let expires_at = tx.now + ttl * 1000;
+    let mut payload = json!({
+        "agent_id": agent_id,
+        "project_id": project_id,
+        "pattern": pattern,
+        "exclusive": exclusive,
+        "reason": reason,
+        "ttl_seconds": ttl,
+        "expires_at": expires_at,
+    });
+    if auto {
+        // Taken by the edit hook rather than asked for; counted by `another stats`.
+        payload["auto"] = json!(true);
+    }
+    Ok(match existing {
+        Some(id) => {
+            let mut payload = payload;
+            payload["hold_id"] = json!(id);
+            tx.emit(actor, "hold.updated", payload)?;
+            tx.execute(
+                "UPDATE holds SET exclusive = ?2, reason = ?3, ttl_seconds = ?4,
+                   renewed_at = ?5, expires_at = ?6 WHERE hold_id = ?1",
+                params![id, exclusive, reason, ttl, tx.now, expires_at],
+            )?;
+            id
+        }
+        None => {
+            let id = new_id();
+            let mut payload = payload;
+            payload["hold_id"] = json!(id);
+            tx.emit(actor, "hold.acquired", payload)?;
+            tx.execute(
+                "INSERT INTO holds (hold_id, node_id, project_id, agent_id, pattern,
+                   exclusive, reason, ttl_seconds, created_at, renewed_at, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10)",
+                params![
+                    id, tx.node_id, project_id, agent_id, pattern, exclusive, reason, ttl, tx.now,
+                    expires_at
+                ],
+            )?;
+            id
+        }
+    })
 }
 
 /// Live holds on other nodes, in a project with the same slug, overlapping `patterns`.
@@ -467,12 +635,18 @@ impl Store {
             let mut patterns: Vec<(String, String)> = Vec::new();
             for raw in &input.paths {
                 let p = normalize_pattern(&project, raw)?;
+                if is_repo_wide(&p) && !input.repo_wide {
+                    return Err(Error::Invalid(format!(
+                        "{raw:?} would hold the whole project ({p}) and block every other agent in \
+                         the repository; hold the files or directories you will change, such as \
+                         src/api, or pass --repo-wide (MCP: repo_wide) if you really mean all of it"
+                    )));
+                }
                 if !patterns.iter().any(|(_, q)| *q == p) {
                     patterns.push((raw.clone(), p));
                 }
             }
-            let conflicts =
-                conflicts_for(tx, &project.project_id, &me.id, &patterns, input.exclusive)?;
+            let conflicts = conflicts_for(tx, &project, &me.id, &patterns, input.exclusive)?;
             let warnings = remote_clashes(tx, &project, &patterns)?;
             if !conflicts.is_empty() {
                 touch(tx, &me.id)?;
@@ -485,62 +659,17 @@ impl Store {
             let mut granted_ids = Vec::new();
             for (_, pattern) in &patterns {
                 // Re-acquiring a pattern you already hold updates and renews that hold.
-                let existing: Option<String> = tx
-                    .query_row(
-                        "SELECT hold_id FROM holds WHERE agent_id = ?1 AND project_id = ?2
-                           AND pattern = ?3 AND released_at IS NULL",
-                        params![me.id, project.project_id, pattern],
-                        |r| r.get(0),
-                    )
-                    .ok();
-                let expires_at = tx.now + ttl * 1000;
-                let payload = json!({
-                    "agent_id": me.id,
-                    "project_id": project.project_id,
-                    "pattern": pattern,
-                    "exclusive": input.exclusive,
-                    "reason": input.reason,
-                    "ttl_seconds": ttl,
-                    "expires_at": expires_at,
-                });
-                let hold_id = match existing {
-                    Some(id) => {
-                        let mut payload = payload;
-                        payload["hold_id"] = json!(id);
-                        tx.emit(&me.address, "hold.updated", payload)?;
-                        tx.execute(
-                            "UPDATE holds SET exclusive = ?2, reason = ?3, ttl_seconds = ?4,
-                               renewed_at = ?5, expires_at = ?6 WHERE hold_id = ?1",
-                            params![id, input.exclusive, input.reason, ttl, tx.now, expires_at],
-                        )?;
-                        id
-                    }
-                    None => {
-                        let id = new_id();
-                        let mut payload = payload;
-                        payload["hold_id"] = json!(id);
-                        tx.emit(&me.address, "hold.acquired", payload)?;
-                        tx.execute(
-                            "INSERT INTO holds (hold_id, node_id, project_id, agent_id, pattern,
-                               exclusive, reason, ttl_seconds, created_at, renewed_at, expires_at)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10)",
-                            params![
-                                id,
-                                tx.node_id,
-                                project.project_id,
-                                me.id,
-                                pattern,
-                                input.exclusive,
-                                input.reason,
-                                ttl,
-                                tx.now,
-                                expires_at
-                            ],
-                        )?;
-                        id
-                    }
-                };
-                granted_ids.push(hold_id);
+                granted_ids.push(upsert_hold_tx(
+                    tx,
+                    &me.id,
+                    &me.address,
+                    &project.project_id,
+                    pattern,
+                    input.exclusive,
+                    input.reason.as_deref(),
+                    ttl,
+                    false,
+                )?);
             }
             touch(tx, &me.id)?;
             Ok(HoldReport {
@@ -567,7 +696,159 @@ impl Store {
                 .iter()
                 .map(|raw| Ok((raw.clone(), normalize_pattern(&project, raw)?)))
                 .collect::<Result<Vec<_>>>()?;
-            conflicts_for(tx, &project.project_id, &me.id, &patterns, exclusive)
+            conflicts_for(tx, &project, &me.id, &patterns, exclusive)
+        })
+    }
+
+    /// Make sure `agent` may edit `paths` (files in `project`) and hold them while it does.
+    ///
+    /// If another agent holds an overlapping path (in this project or a sibling checkout of
+    /// the same repository), nothing is taken and the conflicts are returned. Otherwise each
+    /// path already under a live exclusive hold of the agent's own is left alone (that hold
+    /// is renewed once it is past half its TTL), and every other path gets a narrow exclusive
+    /// hold of the default TTL. Writes nothing when every path is already covered.
+    pub fn guard_edit(
+        &self,
+        agent: &str,
+        project: &str,
+        paths: &[String],
+        reason: &str,
+    ) -> Result<EditGuard> {
+        if paths.is_empty() {
+            return Err(Error::Invalid("no paths given".into()));
+        }
+        self.write(|tx| {
+            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let project = find_project(tx, tx.node_id, project)?;
+            let mut patterns: Vec<(String, String)> = Vec::new();
+            for raw in paths {
+                let p = normalize_pattern(&project, raw)?;
+                if p == "**" {
+                    return Err(Error::Invalid(format!(
+                        "{raw:?} is the project directory, not a file"
+                    )));
+                }
+                if !patterns.iter().any(|(_, q)| *q == p) {
+                    patterns.push((raw.clone(), p));
+                }
+            }
+            let mut conflicts = conflicts_for(tx, &project, &me.id, &patterns, true)?;
+            if !conflicts.is_empty() {
+                // Report project-relative paths, like hold patterns, not what the tool sent
+                // (often an absolute path).
+                for c in &mut conflicts {
+                    if let Some((_, p)) = patterns.iter().find(|(raw, _)| *raw == c.path) {
+                        c.path = p.clone();
+                    }
+                }
+                // Evidence for `another stats`: who was stopped, by whose hold, where.
+                let repo = crate::repo::link_of(tx, &project)?.map(|l| l.key);
+                tx.emit(
+                    &me.address,
+                    crate::stats::BLOCKED_EVENT,
+                    json!({
+                        "agent_id": me.id,
+                        "agent": me.address,
+                        "project_id": project.project_id,
+                        "project": project.slug,
+                        "repo": repo,
+                        "paths": patterns.iter().map(|(_, p)| p).collect::<Vec<_>>(),
+                        "conflicts": conflicts.iter().map(|c| json!({
+                            "path": c.path,
+                            "holder": c.held.agent,
+                            "hold_id": c.held.hold_id,
+                            "pattern": c.held.pattern,
+                            "project": c.held.project,
+                        })).collect::<Vec<_>>(),
+                    }),
+                )?;
+                return Ok(EditGuard {
+                    agent: me.address,
+                    project: project.slug,
+                    held: Vec::new(),
+                    covered: Vec::new(),
+                    conflicts,
+                });
+            }
+            let mut stmt = tx.prepare(
+                "SELECT hold_id, pattern, ttl_seconds, expires_at FROM holds
+                 WHERE agent_id = ?1 AND project_id = ?2 AND exclusive = 1
+                   AND released_at IS NULL AND expires_at > ?3
+                 ORDER BY created_at",
+            )?;
+            let own = stmt
+                .query_map(params![me.id, project.project_id, tx.now], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, i64>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut renew: Vec<(String, i64)> = Vec::new();
+            let mut covered = Vec::new();
+            let mut needed = Vec::new();
+            for (raw, pattern) in &patterns {
+                match own
+                    .iter()
+                    .find(|(_, held, _, _)| hold_covers(held, pattern))
+                {
+                    Some((id, _, ttl, expires_at)) if expires_at - tx.now < ttl * 500 => {
+                        if !renew.iter().any(|(r, _)| r == id) {
+                            renew.push((id.clone(), *ttl));
+                        }
+                    }
+                    Some(_) => covered.push(raw.clone()),
+                    None => needed.push(pattern.clone()),
+                }
+            }
+            renew_tx(tx, &me.address, &renew)?;
+            let mut ids: Vec<String> = renew.into_iter().map(|(id, _)| id).collect();
+            for pattern in &needed {
+                ids.push(upsert_hold_tx(
+                    tx,
+                    &me.id,
+                    &me.address,
+                    &project.project_id,
+                    pattern,
+                    true,
+                    Some(reason),
+                    DEFAULT_HOLD_TTL_SECONDS,
+                    true,
+                )?);
+            }
+            if !ids.is_empty() {
+                touch(tx, &me.id)?;
+            }
+            Ok(EditGuard {
+                agent: me.address,
+                project: project.slug,
+                held: holds_by_id(tx, &ids)?,
+                covered,
+                conflicts: Vec::new(),
+            })
+        })
+    }
+
+    /// A light heartbeat for hooks that run between tool calls: marks the agent active and
+    /// renews only its own live holds that are past half their TTL. No sweep and no session
+    /// event; a `hold.renewed` event is written only when something was renewed.
+    /// Returns how many holds were renewed.
+    pub fn keepalive(&self, agent: &str) -> Result<usize> {
+        self.write(|tx| {
+            let me = resolve_agent(tx, tx.node_id, agent)?;
+            touch(tx, &me.id)?;
+            let mut stmt = tx.prepare(
+                "SELECT hold_id, ttl_seconds FROM holds
+                 WHERE agent_id = ?1 AND released_at IS NULL AND expires_at > ?2
+                   AND expires_at - ?2 < ttl_seconds * 500",
+            )?;
+            let due = stmt
+                .query_map(params![me.id, tx.now], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<(String, i64)>>>()?;
+            renew_tx(tx, &me.address, &due)?;
+            Ok(due.len())
         })
     }
 
@@ -621,22 +902,32 @@ impl Store {
         })
     }
 
-    /// Live holds, optionally filtered by project and/or agent.
+    /// Live holds, optionally filtered by project and/or agent. A project filter also lists
+    /// holds in sibling checkouts of the same repository, since those conflict too.
     pub fn holds(&self, filter: HoldFilter) -> Result<Vec<Hold>> {
-        self.sweep()?;
-        self.read(|conn| {
-            let project_id = match &filter.project {
-                Some(p) => Some(find_project(conn, self.node_id(), p)?.project_id),
-                None => None,
+        self.write(|tx| {
+            sweep_tx(tx)?;
+            let (project_id, repo_key) = match &filter.project {
+                Some(p) => {
+                    let project = find_project(tx, tx.node_id, p)?;
+                    link_unlinked(tx)?;
+                    let key = crate::repo::link_of(tx, &project)?
+                        .map(|l| l.key)
+                        .unwrap_or_default();
+                    (Some(project.project_id), key)
+                }
+                None => (None, String::new()),
             };
             let agent_id = match &filter.agent {
-                Some(a) => Some(resolve_agent(conn, self.node_id(), a)?.id),
+                Some(a) => Some(resolve_agent(tx, tx.node_id, a)?.id),
                 None => None,
             };
             live_holds(
-                conn,
-                "h.node_id = ?1 AND (?2 IS NULL OR h.project_id = ?2) AND (?3 IS NULL OR h.agent_id = ?3)",
-                &[&self.node_id(), &project_id, &agent_id],
+                tx,
+                "h.node_id = ?1 AND (?3 IS NULL OR h.agent_id = ?3)
+                 AND (?2 IS NULL OR h.project_id = ?2 OR (?4 != '' AND h.project_id IN
+                      (SELECT project_id FROM project_repos WHERE repo_key = ?4)))",
+                &[&tx.node_id, &project_id, &agent_id, &repo_key],
             )
         })
     }
@@ -745,6 +1036,27 @@ mod tests {
         assert!(patterns_overlap("src/**", "src/*.toml"));
         assert!(!patterns_overlap("docs/**", "src/**"));
         assert!(patterns_overlap("**", "anything"));
+    }
+
+    #[test]
+    fn repo_wide_patterns() {
+        for p in ["**", "**/*.rs", "*/**", "{src,docs}/**"] {
+            assert!(is_repo_wide(p), "{p}");
+        }
+        for p in ["src/**", "src", "*.md", "src/**/*.rs", "README.md"] {
+            assert!(!is_repo_wide(p), "{p}");
+        }
+    }
+
+    #[test]
+    fn own_hold_coverage() {
+        assert!(hold_covers("src", "src/a.rs"));
+        assert!(hold_covers("src/a.rs", "src/a.rs"));
+        assert!(hold_covers("src/**", "src/x/y.rs"));
+        assert!(hold_covers("src/*.rs", "src/a.rs"));
+        assert!(!hold_covers("src/*.rs", "src/x/a.rs"));
+        assert!(!hold_covers("srcx", "src/a.rs"));
+        assert!(hold_covers("**", "anything/at/all"));
     }
 
     #[test]
