@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Alternatives to Another, and when not to use it</title>
+  <meta name="description" content="Do you need an agent inbox at all? An honest look at copy-paste, shared markdown, git worktrees, Claude Code's built-in teams, MCP tools and orchestrators.">
+  <link rel="canonical" href="https://toanother.one/compare/alternatives/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Another">
+  <meta property="og:title" content="Alternatives to Another, and when not to use it">
+  <meta property="og:description" content="Do you need an agent inbox at all? An honest look at copy-paste, shared markdown, git worktrees, Claude Code's built-in teams, MCP tools and orchestrators.">
+  <meta property="og:url" content="https://toanother.one/compare/alternatives/">
+  <meta property="og:image" content="https://toanother.one/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Another. From one agent to another. So they stop editing the same files.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Alternatives to Another, and when not to use it">
+  <meta name="twitter:description" content="Do you need an agent inbox at all? An honest look at copy-paste, shared markdown, git worktrees, Claude Code's built-in teams, MCP tools and orchestrators.">
+  <meta name="twitter:image" content="https://toanother.one/twitter.png">
+  <meta name="twitter:image:alt" content="Another. From one agent to another. So they stop editing the same files.">
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"You may not need this","description":"Do you need an agent inbox at all? An honest look at copy-paste, shared markdown, git worktrees, Claude Code's built-in teams, MCP tools and orchestrators.","url":"https://toanother.one/compare/alternatives/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Compare","item":"https://toanother.one/compare/"},{"@type":"ListItem","position":3,"name":"Alternatives","item":"https://toanother.one/compare/alternatives/"}]}]}</script>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="preload" href="/fonts/FragmentMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="masthead wrap with-route">
+    <div class="breadcrumb"><a class="wordmark" href="/" aria-label="Another home">another</a> <span class="route">/ <a href="/compare/">compare</a> / alternatives</span></div>
+    <nav aria-label="Main"><a href="/docs/getting-started/">Get started</a> <a href="/docs/">Docs</a> <a href="/guides/">Guides</a> <a href="/compare/">Compare</a> <a href="/changelog/">Changelog</a></nav>
+  </header>
+  <main class="wrap" id="main" tabindex="-1">
+    <div class="guide-hero"><h1>You may not need this</h1><p class="definition">Several simpler or bigger options do part of Another's job. Some will suit you better.</p><nav class="guide-nav" aria-label="Compare pages"><a href="/compare/">Inbox or orchestrator</a> <a href="/compare/alternatives/" aria-current="page">Alternatives</a></nav></div>
+    <section class="guide-section" aria-labelledby="by-hand-title">
+      <h2 id="by-hand-title">Relaying by hand</h2>
+      <p>You copy one agent's output into the other's prompt. It needs no setup, and you read everything that crosses. For an occasional second opinion, this is the right choice.</p>
+      <p>It stops working when the relay fills your day, or when an agent needs an answer while you are away.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="markdown-title">
+      <h2 id="markdown-title">A shared markdown file</h2>
+      <p>Agents append to something like <code>HANDOFF.md</code>. It is readable, works with any client and lives in Git if you want it to. For one sequential handoff between two agents, it is often enough.</p>
+      <p>The file has no recipients, no read state and no owner for a task. Agents have to remember to reread it, and two editing at once can overwrite each other. Stale instructions stay there until someone removes them.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="worktrees-title">
+      <h2 id="worktrees-title">Git worktrees alone</h2>
+      <p>Giving each agent its own checkout prevents most edit collisions, with tools you already have. If the agents never need to talk until you merge their branches, you are done.</p>
+      <p>Worktrees don't carry messages, so one agent won't hear that another changed an API until the merge. The two tools fit together: <a href="/guides/git-worktrees/">here is how Another treats worktrees</a>, including one surprise about holds.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="builtin-title">
+      <h2 id="builtin-title">Features built into your client</h2>
+      <p>If every agent you run is Claude Code, try its own features first. They are integrated and need nothing extra:</p>
+      <dl class="clients">
+        <div class="client"><dt><a href="https://code.claude.com/docs/en/sub-agents">Subagents</a></dt><dd>Helpers with their own context, working within a single session. Good for a focused task where only the result matters.</dd></div>
+        <div class="client"><dt><a href="https://code.claude.com/docs/en/agent-teams">Agent teams</a></dt><dd>Several Claude Code sessions with a lead, a shared task list and direct messages. Experimental and off by default, with one team per session and documented limits on resuming.</dd></div>
+        <div class="client"><dt><a href="https://code.claude.com/docs/en/cross-session-messaging">Cross-session messaging</a></dt><dd>Passes findings between Claude Code sessions you run yourself.</dd></div>
+      </dl>
+      <p>Another fits when the agents are different programs, such as Claude Code and Codex, or when you want mail and leases to outlast a session in a database you can inspect. Other clients may have similar features; we have not surveyed them here.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="mcp-title">
+      <h2 id="mcp-title">Other MCP coordination tools</h2>
+      <dl class="clients">
+        <div class="client"><dt><a href="https://github.com/alessandrobologna/agent-bus-mcp">agent-bus-mcp</a></dt><dd>A stdio MCP server backed by SQLite, built around named topics that peers join. MIT license. Its model is closer to a chat channel than an inbox, and its smaller surface may be all you want.</dd></div>
+        <div class="client"><dt><a href="https://github.com/Dicklesworthstone/mcp_agent_mail_rust">mcp_agent_mail_rust</a></dt><dd>A larger MCP server that keeps its records in Git and has its own terminal and web interfaces. Worth a look if you want those. Its license is MIT with an added rider, so <a href="https://github.com/Dicklesworthstone/mcp_agent_mail_rust/blob/main/LICENSE">read the terms</a> first.</dd></div>
+      </dl>
+      <p>We describe these from their public summaries and have not benchmarked them. Another shares no code with them. <a href="/compare/">The scope comparison</a> sets them side by side.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="claims-title">
+      <h2 id="claims-title">File claims that can deny an edit</h2>
+      <p>Another's holds are advisory. <code>another hold check</code> exits 3 on overlap, and the write still happens if the agent ignores the warning. A few other tools document a Claude Code hook that can refuse the edit. I read their READMEs on 10 Nov 2026. I did not benchmark them against each other.</p>
+      <dl class="clients">
+        <div class="client"><dt><a href="https://github.com/ThatHunky/agent-coord">agent-coord</a></dt><dd>A JSON board at <code>~/.agent-coord/board.json</code>. File locks and task claims. The README says a Claude Code PreToolUse hook can block an edit, and that Codex has no pre-tool hook, so Codex only cooperates if it calls the tools.</dd></div>
+        <div class="client"><dt><a href="https://github.com/polymatx/dibs">dibs</a></dt><dd>One static binary, no daemon. TTL file claims. The README says hooks can block a colliding edit, and that lessons live as markdown in the repo.</dd></div>
+        <div class="client"><dt><a href="https://pypi.org/project/claude-agent-sync/">claude-agent-sync</a></dt><dd>Python standard library and a SQLite file in the repo (<code>.claude/coordination/state.sqlite</code>). The project says a PreToolUse hook fails closed on a lock conflict. There is a console for watching the sessions.</dd></div>
+        <div class="client"><dt><a href="https://github.com/arumwu/agentrelay">AgentRelay</a></dt><dd>Task leases are exclusive while they are active. File-scope claims warn. The README says they do not stop an edit made outside MCP. It also documents a guarded tmux read and send.</dd></div>
+        <div class="client"><dt><a href="https://github.com/LevDomasnih/coordinaut">Coordinaut</a></dt><dd>Claim a task and a file scope, then heartbeat. The README argues agents should not coordinate by racing to edit one markdown file. The markdown it generates is a view. The log is the state.</dd></div>
+      </dl>
+      <p>If you want the hook to deny the write, start with one of those and read the current hook docs for your client. If you want mail across Claude Code and Codex, and you can live with an advisory hold, that is the job I built Another for. I have not measured which one is faster.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="orchestrator-title">
+      <h2 id="orchestrator-title">Orchestrators</h2>
+      <p>If you want software to plan the work, start the agents and give each one a branch, you want an orchestrator, and Another won't do that. <a href="https://github.com/OrchestratorInc/agent-orchestrator">Agent Orchestrator</a> is one example: its README describes a desktop workspace in which a main agent plans the work and starts a worker per task, each with its own branch and worktree.</p>
+      <p>Another starts nothing. It suits people who already run their agents and want them to talk. The two can coexist.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="not-title">
+      <h2 id="not-title">When Another is the wrong choice</h2>
+      <ul>
+        <li><strong>You run one agent at a time.</strong> There is nobody to coordinate with.</li>
+        <li><strong>You need a real lock.</strong> Path holds are advisory, and an agent that ignores them can still write. Use separate checkouts and review the merge.</li>
+        <li><strong>You need instant delivery to a busy agent.</strong> Hooks fire at session start and on the next prompt. <a href="/guides/wake-idle-agents/">Wake adapters</a> can type into an idle terminal, but nothing interrupts an agent mid-task.</li>
+        <li><strong>You need end-to-end encrypted mail.</strong> The database is ordinary SQLite, and a federation hub can read what it relays.</li>
+        <li><strong>You work on native Windows.</strong> <a href="/docs/install/windows/">There is no build for it</a>.</li>
+        <li><strong>You want a signed, packaged release.</strong> There is no release yet, so you build from source, and planned binaries are unsigned.</li>
+      </ul>
+    </section>
+    <section class="guide-section" aria-labelledby="fit-title">
+      <h2 id="fit-title">When it does fit</h2>
+      <p>You run two or more different coding clients side by side, you are tired of being the relay, and you are comfortable with a young open source tool. <a href="/guides/local-agent-inbox/">Try it in temporary state</a>, which changes no client configuration, before you commit to anything.</p>
+      <p class="quiet">Inbox and orchestrator notes reviewed 5 November 2026. File-claim notes reviewed 10 November 2026, from the linked READMEs. Projects change. Read them again before you pick one.</p>
+    </section>
+  </main>
+  <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="/docs/faq/">FAQ</a> <a href="/docs/concepts/">Concepts</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>
+</body>
+</html>

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Getting started with Another - Hooks, MCP and agent mail</title>
+  <meta name="description" content="Connect Claude Code, Codex and other coding agents to a shared MCP inbox. Initialize Another, preview session hooks and send your first agent-to-agent message.">
+  <link rel="canonical" href="https://toanother.one/docs/getting-started/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Another">
+  <meta property="og:title" content="Getting started with Another - Hooks, MCP and agent mail">
+  <meta property="og:description" content="Connect Claude Code, Codex and other coding agents to a shared MCP inbox. Initialize Another, preview session hooks and send your first agent-to-agent message.">
+  <meta property="og:url" content="https://toanother.one/docs/getting-started/">
+  <meta property="og:image" content="https://toanother.one/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Another. From one agent to another. So they stop editing the same files.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Getting started with Another - Hooks, MCP and agent mail">
+  <meta name="twitter:description" content="Connect Claude Code, Codex and other coding agents to a shared MCP inbox. Initialize Another, preview session hooks and send your first agent-to-agent message.">
+  <meta name="twitter:image" content="https://toanother.one/twitter.png">
+  <meta name="twitter:image:alt" content="Another. From one agent to another. So they stop editing the same files.">
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Your first agent handoff","description":"Connect Claude Code, Codex and other coding agents to a shared MCP inbox. Initialize Another, preview session hooks and send your first agent-to-agent message.","url":"https://toanother.one/docs/getting-started/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Docs","item":"https://toanother.one/docs/"},{"@type":"ListItem","position":3,"name":"Getting started","item":"https://toanother.one/docs/getting-started/"}]}]}</script>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="preload" href="/fonts/FragmentMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="masthead wrap with-route">
+    <div class="breadcrumb"><a class="wordmark" href="/" aria-label="Another home">another</a> <span class="route">/ start</span></div>
+    <nav aria-label="Main"><a href="/docs/getting-started/" aria-current="page">Get started</a> <a href="/docs/">Docs</a> <a href="/guides/">Guides</a> <a href="/compare/">Compare</a> <a href="/changelog/">Changelog</a></nav>
+  </header>
+  <main class="wrap" id="main" tabindex="-1">
+    <div class="guide-hero"><h1>Your first agent handoff</h1><p class="definition">One local node. Two agents. A message you no longer have to relay.</p><nav class="guide-nav" aria-label="Guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/">Full guide</a> <a href="/guides/">Task guides</a></nav></div>
+    <section class="guide-section" aria-labelledby="install-title">
+      <h2 id="install-title">1. Install and initialize</h2>
+      <p>With Rust 1.88 or newer installed, run these commands from the repository where your agents will work. Allow extra time for the initial compilation; the following setup is the first five minutes after installation.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Install and initialize"><code>cargo install --locked --git https://github.com/tamler/another another
+another init</code></pre>
+      <p>The local database lives in <code>~/.another</code>, or the directory set in <code>ANOTHER_HOME</code>. No account or hosted service is needed. See <a href="/docs/install/">installation options</a>, with prerequisites for <a href="/docs/install/macos/">macOS</a> and <a href="/docs/install/linux/">Linux</a>.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="hooks-title">
+      <h2 id="hooks-title">2. Preview session hooks</h2>
+      <pre class="code-block shell" tabindex="0" aria-label="Preview then install hooks"><code>another hook install --client all --dry-run
+another hook install --client all</code></pre>
+      <p>Read the dry-run plan before running the second command. It installs user-global hooks for Claude Code, Codex, Grok CLI and Cursor. Existing hooks are preserved and changed configs are backed up. You can choose a single client instead of <code>all</code>.</p>
+      <p>In Codex, review and trust the new hooks under <code>/hooks</code>. Cursor integration is best effort: context arrives at session start; prompt hooks renew holds. Start a new agent session in your repository after installation.</p>
+      <p>Hooks register client identities and supply short inbox/activity digests. Bodies stay out of the digest. <a href="https://github.com/tamler/another/blob/main/docs/HOOKS.md">Client behavior, identity overrides and uninstall</a>.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="mcp-title">
+      <h2 id="mcp-title">3. Connect the MCP inbox</h2>
+      <p>Add a stdio MCP server to each client using its supported configuration format. The command is <code>another serve --stdio</code>; clients that use an <code>mcpServers</code> object can use:</p>
+      <pre class="code-block shell" tabindex="0" aria-label="MCP configuration"><code>{
+  "mcpServers": {
+    "another": {
+      "command": "another",
+      "args": ["serve", "--stdio"]
+    }
+  }
+}</code></pre>
+      <p>Restart or reconnect the client as its MCP settings require. Ensure <code>another</code> is on that client's <code>PATH</code>. Hooks announce waiting mail; the MCP tools read, send, acknowledge and claim it. <a href="/docs/#connections">Client configuration details</a>.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="mail-title">
+      <h2 id="mail-title">4. Send a request</h2>
+      <p>Try a shell exchange in the same repository. Alice and Bob are demo identities; hooks use client-based names by default.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="First mail exchange"><code>another agent register alice --program claude --project .
+another agent register bob --program codex --project .
+another send --from alice --to bob --subject "Review the parser" --body "Please check the error paths." --request
+another inbox --agent bob
+another activity --summary</code></pre>
+      <p>Bob's inbox should show the unread message and an open request. This is an expected result, not a captured run. See <a href="/docs/#mail">recorded fixture output</a>. Names are unique per project; use <code>name@project</code> if a bare name is ambiguous.</p>
+      <p>In an agent session, ask the recipient to fetch its inbox, read the request and reply. Claiming a request gives it an owner; acknowledging mail records its receipt. See the <a href="https://github.com/tamler/another/blob/main/README.md">CLI and MCP reference</a> for those distinct operations.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="next-title">
+      <h2 id="next-title">Then add only what you need</h2>
+      <p><a href="/docs/#resources">Register an existing server or GPU</a> so agents can borrow it. Use advisory path holds to signal which files they plan to edit. Add <a href="/docs/#wake">optional wake adapters</a> for idle terminals. Keep remote peers and federation for when you need a second machine.</p>
+      <p>Another coordinates agents you already run. You still choose their tasks and review their work. <a href="/compare/">Compare inboxes and orchestrators</a>.</p>
+    </section>
+  </main>
+  <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="/docs/faq/">FAQ</a> <a href="/docs/concepts/">Concepts</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>
+</body>
+</html>

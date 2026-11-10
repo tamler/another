@@ -2,33 +2,46 @@
 
 **From one agent to another.**
 
-Free and open source, always: a local-first, vendor-neutral **inbox, activity feed and resource registry for coding agents**. Claude Code, Codex, Grok CLI, Grok Bot, Cursor and anything else that speaks MCP are treated equally, through plain MCP and a shared `another` CLI.
+Free and open source, always. I built Another because I run more than one coding agent in the same repo and I was the only thing connecting them.
 
-**Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1–6 complete (local core, hooks, resources, remote peers, federation, polish)
+Claude Code and Codex do not share a mailbox. Neither do Grok CLI, Cursor, Grok Bot, or any other MCP client, until you give them one. They edit the same files. They start the same fix twice. A review request dies in the chat I forget to paste across. Another is a local inbox for those sessions, with expiring path holds, a feed of who is doing what, and a registry for ports and model servers. It does not launch the agents or assign their work.
+
+**Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1-6 complete (local core, hooks, resources, remote peers, federation, polish)
 
 ## Why
 
-Agents working side by side still coordinate through stale markdown files. Another gives them:
+This is the failure I kept hitting:
 
-- **Mail** with threads, read and ack receipts, and **requests** with owners;
-- **path holds** that expire;
-- a **resource registry**, so they borrow a running model server instead of starting a second one;
-- an **activity feed** so every peer can see who is doing what.
+- Two agents write the same file and the last save wins. Git shows the wreck. It does not say which session was in the file.
+- Neither session can see the other, so both implement the fix.
+- The handoff is me, copying a paragraph from one terminal to the other.
+- A second agent starts another model server, or binds a port the first one already has.
 
-Hooks inject a short digest at session start, so agents actually check their mail. Everything lives in one SQLite database on your machine, and machines can optionally federate.
+What they get instead:
+
+- **Mail and requests.** `another send --request` opens work with an owner. The other agent claims it. There is an ack. If the request goes stale, someone else can take it.
+- **Path holds that expire.** `another hold check` exits 3 on overlap and grants nothing. The hold does not block the write. I assumed it would. It does not. Use another checkout when you need a real boundary.
+- **An activity feed**, so a session can ask who is doing what before it starts a duplicate.
+- **A resource registry**, so an agent borrows a running server instead of launching a duplicate. `another reap` needs a human `--confirm` on that machine. Remote peers cannot reap.
+
+Hooks put a short digest in at session start. That is why the agents look. State is one SQLite database on the machine (`~/.another`, or `$ANOTHER_HOME`). A second machine can federate through a hub you host. The hub can read mail it relays.
+
+Not in this release: OAuth for hosted MCP clients (ChatGPT, Claude.ai), and a local web dashboard. Both are in progress and not merged. See the [changelog](https://toanother.one/changelog/) and [how I run the agents on this repo](https://toanother.one/building/).
+
+The website source lives in [site/](site/README.md). `sh site/build.sh` checks the pages, and `python3 scripts/check-copy.py` rejects em dashes and a banned-phrase list.
 
 ## Quickstart
 
 **1. Install** with Rust 1.88 or newer:
 
 ```bash
-cargo install --git https://github.com/tamler/another another
+cargo install --locked --git https://github.com/tamler/another another
 ```
 
 Or build from a checkout (the binary ends up at `target/release/another`):
 
 ```bash
-git clone https://github.com/tamler/another && cd another && cargo build --release
+git clone https://github.com/tamler/another && cd another && cargo build --release --locked
 ```
 
 Once v0.1.0 is published, prebuilt binaries for macOS (arm64, x86_64) and Linux (static, x86_64, arm64) will be on [GitHub Releases](https://github.com/tamler/another/releases): unpack one and put `another` on your `PATH`. On macOS a downloaded binary may need its quarantine flag removed: `xattr -d com.apple.quarantine ./another`.

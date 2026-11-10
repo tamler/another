@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Another: coordinate multiple coding agents</title>
+  <meta name="description" content="Several coding agents in one repo overwrite files and repeat work. Another is the local inbox and path holds I built so one session can hand a task over.">
+  <link rel="canonical" href="https://toanother.one/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Another">
+  <meta property="og:title" content="Another: coordinate multiple coding agents">
+  <meta property="og:description" content="Several coding agents in one repo overwrite files and repeat work. Another is the local inbox and path holds I built so one session can hand a task over.">
+  <meta property="og:url" content="https://toanother.one/">
+  <meta property="og:image" content="https://toanother.one/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Another. From one agent to another. So they stop editing the same files.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Another: coordinate multiple coding agents">
+  <meta name="twitter:description" content="Several coding agents in one repo overwrite files and repeat work. Another is the local inbox and path holds I built so one session can hand a task over.">
+  <meta name="twitter:image" content="https://toanother.one/twitter.png">
+  <meta name="twitter:image:alt" content="Another. From one agent to another. So they stop editing the same files.">
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"WebSite","author":{"@type":"Organization","name":"The Another Authors"},"name":"Another","url":"https://toanother.one/","description":"Several coding agents in one repo overwrite files and repeat work. Another is the local inbox and path holds I built so one session can hand a task over."},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","description":"A local inbox, activity feed and resource registry for coding agents, through MCP and a shared CLI.","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}},{"@type":"SoftwareSourceCode","@id":"https://toanother.one/#source","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}}]}</script>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="preload" href="/fonts/FragmentMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="masthead wrap">
+    <a class="wordmark" href="/" aria-label="Another home">another</a>
+    <nav aria-label="Main"><a href="/docs/getting-started/">Get started</a> <a href="/docs/">Docs</a> <a href="/guides/">Guides</a> <a href="/compare/">Compare</a> <a href="/changelog/">Changelog</a></nav>
+  </header>
+  <main id="main" class="wrap" tabindex="-1">
+    <section class="hero" aria-labelledby="headline">
+      <h1 id="headline">From one agent to another.</h1>
+      <div class="hero-bottom">
+        <div>
+          <p class="definition">I run Claude Code and Codex in the same repo. They edit the same files, redo each other's work, and the only handoff is me pasting a paragraph from one terminal into the other.</p>
+          <p>Another is a local inbox for those sessions. Path holds so a second agent can see a file is taken. A feed of who is doing what. A registry for ports and model servers, so the next agent borrows the one that is already running. It does not start the agents.</p>
+        </div>
+        <div class="install">
+          <pre class="shell" tabindex="0" aria-label="Install Another"><code>cargo install <span class="token">--locked</span> <span class="token">--git</span> <span class="token">https://github.com/tamler/another</span> another</code></pre>
+          <p class="quiet">Rust 1.88 or newer. Apache-2.0. No account, no telemetry.</p>
+        </div>
+      </div>
+    </section>
+    <section class="section" aria-labelledby="pain-title">
+      <h2 id="pain-title">What keeps going wrong</h2>
+      <dl class="clients">
+        <div class="client"><dt>Same files</dt><dd>Two sessions save <code>parser.rs</code>. The last write wins and the earlier edit is gone. Git will show a mess. It will not tell you which agent was in the file.</dd></div>
+        <div class="client"><dt>Same task, twice</dt><dd>Neither session can see the other, so both go fix the bug. I have reviewed two patches that solve the same thing.</dd></div>
+        <div class="client"><dt>No handoff</dt><dd>A review request lives in whichever chat I forget to scroll back to. The other agent never hears it.</dd></div>
+        <div class="client"><dt>A second server</dt><dd>One agent already has a model server on a port. The next one starts another, or fails the bind and guesses.</dd></div>
+      </dl>
+    </section>
+    <section class="section" aria-labelledby="fix-title">
+      <h2 id="fix-title">What I built for that</h2>
+      <p>Mail with a subject, a thread, and an ack. A request has an owner: open, then claimed, then done. If it goes stale, someone else can take it.</p>
+      <p>Path holds expire. <code>another hold check</code> exits 3 when globs overlap. That does not block the write. I was wrong the first time I assumed it would. Use another checkout when you need a real boundary. The hold is how a cooperating agent notices.</p>
+      <p>Hooks drop a short digest in at session start, which is the only reason an agent looks. Optional wake can type into an idle tmux pane. It will not interrupt an agent that is mid-turn. State sits in one SQLite file under <code>~/.another</code> (or <code>$ANOTHER_HOME</code>). A second machine can federate through a hub you host. That hub can read the mail it relays.</p>
+      <p>Clients I hook up: Claude Code, Codex, Grok CLI, Cursor. Grok Bot can join as a remote peer with a scoped token. Anything else that speaks MCP can use the same tools. <a href="/docs/">The longer docs</a> have the sharp edges.</p>
+    </section>
+    <section class="section" id="quickstart" aria-labelledby="minute-title">
+      <h2 id="minute-title">About a minute</h2>
+      <ol class="steps">
+        <li>
+          <p>Install from the lockfile, then make a local node. Rust 1.88 or newer.</p>
+          <pre class="shell" tabindex="0" aria-label="Install and init"><code>cargo install <span class="token">--locked</span> <span class="token">--git</span> <span class="token">https://github.com/tamler/another</span> another
+another init</code></pre>
+        </li>
+        <li>
+          <p>Preview hooks before they touch your client configs. Drop <code>--dry-run</code> when the plan looks right. Codex still wants you to open <code>/hooks</code> and trust them.</p>
+          <pre class="shell" tabindex="0" aria-label="Preview hooks"><code>another hook install <span class="token">--client</span> all <span class="token">--dry-run</span></code></pre>
+        </li>
+        <li>
+          <p>Point each client at the stdio server. One shared loopback daemon is <code>another serve</code>, then <code>http://127.0.0.1:7466/mcp</code>.</p>
+          <pre class="shell" tabindex="0" aria-label="MCP server config"><code>{ "mcpServers": { "another": { "command": "another", "args": ["serve", "--stdio"] } } }</code></pre>
+        </li>
+        <li>
+          <p>Register two agents in this checkout, send a request, and take a hold. <code>--ttl</code> is seconds. Exclusive is the default.</p>
+          <pre class="shell" tabindex="0" aria-label="Send mail and take a hold"><code>another agent register alice <span class="token">--program</span> claude <span class="token">--project</span> .
+another agent register bob <span class="token">--program</span> codex <span class="token">--project</span> .
+another send <span class="token">--from</span> alice <span class="token">--to</span> bob <span class="token">--subject</span> "Review the parser" <span class="token">--body</span> "Error paths look wrong." <span class="token">--request</span>
+another hold acquire <span class="token">--agent</span> alice src/parser.rs <span class="token">--ttl</span> 1800
+another inbox <span class="token">--agent</span> bob</code></pre>
+        </li>
+      </ol>
+      <p class="quiet">Full install notes, including checksums once a release exists: <a href="/docs/getting-started/">getting started</a> and <a href="/docs/install/">install</a>.</p>
+    </section>
+    <section class="section" aria-labelledby="proof-title">
+      <h2 id="proof-title">A recorded handoff</h2>
+      <p>This output is from <code>another 0.1.0</code> against a temp project named <code>shop</code>. The inbox line is shortened. Your ids and timestamps will differ. The full columns are in the <a href="/docs/#mail">docs</a>.</p>
+      <figure>
+        <div class="terminal">
+          <pre class="block shell" tabindex="0" aria-label="Register demo agents"><code><span class="command">$ another agent register alice <span class="token">--program</span> claude <span class="token">--project</span> <span class="token">/tmp/shop</span></span>
+<span class="output">registered alice@shop (claude)</span>
+<span class="command">$ another agent register bob <span class="token">--program</span> codex <span class="token">--project</span> <span class="token">/tmp/shop</span></span>
+<span class="output">registered bob@shop (codex)</span></code></pre>
+          <pre class="block shell" tabindex="0" aria-label="Send a request"><code><span class="command">$ another send <span class="token">--from</span> alice@shop <span class="token">--to</span> bob@shop <span class="token">--subject</span> "Review the parser" <span class="token">--body</span> "Please check the error paths." <span class="token">--request</span></span>
+<span class="output">sent 01M6FMXVS7KPZV6RR6JTH0VCKJ to bob@shop
+opened request 01M6FMXVS73X1C5HPZKWSC7QZN</span></code></pre>
+          <pre class="block shell" tabindex="0" aria-label="Bob reads and replies"><code><span class="command">$ another inbox <span class="token">--agent</span> bob@shop</span>
+<span class="output">bob@shop: 1 unread (0 urgent), 0 awaiting ack, 1 request(s)</span>
+<span class="command">$ another reply 01M6FMXVS7KPZV6RR6JTH0VCKJ <span class="token">--from</span> bob@shop <span class="token">--body</span> "I will check the error paths."</span>
+<span class="output">sent 01M6FMXVSPP5P8T3C294J384QH to alice@shop</span>
+<span class="command">$ another ack 01M6FMXVS7KPZV6RR6JTH0VCKJ <span class="token">--agent</span> bob@shop</span>
+<span class="output">1 updated, 0 unchanged</span></code></pre>
+        </div>
+        <figcaption><code>another 0.1.0</code>; inbox output excerpted.</figcaption>
+      </figure>
+    </section>
+    <section class="section" aria-labelledby="scenarios-title">
+      <h2 id="scenarios-title">Where it shows up</h2>
+      <dl class="clients">
+        <div class="client"><dt><a href="/guides/claude-code-codex/">Claude Code and Codex</a></dt><dd>Two different programs, one checkout, one project inbox. The guide is the review handoff.</dd></div>
+        <div class="client"><dt><a href="/guides/avoid-agent-file-conflicts/">Same files</a></dt><dd>Advisory holds, the exit status, and what a hold will not do.</dd></div>
+        <div class="client"><dt><a href="/guides/share-model-server/">One model server</a></dt><dd>Register it, borrow it, and do not reap it until a person confirms.</dd></div>
+        <div class="client"><dt><a href="/guides/agents-on-two-machines/">Laptop and a remote box</a></dt><dd>A hub you host. Mail crosses. Requests stay on one node.</dd></div>
+        <div class="client"><dt><a href="/guides/multiple-claude-code-sessions/">Two Claude Code sessions</a></dt><dd>Same client twice. Give each session its own name or they share one identity.</dd></div>
+      </dl>
+      <p><a href="/guides/">All the task guides</a>, including worktrees, wake, and plain MCP messaging.</p>
+    </section>
+    <section class="section" aria-labelledby="compare-title">
+      <h2 id="compare-title">Other tools I looked at</h2>
+      <p>Some projects are inboxes. Some are a file claim plus a Claude Code hook that can deny the edit. Some start the agents and hand out branches. Another does not start agents, and a hold here does not deny the write.</p>
+      <p>I wrote down what their READMEs actually say, and when I would use something else. <a href="/compare/">Inbox or orchestrator</a>. <a href="/compare/alternatives/">When not to use Another</a>, including copy-paste and Claude Code's own agent teams if every session you run is Claude.</p>
+    </section>
+    <section class="section" aria-labelledby="missing-title">
+      <h2 id="missing-title">Not in this release</h2>
+      <p>Two things are being built and are not merged, so they are not features you can use. OAuth, so hosted MCP clients such as ChatGPT and Claude.ai can connect. A local web dashboard. Today the interface is the CLI and MCP on the machine where the agent runs.</p>
+      <p>Public repo on 10 Nov 2026: 0 stars, 1 fork, no GitHub Release. Milestones 1 through 6 are on main. <a href="/changelog/">Changelog and what is next</a>. <a href="/building/">How I run the agents on this repo</a>.</p>
+    </section>
+    <section class="section" aria-labelledby="objections-title">
+      <h2 id="objections-title">Before you install</h2>
+      <dl class="objections">
+        <div><dt>Safety</dt><dd>Servers bind to loopback by default. Remote peers use scoped tokens. Stopping an orphaned process requires explicit confirmation on that machine; remote peers cannot do it. <a href="/docs/#resources">Resource cleanup</a>.</dd></div>
+        <div><dt>Network calls</dt><dd>No telemetry. Another makes no network calls except the ones you configure, such as a tunnel or federation hub. <a href="https://github.com/tamler/another#safety-defaults">Safety defaults</a>.</dd></div>
+        <div><dt>Files and settings</dt><dd>Local state lives in <code>~/.another</code>, or <code>ANOTHER_HOME</code>. Optional hook installation updates user-global client configs, backs them up and preserves their existing hooks and permissions. <a href="/docs/#connections">Hook setup</a>.</dd></div>
+      </dl>
+    </section>
+    <section class="section" aria-labelledby="install-title">
+      <h2 id="install-title">Install Another</h2>
+      <div class="install closing-install">
+        <pre class="shell" tabindex="0" aria-label="Install Another"><code>cargo install <span class="token">--locked</span> <span class="token">--git</span> <span class="token">https://github.com/tamler/another</span> another</code></pre>
+        <p class="quiet">Rust 1.88 or newer.</p>
+      </div>
+      <p class="star-link"><a href="https://github.com/tamler/another">Source on GitHub</a></p>
+    </section>
+  </main>
+  <footer class="footer wrap">
+    <p>Apache-2.0.</p>
+    <nav aria-label="Project"><a href="/docs/">Docs</a> <a href="/docs/faq/">FAQ</a> <a href="/changelog/">Changelog</a> <a href="/building/">How I use it</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav>
+  </footer>
+</body>
+</html>

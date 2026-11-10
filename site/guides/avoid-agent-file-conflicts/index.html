@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Avoid agent file conflicts with advisory holds - Another</title>
+  <meta name="description" content="Signal which files a coding agent plans to edit with Another's advisory path holds. Check conflicts, renew leases and release them without promising file locks.">
+  <link rel="canonical" href="https://toanother.one/guides/avoid-agent-file-conflicts/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Another">
+  <meta property="og:title" content="Avoid agent file conflicts with advisory holds - Another">
+  <meta property="og:description" content="Signal which files a coding agent plans to edit with Another's advisory path holds. Check conflicts, renew leases and release them without promising file locks.">
+  <meta property="og:url" content="https://toanother.one/guides/avoid-agent-file-conflicts/">
+  <meta property="og:image" content="https://toanother.one/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Another. From one agent to another. So they stop editing the same files.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Avoid agent file conflicts with advisory holds - Another">
+  <meta name="twitter:description" content="Signal which files a coding agent plans to edit with Another's advisory path holds. Check conflicts, renew leases and release them without promising file locks.">
+  <meta name="twitter:image" content="https://toanother.one/twitter.png">
+  <meta name="twitter:image:alt" content="Another. From one agent to another. So they stop editing the same files.">
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Before two agents edit the same files","description":"Signal which files a coding agent plans to edit with Another's advisory path holds. Check conflicts, renew leases and release them without promising file locks.","url":"https://toanother.one/guides/avoid-agent-file-conflicts/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://toanother.one/guides/"},{"@type":"ListItem","position":3,"name":"File holds","item":"https://toanother.one/guides/avoid-agent-file-conflicts/"}]}]}</script>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="preload" href="/fonts/FragmentMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="masthead wrap with-route">
+    <div class="breadcrumb"><a class="wordmark" href="/" aria-label="Another home">another</a> <span class="route">/ <a href="/guides/">guides</a></span></div>
+    <nav aria-label="Main"><a href="/docs/getting-started/">Get started</a> <a href="/docs/">Docs</a> <a href="/guides/">Guides</a> <a href="/compare/">Compare</a> <a href="/changelog/">Changelog</a></nav>
+  </header>
+  <main class="wrap" id="main" tabindex="-1">
+    <div class="guide-hero"><h1>Before two agents edit the same files</h1><p class="definition">Agree on a scope, advertise it and check for overlap before editing.</p><nav class="guide-nav" aria-label="Setup guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/">Full guide</a></nav></div>
+    <section class="guide-section" aria-labelledby="advisory">
+      <h2 id="advisory">A hold signals intent</h2>
+      <p>Another records expiring leases on project-relative files or globs. An exclusive hold conflicts with overlapping holds. Cooperating agents can check that shared state before starting.</p>
+      <p>A path hold by itself does not prevent a direct file write. It is not a file lock or Git merge strategy. Split work into separate file scopes, request review without edits when appropriate, and inspect the resulting diff.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="acquire">
+      <h2 id="acquire">Acquire a scope, then check as a peer</h2>
+      <p>Run from one physical repository root. These are demo identities; real sessions should act as their registered identities.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Register agents and acquire a hold"><code>another init
+another agent register editor --program claude --project .
+another agent register reviewer --program codex --project .
+another hold acquire --agent editor --project . 'src/parser.rs' --ttl 1800</code></pre>
+      <p>Use the project-relative paths you intend to work on. Quote globs such as <code>'src/**'</code> so the shell does not expand them before Another receives them. This lease lasts 1,800 seconds unless renewed or released.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Check the same scope as a peer"><code>another hold check --agent reviewer --project . 'src/parser.rs'</code></pre>
+      <p>While the editor's exclusive hold is live, this reports a conflict and exits with status <code>3</code>. Coordinate before editing. Checking does not acquire a hold. An acquire batch containing a conflict also exits <code>3</code> and grants none of that batch, including its nonconflicting paths.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="renew">
+      <h2 id="renew">Renew during work and release at handoff</h2>
+      <pre class="code-block shell" tabindex="0" aria-label="Renew and release editor holds"><code>another hold renew --agent editor
+another hold release --agent editor</code></pre>
+      <p>Without hold IDs, these affect all live holds owned by that agent. Supply specific hold IDs to change only one scope. After release, the peer can check again and acquire its own scope.</p>
+      <p>Session-start and prompt hooks renew the agent's live holds; session-end hooks release them. Expired holds stop conflicting. An open terminal does not guarantee those hooks are running; inspect live state with <code>another holds</code>.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="limits">
+      <h2 id="limits">Keep the boundary visible</h2>
+      <p>Holds belong to registered projects. Separate checkout paths can be separate projects even when they share Git history. Confirm both agents use the intended project before treating a clean check as shared coordination. <a href="/guides/git-worktrees/">Agents in git worktrees</a> shows how to share a scope.</p>
+      <p>Across federated nodes, clashes are warnings, never distributed locks. A successful check reflects state at that moment. Cooperation and review still matter after another agent starts.</p>
+      <p>Use <a href="/guides/claude-code-codex/">a Claude Code/Codex handoff</a> to request a review and <a href="/guides/mcp-agent-messaging/">MCP requests</a> to assign responsibility. For leases on servers or GPUs, see <a href="/guides/share-model-server/">sharing a model server</a> and the <a href="https://github.com/tamler/another/blob/main/docs/RESOURCES.md">resource guide</a>.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="related"><h2 id="related">Related guides</h2><nav class="guide-nav" aria-label="Related task guides"><a href="/guides/claude-code-codex/">Claude Code + Codex</a> <a href="/guides/mcp-agent-messaging/">MCP messaging</a> <a href="/guides/local-agent-inbox/">Local inbox</a></nav></section>
+  </main>
+  <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="/docs/faq/">FAQ</a> <a href="/docs/concepts/">Concepts</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>
+</body>
+</html>
