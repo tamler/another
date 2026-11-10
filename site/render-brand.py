@@ -3,13 +3,13 @@
 
     python3 site/render-brand.py
 
-The mark, the words, and the layout are in this file. It reads the vendored
-Fragment Mono WOFF2 and fills the outlines itself, so the PNG bytes do not
-depend on FreeType or on which machine runs it.
+The mark, the words, and the layout are in this file. Card text is the
+vendored JetBrains Mono ExtraBold, filled from its outlines, so the PNG bytes
+do not depend on FreeType or on which machine runs it.
 
-Requires fontTools and brotli, to read that WOFF2:
+Requires fontTools:
 
-    pip install fonttools brotli
+    pip install fonttools
 
 Outputs, next to this script, are the public files the site build copies:
 favicon.svg, favicon.ico (16, 32, 48), apple-touch-icon.png (180),
@@ -26,7 +26,7 @@ import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-FONT_PATH = ROOT / "fonts" / "FragmentMono-Regular.woff2"
+CARD_FONT = ROOT / "fonts" / "jetbrains" / "JetBrainsMono-ExtraBold.ttf"
 
 # Site palette: paper, ink, and the ochre used for links and the signal square.
 PAPER = (0xF8, 0xF8, 0xF4)
@@ -46,12 +46,13 @@ WORDMARK = "another"
 # Short on purpose. At feed size a long line becomes unreadably small.
 HEADLINE = "One inbox"
 DETAIL = "for coding agents."
-# Fragment Mono is a single weight. The cards draw a heavier stroke over it.
-TEXT_WEIGHT = 0.034
 
 # Fragment Mono's advance is 618/1000 for every glyph, including the space.
+# Filled in by load_font from JetBrains Mono ExtraBold.
 UPM = 1000
-ADVANCE = 618
+ADVANCE = 600
+CAP = 0.73
+DESC = 0.30
 
 
 def write_png(path: Path, width: int, height: int, rgba: bytes) -> None:
@@ -227,22 +228,27 @@ def paint_mark(canvas: Canvas, origin_x: float, origin_y: float, size: int, tile
 
 
 def load_font():
-    if not FONT_PATH.is_file():
-        raise SystemExit(f"missing {FONT_PATH}")
+    global UPM, ADVANCE, CAP, DESC
+    if not CARD_FONT.is_file():
+        raise SystemExit(f"missing {CARD_FONT}")
     try:
         from fontTools.pens.recordingPen import DecomposingRecordingPen
         from fontTools.ttLib import TTFont
     except ImportError as exc:
-        raise SystemExit("Install fonttools and brotli, then run this script again.") from exc
+        raise SystemExit("Install fonttools, then run this script again.") from exc
     try:
-        font = TTFont(FONT_PATH)
-    except Exception as exc:  # fontTools raises if brotli is missing
-        raise SystemExit(
-            "Could not read Fragment Mono. Install fonttools and brotli, then run this script again."
-        ) from exc
+        font = TTFont(CARD_FONT)
+    except Exception as exc:
+        raise SystemExit("Could not read JetBrains Mono ExtraBold.") from exc
+    if font["OS/2"].usWeightClass < 800:
+        raise SystemExit("card font is not ExtraBold or heavier")
     glyph_set = font.getGlyphSet()
     cmap = font.getBestCmap()
-    outlines: dict[str, list[list[tuple[float, float]]]] = {}
+    UPM = font["head"].unitsPerEm
+    ADVANCE = glyph_set[cmap[ord(" ")]].width
+    CAP = font["OS/2"].sCapHeight / UPM
+    DESC = abs(font["OS/2"].sTypoDescender) / UPM
+    outlines: dict[str, tuple[list[list[tuple[float, float]]], int]] = {}
 
     def flatten_quadratic(p0, p1, p2, out, depth: int = 0) -> None:
         mid = ((p0[0] + 2 * p1[0] + p2[0]) / 4, (p0[1] + 2 * p1[1] + p2[1]) / 4)
@@ -259,7 +265,7 @@ def load_font():
     def contours_for(char: str) -> list[list[tuple[float, float]]]:
         name = cmap.get(ord(char))
         if name is None:
-            raise SystemExit(f"Fragment Mono has no glyph for {char!r}")
+            raise SystemExit(f"JetBrains Mono ExtraBold has no glyph for {char!r}")
         pen = DecomposingRecordingPen(glyph_set)
         glyph_set[name].draw(pen)
         contours: list[list[tuple[float, float]]] = []
@@ -301,11 +307,15 @@ def load_font():
                 raise SystemExit(f"unexpected outline op {op} in {char!r}")
         if current:
             contours.append(current)
-        return contours
+        return contours, glyph_set[name].width
 
     def text_width(text: str, size: float, tracking: float) -> float:
-        step = size * (ADVANCE / UPM + tracking)
-        return step * len(text)
+        width = 0.0
+        for char in text:
+            if char not in outlines:
+                outlines[char] = contours_for(char)
+            width += size * (outlines[char][1] / UPM + tracking)
+        return width
 
     def draw_text(
         canvas: Canvas,
@@ -315,7 +325,6 @@ def load_font():
         size: float,
         tracking: float,
         samples: int = 4,
-        weight: float = 0.0,
     ) -> None:
         if not text:
             return
@@ -325,52 +334,54 @@ def load_font():
         for char in text:
             if char not in outlines:
                 outlines[char] = contours_for(char)
-            for contour in outlines[char]:
+            contours, advance = outlines[char]
+            for contour in contours:
                 polygons.append([(pen_x + px * scale, baseline - py * scale) for px, py in contour])
-            pen_x += size * (ADVANCE / UPM + tracking)
+            pen_x += size * (advance / UPM + tracking)
         xs = [px for poly in polygons for px, _py in poly]
         ys = [py for poly in polygons for _px, py in poly]
         if not xs:
             return
-        # Room for the heavier stroke, which is a dilation of the filled outlines.
-        pad = int(math.ceil(size * weight)) + 2
-        x0 = max(0, int(math.floor(min(xs))) - pad)
-        y0 = max(0, int(math.floor(min(ys))) - pad)
-        x1 = min(canvas.width, int(math.ceil(max(xs))) + pad)
-        y1 = min(canvas.height, int(math.ceil(max(ys))) + pad)
+        x0 = max(0, int(math.floor(min(xs))) - 1)
+        y0 = max(0, int(math.floor(min(ys))) - 1)
+        x1 = min(canvas.width, int(math.ceil(max(xs))) + 2)
+        y1 = min(canvas.height, int(math.ceil(max(ys))) + 2)
         width = x1 - x0
         height = y1 - y0
         if width <= 0 or height <= 0:
             raise SystemExit(f"text falls outside the image: {text!r}")
         sw, sh = width * samples, height * samples
         coverage = bytearray(sw * sh)
-        ready = [
-            [((px - x0) * samples, (py - y0) * samples) for px, py in poly]
-            for poly in polygons
-            if len(poly) >= 3
-        ]
-        for pts in ready:
-            count = len(pts)
-            top = max(0, int(min(p[1] for p in pts)))
-            bottom = min(sh - 1, int(max(p[1] for p in pts)) + 1)
+        # All contours of a glyph share one fill, so an inner contour
+        # knocks a counter out of the outer one instead of painting over it.
+        segments: list[tuple[float, float, float, float, int]] = []
+        for poly in polygons:
+            if len(poly) < 3:
+                continue
+            count = len(poly)
+            for index in range(count):
+                x_a, y_a = poly[index]
+                x_b, y_b = poly[(index + 1) % count]
+                if y_a == y_b:
+                    continue
+                if y_a < y_b:
+                    segments.append((y_a, y_b, x_a, x_b, 1))
+                else:
+                    segments.append((y_b, y_a, x_b, x_a, -1))
+        if segments:
+            scaled = [
+                ((y0s - y0) * samples, (y1s - y0) * samples, (x0s - x0) * samples, (x1s - x0) * samples, direction)
+                for y0s, y1s, x0s, x1s, direction in segments
+            ]
+            top = max(0, int(min(seg[0] for seg in scaled)) - 1)
+            bottom = min(sh - 1, int(max(seg[1] for seg in scaled)) + 1)
             for yy in range(top, bottom + 1):
                 scan = yy + 0.5
                 hits: list[tuple[float, int]] = []
-                for index in range(count):
-                    x_a, y_a = pts[index]
-                    x_b, y_b = pts[(index + 1) % count]
-                    if y_a == y_b:
-                        continue
-                    if y_a < y_b:
-                        if not (y_a <= scan < y_b):
-                            continue
-                        direction = 1
-                    else:
-                        if not (y_b <= scan < y_a):
-                            continue
-                        direction = -1
-                    t = (scan - y_a) / (y_b - y_a)
-                    hits.append((x_a + t * (x_b - x_a), direction))
+                for y_start, y_end, x_start, x_end, direction in scaled:
+                    if y_start <= scan < y_end:
+                        t = (scan - y_start) / (y_end - y_start)
+                        hits.append((x_start + t * (x_end - x_start), direction))
                 hits.sort(key=lambda item: item[0])
                 winding = 0
                 previous: float | None = None
@@ -383,9 +394,6 @@ def load_font():
                             coverage[row + left : row + right] = b"\x01" * (right - left)
                     winding += direction
                     previous = hit_x
-        radius = int(round(size * weight * samples))
-        if radius > 0:
-            coverage = _dilate(coverage, sw, sh, radius)
         area = samples * samples
         for y in range(height):
             for x in range(width):
@@ -399,37 +407,50 @@ def load_font():
     return text_width, draw_text
 
 
-def _dilate(mask: bytearray, width: int, height: int, radius: int) -> bytearray:
-    """Square dilation. Expands filled samples so the one Regular weight reads heavier."""
-    horizontal = bytearray(width * height)
-    for y in range(height):
-        row = y * width
-        x = 0
-        while x < width:
-            if mask[row + x]:
-                start = x
-                while x < width and mask[row + x]:
-                    x += 1
-                left = max(0, start - radius)
-                right = min(width, x + radius)
-                horizontal[row + left : row + right] = b"\x01" * (right - left)
-            else:
-                x += 1
-    out = bytearray(width * height)
+def _open_counter_pixels(canvas: Canvas) -> int:
+    """Paper pixels enclosed by ink. A closed bowl has none."""
+    width, height = canvas.width, canvas.height
+    seen = bytearray(width * height)
+    stack: list[tuple[int, int]] = []
     for x in range(width):
-        y = 0
-        while y < height:
-            if horizontal[y * width + x]:
-                start = y
-                while y < height and horizontal[y * width + x]:
-                    y += 1
-                top = max(0, start - radius)
-                bottom = min(height, y + radius)
-                for yy in range(top, bottom):
-                    out[yy * width + x] = 1
-            else:
-                y += 1
-    return out
+        stack.append((x, 0))
+        stack.append((x, height - 1))
+    for y in range(height):
+        stack.append((0, y))
+        stack.append((width - 1, y))
+    while stack:
+        x, y = stack.pop()
+        if not (0 <= x < width and 0 <= y < height):
+            continue
+        pixel = y * width + x
+        if seen[pixel]:
+            continue
+        if canvas.buf[pixel * 4] < 180:
+            continue
+        seen[pixel] = 1
+        stack.append((x + 1, y))
+        stack.append((x - 1, y))
+        stack.append((x, y + 1))
+        stack.append((x, y - 1))
+    enclosed = 0
+    for pixel in range(width * height):
+        if canvas.buf[pixel * 4] >= 180 and not seen[pixel]:
+            enclosed += 1
+    return enclosed
+
+
+def assert_open_counters(draw_text) -> None:
+    """At feed size, the bowls that faux bold filled in must stay open."""
+    letters = "Oeaogdb"
+    # Card sizes scaled to a 360px-wide preview of the 1200px frame.
+    sizes = [round(size * 360 / 1200) for size in (164, 148, 86, 76)]
+    for size in sizes:
+        for char in letters:
+            canvas = Canvas(size * 3, size * 3, PAPER, alpha=255)
+            draw_text(canvas, char, size * 0.4, size * 1.6, size, 0)
+            hole = _open_counter_pixels(canvas)
+            if hole < max(6, size * size // 80):
+                raise SystemExit(f"{char!r} at {size}px has a closed counter ({hole}px)")
 
 
 def favicon_svg() -> str:
@@ -495,10 +516,6 @@ def assert_favicon_pixels(canvas: Canvas) -> None:
         raise SystemExit(f"favicon pixels drifted: ink {ink} gap {gap} message {message}")
 
 
-# Fragment Mono vertical metrics, as a fraction of the em.
-CAP = 699 / UPM
-DESC = 250 / UPM
-X_CENTER = (524 / UPM) / 2
 
 
 def _line_height(size: float) -> float:
@@ -506,7 +523,7 @@ def _line_height(size: float) -> float:
 
 
 def _draw_line(draw_text, canvas: Canvas, text: str, x: float, top: float, size: float, tracking: float) -> float:
-    draw_text(canvas, text, x, top + CAP * size, size, tracking, weight=TEXT_WEIGHT)
+    draw_text(canvas, text, x, top + CAP * size, size, tracking)
     return top + _line_height(size)
 
 
@@ -515,7 +532,7 @@ def build_card(text_width, draw_text, kind: str) -> Canvas:
 
     Every mark and letter sits inside that band, and inside a wider margin,
     so a center crop does not cut a word. The headline is at least half the
-    frame wide. Text is ink on paper, drawn heavier than Fragment Mono Regular.
+    frame wide. Text is ink on paper, set in JetBrains Mono ExtraBold.
     """
     width, height = 1200, 630
     canvas = Canvas(width, height, PAPER, alpha=255)
@@ -692,6 +709,7 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     text_width, draw_text = load_font()
+    assert_open_counters(draw_text)
     (out / "favicon.svg").write_text(favicon_svg(), encoding="utf-8")
     (out / "site.webmanifest").write_text(manifest(), encoding="utf-8")
 
