@@ -48,9 +48,23 @@ Uninstall removes only entries that reference `another-hook.sh`, and deletes the
 | Client | Config written | Events | Notes |
 |---|---|---|---|
 | Claude Code | `~/.claude/settings.json` | `SessionStart`, `UserPromptSubmit`, `SessionEnd`, `PostToolUse` (all tools), `PreToolUse` (`Edit\|Write\|MultiEdit\|NotebookEdit`) | Plain stdout is added to context at session start and prompts. Tool hooks answer in JSON: `additionalContext` after a tool, `permissionDecision: "deny"` before an edit. |
-| Codex CLI | `~/.codex/hooks.json` | Same five; `PreToolUse` matches `apply_patch\|Edit\|Write` | New hooks run only after you trust them: open Codex and review them under `/hooks`. The edit guard reads the file names from the `apply_patch` patch text. |
+| Codex CLI | `~/.codex/hooks.json` | Same five; `PreToolUse` matches `apply_patch\|Edit\|Write` | New hooks run only after you trust them: open Codex and review them under `/hooks`. Each Another entry carries a `statusMessage` that says what it does, so `/hooks` shows a name instead of a bare command (see "Codex labels" below). The edit guard reads the file names from the `apply_patch` patch text. |
 | Grok CLI | `~/.grok/hooks/another.json` | Same five as Claude Code | User-level hooks need no trust step (`/hooks-trust` applies to project hooks). Grok maps `Edit`, `Write` and `MultiEdit` onto its own edit tools. See "Grok and shared hook files" below. |
 | Cursor (best effort) | `~/.cursor/hooks.json` | `sessionStart`, `beforeSubmitPrompt`, `sessionEnd`, `postToolUse` | Context is injected at session start and after tool calls (`additional_context`); the prompt hook just renews holds and lets the prompt through. No edit guard: Cursor blocks a tool call when a `preToolUse` reply is not valid JSON, and a hook that fails open prints nothing. |
+
+### Codex labels
+
+Codex lists each hook in `/hooks` by its `statusMessage` and shows the same text while the hook runs. Another's Codex entries use these:
+
+| Event | `statusMessage` |
+|---|---|
+| `SessionStart` | Another: registering this session |
+| `UserPromptSubmit` | Another: checking for new messages |
+| `PostToolUse` | Another: delivering messages mid-task |
+| `PreToolUse` | Another: checking file holds before an edit |
+| `SessionEnd` | Another: closing this session |
+
+If `~/.codex/hooks.json` has no top-level `description` (or an empty one), install adds "Another coordination hooks (toanother.one): messages and file holds between coding agents". A description you wrote yourself is left as it is, and uninstall never removes one, since it may describe your other hooks too. Installs from before the labels existed get them the next time you run `another hook install --client codex`. Codex records trust against each hook's hash and skips a changed hook until you trust it again, so after that install open `/hooks` and trust Another's hooks again; until you do, mail and holds do not reach Codex sessions through hooks. The other clients' files get neither field.
 
 Edits made through a shell command (`sed -i`, `echo >`, a script) are not seen by any client's edit hook, so they are neither held nor stopped. Neither is an edit through a hard link to a held file, since a path cannot reveal one.
 
