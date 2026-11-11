@@ -295,7 +295,12 @@ fn post_tool_mentions_new_mail_once_and_is_silent_otherwise() {
 
 #[test]
 fn manual_route_directory_holds_block_auto_edits_in_both_orders() {
-    for pattern in ["app/[id]", "app/[id]/**"] {
+    for (pattern, path) in [
+        ("app/[id]", "app/[id]/page.tsx"),
+        ("app/[id]/**", "app/[id]/page.tsx"),
+        ("app/[id]/*.tsx", "app/[id]/page.tsx"),
+        ("app/[id]/**/*.tsx", "app/[id]/deep/page.tsx"),
+    ] {
         let env = Env::new();
         env.start("claude", &env.main, &[]);
         env.start("codex", &env.wt, &[]);
@@ -310,11 +315,7 @@ fn manual_route_directory_holds_block_auto_edits_in_both_orders() {
             pattern,
         ];
         env.ok(&args);
-        let edit = tool(
-            &env.main,
-            "Write",
-            json!({ "file_path": "app/[id]/page.tsx" }),
-        );
+        let edit = tool(&env.main, "Write", json!({ "file_path": path }));
         assert!(
             denial(&env.hook("pre-edit", "claude", &edit)).contains("held by codex@shop-review")
         );

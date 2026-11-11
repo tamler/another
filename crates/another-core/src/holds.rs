@@ -278,7 +278,7 @@ fn hold_covers(held: &str, path: &str) -> bool {
     }
     match literal_pattern(held) {
         Some(held) => covers(&held, &path),
-        None => held == "**" || covers(held.trim_end_matches("/**"), &path) || matches(held, &path),
+        None => held == "**" || matches_with_literal_prefix(held, &path) || matches(held, &path),
     }
 }
 
@@ -378,10 +378,24 @@ fn matches(glob: &str, path: &str) -> bool {
     compile(glob).map(|m| m.is_match(path)).unwrap_or(true)
 }
 
+/// Equal leading components also carry literal directory intent, even when their names
+/// contain brackets or braces. At the first differing (wildcard) component, match the
+/// entire remaining glob normally. An exhausted side may be an ancestor directory hold.
+fn matches_with_literal_prefix(glob: &str, literal: &str) -> bool {
+    let pattern: Vec<&str> = glob.split('/').collect();
+    let path: Vec<&str> = literal.split('/').collect();
+    let shared = pattern
+        .iter()
+        .zip(&path)
+        .take_while(|(a, b)| a == b)
+        .count();
+    shared == pattern.len()
+        || shared == path.len()
+        || matches(&pattern[shared..].join("/"), &path[shared..].join("/"))
+}
+
 fn glob_touches_literal(glob: &str, literal: &str) -> bool {
-    // A manual hold may name a real directory whose spelling also has glob syntax,
-    // such as app/[id] or app/[id]/**. Preserve that literal directory intent too.
-    if covers(glob.trim_end_matches("/**"), literal) || matches(glob, literal) {
+    if matches_with_literal_prefix(glob, literal) || matches(glob, literal) {
         return true;
     }
     // The literal may be a directory with matches of the glob below it: compare the

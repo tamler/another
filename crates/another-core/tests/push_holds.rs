@@ -294,6 +294,58 @@ fn whole_project_holds_need_repo_wide() {
 }
 
 #[test]
+fn manual_globs_under_literal_route_components_conflict_in_both_orders() {
+    assert!(!patterns_overlap(
+        "app/[id]/*.tsx",
+        &globset::escape("app/[id]/page.rs")
+    ));
+    for (pattern, path) in [
+        ("app/[id]/*.tsx", "app/[id]/page.tsx"),
+        ("app/[id]/**/*.tsx", "app/[id]/deep/page.tsx"),
+        ("app/[id]/file?.{ts,tsx}", "app/[id]/file1.tsx"),
+        (
+            "app/{group}/part[ver]/**/file-?.{rs,ts}",
+            "app/{group}/part[ver]/deep/file-1.rs",
+        ),
+        ("app/{a,b}/*.tsx", "app/a/page.tsx"),
+    ] {
+        let fx = Fx::new();
+        let wt = fx.project(&fx.repos.wt);
+        assert_eq!(
+            fx.acquire("alice", &fx.repos.main, &[pattern])
+                .unwrap()
+                .granted
+                .len(),
+            1
+        );
+        assert_eq!(
+            fx.store
+                .guard_edit("bob", &wt, &[path.into()], "auto")
+                .unwrap()
+                .conflicts
+                .len(),
+            1,
+            "manual first: {pattern}"
+        );
+        fx.store.release_holds("alice", &[]).unwrap();
+        assert!(fx
+            .store
+            .guard_edit("bob", &wt, &[path.into()], "auto")
+            .unwrap()
+            .conflicts
+            .is_empty());
+        assert_eq!(
+            fx.acquire("alice", &fx.repos.main, &[pattern])
+                .unwrap()
+                .conflicts
+                .len(),
+            1,
+            "auto first: {pattern}"
+        );
+    }
+}
+
+#[test]
 fn manual_bracket_directory_holds_conflict_with_literal_files_in_both_orders() {
     for pattern in ["app/[id]", "app/[id]/**"] {
         let fx = Fx::new();

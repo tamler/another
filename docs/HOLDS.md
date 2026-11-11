@@ -18,7 +18,7 @@ With the hook pack installed, agents do not have to remember to take holds. Befo
 
 Automatic holds name files only. File targets are literal, even when a new or existing filename contains `[`, `{`, `*` or `?`; stored patterns escape these characters. Directory hints in tool input are skipped, and patch headers supply the exact files a patch changes. To hold a directory or use glob syntax, explicitly request it in `another hold acquire` or MCP `hold_paths`. Be careful: a directory hold blocks every file below it, including unrelated work. Prefer individual files whenever possible.
 
-Manual holds such as `app/[id]` and `app/[id]/**` also protect files below the directory spelled `app/[id]`. Another conservatively keeps that literal directory intent alongside the pattern's glob meaning, so it conflicts with an automatic hold on `app/[id]/page.tsx` whichever hold comes first.
+Manual holds also keep literal intent in equal leading path components, including bracketed or braced directory names. After those components, the remaining glob is matched normally. Thus `app/[id]`, `app/[id]/**`, `app/[id]/*.tsx` and `app/[id]/**/*.tsx` protect matching literal files below `app/[id]` whichever hold comes first. The original glob interpretation still counts too.
 
 ## Holds across worktrees
 
