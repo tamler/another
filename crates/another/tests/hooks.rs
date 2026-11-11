@@ -740,6 +740,41 @@ fn install_changes(env: &Env, client: &str) -> Vec<String> {
 }
 
 #[test]
+fn codex_install_and_status_distinguish_configuration_from_trust() {
+    let env = Env::new();
+    let client_config = env.home.join(".codex/config.toml");
+    std::fs::create_dir_all(client_config.parent().unwrap()).unwrap();
+    std::fs::write(&client_config, "unrelated_setting = true\n").unwrap();
+    let install = env.ok(&["hook", "install", "--client", "codex"]);
+    assert!(install.contains("Codex trust is not checked"));
+    assert!(install.contains("review and trust them yourself in Codex /hooks"));
+    let before = std::fs::read(env.home.join(".codex/hooks.json")).unwrap();
+    let status = env.ok(&["hook", "status"]);
+    assert!(status.contains("Codex trust is not checked"));
+    assert!(status.contains("no automatic mail or edit-hold coverage"));
+    let json: Value = serde_json::from_str(&env.ok(&["--json", "hook", "status"])).unwrap();
+    let codex = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["client"] == "codex")
+        .unwrap();
+    assert_eq!(codex["installed"], true);
+    assert!(codex["trust_note"]
+        .as_str()
+        .unwrap()
+        .contains("Another does not grant trust"));
+    assert_eq!(
+        std::fs::read(env.home.join(".codex/hooks.json")).unwrap(),
+        before
+    );
+    assert_eq!(
+        std::fs::read_to_string(client_config).unwrap(),
+        "unrelated_setting = true\n"
+    );
+}
+
+#[test]
 fn codex_hooks_are_named_for_the_trust_dialog() {
     let env = Env::new();
     let herdr = json!({ "hooks": [{ "type": "command", "command": "herdr hook session-start --agent codex", "timeout": 5 }] });
