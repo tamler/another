@@ -58,7 +58,8 @@ pub struct WakeRecord {
 pub struct TrialStats {
     pub since: String,
     pub until: String,
-    /// Edits the edit hook stopped because another agent held the file.
+    /// Blocking notices recorded by the edit hook. Repeated attempts against an unchanged
+    /// set of blockers are omitted by current builds; older events count every attempt.
     pub edits_blocked: u32,
     /// Distinct (agent, holder, path) collisions among those, so retries count once.
     pub collisions: u32,

@@ -383,6 +383,121 @@ fn manual_bracket_directory_holds_conflict_with_literal_files_in_both_orders() {
 }
 
 #[test]
+fn blocked_retries_are_deduplicated_and_ping_once_after_release() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    let wt = fx.project(&fx.repos.wt);
+    fx.acquire("alice", &fx.repos.main, &["src/a.rs"]).unwrap();
+    for attempt in 0..20 {
+        let blocked = fx
+            .store
+            .guard_edit("bob", &wt, &["src/a.rs".into()], "auto")
+            .unwrap();
+        assert_eq!(blocked.conflicts.len(), 1);
+        assert_eq!(blocked.first_notice, attempt == 0);
+        assert_eq!(blocked.retry_after_seconds, 30);
+    }
+    for (advance, expected) in [(30, 60), (60, 120), (120, 240), (240, 300)] {
+        fx.advance_secs(advance);
+        let blocked = fx
+            .store
+            .guard_edit("bob", &wt, &["src/a.rs".into()], "auto")
+            .unwrap();
+        assert!(!blocked.first_notice);
+        assert_eq!(blocked.retry_after_seconds, expected);
+    }
+    assert_eq!(
+        fx.kinds().iter().filter(|k| *k == "hold.blocked").count(),
+        1
+    );
+    // The subscription survives opening another store connection.
+    let store = Store::open_with_clock(&fx.repos.home, Clock::Manual(fx.clock.clone())).unwrap();
+    store.release_holds("alice", &[]).unwrap();
+    store.sweep().unwrap();
+    store.sweep().unwrap();
+    let inbox = store.inbox("bob", InboxQuery::default()).unwrap();
+    assert_eq!(inbox.messages.len(), 1);
+    assert_eq!(inbox.messages[0].message.subject, "Hold free: src/a.rs");
+    assert!(inbox.messages[0].message.body.contains("not reserved"));
+    assert!(store
+        .guard_edit("bob", &main, &["src/a.rs".into()], "auto")
+        .unwrap()
+        .conflicts
+        .is_empty());
+}
+
+#[test]
+fn hold_free_ping_compares_literal_paths_after_restack() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    let wt = fx.project(&fx.repos.wt);
+    let path = "app/[id]/page.tsx";
+    fx.store
+        .guard_edit("alice", &main, &[path.into()], "auto")
+        .unwrap();
+    fx.store
+        .guard_edit("carol", &main, &["app/i/page.tsx".into()], "auto")
+        .unwrap();
+    assert!(!fx
+        .store
+        .guard_edit("bob", &wt, &[path.into()], "auto")
+        .unwrap()
+        .conflicts
+        .is_empty());
+    fx.store.release_holds("alice", &[]).unwrap();
+    let inbox = fx.store.inbox("bob", InboxQuery::default()).unwrap();
+    assert_eq!(
+        inbox.messages.len(),
+        1,
+        "the ordinary route must not delay a literal-route ping"
+    );
+    assert_eq!(
+        inbox.messages[0].message.subject,
+        "Hold free: app/[id]/page.tsx"
+    );
+}
+
+#[test]
+fn hold_free_ping_waits_for_every_holder_and_covers_expiry() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    for name in ["alice", "carol"] {
+        fx.store
+            .acquire_holds(AcquireHolds {
+                agent: name.into(),
+                project: main.clone(),
+                paths: vec!["src/a.rs".into()],
+                ttl_seconds: Some(60),
+                exclusive: false,
+                reason: None,
+                repo_wide: false,
+            })
+            .unwrap();
+    }
+    fx.store
+        .guard_edit("bob", &main, &["src/a.rs".into()], "auto")
+        .unwrap();
+    fx.store.heartbeat("alice", true).unwrap();
+    assert!(fx
+        .store
+        .inbox("bob", InboxQuery::default())
+        .unwrap()
+        .messages
+        .is_empty());
+    fx.advance_secs(61);
+    fx.store.sweep().unwrap();
+    assert_eq!(fx.store.agent("alice").unwrap().status, "offline");
+    assert_eq!(
+        fx.store
+            .inbox("bob", InboxQuery::default())
+            .unwrap()
+            .messages
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn edit_guard_refuses_directories_and_keeps_glob_characters_literal() {
     let fx = Fx::new();
     let project = fx.project(&fx.repos.main);
@@ -578,21 +693,36 @@ fn unannounced_mail_is_claimed_once() {
     };
     let first = send("first", Importance::Normal, false);
     fx.advance_secs(1);
-    send("second", Importance::Urgent, true);
+    let second = send("second", Importance::Urgent, true);
     fx.advance_secs(1);
     let third = send("third", Importance::Normal, false);
 
     let all = fx.store.unannounced("alice", "", 10).unwrap();
     assert_eq!(all.agent, "alice");
     assert_eq!((all.count, all.urgent), (3, 1));
-    let subjects: Vec<_> = all.items.iter().map(|i| i.subject.as_str()).collect();
-    assert_eq!(subjects, ["third", "second", "first"]);
-    assert!(all.items[1].request_id.is_some());
-    assert_eq!(all.items[1].from, "bob");
+    // IDs use real time and random bits, independently of the store's manual clock.
+    // The query contract orders by ID, including IDs created in the same millisecond.
+    let mut expected = [&first, &second, &third];
+    expected.sort_by(|a, b| b.message_id.cmp(&a.message_id));
+    assert_eq!(
+        all.items.iter().map(|i| &i.message_id).collect::<Vec<_>>(),
+        expected.iter().map(|m| &m.message_id).collect::<Vec<_>>()
+    );
+    let request = all
+        .items
+        .iter()
+        .find(|i| i.message_id == second.message_id)
+        .unwrap();
+    assert!(request.request_id.is_some());
+    assert_eq!(request.from, "bob");
 
-    let newer = fx.store.unannounced("alice", &first.message_id, 1).unwrap();
+    let newer = fx
+        .store
+        .unannounced("alice", &expected[2].message_id, 1)
+        .unwrap();
     assert_eq!(newer.count, 2);
     assert_eq!(newer.items.len(), 1, "limit caps items, not the count");
+    assert_eq!(newer.items[0].message_id, expected[0].message_id);
 
     // Review F2: a claim is exclusive. The first caller wins; a second (another hook, or
     // the daemon) gets nothing for the same message.
@@ -728,7 +858,7 @@ fn stats_count_the_coordination_evidence() {
     edit("alice", &main, "src/a.rs");
     edit("alice", &main, "src/b.rs");
     fx.acquire("carol", &r.main, &["docs/**"]).unwrap();
-    // Bob is stopped three times on two files: three stops, two distinct collisions.
+    // Bob is stopped three times on two files: two notices and two distinct collisions.
     for path in ["src/a.rs", "src/a.rs", "src/b.rs"] {
         assert!(!edit("bob", &wt, path).conflicts.is_empty());
     }
@@ -816,7 +946,7 @@ fn stats_count_the_coordination_evidence() {
     }
 
     let s = fx.store.trial_stats(Some(Since::Time(start))).unwrap();
-    assert_eq!(s.edits_blocked, 3);
+    assert_eq!(s.edits_blocked, 2);
     assert_eq!(s.collisions, 2);
     assert_eq!(s.holds_auto_acquired, 2);
     assert_eq!(s.notices_mid_task, 1);

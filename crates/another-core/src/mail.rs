@@ -265,6 +265,15 @@ fn resolve_all(tx: &Tx<'_>, names: &[String]) -> Result<Vec<AgentRef>> {
 }
 
 pub(crate) fn send_tx(tx: &Tx<'_>, input: &SendMessage) -> Result<Message> {
+    send_inner_tx(tx, input, true)
+}
+
+/// Automated notices do not imply that their sender is present or active.
+pub(crate) fn send_automatic_tx(tx: &Tx<'_>, input: &SendMessage) -> Result<Message> {
+    send_inner_tx(tx, input, false)
+}
+
+fn send_inner_tx(tx: &Tx<'_>, input: &SendMessage, touch_sender: bool) -> Result<Message> {
     check_text(&input.subject, &input.body)?;
     if input.to.is_empty() {
         return Err(Error::Invalid("at least one recipient is required".into()));
@@ -404,7 +413,9 @@ pub(crate) fn send_tx(tx: &Tx<'_>, input: &SendMessage) -> Result<Message> {
             req.due_in_seconds,
         )?;
     }
-    touch(tx, &sender.id)?;
+    if touch_sender {
+        touch(tx, &sender.id)?;
+    }
     load_message(tx, &message_id)
 }
 

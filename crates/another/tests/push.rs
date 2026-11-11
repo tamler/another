@@ -378,6 +378,32 @@ fn literal_metacharacter_filenames_are_protected_across_worktrees() {
 }
 
 #[test]
+fn repeated_edits_get_a_short_backoff_and_a_free_ping() {
+    let env = Env::new();
+    env.start("claude", &env.main, &[]);
+    env.start("codex", &env.wt, &[]);
+    env.hook(
+        "pre-edit",
+        "claude",
+        &tool(&env.main, "Edit", json!({ "file_path": "src/a.rs" })),
+    );
+    let edit = tool(&env.wt, "Edit", json!({ "file_path": "src/a.rs" }));
+    let first = denial(&env.hook("pre-edit", "codex", &edit));
+    assert!(first.contains("You'll be pinged"));
+    for _ in 0..5 {
+        let next = denial(&env.hook("pre-edit", "codex", &edit));
+        assert!(next.starts_with("Another: this edit is still blocked."));
+        assert!(!next.contains("another send"));
+        assert!(next.contains("seconds"));
+    }
+    env.ok(&["hold", "release", "--agent", "claude@shop"]);
+    let after = tool(&env.wt, "Bash", json!({ "command": "true" }));
+    assert!(context(&env.hook("post-tool", "codex", &after)).contains("Hold free: src/a.rs"));
+    assert_eq!(env.hook("post-tool", "codex", &after), "");
+    assert_eq!(env.hook("pre-edit", "codex", &edit), "");
+}
+
+#[test]
 fn pre_edit_never_turns_directory_hints_into_holds() {
     let env = Env::new();
     env.start("codex", &env.main, &[]);

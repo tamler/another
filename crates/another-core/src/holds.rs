@@ -11,13 +11,13 @@
 use std::path::Path;
 
 use globset::{Glob, GlobBuilder, GlobMatcher};
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use serde_json::json;
 
 use crate::error::{Error, Result};
 use crate::identity::{address, find_project, resolve_agent, Project};
-use crate::mail::touch;
+use crate::mail::{send_automatic_tx, touch, SendMessage};
 use crate::requests::stale_overdue_tx;
 use crate::store::{new_id, Store, Tx};
 use crate::time::fmt_ts;
@@ -129,6 +129,10 @@ pub struct EditGuard {
     pub covered: Vec<String>,
     /// Other agents' overlapping holds. When this is not empty nothing was taken.
     pub conflicts: Vec<HoldConflict>,
+    /// First notice for a new set of blockers; repeated attempts get a short denial.
+    pub first_notice: bool,
+    /// Advisory backoff, in seconds. A wait also sends one inbox ping when the file is free.
+    pub retry_after_seconds: i64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -593,6 +597,136 @@ fn remote_clashes(
     Ok(out)
 }
 
+/// Register durable file waits and advance backoff only after its current window ends.
+/// Returns whether any blocker set is new, and the longest remaining backoff.
+fn wait_for_conflicts_tx(
+    tx: &Tx<'_>,
+    agent: &crate::identity::AgentRef,
+    project: &Project,
+    conflicts: &[HoldConflict],
+) -> Result<(bool, i64)> {
+    let mut paths: Vec<&str> = conflicts.iter().map(|c| c.path.as_str()).collect();
+    paths.sort_unstable();
+    paths.dedup();
+    let mut first_notice = false;
+    let mut retry_after = 0;
+    for path in paths {
+        let mut blockers: Vec<&str> = conflicts
+            .iter()
+            .filter(|c| c.path == path)
+            .map(|c| c.held.hold_id.as_str())
+            .collect();
+        blockers.sort_unstable();
+        blockers.dedup();
+        let signature = serde_json::to_string(&blockers)?;
+        let old: Option<(String, i64, i64)> = tx
+            .query_row(
+                "SELECT blockers, retry_at, backoff_seconds FROM hold_waits
+             WHERE agent_id = ?1 AND project_id = ?2 AND path = ?3",
+                params![agent.id, project.project_id, path],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let is_new = old.as_ref().is_none_or(|(s, _, _)| *s != signature);
+        let (retry_at, backoff) = match old {
+            Some((_, until, backoff)) if !is_new && until > tx.now => (until, backoff),
+            old => {
+                let backoff = match old {
+                    Some((_, _, previous)) if !is_new => (previous * 2).min(300),
+                    _ => 30,
+                };
+                let until = tx.now + backoff * 1000;
+                let holder = resolve_agent(
+                    tx,
+                    tx.node_id,
+                    &conflicts
+                        .iter()
+                        .find(|c| c.path == path)
+                        .expect("path came from conflicts")
+                        .held
+                        .agent,
+                )?;
+                tx.emit(
+                    &agent.address,
+                    "hold.waiting",
+                    json!({
+                        "agent_id": agent.id, "project_id": project.project_id,
+                        "path": path, "blockers": blockers, "retry_at": until,
+                    }),
+                )?;
+                tx.execute(
+                    "INSERT INTO hold_waits (agent_id, project_id, path, blockers, holder_id, retry_at, backoff_seconds)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(agent_id, project_id, path) DO UPDATE SET
+                       blockers = excluded.blockers, holder_id = excluded.holder_id,
+                       retry_at = excluded.retry_at, backoff_seconds = excluded.backoff_seconds",
+                    params![agent.id, project.project_id, path, signature, holder.id, until, backoff],
+                )?;
+                (until, backoff)
+            }
+        };
+        first_notice |= is_new;
+        retry_after = retry_after.max(((retry_at - tx.now + 999) / 1000).min(backoff));
+    }
+    Ok((first_notice, retry_after))
+}
+
+/// Deliver each free-file ping and remove its wait in the same transaction. Recheck all
+/// current blockers, including replacement holds and holds in sibling worktrees.
+fn ping_free_waiters_tx(tx: &Tx<'_>) -> Result<()> {
+    let mut stmt = tx.prepare(
+        "SELECT w.agent_id, a.address, p.slug, w.project_id, w.path, h.address
+         FROM hold_waits w JOIN agents a ON a.agent_id = w.agent_id
+         JOIN projects p ON p.project_id = w.project_id
+         JOIN agents h ON h.agent_id = w.holder_id",
+    )?;
+    let waits = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (agent_id, agent, project_key, project_id, path, holder) in waits {
+        let project = find_project(tx, tx.node_id, &project_key)?;
+        if !conflicts_for(
+            tx,
+            &project,
+            &agent_id,
+            &[(path.clone(), globset::escape(&path))],
+            true,
+        )?
+        .is_empty()
+        {
+            continue;
+        }
+        tx.emit(
+            "system",
+            "hold.available",
+            json!({
+                "agent_id": agent_id, "project_id": project_id, "path": path,
+            }),
+        )?;
+        send_automatic_tx(tx, &SendMessage {
+            from: holder,
+            to: vec![agent],
+            subject: format!("Hold free: {}", path.chars().take(280).collect::<String>()),
+            body: format!("Another automatically checked {project_key}:{path}: no conflicting hold remains. The file is not reserved; check again before editing."),
+            ..Default::default()
+        })?;
+        tx.execute(
+            "DELETE FROM hold_waits WHERE agent_id = ?1 AND project_id = ?2 AND path = ?3",
+            params![agent_id, project_id, path],
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
     let mut stmt = tx.prepare(
         "SELECT hold_id, pattern, agent_id FROM holds
@@ -618,6 +752,7 @@ pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
             [hold_id],
         )?;
     }
+    ping_free_waiters_tx(tx)?;
     let stale_requests = stale_overdue_tx(tx)?;
     let expired_leases = crate::resources::expire_leases_tx(tx)?;
     Ok(SweepReport {
@@ -647,6 +782,7 @@ pub(crate) fn release_tx(
             params![id, tx.now, reason],
         )?;
     }
+    ping_free_waiters_tx(tx)?;
     Ok(())
 }
 
@@ -849,9 +985,10 @@ impl Store {
                         c.path = literal_pattern(p).expect("edit targets are escaped literals");
                     }
                 }
-                // Evidence for `another stats`: who was stopped, by whose hold, where.
+                let (first_notice, retry_after_seconds) = wait_for_conflicts_tx(tx, &me, &project, &conflicts)?;
+                // Count each distinct collision, rather than every retry of the same edit.
                 let repo = crate::repo::link_of(tx, &project)?.map(|l| l.key);
-                tx.emit(
+                if first_notice { tx.emit(
                     &me.address,
                     crate::stats::BLOCKED_EVENT,
                     json!({
@@ -869,13 +1006,15 @@ impl Store {
                             "project": c.held.project,
                         })).collect::<Vec<_>>(),
                     }),
-                )?;
+                )?; }
                 return Ok(EditGuard {
                     agent: me.address,
                     project: project.slug,
                     held: Vec::new(),
                     covered: Vec::new(),
                     conflicts,
+                    first_notice,
+                    retry_after_seconds,
                 });
             }
             let mut stmt = tx.prepare(
@@ -929,12 +1068,26 @@ impl Store {
             if !ids.is_empty() {
                 touch(tx, &me.id)?;
             }
+            for (_, path) in &patterns {
+                let path = literal_pattern(path).expect("edit targets are escaped literals");
+                let waiting = tx.query_row(
+                    "SELECT 1 FROM hold_waits WHERE agent_id = ?1 AND project_id = ?2 AND path = ?3",
+                    params![me.id, project.project_id, path], |_| Ok(()),
+                ).optional()?.is_some();
+                if waiting {
+                    tx.emit(&me.address, "hold.wait.finished", json!({ "project_id": project.project_id, "path": path }))?;
+                    tx.execute("DELETE FROM hold_waits WHERE agent_id = ?1 AND project_id = ?2 AND path = ?3",
+                        params![me.id, project.project_id, path])?;
+                }
+            }
             Ok(EditGuard {
                 agent: me.address,
                 project: project.slug,
                 held: holds_by_id(tx, &ids)?,
                 covered,
                 conflicts: Vec::new(),
+                first_notice: false,
+                retry_after_seconds: 0,
             })
         })
     }

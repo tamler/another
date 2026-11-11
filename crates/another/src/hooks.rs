@@ -1198,9 +1198,10 @@ pub fn deny_message(agent: &str, conflicts: &[HoldConflict]) -> String {
         out.push_str(&format!("; and {} more", conflicts.len() - 3));
     }
     out.push_str(". Worktrees of the same repository still conflict at merge");
+    out.push_str(". You'll be pinged in your Another inbox when the file is free. Do not retry this edit while waiting");
     let first = conflicts.first().map(|c| c.path.as_str()).unwrap_or("it");
     out.push_str(&format!(
-        ". Leave it alone until the hold is released. Ask the holder with `another send --from {agent} --to {} --request --subject \"Release {first}?\"`, or work on other files and try again later.",
+        ". Leave it alone until the hold is released. Ask the holder with `another send --from {agent} --to {} --request --subject \"Release {first}?\"`, or work on other files.",
         holders.join(",")
     ));
     truncate(out, 1000)
@@ -1272,6 +1273,8 @@ fn pre_edit(store: &Store, client: Client, dir: &Path, input: &HookInput) -> Res
         }
     }
     let mut conflicts = Vec::new();
+    let mut first_notice = false;
+    let mut retry_after = 0;
     for (project_dir, files) in &groups {
         let project = match store.project(project_dir) {
             Ok(p) => p.abs_path,
@@ -1281,6 +1284,8 @@ fn pre_edit(store: &Store, client: Client, dir: &Path, input: &HookInput) -> Res
             Err(e) => return Err(e.into()),
         };
         let guard = store.guard_edit(&agent, &project, files, AUTO_HOLD_REASON)?;
+        first_notice |= guard.first_notice;
+        retry_after = retry_after.max(guard.retry_after_seconds);
         conflicts.extend(guard.conflicts);
     }
     if conflicts.is_empty() {
@@ -1290,7 +1295,9 @@ fn pre_edit(store: &Store, client: Client, dir: &Path, input: &HookInput) -> Res
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
-            "permissionDecisionReason": deny_message(&agent, &conflicts),
+            "permissionDecisionReason": if first_notice { deny_message(&agent, &conflicts) } else {
+                format!("Another: this edit is still blocked. {} is held by {}. Back off for {retry_after} seconds. Wait for the hold-free inbox ping or work on other files.", truncate(conflicts[0].path.clone(), 200), conflicts[0].held.agent)
+            },
         }
     })
     .to_string())
