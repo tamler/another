@@ -619,6 +619,19 @@ CREATE TABLE announcements (
     PRIMARY KEY (agent_id, message_id)
 );
 "#,
+    // Durable, node-local subscriptions created by blocked file edits.
+    r#"
+CREATE TABLE hold_waits (
+    agent_id       TEXT NOT NULL REFERENCES agents(agent_id),
+    project_id     TEXT NOT NULL REFERENCES projects(project_id),
+    path           TEXT NOT NULL,
+    blockers       TEXT NOT NULL,
+    holder_id      TEXT NOT NULL REFERENCES agents(agent_id),
+    retry_at       INTEGER NOT NULL,
+    backoff_seconds INTEGER NOT NULL,
+    PRIMARY KEY (agent_id, project_id, path)
+);
+"#,
 ];
 
 /// Switch to WAL. While several connections convert a new database at once, SQLite answers

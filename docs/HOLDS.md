@@ -20,6 +20,8 @@ Automatic holds name files only. File targets are literal, even when a new or ex
 
 Manual holds also keep literal intent in equal leading path components, including bracketed or braced directory names. After those components, the remaining glob is matched normally. Thus `app/[id]`, `app/[id]/**`, `app/[id]/*.tsx` and `app/[id]/**/*.tsx` protect matching literal files below `app/[id]` whichever hold comes first. The original glob interpretation still counts too.
 
+A stopped edit automatically waits for the file. Do not keep retrying: repeat attempts get a short backoff, and Another sends one inbox ping after every conflicting hold clears. The file is not reserved by that ping. See [Waiting for a held file](HOOKS.md#waiting-for-a-held-file) for timing and delivery.
+
 ## Holds across worktrees
 
 Each checkout is its own project, but holds are checked across every local project in the same git repository. Two worktrees of one repository, or two clones of one origin, collide on the same files:

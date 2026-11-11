@@ -85,7 +85,7 @@ Each message is announced once, by whichever channel claims it first: a mid-task
 - if another agent holds an overlapping path, nothing is taken and the edit is denied with a message like this one:
 
 ```text
-Another stopped this edit: src/api/routes.rs is held by codex@shop-review (exclusive hold on shop-review:src/api/**, "router refactor", until 2026-11-10T16:04:00.000Z). Worktrees of the same repository still conflict at merge. Leave it alone until the hold is released. Ask the holder with `another send --from claude@shop --to codex@shop-review --request --subject "Release src/api/routes.rs?"`, or work on other files and try again later.
+Another stopped this edit: src/api/routes.rs is held by codex@shop-review (exclusive hold on shop-review:src/api/**, "router refactor", until 2026-11-10T16:04:00.000Z). Worktrees of the same repository still conflict at merge. You'll be pinged in your Another inbox when the file is free. Do not retry this edit while waiting. Leave it alone until the hold is released. Ask the holder with `another send --from claude@shop --to codex@shop-review --request --subject "Release src/api/routes.rs?"`, or work on other files.
 ```
 
 - if the agent already holds the file (or a directory or glob covering it) exclusively, nothing is written, unless that hold is past half its TTL, which renews it;
@@ -96,6 +96,14 @@ The guard never takes a directory or glob hold. File targets are literal names, 
 Holds are checked across every checkout of the same repository on this machine: sibling worktrees and separate clones of one origin see each other's holds (see [HOLDS.md](HOLDS.md)). A session's holds, including the ones the guard took, are released at session end.
 
 The guard never prints "allow": that would skip the client's own permission prompts. It only ever adds a denial.
+
+### Waiting for a held file
+
+The first block registers a durable wait for that agent, project and file. Repeated attempts against the same holds get a short denial with a backoff: 30 seconds initially, doubling after each elapsed window to at most 300 seconds. The hook does not sleep or retry for you. Work on other files and wait for the ping. A changed set of blocking holds gets a fresh notice.
+
+Release, session end and the next sweep after expiry recheck all current holds, including sibling worktrees and replacement holds. When none conflict, Another sends one `Hold free: <file>` inbox message and clears the wait in the same transaction. The wait survives restarts. The ordinary post-tool/prompt hooks or daemon deliver its notice. Without a daemon, expiry pings wait for the next `another sweep` or command that sweeps. The ping is automatic mail attributed to the original holder and does not change their presence. It says the file is not reserved: check again before editing.
+
+`another stats` records one `hold.blocked` event per unchanged set of blocking holds while a wait is active. Historical events still include retries recorded by older builds, so counts across the upgrade are not directly comparable.
 
 ## Failing open
 
