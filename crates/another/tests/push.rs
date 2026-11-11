@@ -294,6 +294,47 @@ fn post_tool_mentions_new_mail_once_and_is_silent_otherwise() {
 }
 
 #[test]
+fn pre_edit_never_turns_directory_hints_into_holds() {
+    let env = Env::new();
+    env.start("codex", &env.main, &[]);
+    let patch = "*** Begin Patch\n*** Add File: src/new.rs\n+fn new() {}\n*** End Patch\n";
+    assert_eq!(
+        env.hook(
+            "pre-edit",
+            "codex",
+            &tool(
+                &env.main,
+                "apply_patch",
+                json!({ "path": "src", "command": patch })
+            )
+        ),
+        ""
+    );
+    let holds = env.holds();
+    assert_eq!(holds.len(), 1);
+    assert_eq!(holds[0]["pattern"], "src/new.rs");
+    assert_eq!(
+        env.hook(
+            "pre-edit",
+            "codex",
+            &tool(&env.main, "Edit", json!({ "file_path": "src" }))
+        ),
+        ""
+    );
+    assert_eq!(env.holds().len(), 1);
+    env.start("claude", &env.wt, &[]);
+    assert_eq!(
+        env.hook(
+            "pre-edit",
+            "claude",
+            &tool(&env.wt, "Write", json!({ "file_path": "src/other.rs" }))
+        ),
+        "",
+        "unrelated files stay free"
+    );
+}
+
+#[test]
 fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
     let env = Env::new();
     env.start("claude", &env.main, &[]);
@@ -328,6 +369,7 @@ fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
     );
     let reason = denial(&out);
     assert!(reason.contains("held by claude@shop"), "{reason}");
+    assert!(reason.contains("Worktrees of the same repository still conflict at merge"));
     assert!(
         reason.starts_with("Another stopped this edit: src/a.rs is held by"),
         "paths are project-relative: {reason}"

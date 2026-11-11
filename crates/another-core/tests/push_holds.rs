@@ -294,6 +294,29 @@ fn whole_project_holds_need_repo_wide() {
 }
 
 #[test]
+fn edit_guard_refuses_directories_and_globs() {
+    let fx = Fx::new();
+    let project = fx.project(&fx.repos.main);
+    std::fs::create_dir_all(fx.repos.main.join("src")).unwrap();
+    for path in ["src", "src/", "src/**", "src/*.rs"] {
+        assert!(
+            fx.store
+                .guard_edit("alice", &project, &[path.into()], "auto")
+                .is_err(),
+            "{path}"
+        );
+    }
+    assert!(fx.store.holds(HoldFilter::default()).unwrap().is_empty());
+    assert_eq!(
+        fx.acquire("alice", &fx.repos.main, &["src"])
+            .unwrap()
+            .granted
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn edit_guard_takes_narrow_holds_and_names_the_holder() {
     let fx = Fx::new();
     let r = &fx.repos;

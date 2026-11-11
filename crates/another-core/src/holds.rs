@@ -784,9 +784,9 @@ impl Store {
             let mut patterns: Vec<(String, String)> = Vec::new();
             for raw in paths {
                 let p = normalize_pattern(&project, raw)?;
-                if p == "**" {
+                if p == "**" || is_glob(&p) || raw.ends_with('/') || Path::new(&project.abs_path).join(&p).is_dir() {
                     return Err(Error::Invalid(format!(
-                        "{raw:?} is the project directory, not a file"
+                        "{raw:?} is a directory or glob, not an edited file; request directory holds explicitly with hold acquire or hold_paths"
                     )));
                 }
                 if !patterns.iter().any(|(_, q)| *q == p) {

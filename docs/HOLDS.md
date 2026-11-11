@@ -3,7 +3,7 @@
 A hold says "I am changing these files". It is a lease on a path or glob inside a project, with a TTL (default 30 minutes, 1 minute to 4 hours). Holds do not lock files on disk. An exclusive hold conflicts with any overlapping hold of another agent; a shared hold conflicts only with exclusive ones.
 
 ```bash
-another hold acquire --agent claude@shop src/api
+another hold acquire --agent claude@shop src/api/routes.rs
 ```
 
 ```bash
@@ -15,6 +15,8 @@ Conflicts are all-or-nothing: if any requested path overlaps another agent's liv
 ## The edit guard
 
 With the hook pack installed, agents do not have to remember to take holds. Before each file edit, the `pre-edit` hook takes a narrow exclusive hold on that file for the editing agent, or stops the edit and names the holder when another agent holds it. [HOOKS.md](HOOKS.md) has the details, the clients it covers, and what happens when the database is unavailable.
+
+Automatic holds name files only. Directory hints in tool input are skipped, and patch headers supply the exact files a patch changes. To hold a directory, explicitly name it in `another hold acquire` or MCP `hold_paths`. Be careful: a directory hold blocks every file below it, including unrelated work. Prefer individual files whenever possible.
 
 ## Holds across worktrees
 
