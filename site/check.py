@@ -7,6 +7,8 @@ import struct
 from urllib.parse import urlsplit
 import xml.etree.ElementTree as ET
 
+from stamp_icons import icon_version, stamped_href
+
 ROOT = Path(__file__).parent / "dist"
 ORIGIN = "https://toanother.one"
 ROUTES = {
@@ -140,11 +142,12 @@ class Page(HTMLParser):
 
 
 pages = {p: Page(p) for p in ROOT.rglob("*.html")}
+ICON_VERSION = icon_version(ROOT)
 ICON_LINKS = (
-    ("icon", "/favicon.ico"),
-    ("icon", "/favicon.svg"),
-    ("apple-touch-icon", "/apple-touch-icon.png"),
-    ("manifest", "/site.webmanifest"),
+    ("icon", stamped_href("/favicon.ico", ICON_VERSION)),
+    ("icon", stamped_href("/favicon.svg", ICON_VERSION)),
+    ("apple-touch-icon", stamped_href("/apple-touch-icon.png", ICON_VERSION)),
+    ("manifest", stamped_href("/site.webmanifest", ICON_VERSION)),
 )
 IMAGE_ALT = "Another. One inbox for coding agents."
 for path, page in pages.items():
@@ -308,8 +311,8 @@ assert sizes == [(16, 16), (32, 32), (48, 48)], sizes
 manifest = json.loads((ROOT / "site.webmanifest").read_text())
 assert manifest["name"] == "Another" and manifest["display"] == "browser"
 assert [(item["src"], item["sizes"], item["type"]) for item in manifest["icons"]] == [
-    ("/icon-192.png", "192x192", "image/png"),
-    ("/icon-512.png", "512x512", "image/png"),
+    (stamped_href("/icon-192.png", ICON_VERSION), "192x192", "image/png"),
+    (stamped_href("/icon-512.png", ICON_VERSION), "512x512", "image/png"),
 ]
 svg = (ROOT / "favicon.svg").read_text()
 assert 'fill="#f8f8f4"' in svg and 'fill="#292922"' in svg and 'fill="#705000"' in svg
