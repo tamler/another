@@ -696,3 +696,157 @@ fn install_and_uninstall_clean_up_pre_rename_hooks() {
     assert!(v["hooks"].get("UserPromptSubmit").is_none());
     assert!(!env.home.join(".grok/hooks/wyres.json").exists());
 }
+
+const CODEX_LABELS: [(&str, &str); 5] = [
+    ("SessionStart", "Another: registering this session"),
+    ("UserPromptSubmit", "Another: checking for new messages"),
+    ("PostToolUse", "Another: delivering messages mid-task"),
+    ("PreToolUse", "Another: checking file holds before an edit"),
+    ("SessionEnd", "Another: closing this session"),
+];
+const CODEX_DESCRIPTION: &str =
+    "Another coordination hooks (toanother.one): messages and file holds between coding agents";
+
+/// Another's handler for one event in a matcher-group config.
+fn our_handler(config: &Value, event: &str) -> Value {
+    config["hooks"][event]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|g| g["hooks"].as_array().unwrap().iter())
+        .find(|h| h["command"].as_str().unwrap().contains("another-hook.sh"))
+        .unwrap_or_else(|| panic!("no Another hook for {event}: {config}"))
+        .clone()
+}
+
+fn has_key(v: &Value, key: &str) -> bool {
+    match v {
+        Value::Object(m) => m.contains_key(key) || m.values().any(|x| has_key(x, key)),
+        Value::Array(a) => a.iter().any(|x| has_key(x, key)),
+        _ => false,
+    }
+}
+
+fn install_changes(env: &Env, client: &str) -> Vec<String> {
+    let out: Value =
+        serde_json::from_str(&env.ok(&["--json", "hook", "install", "--client", client])).unwrap();
+    out["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["path"].as_str().unwrap().ends_with(".codex/hooks.json"))
+        .map(|c| c["change"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn codex_hooks_are_named_for_the_trust_dialog() {
+    let env = Env::new();
+    let herdr = json!({ "hooks": [{ "type": "command", "command": "herdr hook session-start --agent codex", "timeout": 5 }] });
+    env.write(
+        ".codex/hooks.json",
+        &json!({ "hooks": { "SessionStart": [herdr.clone()] } }),
+    );
+    assert_eq!(install_changes(&env, "codex"), ["update"]);
+    let after = env.read(".codex/hooks.json");
+    for (event, label) in CODEX_LABELS {
+        let h = our_handler(&after, event);
+        assert_eq!(h["statusMessage"], label, "{event}");
+        assert_eq!(h["type"], "command");
+        assert!(h["timeout"].is_number());
+    }
+    assert_eq!(after["description"], CODEX_DESCRIPTION);
+    // The Herdr hook is kept, first and unchanged.
+    assert_eq!(after["hooks"]["SessionStart"][0], herdr);
+    assert_eq!(after["hooks"]["SessionStart"].as_array().unwrap().len(), 2);
+    assert_eq!(env.backups(".codex/hooks.json"), 1);
+
+    // Installing again changes nothing and writes no backup.
+    assert_eq!(install_changes(&env, "codex"), ["unchanged"]);
+    assert_eq!(env.read(".codex/hooks.json"), after);
+    assert_eq!(env.backups(".codex/hooks.json"), 1);
+
+    // Uninstall removes only Another's hooks; the description and Herdr's hook stay.
+    env.ok(&["hook", "uninstall", "--client", "codex"]);
+    let left = env.read(".codex/hooks.json");
+    assert_eq!(ours(&left), 0);
+    assert_eq!(left["description"], CODEX_DESCRIPTION);
+    assert_eq!(left["hooks"]["SessionStart"], json!([herdr]));
+}
+
+#[test]
+fn codex_fresh_install_writes_labels_and_description() {
+    let env = Env::new();
+    assert_eq!(install_changes(&env, "codex"), ["create"]);
+    let after = env.read(".codex/hooks.json");
+    assert_eq!(ours(&after), 5);
+    for (event, label) in CODEX_LABELS {
+        assert_eq!(our_handler(&after, event)["statusMessage"], label);
+    }
+    assert_eq!(after["description"], CODEX_DESCRIPTION);
+    assert_eq!(install_changes(&env, "codex"), ["unchanged"]);
+}
+
+#[test]
+fn codex_keeps_a_description_the_user_set() {
+    let env = Env::new();
+    env.write(
+        ".codex/hooks.json",
+        &json!({ "description": "My own hooks", "hooks": {} }),
+    );
+    env.ok(&["hook", "install", "--client", "codex"]);
+    assert_eq!(env.read(".codex/hooks.json")["description"], "My own hooks");
+    // An empty or null description counts as missing.
+    for blank in [json!(""), json!(null)] {
+        env.write(
+            ".codex/hooks.json",
+            &json!({ "description": blank, "hooks": {} }),
+        );
+        env.ok(&["hook", "install", "--client", "codex"]);
+        assert_eq!(
+            env.read(".codex/hooks.json")["description"],
+            CODEX_DESCRIPTION
+        );
+    }
+}
+
+#[test]
+fn codex_refresh_labels_hooks_installed_before_labels() {
+    let env = Env::new();
+    env.ok(&["hook", "install", "--client", "codex"]);
+    // Strip the labels and description, as an install from before them left the file.
+    let mut old = env.read(".codex/hooks.json");
+    old.as_object_mut().unwrap().remove("description");
+    for (event, _) in CODEX_LABELS {
+        for g in old["hooks"][event].as_array_mut().unwrap() {
+            for h in g["hooks"].as_array_mut().unwrap() {
+                h.as_object_mut().unwrap().remove("statusMessage");
+            }
+        }
+    }
+    env.write(".codex/hooks.json", &old);
+    assert!(!has_key(&old, "statusMessage"));
+    assert_eq!(install_changes(&env, "codex"), ["update"]);
+    let after = env.read(".codex/hooks.json");
+    assert_eq!(ours(&after), 5);
+    for (event, label) in CODEX_LABELS {
+        assert_eq!(our_handler(&after, event)["statusMessage"], label);
+    }
+    assert_eq!(after["description"], CODEX_DESCRIPTION);
+}
+
+#[test]
+fn only_codex_gets_labels_and_a_description() {
+    let env = Env::new();
+    env.ok(&["hook", "install", "--client", "all"]);
+    for rel in [
+        ".claude/settings.json",
+        ".grok/hooks/another.json",
+        ".cursor/hooks.json",
+    ] {
+        let v = env.read(rel);
+        assert!(!has_key(&v, "statusMessage"), "{rel}: {v}");
+        assert!(v.get("description").is_none(), "{rel}: {v}");
+    }
+    assert!(has_key(&env.read(".codex/hooks.json"), "statusMessage"));
+}

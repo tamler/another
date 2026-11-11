@@ -118,6 +118,23 @@ const EDIT_TOOLS: &str = "Edit|Write|MultiEdit|NotebookEdit";
 /// Codex edits files with `apply_patch`, which its matchers also accept as `Edit` or `Write`.
 const CODEX_EDIT_TOOLS: &str = "apply_patch|Edit|Write";
 
+/// The `statusMessage` for each of our Codex hooks. Codex documents it as text shown while
+/// the hook runs; it gives each hook a clear label next to its command. Whether `/hooks`
+/// shows it too has not been checked against a live Codex.
+fn codex_status(event: HookEvent) -> &'static str {
+    match event {
+        HookEvent::SessionStart => "Another: registering this session",
+        HookEvent::Prompt => "Another: checking for new messages",
+        HookEvent::PostTool => "Another: delivering messages mid-task",
+        HookEvent::PreEdit => "Another: checking file holds before an edit",
+        HookEvent::SessionEnd => "Another: closing this session",
+    }
+}
+
+/// Top-level `description` for Codex's hooks.json, set only when the file has none.
+const CODEX_DESCRIPTION: &str =
+    "Another coordination hooks (toanother.one): messages and file holds between coding agents";
+
 /// One hook entry Another installs for a client.
 #[derive(Debug, Clone, Copy)]
 struct HookSpec {
@@ -308,12 +325,26 @@ fn install_into(client: Client, env: &HookEnv, root: &mut Map<String, Value>) ->
     if client == Client::Cursor && !root.contains_key("version") {
         root.insert("version".into(), json!(1));
     }
+    if client == Client::Codex {
+        // Only fill a missing (or blank) description; never replace one the user wrote.
+        let blank = match root.get("description") {
+            None | Some(Value::Null) => true,
+            Some(Value::String(s)) => s.trim().is_empty(),
+            Some(_) => false,
+        };
+        if blank {
+            root.insert("description".into(), json!(CODEX_DESCRIPTION));
+        }
+    }
     let hooks = object_entry(root, "hooks")?;
     for spec in client.specs() {
         let command = command_for(env, client, spec.event);
         let groups = array_entry(hooks, spec.key)?;
         let timeout = spec.timeout;
-        let ours = json!({ "type": "command", "command": command, "timeout": timeout });
+        let mut ours = json!({ "type": "command", "command": command, "timeout": timeout });
+        if client == Client::Codex {
+            ours["statusMessage"] = json!(codex_status(spec.event));
+        }
         if client == Client::Cursor {
             // Cursor: a flat list of hook definitions per event.
             match groups.iter_mut().find(|h| is_ours(h)) {
@@ -618,7 +649,7 @@ pub fn install(
     if install {
         if clients.contains(&Client::Codex) {
             notes.push(
-                "Codex runs new hooks only after review: open Codex and trust them under /hooks."
+                "Codex runs new or changed hooks only after review: open Codex and trust them under /hooks."
                     .to_string(),
             );
         }
