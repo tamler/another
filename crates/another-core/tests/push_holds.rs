@@ -383,6 +383,211 @@ fn manual_bracket_directory_holds_conflict_with_literal_files_in_both_orders() {
 }
 
 #[test]
+fn a_cancelled_release_request_does_not_suppress_a_fresh_ask() {
+    let fx = Fx::new();
+    let held = fx
+        .acquire("alice", &fx.repos.main, &["src/a.rs"])
+        .unwrap()
+        .granted
+        .remove(0);
+    let first = fx.store.request_hold_release("bob", &held.hold_id).unwrap();
+    assert_eq!(
+        fx.store
+            .claim_announcement("alice", &[first.message_id], "post_tool", None)
+            .unwrap()
+            .len(),
+        1
+    );
+    fx.store
+        .update_request(RequestUpdate {
+            agent: "bob".into(),
+            request_id: first.request_id.unwrap(),
+            action: RequestAction::Cancel,
+            note: None,
+            due_in_seconds: None,
+        })
+        .unwrap();
+    let fresh = fx.store.request_hold_release("bob", &held.hold_id).unwrap();
+    assert_eq!(
+        fx.store
+            .claim_announcement("alice", &[fresh.message_id], "post_tool", None)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn linked_release_requests_finish_on_session_end_or_expiry() {
+    for session_end in [true, false] {
+        let fx = Fx::new();
+        let held = fx
+            .acquire("alice", &fx.repos.main, &["src/a.rs"])
+            .unwrap()
+            .granted
+            .remove(0);
+        assert!(fx
+            .store
+            .request_hold_release("alice", &held.hold_id)
+            .is_err());
+        let bob = fx.store.request_hold_release("bob", &held.hold_id).unwrap();
+        let carol = fx
+            .store
+            .request_hold_release("carol", &held.hold_id)
+            .unwrap();
+        if session_end {
+            fx.store.heartbeat("alice", true).unwrap();
+            assert_eq!(fx.store.agent("alice").unwrap().status, "offline");
+        } else {
+            fx.advance_secs(601);
+            fx.store.sweep().unwrap();
+        }
+        fx.store.sweep().unwrap();
+        for message in [bob, carol] {
+            assert_eq!(
+                fx.store
+                    .request(message.request_id.as_ref().unwrap())
+                    .unwrap()
+                    .status,
+                RequestStatus::Done
+            );
+            assert_eq!(
+                fx.store
+                    .inbox(&message.from, InboxQuery::default())
+                    .unwrap()
+                    .messages
+                    .len(),
+                1
+            );
+        }
+        assert!(fx.store.request_hold_release("bob", &held.hold_id).is_err());
+        let new_hold = fx
+            .acquire("alice", &fx.repos.main, &["src/a.rs"])
+            .unwrap()
+            .granted
+            .remove(0);
+        assert_ne!(held.hold_id, new_hold.hold_id);
+        let fresh = fx
+            .store
+            .request_hold_release("bob", &new_hold.hold_id)
+            .unwrap();
+        assert_eq!(
+            fx.store
+                .request(fresh.request_id.as_ref().unwrap())
+                .unwrap()
+                .status,
+            RequestStatus::Open
+        );
+    }
+}
+
+#[test]
+fn push_dedupe_preserves_sender_audience_importance_and_thread_changes() {
+    let fx = Fx::new();
+    let base = SendMessage {
+        from: "alice".into(),
+        to: vec!["bob".into()],
+        subject: "Same subject".into(),
+        body: "same body".into(),
+        ..Default::default()
+    };
+    let first = fx.store.send_message(base.clone()).unwrap();
+    let variants = [
+        SendMessage {
+            from: "carol".into(),
+            ..base.clone()
+        },
+        SendMessage {
+            to: vec!["bob".into(), "carol".into()],
+            ..base.clone()
+        },
+        SendMessage {
+            importance: Importance::Urgent,
+            ..base.clone()
+        },
+        SendMessage {
+            thread_id: Some(first.thread_id.clone()),
+            ..base.clone()
+        },
+    ];
+    let mut ids = vec![first.message_id];
+    for input in variants {
+        ids.push(fx.store.send_message(input).unwrap().message_id);
+    }
+    assert_eq!(
+        fx.store
+            .claim_announcement("bob", &ids, "post_tool", None)
+            .unwrap()
+            .len(),
+        5
+    );
+}
+
+#[test]
+fn identical_pushes_are_coalesced_without_losing_mail_or_wake_retries() {
+    let fx = Fx::new();
+    let send = |body: &str| {
+        fx.store
+            .send_message(SendMessage {
+                from: "alice".into(),
+                to: vec!["bob".into()],
+                subject: "Holds came back".into(),
+                body: body.into(),
+                ..Default::default()
+            })
+            .unwrap()
+    };
+    let a = send("same");
+    let b = send("same");
+    let ids = vec![a.message_id.clone(), b.message_id.clone()];
+    let claimed = fx
+        .store
+        .claim_announcement("bob", &ids, "wake", None)
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert!(fx
+        .store
+        .unannounced("bob", "", 100)
+        .unwrap()
+        .items
+        .is_empty());
+    assert_eq!(
+        fx.store
+            .inbox("bob", InboxQuery::default())
+            .unwrap()
+            .messages
+            .len(),
+        2
+    );
+    // A failed wake gives back both the representative and its suppressed duplicates.
+    fx.store.release_announcement("bob", &claimed).unwrap();
+    assert_eq!(
+        fx.store
+            .claim_announcement("bob", &ids, "post_tool", Some("codex"))
+            .unwrap()
+            .len(),
+        1
+    );
+    let different = send("changed body");
+    assert_eq!(
+        fx.store
+            .claim_announcement("bob", &[different.message_id], "post_tool", None)
+            .unwrap()
+            .len(),
+        1
+    );
+    fx.advance_secs(301);
+    let later = send("same");
+    assert_eq!(
+        fx.store
+            .claim_announcement("bob", &[later.message_id], "post_tool", None)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn blocked_retries_are_deduplicated_and_ping_once_after_release() {
     let fx = Fx::new();
     let main = fx.project(&fx.repos.main);

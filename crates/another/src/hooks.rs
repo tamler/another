@@ -1171,16 +1171,15 @@ pub const AUTO_HOLD_REASON: &str = "editing (taken by the edit hook)";
 
 /// The text shown when an edit is stopped.
 pub fn deny_message(agent: &str, conflicts: &[HoldConflict]) -> String {
+    let Some(first) = conflicts.first() else {
+        return String::new();
+    };
     let mut out = String::from("Another stopped this edit: ");
-    let mut holders: Vec<&str> = Vec::new();
     let lines: Vec<String> = conflicts
         .iter()
         .take(3)
         .map(|c| {
             let h = &c.held;
-            if !holders.contains(&h.agent.as_str()) {
-                holders.push(&h.agent);
-            }
             let kind = if h.exclusive { "exclusive" } else { "shared" };
             let reason = h
                 .reason
@@ -1199,10 +1198,9 @@ pub fn deny_message(agent: &str, conflicts: &[HoldConflict]) -> String {
     }
     out.push_str(". Worktrees of the same repository still conflict at merge");
     out.push_str(". You'll be pinged in your Another inbox when the file is free. Do not retry this edit while waiting");
-    let first = conflicts.first().map(|c| c.path.as_str()).unwrap_or("it");
     out.push_str(&format!(
-        ". Leave it alone until the hold is released. Ask the holder with `another send --from {agent} --to {} --request --subject \"Release {first}?\"`, or work on other files.",
-        holders.join(",")
+        ". Leave it alone until the hold is released. Ask the holder with `another hold request-release --agent {agent} {}`, or work on other files.",
+        first.held.hold_id
     ));
     truncate(out, 1000)
 }
@@ -1526,9 +1524,7 @@ mod tests {
         assert!(msg.starts_with("Another stopped this edit: src/a.rs is held by codex@shop"));
         assert!(msg.contains("exclusive hold on shop:src/**, \"refactor api\""));
         assert!(msg.contains("until 2026-11-10T10:30:00.000Z"));
-        assert!(msg.contains(
-            "another send --from claude@shop-wt --to codex@shop --request --subject \"Release src/a.rs?\""
-        ));
+        assert!(msg.contains("another hold request-release --agent claude@shop-wt h1"));
         assert!(!msg.contains('\u{2014}') && !msg.contains('\u{2013}'));
         let msg = deny_message(
             "claude@shop",

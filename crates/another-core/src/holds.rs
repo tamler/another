@@ -17,7 +17,9 @@ use serde_json::json;
 
 use crate::error::{Error, Result};
 use crate::identity::{address, find_project, resolve_agent, Project};
-use crate::mail::{send_automatic_tx, touch, SendMessage};
+use crate::mail::{
+    load_message, send_automatic_tx, send_tx, touch, Message, NewRequest, SendMessage,
+};
 use crate::requests::stale_overdue_tx;
 use crate::store::{new_id, Store, Tx};
 use crate::time::fmt_ts;
@@ -727,6 +729,60 @@ fn ping_free_waiters_tx(tx: &Tx<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Fulfil only requests explicitly linked to a hold, without guessing from mail text.
+fn complete_hold_requests_tx(tx: &Tx<'_>) -> Result<()> {
+    let mut stmt = tx.prepare(
+        "SELECT r.request_id, r.message_id, r.title, c.address, h.hold_id, h.agent_id, a.address
+         FROM request_holds rh JOIN requests r ON r.request_id = rh.request_id
+         JOIN holds h ON h.hold_id = rh.hold_id
+         JOIN agents c ON c.agent_id = r.created_by JOIN agents a ON a.agent_id = h.agent_id
+         WHERE h.node_id = ?1 AND r.status IN ('open', 'claimed', 'stale')
+           AND (h.released_at IS NOT NULL OR h.expires_at <= ?2)",
+    )?;
+    let pending = stmt
+        .query_map(params![tx.node_id, tx.now], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (rid, mid, title, creator, hold_id, owner_id, owner) in pending {
+        let note = format!(
+            "Another automatically closed this release request: hold {hold_id} is no longer live."
+        );
+        tx.emit(
+            "system",
+            "request.completed",
+            json!({
+                "request_id": rid, "hold_id": hold_id, "reason": "hold ended", "note": note,
+            }),
+        )?;
+        tx.execute(
+            "UPDATE requests SET status = 'done', owner_id = coalesce(owner_id, ?2),
+            note = ?3, closed_at = ?4, updated_at = ?4 WHERE request_id = ?1",
+            params![rid, owner_id, note, tx.now],
+        )?;
+        send_automatic_tx(
+            tx,
+            &SendMessage {
+                from: owner,
+                to: vec![creator],
+                subject: format!("Done: {title}"),
+                body: note,
+                reply_to: Some(mid),
+                ..Default::default()
+            },
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
     let mut stmt = tx.prepare(
         "SELECT hold_id, pattern, agent_id FROM holds
@@ -752,6 +808,7 @@ pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
             [hold_id],
         )?;
     }
+    complete_hold_requests_tx(tx)?;
     ping_free_waiters_tx(tx)?;
     let stale_requests = stale_overdue_tx(tx)?;
     let expired_leases = crate::resources::expire_leases_tx(tx)?;
@@ -782,6 +839,7 @@ pub(crate) fn release_tx(
             params![id, tx.now, reason],
         )?;
     }
+    complete_hold_requests_tx(tx)?;
     ping_free_waiters_tx(tx)?;
     Ok(())
 }
@@ -859,6 +917,37 @@ fn holds_by_id(conn: &Connection, ids: &[String]) -> Result<Vec<Hold>> {
 }
 
 impl Store {
+    /// Ask a live local hold's owner to release it. Reuse an outstanding ask from this
+    /// agent for this hold. The linked request closes automatically when the hold ends.
+    pub fn request_hold_release(&self, agent: &str, hold_id: &str) -> Result<Message> {
+        self.write(|tx| {
+            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let held = tx.query_row(&format!("{HOLD_SELECT} WHERE h.hold_id = ?1
+                AND h.node_id = ?2 AND h.released_at IS NULL AND h.expires_at > ?3"),
+                params![hold_id, tx.node_id, tx.now], hold_from_row).optional()?
+                .ok_or_else(|| Error::NotFound(format!("unknown live local hold {hold_id:?}")))?;
+            if held.agent == me.address {
+                return Err(Error::Invalid("release your own hold with hold release".into()));
+            }
+            let existing: Option<String> = tx.query_row(
+                "SELECT r.message_id FROM request_holds rh JOIN requests r ON r.request_id = rh.request_id
+                 WHERE rh.hold_id = ?1 AND r.created_by = ?2 AND r.status IN ('open', 'claimed', 'stale')",
+                params![hold_id, me.id], |r| r.get(0)).optional()?;
+            if let Some(mid) = existing { return load_message(tx, &mid); }
+            let pattern = literal_pattern(&held.pattern).unwrap_or(held.pattern);
+            let title: String = pattern.chars().take(280).collect();
+            let message = send_tx(tx, &SendMessage {
+                from: me.address, to: vec![held.agent], subject: format!("Release {title}?"),
+                body: format!("Please release hold {hold_id} on {}:{pattern} when your edit is done. Another will close this request when that hold ends.", held.project),
+                request: Some(NewRequest::default()), ..Default::default()
+            })?;
+            let rid = message.request_id.as_ref().expect("request was created");
+            tx.emit(&message.from, "request.hold_linked", json!({ "request_id": rid, "hold_id": hold_id }))?;
+            tx.execute("INSERT INTO request_holds (request_id, hold_id) VALUES (?1, ?2)", params![rid, hold_id])?;
+            Ok(message)
+        })
+    }
+
     /// Expire lapsed holds and mark overdue requests stale.
     pub fn sweep(&self) -> Result<SweepReport> {
         self.write(sweep_tx)

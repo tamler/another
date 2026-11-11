@@ -85,7 +85,7 @@ Each message is announced once, by whichever channel claims it first: a mid-task
 - if another agent holds an overlapping path, nothing is taken and the edit is denied with a message like this one:
 
 ```text
-Another stopped this edit: src/api/routes.rs is held by codex@shop-review (exclusive hold on shop-review:src/api/**, "router refactor", until 2026-11-10T16:04:00.000Z). Worktrees of the same repository still conflict at merge. You'll be pinged in your Another inbox when the file is free. Do not retry this edit while waiting. Leave it alone until the hold is released. Ask the holder with `another send --from claude@shop --to codex@shop-review --request --subject "Release src/api/routes.rs?"`, or work on other files.
+Another stopped this edit: src/api/routes.rs is held by codex@shop-review (exclusive hold on shop-review:src/api/**, "router refactor", until 2026-11-10T16:04:00.000Z). Worktrees of the same repository still conflict at merge. You'll be pinged in your Another inbox when the file is free. Do not retry this edit while waiting. Leave it alone until the hold is released. Ask the holder with `another hold request-release --agent claude@shop HOLD_ID`, or work on other files.
 ```
 
 - if the agent already holds the file (or a directory or glob covering it) exclusively, nothing is written, unless that hold is past half its TTL, which renews it;
@@ -104,6 +104,14 @@ The first block registers a durable wait for that agent, project and file. Repea
 Release, session end and the next sweep after expiry recheck all current holds, including sibling worktrees and replacement holds. When none conflict, Another sends one `Hold free: <file>` inbox message and clears the wait in the same transaction. The wait survives restarts. The ordinary post-tool/prompt hooks or daemon deliver its notice. Without a daemon, expiry pings wait for the next `another sweep` or command that sweeps. The ping is automatic mail attributed to the original holder and does not change their presence. It says the file is not reserved: check again before editing.
 
 `another stats` records one `hold.blocked` event per unchanged set of blocking holds while a wait is active. Historical events still include retries recorded by older builds, so counts across the upgrade are not directly comparable.
+
+### Quiet release requests and pushes
+
+The deny notice names a concrete hold ID in `another hold request-release --agent AGENT HOLD_ID`. That command asks its owner once: repeating the same ask reuses the outstanding request. Release, session end and expiry sweeps automatically complete the linked request and notify its creator. A closed linked request is not pushed as new work. Generic `send --request` messages have no hold ID and keep their normal lifecycle, including older free-text release requests; close those manually instead of guessing from titles.
+
+Across hook and daemon channels, identical pushes to the same agent are coalesced for five minutes from the first claim. Identity includes sender, full audience, subject, body, importance, acknowledgement flag, request kind and thread context. Bodies are hashed locally and never put in notice or suppression events. Mail stays in the inbox with its original read state. Changed content or context still gets a notice, and a failed wake gives back both the representative claim and its duplicate claims so delivery can retry.
+
+Completed or cancelled requests never represent a fresh ask for dedupe. Cancelling a request and explicitly asking again remains visible.
 
 ## Failing open
 
