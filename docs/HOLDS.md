@@ -46,6 +46,8 @@ A path given to `another hold acquire` or `hold check`, and every file the edit 
 
 A path whose real location is outside the project is passed on as given. Hard links cannot be seen from a path: an edit through a second hard link to a held file is not stopped.
 
+A project given to the CLI as a path (`--project /tmp/shop`, `another project ensure`, or the current directory by default) is resolved the same way, so a symlinked spelling names the project already registered at the real directory instead of adding a second one. A project registered earlier under a symlinked spelling keeps its row, and that spelling still finds it. Paths given to the MCP `ensure_project` tool are still only normalized as text (`.` and `..` removed), because a remote token's project scope is judged on the path as written.
+
 ## Letter case
 
 An existing file is always checked under its on-disk spelling, so `SRC/A.RS` is `src/a.rs` wherever the volume treats them as one file.
