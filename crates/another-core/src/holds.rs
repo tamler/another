@@ -193,6 +193,18 @@ fn clamp_ttl(ttl: Option<i64>) -> Result<i64> {
 
 /// Normalize a requested path or glob to a project-relative pattern.
 pub(crate) fn normalize_pattern(project: &Project, raw: &str) -> Result<String> {
+    let path = normalize_path(project, raw)?;
+    let pattern = if path.is_empty() {
+        "**".to_string()
+    } else {
+        path
+    };
+    compile(&pattern)?;
+    Ok(pattern)
+}
+
+/// Normalize a path without interpreting filename characters as glob syntax.
+fn normalize_path(project: &Project, raw: &str) -> Result<String> {
     let raw = raw.trim();
     let root = project.abs_path.trim_end_matches('/');
     let rel = if Path::new(raw).is_absolute() {
@@ -220,14 +232,7 @@ pub(crate) fn normalize_pattern(project: &Project, raw: &str) -> Result<String> 
             p => parts.push(p),
         }
     }
-    // An empty pattern means the whole project.
-    let pattern = if parts.is_empty() {
-        "**".to_string()
-    } else {
-        parts.join("/")
-    };
-    compile(&pattern)?;
-    Ok(pattern)
+    Ok(parts.join("/"))
 }
 
 fn compile(pattern: &str) -> Result<GlobMatcher> {
@@ -238,8 +243,25 @@ fn compile(pattern: &str) -> Result<GlobMatcher> {
     Ok(glob.compile_matcher())
 }
 
-fn is_glob(pattern: &str) -> bool {
-    pattern.contains(['*', '?', '[', '{'])
+/// Decode an entirely literal pattern, including globset's single-character escapes.
+/// Real character classes, wildcards and alternations still return None.
+fn literal_pattern(pattern: &str) -> Option<String> {
+    let mut chars = pattern.chars();
+    let mut out = String::new();
+    while let Some(c) = chars.next() {
+        if c == '[' {
+            let escaped = chars.next()?;
+            if !matches!(escaped, '*' | '?' | '[' | ']' | '{' | '}') || chars.next()? != ']' {
+                return None;
+            }
+            out.push(escaped);
+        } else if matches!(c, '*' | '?' | '{') {
+            return None;
+        } else {
+            out.push(c);
+        }
+    }
+    Some(out)
 }
 
 /// A pattern that reaches across the whole project: `**` (also what the project root
@@ -250,10 +272,13 @@ pub fn is_repo_wide(pattern: &str) -> bool {
 
 /// An own hold `held` already covers the literal path `path`.
 fn hold_covers(held: &str, path: &str) -> bool {
-    if is_glob(held) {
-        held == "**" || matches(held, path)
-    } else {
-        covers(held, path)
+    let path = literal_pattern(path).unwrap_or_else(|| path.to_string());
+    if held == path {
+        return true;
+    }
+    match literal_pattern(held) {
+        Some(held) => covers(&held, &path),
+        None => held == "**" || matches(held, &path),
     }
 }
 
@@ -277,11 +302,16 @@ pub fn patterns_overlap(a: &str, b: &str) -> bool {
     if a == b || a == "**" || b == "**" {
         return true;
     }
-    match (is_glob(a), is_glob(b)) {
-        (false, false) => covers(a, b) || covers(b, a),
-        (true, false) => glob_touches_literal(a, b),
-        (false, true) => glob_touches_literal(b, a),
-        (true, true) => {
+    // Older auto holds stored filenames without escapes. Keep their exact spelling
+    // protected while also interpreting any deliberate manual glob conservatively.
+    if literal_pattern(a).as_deref() == Some(b) || literal_pattern(b).as_deref() == Some(a) {
+        return true;
+    }
+    match (literal_pattern(a), literal_pattern(b)) {
+        (Some(a), Some(b)) => covers(&a, &b) || covers(&b, &a),
+        (None, Some(b)) => glob_touches_literal(a, &b),
+        (Some(a), None) => glob_touches_literal(b, &a),
+        (None, None) => {
             let (pa, pb) = (literal_prefix(a), literal_prefix(b));
             pa.starts_with(pb) || pb.starts_with(pa)
         }
@@ -296,8 +326,8 @@ pub fn patterns_overlap(a: &str, b: &str) -> bool {
 fn overlap_on_volume(a: &str, b: &str, fold: bool) -> bool {
     patterns_overlap(a, b)
         || (fold
-            && !a.contains('[')
-            && !b.contains('[')
+            && (literal_pattern(a).is_some() || !a.contains('['))
+            && (literal_pattern(b).is_some() || !b.contains('['))
             && patterns_overlap(&a.to_lowercase(), &b.to_lowercase()))
 }
 
@@ -783,12 +813,13 @@ impl Store {
             let project = find_project(tx, tx.node_id, project)?;
             let mut patterns: Vec<(String, String)> = Vec::new();
             for raw in paths {
-                let p = normalize_pattern(&project, raw)?;
-                if p == "**" || is_glob(&p) || raw.ends_with('/') || Path::new(&project.abs_path).join(&p).is_dir() {
+                let literal = normalize_path(&project, raw)?;
+                if literal.is_empty() || raw.ends_with('/') || Path::new(&project.abs_path).join(&literal).is_dir() {
                     return Err(Error::Invalid(format!(
-                        "{raw:?} is a directory or glob, not an edited file; request directory holds explicitly with hold acquire or hold_paths"
+                        "{raw:?} is a directory, not an edited file; request directory holds explicitly with hold acquire or hold_paths"
                     )));
                 }
+                let p = globset::escape(&literal);
                 if !patterns.iter().any(|(_, q)| *q == p) {
                     patterns.push((raw.clone(), p));
                 }
@@ -799,7 +830,7 @@ impl Store {
                 // (often an absolute path).
                 for c in &mut conflicts {
                     if let Some((_, p)) = patterns.iter().find(|(raw, _)| *raw == c.path) {
-                        c.path = p.clone();
+                        c.path = literal_pattern(p).expect("edit targets are escaped literals");
                     }
                 }
                 // Evidence for `another stats`: who was stopped, by whose hold, where.

@@ -294,11 +294,11 @@ fn whole_project_holds_need_repo_wide() {
 }
 
 #[test]
-fn edit_guard_refuses_directories_and_globs() {
+fn edit_guard_refuses_directories_and_keeps_glob_characters_literal() {
     let fx = Fx::new();
     let project = fx.project(&fx.repos.main);
     std::fs::create_dir_all(fx.repos.main.join("src")).unwrap();
-    for path in ["src", "src/", "src/**", "src/*.rs"] {
+    for path in ["src", "src/"] {
         assert!(
             fx.store
                 .guard_edit("alice", &project, &[path.into()], "auto")
@@ -307,6 +307,48 @@ fn edit_guard_refuses_directories_and_globs() {
         );
     }
     assert!(fx.store.holds(HoldFilter::default()).unwrap().is_empty());
+    for path in [
+        "src/*.rs",
+        "src/a?.rs",
+        "src/{new}.rs",
+        "app/[id]/new.tsx",
+        "src/[.rs",
+        "src/**",
+        "**",
+    ] {
+        // A new file has a literal name too. It must never become a wildcard hold.
+        let guard = fx
+            .store
+            .guard_edit("alice", &project, &[path.into()], "auto")
+            .unwrap();
+        assert_eq!(guard.held[0].pattern, globset::escape(path));
+        write(&fx.repos.main.join(path), "file");
+        let again = fx
+            .store
+            .guard_edit("alice", &project, &[path.into()], "auto")
+            .unwrap();
+        assert_eq!(again.covered, [path]);
+    }
+    assert!(fx
+        .store
+        .guard_edit("bob", &project, &["src/ordinary.rs".into()], "auto")
+        .unwrap()
+        .conflicts
+        .is_empty());
+    fx.store.release_holds("alice", &[]).unwrap();
+    fx.store.release_holds("bob", &[]).unwrap();
+    // Older auto holds used the unescaped name. Their exact path remains protected.
+    fx.acquire("alice", &fx.repos.main, &["app/[id]/new.tsx"])
+        .unwrap();
+    assert_eq!(
+        fx.store
+            .guard_edit("bob", &project, &["app/[id]/new.tsx".into()], "auto")
+            .unwrap()
+            .conflicts
+            .len(),
+        1
+    );
+    fx.store.release_holds("alice", &[]).unwrap();
     assert_eq!(
         fx.acquire("alice", &fx.repos.main, &["src"])
             .unwrap()

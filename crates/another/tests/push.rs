@@ -294,6 +294,54 @@ fn post_tool_mentions_new_mail_once_and_is_silent_otherwise() {
 }
 
 #[test]
+fn literal_metacharacter_filenames_are_protected_across_worktrees() {
+    let env = Env::new();
+    env.start("claude", &env.main, &[]);
+    env.start("codex", &env.wt, &[]);
+    for path in [
+        "app/[id]/page.tsx",
+        "src/{x}.ts",
+        "src/*.rs",
+        "src/a?.rs",
+        "src/[.rs",
+    ] {
+        write(&env.main.join(path), "old");
+        write(&env.wt.join(path), "old");
+        assert_eq!(
+            env.hook(
+                "pre-edit",
+                "claude",
+                &tool(&env.main, "Edit", json!({ "file_path": path }))
+            ),
+            ""
+        );
+        let reason = denial(&env.hook(
+            "pre-edit",
+            "codex",
+            &tool(&env.wt, "Edit", json!({ "file_path": path })),
+        ));
+        assert!(reason.contains("held by claude@shop"), "{path}: {reason}");
+    }
+    // Escaping must not turn the bracketed route into a hold on app/i/page.tsx.
+    assert_eq!(
+        env.hook(
+            "pre-edit",
+            "codex",
+            &tool(&env.wt, "Write", json!({ "file_path": "app/i/page.tsx" }))
+        ),
+        ""
+    );
+    let patch = "*** Begin Patch\n*** Add File: src/ok.ts\n+ok\n*** Update File: app/[id]/page.tsx\n@@\n-old\n+new\n*** End Patch\n";
+    assert!(denial(&env.hook(
+        "pre-edit",
+        "codex",
+        &tool(&env.wt, "apply_patch", json!({ "command": patch }))
+    ))
+    .contains("held by claude@shop"));
+    assert!(!env.holds().iter().any(|h| h["pattern"] == "src/ok.ts"));
+}
+
+#[test]
 fn pre_edit_never_turns_directory_hints_into_holds() {
     let env = Env::new();
     env.start("codex", &env.main, &[]);
