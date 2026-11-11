@@ -831,14 +831,31 @@ fn abs(path: &Path) -> anyhow::Result<String> {
     Ok(p.to_string_lossy().into_owned())
 }
 
+/// A project directory as the filesystem resolves it, the way the edit hook resolves files,
+/// so a symlinked spelling names the same project instead of registering a second one. A
+/// project already registered under the spelling as given, and not under the resolved one
+/// (rows from before paths were resolved), keeps its row.
+fn project_dir(store: &Store, path: &Path) -> anyhow::Result<String> {
+    let given = abs(path)?;
+    let real = hooks::resolve_existing(Path::new(&given))
+        .to_string_lossy()
+        .into_owned();
+    if real != given && store.project(&real).is_err() && store.project(&given).is_ok() {
+        return Ok(given);
+    }
+    Ok(real)
+}
+
 /// Resolve `--project`: a path (ensured on the fly) or an existing slug; default cwd.
 fn project_key(store: &Store, actor: &str, project: Option<String>) -> anyhow::Result<String> {
     let looks_like_path = |p: &str| p.contains('/') || p.contains('\\') || p == "." || p == "..";
     match project {
         Some(p) if !looks_like_path(&p) => Ok(p),
-        Some(p) => Ok(store.ensure_project(actor, &abs(Path::new(&p))?)?.abs_path),
+        Some(p) => Ok(store
+            .ensure_project(actor, &project_dir(store, Path::new(&p))?)?
+            .abs_path),
         None => Ok(store
-            .ensure_project(actor, &abs(&std::env::current_dir()?)?)?
+            .ensure_project(actor, &project_dir(store, &std::env::current_dir()?)?)?
             .abs_path),
     }
 }
@@ -1038,8 +1055,8 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Command::Project(ProjectCmd::Ensure { path }) => {
             let path = match path {
-                Some(p) => abs(&p)?,
-                None => abs(&std::env::current_dir()?)?,
+                Some(p) => project_dir(&store, &p)?,
+                None => project_dir(&store, &std::env::current_dir()?)?,
             };
             let p = store.ensure_project("cli", &path)?;
             emit(json, &p, |p| format!("{}  {}", p.slug, p.abs_path))
