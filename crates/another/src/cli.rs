@@ -665,7 +665,7 @@ pub enum HookCmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Show which clients have Another hooks installed.
+    /// Show hook configuration presence; Codex trust and execution are not checked.
     Status,
     /// Called by the hook wrapper; reads the client's JSON on stdin. Always exits 0.
     Run {
@@ -1762,6 +1762,7 @@ fn hook_command(
                         installed: std::fs::read_to_string(&path)
                             .is_ok_and(|t| t.contains(hooks::MARKER)),
                         config: path.display().to_string(),
+                        trust_note: (*c == Client::Codex).then_some(hooks::CODEX_TRUST_NOTE),
                     }
                 })
                 .collect();

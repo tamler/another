@@ -254,20 +254,26 @@ pub struct HookStatus {
     pub client: String,
     pub installed: bool,
     pub config: String,
+    /// Configuration presence does not verify whether Codex trusted or ran the hooks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trust_note: Option<&'static str>,
 }
 
 pub fn hook_status(rows: &[HookStatus]) -> String {
     rows.iter()
         .map(|r| {
             format!(
-                "{:<7} {:<13} {}\n",
+                "{:<7} {:<13} {}\n{}",
                 r.client,
                 if r.installed {
                     "installed"
                 } else {
                     "not installed"
                 },
-                r.config
+                r.config,
+                r.trust_note
+                    .map(|note| format!("  {note}\n"))
+                    .unwrap_or_default()
             )
         })
         .collect()

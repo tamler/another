@@ -52,6 +52,14 @@ Uninstall removes only entries that reference `another-hook.sh`, and deletes the
 | Grok CLI | `~/.grok/hooks/another.json` | Same five as Claude Code | User-level hooks need no trust step (`/hooks-trust` applies to project hooks). Grok maps `Edit`, `Write` and `MultiEdit` onto its own edit tools. See "Grok and shared hook files" below. |
 | Cursor (best effort) | `~/.cursor/hooks.json` | `sessionStart`, `beforeSubmitPrompt`, `sessionEnd`, `postToolUse` | Context is injected at session start and after tool calls (`additional_context`); the prompt hook just renews holds and lets the prompt through. No edit guard: Cursor blocks a tool call when a `preToolUse` reply is not valid JSON, and a hook that fails open prints nothing. |
 
+### Codex trust and coverage
+
+Installing the pack only configures hooks. Codex skips new or changed non-managed hooks until you review and trust them yourself in `/hooks`, as described in the [official OpenAI hook documentation](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks). Until that step, automatic mail delivery, heartbeats and edit holds do not cover Codex sessions through these hooks. An update can require review again.
+
+`another hook status` looks for Another's wrapper marker in client config. Its `installed` flag is configuration evidence only; the Codex `trust_note` in JSON and text says trust is not checked. Neither that flag, a passing test nor manually running `another hook run` proves that Codex executed a hook. Check `/hooks` yourself. While hooks are awaiting trust, use `another inbox`, `hold acquire` and `hold check` explicitly.
+
+Another never grants hook trust or edits Codex's trust store. Keep that human decision in Codex.
+
 ### Codex labels
 
 Codex shows a hook's `statusMessage` while the hook runs. Another sets one on each of its Codex entries, so every hook has a clear label and not only a bare command. Whether the `/hooks` review screen shows this text as well has not been checked against a live Codex. The labels are:
