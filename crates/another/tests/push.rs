@@ -1360,3 +1360,54 @@ fn a_symlink_loop_then_dot_dot_does_not_register_a_second_project() {
         "{slugs:?}"
     );
 }
+
+fn project_slugs(env: &Env) -> Vec<String> {
+    env.json(&["project", "list"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["slug"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn cli_project_paths_through_a_symlink_name_the_registered_project() {
+    let env = Env::new();
+    env.start("claude", &env.main, &[]);
+    env.start("codex", &env.wt, &[]);
+    let before = project_slugs(&env);
+    let alias = env.root.join("alias");
+    std::os::unix::fs::symlink(env.wt.parent().unwrap(), &alias).unwrap();
+    let spelled = alias.join(env.wt.file_name().unwrap());
+    let spelled = spelled.to_string_lossy().into_owned();
+    let granted = env.json(&[
+        "hold",
+        "acquire",
+        "--agent",
+        "codex@shop-review",
+        "--project",
+        &spelled,
+        "src/b.rs",
+    ]);
+    assert_eq!(granted["granted"][0]["project"], "shop-review", "{granted}");
+    let ensured = env.json(&["project", "ensure", &format!("{spelled}/loop/..")]);
+    assert_eq!(ensured["slug"], "shop-review", "{ensured}");
+    assert_eq!(project_slugs(&env), before);
+}
+
+#[test]
+fn a_project_registered_under_a_symlinked_spelling_keeps_its_row() {
+    let env = Env::new();
+    let old = env.root.join("work").join("legacy");
+    write(&old.join("src/a.rs"), "");
+    let old_s = old.to_string_lossy().into_owned();
+    let first = env.json(&["project", "ensure", &old_s]);
+    // The directory moves and a symlink takes its old name: the stored row now names a
+    // symlinked spelling, as rows written before paths were resolved can.
+    let real = env.root.join("work").join("legacy-real");
+    std::fs::rename(&old, &real).unwrap();
+    std::os::unix::fs::symlink(&real, &old).unwrap();
+    let again = env.json(&["project", "ensure", &old_s]);
+    assert_eq!(again["project_id"], first["project_id"], "{again}");
+    assert_eq!(project_slugs(&env), vec!["legacy".to_string()]);
+}
