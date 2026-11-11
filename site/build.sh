@@ -34,5 +34,7 @@ cp guides/multiple-claude-code-sessions/index.html dist/guides/multiple-claude-c
 cp changelog/index.html dist/changelog/index.html
 cp building/index.html dist/building/index.html
 cp fonts/FragmentMono-Regular.woff2 fonts/OFL.txt dist/fonts/
+# stamp_icons: content-hash query strings on icon and manifest URLs.
+python3 stamp_icons.py
 python3 check.py
 python3 check_checksum.py

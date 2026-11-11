@@ -43,6 +43,8 @@ images from the mark in that file. The words are JetBrains Mono ExtraBold
 (`pip install fonttools`). The site build copies the
 generated files and does not run the script.
 
+The build then runs `stamp_icons.py`, which adds a content-hash query string to icon and manifest URLs in the output. That is so browsers that still have an older favicon for this host, including the games site that used to be here, will request the current files. The icon files themselves stay at the same paths.
+
 `scripts/check-copy.py` rejects em dashes, en dashes, and a banned-phrase list
 in this directory and in `docs/PROMOTION.md`. Canonicals describe the public
 URLs. Deploying to Cloudflare Pages is a maintainer action. CI does not deploy.
