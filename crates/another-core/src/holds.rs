@@ -278,7 +278,7 @@ fn hold_covers(held: &str, path: &str) -> bool {
     }
     match literal_pattern(held) {
         Some(held) => covers(&held, &path),
-        None => held == "**" || matches(held, &path),
+        None => held == "**" || covers(held.trim_end_matches("/**"), &path) || matches(held, &path),
     }
 }
 
@@ -379,7 +379,9 @@ fn matches(glob: &str, path: &str) -> bool {
 }
 
 fn glob_touches_literal(glob: &str, literal: &str) -> bool {
-    if matches(glob, literal) {
+    // A manual hold may name a real directory whose spelling also has glob syntax,
+    // such as app/[id] or app/[id]/**. Preserve that literal directory intent too.
+    if covers(glob.trim_end_matches("/**"), literal) || matches(glob, literal) {
         return true;
     }
     // The literal may be a directory with matches of the glob below it: compare the

@@ -294,6 +294,41 @@ fn post_tool_mentions_new_mail_once_and_is_silent_otherwise() {
 }
 
 #[test]
+fn manual_route_directory_holds_block_auto_edits_in_both_orders() {
+    for pattern in ["app/[id]", "app/[id]/**"] {
+        let env = Env::new();
+        env.start("claude", &env.main, &[]);
+        env.start("codex", &env.wt, &[]);
+        let args = [
+            "--json",
+            "hold",
+            "acquire",
+            "--agent",
+            "codex@shop-review",
+            "--project",
+            env.wt.to_str().unwrap(),
+            pattern,
+        ];
+        env.ok(&args);
+        let edit = tool(
+            &env.main,
+            "Write",
+            json!({ "file_path": "app/[id]/page.tsx" }),
+        );
+        assert!(
+            denial(&env.hook("pre-edit", "claude", &edit)).contains("held by codex@shop-review")
+        );
+        env.ok(&["hold", "release", "--agent", "codex@shop-review"]);
+        assert_eq!(env.hook("pre-edit", "claude", &edit), "");
+        let out = env.cmd(&args).output().unwrap();
+        assert_eq!(out.status.code(), Some(3), "{pattern}");
+        let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(report["granted"].as_array().unwrap().is_empty());
+        assert_eq!(report["conflicts"][0]["held"]["agent"], "claude@shop");
+    }
+}
+
+#[test]
 fn literal_metacharacter_filenames_are_protected_across_worktrees() {
     let env = Env::new();
     env.start("claude", &env.main, &[]);

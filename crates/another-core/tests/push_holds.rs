@@ -294,6 +294,43 @@ fn whole_project_holds_need_repo_wide() {
 }
 
 #[test]
+fn manual_bracket_directory_holds_conflict_with_literal_files_in_both_orders() {
+    for pattern in ["app/[id]", "app/[id]/**"] {
+        let fx = Fx::new();
+        let main = fx.project(&fx.repos.main);
+        let wt = fx.project(&fx.repos.wt);
+        // The directory need not exist for an explicit intent hold to protect it.
+        let manual = fx.acquire("alice", &fx.repos.main, &[pattern]).unwrap();
+        assert_eq!(manual.granted.len(), 1);
+        let edit = fx
+            .store
+            .guard_edit("bob", &wt, &["app/[id]/page.tsx".into()], "auto")
+            .unwrap();
+        assert_eq!(edit.conflicts.len(), 1, "manual first: {pattern}");
+        fx.store.release_holds("alice", &[]).unwrap();
+        assert!(fx
+            .store
+            .guard_edit("bob", &wt, &["app/[id]/page.tsx".into()], "auto")
+            .unwrap()
+            .conflicts
+            .is_empty());
+        let manual = fx.acquire("alice", &fx.repos.main, &[pattern]).unwrap();
+        assert!(manual.granted.is_empty(), "auto first: {pattern}");
+        assert_eq!(manual.conflicts.len(), 1);
+        // A real wildcard still protects ordinary files as well.
+        fx.acquire("carol", &fx.repos.main, &["src/**"]).unwrap();
+        assert_eq!(
+            fx.store
+                .guard_edit("alice", &main, &["src/a.rs".into()], "auto")
+                .unwrap()
+                .conflicts
+                .len(),
+            1
+        );
+    }
+}
+
+#[test]
 fn edit_guard_refuses_directories_and_keeps_glob_characters_literal() {
     let fx = Fx::new();
     let project = fx.project(&fx.repos.main);
