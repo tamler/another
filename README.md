@@ -48,6 +48,8 @@ Once v0.1.0 is published, prebuilt binaries for macOS (arm64, x86_64) and Linux 
 
 On macOS, when replacing an existing `another` with a new build, **remove the old binary first** (`rm "$(command -v another)"`) and then copy the new one in. Copying over the old file in place leaves a stale code signature cached, and macOS kills the new binary on launch. `cargo install` replaces it safely.
 
+After upgrading, restart every `another` process that was already running, since it keeps the old code: run `another daemon restart` on macOS (or `another daemon install` from the new binary if it lives at a different path; on Linux, restart your service), restart each client that runs `another serve --stdio` (or reconnect its MCP server), and restart any `another remote up`, `another serve --auth` or hand-started `another serve`. This matters most when the upgrade changes how repository keys are cached, as the one after #103 does: an old process reading keys written by the new one does not see holds in sibling worktrees and lets those edits through. See [docs/DAEMON.md](docs/DAEMON.md#upgrading).
+
 **2. Create the local node** (`~/.another`, or `$ANOTHER_HOME`):
 
 ```bash

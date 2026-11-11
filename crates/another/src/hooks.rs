@@ -1033,13 +1033,13 @@ const MAX_SYMLINKS: usize = 40;
 ///   directory cannot be a link;
 /// - the existing part is then canonicalized, which also restores on-disk letter case.
 ///
-/// A symlink loop falls back to `path` as given. `path` should be absolute.
+/// On a symlink loop (or a chain longer than the OS allows), `path` is used as given with
+/// its longest resolvable leading part canonicalized (it stops at the loop, even before a
+/// later `..`), so it still names the registered project.
+/// `path` should be absolute.
 pub fn resolve_existing(path: &Path) -> PathBuf {
     let mut budget = MAX_SYMLINKS;
-    match follow_links(path, &mut budget) {
-        Some(resolved) => canonical_prefix(&resolved),
-        None => path.to_path_buf(),
-    }
+    canonical_prefix(&follow_links(path, &mut budget).unwrap_or_else(|| path.to_path_buf()))
 }
 
 fn follow_links(path: &Path, budget: &mut usize) -> Option<PathBuf> {
@@ -1051,8 +1051,10 @@ fn follow_links(path: &Path, budget: &mut usize) -> Option<PathBuf> {
             Component::CurDir => {}
             Component::ParentDir => {
                 // `out` is fully resolved (or a missing, so link-free, tail): its parent is
-                // the physical parent.
+                // the physical parent. Climbing out of a missing tail can land on an
+                // existing directory again, whose entries may be links.
                 out.pop();
+                missing = std::fs::symlink_metadata(&out).is_err();
             }
             Component::Normal(name) => {
                 let next = out.join(name);
@@ -1079,26 +1081,34 @@ fn follow_links(path: &Path, budget: &mut usize) -> Option<PathBuf> {
     Some(out)
 }
 
-/// Canonicalize the deepest existing ancestor of a link-free path and keep the rest.
+/// Canonicalize the longest leading run of `path`'s components that resolves, and keep the
+/// rest as written. For a link-free path that is its deepest existing ancestor; for the
+/// fallback path of a symlink loop, which may still hold `..`, it stops at the loop.
 fn canonical_prefix(path: &Path) -> PathBuf {
-    let mut tail = Vec::new();
-    let mut cur = path.to_path_buf();
-    loop {
-        if let Ok(real) = std::fs::canonicalize(&cur) {
-            let mut out = real;
-            for name in tail.iter().rev() {
-                out.push(name);
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
+    }
+    let comps: Vec<Component> = path.components().collect();
+    let mut cur = PathBuf::new();
+    let mut real = None;
+    let mut kept = 0;
+    for (i, comp) in comps.iter().enumerate() {
+        cur.push(comp.as_os_str());
+        match std::fs::canonicalize(&cur) {
+            Ok(r) => {
+                real = Some(r);
+                kept = i + 1;
             }
-            return out;
-        }
-        match (cur.file_name().map(|n| n.to_os_string()), cur.parent()) {
-            (Some(name), Some(parent)) => {
-                tail.push(name);
-                cur = parent.to_path_buf();
-            }
-            _ => return path.to_path_buf(),
+            Err(_) => break,
         }
     }
+    let Some(mut out) = real else {
+        return path.to_path_buf();
+    };
+    for comp in &comps[kept..] {
+        out.push(comp.as_os_str());
+    }
+    out
 }
 
 /// What an edit of `file` can touch: the file reached through every symlink (a dangling

@@ -35,6 +35,32 @@ another daemon uninstall
 
 `--dry-run` shows the plist path and the `launchctl` commands without running them, `--no-load` writes the plist without loading it, and `--bind` picks another loopback port. The daemon stops cleanly on SIGTERM, which is what launchd sends.
 
+## Upgrading
+
+A running `another` keeps the code it started with, so after installing a new binary restart everything that was already running.
+
+1. **The launchd daemon (macOS).** `another daemon restart` relaunches the binary path recorded in the plist at install time, not whatever `another` is on your `PATH` now. If the new build is at the same path, restart:
+
+   ```bash
+   another daemon restart
+   ```
+
+   If it is at a different path (say `cargo install` put it in `~/.cargo/bin` but the plist names `~/.local/bin/another`), run the new binary's install instead, which rewrites the plist and reloads it. Pass the same `--bind` if you chose one:
+
+   ```bash
+   another daemon install
+   ```
+
+   The recorded path is the first `ProgramArguments` entry in `~/Library/LaunchAgents/one.toanother.another.plist`.
+
+2. **A daemon under another service manager.** `another daemon` is macOS only. On Linux, restart the service, e.g. `systemctl --user restart another.service`, and check that its `ExecStart` names the new binary.
+
+3. **Every other long-running server.** That covers each client that runs `another serve --stdio` as its MCP server (restart the client or reconnect the server), a remote server started with `another remote up` or `another serve --auth`, and any `another serve` started by hand. Stop each one and start it again from the new binary.
+
+Hooks start a fresh process on every call and need nothing.
+
+Skipping this is unsafe when a release changes how repository keys are cached (the `project_repos` table, see [HOLDS.md](HOLDS.md#holds-across-worktrees)). The release after #103 does: keys now carry a `v2:` prefix. The new binary treats an old key as never computed and recomputes it. An old process does not understand the new keys, rewrites the ones it touches in the old form, and then compares keys of two formats. They never match, so it misses holds in sibling worktrees and clones and lets those edits through (it fails open). The new binary never misses one: it recomputes the old keys on its next check. Once no old process is left, the keys settle in the new form.
+
 ## Elsewhere
 
 `another daemon` only manages launchd. On Linux, run `another serve` under your service manager. A systemd user unit along these lines works; it is an example, not something Another's tests exercise:
@@ -72,6 +98,8 @@ Mail reaches a working agent through its `post-tool` hook at the next tool call 
 5. After a wake it leaves that agent alone for 60 seconds.
 
 Every adapter command has a deadline: 3 seconds for `herdr agent get` (and the tmux probe), 10 seconds for a prompt. Each command runs in its own process group. A command that runs past its deadline, or is still running when the daemon is told to stop, gets SIGTERM for its whole group (so a process it started stops too), then a hard stop half a second later. Once a command has exited, its output is collected for at most a quarter of a second more, so a background process it left holding the output cannot stall the daemon either. A stuck adapter can neither hold up the other agents nor a clean shutdown.
+
+Two limits remain, and both need an adapter that misbehaves. A background process that outlives its command and keeps the output open is no longer waited for, but until it exits it still costs the daemon one small thread and one file descriptor. A process that moves itself into a new session (`setsid`) leaves the command's group, so a timeout does not stop it. Catching that would mean tracking every process an adapter starts.
 
 The summary carries subjects and counts, never bodies. Herdr stays headless: Another only calls `herdr agent get` and `herdr agent prompt`, never bare `herdr`, and never focuses a pane.
 
