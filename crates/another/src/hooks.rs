@@ -118,8 +118,9 @@ const EDIT_TOOLS: &str = "Edit|Write|MultiEdit|NotebookEdit";
 /// Codex edits files with `apply_patch`, which its matchers also accept as `Edit` or `Write`.
 const CODEX_EDIT_TOOLS: &str = "apply_patch|Edit|Write";
 
-/// What Codex shows for each of our hooks, in `/hooks` and while it runs (`statusMessage`).
-/// Without one, the trust dialog lists only the bare command.
+/// The `statusMessage` for each of our Codex hooks. Codex documents it as text shown while
+/// the hook runs; it gives each hook a clear label next to its command. Whether `/hooks`
+/// shows it too has not been checked against a live Codex.
 fn codex_status(event: HookEvent) -> &'static str {
     match event {
         HookEvent::SessionStart => "Another: registering this session",

@@ -48,13 +48,13 @@ Uninstall removes only entries that reference `another-hook.sh`, and deletes the
 | Client | Config written | Events | Notes |
 |---|---|---|---|
 | Claude Code | `~/.claude/settings.json` | `SessionStart`, `UserPromptSubmit`, `SessionEnd`, `PostToolUse` (all tools), `PreToolUse` (`Edit\|Write\|MultiEdit\|NotebookEdit`) | Plain stdout is added to context at session start and prompts. Tool hooks answer in JSON: `additionalContext` after a tool, `permissionDecision: "deny"` before an edit. |
-| Codex CLI | `~/.codex/hooks.json` | Same five; `PreToolUse` matches `apply_patch\|Edit\|Write` | New hooks run only after you trust them: open Codex and review them under `/hooks`. Each Another entry carries a `statusMessage` that says what it does, so `/hooks` shows a name instead of a bare command (see "Codex labels" below). The edit guard reads the file names from the `apply_patch` patch text. |
+| Codex CLI | `~/.codex/hooks.json` | Same five; `PreToolUse` matches `apply_patch\|Edit\|Write` | New hooks run only after you trust them: open Codex and review them under `/hooks`. Each Another entry carries a `statusMessage` that says what it does, so it has a clear label and not only a bare command (see "Codex labels" below). The edit guard reads the file names from the `apply_patch` patch text. |
 | Grok CLI | `~/.grok/hooks/another.json` | Same five as Claude Code | User-level hooks need no trust step (`/hooks-trust` applies to project hooks). Grok maps `Edit`, `Write` and `MultiEdit` onto its own edit tools. See "Grok and shared hook files" below. |
 | Cursor (best effort) | `~/.cursor/hooks.json` | `sessionStart`, `beforeSubmitPrompt`, `sessionEnd`, `postToolUse` | Context is injected at session start and after tool calls (`additional_context`); the prompt hook just renews holds and lets the prompt through. No edit guard: Cursor blocks a tool call when a `preToolUse` reply is not valid JSON, and a hook that fails open prints nothing. |
 
 ### Codex labels
 
-Codex lists each hook in `/hooks` by its `statusMessage` and shows the same text while the hook runs. Another's Codex entries use these:
+Codex shows a hook's `statusMessage` while the hook runs. Another sets one on each of its Codex entries, so every hook has a clear label and not only a bare command. Whether the `/hooks` review screen shows this text as well has not been checked against a live Codex. The labels are:
 
 | Event | `statusMessage` |
 |---|---|
