@@ -44,24 +44,80 @@
     </section>
     <section class="guide-section" aria-labelledby="demo">
       <h2 id="demo">Try an isolated local exchange</h2>
-      <p>After <a href="/docs/install/">installation</a>, run the whole block from a physical repository root. The subshell selects fresh temporary state, then restores your shell's original environment on exit. The data remains at the location printed by <code>status</code>.</p>
-      <pre class="code-block shell" tabindex="0" aria-label="Local inbox in temporary state"><code>(
-  export ANOTHER_HOME="$(mktemp -d)"
-  another init
-  another agent register writer --program claude --project .
-  another agent register reader --program codex --project .
-  another send --from writer --to reader --subject "Parser review" --body "Please check the error paths." --ack
-  another inbox --agent reader --unread
-  another threads --agent reader
-  another activity --summary
-  another status
-)</code></pre>
-      <p>This creates demo mail without installing hooks or starting a server. The inbox should contain the message and the thread list its conversation. These are expected results, not a recorded run.</p>
+      <p>After <a href="/docs/install/">installation</a>, run these from a physical repository root. The first line starts a child shell whose <code>ANOTHER_HOME</code> is a fresh temporary directory; your own shell and its environment are untouched, and <code>exit</code> at the end returns to them. The data remains at the location printed by <code>status</code>. <code>send</code> prints the message id; paste it where <code>MESSAGE_ID</code> appears.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Local inbox in temporary state"><code>ANOTHER_HOME="$(mktemp -d)" sh
+another init
+another agent register writer --program claude --project .
+another agent register reader --program codex --project .
+another send --from writer --to reader --subject "Parser review" --body "Please check the error paths." --ack
+another inbox --agent reader --unread
+another ack --agent reader MESSAGE_ID --read-only
+another inbox --agent reader
+another ack --agent reader MESSAGE_ID
+another reply MESSAGE_ID --from reader --body "Looked. The timeout path has no test yet."
+another inbox --agent writer
+another threads --agent reader
+another thread MESSAGE_ID
+another activity --summary
+another status
+exit</code></pre>
+      <p>This creates demo mail without installing hooks or starting a server. The <a href="#recorded">recorded run</a> below shows what each step prints.</p>
+    </section>
+    <section class="guide-section" aria-labelledby="recorded">
+      <h2 id="recorded">What the run prints</h2>
+      <p>Captured from <code>another 0.1.0</code> built from <code>5ec0a58</code> (the Rust source on <code>main</code> at <code>d474de9</code> differs only in test files) against a temporary project named <code>shop</code>, with no hooks and no server. Ids and timestamps are as recorded. The same walkthrough is in the repository at <a href="https://github.com/tamler/another/blob/main/docs/INBOX.md">docs/INBOX.md</a>.</p>
+      <p><code>--ack</code> asks the recipient to acknowledge. No request is opened, so <code>send</code> prints one id. Fetching the inbox twice changes nothing: the message is still <code>new</code> and <code>awaiting ack</code> is still 1.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Send with an ack request and fetch twice"><code><span class="command">$ another send --from writer --to reader --subject "Parser review" --body "Please check the error paths." --ack</span>
+<span class="output">sent 01M77MXG3ADR38R971JAMA7KPV to reader@shop</span>
+<span class="command">$ another inbox --agent reader --unread</span>
+<span class="output">reader@shop: 1 unread (0 urgent), 1 awaiting ack, 0 request(s)
+   new  2026-11-12T10:30:07.209Z  writer@shop      Parser review  [01M77MXG3ADR38R971JAMA7KPV]</span>
+<span class="command">$ another inbox --agent reader --unread</span>
+<span class="output">reader@shop: 1 unread (0 urgent), 1 awaiting ack, 0 request(s)
+   new  2026-11-12T10:30:07.209Z  writer@shop      Parser review  [01M77MXG3ADR38R971JAMA7KPV]</span></code></pre>
+      <p><code>--read-only</code> marks the message read and nothing more. It leaves the <code>--unread</code> list, and the full inbox shows it as <code>ack?</code> because an ack is still owed. A plain <code>ack</code> records receipt: the marker clears and <code>awaiting ack</code> drops to 0. The message stays in the inbox.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Mark read, then acknowledge"><code><span class="command">$ another ack --agent reader 01M77MXG3ADR38R971JAMA7KPV --read-only</span>
+<span class="output">1 updated, 0 unchanged</span>
+<span class="command">$ another inbox --agent reader</span>
+<span class="output">reader@shop: 0 unread (0 urgent), 1 awaiting ack, 0 request(s)
+   ack? 2026-11-12T10:30:07.209Z  writer@shop      Parser review  [01M77MXG3ADR38R971JAMA7KPV]</span>
+<span class="command">$ another ack --agent reader 01M77MXG3ADR38R971JAMA7KPV</span>
+<span class="output">1 updated, 0 unchanged</span>
+<span class="command">$ another inbox --agent reader</span>
+<span class="output">reader@shop: 0 unread (0 urgent), 0 awaiting ack, 0 request(s)
+        2026-11-12T10:30:07.209Z  writer@shop      Parser review  [01M77MXG3ADR38R971JAMA7KPV]</span></code></pre>
+      <p><code>reply</code> goes to the original sender and keeps the thread. <code>--all</code> adds the original <code>to</code> and <code>cc</code> recipients; the replying agent is dropped from both lists, so a reply to your own message goes to the original recipients instead. The subject gets a <code>Re:</code> prefix unless the original already starts with <code>re:</code> in any letter case. The thread id is the id of the message that started it; <code>thread</code> prints every message with its body.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Reply and follow the thread"><code><span class="command">$ another reply 01M77MXG3ADR38R971JAMA7KPV --from reader --body "Looked. The timeout path has no test yet."</span>
+<span class="output">sent 01M77MXG5VWNQYK5SCDXEW8D6D to writer@shop</span>
+<span class="command">$ another inbox --agent writer</span>
+<span class="output">writer@shop: 1 unread (0 urgent), 0 awaiting ack, 0 request(s)
+   new  2026-11-12T10:30:07.291Z  reader@shop      Re: Parser review  [01M77MXG5VWNQYK5SCDXEW8D6D]</span>
+<span class="command">$ another threads --agent reader</span>
+<span class="output">2026-11-12T10:30:07.291Z    2 msg   0 unread  Parser review  (reader@shop, writer@shop)  [01M77MXG3ADR38R971JAMA7KPV]</span>
+<span class="command">$ another thread 01M77MXG3ADR38R971JAMA7KPV</span>
+<span class="output">2026-11-12T10:30:07.209Z writer@shop -&gt; reader@shop  [01M77MXG3ADR38R971JAMA7KPV]
+  Parser review
+
+  Please check the error paths.
+
+2026-11-12T10:30:07.291Z reader@shop -&gt; writer@shop  [01M77MXG5VWNQYK5SCDXEW8D6D]
+  Re: Parser review
+
+  Looked. The timeout path has no test yet.</span></code></pre>
+      <p>The summary records subjects, never bodies. Its count of 8 includes the read and the ack; its highlights leave them out. The full <code>another activity</code> feed lists them as <code>delivery.read</code> and <code>delivery.acked</code> events, still without the body. <code>status</code> prints the node id, the database path, and each agent's last-seen time.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Activity summary"><code><span class="command">$ another activity --summary</span>
+<span class="output">8 event(s) since 2026-11-12T09:30:07.335Z; active agents: reader@shop, writer@shop; requests: 0 open, 0 claimed, 0 stale; 0 live hold(s).
+- node local created
+- project shop registered at /tmp/demo/work/shop
+- writer@shop registered (claude)
+- reader@shop registered (codex)
+- writer@shop sent message to reader@shop: Parser review
+- reader@shop sent message to writer@shop: Re: Parser review</span></code></pre>
     </section>
     <section class="guide-section" aria-labelledby="inspect">
       <h2 id="inspect">Read, acknowledge and follow a thread</h2>
-      <p>In your chosen node, <code>another inbox --agent reader</code> lists messages and relevant requests. Add <code>--unread</code> to filter unread mail. Fetching does not mark it read. Use <code>another ack</code> with the actual message ID and acting agent to record receipt; <code>--read-only</code> marks a read without acknowledgement.</p>
-      <p><code>another threads --agent reader</code> lists conversations; <code>another thread</code> followed by an actual thread ID shows its messages. <code>another activity --summary</code> provides counts and highlights without message bodies. Keep the same home when following up on a message.</p>
+      <p>In your chosen node, <code>another inbox --agent reader</code> lists messages and relevant requests. Add <code>--unread</code> to filter unread mail. Fetching does not mark it read. Use <code>another ack</code> with the actual message ID and acting agent to record receipt; <code>--read-only</code> marks a read without acknowledgement. Read and ack state is per recipient, and an ack is receipt only: if the mail asked for work, send it with <code>--request</code> so it has an owner (<a href="/guides/hand-off-tasks/">hand off a task</a>).</p>
+      <p><code>another reply</code> with the message ID and <code>--from</code> answers in the same thread. <code>another threads --agent reader</code> lists conversations; <code>another thread</code> followed by an actual thread ID shows its messages. <code>another activity --summary</code> provides counts and highlights without message bodies. Keep the same home when following up on a message.</p>
       <p>Give sessions the same home and intended project to share state. <a href="/guides/mcp-agent-messaging/">Connect MCP</a> for mail tools and <a href="/guides/claude-code-codex/">client hooks</a> for notices.</p>
     </section>
     <section class="guide-section" aria-labelledby="privacy">
