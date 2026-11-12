@@ -6,7 +6,7 @@ A message can be acknowledged. A request has an owner and a status. Those are th
 |---|---|---|
 | The agent saw the mail | `another ack <message-id>` | Receipt. Nothing about the work |
 | One agent owns the work | `another request claim <id>` | Who to ask. Not that it is finished |
-| The owner says it finished | `another request complete <id>` | A claim of completion. Review the result yourself |
+| An agent says it finished | `another request complete <id>` | A claim of completion. Review the result yourself |
 
 The walkthrough below is a recorded run, not a sketch. It was captured on 12 Nov 2026 from `another 0.1.0` built from `5ec0a58` (then `main`), against a temporary project named `shop` in a temporary `ANOTHER_HOME`, with no hooks installed and no `another serve` running. Ids and timestamps are as recorded; yours will differ. Where a command needs an id from an earlier step, copy it from that step's output.
 
@@ -84,7 +84,7 @@ $ another activity --since 1h --kinds request
 2026-11-12T09:33:24.866Z  request  worker@shop claimed request: Fix the flaky test
 ```
 
-`another requests --owner worker` lists everything that agent currently owns. The sender's inbox counts only requests sent to the sender, so a sender checks `another requests`, not its own inbox, to see whether work it opened has an owner.
+`another requests --owner worker` lists requests with that owner, including completed ones, newest first, 100 by default. The inbox shows open or stale requests sent to that agent, and claimed or stale requests it owns, even if it was not the addressee (for example after a takeover). A sender still checks `another requests`, not only its own inbox, to see whether work it opened has an owner.
 
 ## 5a. The worker comes back and completes it
 
@@ -100,7 +100,7 @@ $ another threads --agent lead
 2026-11-12T09:33:24.901Z    2 msg   1 unread  Fix the flaky test  (lead@shop, worker@shop)  [01M77HNNED9HZY6CKDHEZTPNSS]
 ```
 
-That `Done:` mail is the only thing the sender's inbox will ever receive about the request. Only the owner can complete a claimed request. A done request cannot be claimed again. If the creator completes its own request, no `Done:` mail is sent.
+That `Done:` mail is the only thing the sender's inbox will ever receive about the request. While a request is `claimed`, only its owner can complete it. An `open` or `stale` request can be completed by any agent, and that agent becomes the owner. A done request cannot be claimed again. If the creator completes its own request, no `Done:` mail is sent.
 
 ## 5b. Or the worker gives it back
 
@@ -112,11 +112,11 @@ sent 01M77HNNJ0B2BD3M5R5EB1AKPC to worker@shop
 opened request 01M77HNNJ0T10Z74VKWG0YWZAX
 $ another request claim --agent worker 01M77HNNJ0T10Z74VKWG0YWZAX
 claimed   worker@shop      Port the fixture  (from lead@shop due 2026-11-12T09:48:24.928Z)  [01M77HNNJ0T10Z74VKWG0YWZAX]
-$ another request release --agent worker 01M77HNNJ0T10Z74VKWG0YWZAX --note "Blocked on the fixture"
+$ another request release --agent worker 01M77HNNJ0T10Z74VKWG0YWZAX
 open      -                Port the fixture  (from lead@shop due 2026-11-12T09:48:24.928Z)  [01M77HNNJ0T10Z74VKWG0YWZAX]
 ```
 
-The note is stored on the request. `release` does not mail anyone, so tell the requester if they need to know.
+`release` does not store a note and does not mail anyone, so tell the requester if they need to know. (`--note` is stored on `complete`, not on `release`.)
 
 ## 5c. Or nobody comes back: stale takeover
 

@@ -94,7 +94,7 @@ open      -                Fix the flaky test  (from lead@shop due 2026-11-12T09
 <span class="command">$ another activity --since 1h --kinds request</span>
 <span class="output">2026-11-12T09:33:24.813Z  request  lead@shop opened request: Fix the flaky test
 2026-11-12T09:33:24.866Z  request  worker@shop claimed request: Fix the flaky test</span></code></pre>
-      <p>When the worker comes back, <code>complete</code> marks the request done and mails the lead a <code>Done:</code> message in the original thread. The note is the body; without one it reads <code>Request &lt;id&gt; is done.</code> That mail is the only thing the sender's inbox receives about the request.</p>
+      <p>When the worker comes back, <code>complete</code> marks the request done and mails the lead a <code>Done:</code> message in the original thread. The note is the body; without one it reads <code>Request &lt;id&gt; is done.</code> That mail is the only thing the sender's inbox receives about the request. While a request is <code>claimed</code>, only its owner can complete it. An <code>open</code> or <code>stale</code> request can be completed by any agent, and that agent becomes the owner.</p>
       <pre class="code-block shell" tabindex="0" aria-label="Complete the request and the Done mail"><code><span class="command">$ another request complete --agent worker 01M77HNNEDVZ92ZVSKQEYXYRB5 --note "Fixed in the retry branch"</span>
 <span class="output">done      worker@shop      Fix the flaky test  (from lead@shop due 2026-11-12T09:48:24.813Z)  [01M77HNNEDVZ92ZVSKQEYXYRB5]</span>
 <span class="command">$ another inbox --agent lead</span>
@@ -106,9 +106,9 @@ open      -                Fix the flaky test  (from lead@shop due 2026-11-12T09
 opened request 01M77HNNJ0T10Z74VKWG0YWZAX</span>
 <span class="command">$ another request claim --agent worker 01M77HNNJ0T10Z74VKWG0YWZAX</span>
 <span class="output">claimed   worker@shop      Port the fixture  (from lead@shop due 2026-11-12T09:48:24.928Z)  [01M77HNNJ0T10Z74VKWG0YWZAX]</span>
-<span class="command">$ another request release --agent worker 01M77HNNJ0T10Z74VKWG0YWZAX --note "Blocked on the fixture"</span>
+<span class="command">$ another request release --agent worker 01M77HNNJ0T10Z74VKWG0YWZAX</span>
 <span class="output">open      -                Port the fixture  (from lead@shop due 2026-11-12T09:48:24.928Z)  [01M77HNNJ0T10Z74VKWG0YWZAX]</span></code></pre>
-      <p>If instead the worker never comes back, the deadline does the work. This third request was opened with <code>--due 5</code>. The worker acked, claimed, and stopped. Past its due time it is <code>stale</code>: <code>another sweep</code> applies that at once, and <code>another requests</code> and <code>another inbox</code> sweep before they list. A stale request keeps its owner, so another agent cannot release it. Takeover is a claim, and the <code>Done:</code> mail names who finished it.</p>
+      <p><code>release</code> does not store a note and does not mail anyone. If instead the worker never comes back, the deadline does the work. This third request was opened with <code>--due 5</code>. The worker acked, claimed, and stopped. Past its due time it is <code>stale</code>: <code>another sweep</code> applies that at once, and <code>another requests</code> and <code>another inbox</code> sweep before they list. A stale request keeps its owner, so another agent cannot release it. Takeover is a claim, and the <code>Done:</code> mail names who finished it.</p>
       <pre class="code-block shell" tabindex="0" aria-label="Stale takeover by another agent"><code><span class="command">$ another send --from lead --to worker --subject "Rotate the log" --body "src/log.rs" --ack --due 5</span>
 <span class="output">sent 01M77HNNKQJVFTPAECB37NZC72 to worker@shop
 opened request 01M77HNNKQAN037F028JXCZKH7</span>
