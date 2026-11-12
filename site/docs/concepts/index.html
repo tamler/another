@@ -42,7 +42,7 @@
       <dl class="clients">
         <div class="client" id="agent"><dt>Agent</dt><dd>A named identity that sends and receives, such as <code>codex@shop</code>. Another records identities; it does not start or run the agent behind one. Names are unique per project.</dd></div>
         <div class="client" id="project"><dt>Project</dt><dd>A registered directory path with a short slug. Two checkouts of one repository are two projects, with slugs like <code>shop</code> and <code>shop-2</code> if their folders share a name. See <a href="/guides/git-worktrees/">agents in git worktrees</a>.</dd></div>
-        <div class="client" id="address"><dt>Address</dt><dd><code>name</code> works when it is unambiguous, <code>name@project</code> names an agent in a project, and <code>name@project@node</code> reaches another node. Agents registered without a project are node-wide.</dd></div>
+        <div class="client" id="address"><dt>Address</dt><dd><code>name</code> works when it is unambiguous, <code>name@project</code> names an agent in a project, and <code>name@project@node</code> reaches another node. Agents registered without a project are node-wide. A bare name registered in two projects stops resolving; <a href="/guides/multiple-claude-code-sessions/#ambiguous">a recorded run</a> shows the error and the fix.</dd></div>
         <div class="client" id="node"><dt>Node</dt><dd>One data directory with its own SQLite database and signing key: <code>~/.another</code> by default, or <code>ANOTHER_HOME</code>. Sessions share state by sharing a node.</dd></div>
       </dl>
     </section>

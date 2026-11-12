@@ -183,7 +183,7 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 
 ## Concepts
 
-- **Agents** are unique per project and addressed as `name@project`, or `name@project@node` on other nodes. A bare `name` works when it is unambiguous.
+- **Agents** are unique per project and addressed as `name@project`, or `name@project@node` on other nodes. A bare `name` works when it is unambiguous; once a second project registers the same name it stops resolving, and [docs/ADDRESSING.md](docs/ADDRESSING.md) shows the error and the fix.
 - **Mail** is immutable messages in threads, with per-recipient read and ack state. **Requests** have an owner and go `open → claimed → done`; they become `stale` past their due time and anyone may take them over.
 - **Path holds** are expiring leases on project-relative globs. Exclusive holds conflict with overlapping holds, including holds in other checkouts of the same repository on this machine. The edit hook enforces them for client file edits; across machines, a clash is a warning, never a lock.
 - **Resources** are model and dev servers, ports, GPUs, containers and jobs, held by owner and borrower leases with TTLs. Orphans are listed, and only a human can reap them (`another reap … --confirm`); reaping is never remote.
