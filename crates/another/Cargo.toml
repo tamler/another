@@ -1,6 +1,6 @@
 [package]
 name = "another"
-description = "Another: local-first cross-agent inbox (daemon + CLI + MCP server)"
+description = "Another: background messaging and coordination for coding agents"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

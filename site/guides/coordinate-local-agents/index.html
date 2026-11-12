@@ -36,7 +36,7 @@
     <nav aria-label="Main"><a href="/docs/getting-started/">Get started</a> <a href="/docs/">Docs</a> <a href="/guides/">Guides</a> <a href="/compare/">Compare</a> <a href="/changelog/">Changelog</a></nav>
   </header>
   <main class="wrap" id="main" tabindex="-1">
-    <div class="guide-hero"><h1>Coordinate local coding agents</h1><p class="definition">Several agents, one project, one machine. Another is a background coordination layer for agents you run.</p><nav class="guide-nav" aria-label="Setup guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/">Full guide</a></nav></div>
+    <div class="guide-hero"><h1>Coordinate local coding agents</h1><p class="definition">Several agents, one project, one machine. Another is a background messaging system that helps them work in parallel, reduce edit conflicts and share resources.</p><nav class="guide-nav" aria-label="Setup guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/">Full guide</a></nav></div>
     <p>Another also works across machines through federation or remote peers. A federation hub can read relayed mail, and remote peers cannot reap.</p>
     <p>Messages are one part of coordination. Path holds help prevent covered edit conflicts, hooks announce new mail after a tool call, and resource records help agents find services already running. Holds are not disk locks: shell edits bypass the guard, Cursor has no edit guard, and hooks can fail open. This guide starts with a message exchange in isolated state.</p>
     <section class="guide-section" aria-labelledby="storage">

@@ -1,4 +1,4 @@
-//! Another core: a local-first, vendor-neutral inbox for coding agents.
+//! Another core: local-first messaging and coordination for coding agents.
 //!
 //! Every mutation appends an event to an append-only log (ULID ids, chained by
 //! `prev_id`) and updates query projections in the same SQLite transaction. All durable

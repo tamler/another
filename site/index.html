@@ -21,7 +21,7 @@
   <meta name="twitter:description" content="Coordinate coding agents on one project and one machine with path holds, background messages and shared resources. Another also works across machines.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
   <meta name="twitter:image:alt" content="Another. Many agents, one project.">
-  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"WebSite","author":{"@type":"Organization","name":"The Another Authors"},"name":"Another","url":"https://toanother.one/","description":"Coordinate coding agents on one project and one machine with path holds, background messages and shared resources. Another also works across machines."},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","description":"A background coordination layer for coding agents, with path holds, messaging and a resource registry, through MCP and a shared CLI.","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}},{"@type":"SoftwareSourceCode","@id":"https://toanother.one/#source","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"WebSite","author":{"@type":"Organization","name":"The Another Authors"},"name":"Another","url":"https://toanother.one/","description":"Coordinate coding agents on one project and one machine with path holds, background messages and shared resources. Another also works across machines."},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","description":"A background messaging system helping coding agents work in parallel, reduce edit conflicts and share resources, through MCP and a shared CLI.","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}},{"@type":"SoftwareSourceCode","@id":"https://toanother.one/#source","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
@@ -40,7 +40,7 @@
       <h1 id="headline">Several agents, one project, one machine.</h1>
       <div class="hero-bottom">
         <div>
-          <p class="definition">A background coordination layer for coding agents.</p>
+          <p class="definition">A background messaging system for coding agents working on the same project, on the same machine, at the same time.</p>
           <p>Another also works across machines today, through remote peers or a federation hub you host.</p>
           <p>Run agents in parallel with messages and mid-task notices, path holds that help prevent conflicting edits, and a registry that helps them share model servers and ports. The mailbox is how agents address each other; coordination is the job. Another does not start the agents or limit their resource use.</p>
         </div>
@@ -119,7 +119,7 @@ opened request 01M6FMXVS73X1C5HPZKWSC7QZN</span></code></pre>
       <h2 id="scenarios-title">Where it shows up</h2>
       <dl class="clients">
         <div class="client"><dt><a href="/guides/avoid-agent-file-conflicts/">Same files</a></dt><dd>Holds, the edit hook that enforces them, the exit status, and what a hold will not do.</dd></div>
-        <div class="client"><dt><a href="/guides/claude-code-codex/">Claude Code and Codex</a></dt><dd>Two different programs, one checkout, one project inbox. The guide is the review handoff.</dd></div>
+        <div class="client"><dt><a href="/guides/claude-code-codex/">Claude Code and Codex</a></dt><dd>Two different programs, one checkout, shared coordination. The guide is the review handoff.</dd></div>
         <div class="client"><dt><a href="/guides/share-model-server/">One model server</a></dt><dd>Register it, borrow it, and do not reap it until a person confirms.</dd></div>
         <div class="client"><dt><a href="/guides/agents-on-two-machines/">Laptop and a remote box</a></dt><dd>A hub you host. Mail crosses. Requests stay on one node.</dd></div>
         <div class="client"><dt><a href="/guides/multiple-claude-code-sessions/">Two Claude Code sessions</a></dt><dd>Same client twice. Give each session its own name or they share one identity.</dd></div>
@@ -129,7 +129,7 @@ opened request 01M6FMXVS73X1C5HPZKWSC7QZN</span></code></pre>
     <section class="section" aria-labelledby="compare-title">
       <h2 id="compare-title">Other tools I looked at</h2>
       <p>Some projects are inboxes. Some are a file claim plus a Claude Code hook that can deny the edit. Some start the agents and hand out branches. Another does not start agents. Its edit hook denies a client edit to a held file; an edit from a shell command still gets through.</p>
-      <p>I wrote down what their READMEs actually say, and when I would use something else. <a href="/compare/">Inbox or orchestrator</a>. <a href="/compare/alternatives/">When not to use Another</a>, including copy-paste and Claude Code's own agent teams if every session you run is Claude.</p>
+      <p>I wrote down what their READMEs actually say, and when I would use something else. <a href="/compare/">Coordination or orchestration</a>. <a href="/compare/alternatives/">When not to use Another</a>, including copy-paste and Claude Code's own agent teams if every session you run is Claude.</p>
     </section>
     <section class="section" aria-labelledby="missing-title">
       <h2 id="missing-title">What is on main, and what is not</h2>
