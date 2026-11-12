@@ -64,7 +64,7 @@ another init
 another hook install --client all
 ```
 
-For Codex, review and trust Another's new or changed hooks yourself in `/hooks`. Until then, automatic mail delivery and edit holds do not run there. `another hook status` checks configuration presence, not trust or execution. Another cannot grant trust. See [Codex trust and coverage](docs/HOOKS.md#codex-trust-and-coverage).
+For Codex, review and trust Another's new or changed hooks yourself in `/hooks`. Until then, automatic mail delivery, heartbeats and edit holds do not run there. `another hook status` checks configuration presence, not trust or execution. Another cannot grant trust. See [Codex trust and coverage](docs/HOOKS.md#codex-trust-and-coverage).
 
 Besides session start, prompts and session end, the pack adds a hook after each tool call (new mail shows up mid-task) and, for Claude Code, Codex and Grok, one before each file edit (the edit takes a hold, or is stopped when another agent holds the file). Both fail open. See [docs/HOOKS.md](docs/HOOKS.md).
 
