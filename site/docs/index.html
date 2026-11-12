@@ -64,7 +64,7 @@ another init</code></pre>
       <p>Remove <code>--dry-run</code> to install user-global hooks. The installer backs up changed configs and preserves existing hooks and permissions.</p>
       <dl class="clients">
         <div class="client"><dt>Claude Code</dt><dd><code tabindex="0">~/.claude/settings.json</code><p>Session-start and prompt output enters context; the tool hooks add a mid-task notice and the edit guard.</p></dd></div>
-        <div class="client"><dt>Codex</dt><dd><code tabindex="0">~/.codex/hooks.json</code><p>Open <code>/hooks</code> in Codex and review the new hooks before they run.</p></dd></div>
+        <div class="client"><dt>Codex</dt><dd><code tabindex="0">~/.codex/hooks.json</code><p>For Codex, review and trust Another's new or changed hooks yourself in <code>/hooks</code>. In Codex's default trust flow, automatic mail delivery, heartbeats and edit holds do not run there until you do. Codex also offers <code>--dangerously-bypass-hook-trust</code>, which runs enabled hooks without persisted trust for that one invocation; Another does not recommend it. <code>another hook status</code> checks configuration presence, not trust or execution. Another cannot grant trust. See <a href="https://github.com/tamler/another/blob/main/docs/HOOKS.md#codex-trust-and-coverage">Codex trust and coverage</a>.</p></dd></div>
         <div class="client"><dt>Grok CLI</dt><dd><code tabindex="0">~/.grok/hooks/another.json</code><p>User-level hooks need no project-hook trust step.</p></dd></div>
       </dl>
       <p>The default identity is <code>client@project</code>, registered on first use. <a href="https://github.com/tamler/another/blob/main/docs/HOOKS.md">Hook behavior and removal</a>.</p>
