@@ -14,7 +14,7 @@ jobs:
     name: copy lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Copy lint self-test
         run: python3 scripts/check-copy.py --self-test
       - name: Copy lint
@@ -27,7 +27,7 @@ jobs:
     name: msrv (Rust 1.88, fresh resolve)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust 1.88
         uses: dtolnay/rust-toolchain@1.88
@@ -43,7 +43,7 @@ jobs:
     name: test / clippy / fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -71,7 +71,7 @@ jobs:
     name: msrv (Rust 1.88)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust 1.88
         uses: dtolnay/rust-toolchain@1.88
