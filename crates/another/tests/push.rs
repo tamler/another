@@ -294,6 +294,193 @@ fn post_tool_mentions_new_mail_once_and_is_silent_otherwise() {
 }
 
 #[test]
+fn manual_route_directory_holds_block_auto_edits_in_both_orders() {
+    for (pattern, path) in [
+        ("app/[id]", "app/[id]/page.tsx"),
+        ("app/[id]/**", "app/[id]/page.tsx"),
+        ("app/[id]/*.tsx", "app/[id]/page.tsx"),
+        ("app/[id]/**/*.tsx", "app/[id]/deep/page.tsx"),
+        // r6: an alternation with a `/`, and the escaped literal directory names `*`
+        // and `?`.
+        ("src/{a/b,c}", "src/a/b/page.tsx"),
+        ("src/{a/b,c}/[id]/page.tsx", "src/a/b/[id]/page.tsx"),
+        ("packages/*/app/[*]", "packages/web/app/*/page.tsx"),
+        ("packages/*/app/[?]", "packages/web/app/?/page.tsx"),
+        // r7: a chain of alternations past any spelling-out cap.
+        (
+            "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}",
+            "src/a/b/d/f/h/j/l/page.tsx",
+        ),
+        (
+            "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+            "src/a/b/d/f/h/j/l/[id]/page.tsx",
+        ),
+    ] {
+        let env = Env::new();
+        env.start("claude", &env.main, &[]);
+        env.start("codex", &env.wt, &[]);
+        let args = [
+            "--json",
+            "hold",
+            "acquire",
+            "--agent",
+            "codex@shop-review",
+            "--project",
+            env.wt.to_str().unwrap(),
+            pattern,
+        ];
+        env.ok(&args);
+        let edit = tool(&env.main, "Write", json!({ "file_path": path }));
+        assert!(
+            denial(&env.hook("pre-edit", "claude", &edit)).contains("held by codex@shop-review"),
+            "manual first: {pattern}"
+        );
+        env.ok(&["hold", "release", "--agent", "codex@shop-review"]);
+        assert_eq!(env.hook("pre-edit", "claude", &edit), "");
+        let out = env.cmd(&args).output().unwrap();
+        assert_eq!(out.status.code(), Some(3), "auto first: {pattern}");
+        let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(report["granted"].as_array().unwrap().is_empty());
+        assert_eq!(report["conflicts"][0]["held"]["agent"], "claude@shop");
+    }
+}
+
+/// r6: through the real binary, an agent's own glob hold with an alternation that spans a
+/// `/` or an escaped literal `*` directory covers the file it names, so the pre-edit hook
+/// takes no second hold and the file stays blocked for a sibling worktree.
+#[test]
+fn own_brace_and_escaped_wildcard_holds_cover_edits_through_the_hook() {
+    let env = Env::new();
+    env.start("claude", &env.main, &[]);
+    env.start("codex", &env.wt, &[]);
+    for (pattern, path, other) in [
+        ("src/{a/b,c}", "src/a/b/page.tsx", "src/a/x.ts"),
+        (
+            "packages/*/app/[*]",
+            "packages/web/app/*/page.tsx",
+            "packages/web/app/x/page.tsx",
+        ),
+        (
+            "lib/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+            "lib/a/b/d/f/h/j/l/[id]/page.tsx",
+            "lib/a/b/d/f/h/j/x/[id]/page.tsx",
+        ),
+    ] {
+        env.ok(&[
+            "hold",
+            "acquire",
+            "--agent",
+            "claude@shop",
+            "--project",
+            env.main.to_str().unwrap(),
+            pattern,
+        ]);
+        let before = env.holds().len();
+        let edit = tool(&env.main, "Write", json!({ "file_path": path }));
+        assert_eq!(env.hook("pre-edit", "claude", &edit), "", "{pattern}");
+        assert_eq!(env.holds().len(), before, "{pattern}: no second hold");
+        let sibling = tool(&env.wt, "Write", json!({ "file_path": path }));
+        assert!(
+            denial(&env.hook("pre-edit", "codex", &sibling)).contains("held by claude@shop"),
+            "{pattern}"
+        );
+        // A file the pattern does not name is free, and gets a hold of its own.
+        let free = tool(&env.wt, "Write", json!({ "file_path": other }));
+        assert_eq!(env.hook("pre-edit", "codex", &free), "", "{pattern}");
+        assert_eq!(env.holds().len(), before + 1, "{pattern}");
+    }
+}
+
+#[test]
+fn literal_metacharacter_filenames_are_protected_across_worktrees() {
+    let env = Env::new();
+    env.start("claude", &env.main, &[]);
+    env.start("codex", &env.wt, &[]);
+    for path in [
+        "app/[id]/page.tsx",
+        "src/{x}.ts",
+        "src/*.rs",
+        "src/a?.rs",
+        "src/[.rs",
+    ] {
+        write(&env.main.join(path), "old");
+        write(&env.wt.join(path), "old");
+        assert_eq!(
+            env.hook(
+                "pre-edit",
+                "claude",
+                &tool(&env.main, "Edit", json!({ "file_path": path }))
+            ),
+            ""
+        );
+        let reason = denial(&env.hook(
+            "pre-edit",
+            "codex",
+            &tool(&env.wt, "Edit", json!({ "file_path": path })),
+        ));
+        assert!(reason.contains("held by claude@shop"), "{path}: {reason}");
+    }
+    // Escaping must not turn the bracketed route into a hold on app/i/page.tsx.
+    assert_eq!(
+        env.hook(
+            "pre-edit",
+            "codex",
+            &tool(&env.wt, "Write", json!({ "file_path": "app/i/page.tsx" }))
+        ),
+        ""
+    );
+    let patch = "*** Begin Patch\n*** Add File: src/ok.ts\n+ok\n*** Update File: app/[id]/page.tsx\n@@\n-old\n+new\n*** End Patch\n";
+    assert!(denial(&env.hook(
+        "pre-edit",
+        "codex",
+        &tool(&env.wt, "apply_patch", json!({ "command": patch }))
+    ))
+    .contains("held by claude@shop"));
+    assert!(!env.holds().iter().any(|h| h["pattern"] == "src/ok.ts"));
+}
+
+#[test]
+fn pre_edit_never_turns_directory_hints_into_holds() {
+    let env = Env::new();
+    env.start("codex", &env.main, &[]);
+    let patch = "*** Begin Patch\n*** Add File: src/new.rs\n+fn new() {}\n*** End Patch\n";
+    assert_eq!(
+        env.hook(
+            "pre-edit",
+            "codex",
+            &tool(
+                &env.main,
+                "apply_patch",
+                json!({ "path": "src", "command": patch })
+            )
+        ),
+        ""
+    );
+    let holds = env.holds();
+    assert_eq!(holds.len(), 1);
+    assert_eq!(holds[0]["pattern"], "src/new.rs");
+    assert_eq!(
+        env.hook(
+            "pre-edit",
+            "codex",
+            &tool(&env.main, "Edit", json!({ "file_path": "src" }))
+        ),
+        ""
+    );
+    assert_eq!(env.holds().len(), 1);
+    env.start("claude", &env.wt, &[]);
+    assert_eq!(
+        env.hook(
+            "pre-edit",
+            "claude",
+            &tool(&env.wt, "Write", json!({ "file_path": "src/other.rs" }))
+        ),
+        "",
+        "unrelated files stay free"
+    );
+}
+
+#[test]
 fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
     let env = Env::new();
     env.start("claude", &env.main, &[]);
@@ -328,6 +515,7 @@ fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
     );
     let reason = denial(&out);
     assert!(reason.contains("held by claude@shop"), "{reason}");
+    assert!(reason.contains("Worktrees of the same repository still conflict at merge"));
     assert!(
         reason.starts_with("Another stopped this edit: src/a.rs is held by"),
         "paths are project-relative: {reason}"

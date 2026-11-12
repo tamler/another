@@ -735,17 +735,6 @@ impl HookInput {
                 out.push(p.to_string());
             }
         };
-        for key in [
-            "file_path",
-            "filePath",
-            "notebook_path",
-            "path",
-            "target_notebook",
-        ] {
-            if let Some(p) = input.get(key).and_then(Value::as_str) {
-                add(p);
-            }
-        }
         let patch = input
             .get("command")
             .or_else(|| input.get("patch"))
@@ -763,6 +752,18 @@ impl HookInput {
                     if let Some(p) = line.strip_prefix(header) {
                         add(p);
                     }
+                }
+            }
+        } else {
+            for key in [
+                "file_path",
+                "filePath",
+                "notebook_path",
+                "path",
+                "target_notebook",
+            ] {
+                if let Some(p) = input.get(key).and_then(Value::as_str) {
+                    add(p);
                 }
             }
         }
@@ -1195,10 +1196,11 @@ pub fn deny_message(agent: &str, conflicts: &[HoldConflict]) -> String {
             )
         })
         .collect();
-    out.push_str(&lines.join("; "));
+    out.push_str(&truncate(lines.join("; "), 450));
     if conflicts.len() > 3 {
         out.push_str(&format!("; and {} more", conflicts.len() - 3));
     }
+    out.push_str(". Worktrees of the same repository still conflict at merge");
     let first = conflicts.first().map(|c| c.path.as_str()).unwrap_or("it");
     out.push_str(&format!(
         ". Leave it alone until the hold is released. Ask the holder with `another send --from {agent} --to {} --request --subject \"Release {first}?\"`, or work on other files and try again later.",
@@ -1238,6 +1240,11 @@ fn pre_edit(store: &Store, client: Client, dir: &Path, input: &HookInput) -> Res
     for raw in &paths {
         // Not normalized lexically: `..` must apply after symlinks (review N1).
         for target in edit_targets(&dir.join(raw)) {
+            // Some tool envelopes name a working directory rather than an edited file.
+            // Never widen an automatic hold to that directory.
+            if target.is_dir() || raw.ends_with('/') {
+                continue;
+            }
             let git = git_root_above(&target);
             let registered = projects
                 .iter()
@@ -1509,7 +1516,7 @@ mod tests {
             "claude@shop-wt",
             &[HoldConflict {
                 path: "src/a.rs".into(),
-                held,
+                held: held.clone(),
             }],
         );
         assert!(msg.starts_with("Another stopped this edit: src/a.rs is held by codex@shop"));
@@ -1519,6 +1526,14 @@ mod tests {
             "another send --from claude@shop-wt --to codex@shop --request --subject \"Release src/a.rs?\""
         ));
         assert!(!msg.contains('\u{2014}') && !msg.contains('\u{2013}'));
+        let msg = deny_message(
+            "claude@shop",
+            &[HoldConflict {
+                path: "long/".repeat(300),
+                held,
+            }],
+        );
+        assert!(msg.contains("Worktrees of the same repository still conflict at merge"));
     }
 
     #[test]
