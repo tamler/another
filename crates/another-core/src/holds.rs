@@ -278,7 +278,7 @@ fn hold_covers(held: &str, path: &str) -> bool {
     }
     match literal_pattern(held) {
         Some(held) => covers(&held, &path),
-        None => held == "**" || matches_with_literal_prefix(held, &path) || matches(held, &path),
+        None => held == "**" || glob_touches_literal(held, &path, false),
     }
 }
 
@@ -309,8 +309,8 @@ pub fn patterns_overlap(a: &str, b: &str) -> bool {
     }
     match (literal_pattern(a), literal_pattern(b)) {
         (Some(a), Some(b)) => covers(&a, &b) || covers(&b, &a),
-        (None, Some(b)) => glob_touches_literal(a, &b),
-        (Some(a), None) => glob_touches_literal(b, &a),
+        (None, Some(b)) => glob_touches_literal(a, &b, true),
+        (Some(a), None) => glob_touches_literal(b, &a, true),
         (None, None) => {
             let (pa, pb) = (literal_prefix(a), literal_prefix(b));
             pa.starts_with(pb) || pb.starts_with(pa)
@@ -378,36 +378,54 @@ fn matches(glob: &str, path: &str) -> bool {
     compile(glob).map(|m| m.is_match(path)).unwrap_or(true)
 }
 
-/// Equal leading components also carry literal directory intent, even when their names
-/// contain brackets or braces. At the first differing (wildcard) component, match the
-/// entire remaining glob normally. An exhausted side may be an ancestor directory hold.
-fn matches_with_literal_prefix(glob: &str, literal: &str) -> bool {
-    let pattern: Vec<&str> = glob.split('/').collect();
-    let path: Vec<&str> = literal.split('/').collect();
-    let shared = pattern
-        .iter()
-        .zip(&path)
-        .take_while(|(a, b)| a == b)
-        .count();
-    shared == pattern.len()
-        || shared == path.len()
-        || matches(&pattern[shared..].join("/"), &path[shared..].join("/"))
-}
-
-fn glob_touches_literal(glob: &str, literal: &str) -> bool {
-    if matches_with_literal_prefix(glob, literal) || matches(glob, literal) {
+/// One glob component against one literal path component. Three readings count: the same
+/// text, a glob match, and a glob match in which `[`, `]`, `{` and `}` are plain characters
+/// while `*` and `?` stay wildcards. The last reading is how `[id]*` names the route
+/// directories that start with `[id]`, and it keeps a bracketed directory name literal even
+/// after a wildcard component, where no leading-prefix rule can reach it.
+fn component_touches(glob: &str, path: &str) -> bool {
+    if glob == path || matches(glob, path) {
         return true;
     }
-    // The literal may be a directory with matches of the glob below it: compare the
-    // glob's leading components at the literal's depth.
-    let comps: Vec<&str> = glob.split('/').collect();
-    let lit: Vec<&str> = literal.split('/').collect();
-    if let Some(pos) = comps.iter().position(|c| c.contains("**")) {
-        if pos < lit.len() {
-            return pos == 0 || matches(&comps[..pos].join("/"), &lit[..pos].join("/"));
+    let mut spelled = String::with_capacity(glob.len() + 8);
+    for c in glob.chars() {
+        if matches!(c, '[' | ']' | '{' | '}') {
+            spelled.push('[');
+            spelled.push(c);
+            spelled.push(']');
+        } else {
+            spelled.push(c);
         }
     }
-    comps.len() > lit.len() && matches(&comps[..lit.len()].join("/"), literal)
+    // An unparsable respelling adds nothing; the glob reading above already counted.
+    spelled != glob && compile(&spelled).is_ok_and(|m| m.is_match(path))
+}
+
+/// Glob components against the components of a literal path. `**` spans zero or more
+/// components. A glob that ends first names a directory above the rest of the path, and a
+/// directory hold covers everything below it. A path that ends first is an ancestor
+/// directory of what the glob names when the caller allows the path to be a directory
+/// (`path_may_be_dir`); an edited file is never that.
+fn components_touch(glob: &[&str], path: &[&str], path_may_be_dir: bool) -> bool {
+    match (glob.split_first(), path.split_first()) {
+        (None, _) => true,
+        (Some(_), None) => path_may_be_dir,
+        (Some((&"**", rest)), Some((_, deeper))) => {
+            components_touch(rest, path, path_may_be_dir)
+                || components_touch(glob, deeper, path_may_be_dir)
+        }
+        (Some((g, rest)), Some((p, deeper))) => {
+            component_touches(g, p) && components_touch(rest, deeper, path_may_be_dir)
+        }
+    }
+}
+
+/// A glob against a literal path: component by component, and as globset reads the whole
+/// (an alternation may span a `/`).
+fn glob_touches_literal(glob: &str, literal: &str, path_may_be_dir: bool) -> bool {
+    let comps: Vec<&str> = glob.split('/').collect();
+    let lit: Vec<&str> = literal.split('/').collect();
+    components_touch(&comps, &lit, path_may_be_dir) || matches(glob, literal)
 }
 
 /// Link local projects that hold live holds but have no current repository link: never
@@ -1144,6 +1162,105 @@ mod tests {
         assert!(patterns_overlap("src/**", "src/*.toml"));
         assert!(!patterns_overlap("docs/**", "src/**"));
         assert!(patterns_overlap("**", "anything"));
+    }
+
+    /// PR #108 r4: a wildcard component before a bracketed or braced directory must not
+    /// turn that directory back into a character class or an alternation, in either order.
+    #[test]
+    fn wildcards_before_bracketed_components_keep_literal_intent() {
+        for (glob, path) in [
+            (
+                "packages/*/app/[id]/page.tsx",
+                "packages/web/app/[id]/page.tsx",
+            ),
+            ("app/*/[id]/*.tsx", "app/shop/[id]/page.tsx"),
+            ("app/{shop,blog}/[id]/page.tsx", "app/shop/[id]/page.tsx"),
+            ("app/[id]/**/[slug]/*.tsx", "app/[id]/x/[slug]/page.tsx"),
+            ("app/[id]/*/[slug]/page.tsx", "app/[id]/x/[slug]/page.tsx"),
+            ("app/?/[id]/page.tsx", "app/a/[id]/page.tsx"),
+            ("app/[id]*/page.tsx", "app/[id]x/page.tsx"),
+            // A glob that names a directory covers the files below it.
+            ("packages/*/app/[id]", "packages/web/app/[id]/page.tsx"),
+            ("packages/*/app/[id]/**", "packages/web/app/[id]/page.tsx"),
+            // A literal ancestor directory still meets a deeper glob.
+            ("packages/*/app/[id]/page.tsx", "packages/web/app"),
+            ("packages/*/app/[id]/page.tsx", "packages/web/app/[id]"),
+            // Below a `**`, a deeper literal may be a directory with matches inside it,
+            // as it always was for `src/**/*.rs` against `src/a/b.css`.
+            ("app/[id]/**/[slug]/*.tsx", "app/[id]/x/[slug]/page.css"),
+            ("src/**/*.rs", "src/a/b.css"),
+        ] {
+            let literal = globset::escape(path);
+            assert!(patterns_overlap(glob, &literal), "{glob} vs {path}");
+            assert!(patterns_overlap(&literal, glob), "{path} vs {glob}");
+        }
+        // Real glob readings still count: a class, an alternation, a wildcard tail.
+        assert!(patterns_overlap(
+            "app/[ab]/page.tsx",
+            &globset::escape("app/a/page.tsx")
+        ));
+        assert!(patterns_overlap(
+            "src/{a,b}.ts",
+            &globset::escape("src/a.ts")
+        ));
+        assert!(patterns_overlap(
+            "app/[id]/*.tsx",
+            &globset::escape("app/[id]/page.tsx")
+        ));
+        // Must stay free.
+        for (glob, path) in [
+            (
+                "packages/*/app/[id]/page.tsx",
+                "packages/web/app/[idx]/page.tsx",
+            ),
+            (
+                "packages/*/app/[id]/page.tsx",
+                "packages/web/lib/[id]/page.tsx",
+            ),
+            ("app/{shop,blog}/[id]/page.tsx", "app/docs/[id]/page.tsx"),
+            ("app/?/[id]/page.tsx", "app/ab/[id]/page.tsx"),
+            ("app/[id]*/page.tsx", "app/[idx]/page.tsx"),
+            ("app/[id]/**/[slug]/*.tsx", "app/other/[slug]/page.tsx"),
+            ("app/[id]/*/[slug]/page.tsx", "app/[id]/x/[slug]/page.css"),
+            ("app/*/[id]/*.tsx", "app/shop/[id]/deep/page.tsx"),
+            ("app/[id]", "app/[idx]/page.tsx"),
+            ("app/[id]", "other/[id]/page.tsx"),
+            ("src/*.rs", "src/deep/a.rs"),
+            ("src/a?.rs", "src/abc.rs"),
+        ] {
+            let literal = globset::escape(path);
+            assert!(!patterns_overlap(glob, &literal), "{glob} vs {path}");
+            assert!(!patterns_overlap(&literal, glob), "{path} vs {glob}");
+        }
+        // The escaped spelling keeps working and does not read as a class.
+        assert!(patterns_overlap(
+            "packages/*/app/[[]id[]]/page.tsx",
+            &globset::escape("packages/web/app/[id]/page.tsx")
+        ));
+        assert!(!patterns_overlap(
+            "packages/*/app/[[]id[]]/page.tsx",
+            &globset::escape("packages/web/app/i/page.tsx")
+        ));
+    }
+
+    /// Own-hold coverage reads the glob the same way, but the edited path is a file: a glob
+    /// that would only match a directory above it does not cover it.
+    #[test]
+    fn own_hold_coverage_through_wildcards() {
+        assert!(hold_covers(
+            "packages/*/app/[id]",
+            "packages/web/app/[id]/page.tsx"
+        ));
+        assert!(hold_covers("app/[id]*", "app/[id]x/page.tsx"));
+        assert!(hold_covers(
+            "app/{shop,blog}/[id]/page.tsx",
+            "app/shop/[id]/page.tsx"
+        ));
+        assert!(!hold_covers("src/**/*.rs", "src/a"));
+        assert!(!hold_covers(
+            "packages/*/app/[id]/page.tsx",
+            "packages/web/app"
+        ));
     }
 
     #[test]

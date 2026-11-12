@@ -308,6 +308,17 @@ fn manual_globs_under_literal_route_components_conflict_in_both_orders() {
             "app/{group}/part[ver]/deep/file-1.rs",
         ),
         ("app/{a,b}/*.tsx", "app/a/page.tsx"),
+        // r4: a wildcard before the bracketed or braced directory.
+        (
+            "packages/*/app/[id]/page.tsx",
+            "packages/web/app/[id]/page.tsx",
+        ),
+        ("app/{shop,blog}/[id]/page.tsx", "app/shop/[id]/page.tsx"),
+        ("app/[id]/**/[slug]/*.tsx", "app/[id]/x/[slug]/page.tsx"),
+        ("app/*/[id]/*.tsx", "app/shop/[id]/page.tsx"),
+        ("app/?/[id]/page.tsx", "app/a/[id]/page.tsx"),
+        ("app/[id]*/page.tsx", "app/[id]x/page.tsx"),
+        ("packages/*/app/[id]", "packages/web/app/[id]/page.tsx"),
     ] {
         let fx = Fx::new();
         let wt = fx.project(&fx.repos.wt);
@@ -341,6 +352,39 @@ fn manual_globs_under_literal_route_components_conflict_in_both_orders() {
                 .len(),
             1,
             "auto first: {pattern}"
+        );
+    }
+    // Must stay free: a different route directory, a different package subtree, and a
+    // file the tail does not name.
+    let fx = Fx::new();
+    let wt = fx.project(&fx.repos.wt);
+    for pattern in [
+        "packages/*/app/[id]/page.tsx",
+        "app/{shop,blog}/[id]/page.tsx",
+        "app/[id]/**/[slug]/*.tsx",
+    ] {
+        assert_eq!(
+            fx.acquire("alice", &fx.repos.main, &[pattern])
+                .unwrap()
+                .granted
+                .len(),
+            1
+        );
+    }
+    for path in [
+        "packages/web/app/[idx]/page.tsx",
+        "packages/web/lib/[id]/page.tsx",
+        "app/docs/[id]/page.tsx",
+        "app/other/[slug]/page.tsx",
+        "packages/web/app/[id]/page.css",
+    ] {
+        assert!(
+            fx.store
+                .guard_edit("bob", &wt, &[path.into()], "auto")
+                .unwrap()
+                .conflicts
+                .is_empty(),
+            "{path} must stay free"
         );
     }
 }
