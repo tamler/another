@@ -71,7 +71,7 @@ another request claim --agent lead REQUEST_ID</code></pre>
     </section>
     <section class="guide-section" aria-labelledby="received">
       <h2 id="received">Received is not done: a recorded run</h2>
-      <p>An ack records receipt. A claim records an owner. Only <code>complete</code> records that the owner says it finished, and only you can check that it did. This run was captured from <code>another 0.1.0</code> built from <code>5ec0a58</code> (then <code>main</code>) against a temporary project named <code>shop</code>, with no hooks and no server. Ids are as recorded. The same walkthrough is in the repository at <a href="https://github.com/tamler/another/blob/main/docs/REQUESTS.md">docs/REQUESTS.md</a>.</p>
+      <p>An ack records receipt. A claim records an owner. Only <code>complete</code> records that the completing agent reports it finished, and only you can check that it did. This run was captured from <code>another 0.1.0</code> built from <code>5ec0a58</code> (then <code>main</code>) against a temporary project named <code>shop</code>, with no hooks and no server. Ids are as recorded. The same walkthrough is in the repository at <a href="https://github.com/tamler/another/blob/main/docs/REQUESTS.md">docs/REQUESTS.md</a>.</p>
       <p>The lead opens work with a deadline. The worker acks the mail: <code>awaiting ack</code> drops to 0, and the request is still <code>open</code> with no owner.</p>
       <pre class="code-block shell" tabindex="0" aria-label="Open a request and acknowledge the mail"><code><span class="command">$ another send --from lead --to worker --subject "Fix the flaky test" --body "See tests/net.rs" --ack --due 900</span>
 <span class="output">sent 01M77HNNED9HZY6CKDHEZTPNSS to worker@shop
