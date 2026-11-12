@@ -13,7 +13,7 @@ use std::path::Path;
 use globset::{Glob, GlobBuilder, GlobMatcher};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::error::{Error, Result};
 use crate::identity::{address, find_project, resolve_agent, Project};
@@ -672,6 +672,53 @@ fn wait_for_conflicts_tx(
     Ok((first_notice, retry_after))
 }
 
+/// True when this agent already had a first notice for a conflict in this project:
+/// a wait row is present, or a prior `hold.blocked` / `hold.wait_failed` event was
+/// committed. Used when recording the wait itself failed, so the wait row cannot
+/// tell a retry from a first encounter.
+fn wait_notice_already_sent(
+    tx: &Tx<'_>,
+    agent_id: &str,
+    project_id: &str,
+    conflicts: &[HoldConflict],
+) -> Result<bool> {
+    let mut paths: Vec<&str> = conflicts.iter().map(|c| c.path.as_str()).collect();
+    paths.sort_unstable();
+    paths.dedup();
+    for path in &paths {
+        let found: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM hold_waits
+                 WHERE agent_id = ?1 AND project_id = ?2 AND path = ?3",
+                params![agent_id, project_id, path],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if found.is_some() {
+            return Ok(true);
+        }
+    }
+    let mut stmt = tx.prepare(
+        "SELECT payload FROM events
+         WHERE kind IN ('hold.blocked', 'hold.wait_failed')
+         ORDER BY seq DESC LIMIT 200",
+    )?;
+    let payloads = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for raw in payloads {
+        let Value::Object(map) = serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null) else {
+            continue;
+        };
+        let same_agent = map.get("agent_id").and_then(|v| v.as_str()) == Some(agent_id);
+        let same_project = map.get("project_id").and_then(|v| v.as_str()) == Some(project_id);
+        if same_agent && same_project {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Run `f` inside a savepoint. On error only its own work is rolled back and the error is
 /// returned; the surrounding transaction stays usable. The event chain is unaffected, since
 /// each emit reads its predecessor from the table.
@@ -1123,6 +1170,11 @@ impl Store {
                 }) {
                     Ok(outcome) => outcome,
                     Err(e) => {
+                        // Check first, then record the failure. Counting the event we are
+                        // about to emit would make every first failure look like a retry.
+                        let already = wait_notice_already_sent(
+                            tx, &me.id, &project.project_id, &conflicts,
+                        )?;
                         tx.emit(
                             &me.address,
                             "hold.wait_failed",
@@ -1131,7 +1183,11 @@ impl Store {
                                 "error": e.to_string(),
                             }),
                         )?;
-                        (true, 30)
+                        // A failed wait record must not look like a brand-new conflict on
+                        // every retry: that re-sends the first hook notice (which includes
+                        // expires_at) and a fresh hold.blocked event, and breaks D59
+                        // dedupe of unchanged blockers.
+                        (!already, 30)
                     }
                 };
                 // Count each distinct collision, rather than every retry of the same edit.

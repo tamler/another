@@ -1474,3 +1474,54 @@ fn second_hold_free_ping_for_the_same_file_is_announced() {
         .conflicts
         .is_empty());
 }
+
+/// Wait-record failure must still deny the edit, but retries must not re-send the first
+/// hook notice or a second hold.blocked event (D59).
+#[test]
+fn wait_record_failure_does_not_renotice_on_retry() {
+    let fx = Fx::new();
+    let wt = fx.project(&fx.repos.wt);
+    fx.acquire("alice", &fx.repos.main, &["src/a.rs"]).unwrap();
+    let db = rusqlite::Connection::open(fx.repos.home.join(DB_FILE)).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER hold_waits_inject_failure BEFORE INSERT ON hold_waits
+         BEGIN SELECT RAISE(ABORT, 'injected wait-record failure'); END;",
+    )
+    .unwrap();
+    drop(db);
+
+    let first = fx
+        .store
+        .guard_edit("bob", &wt, &["src/a.rs".into()], "auto")
+        .expect("a wait-record failure must still deny, not fail the guard");
+    assert_eq!(first.conflicts.len(), 1);
+    assert!(
+        first.first_notice,
+        "the first failed wait still gets the first notice"
+    );
+    assert_eq!(first.retry_after_seconds, 30);
+
+    let second = fx
+        .store
+        .guard_edit("bob", &wt, &["src/a.rs".into()], "auto")
+        .expect("retries must still deny");
+    assert_eq!(second.conflicts.len(), 1);
+    assert!(
+        !second.first_notice,
+        "a retry after wait-record failure must not re-send the first hook notice"
+    );
+    assert_eq!(second.retry_after_seconds, 30);
+
+    assert_eq!(
+        fx.kinds().iter().filter(|k| *k == "hold.blocked").count(),
+        1,
+        "unchanged blockers must not get a second hold.blocked"
+    );
+    assert!(
+        fx.kinds()
+            .iter()
+            .filter(|k| *k == "hold.wait_failed")
+            .count()
+            >= 2
+    );
+}
