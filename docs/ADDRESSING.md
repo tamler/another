@@ -126,7 +126,7 @@ shop-3  /tmp/demo/edge/-shop-
 
 The suffix counts from 2 and skips taken slugs, so the order projects are registered in decides who is `shop` and who is `shop-3`. An agent registered in `/tmp/demo/edge/-shop-` would be `name@shop-3`.
 
-Non-ASCII characters are not lower-cased or transliterated; each one becomes a `-` and is then subject to the same trimming. In a fresh node, `Café` ends as `caf`, `Ünïcode-Straße` as `n-code-stra-e`, and a name with no ASCII letters or digits at all falls back to `project`:
+Non-ASCII characters are not lower-cased or transliterated; each one becomes a `-` and is then subject to the same trimming. In a fresh node, `Café` ends as `caf` and `Ünïcode-Straße` as `n-code-stra-e`. `日本語` becomes three hyphens, trimming leaves nothing, and the empty result falls back to `project`:
 
 ```text
 $ another project ensure /tmp/demo/edge/Café
@@ -135,6 +135,17 @@ $ another project ensure /tmp/demo/edge/Ünïcode-Straße
 n-code-stra-e  /tmp/demo/edge/Ünïcode-Straße
 $ another project ensure /tmp/demo/edge/日本語
 project  /tmp/demo/edge/日本語
+```
+
+The fallback is about the empty result, not about letters and digits. Underscores are kept and are never trimmed, so a name made only of underscores is its own slug, and `-_-` keeps the `_` that the trimming exposes. Only `---`, with nothing left, gets `project`:
+
+```text
+$ another project ensure /tmp/demo/edge/___
+___  /tmp/demo/edge/___
+$ another project ensure /tmp/demo/edge/-_-
+_  /tmp/demo/edge/-_-
+$ another project ensure /tmp/demo/edge/---
+project  /tmp/demo/edge/---
 ```
 
 ## Set the identity once
@@ -168,4 +179,4 @@ The last row is the form of the error in the code; it was not part of this run, 
 
 Three `git init` repositories under one temporary root, one `another init`, four `agent register` calls, then the `inbox`, `send`, `agent list` and `status` commands shown above, in one continuous run. The error lines are copied from stderr. Timestamps are UTC, as the CLI prints them.
 
-The `another project list` output and the slug cases come from a second run on the same day, same setup, with `another 0.1.0` built from commit `d474de9`. The slug code did not change between the two commits. That run registered the same three repositories and agents, then three more directories with `project ensure`. The non-ASCII cases are a third run, same build, in a fresh node with only those three directories. The paths are shown as `/tmp/demo` as above.
+The `another project list` output and the slug cases come from a second run on the same day, same setup, with `another 0.1.0` built from commit `d474de9`. The slug code did not change between the two commits. That run registered the same three repositories and agents, then three more directories with `project ensure`. The non-ASCII cases are a third run, same build, in a fresh node with only those three directories, and the underscore cases a fourth run done the same way. The paths are shown as `/tmp/demo` as above.
