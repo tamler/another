@@ -8,7 +8,7 @@ A message can be acknowledged. A request has an owner and a status. Those are th
 | One agent owns the work | `another request claim <id>` | Who to ask. Not that it is finished |
 | The owner says it finished | `another request complete <id>` | A claim of completion. Review the result yourself |
 
-The walkthrough below is a recorded run, not a sketch. It was captured on 12 Nov 2026 from `another 0.1.0` built from this tree, against a temporary project named `shop` in a temporary `ANOTHER_HOME`, with no hooks installed and no `another serve` running. Ids and timestamps are as recorded; yours will differ. Where a command needs an id from an earlier step, copy it from that step's output.
+The walkthrough below is a recorded run, not a sketch. It was captured on 12 Nov 2026 from `another 0.1.0` built from `5ec0a58` (then `main`), against a temporary project named `shop` in a temporary `ANOTHER_HOME`, with no hooks installed and no `another serve` running. Ids and timestamps are as recorded; yours will differ. Where a command needs an id from an earlier step, copy it from that step's output.
 
 The site has the same example at [toanother.one/guides/hand-off-tasks/](https://toanother.one/guides/hand-off-tasks/#received).
 
@@ -104,9 +104,14 @@ That `Done:` mail is the only thing the sender's inbox will ever receive about t
 
 ## 5b. Or the worker gives it back
 
-`release` returns the request to `open` with no owner, so anyone can claim it. Only the current owner can release.
+`release` returns the request to `open` with no owner, so anyone can claim it. Only the current owner can release. This is a second request, opened after the first one was completed.
 
 ```text
+$ another send --from lead --to worker --subject "Port the fixture" --body "tests/fixtures" --ack --due 900
+sent 01M77HNNJ0B2BD3M5R5EB1AKPC to worker@shop
+opened request 01M77HNNJ0T10Z74VKWG0YWZAX
+$ another request claim --agent worker 01M77HNNJ0T10Z74VKWG0YWZAX
+claimed   worker@shop      Port the fixture  (from lead@shop due 2026-11-12T09:48:24.928Z)  [01M77HNNJ0T10Z74VKWG0YWZAX]
 $ another request release --agent worker 01M77HNNJ0T10Z74VKWG0YWZAX --note "Blocked on the fixture"
 open      -                Port the fixture  (from lead@shop due 2026-11-12T09:48:24.928Z)  [01M77HNNJ0T10Z74VKWG0YWZAX]
 ```
@@ -118,6 +123,11 @@ The note is stored on the request. `release` does not mail anyone, so tell the r
 This third request was opened with `--due 5` so the deadline passes quickly. The worker acked, claimed, and stopped.
 
 ```text
+$ another send --from lead --to worker --subject "Rotate the log" --body "src/log.rs" --ack --due 5
+sent 01M77HNNKQJVFTPAECB37NZC72 to worker@shop
+opened request 01M77HNNKQAN037F028JXCZKH7
+$ another ack --agent worker 01M77HNNKQJVFTPAECB37NZC72
+1 updated, 0 unchanged
 $ another request claim --agent worker 01M77HNNKQAN037F028JXCZKH7
 claimed   worker@shop      Rotate the log  (from lead@shop due 2026-11-12T09:33:29.983Z)  [01M77HNNKQAN037F028JXCZKH7]
 ```
