@@ -21,7 +21,7 @@ Short definitions of the words Another uses, with the places that explain each o
 ## Coordination
 
 - **Path hold**: an expiring claim on project-relative files or globs, with a TTL. "I am changing these files." An exclusive hold conflicts with any overlapping hold of another agent; a shared hold conflicts only with exclusive ones. Conflicts are checked across every checkout of the same repository on this machine (D48). [HOLDS.md](HOLDS.md).
-- **Edit guard**: the `pre-edit` hook. Before a client file edit it takes a narrow hold on that file for the editing agent, or stops the edit and names the holder when another agent holds it. It covers the client's edit tools; a write made from a shell command is not checked. It fails open when it cannot reach the database (D46, D47). [HOOKS.md](HOOKS.md).
+- **Edit guard**: the `pre-edit` hook, installed with `another hook install` for Claude Code, Codex CLI and Grok CLI. Before an edit through one of those clients' edit tools it takes a narrow hold on that file for the editing agent, or stops the edit and names the holder when another agent holds it. Cursor has no edit guard (D46), and a write made from a shell command is not checked in any client. The guard stops only a conflict it actually found: when the hook is not installed, or cannot reach the database, the edit goes ahead and a line is appended to the hooks log (D47). [HOOKS.md](HOOKS.md).
 - **Resource**: a registered model server, dev server, port, GPU, container or long job, addressed by id or `kind:name`. Another lists it so a second agent borrows it instead of starting a duplicate. [RESOURCES.md](RESOURCES.md).
 - **Lease**: a time-limited claim on a resource, held as **owner** (the agent that registered it) or **borrower** (shared resources only). `refcount` is the number of live leases. If the owner releases while others still borrow, the oldest borrower becomes owner (D10). [RESOURCES.md](RESOURCES.md).
 - **Orphan**: a cleanup candidate. Either a registered resource with no live lease (it is `lapsed`, still listed, and adopted by the next register or borrow, D9) or a listening process that nothing registered. A listed process may be something you want running.
@@ -29,7 +29,7 @@ Short definitions of the words Another uses, with the places that explain each o
 
 ## Awareness
 
-- **Hook**: a user-global entry in a coding client's config that runs Another at session start, on each prompt, after each tool call, before each file edit and at session end. [HOOKS.md](HOOKS.md).
+- **Hook**: a user-global entry in a coding client's config that runs Another at session start, on each prompt, after each tool call and at session end, and before each file edit in Claude Code, Codex CLI and Grok CLI (Cursor has no edit hook). [HOOKS.md](HOOKS.md).
 - **Digest**: the short inbox and activity summary a hook gives a session. Never message bodies.
 - **Activity feed**: who did what: sessions, mail subjects, requests, holds and resources. `another activity`.
 - **Event log**: the signed, append-only record behind everything. Query tables are projections of it, and it is what federation syncs. [SPEC.md](SPEC.md).
@@ -49,7 +49,7 @@ Short definitions of the words Another uses, with the places that explain each o
 | Means | This agent saw the message | This agent is doing the work |
 | Scope | One agent, one message | One request, at most one owner |
 | Ends with | Nothing; it is a fact about receipt | `request complete` (mails the creator a `Done:` message), `request release`, or `request cancel` by the creator |
-| If the agent stops | The ack stays true | The request stays `claimed` until its due time, then goes `stale` and anyone may take it over |
+| If the agent stops | The ack stays true | The request stays `claimed`. With a due time it goes `stale` once that passes and anyone may take it over; without one it stays claimed until the owner releases it or the creator cancels it |
 
 Reading or acknowledging a message never claims its request. A worked example with recorded output is in [REQUESTS.md](REQUESTS.md).
 
@@ -60,7 +60,7 @@ Reading or acknowledging a message never claims its request. A worked example wi
 | Claims | Files or globs in a project | A running thing: server, port, GPU, container, job |
 | Taken with | `another hold acquire`, or the edit guard | `another resource register` (owner) or `another borrow` (borrower) |
 | Conflict | Exclusive overlaps exit with status 3 and grant nothing | `--exclusive` resources refuse borrowers; shared ones count leases |
-| Enforced by | The edit guard, for client edits on this machine. Nothing locks the file on disk, and a shell write is not checked | Nothing. A lease is a record; another process can still bind the port |
+| Enforced by | The edit guard, for edits through the Claude Code, Codex CLI or Grok CLI edit tools on a machine where the hook is installed and can reach the database. A conflict it cannot check lets the edit through. Nothing locks the file on disk; a Cursor edit or a shell write is not checked | Nothing. A lease is a record; another process can still bind the port |
 | Across machines | A clash with another node's hold is a warning (D26) | Foreign leases count until their TTL; stop or reap only on the owning node (D25) |
 | Session end | Released by the session-end hook, always (D11) | Released too, unless `another heartbeat --end --keep` |
 
@@ -68,12 +68,12 @@ Holds are advisory outside the edit guard. If you need a boundary a shell comman
 
 ## What expiry means
 
-Every claim above has a TTL and lapses on its own. What happens next differs.
+A path hold and a resource lease always carry a TTL and lapse on their own. A request lapses only when it was given a due time; one without a due time never goes stale. What happens next differs.
 
 | | Default TTL | Range | Renewed by | On expiry |
 |---|---|---|---|---|
 | Path hold | 30 minutes | 1 minute to 4 hours | Session start, each prompt, and the post-tool hook once a minute for holds past half their TTL; `another hold renew` | Stops conflicting at once. The next sweep records it as expired. Nobody is told; the holder finds out at its next check |
-| Request due time | None | Any number of seconds | A claim with `--due`; a takeover without one clears a past-due deadline | Status becomes `stale` at the next sweep or listing. The owner keeps the request until someone claims it away |
+| Request due time | None | Positive seconds within the supported timestamp range; zero, negative and overflowing values are refused | A claim with `--due`; a takeover without one clears a past-due deadline | Status becomes `stale` at the next sweep or listing. The owner keeps the request until someone claims it away. Without a due time nothing expires |
 | Resource lease | 30 minutes | 1 minute to 24 hours (D13) | `another heartbeat`, the session hooks, `another resource heartbeat` | The lease ends. With no live lease the resource is `lapsed`: still listed, an orphan candidate, adopted by the next register or borrow. Only a human can reap it |
 
 Expiry is silent in all three cases. There is no notification to the holder, the owner or the people waiting; the state is visible to whoever looks next, through `another holds`, `another requests`, `another orphans`, the hook digest, or the dashboard.
