@@ -320,6 +320,180 @@ fn send_inbox_ack() {
     assert!(k.contains(&"delivery.acked".to_string()));
 }
 
+/// Fetching is not an ack: reading the inbox twice reports the same counters and leaves the
+/// delivery unread and unacknowledged.
+#[test]
+fn fetching_an_inbox_twice_leaves_unread_unchanged() {
+    let fx = Fixture::new();
+    let msg = fx
+        .store
+        .send_message(SendMessage {
+            from: "alice".into(),
+            to: vec!["bob".into()],
+            subject: "Fetch is not an ack".into(),
+            body: "reading this changes nothing".into(),
+            importance: Importance::High,
+            ack_required: true,
+            ..Default::default()
+        })
+        .unwrap();
+
+    let first = fx.store.inbox("bob", InboxQuery::default()).unwrap();
+    assert_eq!(
+        (first.unread, first.urgent_unread, first.awaiting_ack),
+        (1, 1, 1)
+    );
+    assert_eq!(first.messages[0].message.message_id, msg.message_id);
+    assert!(first.messages[0].read_at.is_none());
+    assert!(first.messages[0].acked_at.is_none());
+
+    fx.advance_secs(5);
+    let second = fx.store.inbox("bob", InboxQuery::default()).unwrap();
+    assert_eq!(
+        (second.unread, second.urgent_unread, second.awaiting_ack),
+        (first.unread, first.urgent_unread, first.awaiting_ack),
+        "a second fetch must not change the counters"
+    );
+    assert!(second.messages[0].read_at.is_none());
+    assert!(second.messages[0].acked_at.is_none());
+
+    // The unread-only view still lists it, and whats_new sees the same unread count.
+    let unread_only = InboxQuery {
+        unread_only: true,
+        ..Default::default()
+    };
+    let filtered = fx.store.inbox("bob", unread_only).unwrap();
+    assert_eq!(filtered.unread, 1);
+    assert_eq!(filtered.messages.len(), 1);
+    let digest = fx.store.whats_new("bob", None, 10).unwrap();
+    assert_eq!((digest.unread, digest.awaiting_ack), (1, 1));
+    assert_eq!(
+        fx.store.inbox("bob", InboxQuery::default()).unwrap().unread,
+        1
+    );
+
+    // No read or ack receipt was recorded by any of those reads.
+    let k = kinds(&fx.store);
+    assert!(
+        !k.iter().any(|kind| kind.starts_with("delivery.")),
+        "fetching emitted delivery events: {k:?}"
+    );
+}
+
+/// `acknowledge` records receipt for the acting agent only; the other recipients' deliveries
+/// stay unread and unacknowledged until they act themselves.
+#[test]
+fn ack_records_receipt_only_for_the_acting_agent() {
+    let fx = Fixture::new();
+    let msg = fx
+        .store
+        .send_message(SendMessage {
+            from: "alice".into(),
+            to: vec!["bob".into(), "carol".into()],
+            subject: "Both of you".into(),
+            body: "please confirm".into(),
+            ack_required: true,
+            ..Default::default()
+        })
+        .unwrap();
+    let id = std::slice::from_ref(&msg.message_id);
+    let bob_address = fx.store.inbox("bob", InboxQuery::default()).unwrap().agent;
+
+    let out = fx.store.acknowledge("bob", id, true).unwrap();
+    assert_eq!(out.updated, vec![msg.message_id.clone()]);
+
+    let bob = fx.store.inbox("bob", InboxQuery::default()).unwrap();
+    assert_eq!((bob.unread, bob.awaiting_ack), (0, 0));
+    assert!(bob.messages[0].read_at.is_some());
+    assert!(bob.messages[0].acked_at.is_some());
+
+    let carol = fx.store.inbox("carol", InboxQuery::default()).unwrap();
+    assert_eq!(
+        (carol.unread, carol.awaiting_ack),
+        (1, 1),
+        "bob's ack must not touch carol's delivery"
+    );
+    assert!(carol.messages[0].read_at.is_none());
+    assert!(carol.messages[0].acked_at.is_none());
+
+    // Exactly one receipt exists, and it names bob.
+    let acked: Vec<Event> = fx
+        .store
+        .events(1000)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "delivery.acked")
+        .collect();
+    assert_eq!(acked.len(), 1);
+    assert_eq!(acked[0].actor, bob_address);
+    assert_eq!(acked[0].payload["message_id"], msg.message_id);
+
+    // Carol's own ack is a separate receipt.
+    let out = fx.store.acknowledge("carol", id, true).unwrap();
+    assert_eq!(out.updated, vec![msg.message_id.clone()]);
+    let carol = fx.store.inbox("carol", InboxQuery::default()).unwrap();
+    assert_eq!((carol.unread, carol.awaiting_ack), (0, 0));
+    assert_eq!(
+        kinds(&fx.store)
+            .iter()
+            .filter(|k| *k == "delivery.acked")
+            .count(),
+        2
+    );
+}
+
+/// Read-only (`another ack --read-only`, MCP `ack: false`) marks the delivery read and emits a
+/// read receipt, but never an acknowledgement; a later real ack still goes through.
+#[test]
+fn read_only_marks_read_without_acking() {
+    let fx = Fixture::new();
+    let msg = fx
+        .store
+        .send_message(SendMessage {
+            from: "alice".into(),
+            to: vec!["bob".into()],
+            subject: "Read me".into(),
+            body: "ack later".into(),
+            ack_required: true,
+            ..Default::default()
+        })
+        .unwrap();
+    let id = std::slice::from_ref(&msg.message_id);
+
+    let out = fx.store.acknowledge("bob", id, false).unwrap();
+    assert_eq!(out.updated, vec![msg.message_id.clone()]);
+    let bob = fx.store.inbox("bob", InboxQuery::default()).unwrap();
+    assert_eq!((bob.unread, bob.awaiting_ack), (0, 1));
+    let read_at = bob.messages[0].read_at.clone();
+    assert!(read_at.is_some());
+    assert!(bob.messages[0].acked_at.is_none());
+    let k = kinds(&fx.store);
+    assert!(k.contains(&"delivery.read".to_string()));
+    assert!(!k.contains(&"delivery.acked".to_string()));
+
+    // Repeating read-only is a no-op, not an ack.
+    let again = fx.store.acknowledge("bob", id, false).unwrap();
+    assert_eq!(again.unchanged, vec![msg.message_id.clone()]);
+    assert_eq!(
+        fx.store
+            .inbox("bob", InboxQuery::default())
+            .unwrap()
+            .awaiting_ack,
+        1
+    );
+
+    // A real ack later keeps the original read time and records the receipt.
+    fx.advance_secs(60);
+    let acked = fx.store.acknowledge("bob", id, true).unwrap();
+    assert_eq!(acked.updated, vec![msg.message_id.clone()]);
+    let bob = fx.store.inbox("bob", InboxQuery::default()).unwrap();
+    assert_eq!((bob.unread, bob.awaiting_ack), (0, 0));
+    assert_eq!(bob.messages[0].read_at, read_at);
+    assert!(bob.messages[0].acked_at.is_some());
+    assert_ne!(bob.messages[0].acked_at, read_at);
+    assert!(kinds(&fx.store).contains(&"delivery.acked".to_string()));
+}
+
 #[test]
 fn unknown_recipient_is_rejected_without_side_effects() {
     let fx = Fixture::new();
