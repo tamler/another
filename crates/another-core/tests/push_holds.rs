@@ -1290,3 +1290,187 @@ fn repo_keys_cached_under_older_rules_are_recomputed() {
         .unwrap();
     assert_eq!(g.conflicts.len(), 1);
 }
+
+fn register_as(fx: &Fx, name: &str, project: Option<&Path>) -> String {
+    fx.store
+        .register_agent(RegisterAgent {
+            name: name.into(),
+            program: Program::Claude,
+            project: project.map(Repos::path),
+            model: None,
+            description: None,
+        })
+        .unwrap()
+        .agent_id
+}
+
+/// #110 review P1, result A: the holder's bare name becomes ambiguous after it took the
+/// hold. The guard must still deny and record the wait; it must never fail open.
+#[test]
+fn ambiguous_holder_name_still_denies_the_edit() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    fx.project(&fx.repos.wt);
+    register_as(&fx, "solo", None);
+    fx.acquire("solo", &fx.repos.wt, &["src/d.rs"]).unwrap();
+    register_as(&fx, "solo", Some(&fx.repos.wt));
+    for attempt in 0..2 {
+        let guard = fx
+            .store
+            .guard_edit("bob", &main, &["src/d.rs".into()], "auto")
+            .expect("a real conflict must not fail the guard");
+        assert_eq!(guard.conflicts.len(), 1, "attempt {attempt}");
+        assert_eq!(guard.first_notice, attempt == 0);
+        assert_eq!(guard.retry_after_seconds, 30);
+    }
+    assert_eq!(
+        fx.kinds().iter().filter(|k| *k == "hold.waiting").count(),
+        1
+    );
+}
+
+/// #110 review P1, result B: the waiter's bare name becomes ambiguous after it was blocked.
+/// The holder's release, or the sweep after expiry, must still succeed; the ping reaches
+/// the waiter by id; the wait is gone; other agents' hold commands keep working.
+#[test]
+fn ambiguous_waiter_does_not_break_release_sweep_or_other_agents() {
+    for expiry in [false, true] {
+        let fx = Fx::new();
+        let main = fx.project(&fx.repos.main);
+        let wt = fx.project(&fx.repos.wt);
+        let w = register_as(&fx, "w", None);
+        fx.store
+            .acquire_holds(AcquireHolds {
+                agent: "bob".into(),
+                project: wt.clone(),
+                paths: vec!["src/e.rs".into()],
+                ttl_seconds: Some(60),
+                exclusive: true,
+                reason: None,
+                repo_wide: false,
+            })
+            .unwrap();
+        assert!(!fx
+            .store
+            .guard_edit("w", &main, &["src/e.rs".into()], "auto")
+            .unwrap()
+            .conflicts
+            .is_empty());
+        register_as(&fx, "w", Some(&fx.repos.main));
+        if expiry {
+            fx.advance_secs(61);
+            fx.store
+                .sweep()
+                .expect("sweep must not depend on resolving the waiter");
+        } else {
+            fx.store
+                .release_holds("bob", &[])
+                .expect("release must not depend on resolving the waiter");
+        }
+        let pings: Vec<_> = fx
+            .store
+            .events(10_000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "message.sent" && e.payload["subject"] == "Hold free: src/e.rs")
+            .collect();
+        assert_eq!(pings.len(), 1, "expiry={expiry}");
+        assert_eq!(pings[0].payload["recipients"][0]["agent_id"], w);
+        assert_eq!(
+            fx.kinds().iter().filter(|k| *k == "hold.available").count(),
+            1
+        );
+        // The wait is gone, so later sweeps and other agents are unaffected.
+        fx.store.sweep().unwrap();
+        fx.acquire("carol", &fx.repos.main, &["docs/x.md"]).unwrap();
+        assert!(fx
+            .store
+            .check_holds("carol", &main, &["docs/y.md".into()], true)
+            .is_ok());
+        fx.store.holds(HoldFilter::default()).unwrap();
+        fx.store.heartbeat("carol", true).unwrap();
+    }
+}
+
+/// #111 review P1: the requester's bare name becomes ambiguous before the hold ends. The
+/// holder's release must still succeed and the linked request must still close, with its
+/// notice sent to the requester by id.
+#[test]
+fn ambiguous_requester_does_not_break_release() {
+    let fx = Fx::new();
+    fx.project(&fx.repos.main);
+    let w = register_as(&fx, "w", None);
+    let held = fx
+        .acquire("bob", &fx.repos.wt, &["src/g.rs"])
+        .unwrap()
+        .granted
+        .remove(0);
+    let ask = fx.store.request_hold_release("w", &held.hold_id).unwrap();
+    register_as(&fx, "w", Some(&fx.repos.main));
+    fx.store
+        .release_holds("bob", &[])
+        .expect("release must not depend on resolving the requester");
+    assert_eq!(
+        fx.store
+            .request(ask.request_id.as_ref().unwrap())
+            .unwrap()
+            .status,
+        RequestStatus::Done
+    );
+    let done: Vec<_> = fx
+        .store
+        .events(10_000)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "message.sent" && e.payload["subject"] == "Done: Release src/g.rs?")
+        .collect();
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].payload["recipients"][0]["agent_id"], w);
+    fx.store.sweep().unwrap();
+}
+
+/// #111 review P2: a second `Hold free` ping for the same file within five minutes must
+/// still be announced; the waiter was just told to wait for it.
+#[test]
+fn second_hold_free_ping_for_the_same_file_is_announced() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    let wt = fx.project(&fx.repos.wt);
+    for round in 0..2 {
+        fx.acquire("alice", &fx.repos.main, &["src/b.rs"]).unwrap();
+        let blocked = fx
+            .store
+            .guard_edit("bob", &wt, &["src/b.rs".into()], "auto")
+            .unwrap();
+        assert!(blocked.first_notice, "round {round}");
+        fx.store.release_holds("alice", &[]).unwrap();
+        let unread = InboxQuery {
+            unread_only: true,
+            ..Default::default()
+        };
+        let inbox = fx.store.inbox("bob", unread).unwrap();
+        assert_eq!(inbox.messages.len(), 1, "round {round}");
+        assert_eq!(inbox.messages[0].message.subject, "Hold free: src/b.rs");
+        let id = inbox.messages[0].message.message_id.clone();
+        let claimed = fx
+            .store
+            .claim_announcement("bob", std::slice::from_ref(&id), "post_tool", None)
+            .unwrap();
+        assert_eq!(
+            claimed,
+            vec![id.clone()],
+            "round {round}: the ping must be announced"
+        );
+        fx.store
+            .acknowledge("bob", std::slice::from_ref(&id), false)
+            .unwrap();
+        fx.advance_secs(10);
+    }
+    assert!(!fx.kinds().iter().any(|k| k == "push.suppressed"));
+    assert!(fx
+        .store
+        .guard_edit("bob", &main, &["src/b.rs".into()], "auto")
+        .unwrap()
+        .conflicts
+        .is_empty());
+}
