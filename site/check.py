@@ -150,7 +150,7 @@ ICON_LINKS = (
     ("apple-touch-icon", stamped_href("/apple-touch-icon.png", ICON_VERSION)),
     ("manifest", stamped_href("/site.webmanifest", ICON_VERSION)),
 )
-IMAGE_ALT = "Another. One inbox for coding agents."
+IMAGE_ALT = "Another. Path holds and an inbox for coding agents."
 for path, page in pages.items():
     for rel, href in ICON_LINKS:
         assert (rel, href) in page.relations, f"{path}: missing link rel={rel} href={href}"
