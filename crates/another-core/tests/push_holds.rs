@@ -1290,3 +1290,457 @@ fn repo_keys_cached_under_older_rules_are_recomputed() {
         .unwrap();
     assert_eq!(g.conflicts.len(), 1);
 }
+
+fn register_as(fx: &Fx, name: &str, project: Option<&Path>) -> String {
+    fx.store
+        .register_agent(RegisterAgent {
+            name: name.into(),
+            program: Program::Claude,
+            project: project.map(Repos::path),
+            model: None,
+            description: None,
+        })
+        .unwrap()
+        .agent_id
+}
+
+/// #110 review P1, result A: the holder's bare name becomes ambiguous after it took the
+/// hold. The guard must still deny and record the wait; it must never fail open.
+#[test]
+fn ambiguous_holder_name_still_denies_the_edit() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    fx.project(&fx.repos.wt);
+    register_as(&fx, "solo", None);
+    fx.acquire("solo", &fx.repos.wt, &["src/d.rs"]).unwrap();
+    register_as(&fx, "solo", Some(&fx.repos.wt));
+    for attempt in 0..2 {
+        let guard = fx
+            .store
+            .guard_edit("bob", &main, &["src/d.rs".into()], "auto")
+            .expect("a real conflict must not fail the guard");
+        assert_eq!(guard.conflicts.len(), 1, "attempt {attempt}");
+        assert_eq!(guard.first_notice, attempt == 0);
+        assert_eq!(guard.retry_after_seconds, 30);
+    }
+    assert_eq!(
+        fx.kinds().iter().filter(|k| *k == "hold.waiting").count(),
+        1
+    );
+}
+
+/// #110 review P1, result B: the waiter's bare name becomes ambiguous after it was blocked.
+/// The holder's release, or the sweep after expiry, must still succeed; the ping reaches
+/// the waiter by id; the wait is gone; other agents' hold commands keep working.
+#[test]
+fn ambiguous_waiter_does_not_break_release_sweep_or_other_agents() {
+    for expiry in [false, true] {
+        let fx = Fx::new();
+        let main = fx.project(&fx.repos.main);
+        let wt = fx.project(&fx.repos.wt);
+        let w = register_as(&fx, "w", None);
+        fx.store
+            .acquire_holds(AcquireHolds {
+                agent: "bob".into(),
+                project: wt.clone(),
+                paths: vec!["src/e.rs".into()],
+                ttl_seconds: Some(60),
+                exclusive: true,
+                reason: None,
+                repo_wide: false,
+            })
+            .unwrap();
+        assert!(!fx
+            .store
+            .guard_edit("w", &main, &["src/e.rs".into()], "auto")
+            .unwrap()
+            .conflicts
+            .is_empty());
+        register_as(&fx, "w", Some(&fx.repos.main));
+        if expiry {
+            fx.advance_secs(61);
+            fx.store
+                .sweep()
+                .expect("sweep must not depend on resolving the waiter");
+        } else {
+            fx.store
+                .release_holds("bob", &[])
+                .expect("release must not depend on resolving the waiter");
+        }
+        let pings: Vec<_> = fx
+            .store
+            .events(10_000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "message.sent" && e.payload["subject"] == "Hold free: src/e.rs")
+            .collect();
+        assert_eq!(pings.len(), 1, "expiry={expiry}");
+        assert_eq!(pings[0].payload["recipients"][0]["agent_id"], w);
+        assert_eq!(
+            fx.kinds().iter().filter(|k| *k == "hold.available").count(),
+            1
+        );
+        // The wait is gone, so later sweeps and other agents are unaffected.
+        fx.store.sweep().unwrap();
+        fx.acquire("carol", &fx.repos.main, &["docs/x.md"]).unwrap();
+        assert!(fx
+            .store
+            .check_holds("carol", &main, &["docs/y.md".into()], true)
+            .is_ok());
+        fx.store.holds(HoldFilter::default()).unwrap();
+        fx.store.heartbeat("carol", true).unwrap();
+    }
+}
+
+/// #111 review P1: the requester's bare name becomes ambiguous before the hold ends. The
+/// holder's release must still succeed and the linked request must still close, with its
+/// notice sent to the requester by id.
+#[test]
+fn ambiguous_requester_does_not_break_release() {
+    let fx = Fx::new();
+    fx.project(&fx.repos.main);
+    let w = register_as(&fx, "w", None);
+    let held = fx
+        .acquire("bob", &fx.repos.wt, &["src/g.rs"])
+        .unwrap()
+        .granted
+        .remove(0);
+    let ask = fx.store.request_hold_release("w", &held.hold_id).unwrap();
+    register_as(&fx, "w", Some(&fx.repos.main));
+    fx.store
+        .release_holds("bob", &[])
+        .expect("release must not depend on resolving the requester");
+    assert_eq!(
+        fx.store
+            .request(ask.request_id.as_ref().unwrap())
+            .unwrap()
+            .status,
+        RequestStatus::Done
+    );
+    let done: Vec<_> = fx
+        .store
+        .events(10_000)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "message.sent" && e.payload["subject"] == "Done: Release src/g.rs?")
+        .collect();
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].payload["recipients"][0]["agent_id"], w);
+    fx.store.sweep().unwrap();
+}
+
+/// #111 review P2: a second `Hold free` ping for the same file within five minutes must
+/// still be announced; the waiter was just told to wait for it.
+#[test]
+fn second_hold_free_ping_for_the_same_file_is_announced() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    let wt = fx.project(&fx.repos.wt);
+    for round in 0..2 {
+        fx.acquire("alice", &fx.repos.main, &["src/b.rs"]).unwrap();
+        let blocked = fx
+            .store
+            .guard_edit("bob", &wt, &["src/b.rs".into()], "auto")
+            .unwrap();
+        assert!(blocked.first_notice, "round {round}");
+        fx.store.release_holds("alice", &[]).unwrap();
+        let unread = InboxQuery {
+            unread_only: true,
+            ..Default::default()
+        };
+        let inbox = fx.store.inbox("bob", unread).unwrap();
+        assert_eq!(inbox.messages.len(), 1, "round {round}");
+        assert_eq!(inbox.messages[0].message.subject, "Hold free: src/b.rs");
+        let id = inbox.messages[0].message.message_id.clone();
+        let claimed = fx
+            .store
+            .claim_announcement("bob", std::slice::from_ref(&id), "post_tool", None)
+            .unwrap();
+        assert_eq!(
+            claimed,
+            vec![id.clone()],
+            "round {round}: the ping must be announced"
+        );
+        fx.store
+            .acknowledge("bob", std::slice::from_ref(&id), false)
+            .unwrap();
+        fx.advance_secs(10);
+    }
+    assert!(!fx.kinds().iter().any(|k| k == "push.suppressed"));
+    assert!(fx
+        .store
+        .guard_edit("bob", &main, &["src/b.rs".into()], "auto")
+        .unwrap()
+        .conflicts
+        .is_empty());
+}
+
+/// Make every wait record fail, or let waits through again.
+fn inject_wait_failure(fx: &Fx, on: bool) {
+    let db = rusqlite::Connection::open(fx.repos.home.join(DB_FILE)).unwrap();
+    db.execute_batch(if on {
+        "CREATE TRIGGER hold_waits_inject_failure BEFORE INSERT ON hold_waits
+         BEGIN SELECT RAISE(ABORT, 'injected wait-record failure'); END;"
+    } else {
+        "DROP TRIGGER hold_waits_inject_failure;"
+    })
+    .unwrap();
+}
+
+fn count(fx: &Fx, kind: &str) -> usize {
+    fx.kinds().iter().filter(|k| *k == kind).count()
+}
+
+/// Wait-record failure must still deny the edit and must say that no wait exists, so the
+/// hook never promises a ping that cannot arrive. Retries must not re-send the first hook
+/// notice or a second hold.blocked event (D59).
+#[test]
+fn wait_record_failure_does_not_renotice_on_retry() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    let wt = fx.project(&fx.repos.wt);
+    fx.acquire("alice", &fx.repos.main, &["src/a.rs"]).unwrap();
+    inject_wait_failure(&fx, true);
+
+    let first = fx
+        .store
+        .guard_edit("bob", &wt, &["src/a.rs".into()], "auto")
+        .expect("a wait-record failure must still deny, not fail the guard");
+    assert_eq!(first.conflicts.len(), 1);
+    assert!(
+        first.first_notice,
+        "the first failed wait still gets the first notice"
+    );
+    assert!(
+        !first.wait_recorded,
+        "a rolled-back wait must not be reported as recorded"
+    );
+    assert_eq!(first.retry_after_seconds, 30);
+
+    let second = fx
+        .store
+        .guard_edit("bob", &wt, &["src/a.rs".into()], "auto")
+        .expect("retries must still deny");
+    assert_eq!(second.conflicts.len(), 1);
+    assert!(
+        !second.first_notice,
+        "a retry after wait-record failure must not re-send the first hook notice"
+    );
+    assert!(!second.wait_recorded);
+    assert_eq!(second.retry_after_seconds, 30);
+
+    assert_eq!(
+        count(&fx, "hold.blocked"),
+        1,
+        "unchanged blockers must not get a second hold.blocked"
+    );
+    assert!(count(&fx, "hold.wait_failed") >= 2);
+    // Nothing was recorded, so a release pings nobody and the next edit goes through.
+    fx.store.release_holds("alice", &[]).unwrap();
+    fx.store.sweep().unwrap();
+    assert!(fx
+        .store
+        .inbox("bob", InboxQuery::default())
+        .unwrap()
+        .messages
+        .is_empty());
+    assert!(fx
+        .store
+        .guard_edit("bob", &main, &["src/a.rs".into()], "auto")
+        .unwrap()
+        .conflicts
+        .is_empty());
+}
+
+/// Dedupe after a wait-record failure is keyed by the exact path and set of blocking
+/// hold ids, not by "this agent was blocked in this project before": a new file, a
+/// replacement hold and a conflict after an ended wait each get a first notice, while an
+/// unchanged blocker stays a short denial however many unrelated events pile up (D59).
+#[test]
+fn wait_record_failure_notices_new_paths_and_replacement_holds() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    let wt = fx.project(&fx.repos.wt);
+    let edit = |path: &str| {
+        fx.store
+            .guard_edit("bob", &wt, &[path.into()], "auto")
+            .unwrap()
+    };
+
+    // A wait that was recorded and ended by its free-file ping, before failures begin.
+    fx.acquire("alice", &fx.repos.main, &["src/c.rs"]).unwrap();
+    let recorded = edit("src/c.rs");
+    assert!(recorded.first_notice && recorded.wait_recorded);
+    fx.store.release_holds("alice", &[]).unwrap();
+    assert_eq!(
+        fx.store
+            .inbox("bob", InboxQuery::default())
+            .unwrap()
+            .messages
+            .len(),
+        1
+    );
+    // A wait that was recorded and ended because the edit went through after expiry.
+    fx.acquire("alice", &fx.repos.main, &["src/d.rs"]).unwrap();
+    assert!(edit("src/d.rs").wait_recorded);
+    fx.advance_secs(601);
+    assert!(edit("src/d.rs").conflicts.is_empty());
+    assert_eq!(count(&fx, "hold.wait.finished"), 1);
+    fx.store.release_holds("bob", &[]).unwrap();
+
+    fx.acquire(
+        "alice",
+        &fx.repos.main,
+        &["src/a.rs", "src/b.rs", "src/c.rs", "src/d.rs"],
+    )
+    .unwrap();
+    inject_wait_failure(&fx, true);
+
+    // First failure on a file: first notice. Retries: short denial.
+    let a = edit("src/a.rs");
+    assert!(a.first_notice && !a.wait_recorded);
+    for _ in 0..3 {
+        let again = edit("src/a.rs");
+        assert!(!again.first_notice && !again.wait_recorded);
+        assert_eq!(again.retry_after_seconds, 30);
+    }
+    // Two from the recorded waits on src/c.rs and src/d.rs, one from src/a.rs.
+    assert_eq!(count(&fx, "hold.blocked"), 3);
+
+    // Another file held by the same agent is a new conflict.
+    assert!(edit("src/b.rs").first_notice, "new path");
+    assert!(!edit("src/b.rs").first_notice);
+    assert!(
+        !edit("src/a.rs").first_notice,
+        "interleaved paths stay deduped"
+    );
+    assert_eq!(count(&fx, "hold.blocked"), 4);
+
+    // Files whose earlier waits ended get a first notice for the new hold.
+    assert!(edit("src/c.rs").first_notice, "after a free-file ping");
+    assert!(!edit("src/c.rs").first_notice);
+    assert!(edit("src/d.rs").first_notice, "after a finished wait");
+    assert!(!edit("src/d.rs").first_notice);
+    assert_eq!(count(&fx, "hold.blocked"), 6);
+
+    // A replacement hold on the same file is a new blocker set.
+    fx.store.release_holds("alice", &[]).unwrap();
+    fx.acquire("carol", &fx.repos.main, &["src/a.rs"]).unwrap();
+    let replaced = edit("src/a.rs");
+    assert!(replaced.first_notice, "replacement hold");
+    assert_eq!(replaced.conflicts[0].held.agent, "carol");
+    assert!(!edit("src/a.rs").first_notice);
+    assert_eq!(count(&fx, "hold.blocked"), 7);
+
+    // Hundreds of unrelated events, including other agents' blocks and wait failures in
+    // this project, never push the matching record out of view or stand in for it.
+    for i in 0..150 {
+        fx.acquire("alice", &fx.repos.main, &[&format!("src/z{i}.rs")])
+            .unwrap();
+    }
+    for _ in 0..3 {
+        fx.store
+            .guard_edit("alice", &wt, &["src/a.rs".into()], "auto")
+            .unwrap();
+    }
+    assert_eq!(count(&fx, "hold.blocked"), 8, "alice's own first notice");
+    assert!(
+        !edit("src/a.rs").first_notice,
+        "unchanged blockers after noise"
+    );
+    assert_eq!(count(&fx, "hold.blocked"), 8);
+    assert!(
+        fx.store
+            .events(10_000)
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == "hold.wait_failed")
+            .all(|e| e.payload["path"].is_string() && e.payload["blockers"].is_array()),
+        "every failure names its path and blockers"
+    );
+
+    // Once waits can be recorded again the next block registers one and the ping comes.
+    inject_wait_failure(&fx, false);
+    let again = edit("src/a.rs");
+    assert!(again.wait_recorded);
+    fx.store.release_holds("carol", &[]).unwrap();
+    let inbox = fx.store.inbox("bob", InboxQuery::default()).unwrap();
+    assert_eq!(inbox.messages.len(), 2);
+    assert_eq!(inbox.messages[0].message.subject, "Hold free: src/a.rs");
+    assert!(fx
+        .store
+        .guard_edit("bob", &main, &["src/a.rs".into()], "auto")
+        .unwrap()
+        .conflicts
+        .is_empty());
+}
+
+/// A wait recorded for one hold, then a second overlapping hold whose wait update fails:
+/// the changed blockers get one first notice, every retry with the same blockers is a
+/// short denial, and the wait row's stale signature never stands in for the current
+/// blocker set (D59).
+#[test]
+fn wait_update_failure_does_not_renotice_unchanged_blockers() {
+    let fx = Fx::new();
+    let wt = fx.project(&fx.repos.wt);
+    let edit = |path: &str| {
+        fx.store
+            .guard_edit("bob", &wt, &[path.into()], "auto")
+            .unwrap()
+    };
+    fx.acquire("alice", &fx.repos.main, &["src/**"]).unwrap();
+    let recorded = edit("src/a.rs");
+    assert!(recorded.first_notice && recorded.wait_recorded);
+    assert_eq!(recorded.conflicts.len(), 1);
+    let narrow = fx
+        .acquire("alice", &fx.repos.main, &["src/a.rs"])
+        .unwrap()
+        .granted[0]
+        .hold_id
+        .clone();
+    let db = rusqlite::Connection::open(fx.repos.home.join(DB_FILE)).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER hold_waits_inject_update_failure BEFORE UPDATE ON hold_waits
+         BEGIN SELECT RAISE(ABORT, 'injected wait-update failure'); END;",
+    )
+    .unwrap();
+
+    let changed = edit("src/a.rs");
+    assert_eq!(changed.conflicts.len(), 2);
+    assert!(
+        changed.first_notice,
+        "a second blocking hold is a changed set"
+    );
+    assert!(!changed.wait_recorded);
+    assert_eq!(changed.retry_after_seconds, 30);
+    for _ in 0..3 {
+        let again = edit("src/a.rs");
+        assert_eq!(again.conflicts.len(), 2);
+        assert!(
+            !again.first_notice,
+            "unchanged blockers after a failed update must be a short denial"
+        );
+        assert!(!again.wait_recorded);
+    }
+    assert_eq!(count(&fx, "hold.blocked"), 2);
+
+    // Back to the recorded set: that wait already announced it.
+    fx.store.release_holds("alice", &[narrow]).unwrap();
+    let back = edit("src/a.rs");
+    assert_eq!(back.conflicts.len(), 1);
+    assert!(!back.first_notice, "the recorded wait covers this hold");
+    assert_eq!(count(&fx, "hold.blocked"), 2);
+
+    // Once updates work again the changed set is recorded and the ping comes once.
+    db.execute_batch("DROP TRIGGER hold_waits_inject_update_failure;")
+        .unwrap();
+    drop(db);
+    fx.acquire("alice", &fx.repos.main, &["src/a.rs"]).unwrap();
+    let again = edit("src/a.rs");
+    assert!(again.first_notice && again.wait_recorded);
+    assert_eq!(count(&fx, "hold.blocked"), 3);
+    fx.store.release_holds("alice", &[]).unwrap();
+    let inbox = fx.store.inbox("bob", InboxQuery::default()).unwrap();
+    assert_eq!(inbox.messages.len(), 1);
+    assert_eq!(inbox.messages[0].message.subject, "Hold free: src/a.rs");
+}
