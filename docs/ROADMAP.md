@@ -34,7 +34,7 @@ Ranking weighs three things: feedback already received from people trying Anothe
 
 ## Not planned
 
-- **Auto-reap policies.** The locked default is that nothing is killed without a human `--confirm` on the owning machine (D8, D17). The risk of a false orphan kill outweighs the convenience. The orphan list and the reap plan stay; the decision stays with a person. [SPEC.md](SPEC.md) still lists "auto-reap policies" under Later (around line 294). That line is stale against D8 and should be removed in a follow-up edit of the spec, not treated as a roadmap candidate.
+- **Auto-reap policies.** The locked default is that nothing is killed without a human `--confirm` on the owning machine (D8, D17). The risk of a false orphan kill outweighs the convenience. The orphan list and the reap plan stay; the decision stays with a person. The Later section of [SPEC.md](SPEC.md) says auto-reap is not planned and points at D8. It is not a roadmap candidate.
 - **Turning holds into locks.** Holds are advisory outside the edit hook, and a separate checkout is the real boundary. Candidate 3 adds a warning, not a lock.
 - **Telemetry or a paid tier.** Locked defaults. A version check (candidate 8) must not become telemetry or a default phone-home.
 

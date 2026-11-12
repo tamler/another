@@ -291,7 +291,7 @@ Path holds are advisory leases on globs. They signal intent; they do not replace
 ### Later
 
 - Herdr plugin packaged; cmux notify + inbox pane
-- TUI; pre-commit hold guard; auto-reap policies. A loopback dashboard (`another dashboard`, `GET /ui`) is documented in [DASHBOARD.md](DASHBOARD.md)
+- TUI; pre-commit hold guard. Auto-reap is not planned: reaping stays human-only (D8). A loopback dashboard (`another dashboard`, `GET /ui`) is documented in [DASHBOARD.md](DASHBOARD.md)
 - Cross-repo contact directory; A2A bridge; Beads deep link
 - MCP resources/subscribe where clients catch up
 
