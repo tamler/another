@@ -93,6 +93,8 @@ pre code { font-size: inherit; font-size-adjust: inherit; white-space: inherit; 
 figcaption { margin-top: 16px; font-size: .85rem; color: var(--muted); max-width: 84ch; }
 figcaption code { font-size: .85rem; }
 figure { margin: 0; }
+.illustration { margin-block: 24px; }
+.illustration img { display: block; width: 100%; height: auto; border: 1px solid var(--rule); border-radius: 8px; }
 .code-block { background: var(--terminal); color: var(--terminal-ink); padding: 20px 24px; margin-block: 16px; font-size: .9rem; }
 .clients { margin-block: 28px; }
 .client { display: grid; grid-template-columns: 160px 1fr; gap: 24px; padding-block: 18px; border-top: 1px solid var(--rule); }

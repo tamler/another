@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 600" width="1200" height="600" role="img" aria-labelledby="title desc" font-family="Fragment Mono, Menlo, Consolas, Liberation Mono, monospace">
+  <title id="title">Mail reaches a busy agent at its next tool call</title>
+  <desc id="desc">A timeline of bob@shop's session: a tool call, then alice@shop's mail arrives while bob is mid-task, then bob's next tool call, after which the post-tool hook adds a one-line notice naming the message. An idle Herdr agent is woken by the loopback daemon instead. Each message is announced once.</desc>
+  <rect width="1200" height="600" fill="#f8f8f4"/>
+
+  <!-- session axis -->
+  <text x="80" y="118" font-size="22" fill="#292922">bob@shop, mid-task</text>
+  <line x1="80" y1="160" x2="1120" y2="160" stroke="#292922" stroke-width="4"/>
+  <polygon points="1120,160 1100,150 1100,170" fill="#292922"/>
+
+  <!-- tool call 1 -->
+  <circle cx="220" cy="160" r="12" fill="#f8f8f4" stroke="#292922" stroke-width="4"/>
+  <text x="220" y="204" text-anchor="middle" font-size="18" fill="#5d5d50">tool call</text>
+
+  <!-- mail arrives -->
+  <rect x="470" y="46" width="36" height="36" fill="#705000"/>
+  <line x1="488" y1="82" x2="488" y2="148" stroke="#705000" stroke-width="3" stroke-dasharray="6 5"/>
+  <text x="488" y="36" text-anchor="middle" font-size="18" fill="#705000">mail from alice@shop lands</text>
+
+  <!-- tool call 2 -->
+  <circle cx="720" cy="160" r="12" fill="#f8f8f4" stroke="#292922" stroke-width="4"/>
+  <text x="720" y="204" text-anchor="middle" font-size="18" fill="#5d5d50">next tool call</text>
+
+  <!-- the notice -->
+  <line x1="720" y1="172" x2="720" y2="250" stroke="#292922" stroke-width="3"/>
+  <polygon points="720,250 710,232 730,232" fill="#292922"/>
+  <rect x="100" y="250" width="1000" height="92" rx="6" fill="#25251f"/>
+  <text x="124" y="286" font-size="18" fill="#f4f2e7">Another: 1 new message(s) for bob@shop (0 urgent): "Review the parser"</text>
+  <text x="124" y="318" font-size="18" fill="#f4f2e7">from alice@shop (opens request 01J...). Read them with fetch_inbox.</text>
+  <text x="600" y="376" text-anchor="middle" font-size="18" fill="#5d5d50">one line from the post-tool hook, into the running session, no interruption</text>
+
+  <!-- the idle case -->
+  <line x1="80" y1="430" x2="1120" y2="430" stroke="#cecec2" stroke-width="2"/>
+  <text x="80" y="470" font-size="22" fill="#292922">an idle agent makes no tool calls</text>
+  <text x="80" y="504" font-size="18" fill="#5d5d50">the loopback daemon wakes an idle Herdr agent; tmux and cmux panes are woken on demand</text>
+  <text x="80" y="548" font-size="18" fill="#5d5d50">each message is announced once: mid-task notice, prompt notice or daemon wake, whichever is first</text>
+</svg>
