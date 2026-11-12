@@ -28,7 +28,7 @@ codex@billing            codex     active   last seen 2026-11-12T09:39:52.230Z
 codex@shop               codex     active   last seen 2026-11-12T09:39:52.222Z
 ```
 
-The project part of an address is the project's slug: the directory name, lower-cased, with anything that is not a letter, digit, `-` or `_` replaced by `-`. `another agent list` shows every full address on the node, so it is the first thing to run when a name stops working.
+The project part of an address is the project's slug. Another derives it from the directory name when the project is first registered: lower-cased, with anything that is not a letter, digit, `-` or `_` replaced by `-`, then with leading and trailing `-` stripped. A name with nothing left after that gets the slug `project`. If another project on the node already has the slug, a numeric suffix is added, as the second `shop` below shows. So `Invoice API` becomes `invoice-api`, and a directory called `-shop-` starts from `shop`, not `-shop-`; the [slug cases](#how-a-slug-is-chosen) section below shows each of these on the real binary. Do not derive the slug by hand when it matters: `another project list` prints every slug on the node next to its absolute path, and `another agent list` shows every full address, so those two are the first things to run when a name stops working.
 
 ## The error
 
@@ -86,7 +86,16 @@ $ another inbox --agent codex@shop-2
 codex@shop-2: 0 unread (0 urgent), 0 awaiting ack, 0 request(s)
 ```
 
-Which `shop` is which? `another status` lists the agents, and the project part also accepts the project's absolute path, which Another answers with the canonical address:
+Which `shop` is which? `another status` and `another agent list` print addresses, not directories. `another project list` prints each slug with the absolute path it was registered from, so run it before picking an address:
+
+```text
+$ another project list
+billing  /tmp/demo/work/billing
+shop  /tmp/demo/work/shop
+shop-2  /tmp/demo/scratch/shop
+```
+
+Here `shop` is `work/shop` and `shop-2` is `scratch/shop`, so the Codex in the scratch checkout is `codex@shop-2`. The project part also accepts the project's absolute path, which Another answers with the canonical address:
 
 ```text
 $ another inbox --agent codex@/tmp/demo/scratch/shop
@@ -94,6 +103,28 @@ codex@shop-2: 0 unread (0 urgent), 0 awaiting ack, 0 request(s)
 ```
 
 The numbered slug is assigned when the project is first registered and does not change, so the second `shop` stays `shop-2` for the life of the node.
+
+## How a slug is chosen
+
+Three more directories registered in the same node, with `another project ensure`, which registers a project without an agent and prints its slug and path. `-shop-` loses its hyphens and starts from `shop`; that is taken twice already, so it gets `shop-3`. `Invoice API` becomes `invoice-api`. A name of nothing but hyphens has nothing left and gets `project`.
+
+```text
+$ another project ensure /tmp/demo/edge/-shop-
+shop-3  /tmp/demo/edge/-shop-
+$ another project ensure "/tmp/demo/edge/Invoice API"
+invoice-api  /tmp/demo/edge/Invoice API
+$ another project ensure /tmp/demo/edge/---
+project  /tmp/demo/edge/---
+$ another project list
+billing  /tmp/demo/work/billing
+invoice-api  /tmp/demo/edge/Invoice API
+project  /tmp/demo/edge/---
+shop  /tmp/demo/work/shop
+shop-2  /tmp/demo/scratch/shop
+shop-3  /tmp/demo/edge/-shop-
+```
+
+The suffix counts from 2 and skips taken slugs, so the order projects are registered in decides who is `shop` and who is `shop-3`. An agent registered in `/tmp/demo/edge/-shop-` would be `name@shop-3`.
 
 ## Set the identity once
 
@@ -125,3 +156,5 @@ The last row is the form of the error in the code; it was not part of this run, 
 ## What was run
 
 Three `git init` repositories under one temporary root, one `another init`, four `agent register` calls, then the `inbox`, `send`, `agent list` and `status` commands shown above, in one continuous run. The error lines are copied from stderr. Timestamps are UTC, as the CLI prints them.
+
+The `another project list` output and the slug cases come from a second run on the same day, same setup, with `another 0.1.0` built from commit `d474de9`. The slug code did not change between the two commits. That run registered the same three repositories and agents, then three more directories with `project ensure`. The paths are shown as `/tmp/demo` as above.
