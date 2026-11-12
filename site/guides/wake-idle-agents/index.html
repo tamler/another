@@ -39,7 +39,7 @@
     <div class="guide-hero"><h1>Wake an idle agent at its prompt</h1><p class="definition">Hooks fire on activity. An idle session has none, so something has to type into its terminal.</p><nav class="guide-nav" aria-label="Setup guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/concepts/#wake">What is wake?</a></nav></div>
     <section class="guide-section" aria-labelledby="why">
       <h2 id="why">When you need this</h2>
-      <p>Session hooks deliver a digest at session start and a notice on the next prompt. If an agent has finished and is waiting for you, nothing happens until you type. <code>another wake</code> does that typing, through tmux, cmux or Herdr.</p>
+      <p>Session hooks deliver a digest at session start, a notice after the next tool call, and a notice on the next prompt. If an agent has finished and is waiting for you, nothing happens until you type. <code>another wake</code> does that typing, through tmux, cmux or Herdr. A loopback <code>another serve</code> does it on its own for idle Herdr agents; tmux and cmux panes are only woken on demand, because neither can say whether the agent is busy.</p>
       <p>You may not need it. If you check each agent yourself every few minutes, hooks alone are simpler.</p>
     </section>
     <section class="guide-section" aria-labelledby="target">

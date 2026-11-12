@@ -49,8 +49,8 @@ another init</code></pre>
       <pre class="code-block shell" tabindex="0" aria-label="Preview then install hooks"><code>another hook install --client all --dry-run
 another hook install --client all</code></pre>
       <p>Read the dry-run plan before running the second command. It installs user-global hooks for Claude Code, Codex, Grok CLI and Cursor. Existing hooks are preserved and changed configs are backed up. You can choose a single client instead of <code>all</code>.</p>
-      <p>In Codex, review and trust the new hooks under <code>/hooks</code>. Cursor integration is best effort: context arrives at session start; prompt hooks renew holds. Start a new agent session in your repository after installation.</p>
-      <p>Hooks register client identities and supply short inbox/activity digests. Bodies stay out of the digest. <a href="https://github.com/tamler/another/blob/main/docs/HOOKS.md">Client behavior, identity overrides and uninstall</a>.</p>
+      <p>In Codex, review and trust the new hooks under <code>/hooks</code>. Cursor integration is best effort: context arrives at session start and after tool calls; prompt hooks renew holds; there is no edit guard. Start a new agent session in your repository after installation.</p>
+      <p>Hooks register client identities, supply short inbox/activity digests, and add a one-line notice after the next tool call when mail lands mid-task. For Claude Code, Codex and Grok CLI they also run before each file edit: the edit takes a hold on that file, or is stopped when another agent holds it. Bodies stay out of the digest. <a href="https://github.com/tamler/another/blob/main/docs/HOOKS.md">Client behavior, identity overrides and uninstall</a>.</p>
     </section>
     <section class="guide-section" aria-labelledby="mcp-title">
       <h2 id="mcp-title">3. Connect the MCP inbox</h2>
@@ -78,7 +78,7 @@ another activity --summary</code></pre>
     </section>
     <section class="guide-section" aria-labelledby="next-title">
       <h2 id="next-title">Then add only what you need</h2>
-      <p><a href="/docs/#resources">Register an existing server or GPU</a> so agents can borrow it. Use advisory path holds to signal which files they plan to edit. Add <a href="/docs/#wake">optional wake adapters</a> for idle terminals. Keep remote peers and federation for when you need a second machine.</p>
+      <p><a href="/docs/#resources">Register an existing server or GPU</a> so agents can borrow it. Let path holds say which files each agent is in; the edit hook takes them for you. Add <a href="/docs/#wake">optional wake adapters</a> for idle terminals. Keep remote peers and federation for when you need a second machine.</p>
       <p>Another coordinates agents you already run. You still choose their tasks and review their work. <a href="/compare/">Compare inboxes and orchestrators</a>.</p>
     </section>
   </main>

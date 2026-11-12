@@ -50,7 +50,7 @@
     <section class="guide-section" aria-labelledby="worktrees-title">
       <h2 id="worktrees-title">Git worktrees alone</h2>
       <p>Giving each agent its own checkout prevents most edit collisions, with tools you already have. If the agents never need to talk until you merge their branches, you are done.</p>
-      <p>Worktrees don't carry messages, so one agent won't hear that another changed an API until the merge. The two tools fit together: <a href="/guides/git-worktrees/">here is how Another treats worktrees</a>, including one surprise about holds.</p>
+      <p>Worktrees don't carry messages, so one agent won't hear that another changed an API until the merge. The two tools fit together: <a href="/guides/git-worktrees/">here is how Another treats worktrees</a>, including how holds cross them.</p>
     </section>
     <section class="guide-section" aria-labelledby="builtin-title">
       <h2 id="builtin-title">Features built into your client</h2>
@@ -72,7 +72,7 @@
     </section>
     <section class="guide-section" aria-labelledby="claims-title">
       <h2 id="claims-title">File claims that can deny an edit</h2>
-      <p>Another's holds are advisory. <code>another hold check</code> exits 3 on overlap, and the write still happens if the agent ignores the warning. A few other tools document a Claude Code hook that can refuse the edit. I read their READMEs on 10 Nov 2026. I did not benchmark them against each other.</p>
+      <p>Another's <code>another hold check</code> is advisory: it exits 3 on overlap and grants nothing. Its edit hook is not. With the hooks installed, a Claude Code, Codex or Grok CLI edit to a file another agent holds is stopped and the holder named; an edit from a shell command still gets through. A few other tools also document a Claude Code hook that can refuse the edit. I read their READMEs on 10 Nov 2026. I did not benchmark them against each other.</p>
       <dl class="clients">
         <div class="client"><dt><a href="https://github.com/ThatHunky/agent-coord">agent-coord</a></dt><dd>A JSON board at <code>~/.agent-coord/board.json</code>. File locks and task claims. The README says a Claude Code PreToolUse hook can block an edit, and that Codex has no pre-tool hook, so Codex only cooperates if it calls the tools.</dd></div>
         <div class="client"><dt><a href="https://github.com/polymatx/dibs">dibs</a></dt><dd>One static binary, no daemon. TTL file claims. The README says hooks can block a colliding edit, and that lessons live as markdown in the repo.</dd></div>
@@ -80,7 +80,7 @@
         <div class="client"><dt><a href="https://github.com/arumwu/agentrelay">AgentRelay</a></dt><dd>Task leases are exclusive while they are active. File-scope claims warn. The README says they do not stop an edit made outside MCP. It also documents a guarded tmux read and send.</dd></div>
         <div class="client"><dt><a href="https://github.com/LevDomasnih/coordinaut">Coordinaut</a></dt><dd>Claim a task and a file scope, then heartbeat. The README argues agents should not coordinate by racing to edit one markdown file. The markdown it generates is a view. The log is the state.</dd></div>
       </dl>
-      <p>If you want the hook to deny the write, start with one of those and read the current hook docs for your client. If you want mail across Claude Code and Codex, and you can live with an advisory hold, that is the job I built Another for. I have not measured which one is faster.</p>
+      <p>If you want mail across Claude Code and Codex, plus a hook that stops a client edit to a held file, that is the job I built Another for. If you need every write stopped, including one from a shell, none of these do that; use separate checkouts. Read the current hook docs for your client before you pick one. I have not measured which one is faster.</p>
     </section>
     <section class="guide-section" aria-labelledby="orchestrator-title">
       <h2 id="orchestrator-title">Orchestrators</h2>
@@ -91,8 +91,8 @@
       <h2 id="not-title">When Another is the wrong choice</h2>
       <ul>
         <li><strong>You run one agent at a time.</strong> There is nobody to coordinate with.</li>
-        <li><strong>You need a real lock.</strong> Path holds are advisory, and an agent that ignores them can still write. Use separate checkouts and review the merge.</li>
-        <li><strong>You need instant delivery to a busy agent.</strong> Hooks fire at session start and on the next prompt. <a href="/guides/wake-idle-agents/">Wake adapters</a> can type into an idle terminal, but nothing interrupts an agent mid-task.</li>
+        <li><strong>You need a real lock.</strong> The edit hook stops a client edit to a held file, but an edit from a shell command still gets through, and nothing guards a commit. Use separate checkouts and review the merge.</li>
+        <li><strong>You need instant delivery.</strong> Hooks fire at session start, after the next tool call and on the next prompt. A loopback daemon wakes idle Herdr agents, and <a href="/guides/wake-idle-agents/">wake adapters</a> can type into an idle terminal, but nothing interrupts an agent mid-task.</li>
         <li><strong>You need end-to-end encrypted mail.</strong> The database is ordinary SQLite, and a federation hub can read what it relays.</li>
         <li><strong>You work on native Windows.</strong> <a href="/docs/install/windows/">There is no build for it</a>.</li>
         <li><strong>You want a signed, packaged release.</strong> There is no release yet, so you build from source, and planned binaries are unsigned.</li>

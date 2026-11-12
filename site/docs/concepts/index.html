@@ -58,7 +58,7 @@
     <section class="guide-section" aria-labelledby="coordination">
       <h2 id="coordination">Coordination</h2>
       <dl class="clients">
-        <div class="client" id="hold"><dt>Path hold</dt><dd>An expiring, advisory claim on project-relative files or globs. Cooperating agents check holds before editing, and a conflict exits with status 3. A hold does not stop any write. See <a href="/guides/avoid-agent-file-conflicts/">file holds</a>.</dd></div>
+        <div class="client" id="hold"><dt>Path hold</dt><dd>An expiring claim on project-relative files or globs, checked across every checkout of one repository on this machine. <code>another hold check</code> exits with status 3 on a conflict and takes nothing. With the hooks installed, a client's file edit takes a hold on that file, and an edit to a file another agent holds is stopped. An edit from a shell command is not. See <a href="/guides/avoid-agent-file-conflicts/">file holds</a>.</dd></div>
         <div class="client" id="resource"><dt>Resource</dt><dd>A registered model server, dev server, port, GPU, container or long job, addressed by ID or by <code>kind:name</code>. Another lists it; it does not start it. See <a href="/guides/share-model-server/">sharing a model server</a>.</dd></div>
         <div class="client" id="lease"><dt>Lease</dt><dd>A time-limited claim on a resource, held as owner or borrower. The default is 30 minutes. Heartbeats renew it, and if the owner leaves while others borrow, the oldest borrower becomes the owner.</dd></div>
         <div class="client" id="orphan"><dt>Orphan</dt><dd>A candidate for cleanup: a registered resource with no live lease, or a listening process that nothing registered. A listed process is only a candidate and may be something you want running.</dd></div>
@@ -68,7 +68,7 @@
     <section class="guide-section" aria-labelledby="awareness">
       <h2 id="awareness">Awareness</h2>
       <dl class="clients">
-        <div class="client" id="hook"><dt>Hook</dt><dd>A user-global entry in a coding client's config that runs Another at session start, on each prompt and at session end. It is how an agent learns about mail without polling. See the <a href="https://github.com/tamler/another/blob/main/docs/HOOKS.md">hook reference</a>.</dd></div>
+        <div class="client" id="hook"><dt>Hook</dt><dd>A user-global entry in a coding client's config that runs Another at session start, on each prompt, after each tool call, before each file edit and at session end. It is how an agent learns about mail without polling, and how a held file stops an edit. See the <a href="https://github.com/tamler/another/blob/main/docs/HOOKS.md">hook reference</a>.</dd></div>
         <div class="client" id="digest"><dt>Digest</dt><dd>The short inbox and activity summary a hook gives a session. It never includes message bodies.</dd></div>
         <div class="client" id="activity"><dt>Activity feed</dt><dd>A readable record of who did what: sessions, mail subjects, requests, holds and resources. Message bodies stay out of it.</dd></div>
         <div class="client" id="event-log"><dt>Event log</dt><dd>The signed, append-only record behind everything. Query tables are built from it, and it is what federation syncs.</dd></div>

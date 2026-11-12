@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>Coding agents in separate git worktrees - Another</title>
-  <meta name="description" content="Each git worktree is its own Another project. Mail crosses between them, but path holds don't. How to address agents, and how to share one hold scope.">
+  <meta name="description" content="Each git worktree is its own Another project. Mail crosses between them, and so do path holds: one checkout's hold conflicts with the same path in another.">
   <link rel="canonical" href="https://toanother.one/guides/git-worktrees/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Another">
   <meta property="og:title" content="Coding agents in separate git worktrees - Another">
-  <meta property="og:description" content="Each git worktree is its own Another project. Mail crosses between them, but path holds don't. How to address agents, and how to share one hold scope.">
+  <meta property="og:description" content="Each git worktree is its own Another project. Mail crosses between them, and so do path holds: one checkout's hold conflicts with the same path in another.">
   <meta property="og:url" content="https://toanother.one/guides/git-worktrees/">
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
@@ -18,10 +18,10 @@
   <meta property="og:image:alt" content="Another. One inbox for coding agents.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Coding agents in separate git worktrees - Another">
-  <meta name="twitter:description" content="Each git worktree is its own Another project. Mail crosses between them, but path holds don't. How to address agents, and how to share one hold scope.">
+  <meta name="twitter:description" content="Each git worktree is its own Another project. Mail crosses between them, and so do path holds: one checkout's hold conflicts with the same path in another.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
   <meta name="twitter:image:alt" content="Another. One inbox for coding agents.">
-  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Agents in separate git worktrees","description":"Each git worktree is its own Another project. Mail crosses between them, but path holds don't. How to address agents, and how to share one hold scope.","url":"https://toanother.one/guides/git-worktrees/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://toanother.one/guides/"},{"@type":"ListItem","position":3,"name":"Git worktrees","item":"https://toanother.one/guides/git-worktrees/"}]}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Agents in separate git worktrees","description":"Each git worktree is its own Another project. Mail crosses between them, and so do path holds: one checkout's hold conflicts with the same path in another.","url":"https://toanother.one/guides/git-worktrees/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://toanother.one/guides/"},{"@type":"ListItem","position":3,"name":"Git worktrees","item":"https://toanother.one/guides/git-worktrees/"}]}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
@@ -36,10 +36,10 @@
     <nav aria-label="Main"><a href="/docs/getting-started/">Get started</a> <a href="/docs/">Docs</a> <a href="/guides/">Guides</a> <a href="/compare/">Compare</a> <a href="/changelog/">Changelog</a></nav>
   </header>
   <main class="wrap" id="main" tabindex="-1">
-    <div class="guide-hero"><h1>Agents in separate git worktrees</h1><p class="definition">Worktrees keep their files apart. Another lets them talk, with one catch about holds.</p><nav class="guide-nav" aria-label="Setup guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/concepts/#project">What is a project?</a></nav></div>
+    <div class="guide-hero"><h1>Agents in separate git worktrees</h1><p class="definition">Worktrees keep their files apart. Another lets them talk, and its holds cross them.</p><nav class="guide-nav" aria-label="Setup guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/concepts/#project">What is a project?</a></nav></div>
     <section class="guide-section" aria-labelledby="catch">
-      <h2 id="catch">The catch: each worktree is its own project</h2>
-      <p>Another identifies a project by its directory, so it doesn't know two worktrees share a repository. Here is what that means with two worktrees, <code>shop-parser</code> and <code>shop-ui</code>, on one machine using the same <code>~/.another</code>:</p>
+      <h2 id="catch">Each worktree is its own project, and holds still cross them</h2>
+      <p>Another identifies a project by its directory, and it also links each project to its repository, read from the <code>origin</code> remote or the shared git directory without running git. Here is what that means with two worktrees, <code>shop-parser</code> and <code>shop-ui</code>, on one machine using the same <code>~/.another</code>:</p>
       <div class="table-scroll" role="region" aria-label="Behavior across worktrees, scroll horizontally on small screens" tabindex="0">
         <table>
           <caption>What crosses between worktrees on one node</caption>
@@ -48,11 +48,11 @@
             <tr><th scope="row">Mail and requests</th><td>Yes. Same node, so any agent can reach any other</td></tr>
             <tr><th scope="row">Activity feed</th><td>Yes. It covers the whole node</td></tr>
             <tr><th scope="row">Resources</th><td>Yes. Listings aren't limited to a worktree unless you pass <code>--project</code></td></tr>
-            <tr><th scope="row">Path holds</th><td><strong>No.</strong> A hold in one worktree does not conflict with the other</td></tr>
+            <tr><th scope="row">Path holds</th><td><strong>Yes.</strong> A hold in one worktree conflicts with the same path in the other, and the edit hook stops the edit</td></tr>
           </tbody>
         </table>
       </div>
-      <p>That last row usually matches reality. Each worktree has its own files, so editing <code>src/app.rs</code> in both is not an immediate collision, and a clean <code>hold check</code> only says that no one holds it in that project. The clash, if there is one, arrives as a merge conflict.</p>
+      <p>That last row is on purpose. Each worktree has its own files, so editing <code>src/app.rs</code> in both is not an immediate collision, but it is a merge conflict waiting to happen. The hold says so before the second agent writes.</p>
     </section>
     <section class="guide-section" aria-labelledby="mail">
       <h2 id="mail">Talk across worktrees</h2>
@@ -68,15 +68,18 @@ another inbox --agent parser</code></pre>
       <p>This is a good use of mail: tell the other worktree when you change something it depends on, before the merge finds it.</p>
     </section>
     <section class="guide-section" aria-labelledby="shared">
-      <h2 id="shared">If you do want shared holds</h2>
-      <p>Sometimes you want one claim across every worktree, such as "I'm reworking the migrations, stay out". Register the agents and take holds against one common project: pick the main checkout's path, or its slug once registered, and use it from everywhere. The path here is an example.</p>
-      <pre class="code-block shell" tabindex="0" aria-label="Share a hold scope across worktrees"><code>another hold acquire --agent ui --project ~/work/shop 'migrations/**'
-another hold check --agent parser --project ~/work/shop 'migrations/001.sql'</code></pre>
-      <p>Both agents need to be registered and to use the same <code>--project</code> value. The check exits with status 3 on a conflict. The holds still don't touch your files or stop a commit; this only makes the intent visible. Without that flag, hold commands use the current directory, so an agent that forgets it checks its own worktree and sees no conflict. That is a false reassurance if you were counting on the shared scope.</p>
+      <h2 id="shared">Holds across checkouts</h2>
+      <p>Holds are compared by repository-relative path across every local checkout of the same repository: sibling worktrees, and separate clones of one origin. Take the hold in your own worktree, and the check in the other one sees it:</p>
+      <pre class="code-block shell" tabindex="0" aria-label="A hold in one worktree, checked from the other"><code>cd ../shop-ui
+another hold acquire --agent ui --project . 'migrations/**'
+cd ../shop-parser
+another hold check --agent parser --project . 'migrations/001.sql'</code></pre>
+      <pre class="code-block shell" tabindex="0" aria-label="Conflict output"><code>conflict: migrations/001.sql is held by ui@shop-ui (shop-ui:migrations/**, exclusive until 2026-11-12T10:14:45.075Z)</code></pre>
+      <p>The check exits with status 3, and with the hooks installed, the edit hook stops <code>parser</code>'s client edit of that file and names <code>ui@shop-ui</code>. <code>another holds --project .</code> lists holds in sibling checkouts too. An edit from a shell command still gets through, and nothing guards a commit. Holds on other machines are matched by project name and reported as warnings, never conflicts.</p>
     </section>
     <section class="guide-section" aria-labelledby="tested">
       <h2 id="tested">What this page rests on</h2>
-      <p>We ran these with real <code>git worktree</code> checkouts and the CLI on one machine, and saw the behavior in the table: mail delivered, no hold conflict across worktrees, and status 3 under a common project. Hook-created names are from the <a href="https://github.com/tamler/another/blob/main/docs/HOOKS.md">hook documentation</a>, not from a client session in a worktree.</p>
+      <p>We ran these with real <code>git worktree</code> checkouts and a build of main on one machine, in temporary state: mail delivered; a hold taken in one worktree made <code>hold check</code> exit 3 in the other; the edit hook, fed a client edit event for the held file in the sibling worktree, answered with a denial naming the holder; and a shell write to that same file went through. Hook-created names are from the <a href="https://github.com/tamler/another/blob/main/docs/HOOKS.md">hook documentation</a>, not from a client session in a worktree.</p>
     </section>
     <section class="guide-section" aria-labelledby="related"><h2 id="related">Related guides</h2><nav class="guide-nav" aria-label="Related task guides"><a href="/guides/avoid-agent-file-conflicts/">File holds</a> <a href="/guides/multiple-claude-code-sessions/">One checkout, several sessions</a> <a href="/guides/hand-off-tasks/">Hand off a task</a> <a href="/compare/alternatives/">Worktrees vs Another</a></nav></section>
   </main>
