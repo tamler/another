@@ -382,7 +382,8 @@ fn matches(glob: &str, path: &str) -> bool {
 /// text, a glob match, and a glob match in which `[`, `]`, `{` and `}` are plain characters
 /// while `*` and `?` stay wildcards. The last reading is how `[id]*` names the route
 /// directories that start with `[id]`, and it keeps a bracketed directory name literal even
-/// after a wildcard component, where no leading-prefix rule can reach it.
+/// after a wildcard component, where no leading-prefix rule can reach it. A globset escape
+/// such as `[*]` already spells one plain character and is kept as it is.
 fn component_touches(glob: &str, path: &str) -> bool {
     // A piece of a split pattern may not compile on its own; then it matches nothing here
     // and only the whole-glob reading in `glob_touches_literal` can count.
@@ -390,7 +391,16 @@ fn component_touches(glob: &str, path: &str) -> bool {
         return true;
     }
     let mut spelled = String::with_capacity(glob.len() + 8);
-    for c in glob.chars() {
+    let mut rest = glob;
+    while let Some(c) = rest.chars().next() {
+        let escape = rest
+            .get(..3)
+            .filter(|e| literal_pattern(e).is_some_and(|l| l.len() == 1));
+        if let Some(e) = escape {
+            spelled.push_str(e);
+            rest = &rest[3..];
+            continue;
+        }
         if matches!(c, '[' | ']' | '{' | '}') {
             spelled.push('[');
             spelled.push(c);
@@ -398,25 +408,63 @@ fn component_touches(glob: &str, path: &str) -> bool {
         } else {
             spelled.push(c);
         }
+        rest = &rest[c.len_utf8()..];
     }
     spelled != glob && compile(&spelled).is_ok_and(|m| m.is_match(path))
 }
 
+/// Where the character class opened by the `[` at byte `open` closes: the byte of its `]`,
+/// read as globset reads it (`[!` and `[^` negate; a `]` first in the class is a member,
+/// so `[]]` is the class of `]`). None for an unclosed class, which is then a plain `[`.
+fn class_end(pattern: &str, open: usize) -> Option<usize> {
+    let bytes = pattern.as_bytes();
+    let mut i = open + 1;
+    if matches!(bytes.get(i), Some(b'!' | b'^')) {
+        i += 1;
+    }
+    if bytes.get(i) == Some(&b']') {
+        i += 1;
+    }
+    pattern.get(i..)?.find(']').map(|j| i + j)
+}
+
+/// The characters of `pattern` outside character classes, with their byte offsets. A class
+/// and everything in it is skipped, so `[*]`, `[/]` and `[{]` are never read as a
+/// wildcard, a separator or an alternation.
+fn outside_classes(pattern: &str) -> Vec<(usize, char)> {
+    let mut out = Vec::new();
+    let mut skip_to = 0;
+    for (i, c) in pattern.char_indices() {
+        if i < skip_to {
+            continue;
+        }
+        if c == '[' {
+            if let Some(end) = class_end(pattern, i) {
+                skip_to = end + 1;
+                continue;
+            }
+        }
+        out.push((i, c));
+    }
+    out
+}
+
 /// A glob component that names a directory or a file rather than a set of them: no `*` and
-/// no `?`. `[id]` and `{shop,blog}` qualify, `*` and `[id]*` do not.
+/// no `?` outside a character class. `[id]`, `{shop,blog}` and the escaped literal names
+/// `[*]` and `[?]` qualify, `*` and `[id]*` do not.
 fn names_entries(component: &str) -> bool {
-    !component.contains(['*', '?'])
+    !outside_classes(component)
+        .iter()
+        .any(|&(_, c)| matches!(c, '*' | '?'))
 }
 
 /// A pattern's components: split on `/` outside brackets and braces, so an alternation
-/// such as `{a/b,c}` stays one piece.
+/// such as `{a/b,c}` stays one piece (`expand_alternations` spells those out first).
 fn pattern_components(pattern: &str) -> Vec<&str> {
     let mut out = Vec::new();
-    let (mut start, mut depth, mut in_class) = (0, 0usize, false);
-    for (i, c) in pattern.char_indices() {
+    let (mut start, mut depth) = (0, 0usize);
+    for (i, c) in outside_classes(pattern) {
         match c {
-            _ if in_class => in_class = c != ']',
-            '[' => in_class = true,
             '{' => depth += 1,
             '}' => depth = depth.saturating_sub(1),
             '/' if depth == 0 => {
@@ -428,6 +476,61 @@ fn pattern_components(pattern: &str) -> Vec<&str> {
     }
     out.push(&pattern[start..]);
     out
+}
+
+/// The first alternation of `pattern` outside character classes: the text before it, its
+/// alternatives, and the text after it. The braces read as plain characters count as one
+/// more alternative, spelled `[{]...[}]`, so that `{group}` still names a directory called
+/// `{group}`; a name cannot contain a `/`, so that reading is skipped when the alternation
+/// does. None without an alternation, and for an unclosed `{`, which globset refuses.
+fn first_alternation(pattern: &str) -> Option<(&str, Vec<String>, &str)> {
+    let outside = outside_classes(pattern);
+    let open = outside.iter().position(|&(_, c)| c == '{')?;
+    let open_at = outside[open].0;
+    let close_at = outside[open..].iter().find(|&&(_, c)| c == '}')?.0;
+    let inside = &pattern[open_at + 1..close_at];
+    let mut alternatives = Vec::new();
+    let mut start = open_at + 1;
+    for &(i, c) in &outside[open + 1..] {
+        if i >= close_at {
+            break;
+        }
+        if c == ',' {
+            alternatives.push(pattern[start..i].to_string());
+            start = i + 1;
+        }
+    }
+    alternatives.push(pattern[start..close_at].to_string());
+    if !inside.contains('/') {
+        alternatives.push(format!("[{{]{inside}[}}]"));
+    }
+    Some((&pattern[..open_at], alternatives, &pattern[close_at + 1..]))
+}
+
+/// `pattern` with every alternation spelled out, so that an alternative containing a `/`
+/// becomes ordinary components: `src/{a/b,c}` is `src/a/b` and `src/c`. A pattern with no
+/// alternation comes back as it is. So does one that would spell out to more than
+/// `ALTERNATION_CAP` patterns; the whole-glob reading still covers it.
+fn expand_alternations(pattern: &str) -> Vec<String> {
+    const ALTERNATION_CAP: usize = 256;
+    let mut done = Vec::new();
+    let mut todo = vec![pattern.to_string()];
+    while let Some(p) = todo.pop() {
+        match first_alternation(&p) {
+            None => done.push(p),
+            Some((head, alternatives, tail)) => {
+                if done.len() + todo.len() + alternatives.len() > ALTERNATION_CAP {
+                    return vec![pattern.to_string()];
+                }
+                todo.extend(
+                    alternatives
+                        .into_iter()
+                        .map(|alt| format!("{head}{alt}{tail}")),
+                );
+            }
+        }
+    }
+    done
 }
 
 /// Glob components against the components of a literal path. `**` spans zero or more
@@ -457,12 +560,14 @@ fn components_touch(glob: &[&str], path: &[&str], path_may_be_dir: bool) -> bool
     }
 }
 
-/// A glob against a literal path: component by component, and as globset reads the whole
-/// (an alternation may span a `/`, as in `src/{a/b,c}.ts`).
+/// A glob against a literal path: each spelled-out alternation component by component, and
+/// the whole as globset reads it.
 fn glob_touches_literal(glob: &str, literal: &str, path_may_be_dir: bool) -> bool {
-    let comps = pattern_components(glob);
     let lit: Vec<&str> = literal.split('/').collect();
-    components_touch(&comps, &lit, path_may_be_dir) || matches(glob, literal)
+    expand_alternations(glob)
+        .iter()
+        .any(|g| components_touch(&pattern_components(g), &lit, path_may_be_dir))
+        || matches(glob, literal)
 }
 
 /// Link local projects that hold live holds but have no current repository link: never
@@ -1226,9 +1331,29 @@ mod tests {
             // An alternation may contain a `/`; the whole-glob reading catches it.
             ("src/{a/b,c}.ts", "src/a/b.ts"),
             ("src/{a/b,c}.ts", "src/c.ts"),
+            // r6: an alternation with a `/` is spelled out before the components are
+            // compared, so it still names a directory or keeps a later route literal.
+            ("src/{a/b,c}", "src/a/b/page.tsx"),
+            ("src/{a/b,c}", "src/c/page.tsx"),
+            ("src/{a/b,c}/[id]/page.tsx", "src/a/b/[id]/page.tsx"),
+            ("src/{a/b,c}/[id]/page.tsx", "src/c/[id]/page.tsx"),
+            ("src/{a/b,c}/**/[slug]/*.tsx", "src/a/b/x/[slug]/page.tsx"),
+            ("{a/b,c}/[id]", "a/b/[id]/page.tsx"),
+            // Braces read as plain characters still name a directory called `{group}`.
+            (
+                "app/{group}/part[ver]/**/file-?.{rs,ts}",
+                "app/{group}/part[ver]/deep/file-1.rs",
+            ),
+            ("app/{group}", "app/{group}/[id]/page.tsx"),
+            // r6: `[*]` and `[?]` are the literal names `*` and `?`, so they name a
+            // directory the way `[id]` does.
+            ("packages/*/app/[*]", "packages/web/app/*/page.tsx"),
+            ("packages/*/app/[?]", "packages/web/app/?/page.tsx"),
+            ("app/[*]/[id]", "app/*/[id]/page.tsx"),
             // A literal ancestor directory still meets a deeper glob.
             ("packages/*/app/[id]/page.tsx", "packages/web/app"),
             ("packages/*/app/[id]/page.tsx", "packages/web/app/[id]"),
+            ("src/{a/b,c}.ts", "src/a"),
             // Below a `**`, a deeper literal may be a directory with matches inside it,
             // as it always was for `src/**/*.rs` against `src/a/b.css`.
             ("app/[id]/**/[slug]/*.tsx", "app/[id]/x/[slug]/page.css"),
@@ -1278,10 +1403,20 @@ mod tests {
             ("src/*", "src/deep/a.rs"),
             ("app/[id]*", "app/[id]x/page.tsx"),
             ("app/?", "app/a/page.tsx"),
-            // A piece that does not compile on its own is not a match.
+            // The alternatives name exactly what they spell.
             ("src/{a/b,c}.ts", "src/x.ts"),
             ("src/{a/b,c}.ts", "src/a/x.ts"),
-            ("src/{a/b,c}.ts", "src/a"),
+            ("src/{a/b,c}", "src/a/x.ts"),
+            ("src/{a/b,c}", "src/ab/page.tsx"),
+            ("src/{a/b,c}/[id]/page.tsx", "src/a/b/[idx]/page.tsx"),
+            ("src/{a/b,c}/[id]/page.tsx", "src/a/[id]/page.tsx"),
+            ("src/{a/b,c}/[id]/page.tsx", "src/c/[id]/page.css"),
+            // An escaped wildcard is one literal character, not a wildcard.
+            ("packages/*/app/[*]", "packages/web/app/x/page.tsx"),
+            ("packages/*/app/[*]", "packages/web/app/*x/page.tsx"),
+            ("packages/*/app/[*]", "packages/web/app/[idx]/page.tsx"),
+            ("packages/*/app/[?]", "packages/web/app/x/page.tsx"),
+            ("packages/*/app/[?]", "packages/web/app/[i]/page.tsx"),
         ] {
             let literal = globset::escape(path);
             assert!(!patterns_overlap(glob, &literal), "{glob} vs {path}");
@@ -1291,6 +1426,43 @@ mod tests {
             pattern_components("src/{a/b,c}/[x/y]/*.ts"),
             vec!["src", "{a/b,c}", "[x/y]", "*.ts"]
         );
+        assert_eq!(
+            pattern_components("src/[/]x/[!/]y/[]/]z/*.ts"),
+            vec!["src", "[/]x", "[!/]y", "[]/]z", "*.ts"]
+        );
+        let mut spelled = expand_alternations("src/{a/b,c}/[x,y]/{d,}.ts");
+        spelled.sort();
+        assert_eq!(
+            spelled,
+            [
+                "src/a/b/[x,y]/.ts",
+                "src/a/b/[x,y]/[{]d,[}].ts",
+                "src/a/b/[x,y]/d.ts",
+                "src/c/[x,y]/.ts",
+                "src/c/[x,y]/[{]d,[}].ts",
+                "src/c/[x,y]/d.ts",
+            ]
+        );
+        assert_eq!(
+            expand_alternations("src/[{]a,b[}]/*.ts"),
+            ["src/[{]a,b[}]/*.ts"]
+        );
+        assert_eq!(expand_alternations("src/{a,b"), ["src/{a,b"]);
+        for c in [
+            "[id]",
+            "{shop,blog}",
+            "[*]",
+            "[?]",
+            "[!*?]",
+            "[]*]",
+            "a[",
+            "x",
+        ] {
+            assert!(names_entries(c), "{c}");
+        }
+        for c in ["*", "?", "[id]*", "*.rs", "[*]*", "a[b]?"] {
+            assert!(!names_entries(c), "{c}");
+        }
         // The escaped spelling keeps working and does not read as a class.
         assert!(patterns_overlap(
             "packages/*/app/[[]id[]]/page.tsx",
@@ -1322,6 +1494,29 @@ mod tests {
         assert!(!hold_covers(
             "packages/*/app/[id]/page.tsx",
             "packages/web/app"
+        ));
+        // r6: an alternation with a `/`, and the escaped literal names `*` and `?`.
+        assert!(hold_covers("src/{a/b,c}", "src/a/b/page.tsx"));
+        assert!(hold_covers(
+            "src/{a/b,c}/[id]/page.tsx",
+            "src/a/b/[id]/page.tsx"
+        ));
+        assert!(!hold_covers("src/{a/b,c}", "src/a/x.ts"));
+        assert!(hold_covers(
+            "packages/*/app/[*]",
+            "packages/web/app/*/page.tsx"
+        ));
+        assert!(hold_covers(
+            "packages/*/app/[*]",
+            &globset::escape("packages/web/app/*/page.tsx")
+        ));
+        assert!(hold_covers(
+            "packages/*/app/[?]",
+            "packages/web/app/?/page.tsx"
+        ));
+        assert!(!hold_covers(
+            "packages/*/app/[*]",
+            "packages/web/app/x/page.tsx"
         ));
     }
 

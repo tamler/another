@@ -319,6 +319,13 @@ fn manual_globs_under_literal_route_components_conflict_in_both_orders() {
         ("app/?/[id]/page.tsx", "app/a/[id]/page.tsx"),
         ("app/[id]*/page.tsx", "app/[id]x/page.tsx"),
         ("packages/*/app/[id]", "packages/web/app/[id]/page.tsx"),
+        // r6: an alternation with a `/` still names a directory or a literal route, and
+        // the escaped literal names `*` and `?` are directories like `[id]`.
+        ("src/{a/b,c}", "src/a/b/page.tsx"),
+        ("src/{a/b,c}", "src/c/page.tsx"),
+        ("src/{a/b,c}/[id]/page.tsx", "src/a/b/[id]/page.tsx"),
+        ("packages/*/app/[*]", "packages/web/app/*/page.tsx"),
+        ("packages/*/app/[?]", "packages/web/app/?/page.tsx"),
     ] {
         let fx = Fx::new();
         let wt = fx.project(&fx.repos.wt);
@@ -362,6 +369,8 @@ fn manual_globs_under_literal_route_components_conflict_in_both_orders() {
         "packages/*/app/[id]/page.tsx",
         "app/{shop,blog}/[id]/page.tsx",
         "app/[id]/**/[slug]/*.tsx",
+        "src/{a/b,c}/[id]/page.tsx",
+        "packages/*/app/[*]",
     ] {
         assert_eq!(
             fx.acquire("alice", &fx.repos.main, &[pattern])
@@ -377,6 +386,9 @@ fn manual_globs_under_literal_route_components_conflict_in_both_orders() {
         "app/docs/[id]/page.tsx",
         "app/other/[slug]/page.tsx",
         "packages/web/app/[id]/page.css",
+        "src/a/[id]/page.tsx",
+        "src/a/b/[idx]/page.tsx",
+        "packages/web/app/x/page.tsx",
     ] {
         assert!(
             fx.store
@@ -387,6 +399,47 @@ fn manual_globs_under_literal_route_components_conflict_in_both_orders() {
             "{path} must stay free"
         );
     }
+}
+
+/// r6: an agent's own glob hold covers the files it names through an alternation with a
+/// `/` or through the escaped literal names `*` and `?`, so the edit guard takes no second
+/// hold for them.
+#[test]
+fn own_glob_holds_cover_brace_and_escaped_wildcard_files() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    let granted = fx
+        .acquire(
+            "alice",
+            &fx.repos.main,
+            &[
+                "src/{a/b,c}",
+                "src/{a/b,c}/[id]/page.tsx",
+                "packages/*/app/[*]",
+            ],
+        )
+        .unwrap();
+    assert_eq!(granted.granted.len(), 3);
+    for path in [
+        "src/a/b/page.tsx",
+        "src/c/page.tsx",
+        "src/a/b/[id]/page.tsx",
+        "packages/web/app/*/page.tsx",
+    ] {
+        let guard = fx
+            .store
+            .guard_edit("alice", &main, &[path.into()], "auto")
+            .unwrap();
+        assert_eq!(guard.covered, [path], "{path}");
+        assert!(guard.held.is_empty(), "{path}");
+    }
+    // A file outside the alternation gets a hold of its own.
+    let guard = fx
+        .store
+        .guard_edit("alice", &main, &["src/a/x.ts".into()], "auto")
+        .unwrap();
+    assert!(guard.covered.is_empty());
+    assert_eq!(guard.held.len(), 1);
 }
 
 /// r5: `*` and `src/*` name the entries at their own depth. They are granted without

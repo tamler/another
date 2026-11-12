@@ -300,6 +300,12 @@ fn manual_route_directory_holds_block_auto_edits_in_both_orders() {
         ("app/[id]/**", "app/[id]/page.tsx"),
         ("app/[id]/*.tsx", "app/[id]/page.tsx"),
         ("app/[id]/**/*.tsx", "app/[id]/deep/page.tsx"),
+        // r6: an alternation with a `/`, and the escaped literal directory names `*`
+        // and `?`.
+        ("src/{a/b,c}", "src/a/b/page.tsx"),
+        ("src/{a/b,c}/[id]/page.tsx", "src/a/b/[id]/page.tsx"),
+        ("packages/*/app/[*]", "packages/web/app/*/page.tsx"),
+        ("packages/*/app/[?]", "packages/web/app/?/page.tsx"),
     ] {
         let env = Env::new();
         env.start("claude", &env.main, &[]);
@@ -317,15 +323,57 @@ fn manual_route_directory_holds_block_auto_edits_in_both_orders() {
         env.ok(&args);
         let edit = tool(&env.main, "Write", json!({ "file_path": path }));
         assert!(
-            denial(&env.hook("pre-edit", "claude", &edit)).contains("held by codex@shop-review")
+            denial(&env.hook("pre-edit", "claude", &edit)).contains("held by codex@shop-review"),
+            "manual first: {pattern}"
         );
         env.ok(&["hold", "release", "--agent", "codex@shop-review"]);
         assert_eq!(env.hook("pre-edit", "claude", &edit), "");
         let out = env.cmd(&args).output().unwrap();
-        assert_eq!(out.status.code(), Some(3), "{pattern}");
+        assert_eq!(out.status.code(), Some(3), "auto first: {pattern}");
         let report: Value = serde_json::from_slice(&out.stdout).unwrap();
         assert!(report["granted"].as_array().unwrap().is_empty());
         assert_eq!(report["conflicts"][0]["held"]["agent"], "claude@shop");
+    }
+}
+
+/// r6: through the real binary, an agent's own glob hold with an alternation that spans a
+/// `/` or an escaped literal `*` directory covers the file it names, so the pre-edit hook
+/// takes no second hold and the file stays blocked for a sibling worktree.
+#[test]
+fn own_brace_and_escaped_wildcard_holds_cover_edits_through_the_hook() {
+    let env = Env::new();
+    env.start("claude", &env.main, &[]);
+    env.start("codex", &env.wt, &[]);
+    for (pattern, path, other) in [
+        ("src/{a/b,c}", "src/a/b/page.tsx", "src/a/x.ts"),
+        (
+            "packages/*/app/[*]",
+            "packages/web/app/*/page.tsx",
+            "packages/web/app/x/page.tsx",
+        ),
+    ] {
+        env.ok(&[
+            "hold",
+            "acquire",
+            "--agent",
+            "claude@shop",
+            "--project",
+            env.main.to_str().unwrap(),
+            pattern,
+        ]);
+        let before = env.holds().len();
+        let edit = tool(&env.main, "Write", json!({ "file_path": path }));
+        assert_eq!(env.hook("pre-edit", "claude", &edit), "", "{pattern}");
+        assert_eq!(env.holds().len(), before, "{pattern}: no second hold");
+        let sibling = tool(&env.wt, "Write", json!({ "file_path": path }));
+        assert!(
+            denial(&env.hook("pre-edit", "codex", &sibling)).contains("held by claude@shop"),
+            "{pattern}"
+        );
+        // A file the pattern does not name is free, and gets a hold of its own.
+        let free = tool(&env.wt, "Write", json!({ "file_path": other }));
+        assert_eq!(env.hook("pre-edit", "codex", &free), "", "{pattern}");
+        assert_eq!(env.holds().len(), before + 1, "{pattern}");
     }
 }
 
