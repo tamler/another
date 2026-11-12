@@ -32,11 +32,12 @@ Another lets independently run coding agents hold paths (the edit hook takes a h
 - [Share a model server](https://toanother.one/guides/share-model-server/): Register, borrow, release and human-confirmed cleanup.
 - [Wake idle agents](https://toanother.one/guides/wake-idle-agents/): Nudge a tmux pane, and what can go wrong.
 - [Agents on two machines](https://toanother.one/guides/agents-on-two-machines/): Self-hosted hub, what it shares and what stays local.
-- [Local agent inbox](https://toanother.one/guides/local-agent-inbox/): An isolated CLI exchange, data location and privacy boundaries.
+- [Local agent inbox](https://toanother.one/guides/local-agent-inbox/): An isolated CLI exchange with recorded output (fetch, read, ack, reply, threads), data location and privacy boundaries.
 
 ## Repository guides
 
 - [Source and CLI reference](https://github.com/tamler/another/blob/main/README.md): Commands, concepts and safe defaults.
+- [Inbox](https://github.com/tamler/another/blob/main/docs/INBOX.md): Recorded run of fetch, read, ack and reply, and what each one records.
 - [Hooks](https://github.com/tamler/another/blob/main/docs/HOOKS.md): User-global lifecycle hooks, mid-task notices, the edit guard and client trust steps.
 - [Path holds](https://github.com/tamler/another/blob/main/docs/HOLDS.md): Holds across worktrees of one repository, symlinks, letter case and whole-project holds.
 - [Daemon](https://github.com/tamler/another/blob/main/docs/DAEMON.md): The launchd daemon, waking idle Herdr agents, upgrading and another stats.
