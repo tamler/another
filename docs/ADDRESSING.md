@@ -28,7 +28,7 @@ codex@billing            codex     active   last seen 2026-11-12T09:39:52.230Z
 codex@shop               codex     active   last seen 2026-11-12T09:39:52.222Z
 ```
 
-The project part of an address is the project's slug. Another derives it from the directory name when the project is first registered: lower-cased, with anything that is not a letter, digit, `-` or `_` replaced by `-`, then with leading and trailing `-` stripped. A name with nothing left after that gets the slug `project`. If another project on the node already has the slug, a numeric suffix is added, as the second `shop` below shows. So `Invoice API` becomes `invoice-api`, and a directory called `-shop-` starts from `shop`, not `-shop-`; the [slug cases](#how-a-slug-is-chosen) section below shows each of these on the real binary. Do not derive the slug by hand when it matters: `another project list` prints every slug on the node next to its absolute path, and `another agent list` shows every full address, so those two are the first things to run when a name stops working.
+The project part of an address is the project's slug. Another derives it from the directory name when the project is first registered, and only ASCII survives: ASCII letters are lower-cased, and every character that is not an ASCII letter, an ASCII digit, `-` or `_` becomes one `-`. That includes accented letters and letters from other scripts, so `é` is dropped the same way a space is. Then leading and trailing `-` are stripped. A name with nothing left after that gets the slug `project`. If another project on the node already has the slug, a numeric suffix is added, as the second `shop` below shows. So `Invoice API` becomes `invoice-api`, `Café` becomes `caf`, not `café`, and a directory called `-shop-` starts from `shop`, not `-shop-`; the [slug cases](#how-a-slug-is-chosen) section below shows each of these on the real binary. Do not derive the slug by hand when it matters: `another project list` prints every slug on the node next to its absolute path, and `another agent list` shows every full address, so those two are the first things to run when a name stops working.
 
 ## The error
 
@@ -126,6 +126,17 @@ shop-3  /tmp/demo/edge/-shop-
 
 The suffix counts from 2 and skips taken slugs, so the order projects are registered in decides who is `shop` and who is `shop-3`. An agent registered in `/tmp/demo/edge/-shop-` would be `name@shop-3`.
 
+Non-ASCII characters are not lower-cased or transliterated; each one becomes a `-` and is then subject to the same trimming. In a fresh node, `Café` ends as `caf`, `Ünïcode-Straße` as `n-code-stra-e`, and a name with no ASCII letters or digits at all falls back to `project`:
+
+```text
+$ another project ensure /tmp/demo/edge/Café
+caf  /tmp/demo/edge/Café
+$ another project ensure /tmp/demo/edge/Ünïcode-Straße
+n-code-stra-e  /tmp/demo/edge/Ünïcode-Straße
+$ another project ensure /tmp/demo/edge/日本語
+project  /tmp/demo/edge/日本語
+```
+
 ## Set the identity once
 
 `--agent` and `--from` default to `$ANOTHER_AGENT`. Set it to the full address for a shell or a session and leave the flags off:
@@ -157,4 +168,4 @@ The last row is the form of the error in the code; it was not part of this run, 
 
 Three `git init` repositories under one temporary root, one `another init`, four `agent register` calls, then the `inbox`, `send`, `agent list` and `status` commands shown above, in one continuous run. The error lines are copied from stderr. Timestamps are UTC, as the CLI prints them.
 
-The `another project list` output and the slug cases come from a second run on the same day, same setup, with `another 0.1.0` built from commit `d474de9`. The slug code did not change between the two commits. That run registered the same three repositories and agents, then three more directories with `project ensure`. The paths are shown as `/tmp/demo` as above.
+The `another project list` output and the slug cases come from a second run on the same day, same setup, with `another 0.1.0` built from commit `d474de9`. The slug code did not change between the two commits. That run registered the same three repositories and agents, then three more directories with `project ensure`. The non-ASCII cases are a third run, same build, in a fresh node with only those three directories. The paths are shown as `/tmp/demo` as above.
