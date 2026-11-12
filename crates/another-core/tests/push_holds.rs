@@ -326,6 +326,15 @@ fn manual_globs_under_literal_route_components_conflict_in_both_orders() {
         ("src/{a/b,c}/[id]/page.tsx", "src/a/b/[id]/page.tsx"),
         ("packages/*/app/[*]", "packages/web/app/*/page.tsx"),
         ("packages/*/app/[?]", "packages/web/app/?/page.tsx"),
+        // r7: a chain of alternations past any spelling-out cap.
+        (
+            "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}",
+            "src/a/b/d/f/h/j/l/page.tsx",
+        ),
+        (
+            "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+            "src/a/b/d/f/h/j/l/[id]/page.tsx",
+        ),
     ] {
         let fx = Fx::new();
         let wt = fx.project(&fx.repos.wt);
@@ -371,6 +380,7 @@ fn manual_globs_under_literal_route_components_conflict_in_both_orders() {
         "app/[id]/**/[slug]/*.tsx",
         "src/{a/b,c}/[id]/page.tsx",
         "packages/*/app/[*]",
+        "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
     ] {
         assert_eq!(
             fx.acquire("alice", &fx.repos.main, &[pattern])
@@ -389,6 +399,8 @@ fn manual_globs_under_literal_route_components_conflict_in_both_orders() {
         "src/a/[id]/page.tsx",
         "src/a/b/[idx]/page.tsx",
         "packages/web/app/x/page.tsx",
+        "src/a/b/d/f/h/j/x/[id]/page.tsx",
+        "src/a/b/d/f/h/j/l/[idx]/page.tsx",
     ] {
         assert!(
             fx.store
@@ -416,15 +428,17 @@ fn own_glob_holds_cover_brace_and_escaped_wildcard_files() {
                 "src/{a/b,c}",
                 "src/{a/b,c}/[id]/page.tsx",
                 "packages/*/app/[*]",
+                "lib/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
             ],
         )
         .unwrap();
-    assert_eq!(granted.granted.len(), 3);
+    assert_eq!(granted.granted.len(), 4);
     for path in [
         "src/a/b/page.tsx",
         "src/c/page.tsx",
         "src/a/b/[id]/page.tsx",
         "packages/web/app/*/page.tsx",
+        "lib/a/b/d/f/h/j/l/[id]/page.tsx",
     ] {
         let guard = fx
             .store

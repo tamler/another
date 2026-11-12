@@ -459,7 +459,7 @@ fn names_entries(component: &str) -> bool {
 }
 
 /// A pattern's components: split on `/` outside brackets and braces, so an alternation
-/// such as `{a/b,c}` stays one piece (`expand_alternations` spells those out first).
+/// such as `{a/b,c}` stays one piece until `components_touch` reaches it.
 fn pattern_components(pattern: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let (mut start, mut depth) = (0, 0usize);
@@ -507,67 +507,72 @@ fn first_alternation(pattern: &str) -> Option<(&str, Vec<String>, &str)> {
     Some((&pattern[..open_at], alternatives, &pattern[close_at + 1..]))
 }
 
-/// `pattern` with every alternation spelled out, so that an alternative containing a `/`
-/// becomes ordinary components: `src/{a/b,c}` is `src/a/b` and `src/c`. A pattern with no
-/// alternation comes back as it is. So does one that would spell out to more than
-/// `ALTERNATION_CAP` patterns; the whole-glob reading still covers it.
-fn expand_alternations(pattern: &str) -> Vec<String> {
-    const ALTERNATION_CAP: usize = 256;
-    let mut done = Vec::new();
-    let mut todo = vec![pattern.to_string()];
-    while let Some(p) = todo.pop() {
-        match first_alternation(&p) {
-            None => done.push(p),
-            Some((head, alternatives, tail)) => {
-                if done.len() + todo.len() + alternatives.len() > ALTERNATION_CAP {
-                    return vec![pattern.to_string()];
-                }
-                todo.extend(
-                    alternatives
-                        .into_iter()
-                        .map(|alt| format!("{head}{alt}{tail}")),
-                );
-            }
+/// Steps one component walk may take. A comparison that runs past it counts as an
+/// overlap: a spurious conflict costs a retry, a missed one lets two agents edit one file.
+/// A realistic pattern takes a few dozen steps; only a pattern that branches at every
+/// component, such as `{**,x}` many times over, gets near this.
+const WALK_BUDGET: usize = 20_000;
+
+/// Glob components against the components of a literal path. An alternation in the first
+/// component is spelled out one alternative at a time, each respliced into components, so
+/// `{a/b,c}` continues as `a`, `b` or as `c` and no chain of alternations is ever expanded
+/// in full. `**` spans zero or more components. A glob whose last component names an
+/// entry (`names_entries`) and that ends above the rest of the path is a directory hold,
+/// and covers everything below it; `src/*` names the entries directly in `src` and nothing
+/// deeper. A path that ends first is an ancestor directory of what the glob names when the
+/// caller allows the path to be a directory (`path_may_be_dir`); an edited file is never
+/// that. Every call spends one step of `budget`; at zero the answer is an overlap.
+fn components_touch(
+    glob: &[&str],
+    path: &[&str],
+    path_may_be_dir: bool,
+    budget: &mut usize,
+) -> bool {
+    if *budget == 0 {
+        return true;
+    }
+    *budget -= 1;
+    if let Some((g, rest)) = glob.split_first() {
+        if let Some((head, alternatives, tail)) = first_alternation(g) {
+            return alternatives.iter().any(|alt| {
+                let spliced = format!("{head}{alt}{tail}");
+                let mut pieces = pattern_components(&spliced);
+                pieces.extend_from_slice(rest);
+                components_touch(&pieces, path, path_may_be_dir, budget)
+            });
         }
     }
-    done
-}
-
-/// Glob components against the components of a literal path. `**` spans zero or more
-/// components. A glob whose last component names an entry (`names_entries`) and that ends
-/// above the rest of the path is a directory hold, and covers everything below it; `src/*`
-/// names the entries directly in `src` and nothing deeper. A path that ends first is an
-/// ancestor directory of what the glob names when the caller allows the path to be a
-/// directory (`path_may_be_dir`); an edited file is never that.
-fn components_touch(glob: &[&str], path: &[&str], path_may_be_dir: bool) -> bool {
     match (glob.split_first(), path.split_first()) {
         (None, None) => true,
         (None, Some(_)) => false,
         (Some(_), None) => path_may_be_dir,
         (Some((&"**", rest)), Some((_, deeper))) => {
             rest.is_empty()
-                || components_touch(rest, path, path_may_be_dir)
-                || components_touch(glob, deeper, path_may_be_dir)
+                || components_touch(rest, path, path_may_be_dir, budget)
+                || components_touch(glob, deeper, path_may_be_dir, budget)
         }
         (Some((g, rest)), Some((p, deeper))) => {
             component_touches(g, p)
                 && if rest.is_empty() {
                     deeper.is_empty() || names_entries(g)
                 } else {
-                    components_touch(rest, deeper, path_may_be_dir)
+                    components_touch(rest, deeper, path_may_be_dir, budget)
                 }
         }
     }
 }
 
-/// A glob against a literal path: each spelled-out alternation component by component, and
-/// the whole as globset reads it.
+/// A glob against a literal path: component by component with alternations spelled out
+/// as they are reached, and the whole as globset reads it.
 fn glob_touches_literal(glob: &str, literal: &str, path_may_be_dir: bool) -> bool {
     let lit: Vec<&str> = literal.split('/').collect();
-    expand_alternations(glob)
-        .iter()
-        .any(|g| components_touch(&pattern_components(g), &lit, path_may_be_dir))
-        || matches(glob, literal)
+    let mut budget = WALK_BUDGET;
+    components_touch(
+        &pattern_components(glob),
+        &lit,
+        path_may_be_dir,
+        &mut budget,
+    ) || matches(glob, literal)
 }
 
 /// Link local projects that hold live holds but have no current repository link: never
@@ -1345,6 +1350,28 @@ mod tests {
                 "app/{group}/part[ver]/deep/file-1.rs",
             ),
             ("app/{group}", "app/{group}/[id]/page.tsx"),
+            // r7: a chain of alternations past any spelling-out cap still branches one
+            // component at a time, in either reading.
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}",
+                "src/a/b/d/f/h/j/l/page.tsx",
+            ),
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+                "src/a/b/d/f/h/j/l/[id]/page.tsx",
+            ),
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/{n,o}/{p,q}/{r,s}/{t,u}/{v,w}/{x,y}",
+                "src/c/e/g/i/k/m/o/q/s/u/w/y/page.tsx",
+            ),
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{group}",
+                "src/a/b/d/f/h/j/{group}/page.tsx",
+            ),
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/**/[slug]/*.tsx",
+                "src/c/d/f/h/j/x/y/[slug]/page.tsx",
+            ),
             // r6: `[*]` and `[?]` are the literal names `*` and `?`, so they name a
             // directory the way `[id]` does.
             ("packages/*/app/[*]", "packages/web/app/*/page.tsx"),
@@ -1417,6 +1444,23 @@ mod tests {
             ("packages/*/app/[*]", "packages/web/app/[idx]/page.tsx"),
             ("packages/*/app/[?]", "packages/web/app/x/page.tsx"),
             ("packages/*/app/[?]", "packages/web/app/[i]/page.tsx"),
+            // r7: a long chain still names only what it spells.
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}",
+                "src/a/b/d/f/h/j/x/page.tsx",
+            ),
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}",
+                "src/a/d/f/h/j/l/page.tsx",
+            ),
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+                "src/a/b/d/f/h/j/l/[idx]/page.tsx",
+            ),
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+                "src/a/b/d/f/h/j/l/[id]/page.css",
+            ),
         ] {
             let literal = globset::escape(path);
             assert!(!patterns_overlap(glob, &literal), "{glob} vs {path}");
@@ -1430,24 +1474,20 @@ mod tests {
             pattern_components("src/[/]x/[!/]y/[]/]z/*.ts"),
             vec!["src", "[/]x", "[!/]y", "[]/]z", "*.ts"]
         );
-        let mut spelled = expand_alternations("src/{a/b,c}/[x,y]/{d,}.ts");
-        spelled.sort();
         assert_eq!(
-            spelled,
-            [
-                "src/a/b/[x,y]/.ts",
-                "src/a/b/[x,y]/[{]d,[}].ts",
-                "src/a/b/[x,y]/d.ts",
-                "src/c/[x,y]/.ts",
-                "src/c/[x,y]/[{]d,[}].ts",
-                "src/c/[x,y]/d.ts",
-            ]
+            first_alternation("{a/b,c}"),
+            Some(("", vec!["a/b".to_string(), "c".to_string()], ""))
         );
         assert_eq!(
-            expand_alternations("src/[{]a,b[}]/*.ts"),
-            ["src/[{]a,b[}]/*.ts"]
+            first_alternation("{d,}.ts"),
+            Some((
+                "",
+                vec!["d".to_string(), String::new(), "[{]d,[}]".to_string()],
+                ".ts"
+            ))
         );
-        assert_eq!(expand_alternations("src/{a,b"), ["src/{a,b"]);
+        assert_eq!(first_alternation("[{]a,b[}]"), None);
+        assert_eq!(first_alternation("src/{a,b"), None);
         for c in [
             "[id]",
             "{shop,blog}",
@@ -1518,6 +1558,37 @@ mod tests {
             "packages/*/app/[*]",
             "packages/web/app/x/page.tsx"
         ));
+        // r7: a chain of alternations past any spelling-out cap.
+        assert!(hold_covers(
+            "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}",
+            "src/a/b/d/f/h/j/l/page.tsx"
+        ));
+        assert!(hold_covers(
+            "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+            "src/a/b/d/f/h/j/l/[id]/page.tsx"
+        ));
+        assert!(!hold_covers(
+            "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}",
+            "src/a/b/d/f/h/j/x/page.tsx"
+        ));
+    }
+
+    /// r7: the component walk has a step budget instead of a spelling-out cap. A
+    /// comparison that would run past it counts as an overlap, never as free, and a
+    /// pattern built to make the walk branch at every step still answers quickly.
+    #[test]
+    fn exhausted_walk_budget_counts_as_overlap() {
+        let mut none = 0;
+        assert!(components_touch(&["a"], &["b"], false, &mut none));
+        let mut plenty = WALK_BUDGET;
+        assert!(!components_touch(&["a"], &["b"], false, &mut plenty));
+        assert_eq!(plenty, WALK_BUDGET - 1);
+        let branching = "{**,x}/".repeat(40) + "end";
+        let deep = "a/".repeat(60) + "tail";
+        let started = std::time::Instant::now();
+        assert!(patterns_overlap(&branching, &globset::escape(&deep)));
+        assert!(patterns_overlap(&globset::escape(&deep), &branching));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]

@@ -306,6 +306,15 @@ fn manual_route_directory_holds_block_auto_edits_in_both_orders() {
         ("src/{a/b,c}/[id]/page.tsx", "src/a/b/[id]/page.tsx"),
         ("packages/*/app/[*]", "packages/web/app/*/page.tsx"),
         ("packages/*/app/[?]", "packages/web/app/?/page.tsx"),
+        // r7: a chain of alternations past any spelling-out cap.
+        (
+            "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}",
+            "src/a/b/d/f/h/j/l/page.tsx",
+        ),
+        (
+            "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+            "src/a/b/d/f/h/j/l/[id]/page.tsx",
+        ),
     ] {
         let env = Env::new();
         env.start("claude", &env.main, &[]);
@@ -350,6 +359,11 @@ fn own_brace_and_escaped_wildcard_holds_cover_edits_through_the_hook() {
             "packages/*/app/[*]",
             "packages/web/app/*/page.tsx",
             "packages/web/app/x/page.tsx",
+        ),
+        (
+            "lib/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+            "lib/a/b/d/f/h/j/l/[id]/page.tsx",
+            "lib/a/b/d/f/h/j/x/[id]/page.tsx",
         ),
     ] {
         env.ok(&[
