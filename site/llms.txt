@@ -1,8 +1,8 @@
 # Another
 
-> A local-first inbox, activity feed and resource registry for coding agents. Apache-2.0; hooks and MCP; no telemetry or paid tier.
+> Path holds, a local-first inbox, an activity feed and a resource registry for coding agents. Apache-2.0; hooks and MCP; no telemetry or paid tier.
 
-Another lets independently run coding agents exchange mail, claim node-local requests, hold paths (the edit hook takes a hold per edited file and stops a client edit to a file another agent holds; shell edits get past it) and borrow registered resources. It does not launch or manage agent teams. State is local SQLite by default. Federation is optional; a self-hosted hub can read relayed mail bodies. Reaping requires human confirmation on the owning node and is never remote.
+Another lets independently run coding agents hold paths (the edit hook takes a hold per edited file and stops a Claude Code, Codex or Grok CLI edit to a file another agent holds, across checkouts of one repository; shell edits get past it), exchange mail, claim node-local requests and borrow registered resources. It does not launch or manage agent teams. State is local SQLite by default. Federation is optional; a self-hosted hub can read relayed mail bodies. Reaping requires human confirmation on the owning node and is never remote.
 
 ## Start here
 

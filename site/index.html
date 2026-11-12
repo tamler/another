@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>Another: coordinate multiple coding agents</title>
-  <meta name="description" content="Several coding agents in one repo overwrite files and repeat work. Another is the local inbox and path holds I built so one session can hand a task over.">
+  <meta name="description" content="Several coding agents in one repo overwrite files and repeat work. Another is the path holds and inbox I built so one session cannot edit a file another is in.">
   <link rel="canonical" href="https://toanother.one/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Another">
   <meta property="og:title" content="Another: coordinate multiple coding agents">
-  <meta property="og:description" content="Several coding agents in one repo overwrite files and repeat work. Another is the local inbox and path holds I built so one session can hand a task over.">
+  <meta property="og:description" content="Several coding agents in one repo overwrite files and repeat work. Another is the path holds and inbox I built so one session cannot edit a file another is in.">
   <meta property="og:url" content="https://toanother.one/">
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
@@ -18,10 +18,10 @@
   <meta property="og:image:alt" content="Another. One inbox for coding agents.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Another: coordinate multiple coding agents">
-  <meta name="twitter:description" content="Several coding agents in one repo overwrite files and repeat work. Another is the local inbox and path holds I built so one session can hand a task over.">
+  <meta name="twitter:description" content="Several coding agents in one repo overwrite files and repeat work. Another is the path holds and inbox I built so one session cannot edit a file another is in.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
   <meta name="twitter:image:alt" content="Another. One inbox for coding agents.">
-  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"WebSite","author":{"@type":"Organization","name":"The Another Authors"},"name":"Another","url":"https://toanother.one/","description":"Several coding agents in one repo overwrite files and repeat work. Another is the local inbox and path holds I built so one session can hand a task over."},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","description":"A local inbox, activity feed and resource registry for coding agents, through MCP and a shared CLI.","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}},{"@type":"SoftwareSourceCode","@id":"https://toanother.one/#source","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"WebSite","author":{"@type":"Organization","name":"The Another Authors"},"name":"Another","url":"https://toanother.one/","description":"Several coding agents in one repo overwrite files and repeat work. Another is the path holds and inbox I built so one session cannot edit a file another is in."},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","description":"A local inbox, activity feed and resource registry for coding agents, through MCP and a shared CLI.","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}},{"@type":"SoftwareSourceCode","@id":"https://toanother.one/#source","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
@@ -41,7 +41,7 @@
       <div class="hero-bottom">
         <div>
           <p class="definition">I run Claude Code and Codex in the same repo. They edit the same files, redo each other's work, and the only handoff is me pasting a paragraph from one terminal into the other.</p>
-          <p>Another is a local inbox for those sessions. Path holds so a second agent can see a file is taken. A feed of who is doing what. A registry for ports and model servers, so the next agent borrows the one that is already running. It does not start the agents.</p>
+          <p>Another puts path holds on the files those sessions edit, so a second agent's edit to a file the first one is in is stopped with the holder's name. Around the holds: a local inbox with requests that have an owner, a feed of who is doing what, and a registry for ports and model servers, so the next agent borrows the one that is already running. It does not start the agents.</p>
         </div>
         <div class="install">
           <pre class="shell" tabindex="0" aria-label="Install Another"><code>cargo install <span class="token">--locked</span> <span class="token">--git</span> <span class="token">https://github.com/tamler/another</span> another</code></pre>
@@ -60,8 +60,8 @@
     </section>
     <section class="section" aria-labelledby="fix-title">
       <h2 id="fix-title">What I built for that</h2>
+      <p>Path holds, taken at the edit. With the hooks installed, each file an agent edits gets an expiring hold, and a Claude Code, Codex or Grok CLI edit to a file another agent holds is stopped with the holder's name, across worktrees and clones of the same repo. <code>another hold check</code> exits 3 when globs overlap and grants nothing. An edit made from a shell command gets past the hook, and Cursor has no edit guard, so use another checkout when you need a real boundary.</p>
       <p>Mail with a subject, a thread, and an ack. A request has an owner: open, then claimed, then done. If it goes stale, someone else can take it.</p>
-      <p>Path holds expire. <code>another hold check</code> exits 3 when globs overlap and grants nothing. With the hooks installed, an agent's file edit takes a hold on that file, and an edit to a file another agent holds is stopped with the holder's name, across worktrees of the same repo. An edit made from a shell command gets past that, so use another checkout when you need a real boundary.</p>
       <p>Hooks drop a short digest in at session start, and a one-line notice after the next tool call when mail lands mid-task. That is why the agents look. A loopback daemon can wake an idle Herdr agent, and optional wake can type into an idle tmux pane. Neither interrupts an agent that is mid-turn. State sits in one SQLite file under <code>~/.another</code> (or <code>$ANOTHER_HOME</code>). A second machine can federate through a hub you host. That hub can read the mail it relays.</p>
       <p>Clients I hook up: Claude Code, Codex, Grok CLI, Cursor. Grok Bot can join as a remote peer with a scoped token. ChatGPT and Claude.ai can join through OAuth against a URL you run, with each grant approved on this machine. Anything else that speaks MCP can use the same tools. <a href="/docs/">The longer docs</a> have the sharp edges.</p>
     </section>
@@ -117,8 +117,8 @@ opened request 01M6FMXVS73X1C5HPZKWSC7QZN</span></code></pre>
     <section class="section" aria-labelledby="scenarios-title">
       <h2 id="scenarios-title">Where it shows up</h2>
       <dl class="clients">
-        <div class="client"><dt><a href="/guides/claude-code-codex/">Claude Code and Codex</a></dt><dd>Two different programs, one checkout, one project inbox. The guide is the review handoff.</dd></div>
         <div class="client"><dt><a href="/guides/avoid-agent-file-conflicts/">Same files</a></dt><dd>Holds, the edit hook that enforces them, the exit status, and what a hold will not do.</dd></div>
+        <div class="client"><dt><a href="/guides/claude-code-codex/">Claude Code and Codex</a></dt><dd>Two different programs, one checkout, one project inbox. The guide is the review handoff.</dd></div>
         <div class="client"><dt><a href="/guides/share-model-server/">One model server</a></dt><dd>Register it, borrow it, and do not reap it until a person confirms.</dd></div>
         <div class="client"><dt><a href="/guides/agents-on-two-machines/">Laptop and a remote box</a></dt><dd>A hub you host. Mail crosses. Requests stay on one node.</dd></div>
         <div class="client"><dt><a href="/guides/multiple-claude-code-sessions/">Two Claude Code sessions</a></dt><dd>Same client twice. Give each session its own name or they share one identity.</dd></div>
