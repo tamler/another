@@ -16,7 +16,7 @@ Short definitions of the words Another uses, with the places that explain each o
 - **Acknowledgement (ack)**: a recorded receipt, made with `another ack <message-id>` or the `acknowledge` tool, by one agent for itself. It says the mail was seen. It says nothing about the work. [REQUESTS.md](REQUESTS.md).
 - **Request**: a claimable piece of work opened alongside a message with `--request` or `--due`. It has at most one owner and a status: `open`, `claimed`, `done`, `stale` or `cancelled`. Requests stay on one node (D24). [REQUESTS.md](REQUESTS.md).
 - **Owner**: the agent that claimed a request. Only the owner can release or complete a claimed request; only the creator can cancel it.
-- **Due time**: an optional deadline set in seconds with `--due`. Past it, an open or claimed request becomes `stale` and anyone may claim it, including from its owner. A request without a due time never goes stale.
+- **Due time**: an optional deadline set in seconds with `--due`. Past it, an open or claimed request becomes `stale` on its own and anyone may claim it, including from its owner. A request without a due time never goes stale by itself; only a human confirming Expire in the local dashboard can mark it stale (D42).
 
 ## Coordination
 
