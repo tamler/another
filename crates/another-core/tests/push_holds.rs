@@ -308,6 +308,33 @@ fn manual_globs_under_literal_route_components_conflict_in_both_orders() {
             "app/{group}/part[ver]/deep/file-1.rs",
         ),
         ("app/{a,b}/*.tsx", "app/a/page.tsx"),
+        // r4: a wildcard before the bracketed or braced directory.
+        (
+            "packages/*/app/[id]/page.tsx",
+            "packages/web/app/[id]/page.tsx",
+        ),
+        ("app/{shop,blog}/[id]/page.tsx", "app/shop/[id]/page.tsx"),
+        ("app/[id]/**/[slug]/*.tsx", "app/[id]/x/[slug]/page.tsx"),
+        ("app/*/[id]/*.tsx", "app/shop/[id]/page.tsx"),
+        ("app/?/[id]/page.tsx", "app/a/[id]/page.tsx"),
+        ("app/[id]*/page.tsx", "app/[id]x/page.tsx"),
+        ("packages/*/app/[id]", "packages/web/app/[id]/page.tsx"),
+        // r6: an alternation with a `/` still names a directory or a literal route, and
+        // the escaped literal names `*` and `?` are directories like `[id]`.
+        ("src/{a/b,c}", "src/a/b/page.tsx"),
+        ("src/{a/b,c}", "src/c/page.tsx"),
+        ("src/{a/b,c}/[id]/page.tsx", "src/a/b/[id]/page.tsx"),
+        ("packages/*/app/[*]", "packages/web/app/*/page.tsx"),
+        ("packages/*/app/[?]", "packages/web/app/?/page.tsx"),
+        // r7: a chain of alternations past any spelling-out cap.
+        (
+            "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}",
+            "src/a/b/d/f/h/j/l/page.tsx",
+        ),
+        (
+            "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+            "src/a/b/d/f/h/j/l/[id]/page.tsx",
+        ),
     ] {
         let fx = Fx::new();
         let wt = fx.project(&fx.repos.wt);
@@ -342,6 +369,115 @@ fn manual_globs_under_literal_route_components_conflict_in_both_orders() {
             1,
             "auto first: {pattern}"
         );
+    }
+    // Must stay free: a different route directory, a different package subtree, and a
+    // file the tail does not name.
+    let fx = Fx::new();
+    let wt = fx.project(&fx.repos.wt);
+    for pattern in [
+        "packages/*/app/[id]/page.tsx",
+        "app/{shop,blog}/[id]/page.tsx",
+        "app/[id]/**/[slug]/*.tsx",
+        "src/{a/b,c}/[id]/page.tsx",
+        "packages/*/app/[*]",
+        "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+    ] {
+        assert_eq!(
+            fx.acquire("alice", &fx.repos.main, &[pattern])
+                .unwrap()
+                .granted
+                .len(),
+            1
+        );
+    }
+    for path in [
+        "packages/web/app/[idx]/page.tsx",
+        "packages/web/lib/[id]/page.tsx",
+        "app/docs/[id]/page.tsx",
+        "app/other/[slug]/page.tsx",
+        "packages/web/app/[id]/page.css",
+        "src/a/[id]/page.tsx",
+        "src/a/b/[idx]/page.tsx",
+        "packages/web/app/x/page.tsx",
+        "src/a/b/d/f/h/j/x/[id]/page.tsx",
+        "src/a/b/d/f/h/j/l/[idx]/page.tsx",
+    ] {
+        assert!(
+            fx.store
+                .guard_edit("bob", &wt, &[path.into()], "auto")
+                .unwrap()
+                .conflicts
+                .is_empty(),
+            "{path} must stay free"
+        );
+    }
+}
+
+/// r6: an agent's own glob hold covers the files it names through an alternation with a
+/// `/` or through the escaped literal names `*` and `?`, so the edit guard takes no second
+/// hold for them.
+#[test]
+fn own_glob_holds_cover_brace_and_escaped_wildcard_files() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    let granted = fx
+        .acquire(
+            "alice",
+            &fx.repos.main,
+            &[
+                "src/{a/b,c}",
+                "src/{a/b,c}/[id]/page.tsx",
+                "packages/*/app/[*]",
+                "lib/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+            ],
+        )
+        .unwrap();
+    assert_eq!(granted.granted.len(), 4);
+    for path in [
+        "src/a/b/page.tsx",
+        "src/c/page.tsx",
+        "src/a/b/[id]/page.tsx",
+        "packages/web/app/*/page.tsx",
+        "lib/a/b/d/f/h/j/l/[id]/page.tsx",
+    ] {
+        let guard = fx
+            .store
+            .guard_edit("alice", &main, &[path.into()], "auto")
+            .unwrap();
+        assert_eq!(guard.covered, [path], "{path}");
+        assert!(guard.held.is_empty(), "{path}");
+    }
+    // A file outside the alternation gets a hold of its own.
+    let guard = fx
+        .store
+        .guard_edit("alice", &main, &["src/a/x.ts".into()], "auto")
+        .unwrap();
+    assert!(guard.covered.is_empty());
+    assert_eq!(guard.held.len(), 1);
+}
+
+/// r5: `*` and `src/*` name the entries at their own depth. They are granted without
+/// `--repo-wide` and must not hold everything below the way `**` does.
+#[test]
+fn wildcard_only_globs_hold_one_level() {
+    let fx = Fx::new();
+    let wt = fx.project(&fx.repos.wt);
+    for pattern in ["*", "src/*"] {
+        let granted = fx.acquire("alice", &fx.repos.main, &[pattern]).unwrap();
+        assert_eq!(granted.granted.len(), 1, "{pattern}");
+    }
+    for (path, blocked) in [
+        ("top.rs", true),
+        ("src/a.rs", true),
+        ("src/deep/a.rs", false),
+        ("a/b/c.rs", false),
+    ] {
+        let conflicts = fx
+            .store
+            .guard_edit("bob", &wt, &[path.into()], "auto")
+            .unwrap()
+            .conflicts;
+        assert_eq!(!conflicts.is_empty(), blocked, "{path}");
     }
 }
 

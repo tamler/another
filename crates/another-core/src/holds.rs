@@ -278,7 +278,7 @@ fn hold_covers(held: &str, path: &str) -> bool {
     }
     match literal_pattern(held) {
         Some(held) => covers(&held, &path),
-        None => held == "**" || matches_with_literal_prefix(held, &path) || matches(held, &path),
+        None => held == "**" || glob_touches_literal(held, &path, false),
     }
 }
 
@@ -309,8 +309,8 @@ pub fn patterns_overlap(a: &str, b: &str) -> bool {
     }
     match (literal_pattern(a), literal_pattern(b)) {
         (Some(a), Some(b)) => covers(&a, &b) || covers(&b, &a),
-        (None, Some(b)) => glob_touches_literal(a, &b),
-        (Some(a), None) => glob_touches_literal(b, &a),
+        (None, Some(b)) => glob_touches_literal(a, &b, true),
+        (Some(a), None) => glob_touches_literal(b, &a, true),
         (None, None) => {
             let (pa, pb) = (literal_prefix(a), literal_prefix(b));
             pa.starts_with(pb) || pb.starts_with(pa)
@@ -378,36 +378,201 @@ fn matches(glob: &str, path: &str) -> bool {
     compile(glob).map(|m| m.is_match(path)).unwrap_or(true)
 }
 
-/// Equal leading components also carry literal directory intent, even when their names
-/// contain brackets or braces. At the first differing (wildcard) component, match the
-/// entire remaining glob normally. An exhausted side may be an ancestor directory hold.
-fn matches_with_literal_prefix(glob: &str, literal: &str) -> bool {
-    let pattern: Vec<&str> = glob.split('/').collect();
-    let path: Vec<&str> = literal.split('/').collect();
-    let shared = pattern
-        .iter()
-        .zip(&path)
-        .take_while(|(a, b)| a == b)
-        .count();
-    shared == pattern.len()
-        || shared == path.len()
-        || matches(&pattern[shared..].join("/"), &path[shared..].join("/"))
-}
-
-fn glob_touches_literal(glob: &str, literal: &str) -> bool {
-    if matches_with_literal_prefix(glob, literal) || matches(glob, literal) {
+/// One glob component against one literal path component. Three readings count: the same
+/// text, a glob match, and a glob match in which `[`, `]`, `{` and `}` are plain characters
+/// while `*` and `?` stay wildcards. The last reading is how `[id]*` names the route
+/// directories that start with `[id]`, and it keeps a bracketed directory name literal even
+/// after a wildcard component, where no leading-prefix rule can reach it. A globset escape
+/// such as `[*]` already spells one plain character and is kept as it is.
+fn component_touches(glob: &str, path: &str) -> bool {
+    // A piece of a split pattern may not compile on its own; then it matches nothing here
+    // and only the whole-glob reading in `glob_touches_literal` can count.
+    if glob == path || compile(glob).is_ok_and(|m| m.is_match(path)) {
         return true;
     }
-    // The literal may be a directory with matches of the glob below it: compare the
-    // glob's leading components at the literal's depth.
-    let comps: Vec<&str> = glob.split('/').collect();
-    let lit: Vec<&str> = literal.split('/').collect();
-    if let Some(pos) = comps.iter().position(|c| c.contains("**")) {
-        if pos < lit.len() {
-            return pos == 0 || matches(&comps[..pos].join("/"), &lit[..pos].join("/"));
+    let mut spelled = String::with_capacity(glob.len() + 8);
+    let mut rest = glob;
+    while let Some(c) = rest.chars().next() {
+        let escape = rest
+            .get(..3)
+            .filter(|e| literal_pattern(e).is_some_and(|l| l.len() == 1));
+        if let Some(e) = escape {
+            spelled.push_str(e);
+            rest = &rest[3..];
+            continue;
+        }
+        if matches!(c, '[' | ']' | '{' | '}') {
+            spelled.push('[');
+            spelled.push(c);
+            spelled.push(']');
+        } else {
+            spelled.push(c);
+        }
+        rest = &rest[c.len_utf8()..];
+    }
+    spelled != glob && compile(&spelled).is_ok_and(|m| m.is_match(path))
+}
+
+/// Where the character class opened by the `[` at byte `open` closes: the byte of its `]`,
+/// read as globset reads it (`[!` and `[^` negate; a `]` first in the class is a member,
+/// so `[]]` is the class of `]`). None for an unclosed class, which is then a plain `[`.
+fn class_end(pattern: &str, open: usize) -> Option<usize> {
+    let bytes = pattern.as_bytes();
+    let mut i = open + 1;
+    if matches!(bytes.get(i), Some(b'!' | b'^')) {
+        i += 1;
+    }
+    if bytes.get(i) == Some(&b']') {
+        i += 1;
+    }
+    pattern.get(i..)?.find(']').map(|j| i + j)
+}
+
+/// The characters of `pattern` outside character classes, with their byte offsets. A class
+/// and everything in it is skipped, so `[*]`, `[/]` and `[{]` are never read as a
+/// wildcard, a separator or an alternation.
+fn outside_classes(pattern: &str) -> Vec<(usize, char)> {
+    let mut out = Vec::new();
+    let mut skip_to = 0;
+    for (i, c) in pattern.char_indices() {
+        if i < skip_to {
+            continue;
+        }
+        if c == '[' {
+            if let Some(end) = class_end(pattern, i) {
+                skip_to = end + 1;
+                continue;
+            }
+        }
+        out.push((i, c));
+    }
+    out
+}
+
+/// A glob component that names a directory or a file rather than a set of them: no `*` and
+/// no `?` outside a character class. `[id]`, `{shop,blog}` and the escaped literal names
+/// `[*]` and `[?]` qualify, `*` and `[id]*` do not.
+fn names_entries(component: &str) -> bool {
+    !outside_classes(component)
+        .iter()
+        .any(|&(_, c)| matches!(c, '*' | '?'))
+}
+
+/// A pattern's components: split on `/` outside brackets and braces, so an alternation
+/// such as `{a/b,c}` stays one piece until `components_touch` reaches it.
+fn pattern_components(pattern: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut start, mut depth) = (0, 0usize);
+    for (i, c) in outside_classes(pattern) {
+        match c {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            '/' if depth == 0 => {
+                out.push(&pattern[start..i]);
+                start = i + 1;
+            }
+            _ => {}
         }
     }
-    comps.len() > lit.len() && matches(&comps[..lit.len()].join("/"), literal)
+    out.push(&pattern[start..]);
+    out
+}
+
+/// The first alternation of `pattern` outside character classes: the text before it, its
+/// alternatives, and the text after it. The braces read as plain characters count as one
+/// more alternative, spelled `[{]...[}]`, so that `{group}` still names a directory called
+/// `{group}`; a name cannot contain a `/`, so that reading is skipped when the alternation
+/// does. None without an alternation, and for an unclosed `{`, which globset refuses.
+fn first_alternation(pattern: &str) -> Option<(&str, Vec<String>, &str)> {
+    let outside = outside_classes(pattern);
+    let open = outside.iter().position(|&(_, c)| c == '{')?;
+    let open_at = outside[open].0;
+    let close_at = outside[open..].iter().find(|&&(_, c)| c == '}')?.0;
+    let inside = &pattern[open_at + 1..close_at];
+    let mut alternatives = Vec::new();
+    let mut start = open_at + 1;
+    for &(i, c) in &outside[open + 1..] {
+        if i >= close_at {
+            break;
+        }
+        if c == ',' {
+            alternatives.push(pattern[start..i].to_string());
+            start = i + 1;
+        }
+    }
+    alternatives.push(pattern[start..close_at].to_string());
+    if !inside.contains('/') {
+        alternatives.push(format!("[{{]{inside}[}}]"));
+    }
+    Some((&pattern[..open_at], alternatives, &pattern[close_at + 1..]))
+}
+
+/// Steps one component walk may take. A comparison that runs past it counts as an
+/// overlap: a spurious conflict costs a retry, a missed one lets two agents edit one file.
+/// A realistic pattern takes a few dozen steps; only a pattern that branches at every
+/// component, such as `{**,x}` many times over, gets near this.
+const WALK_BUDGET: usize = 20_000;
+
+/// Glob components against the components of a literal path. An alternation in the first
+/// component is spelled out one alternative at a time, each respliced into components, so
+/// `{a/b,c}` continues as `a`, `b` or as `c` and no chain of alternations is ever expanded
+/// in full. `**` spans zero or more components. A glob whose last component names an
+/// entry (`names_entries`) and that ends above the rest of the path is a directory hold,
+/// and covers everything below it; `src/*` names the entries directly in `src` and nothing
+/// deeper. A path that ends first is an ancestor directory of what the glob names when the
+/// caller allows the path to be a directory (`path_may_be_dir`); an edited file is never
+/// that. Every call spends one step of `budget`; at zero the answer is an overlap.
+fn components_touch(
+    glob: &[&str],
+    path: &[&str],
+    path_may_be_dir: bool,
+    budget: &mut usize,
+) -> bool {
+    if *budget == 0 {
+        return true;
+    }
+    *budget -= 1;
+    if let Some((g, rest)) = glob.split_first() {
+        if let Some((head, alternatives, tail)) = first_alternation(g) {
+            return alternatives.iter().any(|alt| {
+                let spliced = format!("{head}{alt}{tail}");
+                let mut pieces = pattern_components(&spliced);
+                pieces.extend_from_slice(rest);
+                components_touch(&pieces, path, path_may_be_dir, budget)
+            });
+        }
+    }
+    match (glob.split_first(), path.split_first()) {
+        (None, None) => true,
+        (None, Some(_)) => false,
+        (Some(_), None) => path_may_be_dir,
+        (Some((&"**", rest)), Some((_, deeper))) => {
+            rest.is_empty()
+                || components_touch(rest, path, path_may_be_dir, budget)
+                || components_touch(glob, deeper, path_may_be_dir, budget)
+        }
+        (Some((g, rest)), Some((p, deeper))) => {
+            component_touches(g, p)
+                && if rest.is_empty() {
+                    deeper.is_empty() || names_entries(g)
+                } else {
+                    components_touch(rest, deeper, path_may_be_dir, budget)
+                }
+        }
+    }
+}
+
+/// A glob against a literal path: component by component with alternations spelled out
+/// as they are reached, and the whole as globset reads it.
+fn glob_touches_literal(glob: &str, literal: &str, path_may_be_dir: bool) -> bool {
+    let lit: Vec<&str> = literal.split('/').collect();
+    let mut budget = WALK_BUDGET;
+    components_touch(
+        &pattern_components(glob),
+        &lit,
+        path_may_be_dir,
+        &mut budget,
+    ) || matches(glob, literal)
 }
 
 /// Link local projects that hold live holds but have no current repository link: never
@@ -1144,6 +1309,286 @@ mod tests {
         assert!(patterns_overlap("src/**", "src/*.toml"));
         assert!(!patterns_overlap("docs/**", "src/**"));
         assert!(patterns_overlap("**", "anything"));
+    }
+
+    /// PR #108 r4: a wildcard component before a bracketed or braced directory must not
+    /// turn that directory back into a character class or an alternation, in either order.
+    #[test]
+    fn wildcards_before_bracketed_components_keep_literal_intent() {
+        for (glob, path) in [
+            (
+                "packages/*/app/[id]/page.tsx",
+                "packages/web/app/[id]/page.tsx",
+            ),
+            ("app/*/[id]/*.tsx", "app/shop/[id]/page.tsx"),
+            ("app/{shop,blog}/[id]/page.tsx", "app/shop/[id]/page.tsx"),
+            ("app/[id]/**/[slug]/*.tsx", "app/[id]/x/[slug]/page.tsx"),
+            ("app/[id]/*/[slug]/page.tsx", "app/[id]/x/[slug]/page.tsx"),
+            ("app/?/[id]/page.tsx", "app/a/[id]/page.tsx"),
+            ("app/[id]*/page.tsx", "app/[id]x/page.tsx"),
+            // A glob whose last component names a directory covers the files below it.
+            ("packages/*/app/[id]", "packages/web/app/[id]/page.tsx"),
+            ("packages/*/app/[id]/**", "packages/web/app/[id]/page.tsx"),
+            ("app/{shop,blog}", "app/shop/[id]/page.tsx"),
+            // `*` and `src/*` name the entries at their own depth.
+            ("*", "top.rs"),
+            ("src/*", "src/a.rs"),
+            // An alternation may contain a `/`; the whole-glob reading catches it.
+            ("src/{a/b,c}.ts", "src/a/b.ts"),
+            ("src/{a/b,c}.ts", "src/c.ts"),
+            // r6: an alternation with a `/` is spelled out before the components are
+            // compared, so it still names a directory or keeps a later route literal.
+            ("src/{a/b,c}", "src/a/b/page.tsx"),
+            ("src/{a/b,c}", "src/c/page.tsx"),
+            ("src/{a/b,c}/[id]/page.tsx", "src/a/b/[id]/page.tsx"),
+            ("src/{a/b,c}/[id]/page.tsx", "src/c/[id]/page.tsx"),
+            ("src/{a/b,c}/**/[slug]/*.tsx", "src/a/b/x/[slug]/page.tsx"),
+            ("{a/b,c}/[id]", "a/b/[id]/page.tsx"),
+            // Braces read as plain characters still name a directory called `{group}`.
+            (
+                "app/{group}/part[ver]/**/file-?.{rs,ts}",
+                "app/{group}/part[ver]/deep/file-1.rs",
+            ),
+            ("app/{group}", "app/{group}/[id]/page.tsx"),
+            // r7: a chain of alternations past any spelling-out cap still branches one
+            // component at a time, in either reading.
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}",
+                "src/a/b/d/f/h/j/l/page.tsx",
+            ),
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+                "src/a/b/d/f/h/j/l/[id]/page.tsx",
+            ),
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/{n,o}/{p,q}/{r,s}/{t,u}/{v,w}/{x,y}",
+                "src/c/e/g/i/k/m/o/q/s/u/w/y/page.tsx",
+            ),
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{group}",
+                "src/a/b/d/f/h/j/{group}/page.tsx",
+            ),
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/**/[slug]/*.tsx",
+                "src/c/d/f/h/j/x/y/[slug]/page.tsx",
+            ),
+            // r6: `[*]` and `[?]` are the literal names `*` and `?`, so they name a
+            // directory the way `[id]` does.
+            ("packages/*/app/[*]", "packages/web/app/*/page.tsx"),
+            ("packages/*/app/[?]", "packages/web/app/?/page.tsx"),
+            ("app/[*]/[id]", "app/*/[id]/page.tsx"),
+            // A literal ancestor directory still meets a deeper glob.
+            ("packages/*/app/[id]/page.tsx", "packages/web/app"),
+            ("packages/*/app/[id]/page.tsx", "packages/web/app/[id]"),
+            ("src/{a/b,c}.ts", "src/a"),
+            // Below a `**`, a deeper literal may be a directory with matches inside it,
+            // as it always was for `src/**/*.rs` against `src/a/b.css`.
+            ("app/[id]/**/[slug]/*.tsx", "app/[id]/x/[slug]/page.css"),
+            ("src/**/*.rs", "src/a/b.css"),
+        ] {
+            let literal = globset::escape(path);
+            assert!(patterns_overlap(glob, &literal), "{glob} vs {path}");
+            assert!(patterns_overlap(&literal, glob), "{path} vs {glob}");
+        }
+        // Real glob readings still count: a class, an alternation, a wildcard tail.
+        assert!(patterns_overlap(
+            "app/[ab]/page.tsx",
+            &globset::escape("app/a/page.tsx")
+        ));
+        assert!(patterns_overlap(
+            "src/{a,b}.ts",
+            &globset::escape("src/a.ts")
+        ));
+        assert!(patterns_overlap(
+            "app/[id]/*.tsx",
+            &globset::escape("app/[id]/page.tsx")
+        ));
+        // Must stay free.
+        for (glob, path) in [
+            (
+                "packages/*/app/[id]/page.tsx",
+                "packages/web/app/[idx]/page.tsx",
+            ),
+            (
+                "packages/*/app/[id]/page.tsx",
+                "packages/web/lib/[id]/page.tsx",
+            ),
+            ("app/{shop,blog}/[id]/page.tsx", "app/docs/[id]/page.tsx"),
+            ("app/?/[id]/page.tsx", "app/ab/[id]/page.tsx"),
+            ("app/[id]*/page.tsx", "app/[idx]/page.tsx"),
+            ("app/[id]/**/[slug]/*.tsx", "app/other/[slug]/page.tsx"),
+            ("app/[id]/*/[slug]/page.tsx", "app/[id]/x/[slug]/page.css"),
+            ("app/*/[id]/*.tsx", "app/shop/[id]/deep/page.tsx"),
+            ("app/[id]", "app/[idx]/page.tsx"),
+            ("app/[id]", "other/[id]/page.tsx"),
+            ("src/*.rs", "src/deep/a.rs"),
+            ("src/a?.rs", "src/abc.rs"),
+            // r5: a wildcard last component is not a directory hold, so `*`, `*/*` and
+            // `src/*` do not act like `**`.
+            ("*", "src/a.rs"),
+            ("*/*", "a/b/c.rs"),
+            ("src/*", "src/deep/a.rs"),
+            ("app/[id]*", "app/[id]x/page.tsx"),
+            ("app/?", "app/a/page.tsx"),
+            // The alternatives name exactly what they spell.
+            ("src/{a/b,c}.ts", "src/x.ts"),
+            ("src/{a/b,c}.ts", "src/a/x.ts"),
+            ("src/{a/b,c}", "src/a/x.ts"),
+            ("src/{a/b,c}", "src/ab/page.tsx"),
+            ("src/{a/b,c}/[id]/page.tsx", "src/a/b/[idx]/page.tsx"),
+            ("src/{a/b,c}/[id]/page.tsx", "src/a/[id]/page.tsx"),
+            ("src/{a/b,c}/[id]/page.tsx", "src/c/[id]/page.css"),
+            // An escaped wildcard is one literal character, not a wildcard.
+            ("packages/*/app/[*]", "packages/web/app/x/page.tsx"),
+            ("packages/*/app/[*]", "packages/web/app/*x/page.tsx"),
+            ("packages/*/app/[*]", "packages/web/app/[idx]/page.tsx"),
+            ("packages/*/app/[?]", "packages/web/app/x/page.tsx"),
+            ("packages/*/app/[?]", "packages/web/app/[i]/page.tsx"),
+            // r7: a long chain still names only what it spells.
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}",
+                "src/a/b/d/f/h/j/x/page.tsx",
+            ),
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}",
+                "src/a/d/f/h/j/l/page.tsx",
+            ),
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+                "src/a/b/d/f/h/j/l/[idx]/page.tsx",
+            ),
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+                "src/a/b/d/f/h/j/l/[id]/page.css",
+            ),
+        ] {
+            let literal = globset::escape(path);
+            assert!(!patterns_overlap(glob, &literal), "{glob} vs {path}");
+            assert!(!patterns_overlap(&literal, glob), "{path} vs {glob}");
+        }
+        assert_eq!(
+            pattern_components("src/{a/b,c}/[x/y]/*.ts"),
+            vec!["src", "{a/b,c}", "[x/y]", "*.ts"]
+        );
+        assert_eq!(
+            pattern_components("src/[/]x/[!/]y/[]/]z/*.ts"),
+            vec!["src", "[/]x", "[!/]y", "[]/]z", "*.ts"]
+        );
+        assert_eq!(
+            first_alternation("{a/b,c}"),
+            Some(("", vec!["a/b".to_string(), "c".to_string()], ""))
+        );
+        assert_eq!(
+            first_alternation("{d,}.ts"),
+            Some((
+                "",
+                vec!["d".to_string(), String::new(), "[{]d,[}]".to_string()],
+                ".ts"
+            ))
+        );
+        assert_eq!(first_alternation("[{]a,b[}]"), None);
+        assert_eq!(first_alternation("src/{a,b"), None);
+        for c in [
+            "[id]",
+            "{shop,blog}",
+            "[*]",
+            "[?]",
+            "[!*?]",
+            "[]*]",
+            "a[",
+            "x",
+        ] {
+            assert!(names_entries(c), "{c}");
+        }
+        for c in ["*", "?", "[id]*", "*.rs", "[*]*", "a[b]?"] {
+            assert!(!names_entries(c), "{c}");
+        }
+        // The escaped spelling keeps working and does not read as a class.
+        assert!(patterns_overlap(
+            "packages/*/app/[[]id[]]/page.tsx",
+            &globset::escape("packages/web/app/[id]/page.tsx")
+        ));
+        assert!(!patterns_overlap(
+            "packages/*/app/[[]id[]]/page.tsx",
+            &globset::escape("packages/web/app/i/page.tsx")
+        ));
+    }
+
+    /// Own-hold coverage reads the glob the same way, but the edited path is a file: a glob
+    /// that would only match a directory above it does not cover it.
+    #[test]
+    fn own_hold_coverage_through_wildcards() {
+        assert!(hold_covers(
+            "packages/*/app/[id]",
+            "packages/web/app/[id]/page.tsx"
+        ));
+        assert!(!hold_covers("app/[id]*", "app/[id]x/page.tsx"));
+        assert!(hold_covers("app/[id]*/**", "app/[id]x/page.tsx"));
+        assert!(hold_covers("src/*", "src/a.rs"));
+        assert!(!hold_covers("src/*", "src/deep/a.rs"));
+        assert!(hold_covers(
+            "app/{shop,blog}/[id]/page.tsx",
+            "app/shop/[id]/page.tsx"
+        ));
+        assert!(!hold_covers("src/**/*.rs", "src/a"));
+        assert!(!hold_covers(
+            "packages/*/app/[id]/page.tsx",
+            "packages/web/app"
+        ));
+        // r6: an alternation with a `/`, and the escaped literal names `*` and `?`.
+        assert!(hold_covers("src/{a/b,c}", "src/a/b/page.tsx"));
+        assert!(hold_covers(
+            "src/{a/b,c}/[id]/page.tsx",
+            "src/a/b/[id]/page.tsx"
+        ));
+        assert!(!hold_covers("src/{a/b,c}", "src/a/x.ts"));
+        assert!(hold_covers(
+            "packages/*/app/[*]",
+            "packages/web/app/*/page.tsx"
+        ));
+        assert!(hold_covers(
+            "packages/*/app/[*]",
+            &globset::escape("packages/web/app/*/page.tsx")
+        ));
+        assert!(hold_covers(
+            "packages/*/app/[?]",
+            "packages/web/app/?/page.tsx"
+        ));
+        assert!(!hold_covers(
+            "packages/*/app/[*]",
+            "packages/web/app/x/page.tsx"
+        ));
+        // r7: a chain of alternations past any spelling-out cap.
+        assert!(hold_covers(
+            "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}",
+            "src/a/b/d/f/h/j/l/page.tsx"
+        ));
+        assert!(hold_covers(
+            "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+            "src/a/b/d/f/h/j/l/[id]/page.tsx"
+        ));
+        assert!(!hold_covers(
+            "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}",
+            "src/a/b/d/f/h/j/x/page.tsx"
+        ));
+    }
+
+    /// r7: the component walk has a step budget instead of a spelling-out cap. A
+    /// comparison that would run past it counts as an overlap, never as free, and a
+    /// pattern built to make the walk branch at every step still answers quickly.
+    #[test]
+    fn exhausted_walk_budget_counts_as_overlap() {
+        let mut none = 0;
+        assert!(components_touch(&["a"], &["b"], false, &mut none));
+        let mut plenty = WALK_BUDGET;
+        assert!(!components_touch(&["a"], &["b"], false, &mut plenty));
+        assert_eq!(plenty, WALK_BUDGET - 1);
+        let branching = "{**,x}/".repeat(40) + "end";
+        let deep = "a/".repeat(60) + "tail";
+        let started = std::time::Instant::now();
+        assert!(patterns_overlap(&branching, &globset::escape(&deep)));
+        assert!(patterns_overlap(&globset::escape(&deep), &branching));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]
