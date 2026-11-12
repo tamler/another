@@ -131,6 +131,11 @@ pub struct EditGuard {
     pub conflicts: Vec<HoldConflict>,
     /// First notice for a new set of blockers; repeated attempts get a short denial.
     pub first_notice: bool,
+    /// A durable wait is on record for these conflicts, so one inbox ping follows when the
+    /// file is free. False when recording the wait failed: no ping will come, and the
+    /// agent has to check again itself after `retry_after_seconds`. Always false when
+    /// there are no conflicts.
+    pub wait_recorded: bool,
     /// Advisory backoff, in seconds. A wait also sends one inbox ping when the file is free.
     pub retry_after_seconds: i64,
 }
@@ -597,6 +602,27 @@ fn remote_clashes(
     Ok(out)
 }
 
+/// The blocked paths and, per path, the sorted ids of the holds blocking it. This is the
+/// identity of a wait: the same path with a different set of hold ids is a new conflict.
+fn blocker_sets(conflicts: &[HoldConflict]) -> Vec<(&str, Vec<&str>)> {
+    let mut paths: Vec<&str> = conflicts.iter().map(|c| c.path.as_str()).collect();
+    paths.sort_unstable();
+    paths.dedup();
+    paths
+        .into_iter()
+        .map(|path| {
+            let mut blockers: Vec<&str> = conflicts
+                .iter()
+                .filter(|c| c.path == path)
+                .map(|c| c.held.hold_id.as_str())
+                .collect();
+            blockers.sort_unstable();
+            blockers.dedup();
+            (path, blockers)
+        })
+        .collect()
+}
+
 /// Register durable file waits and advance backoff only after its current window ends.
 /// Returns whether any blocker set is new, and the longest remaining backoff.
 fn wait_for_conflicts_tx(
@@ -605,19 +631,9 @@ fn wait_for_conflicts_tx(
     project: &Project,
     conflicts: &[HoldConflict],
 ) -> Result<(bool, i64)> {
-    let mut paths: Vec<&str> = conflicts.iter().map(|c| c.path.as_str()).collect();
-    paths.sort_unstable();
-    paths.dedup();
     let mut first_notice = false;
     let mut retry_after = 0;
-    for path in paths {
-        let mut blockers: Vec<&str> = conflicts
-            .iter()
-            .filter(|c| c.path == path)
-            .map(|c| c.held.hold_id.as_str())
-            .collect();
-        blockers.sort_unstable();
-        blockers.dedup();
+    for (path, blockers) in blocker_sets(conflicts) {
         let signature = serde_json::to_string(&blockers)?;
         let old: Option<(String, i64, i64)> = tx
             .query_row(
@@ -672,51 +688,56 @@ fn wait_for_conflicts_tx(
     Ok((first_notice, retry_after))
 }
 
-/// True when this agent already had a first notice for a conflict in this project:
-/// a wait row is present, or a prior `hold.blocked` / `hold.wait_failed` event was
-/// committed. Used when recording the wait itself failed, so the wait row cannot
-/// tell a retry from a first encounter.
-fn wait_notice_already_sent(
+/// Whether `blockers` on `path` are a new conflict for this agent when the wait could
+/// not be recorded. The wait row, when there is one, is compared by its stored blocker
+/// signature. Without a row, the agent's latest wait event for exactly this path decides:
+/// a `hold.waiting` or `hold.wait_failed` that names the same hold ids means the first
+/// notice already went out; an event that ended the wait (`hold.available`,
+/// `hold.notify_failed`, `hold.wait.finished`), a different set of hold ids, or no event
+/// at all means a first notice is due. Events for other agents, projects or paths never
+/// count, however many of them there are.
+fn failed_wait_is_new(
     tx: &Tx<'_>,
     agent_id: &str,
     project_id: &str,
-    conflicts: &[HoldConflict],
+    path: &str,
+    blockers: &[&str],
 ) -> Result<bool> {
-    let mut paths: Vec<&str> = conflicts.iter().map(|c| c.path.as_str()).collect();
-    paths.sort_unstable();
-    paths.dedup();
-    for path in &paths {
-        let found: Option<i64> = tx
-            .query_row(
-                "SELECT 1 FROM hold_waits
-                 WHERE agent_id = ?1 AND project_id = ?2 AND path = ?3",
-                params![agent_id, project_id, path],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if found.is_some() {
-            return Ok(true);
-        }
+    let recorded: Option<String> = tx
+        .query_row(
+            "SELECT blockers FROM hold_waits
+             WHERE agent_id = ?1 AND project_id = ?2 AND path = ?3",
+            params![agent_id, project_id, path],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(signature) = recorded {
+        let stored: Vec<String> = serde_json::from_str(&signature).unwrap_or_default();
+        return Ok(stored != blockers);
     }
-    let mut stmt = tx.prepare(
-        "SELECT payload FROM events
-         WHERE kind IN ('hold.blocked', 'hold.wait_failed')
-         ORDER BY seq DESC LIMIT 200",
-    )?;
-    let payloads = stmt
-        .query_map([], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for raw in payloads {
-        let Value::Object(map) = serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null) else {
-            continue;
-        };
-        let same_agent = map.get("agent_id").and_then(|v| v.as_str()) == Some(agent_id);
-        let same_project = map.get("project_id").and_then(|v| v.as_str()) == Some(project_id);
-        if same_agent && same_project {
-            return Ok(true);
+    let latest: Option<(String, String)> = tx
+        .query_row(
+            "SELECT kind, payload FROM events
+             WHERE kind IN ('hold.waiting', 'hold.wait_failed', 'hold.available',
+                            'hold.notify_failed', 'hold.wait.finished')
+               AND json_extract(payload, '$.agent_id') = ?1
+               AND json_extract(payload, '$.project_id') = ?2
+               AND json_extract(payload, '$.path') = ?3
+             ORDER BY seq DESC LIMIT 1",
+            params![agent_id, project_id, path],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(match latest {
+        Some((kind, payload)) if kind == "hold.waiting" || kind == "hold.wait_failed" => {
+            let announced: Vec<String> = serde_json::from_str::<Value>(&payload)
+                .ok()
+                .and_then(|v| serde_json::from_value(v["blockers"].clone()).ok())
+                .unwrap_or_default();
+            announced != blockers
         }
-    }
-    Ok(false)
+        _ => true,
+    })
 }
 
 /// Run `f` inside a savepoint. On error only its own work is rolled back and the error is
@@ -1165,31 +1186,41 @@ impl Store {
                 }
                 // Recording the wait is bookkeeping. A real conflict is denied even when
                 // that fails; the failure is an event, never an open guard.
-                let (first_notice, retry_after_seconds) = match attempt(tx, "wait", || {
-                    wait_for_conflicts_tx(tx, &me, &project, &conflicts)
-                }) {
-                    Ok(outcome) => outcome,
-                    Err(e) => {
-                        // Check first, then record the failure. Counting the event we are
-                        // about to emit would make every first failure look like a retry.
-                        let already = wait_notice_already_sent(
-                            tx, &me.id, &project.project_id, &conflicts,
-                        )?;
-                        tx.emit(
-                            &me.address,
-                            "hold.wait_failed",
-                            json!({
-                                "agent_id": me.id, "project_id": project.project_id,
-                                "error": e.to_string(),
-                            }),
-                        )?;
-                        // A failed wait record must not look like a brand-new conflict on
-                        // every retry: that re-sends the first hook notice (which includes
-                        // expires_at) and a fresh hold.blocked event, and breaks D59
-                        // dedupe of unchanged blockers.
-                        (!already, 30)
-                    }
-                };
+                let (first_notice, wait_recorded, retry_after_seconds) =
+                    match attempt(tx, "wait", || {
+                        wait_for_conflicts_tx(tx, &me, &project, &conflicts)
+                    }) {
+                        Ok((first_notice, retry_after)) => (first_notice, true, retry_after),
+                        Err(e) => {
+                            // The savepoint rolled the wait back, so no ping can follow.
+                            // The guard says so (wait_recorded = false) and the hook tells
+                            // the agent to check again itself. One hold.wait_failed per
+                            // path records which hold ids were announced, so a retry with
+                            // the same blockers is a short denial (D59 dedupe) while a new
+                            // path or a replacement hold still gets its first notice.
+                            // Each path is checked before its own failure event is written.
+                            let mut first_notice = false;
+                            for (path, blockers) in blocker_sets(&conflicts) {
+                                first_notice |= failed_wait_is_new(
+                                    tx,
+                                    &me.id,
+                                    &project.project_id,
+                                    path,
+                                    &blockers,
+                                )?;
+                                tx.emit(
+                                    &me.address,
+                                    "hold.wait_failed",
+                                    json!({
+                                        "agent_id": me.id, "project_id": project.project_id,
+                                        "path": path, "blockers": blockers,
+                                        "error": e.to_string(),
+                                    }),
+                                )?;
+                            }
+                            (first_notice, false, 30)
+                        }
+                    };
                 // Count each distinct collision, rather than every retry of the same edit.
                 let repo = crate::repo::link_of(tx, &project)?.map(|l| l.key);
                 if first_notice { tx.emit(
@@ -1218,6 +1249,7 @@ impl Store {
                     covered: Vec::new(),
                     conflicts,
                     first_notice,
+                    wait_recorded,
                     retry_after_seconds,
                 });
             }
@@ -1279,7 +1311,7 @@ impl Store {
                     params![me.id, project.project_id, path], |_| Ok(()),
                 ).optional()?.is_some();
                 if waiting {
-                    tx.emit(&me.address, "hold.wait.finished", json!({ "project_id": project.project_id, "path": path }))?;
+                    tx.emit(&me.address, "hold.wait.finished", json!({ "agent_id": me.id, "project_id": project.project_id, "path": path }))?;
                     tx.execute("DELETE FROM hold_waits WHERE agent_id = ?1 AND project_id = ?2 AND path = ?3",
                         params![me.id, project.project_id, path])?;
                 }
@@ -1291,6 +1323,7 @@ impl Store {
                 covered,
                 conflicts: Vec::new(),
                 first_notice: false,
+                wait_recorded: false,
                 retry_after_seconds: 0,
             })
         })

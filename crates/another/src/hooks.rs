@@ -1169,8 +1169,20 @@ fn git_root_above(path: &Path) -> Option<PathBuf> {
 /// Reason given on auto-acquired holds.
 pub const AUTO_HOLD_REASON: &str = "editing (taken by the edit hook)";
 
-/// The text shown when an edit is stopped.
-pub fn deny_message(agent: &str, conflicts: &[HoldConflict]) -> String {
+/// Said instead of the ping promise when the wait could not be recorded.
+const NO_PING_NOTICE: &str =
+    "Another could not record your wait for this file, so no inbox ping will come.";
+
+/// The text shown when an edit is stopped the first time. `wait_recorded` says whether a
+/// durable wait exists for it: only then may the text promise an inbox ping. When the
+/// wait could not be recorded, the agent is told to check again itself after
+/// `retry_after` seconds instead.
+pub fn deny_message(
+    agent: &str,
+    conflicts: &[HoldConflict],
+    wait_recorded: bool,
+    retry_after: i64,
+) -> String {
     let Some(first) = conflicts.first() else {
         return String::new();
     };
@@ -1197,7 +1209,13 @@ pub fn deny_message(agent: &str, conflicts: &[HoldConflict]) -> String {
         out.push_str(&format!("; and {} more", conflicts.len() - 3));
     }
     out.push_str(". Worktrees of the same repository still conflict at merge");
-    out.push_str(". You'll be pinged in your Another inbox when the file is free. Do not retry this edit while waiting");
+    if wait_recorded {
+        out.push_str(". You'll be pinged in your Another inbox when the file is free. Do not retry this edit while waiting");
+    } else {
+        out.push_str(&format!(
+            ". {NO_PING_NOTICE} Retry this edit after {retry_after} seconds"
+        ));
+    }
     out.push_str(&format!(
         ". Leave it alone until the hold is released. Ask the holder with `another hold request-release --agent {agent} {}`, or work on other files.",
         first.held.hold_id
@@ -1272,6 +1290,8 @@ fn pre_edit(store: &Store, client: Client, dir: &Path, input: &HookInput) -> Res
     }
     let mut conflicts = Vec::new();
     let mut first_notice = false;
+    // A ping is promised only when every blocked project has its wait on record.
+    let mut wait_recorded = true;
     let mut retry_after = 0;
     for (project_dir, files) in &groups {
         let project = match store.project(project_dir) {
@@ -1282,20 +1302,32 @@ fn pre_edit(store: &Store, client: Client, dir: &Path, input: &HookInput) -> Res
             Err(e) => return Err(e.into()),
         };
         let guard = store.guard_edit(&agent, &project, files, AUTO_HOLD_REASON)?;
-        first_notice |= guard.first_notice;
-        retry_after = retry_after.max(guard.retry_after_seconds);
-        conflicts.extend(guard.conflicts);
+        if !guard.conflicts.is_empty() {
+            first_notice |= guard.first_notice;
+            wait_recorded &= guard.wait_recorded;
+            retry_after = retry_after.max(guard.retry_after_seconds);
+            conflicts.extend(guard.conflicts);
+        }
     }
     if conflicts.is_empty() {
         return Ok(String::new());
     }
+    let reason = if first_notice {
+        deny_message(&agent, &conflicts, wait_recorded, retry_after)
+    } else {
+        let path = truncate(conflicts[0].path.clone(), 200);
+        let holder = &conflicts[0].held.agent;
+        if wait_recorded {
+            format!("Another: this edit is still blocked. {path} is held by {holder}. Back off for {retry_after} seconds. Wait for the hold-free inbox ping or work on other files.")
+        } else {
+            format!("Another: this edit is still blocked. {path} is held by {holder}. {NO_PING_NOTICE} Retry after {retry_after} seconds, or work on other files.")
+        }
+    };
     Ok(json!({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
-            "permissionDecisionReason": if first_notice { deny_message(&agent, &conflicts) } else {
-                format!("Another: this edit is still blocked. {} is held by {}. Back off for {retry_after} seconds. Wait for the hold-free inbox ping or work on other files.", truncate(conflicts[0].path.clone(), 200), conflicts[0].held.agent)
-            },
+            "permissionDecisionReason": reason,
         }
     })
     .to_string())
@@ -1514,16 +1546,22 @@ mod tests {
             created_at: "2026-11-10T10:00:00.000Z".into(),
             expires_at: "2026-11-10T10:30:00.000Z".into(),
         };
-        let msg = deny_message(
-            "claude@shop-wt",
-            &[HoldConflict {
-                path: "src/a.rs".into(),
-                held: held.clone(),
-            }],
-        );
+        let conflict = HoldConflict {
+            path: "src/a.rs".into(),
+            held: held.clone(),
+        };
+        let msg = deny_message("claude@shop-wt", std::slice::from_ref(&conflict), true, 30);
         assert!(msg.starts_with("Another stopped this edit: src/a.rs is held by codex@shop"));
         assert!(msg.contains("exclusive hold on shop:src/**, \"refactor api\""));
         assert!(msg.contains("until 2026-11-10T10:30:00.000Z"));
+        assert!(msg.contains("You'll be pinged in your Another inbox"));
+        assert!(msg.contains("another hold request-release --agent claude@shop-wt h1"));
+        assert!(!msg.contains('\u{2014}') && !msg.contains('\u{2013}'));
+        // No wait on record: no ping is promised, and the fallback is spelled out.
+        let msg = deny_message("claude@shop-wt", &[conflict], false, 30);
+        assert!(msg.starts_with("Another stopped this edit: src/a.rs is held by codex@shop"));
+        assert!(!msg.contains("pinged"), "{msg}");
+        assert!(msg.contains("no inbox ping will come. Retry this edit after 30 seconds"));
         assert!(msg.contains("another hold request-release --agent claude@shop-wt h1"));
         assert!(!msg.contains('\u{2014}') && !msg.contains('\u{2013}'));
         let msg = deny_message(
@@ -1532,6 +1570,8 @@ mod tests {
                 path: "long/".repeat(300),
                 held,
             }],
+            true,
+            30,
         );
         assert!(msg.contains("Worktrees of the same repository still conflict at merge"));
     }

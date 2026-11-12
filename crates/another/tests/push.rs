@@ -457,6 +457,77 @@ fn repeated_edits_get_a_short_backoff_and_a_free_ping() {
     assert_eq!(env.hook("pre-edit", "codex", &edit), "");
 }
 
+/// When the wait cannot be recorded the hook must say so and give a fallback, instead of
+/// promising a ping that has no subscription behind it. A second file still gets its
+/// own first notice.
+#[test]
+fn wait_record_failure_tells_the_agent_no_ping_is_coming() {
+    let env = Env::new();
+    env.start("claude", &env.main, &[]);
+    env.start("codex", &env.wt, &[]);
+    for path in ["src/a.rs", "src/b.rs"] {
+        assert_eq!(
+            env.hook(
+                "pre-edit",
+                "claude",
+                &tool(&env.main, "Edit", json!({ "file_path": path }))
+            ),
+            ""
+        );
+    }
+    let db = rusqlite::Connection::open(env.another_home.join("another.db")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER hold_waits_inject_failure BEFORE INSERT ON hold_waits
+         BEGIN SELECT RAISE(ABORT, 'injected wait-record failure'); END;",
+    )
+    .unwrap();
+    drop(db);
+
+    let edit = tool(&env.wt, "Edit", json!({ "file_path": "src/a.rs" }));
+    let first = denial(&env.hook("pre-edit", "codex", &edit));
+    assert!(
+        first.starts_with("Another stopped this edit: src/a.rs is held by claude@shop"),
+        "{first}"
+    );
+    assert!(!first.contains("pinged"), "{first}");
+    assert!(
+        first.contains("could not record your wait for this file, so no inbox ping will come. Retry this edit after 30 seconds"),
+        "{first}"
+    );
+    assert!(first.contains("another hold request-release --agent codex@shop-review"));
+    for _ in 0..3 {
+        let next = denial(&env.hook("pre-edit", "codex", &edit));
+        assert!(
+            next.starts_with(
+                "Another: this edit is still blocked. src/a.rs is held by claude@shop."
+            ),
+            "{next}"
+        );
+        assert!(!next.contains("inbox ping or"), "{next}");
+        assert!(
+            next.contains(
+                "no inbox ping will come. Retry after 30 seconds, or work on other files."
+            ),
+            "{next}"
+        );
+    }
+    let other = denial(&env.hook(
+        "pre-edit",
+        "codex",
+        &tool(&env.wt, "Edit", json!({ "file_path": "src/b.rs" })),
+    ));
+    assert!(
+        other.starts_with("Another stopped this edit: src/b.rs is held by claude@shop"),
+        "{other}"
+    );
+    assert!(other.contains("no inbox ping will come"), "{other}");
+    // Nothing waits, so the release pings nobody; the retry it asked for then succeeds.
+    env.ok(&["hold", "release", "--agent", "claude@shop"]);
+    let after = tool(&env.wt, "Bash", json!({ "command": "true" }));
+    assert_eq!(env.hook("post-tool", "codex", &after), "");
+    assert_eq!(env.hook("pre-edit", "codex", &edit), "");
+}
+
 #[test]
 fn pre_edit_never_turns_directory_hints_into_holds() {
     let env = Env::new();
