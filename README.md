@@ -35,7 +35,8 @@ What they get instead:
 Hooks put a short digest in at session start, and a one-line notice after the next tool call when mail lands mid-task. That is why the agents look.
 
 ![Diagram: on bob@shop's session timeline, mail from alice@shop lands between two tool calls. After the next tool call the post-tool hook adds a one-line notice naming the message. An idle agent makes no tool calls, so the loopback daemon wakes an idle Herdr agent; tmux and cmux panes are woken on demand. Each message is announced once.](docs/assets/mid-task-notice.svg)
- State is one SQLite database on the machine (`~/.another`, or `$ANOTHER_HOME`). A second machine can federate through a hub you host. The hub can read mail it relays.
+
+State is one SQLite database on the machine (`~/.another`, or `$ANOTHER_HOME`). A second machine can federate through a hub you host. The hub can read mail it relays.
 
 OAuth for hosted MCP clients (ChatGPT, Claude.ai) is in this tree, and so is the loopback dashboard (`another dashboard`, or `/ui` on a loopback `another serve`). See the [changelog](https://toanother.one/changelog/) and [how I run the agents on this repo](https://toanother.one/building/).
 

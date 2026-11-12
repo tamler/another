@@ -34,7 +34,7 @@ cp guides/multiple-claude-code-sessions/index.html dist/guides/multiple-claude-c
 cp changelog/index.html dist/changelog/index.html
 cp building/index.html dist/building/index.html
 cp fonts/FragmentMono-Regular.woff2 fonts/OFL.txt dist/fonts/
-# The two diagrams are shared with the repository README; docs/assets is the single source.
+# The three diagrams are shared with the repository README; docs/assets is the single source.
 cp ../docs/assets/path-holds.svg ../docs/assets/handoff.svg ../docs/assets/mid-task-notice.svg dist/illustrations/
 # stamp_icons: content-hash query strings on icon and manifest URLs.
 python3 stamp_icons.py
