@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 600" width="1200" height="600" role="img" aria-labelledby="title desc" font-family="Fragment Mono, Menlo, Consolas, Liberation Mono, monospace">
+  <title id="title">A path hold stops a second agent's client edit</title>
+  <desc id="desc">codex@shop-review holds src/api/routes.rs. claude@shop's Edit tool call on that file is stopped by the Another edit hook, which names the holder. claude@shop sends a release request instead. An edit from a shell command is not seen by the hook, so a hold is not a lock.</desc>
+  <rect width="1200" height="600" fill="#f8f8f4"/>
+
+  <!-- left agent -->
+  <text x="110" y="128" text-anchor="middle" font-size="22" fill="#292922">claude@shop</text>
+  <rect x="80" y="150" width="60" height="200" rx="4" fill="#292922"/>
+
+  <!-- right agent -->
+  <text x="1120" y="128" text-anchor="end" font-size="22" fill="#292922">codex@shop-review</text>
+  <rect x="1060" y="150" width="60" height="200" rx="4" fill="#292922"/>
+
+  <!-- file card in the middle -->
+  <rect x="400" y="140" width="400" height="220" rx="8" fill="#ffffff" stroke="#cecec2" stroke-width="2"/>
+  <text x="600" y="190" text-anchor="middle" font-size="26" fill="#292922">src/api/routes.rs</text>
+  <rect x="425" y="218" width="350" height="38" rx="4" fill="#e4c56e"/>
+  <text x="600" y="244" text-anchor="middle" font-size="20" fill="#292922">held by codex@shop-review</text>
+  <text x="600" y="292" text-anchor="middle" font-size="18" fill="#5d5d50">exclusive, expires in 30 min</text>
+  <text x="600" y="322" text-anchor="middle" font-size="18" fill="#5d5d50">taken by its edit hook</text>
+
+  <!-- holder's edit goes through -->
+  <line x1="1060" y1="250" x2="810" y2="250" stroke="#292922" stroke-width="4"/>
+  <polygon points="810,250 830,240 830,260" fill="#292922"/>
+  <text x="930" y="236" text-anchor="middle" font-size="18" fill="#5d5d50">edits, hold renews</text>
+
+  <!-- the other agent's client edit is stopped -->
+  <line x1="140" y1="250" x2="366" y2="250" stroke="#705000" stroke-width="4"/>
+  <rect x="366" y="222" width="8" height="56" fill="#705000"/>
+  <text x="250" y="236" text-anchor="middle" font-size="16" fill="#705000">Edit src/api/routes.rs</text>
+  <text x="256" y="284" text-anchor="middle" font-size="17" fill="#705000">stopped by the</text>
+  <text x="256" y="308" text-anchor="middle" font-size="17" fill="#705000">edit hook,</text>
+  <text x="256" y="332" text-anchor="middle" font-size="17" fill="#705000">holder named</text>
+
+  <!-- the request instead -->
+  <path d="M 110 350 L 110 470 L 1090 470 L 1090 350" fill="none" stroke="#292922" stroke-width="3" stroke-dasharray="10 8"/>
+  <polygon points="1090,350 1080,372 1100,372" fill="#292922"/>
+  <rect x="260" y="446" width="680" height="48" rx="6" fill="#25251f"/>
+  <text x="600" y="477" text-anchor="middle" font-size="20" fill="#f4f2e7">another send --request "Release src/api/routes.rs?"</text>
+
+  <!-- the limit -->
+  <text x="600" y="544" text-anchor="middle" font-size="18" fill="#5d5d50">An edit from a shell command is not seen by any client's edit hook,</text>
+  <text x="600" y="572" text-anchor="middle" font-size="18" fill="#5d5d50">so a hold is not a lock. Review the diff.</text>
+</svg>

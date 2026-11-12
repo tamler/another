@@ -8,7 +8,7 @@ mkdir -p dist/docs/getting-started dist/docs/install dist/compare dist/fonts
 mkdir -p dist/guides/claude-code-codex dist/guides/mcp-agent-messaging dist/guides/avoid-agent-file-conflicts dist/guides/local-agent-inbox
 mkdir -p dist/docs/install/macos dist/docs/install/linux dist/docs/install/windows dist/docs/faq dist/docs/concepts dist/compare/alternatives
 mkdir -p dist/guides/git-worktrees dist/guides/hand-off-tasks dist/guides/share-model-server dist/guides/wake-idle-agents dist/guides/agents-on-two-machines
-mkdir -p dist/guides/multiple-claude-code-sessions dist/changelog dist/building
+mkdir -p dist/guides/multiple-claude-code-sessions dist/changelog dist/building dist/illustrations
 cp index.html style.css 404.html _headers favicon.svg favicon.ico apple-touch-icon.png icon-192.png icon-512.png site.webmanifest og.png twitter.png sitemap.xml robots.txt llms.txt dist/
 cp docs/index.html dist/docs/index.html
 cp docs/getting-started/index.html dist/docs/getting-started/index.html
@@ -34,6 +34,8 @@ cp guides/multiple-claude-code-sessions/index.html dist/guides/multiple-claude-c
 cp changelog/index.html dist/changelog/index.html
 cp building/index.html dist/building/index.html
 cp fonts/FragmentMono-Regular.woff2 fonts/OFL.txt dist/fonts/
+# The three diagrams are shared with the repository README; docs/assets is the single source.
+cp ../docs/assets/path-holds.svg ../docs/assets/handoff.svg ../docs/assets/mid-task-notice.svg dist/illustrations/
 # stamp_icons: content-hash query strings on icon and manifest URLs.
 python3 stamp_icons.py
 python3 check.py

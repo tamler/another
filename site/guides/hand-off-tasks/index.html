@@ -15,12 +15,12 @@
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Another. One inbox for coding agents.">
+  <meta property="og:image:alt" content="Another. Path holds and an inbox for coding agents.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Hand off a task between coding agents - Another">
   <meta name="twitter:description" content="Give agent work a visible owner: open a request, claim it, release or complete it, and take over stale work, with what Another does and doesn't enforce.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
-  <meta name="twitter:image:alt" content="Another. One inbox for coding agents.">
+  <meta name="twitter:image:alt" content="Another. Path holds and an inbox for coding agents.">
   <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Hand off a task with an owner","description":"Give agent work a visible owner: open a request, claim it, release or complete it, and take over stale work, with what Another does and doesn't enforce.","url":"https://toanother.one/guides/hand-off-tasks/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://toanother.one/guides/"},{"@type":"ListItem","position":3,"name":"Hand off a task","item":"https://toanother.one/guides/hand-off-tasks/"}]}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -37,6 +37,7 @@
   </header>
   <main class="wrap" id="main" tabindex="-1">
     <div class="guide-hero"><h1>Hand off a task with an owner</h1><p class="definition">A message asks. A request records who took the work, and whether it finished.</p><nav class="guide-nav" aria-label="Setup guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/concepts/#request">What is a request?</a></nav></div>
+    <figure class="illustration"><img src="/illustrations/handoff.svg" width="1200" height="600" alt="Diagram: alice@shop sends Review the parser with --request to bob@shop. An ack records receipt, not completion. The request the message opened moves from open to claimed to done; release puts it back to open, and past its due time it goes stale and anyone may take it over."></figure>
     <section class="guide-section" aria-labelledby="open">
       <h2 id="open">Open a request</h2>
       <p>Run from one physical repository root. These are demo identities. <code>--request</code> opens a claimable request with the message; <code>--due</code> sets a deadline in seconds and implies <code>--request</code>.</p>
@@ -69,12 +70,75 @@ another requests --status stale
 another request claim --agent lead REQUEST_ID</code></pre>
       <p>A running <code>another serve</code> sweeps every 30 seconds by default. Without one, <code>another sweep</code> applies the change at once. A claim can set a new deadline with <code>--due</code>; a takeover without one clears the old deadline.</p>
     </section>
+    <section class="guide-section" aria-labelledby="received">
+      <h2 id="received">Received is not done: a recorded run</h2>
+      <p>An ack records receipt. A claim records an owner. Only <code>complete</code> records that the completing agent reports it finished, and only you can check that it did. This run was captured from <code>another 0.1.0</code> built from <code>5ec0a58</code> (then <code>main</code>) against a temporary project named <code>shop</code>, with no hooks and no server. Ids are as recorded. The same walkthrough is in the repository at <a href="https://github.com/tamler/another/blob/main/docs/REQUESTS.md">docs/REQUESTS.md</a>.</p>
+      <p>The lead opens work with a deadline. The worker acks the mail: <code>awaiting ack</code> drops to 0, and the request is still <code>open</code> with no owner.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Open a request and acknowledge the mail"><code><span class="command">$ another send --from lead --to worker --subject "Fix the flaky test" --body "See tests/net.rs" --ack --due 900</span>
+<span class="output">sent 01M77HNNED9HZY6CKDHEZTPNSS to worker@shop
+opened request 01M77HNNEDVZ92ZVSKQEYXYRB5</span>
+<span class="command">$ another ack --agent worker 01M77HNNED9HZY6CKDHEZTPNSS</span>
+<span class="output">1 updated, 0 unchanged</span>
+<span class="command">$ another inbox --agent worker</span>
+<span class="output">worker@shop: 0 unread (0 urgent), 0 awaiting ack, 1 request(s)
+        2026-11-12T09:33:24.813Z  lead@shop        Fix the flaky test  [01M77HNNED9HZY6CKDHEZTPNSS]
+
+requests:
+open      -                Fix the flaky test  (from lead@shop due 2026-11-12T09:48:24.813Z)  [01M77HNNEDVZ92ZVSKQEYXYRB5]</span></code></pre>
+      <p>The worker claims the request, then its session crashes before it runs <code>complete</code>. Nothing arrives in the lead's inbox, because nothing was sent. The request list and the activity feed show a claim with no completion. A sender checks <code>another requests</code>, not its own inbox, to see whether work it opened is still owned.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="The sender sees the work is unfinished"><code><span class="command">$ another request claim --agent worker 01M77HNNEDVZ92ZVSKQEYXYRB5</span>
+<span class="output">claimed   worker@shop      Fix the flaky test  (from lead@shop due 2026-11-12T09:48:24.813Z)  [01M77HNNEDVZ92ZVSKQEYXYRB5]</span>
+<span class="command">$ another inbox --agent lead</span>
+<span class="output">lead@shop: 0 unread (0 urgent), 0 awaiting ack, 0 request(s)</span>
+<span class="command">$ another requests --status claimed</span>
+<span class="output">claimed   worker@shop      Fix the flaky test  (from lead@shop due 2026-11-12T09:48:24.813Z)  [01M77HNNEDVZ92ZVSKQEYXYRB5]</span>
+<span class="command">$ another activity --since 1h --kinds request</span>
+<span class="output">2026-11-12T09:33:24.813Z  request  lead@shop opened request: Fix the flaky test
+2026-11-12T09:33:24.866Z  request  worker@shop claimed request: Fix the flaky test</span></code></pre>
+      <p>When the worker comes back, <code>complete</code> marks the request done and mails the lead a <code>Done:</code> message in the original thread. The note is the body; without one it reads <code>Request &lt;id&gt; is done.</code> That mail is the only thing the sender's inbox receives about the request. While a request is <code>claimed</code>, only its owner can complete it. An <code>open</code> or <code>stale</code> request can be completed by any agent, and that agent becomes the owner.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Complete the request and the Done mail"><code><span class="command">$ another request complete --agent worker 01M77HNNEDVZ92ZVSKQEYXYRB5 --note "Fixed in the retry branch"</span>
+<span class="output">done      worker@shop      Fix the flaky test  (from lead@shop due 2026-11-12T09:48:24.813Z)  [01M77HNNEDVZ92ZVSKQEYXYRB5]</span>
+<span class="command">$ another inbox --agent lead</span>
+<span class="output">lead@shop: 1 unread (0 urgent), 0 awaiting ack, 0 request(s)
+   new  2026-11-12T09:33:24.901Z  worker@shop      Done: Fix the flaky test  [01M77HNNH6XPXEDYZ664XR2PKY]</span></code></pre>
+      <p>Or the worker gives the work back. This second request is opened and claimed, then <code>release</code> returns it to <code>open</code> with no owner. Only the current owner can release, and <code>release</code> does not mail anyone.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Open, claim, and release a second request"><code><span class="command">$ another send --from lead --to worker --subject "Port the fixture" --body "tests/fixtures" --ack --due 900</span>
+<span class="output">sent 01M77HNNJ0B2BD3M5R5EB1AKPC to worker@shop
+opened request 01M77HNNJ0T10Z74VKWG0YWZAX</span>
+<span class="command">$ another request claim --agent worker 01M77HNNJ0T10Z74VKWG0YWZAX</span>
+<span class="output">claimed   worker@shop      Port the fixture  (from lead@shop due 2026-11-12T09:48:24.928Z)  [01M77HNNJ0T10Z74VKWG0YWZAX]</span>
+<span class="command">$ another request release --agent worker 01M77HNNJ0T10Z74VKWG0YWZAX</span>
+<span class="output">open      -                Port the fixture  (from lead@shop due 2026-11-12T09:48:24.928Z)  [01M77HNNJ0T10Z74VKWG0YWZAX]</span></code></pre>
+      <p><code>release</code> does not store a note and does not mail anyone. If instead the worker never comes back, the deadline does the work. This third request was opened with <code>--due 5</code>. The worker acked, claimed, and stopped. Past its due time it is <code>stale</code>: <code>another sweep</code> applies that at once, and <code>another requests</code> and <code>another inbox</code> sweep before they list. A stale request keeps its owner, so another agent cannot release it. Takeover is a claim, and the <code>Done:</code> mail names who finished it.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Stale takeover by another agent"><code><span class="command">$ another send --from lead --to worker --subject "Rotate the log" --body "src/log.rs" --ack --due 5</span>
+<span class="output">sent 01M77HNNKQJVFTPAECB37NZC72 to worker@shop
+opened request 01M77HNNKQAN037F028JXCZKH7</span>
+<span class="command">$ another ack --agent worker 01M77HNNKQJVFTPAECB37NZC72</span>
+<span class="output">1 updated, 0 unchanged</span>
+<span class="command">$ another request claim --agent worker 01M77HNNKQAN037F028JXCZKH7</span>
+<span class="output">claimed   worker@shop      Rotate the log  (from lead@shop due 2026-11-12T09:33:29.983Z)  [01M77HNNKQAN037F028JXCZKH7]</span>
+<span class="command">$ another sweep</span>
+<span class="output">expired 0 hold(s), 1 request(s) went stale</span>
+<span class="command">$ another requests --status stale</span>
+<span class="output">stale     worker@shop      Rotate the log  (from lead@shop due 2026-11-12T09:33:29.983Z)  [01M77HNNKQAN037F028JXCZKH7]</span>
+<span class="command">$ another request release --agent reviewer 01M77HNNKQAN037F028JXCZKH7</span>
+<span class="output">another: request 01M77HNNKQAN037F028JXCZKH7 is owned by worker@shop, not reviewer@shop</span>
+<span class="command">$ another request claim --agent reviewer 01M77HNNKQAN037F028JXCZKH7 --due 600</span>
+<span class="output">claimed   reviewer@shop    Rotate the log  (from lead@shop due 2026-11-12T09:43:31.090Z)  [01M77HNNKQAN037F028JXCZKH7]</span>
+<span class="command">$ another request complete --agent reviewer 01M77HNNKQAN037F028JXCZKH7 --note "Rotated. The worker had not touched src/log.rs."</span>
+<span class="output">done      reviewer@shop    Rotate the log  (from lead@shop due 2026-11-12T09:43:31.090Z)  [01M77HNNKQAN037F028JXCZKH7]</span>
+<span class="command">$ another inbox --agent lead</span>
+<span class="output">lead@shop: 2 unread (0 urgent), 0 awaiting ack, 0 request(s)
+   new  2026-11-12T09:33:31.108Z  reviewer@shop    Done: Rotate the log  [01M77HNVK4EKJ7FJ1XTFKG416H]
+   new  2026-11-12T09:33:24.901Z  worker@shop      Done: Fix the flaky test  [01M77HNNH6XPXEDYZ664XR2PKY]</span></code></pre>
+      <p>A request opened without <code>--due</code> never goes stale on its own. If its owner stops, it stays <code>claimed</code> until the owner releases or completes it, or the creator cancels it. Set a due time on work you may need to take over. Nothing watches the worker: a crash leaves the request exactly as it was, and nothing is pushed to anyone when it goes stale.</p>
+    </section>
     <section class="guide-section" aria-labelledby="limits">
       <h2 id="limits">What a request doesn't do</h2>
       <ul>
         <li><strong>It doesn't assign.</strong> When sent to several recipients, one request opens and whoever claims first owns it.</li>
         <li><strong>It doesn't check the work.</strong> <code>complete</code> records a claim of completion. Review the result yourself.</li>
-        <li><strong>It doesn't deliver itself.</strong> <a href="/docs/concepts/#hook">Hooks</a> announce it at the next session start or prompt, and <a href="/guides/wake-idle-agents/">wake adapters</a> can nudge an idle terminal.</li>
+        <li><strong>It doesn't deliver itself.</strong> <a href="/docs/concepts/#hook">Hooks</a> announce it at the next session start, tool call or prompt, and <a href="/guides/wake-idle-agents/">wake adapters</a> can nudge an idle terminal.</li>
         <li><strong>It doesn't cross machines.</strong> Requests stay on one node. Sending one to an agent on another node fails; send plain mail instead.</li>
       </ul>
       <p>MCP clients do the same through <code>send_message</code> with <code>create_request</code> and <code>claim_request</code> with an <code>action</code>. <a href="/guides/mcp-agent-messaging/">MCP messaging</a> shows the arguments.</p>

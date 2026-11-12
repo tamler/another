@@ -151,6 +151,92 @@ fn mail_requests_and_holds_from_the_cli() {
     assert!(String::from_utf8_lossy(&text.stdout).contains("Done: Review PR"));
 }
 
+/// `another inbox` is not an ack, `another ack` only records the acting agent's receipt, and
+/// `--read-only` marks read without acknowledging.
+#[test]
+fn inbox_fetch_is_not_an_ack_and_read_only_does_not_ack() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("h");
+    for (name, program) in [("alice", "claude"), ("bob", "codex"), ("carol", "grok")] {
+        json(&home, &["agent", "register", name, "--program", program]);
+    }
+    let sent = json(
+        &home,
+        &[
+            "send",
+            "--from",
+            "alice",
+            "--to",
+            "bob,carol",
+            "--subject",
+            "Confirm receipt",
+            "--body",
+            "please ack",
+            "--ack",
+        ],
+    );
+    let mid = sent["message_id"].as_str().unwrap().to_string();
+
+    // Fetching twice (and with --unread) leaves the counters and the delivery untouched.
+    let first = json(&home, &["inbox", "--agent", "bob"]);
+    assert_eq!(
+        (first["unread"].as_u64(), first["awaiting_ack"].as_u64()),
+        (Some(1), Some(1))
+    );
+    let second = json(&home, &["inbox", "--agent", "bob"]);
+    assert_eq!(second["unread"], first["unread"]);
+    assert_eq!(second["awaiting_ack"], first["awaiting_ack"]);
+    assert_eq!(second["messages"][0]["message_id"], mid.as_str());
+    assert!(second["messages"][0]["read_at"].is_null());
+    assert!(second["messages"][0]["acked_at"].is_null());
+    let unread = json(&home, &["inbox", "--agent", "bob", "--unread"]);
+    assert_eq!(unread["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(json(&home, &["inbox", "--agent", "bob"])["unread"], 1);
+
+    // --read-only: read, not acknowledged.
+    let read = json(&home, &["ack", "--agent", "bob", "--read-only", &mid]);
+    assert_eq!(read["updated"].as_array().unwrap().len(), 1);
+    let bob = json(&home, &["inbox", "--agent", "bob"]);
+    assert_eq!(
+        (bob["unread"].as_u64(), bob["awaiting_ack"].as_u64()),
+        (Some(0), Some(1))
+    );
+    assert!(bob["messages"][0]["read_at"].is_string());
+    assert!(bob["messages"][0]["acked_at"].is_null());
+
+    // Bob's actions never touched Carol's delivery.
+    let carol = json(&home, &["inbox", "--agent", "carol"]);
+    assert_eq!(
+        (carol["unread"].as_u64(), carol["awaiting_ack"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert!(carol["messages"][0]["read_at"].is_null());
+    assert!(carol["messages"][0]["acked_at"].is_null());
+
+    // A real ack records Bob's receipt only.
+    let acked = json(&home, &["ack", "--agent", "bob", &mid]);
+    assert_eq!(acked["updated"].as_array().unwrap().len(), 1);
+    let bob = json(&home, &["inbox", "--agent", "bob"]);
+    assert_eq!(bob["awaiting_ack"], 0);
+    assert!(bob["messages"][0]["acked_at"].is_string());
+    let carol = json(&home, &["inbox", "--agent", "carol"]);
+    assert_eq!(
+        (carol["unread"].as_u64(), carol["awaiting_ack"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert!(carol["messages"][0]["acked_at"].is_null());
+
+    // Human output names the counts; Carol's read-only call is her own.
+    let text = another(&home, &["ack", "--agent", "carol", "--read-only", &mid]);
+    assert!(text.status.success());
+    assert!(String::from_utf8_lossy(&text.stdout).contains("1 updated, 0 unchanged"));
+    let carol = json(&home, &["inbox", "--agent", "carol"]);
+    assert_eq!(
+        (carol["unread"].as_u64(), carol["awaiting_ack"].as_u64()),
+        (Some(0), Some(1))
+    );
+}
+
 #[test]
 fn errors_are_structured_in_json_mode() {
     let dir = tempfile::tempdir().unwrap();

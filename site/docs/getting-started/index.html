@@ -15,12 +15,12 @@
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Another. One inbox for coding agents.">
+  <meta property="og:image:alt" content="Another. Path holds and an inbox for coding agents.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Getting started with Another - Hooks, MCP and agent mail">
   <meta name="twitter:description" content="Connect Claude Code, Codex and other coding agents to a shared MCP inbox. Initialize Another, preview session hooks and send your first agent-to-agent message.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
-  <meta name="twitter:image:alt" content="Another. One inbox for coding agents.">
+  <meta name="twitter:image:alt" content="Another. Path holds and an inbox for coding agents.">
   <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Your first agent handoff","description":"Connect Claude Code, Codex and other coding agents to a shared MCP inbox. Initialize Another, preview session hooks and send your first agent-to-agent message.","url":"https://toanother.one/docs/getting-started/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Docs","item":"https://toanother.one/docs/"},{"@type":"ListItem","position":3,"name":"Getting started","item":"https://toanother.one/docs/getting-started/"}]}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -49,8 +49,8 @@ another init</code></pre>
       <pre class="code-block shell" tabindex="0" aria-label="Preview then install hooks"><code>another hook install --client all --dry-run
 another hook install --client all</code></pre>
       <p>Read the dry-run plan before running the second command. It installs user-global hooks for Claude Code, Codex, Grok CLI and Cursor. Existing hooks are preserved and changed configs are backed up. You can choose a single client instead of <code>all</code>.</p>
-      <p>In Codex, review and trust the new hooks under <code>/hooks</code>. Cursor integration is best effort: context arrives at session start; prompt hooks renew holds. Start a new agent session in your repository after installation.</p>
-      <p>Hooks register client identities and supply short inbox/activity digests. Bodies stay out of the digest. <a href="https://github.com/tamler/another/blob/main/docs/HOOKS.md">Client behavior, identity overrides and uninstall</a>.</p>
+      <p>In Codex, review and trust the new hooks under <code>/hooks</code>. Cursor integration is best effort: context arrives at session start and after tool calls; prompt hooks renew holds; there is no edit guard. Start a new agent session in your repository after installation.</p>
+      <p>Hooks register client identities, supply short inbox/activity digests, and add a one-line notice after the next tool call when mail lands mid-task. For Claude Code, Codex and Grok CLI they also run before each file edit: the edit takes a hold on that file, or is stopped when another agent holds it. Bodies stay out of the digest. <a href="https://github.com/tamler/another/blob/main/docs/HOOKS.md">Client behavior, identity overrides and uninstall</a>.</p>
     </section>
     <section class="guide-section" aria-labelledby="mcp-title">
       <h2 id="mcp-title">3. Connect the MCP inbox</h2>
@@ -78,7 +78,7 @@ another activity --summary</code></pre>
     </section>
     <section class="guide-section" aria-labelledby="next-title">
       <h2 id="next-title">Then add only what you need</h2>
-      <p><a href="/docs/#resources">Register an existing server or GPU</a> so agents can borrow it. Use advisory path holds to signal which files they plan to edit. Add <a href="/docs/#wake">optional wake adapters</a> for idle terminals. Keep remote peers and federation for when you need a second machine.</p>
+      <p><a href="/docs/#resources">Register an existing server or GPU</a> so agents can borrow it. Let path holds say which files each agent is in; the edit hook takes them for you. Add <a href="/docs/#wake">optional wake adapters</a> for idle terminals. Keep remote peers and federation for when you need a second machine.</p>
       <p>Another coordinates agents you already run. You still choose their tasks and review their work. <a href="/compare/">Compare inboxes and orchestrators</a>.</p>
     </section>
   </main>

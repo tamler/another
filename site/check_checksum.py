@@ -1,7 +1,7 @@
 """Run the install page's checksum snippet against local fixture archives; stdlib only.
 
-The fixtures are built the way the release workflows build theirs: `.sha256` per
-archive, and `SHA256SUMS` as those files concatenated. No release is downloaded.
+The release workflow writes a `.sha256` file per archive. A combined-file
+fixture also checks that the snippet does not fall back to it. No release is downloaded.
 """
 import hashlib
 from html.parser import HTMLParser
@@ -71,14 +71,12 @@ def sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def fixture(directory, manifest, tamper=False, listed=True):
+def fixture(directory, manifest, tamper=False):
     directory.mkdir()
     for name in (ARCHIVE, OTHER):
         make_archive(directory / name)
     lines = {name: f"{sha256(directory / name)}  {name}\n" for name in (ARCHIVE, OTHER)}
-    if not listed:
-        del lines[ARCHIVE]
-    if manifest == "per-archive" and listed:
+    if manifest == "per-archive":
         (directory / f"{ARCHIVE}.sha256").write_text(lines[ARCHIVE])
     if manifest == "per-archive-wrong-name":
         (directory / f"{ARCHIVE}.sha256").write_text(lines[OTHER])
@@ -91,9 +89,9 @@ def fixture(directory, manifest, tamper=False, listed=True):
         (directory / f"{ARCHIVE}.sha256").write_text(f"{'a' * 64}\t{ARCHIVE}\n")
     # Both orders: a recipe that trusts only the first or only the last line fails one of these.
     if manifest == "conflicting-wrong-first":
-        (directory / "SHA256SUMS").write_text(f"{'a' * 64}  {ARCHIVE}\n{lines[ARCHIVE]}")
+        (directory / f"{ARCHIVE}.sha256").write_text(f"{'a' * 64}  {ARCHIVE}\n{lines[ARCHIVE]}")
     if manifest == "conflicting-right-first":
-        (directory / "SHA256SUMS").write_text(f"{lines[ARCHIVE]}{'a' * 64}  {ARCHIVE}\n")
+        (directory / f"{ARCHIVE}.sha256").write_text(f"{lines[ARCHIVE]}{'a' * 64}  {ARCHIVE}\n")
     if manifest == "SHA256SUMS":
         (directory / "SHA256SUMS").write_text("".join(lines[name] for name in sorted(lines)))
     (directory / OTHER).unlink()
@@ -119,10 +117,8 @@ def main():
     shells = [name for name in ("sh", "bash", "zsh") if shutil.which(name)]
     cases = [
         ("per-archive", {"manifest": "per-archive"}, True),
-        ("SHA256SUMS", {"manifest": "SHA256SUMS"}, True),
+        ("combined file only", {"manifest": "SHA256SUMS"}, False),
         ("per-archive tampered", {"manifest": "per-archive", "tamper": True}, False),
-        ("SHA256SUMS tampered", {"manifest": "SHA256SUMS", "tamper": True}, False),
-        ("archive not listed", {"manifest": "SHA256SUMS", "listed": False}, False),
         ("per-archive names another file", {"manifest": "per-archive-wrong-name"}, False),
         ("malformed checksum line", {"manifest": "malformed"}, False),
         ("wrong digest after a leading space", {"manifest": "wrong-leading-space"}, False),

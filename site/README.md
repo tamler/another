@@ -43,6 +43,8 @@ images from the mark in that file. The words are JetBrains Mono ExtraBold
 (`pip install fonttools`). The site build copies the
 generated files and does not run the script.
 
+The three diagrams under `/illustrations/` are copied from `../docs/assets/`, which is their single source (the repository README uses the same files). `docs/assets/README.md` says how each was made. Add any new one to the allowlist in `check.py` and the copy in `build.sh`, with alt text on the page.
+
 The build then runs `stamp_icons.py`, which adds a content-hash query string to icon and manifest URLs in the output. That is so browsers that still have an older favicon for this host, including the games site that used to be here, will request the current files. The icon files themselves stay at the same paths.
 
 `scripts/check-copy.py` rejects em dashes, en dashes, and a banned-phrase list

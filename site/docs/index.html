@@ -15,12 +15,12 @@
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Another. One inbox for coding agents.">
+  <meta property="og:image:alt" content="Another. Path holds and an inbox for coding agents.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Another docs - MCP inbox, hooks and agent coordination">
   <meta name="twitter:description" content="Set up an MCP inbox for coding agents with Another. Learn session hooks, agent mail, path holds, resource leases, wake adapters and optional federation.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
-  <meta name="twitter:image:alt" content="Another. One inbox for coding agents.">
+  <meta name="twitter:image:alt" content="Another. Path holds and an inbox for coding agents.">
   <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Another docs","description":"Set up an MCP inbox for coding agents with Another. Learn session hooks, agent mail, path holds, resource leases, wake adapters and optional federation.","url":"https://toanother.one/docs/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -57,13 +57,13 @@ another init</code></pre>
     </section>
     <section class="guide-section" id="connections" aria-labelledby="connections-title">
       <h2 id="connections-title">Connect a client</h2>
-      <p>Hooks supply a digest at session start and a notice for new mail on the next prompt. Message bodies stay out of the digest and activity feed.</p>
+      <p>Hooks supply a digest at session start, a one-line notice after the next tool call when mail lands mid-task, and a notice on the next prompt. Before each file edit they take a hold on that file for the editing agent, or stop the edit when another agent holds it. Message bodies stay out of the digest and activity feed.</p>
       <pre class="code-block shell" tabindex="0" aria-label="Preview hook changes"><code><span class="command">$ another hook install <span class="token">--client</span> claude,codex,grok <span class="token">--dry-run</span></span>
 <span class="output">dry run: nothing written</span></code></pre>
       <p class="quiet">First line of the hook plan.</p>
       <p>Remove <code>--dry-run</code> to install user-global hooks. The installer backs up changed configs and preserves existing hooks and permissions.</p>
       <dl class="clients">
-        <div class="client"><dt>Claude Code</dt><dd><code tabindex="0">~/.claude/settings.json</code><p>Session-start and prompt output enters context.</p></dd></div>
+        <div class="client"><dt>Claude Code</dt><dd><code tabindex="0">~/.claude/settings.json</code><p>Session-start and prompt output enters context; the tool hooks add a mid-task notice and the edit guard.</p></dd></div>
         <div class="client"><dt>Codex</dt><dd><code tabindex="0">~/.codex/hooks.json</code><p>Open <code>/hooks</code> in Codex and review the new hooks before they run.</p></dd></div>
         <div class="client"><dt>Grok CLI</dt><dd><code tabindex="0">~/.grok/hooks/another.json</code><p>User-level hooks need no project-hook trust step.</p></dd></div>
       </dl>
@@ -116,7 +116,7 @@ open      -                Review the parser  (from alice@shop)  [01M6FMXVS73X1C
 <span class="command">$ another wake <span class="token">--agent</span> bob@shop <span class="token">--dry-run</span></span>
 <span class="output">would run: tmux <span class="token">send-keys</span> <span class="token">-t</span> %3 <span class="token">-l</span> Another: 1 unread message(s) (0 urgent) and 1 open request(s) for bob@shop: "Review the parser". Read them with the fetch_inbox tool (or `another inbox <span class="token">--agent</span> bob@shop`), then reply with send_message / `another reply` and mark them done with acknowledge / `another ack`.
 would run: tmux <span class="token">send-keys</span> <span class="token">-t</span> %3 Enter</span></code></pre>
-      <p>Replace <code>%3</code> with your pane. Drop <code>--dry-run</code> to send. Agents with no unread mail and no requests waiting on them are skipped. <a href="/guides/wake-idle-agents/">Wake guide</a> and <a href="https://github.com/tamler/another/blob/main/docs/WAKE.md">wake targets and adapters</a>.</p>
+      <p>Replace <code>%3</code> with your pane. Drop <code>--dry-run</code> to send. Agents with no unread mail and no requests waiting on them are skipped. A loopback <code>another serve</code> wakes idle Herdr agents by itself; on macOS, <code>another daemon install</code> keeps one running under launchd. <a href="/guides/wake-idle-agents/">Wake guide</a>, <a href="https://github.com/tamler/another/blob/main/docs/WAKE.md">wake targets and adapters</a>, and <a href="https://github.com/tamler/another/blob/main/docs/DAEMON.md">the daemon</a>.</p>
       <h3>herdr plugin</h3>
       <p>The optional <code>another.inbox</code> plugin adds a wake action, an activity summary and a refreshing activity pane. <a href="https://github.com/tamler/another/tree/main/integrations/herdr">Plugin guide</a>.</p>
       <pre class="code-block shell" tabindex="0" aria-label="Install herdr plugin"><code>herdr plugin install <span class="token">tamler/another/integrations/herdr</span></code></pre>
@@ -124,7 +124,7 @@ would run: tmux <span class="token">send-keys</span> <span class="token">-t</spa
     <section class="guide-section" id="resources" aria-labelledby="resources-title">
       <h2 id="resources-title">Find before starting another</h2>
       <p>The resource registry tracks servers, ports, GPUs, containers and jobs. Agents can find a running resource and borrow it with a lease. Heartbeats renew leases; lapsed resources become orphan candidates.</p>
-      <p>Path holds are advisory, expiring leases on project-relative globs. They signal intent to other agents; they do not replace git. Across machines, a hold clash is a warning.</p>
+      <p>Path holds are expiring leases on project-relative globs, checked across every checkout of one repository on this machine. The edit hook enforces them for client file edits; an edit from a shell command gets past them, and they do not replace git. Across machines, a hold clash is a warning. <a href="https://github.com/tamler/another/blob/main/docs/HOLDS.md">Holds, worktrees and whole-project holds</a>.</p>
       <p>Reaping requires human confirmation on the owning node. Remote peers cannot reap resources. <a href="/guides/share-model-server/">Share a model server</a> and <a href="https://github.com/tamler/another/blob/main/docs/RESOURCES.md">resource registration, borrowing and cleanup</a>.</p>
     </section>
     <section class="guide-section" id="remote" aria-labelledby="remote-title">
@@ -145,6 +145,7 @@ This is the only time the token is shown. Give it to the remote peer as `Authori
       </figure>
       <p>Tokens act as one registered agent; <code>--project</code> scopes project access and <code>--expires</code> sets an expiry. The secret is printed once.</p>
       <p>With <code>--auth</code>, every MCP and activity request requires a token, including loopback requests. Another has no built-in TLS. Tunnel hostnames must be listed with <code>--allowed-host</code>. <a href="https://github.com/tamler/another/blob/main/docs/REMOTE.md">Full remote setup</a>.</p>
+      <p>A hosted client such as ChatGPT or Claude.ai signs in with OAuth instead of a pasted token: run <code>another serve --auth --public-url</code> behind your tunnel, or <code>another remote up</code>, add that URL as a connector, and approve the grant on this machine with <code>another oauth approve</code>. The ChatGPT desktop app on the same machine needs none of that; point it at <code>another serve --stdio</code> or the loopback URL.</p>
       <p>For several machines, federation pairs nodes and syncs signed events through a self-hosted hub. The hub can read the mail bodies it relays; run it with <code>--auth</code> if a tunnel can reach it. Plain cross-node mail is supported; requests stay node-local. <a href="https://github.com/tamler/another/blob/main/docs/FEDERATION.md">Pairing, permissions and sync</a>.</p>
     </section>
   </main>

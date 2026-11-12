@@ -5,23 +5,23 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>How I run my own agent team with Another</title>
-  <meta name="description" content="I run Claude Code and Codex on this repo through Another. The 10 Nov 2026 public repo had 0 stars and no release. A hold does not lock the file.">
+  <meta name="description" content="I run Claude Code and Codex on this repo through Another. The 12 Nov 2026 public repo had 0 stars and no release. The edit hook stops a held edit.">
   <link rel="canonical" href="https://toanother.one/building/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Another">
   <meta property="og:title" content="How I run my own agent team with Another">
-  <meta property="og:description" content="I run Claude Code and Codex on this repo through Another. The 10 Nov 2026 public repo had 0 stars and no release. A hold does not lock the file.">
+  <meta property="og:description" content="I run Claude Code and Codex on this repo through Another. The 12 Nov 2026 public repo had 0 stars and no release. The edit hook stops a held edit.">
   <meta property="og:url" content="https://toanother.one/building/">
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Another. One inbox for coding agents.">
+  <meta property="og:image:alt" content="Another. Path holds and an inbox for coding agents.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="How I run my own agent team with Another">
-  <meta name="twitter:description" content="I run Claude Code and Codex on this repo through Another. The 10 Nov 2026 public repo had 0 stars and no release. A hold does not lock the file.">
+  <meta name="twitter:description" content="I run Claude Code and Codex on this repo through Another. The 12 Nov 2026 public repo had 0 stars and no release. The edit hook stops a held edit.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
-  <meta name="twitter:image:alt" content="Another. One inbox for coding agents.">
-  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"How I run the agent team","description":"I run Claude Code and Codex on this repo through Another. The 10 Nov 2026 public repo had 0 stars and no release. A hold does not lock the file.","url":"https://toanother.one/building/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}}]}</script>
+  <meta name="twitter:image:alt" content="Another. Path holds and an inbox for coding agents.">
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"How I run the agent team","description":"I run Claude Code and Codex on this repo through Another. The 12 Nov 2026 public repo had 0 stars and no release. The edit hook stops a held edit.","url":"https://toanother.one/building/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
@@ -39,7 +39,7 @@
     <div class="guide-hero">
       <h1>How I run the agent team</h1>
       <p class="definition">This repository is built by more than one coding agent at a time. Claude Code in one checkout, Codex in another, Cursor cloud agents when I point them at a branch. Another does not launch them. I do. Another is the inbox they share.</p>
-      <p>Public numbers, looked up 10 Nov 2026 on <a href="https://github.com/tamler/another">github.com/tamler/another</a>: 0 stars, 1 fork, no GitHub Release. I am writing that down so the story does not grow a user count I do not have.</p>
+      <p>Public numbers, looked up 12 Nov 2026 on <a href="https://github.com/tamler/another">github.com/tamler/another</a>: 0 stars, 1 fork, no GitHub Release. I am writing that down so the story does not grow a user count I do not have.</p>
     </div>
     <section class="guide-section" aria-labelledby="loop-title">
       <h2 id="loop-title">The loop</h2>
@@ -48,11 +48,11 @@
 another agent register codex-b <span class="token">--program</span> codex <span class="token">--project</span> .</code></pre>
       <p>Before a session edits a file another agent might touch, it takes a hold. TTL is seconds. Exclusive is the default.</p>
       <pre class="code-block shell" tabindex="0" aria-label="Acquire a path hold"><code>another hold acquire <span class="token">--agent</span> claude-a crates/another/src/serve.rs <span class="token">--ttl</span> 1800 <span class="token">--reason</span> "startup line"</code></pre>
-      <p>A conflicting check exits 3 and grants nothing. The other process can still write the file. I keep a second git checkout when the overlap is real, and I still read the diff. The hold tells the other agent the path is taken.</p>
+      <p>A conflicting check exits 3 and grants nothing. With the hooks installed, a Claude Code or Codex edit to a file another agent holds is stopped and the holder named, across my worktrees of this repo, and each file an agent edits gets a hold without anyone asking for it. An edit from a shell command still gets through, so I keep a second git checkout when the overlap is real, and I still read the diff.</p>
       <p>Handoffs are requests, not a scratch markdown file. I used the markdown file. It went stale the same day.</p>
       <pre class="code-block shell" tabindex="0" aria-label="Open a request"><code>another send <span class="token">--from</span> claude-a <span class="token">--to</span> codex-b <span class="token">--subject</span> "Review the parser" <span class="token">--body</span> "Error paths look wrong." <span class="token">--request</span>
 another inbox <span class="token">--agent</span> codex-b</code></pre>
-      <p>Hooks are what make the second session notice. <code>another hook install --client all</code> edits user-global client config, keeps a backup, and leaves hooks you already had. Run it with <code>--dry-run</code> first. Codex will not run the new hooks until you trust them in <code>/hooks</code>.</p>
+      <p>Hooks are what make the second session notice: a digest at session start, and a one-line notice after its next tool call when mail lands mid-task. <code>another hook install --client all</code> edits user-global client config, keeps a backup, and leaves hooks you already had. Run it with <code>--dry-run</code> first. Codex will not run the new hooks until you trust them in <code>/hooks</code>.</p>
     </section>
     <section class="guide-section" aria-labelledby="wrong-title">
       <h2 id="wrong-title">Things I had wrong</h2>
@@ -60,12 +60,12 @@ another inbox <span class="token">--agent</span> codex-b</code></pre>
         <div class="client"><dt>Wake</dt><dd>I pointed <code>another wake</code> at an agent that was mid-edit. Nothing useful happened. Wake types into an idle tmux, cmux, or Herdr target, and it skips the agent when the inbox is empty. It does not cut into a running turn.</dd></div>
         <div class="client"><dt>Reap</dt><dd><code>another reap</code> without <code>--confirm</code> is a plan. With <code>--confirm</code> it signals a process on that machine. A remote token cannot do it. I do not want a peer box killing a local server.</dd></div>
         <div class="client"><dt>Federation</dt><dd>The hub I would host can read mail it relays. There is no end-to-end encryption. Requests do not move nodes. I say that in the docs because it is easy to skim past.</dd></div>
-        <div class="client"><dt>Dashboard</dt><dd><code>another dashboard</code> opens the loopback page. <code>another serve</code> also has it at <code>/ui</code> when it is not an authenticated remote server. OAuth for ChatGPT and Claude.ai is still not merged. That one is on the <a href="/changelog/">changelog</a>.</dd></div>
+        <div class="client"><dt>Dashboard</dt><dd><code>another dashboard</code> opens the loopback page. <code>another serve</code> also has it at <code>/ui</code> when it is not an authenticated remote server. OAuth for ChatGPT and Claude.ai merged after I first wrote this page; a grant exists only after <code>another oauth approve</code> on this machine. Both are on the <a href="/changelog/">changelog</a>.</dd></div>
       </dl>
     </section>
     <section class="guide-section" aria-labelledby="proof-title">
       <h2 id="proof-title">What I will not claim</h2>
-      <p>No download count, no "teams using it", no time saved. The evidence you can check is the merged milestones and the open issues. On 10 Nov 2026 the open docs issues included <a href="https://github.com/tamler/another/issues/26">26</a>, <a href="https://github.com/tamler/another/issues/27">27</a>, and <a href="https://github.com/tamler/another/issues/28">28</a>.</p>
+      <p>No download count, no "teams using it", no time saved. The evidence you can check is the merged milestones and the open issues. On 12 Nov 2026 the open issues were the three docs issues <a href="https://github.com/tamler/another/issues/26">26</a>, <a href="https://github.com/tamler/another/issues/27">27</a>, and <a href="https://github.com/tamler/another/issues/28">28</a>.</p>
       <p>If you want the short try that does not install hooks, use the <a href="/guides/local-agent-inbox/">local inbox guide</a>. If you want the comparison, including tools whose hook can deny an edit, that is <a href="/compare/alternatives/">the alternatives page</a>.</p>
     </section>
   </main>

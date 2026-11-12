@@ -15,12 +15,12 @@
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Another. One inbox for coding agents.">
+  <meta property="og:image:alt" content="Another. Path holds and an inbox for coding agents.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Run multiple Claude Code sessions in one repo - Another">
   <meta name="twitter:description" content="Two Claude Code sessions in one repository share one Another identity by default. Ending either releases both sessions' holds. Give each its own name.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
-  <meta name="twitter:image:alt" content="Another. One inbox for coding agents.">
+  <meta name="twitter:image:alt" content="Another. Path holds and an inbox for coding agents.">
   <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Multiple Claude Code sessions, one repository","description":"Two Claude Code sessions in one repository share one Another identity by default. Ending either releases both sessions' holds. Give each its own name.","url":"https://toanother.one/guides/multiple-claude-code-sessions/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://toanother.one/guides/"},{"@type":"ListItem","position":3,"name":"Multiple Claude Code sessions","item":"https://toanother.one/guides/multiple-claude-code-sessions/"}]}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -41,9 +41,9 @@
       <h2 id="catch">The catch: one identity per client and project</h2>
       <p>A session hook acts as the client name within its project, so two Claude Code sessions started in the same checkout are both <code>claude@shop</code>. The same rule applies to Codex, Grok CLI and Cursor. Sharing an identity has three effects:</p>
       <ul>
-        <li><strong>Holds don't separate them.</strong> A hold conflicts with other agents, so one session's check passes against the other's hold, and overlapping acquires both succeed.</li>
+        <li><strong>Holds don't separate them.</strong> A hold conflicts with other agents, so one session's check passes against the other's hold, overlapping acquires both succeed, and the edit hook lets each session edit the files the other is in.</li>
         <li><strong>The first session to end ends the agent.</strong> Its session-end hook releases every hold, including any the other session took, and marks <code>claude@shop</code> offline until the other session's next prompt.</li>
-        <li><strong>A new-mail notice appears once.</strong> Whichever session has the next prompt gets it, and the other session hears nothing about that message. Cursor gets no prompt notices at all.</li>
+        <li><strong>A new-mail notice appears once.</strong> Whichever session has the next tool call or prompt gets it, and the other session hears nothing about that message. Cursor gets no prompt notices at all.</li>
       </ul>
     </section>
     <section class="guide-section" aria-labelledby="names">
@@ -65,11 +65,11 @@ ANOTHER_AGENT=ui@shop claude</code></pre>
 another inbox --agent ui@shop
 another hold acquire --agent parser@shop --project . 'src/parser/**'
 another hold check --agent ui@shop --project . 'src/parser/lex.rs'</code></pre>
-      <p>The check exits with status 3 on a conflict. When <code>ui</code> ends its session, <code>parser</code> keeps its hold. Holds are still <a href="/guides/avoid-agent-file-conflicts/">advisory</a>: they show intent, and nothing stops a session writing to a held file.</p>
+      <p>The check exits with status 3 on a conflict. When <code>ui</code> ends its session, <code>parser</code> keeps its hold. With the hooks installed, <code>ui</code>'s edit to a file under that hold is stopped and <code>parser@shop</code> named; an edit from a shell command is not. <a href="/guides/avoid-agent-file-conflicts/">File holds</a> has the limits.</p>
     </section>
     <section class="guide-section" aria-labelledby="worktrees">
       <h2 id="worktrees">Or use a worktree per session</h2>
-      <p>Sessions in separate <a href="/guides/git-worktrees/">git worktrees</a> get separate names without <code>ANOTHER_AGENT</code>, such as <code>claude@shop</code> and <code>claude@shop-ui</code>, because each worktree is its own project. They also get separate files. The trade-off is that holds no longer conflict across worktrees unless you share a project scope.</p>
+      <p>Sessions in separate <a href="/guides/git-worktrees/">git worktrees</a> get separate names without <code>ANOTHER_AGENT</code>, such as <code>claude@shop</code> and <code>claude@shop-ui</code>, because each worktree is its own project. They also get separate files, and holds still conflict across worktrees of one repository, so the two find out before both edit the same path.</p>
     </section>
     <section class="guide-section" aria-labelledby="ambiguous">
       <h2 id="ambiguous">When a bare name stops resolving</h2>

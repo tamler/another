@@ -266,6 +266,102 @@ async fn full_flow_over_mcp() {
     client.cancel().await.unwrap();
 }
 
+/// `fetch_inbox` is not an ack, `acknowledge` records only the acting agent's receipt, and
+/// `ack: false` marks read without acknowledging.
+#[tokio::test]
+async fn fetch_inbox_is_not_an_ack_and_acknowledge_is_per_agent() {
+    let client = in_process(Store::open_in_memory(Clock::System).unwrap()).await;
+    for (name, program) in [
+        ("claude-1", "claude"),
+        ("codex-1", "codex"),
+        ("grok-1", "grok"),
+    ] {
+        call_ok(
+            &client,
+            "register_agent",
+            json!({ "name": name, "program": program }),
+        )
+        .await;
+    }
+    let sent = call_ok(
+        &client,
+        "send_message",
+        json!({
+            "from": "claude-1", "to": ["codex-1", "grok-1"], "subject": "Confirm receipt",
+            "body": "please ack", "ack_required": true
+        }),
+    )
+    .await;
+    let message_id = sent["message_id"].as_str().unwrap().to_string();
+    let all = |agent: &str| json!({ "agent": agent, "unread_only": false });
+
+    // Fetching twice leaves the counters and the delivery untouched.
+    let first = call_ok(&client, "fetch_inbox", json!({ "agent": "codex-1" })).await;
+    assert_eq!(
+        (first["unread"].as_u64(), first["awaiting_ack"].as_u64()),
+        (Some(1), Some(1))
+    );
+    let second = call_ok(&client, "fetch_inbox", json!({ "agent": "codex-1" })).await;
+    assert_eq!(second["unread"], first["unread"]);
+    assert_eq!(second["awaiting_ack"], first["awaiting_ack"]);
+    assert_eq!(second["messages"][0]["message_id"], message_id.as_str());
+    assert!(second["messages"][0]["read_at"].is_null());
+    assert!(second["messages"][0]["acked_at"].is_null());
+    let digest = call_ok(&client, "whats_new", json!({ "agent": "codex-1" })).await;
+    assert_eq!(
+        (digest["unread"].as_u64(), digest["awaiting_ack"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert_eq!(
+        call_ok(&client, "fetch_inbox", json!({ "agent": "codex-1" })).await["unread"],
+        1
+    );
+
+    // ack: false marks read without acknowledging.
+    let read = call_ok(
+        &client,
+        "acknowledge",
+        json!({ "agent": "codex-1", "message_ids": [message_id], "ack": false }),
+    )
+    .await;
+    assert_eq!(read["updated"].as_array().unwrap().len(), 1);
+    let codex = call_ok(&client, "fetch_inbox", all("codex-1")).await;
+    assert_eq!(
+        (codex["unread"].as_u64(), codex["awaiting_ack"].as_u64()),
+        (Some(0), Some(1))
+    );
+    assert!(codex["messages"][0]["read_at"].is_string());
+    assert!(codex["messages"][0]["acked_at"].is_null());
+
+    // The other recipient is untouched.
+    let grok = call_ok(&client, "fetch_inbox", all("grok-1")).await;
+    assert_eq!(
+        (grok["unread"].as_u64(), grok["awaiting_ack"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert!(grok["messages"][0]["read_at"].is_null());
+    assert!(grok["messages"][0]["acked_at"].is_null());
+
+    // A real ack records codex-1's receipt only.
+    let acked = call_ok(
+        &client,
+        "acknowledge",
+        json!({ "agent": "codex-1", "message_ids": [message_id] }),
+    )
+    .await;
+    assert_eq!(acked["updated"].as_array().unwrap().len(), 1);
+    let codex = call_ok(&client, "fetch_inbox", all("codex-1")).await;
+    assert_eq!(codex["awaiting_ack"], 0);
+    assert!(codex["messages"][0]["acked_at"].is_string());
+    let grok = call_ok(&client, "fetch_inbox", all("grok-1")).await;
+    assert_eq!(
+        (grok["unread"].as_u64(), grok["awaiting_ack"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert!(grok["messages"][0]["acked_at"].is_null());
+    client.cancel().await.unwrap();
+}
+
 #[tokio::test]
 async fn streamable_http_on_loopback() {
     let dir = tempfile::tempdir().unwrap();

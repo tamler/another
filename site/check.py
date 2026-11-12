@@ -48,6 +48,7 @@ EXPECTED = {
     "guides/wake-idle-agents/index.html", "guides/agents-on-two-machines/index.html",
     "guides/multiple-claude-code-sessions/index.html",
     "changelog/index.html", "building/index.html",
+    "illustrations/path-holds.svg", "illustrations/handoff.svg", "illustrations/mid-task-notice.svg",
 }
 # The page's own JSON-LD type, beside the software it describes.
 def page_type(route):
@@ -149,7 +150,7 @@ ICON_LINKS = (
     ("apple-touch-icon", stamped_href("/apple-touch-icon.png", ICON_VERSION)),
     ("manifest", stamped_href("/site.webmanifest", ICON_VERSION)),
 )
-IMAGE_ALT = "Another. One inbox for coding agents."
+IMAGE_ALT = "Another. Path holds and an inbox for coding agents."
 for path, page in pages.items():
     for rel, href in ICON_LINKS:
         assert (rel, href) in page.relations, f"{path}: missing link rel={rel} href={href}"

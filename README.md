@@ -1,10 +1,14 @@
 # Another
 
+![Another: one inbox for coding agents. Mail, requests, path holds, a feed, a resource registry.](docs/assets/banner.png)
+
 **From one agent to another.**
+
+[![ci](https://github.com/tamler/another/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tamler/another/actions/workflows/ci.yml) [![license Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE) [![MSRV 1.88](https://img.shields.io/badge/MSRV-1.88-informational)](Cargo.toml) [![platforms macOS and Linux](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-informational)](https://toanother.one/docs/install/) [![no GitHub Release yet](https://img.shields.io/badge/GitHub%20Release-none%20yet-lightgrey)](https://github.com/tamler/another/releases)
 
 Free and open source, always. I built Another because I run more than one coding agent in the same repo and I was the only thing connecting them.
 
-Claude Code and Codex do not share a mailbox. Neither do Grok CLI, Cursor, Grok Bot, or any other MCP client, until you give them one. They edit the same files. They start the same fix twice. A review request dies in the chat I forget to paste across. Another is a local inbox for those sessions, with expiring path holds, a feed of who is doing what, and a registry for ports and model servers. It does not launch the agents or assign their work.
+Claude Code and Codex cannot see each other. Neither can Grok CLI, Cursor, Grok Bot, or any other MCP client, until you give them something shared. They edit the same files. They start the same fix twice. A review request dies in the chat I forget to paste across. Another puts path holds on the files those sessions edit, so an edit to a file another agent is in is stopped with that agent's name. Around the holds: a local inbox with requests that have an owner, a feed of who is doing what, and a registry for ports and model servers. It does not launch the agents or assign their work.
 
 **Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1-6 complete. Hosted connectors (OAuth for ChatGPT, Claude, and other MCP clients) and the loopback dashboard are in this tree. See [docs/REMOTE.md](docs/REMOTE.md) and [docs/DASHBOARD.md](docs/DASHBOARD.md).
 
@@ -19,12 +23,20 @@ This is the failure I kept hitting:
 
 What they get instead:
 
+- **Path holds, taken at the edit.** With the hook pack, each file an agent edits gets an expiring hold, and a Claude Code, Codex or Grok CLI edit to a file another agent holds is stopped with the holder's name, across worktrees and clones of the same repo. `another hold check` exits 3 on overlap and grants nothing. Edits made from a shell command get past the hook, and Cursor has no edit guard, so use another checkout when you need a real boundary.
 - **Mail and requests.** `another send --request` opens work with an owner. The other agent claims it. There is an ack. If the request goes stale, someone else can take it.
-- **Path holds that expire.** `another hold check` exits 3 on overlap and grants nothing. With the hook pack, an agent's file edit takes a hold on that file, and an edit to a file another agent holds is stopped with the holder's name, across worktrees of the same repo. Edits made from a shell command get past it, so use another checkout when you need a real boundary.
 - **An activity feed**, so a session can ask who is doing what before it starts a duplicate.
 - **A resource registry**, so an agent borrows a running server instead of launching a duplicate. `another reap` needs a human `--confirm` on that machine. Remote peers cannot reap.
 
-Hooks put a short digest in at session start, and a one-line notice after the next tool call when mail lands mid-task. That is why the agents look. State is one SQLite database on the machine (`~/.another`, or `$ANOTHER_HOME`). A second machine can federate through a hub you host. The hub can read mail it relays.
+![Diagram: codex@shop-review holds src/api/routes.rs. claude@shop's Edit tool call on that file is stopped by the edit hook, which names the holder, and claude@shop sends a release request instead. An edit from a shell command is not seen by the hook, so a hold is not a lock.](docs/assets/path-holds.svg)
+
+![Diagram: alice@shop sends "Review the parser" with --request to bob@shop. An ack records receipt, not completion. The request the message opened moves from open to claimed to done; release puts it back to open, and past its due time it goes stale and anyone may take it over.](docs/assets/handoff.svg)
+
+Hooks put a short digest in at session start, and a one-line notice after the next tool call when mail lands mid-task. That is why the agents look.
+
+![Diagram: on bob@shop's session timeline, mail from alice@shop lands between two tool calls. After the next tool call the post-tool hook adds a one-line notice naming the message. An idle agent makes no tool calls, so the loopback daemon wakes an idle Herdr agent; tmux and cmux panes are woken on demand. Each message is announced once.](docs/assets/mid-task-notice.svg)
+
+State is one SQLite database on the machine (`~/.another`, or `$ANOTHER_HOME`). A second machine can federate through a hub you host. The hub can read mail it relays.
 
 OAuth for hosted MCP clients (ChatGPT, Claude.ai) is in this tree, and so is the loopback dashboard (`another dashboard`, or `/ui` on a loopback `another serve`). See the [changelog](https://toanother.one/changelog/) and [how I run the agents on this repo](https://toanother.one/building/).
 
@@ -106,6 +118,10 @@ another inbox --agent bob
 another activity --summary
 ```
 
+That exchange, recorded from a temporary home with a build of `main` (ids and timestamps will differ; the hold check exits 3 on purpose):
+
+![Terminal recording: another agent register alice and bob; another send --request opens a request; another inbox shows bob's unread message and the open request; another hold acquire for alice on src/parser.rs; another hold check for bob reports the conflict and exits 3; another reply and another ack; another holds lists alice's hold.](docs/assets/demo.gif)
+
 **6. Open the local dashboard** (loopback only, no extra install):
 
 ```bash
@@ -126,7 +142,7 @@ Or, while `another serve` is running, open <http://127.0.0.1:7466/ui>. The page 
 | 6 | Polish: `another wake` (tmux, cmux, Herdr), Herdr plugin, release builds, quickstart, CONTRIBUTING | ✅ complete |
 | 7 | Hosted connectors: OAuth 2.1 on the authenticated server, local approval, `another remote up`, `whats_new`, ChatGPT desktop local MCP | ✅ tamler/another#99 |
 | - | Local dashboard: agents, holds, mail, requests, resources, timeline, peers | ✅ [docs/DASHBOARD.md](docs/DASHBOARD.md) |
-| - | Push and enforced holds: mid-task notices, edit guard, holds across worktrees, launchd daemon, Herdr wakes, `another stats` | In review ([docs/HOOKS.md](docs/HOOKS.md), [docs/DAEMON.md](docs/DAEMON.md)) |
+| - | Push and enforced holds: mid-task notices, edit guard, holds across worktrees, launchd daemon, Herdr wakes, `another stats` | ✅ tamler/another#103, #104, #105 ([docs/HOOKS.md](docs/HOOKS.md), [docs/HOLDS.md](docs/HOLDS.md), [docs/DAEMON.md](docs/DAEMON.md)) |
 
 Current brief: [AGENTS.md](AGENTS.md). Milestone 7 is the connectors work. Bearer tokens from milestone 4 still work. Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88, copy lint.
 
@@ -170,7 +186,7 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 | Node | `another init`, `another status`, `another node show`, `another node name [<name>]` (no name prints the current one), `another events` |
 | Agents | `another agent register <name> --program claude\|codex\|grok\|cursor\|grok_bot\|other [--project PATH]`, `another agent list` |
 | Mail | `another send`, `another inbox`, `another reply <message-id>`, `another ack <message-id>`, `another threads`, `another thread <id>` (there is no `another mail` command) |
-| Requests | `another requests`, `another request claim\|release\|complete\|cancel <id>` |
+| Requests | `another requests`, `another request claim\|release\|complete\|cancel <id>` (recorded walkthrough: [docs/REQUESTS.md](docs/REQUESTS.md)) |
 | Holds | `another hold acquire\|check\|renew\|release`, `another holds` (conflicts exit with status 3; `--repo-wide` for a whole-project hold) |
 | Sessions and feed | `another heartbeat [--start\|--end [--keep]]`, `another activity [--since 1h] [--kinds mail,request] [--summary]`, `another stats [--since 48h]` |
 | Hooks | `another hook install\|uninstall --client <c>\|all [--dry-run]`, `another hook status` |
@@ -184,7 +200,7 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 ## Concepts
 
 - **Agents** are unique per project and addressed as `name@project`, or `name@project@node` on other nodes. A bare `name` works when it is unambiguous; once a second project registers the same name it stops resolving, and [docs/ADDRESSING.md](docs/ADDRESSING.md) shows the error and the fix.
-- **Mail** is immutable messages in threads, with per-recipient read and ack state. **Requests** have an owner and go `open → claimed → done`; they become `stale` past their due time and anyone may take them over.
+- **Mail** is immutable messages in threads, with per-recipient read and ack state. **Requests** have an owner and go `open → claimed → done`; they become `stale` past their due time and anyone may take them over. An ack records receipt, not completion: [docs/REQUESTS.md](docs/REQUESTS.md) walks through a worker that acks, claims, and crashes.
 - **Path holds** are expiring leases on project-relative globs. Exclusive holds conflict with overlapping holds, including holds in other checkouts of the same repository on this machine. The edit hook enforces them for client file edits; across machines, a clash is a warning, never a lock.
 - **Resources** are model and dev servers, ports, GPUs, containers and jobs, held by owner and borrower leases with TTLs. Orphans are listed, and only a human can reap them (`another reap … --confirm`); reaping is never remote.
 - **Event log**: every change is appended to a signed, chained, append-only log, and the query tables are projections of it. That log is what federation syncs.
