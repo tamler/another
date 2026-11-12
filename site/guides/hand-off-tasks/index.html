@@ -37,6 +37,7 @@
   </header>
   <main class="wrap" id="main" tabindex="-1">
     <div class="guide-hero"><h1>Hand off a task with an owner</h1><p class="definition">A message asks. A request records who took the work, and whether it finished.</p><nav class="guide-nav" aria-label="Setup guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/concepts/#request">What is a request?</a></nav></div>
+    <figure class="illustration"><img src="/illustrations/handoff.svg" width="1200" height="600" alt="Diagram: alice@shop sends Review the parser with --request to bob@shop. An ack records receipt, not completion. The request the message opened moves from open to claimed to done; release puts it back to open, and past its due time it goes stale and anyone may take it over."></figure>
     <section class="guide-section" aria-labelledby="open">
       <h2 id="open">Open a request</h2>
       <p>Run from one physical repository root. These are demo identities. <code>--request</code> opens a claimable request with the message; <code>--due</code> sets a deadline in seconds and implies <code>--request</code>.</p>

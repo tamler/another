@@ -48,6 +48,7 @@ EXPECTED = {
     "guides/wake-idle-agents/index.html", "guides/agents-on-two-machines/index.html",
     "guides/multiple-claude-code-sessions/index.html",
     "changelog/index.html", "building/index.html",
+    "illustrations/path-holds.svg", "illustrations/handoff.svg", "illustrations/mid-task-notice.svg",
 }
 # The page's own JSON-LD type, beside the software it describes.
 def page_type(route):

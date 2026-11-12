@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 600" width="1200" height="600" role="img" aria-labelledby="title desc" font-family="Fragment Mono, Menlo, Consolas, Liberation Mono, monospace">
+  <title id="title">A handoff is a request with an owner</title>
+  <desc id="desc">alice@shop sends "Review the parser" with --request. The message lands in bob@shop's inbox and opens a request. An ack records receipt only. The request moves from open to claimed to done; past its due time it goes stale and anyone may take it over.</desc>
+  <rect width="1200" height="600" fill="#f8f8f4"/>
+
+  <!-- agents -->
+  <text x="110" y="68" text-anchor="middle" font-size="22" fill="#292922">alice@shop</text>
+  <rect x="80" y="90" width="60" height="200" rx="4" fill="#292922"/>
+  <text x="1090" y="68" text-anchor="middle" font-size="22" fill="#292922">bob@shop</text>
+  <rect x="1060" y="90" width="60" height="200" rx="4" fill="#292922"/>
+
+  <!-- the message -->
+  <line x1="140" y1="150" x2="1040" y2="150" stroke="#292922" stroke-width="4"/>
+  <polygon points="1040,150 1020,140 1020,160" fill="#292922"/>
+  <rect x="200" y="110" width="800" height="48" rx="6" fill="#25251f"/>
+  <text x="600" y="141" text-anchor="middle" font-size="20" fill="#f4f2e7">another send --to bob --subject "Review the parser" --request</text>
+
+  <!-- the ack, back -->
+  <line x1="1060" y1="236" x2="160" y2="236" stroke="#5d5d50" stroke-width="3" stroke-dasharray="10 8"/>
+  <polygon points="160,236 180,226 180,246" fill="#5d5d50"/>
+  <text x="600" y="226" text-anchor="middle" font-size="18" fill="#5d5d50">another ack: received, not done</text>
+
+  <!-- request states -->
+  <text x="600" y="352" text-anchor="middle" font-size="20" fill="#5d5d50">the request the message opened</text>
+
+  <!-- release back to open -->
+  <path d="M 570 430 L 570 400 L 290 400 L 290 430" fill="none" stroke="#5d5d50" stroke-width="2" stroke-dasharray="8 6"/>
+  <polygon points="290,430 282,414 298,414" fill="#5d5d50"/>
+  <text x="430" y="392" text-anchor="middle" font-size="16" fill="#5d5d50">release</text>
+
+  <rect x="200" y="430" width="180" height="60" rx="6" fill="#ffffff" stroke="#292922" stroke-width="3"/>
+  <text x="290" y="468" text-anchor="middle" font-size="24" fill="#292922">open</text>
+
+  <line x1="380" y1="460" x2="470" y2="460" stroke="#292922" stroke-width="3"/>
+  <polygon points="470,460 452,451 452,469" fill="#292922"/>
+  <text x="425" y="446" text-anchor="middle" font-size="16" fill="#5d5d50">claim</text>
+
+  <rect x="470" y="430" width="200" height="60" rx="6" fill="#e4c56e" stroke="#292922" stroke-width="3"/>
+  <text x="570" y="468" text-anchor="middle" font-size="24" fill="#292922">claimed</text>
+  <text x="540" y="516" text-anchor="middle" font-size="16" fill="#5d5d50">one owner</text>
+
+  <line x1="670" y1="460" x2="760" y2="460" stroke="#292922" stroke-width="3"/>
+  <polygon points="760,460 742,451 742,469" fill="#292922"/>
+  <text x="715" y="446" text-anchor="middle" font-size="16" fill="#5d5d50">complete</text>
+
+  <rect x="760" y="430" width="180" height="60" rx="6" fill="#292922"/>
+  <text x="850" y="468" text-anchor="middle" font-size="24" fill="#f4f2e7">done</text>
+
+  <!-- stale -->
+  <path d="M 640 490 L 640 556 L 290 556 L 290 490" fill="none" stroke="#705000" stroke-width="2" stroke-dasharray="8 6"/>
+  <polygon points="290,490 282,506 298,506" fill="#705000"/>
+  <text x="465" y="582" text-anchor="middle" font-size="16" fill="#705000">past its due time: stale, anyone may take it over</text>
+</svg>
