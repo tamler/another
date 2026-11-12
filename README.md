@@ -8,7 +8,7 @@
 
 Free and open source, always. I built Another because I run more than one coding agent in the same repo and I was the only thing connecting them.
 
-Claude Code and Codex do not share a mailbox. Neither do Grok CLI, Cursor, Grok Bot, or any other MCP client, until you give them one. They edit the same files. They start the same fix twice. A review request dies in the chat I forget to paste across. Another is a local inbox for those sessions, with expiring path holds, a feed of who is doing what, and a registry for ports and model servers. It does not launch the agents or assign their work.
+Claude Code and Codex cannot see each other. Neither can Grok CLI, Cursor, Grok Bot, or any other MCP client, until you give them something shared. They edit the same files. They start the same fix twice. A review request dies in the chat I forget to paste across. Another puts path holds on the files those sessions edit, so an edit to a file another agent is in is stopped with that agent's name. Around the holds: a local inbox with requests that have an owner, a feed of who is doing what, and a registry for ports and model servers. It does not launch the agents or assign their work.
 
 **Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1-6 complete. Hosted connectors (OAuth for ChatGPT, Claude, and other MCP clients) and the loopback dashboard are in this tree. See [docs/REMOTE.md](docs/REMOTE.md) and [docs/DASHBOARD.md](docs/DASHBOARD.md).
 
@@ -23,8 +23,8 @@ This is the failure I kept hitting:
 
 What they get instead:
 
+- **Path holds, taken at the edit.** With the hook pack, each file an agent edits gets an expiring hold, and a Claude Code, Codex or Grok CLI edit to a file another agent holds is stopped with the holder's name, across worktrees and clones of the same repo. `another hold check` exits 3 on overlap and grants nothing. Edits made from a shell command get past the hook, and Cursor has no edit guard, so use another checkout when you need a real boundary.
 - **Mail and requests.** `another send --request` opens work with an owner. The other agent claims it. There is an ack. If the request goes stale, someone else can take it.
-- **Path holds that expire.** `another hold check` exits 3 on overlap and grants nothing. With the hook pack, an agent's file edit takes a hold on that file, and an edit to a file another agent holds is stopped with the holder's name, across worktrees of the same repo. Edits made from a shell command get past it, so use another checkout when you need a real boundary.
 - **An activity feed**, so a session can ask who is doing what before it starts a duplicate.
 - **A resource registry**, so an agent borrows a running server instead of launching a duplicate. `another reap` needs a human `--confirm` on that machine. Remote peers cannot reap.
 
