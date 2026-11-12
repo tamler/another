@@ -5,23 +5,23 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>How I run my own agent team with Another</title>
-  <meta name="description" content="I run Claude Code and Codex on this repo through Another. The 12 Nov 2026 public repo had 0 stars and no release. The edit hook stops a held edit.">
+  <meta name="description" content="I coordinate Claude Code and Codex on this repo with messages, path holds and shared resources. See the workflow, its limits and what I check myself.">
   <link rel="canonical" href="https://toanother.one/building/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Another">
   <meta property="og:title" content="How I run my own agent team with Another">
-  <meta property="og:description" content="I run Claude Code and Codex on this repo through Another. The 12 Nov 2026 public repo had 0 stars and no release. The edit hook stops a held edit.">
+  <meta property="og:description" content="I coordinate Claude Code and Codex on this repo with messages, path holds and shared resources. See the workflow, its limits and what I check myself.">
   <meta property="og:url" content="https://toanother.one/building/">
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Another. Path holds and an inbox for coding agents.">
+  <meta property="og:image:alt" content="Another. Many agents, one project.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="How I run my own agent team with Another">
-  <meta name="twitter:description" content="I run Claude Code and Codex on this repo through Another. The 12 Nov 2026 public repo had 0 stars and no release. The edit hook stops a held edit.">
+  <meta name="twitter:description" content="I coordinate Claude Code and Codex on this repo with messages, path holds and shared resources. See the workflow, its limits and what I check myself.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
-  <meta name="twitter:image:alt" content="Another. Path holds and an inbox for coding agents.">
-  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"How I run the agent team","description":"I run Claude Code and Codex on this repo through Another. The 12 Nov 2026 public repo had 0 stars and no release. The edit hook stops a held edit.","url":"https://toanother.one/building/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}}]}</script>
+  <meta name="twitter:image:alt" content="Another. Many agents, one project.">
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"How I run the agent team","description":"I coordinate Claude Code and Codex on this repo with messages, path holds and shared resources. See the workflow, its limits and what I check myself.","url":"https://toanother.one/building/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
@@ -38,8 +38,8 @@
   <main class="wrap" id="main" tabindex="-1">
     <div class="guide-hero">
       <h1>How I run the agent team</h1>
-      <p class="definition">This repository is built by more than one coding agent at a time. Claude Code in one checkout, Codex in another, Cursor cloud agents when I point them at a branch. Another does not launch them. I do. Another is the inbox they share.</p>
-      <p>Public numbers, looked up 12 Nov 2026 on <a href="https://github.com/tamler/another">github.com/tamler/another</a>: 0 stars, 1 fork, no GitHub Release. I am writing that down so the story does not grow a user count I do not have.</p>
+      <p class="definition">This repository is built by more than one coding agent at a time. Claude Code in one checkout, Codex in another, Cursor cloud agents when I point them at a branch. Another coordinates their messages, holds and shared resources in the background. I launch the agents and review their work.</p>
+      <p>Public numbers, looked up 13 Nov 2026 on <a href="https://github.com/tamler/another">github.com/tamler/another</a>: 0 stars, 1 fork, no GitHub Release. I am writing that down so the story does not grow a user count I do not have.</p>
     </div>
     <section class="guide-section" aria-labelledby="loop-title">
       <h2 id="loop-title">The loop</h2>
@@ -48,7 +48,7 @@
 another agent register codex-b <span class="token">--program</span> codex <span class="token">--project</span> .</code></pre>
       <p>Before a session edits a file another agent might touch, it takes a hold. TTL is seconds. Exclusive is the default.</p>
       <pre class="code-block shell" tabindex="0" aria-label="Acquire a path hold"><code>another hold acquire <span class="token">--agent</span> claude-a crates/another/src/serve.rs <span class="token">--ttl</span> 1800 <span class="token">--reason</span> "startup line"</code></pre>
-      <p>A conflicting check exits 3 and grants nothing. With the hooks installed, a Claude Code or Codex edit to a file another agent holds is stopped and the holder named, across my worktrees of this repo, and each file an agent edits gets a hold without anyone asking for it. An edit from a shell command still gets through, so I keep a second git checkout when the overlap is real, and I still read the diff.</p>
+      <p>A conflicting check exits 3 and grants nothing. With the hooks installed, a Claude Code or Codex edit to a file another agent holds is stopped and the holder named, across my worktrees of this repo, and each file an agent edits gets a hold without anyone asking for it. An edit from a shell command still gets through, the guard fails open if its database is unavailable, and Cursor has no edit guard. I keep a second git checkout when the overlap is real, and I still read the diff.</p>
       <p>Handoffs are requests, not a scratch markdown file. I used the markdown file. It went stale the same day.</p>
       <pre class="code-block shell" tabindex="0" aria-label="Open a request"><code>another send <span class="token">--from</span> claude-a <span class="token">--to</span> codex-b <span class="token">--subject</span> "Review the parser" <span class="token">--body</span> "Error paths look wrong." <span class="token">--request</span>
 another inbox <span class="token">--agent</span> codex-b</code></pre>
@@ -65,8 +65,8 @@ another inbox <span class="token">--agent</span> codex-b</code></pre>
     </section>
     <section class="guide-section" aria-labelledby="proof-title">
       <h2 id="proof-title">What I will not claim</h2>
-      <p>No download count, no "teams using it", no time saved. The evidence you can check is the merged milestones and the open issues. On 12 Nov 2026 the open issues were the three docs issues <a href="https://github.com/tamler/another/issues/26">26</a>, <a href="https://github.com/tamler/another/issues/27">27</a>, and <a href="https://github.com/tamler/another/issues/28">28</a>.</p>
-      <p>If you want the short try that does not install hooks, use the <a href="/guides/local-agent-inbox/">local inbox guide</a>. If you want the comparison, including tools whose hook can deny an edit, that is <a href="/compare/alternatives/">the alternatives page</a>.</p>
+      <p>No download count, no "teams using it", no time saved. The evidence you can check is the merged milestones and the open issues. The current <a href="https://github.com/tamler/another/issues">issue list</a> shows what remains open.</p>
+      <p>If you want the short try that does not install hooks, use the <a href="/guides/coordinate-local-agents/">local coordination guide</a>. If you want the comparison, including tools whose hook can deny an edit, that is <a href="/compare/alternatives/">the alternatives page</a>.</p>
     </section>
   </main>
   <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="/changelog/">Changelog</a> <a href="/docs/faq/">FAQ</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>

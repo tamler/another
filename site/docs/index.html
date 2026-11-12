@@ -4,24 +4,24 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Another docs - MCP inbox, hooks and agent coordination</title>
-  <meta name="description" content="Set up an MCP inbox for coding agents with Another. Learn session hooks, agent mail, path holds, resource leases, wake adapters and optional federation.">
+  <title>Another docs - coding agent coordination</title>
+  <meta name="description" content="Coordinate coding agents with Another. Learn session hooks, messaging, path holds, resource leases, wake adapters and federation across machines.">
   <link rel="canonical" href="https://toanother.one/docs/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Another">
-  <meta property="og:title" content="Another docs - MCP inbox, hooks and agent coordination">
-  <meta property="og:description" content="Set up an MCP inbox for coding agents with Another. Learn session hooks, agent mail, path holds, resource leases, wake adapters and optional federation.">
+  <meta property="og:title" content="Another docs - coding agent coordination">
+  <meta property="og:description" content="Coordinate coding agents with Another. Learn session hooks, messaging, path holds, resource leases, wake adapters and federation across machines.">
   <meta property="og:url" content="https://toanother.one/docs/">
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Another. Path holds and an inbox for coding agents.">
+  <meta property="og:image:alt" content="Another. Many agents, one project.">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Another docs - MCP inbox, hooks and agent coordination">
-  <meta name="twitter:description" content="Set up an MCP inbox for coding agents with Another. Learn session hooks, agent mail, path holds, resource leases, wake adapters and optional federation.">
+  <meta name="twitter:title" content="Another docs - coding agent coordination">
+  <meta name="twitter:description" content="Coordinate coding agents with Another. Learn session hooks, messaging, path holds, resource leases, wake adapters and federation across machines.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
-  <meta name="twitter:image:alt" content="Another. Path holds and an inbox for coding agents.">
-  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Another docs","description":"Set up an MCP inbox for coding agents with Another. Learn session hooks, agent mail, path holds, resource leases, wake adapters and optional federation.","url":"https://toanother.one/docs/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}}]}</script>
+  <meta name="twitter:image:alt" content="Another. Many agents, one project.">
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Another docs","description":"Coordinate coding agents with Another. Learn session hooks, messaging, path holds, resource leases, wake adapters and federation across machines.","url":"https://toanother.one/docs/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
@@ -44,7 +44,7 @@
     </div>
     <section class="guide-section" id="task-guides" aria-labelledby="task-guides-title">
       <h2 id="task-guides-title">Task guides</h2>
-      <nav class="guide-nav" aria-label="Task guides"><a href="/guides/claude-code-codex/">Claude Code + Codex</a> <a href="/guides/multiple-claude-code-sessions/">Multiple sessions</a> <a href="/guides/mcp-agent-messaging/">MCP messaging</a> <a href="/guides/avoid-agent-file-conflicts/">File holds</a> <a href="/guides/local-agent-inbox/">Local inbox</a> <a href="/guides/git-worktrees/">Git worktrees</a> <a href="/guides/hand-off-tasks/">Hand off a task</a> <a href="/guides/share-model-server/">Share a model server</a> <a href="/guides/wake-idle-agents/">Wake idle agents</a> <a href="/guides/agents-on-two-machines/">Two machines</a></nav>
+      <nav class="guide-nav" aria-label="Task guides"><a href="/guides/claude-code-codex/">Claude Code + Codex</a> <a href="/guides/multiple-claude-code-sessions/">Multiple sessions</a> <a href="/guides/mcp-agent-messaging/">MCP messaging</a> <a href="/guides/avoid-agent-file-conflicts/">File holds</a> <a href="/guides/coordinate-local-agents/">Coordinate local agents</a> <a href="/guides/git-worktrees/">Git worktrees</a> <a href="/guides/hand-off-tasks/">Hand off a task</a> <a href="/guides/share-model-server/">Share a model server</a> <a href="/guides/wake-idle-agents/">Wake idle agents</a> <a href="/guides/agents-on-two-machines/">Two machines</a></nav>
       <p>Follow a specific workflow, then use the references below for command and safety details. New terms are in <a href="/docs/concepts/">Concepts</a>, and common questions in the <a href="/docs/faq/">FAQ</a>.</p>
       <p>What is on main, and what is not: <a href="/changelog/">changelog</a>. How I use it on this repository: <a href="/building/">the agent team</a>.</p>
     </section>

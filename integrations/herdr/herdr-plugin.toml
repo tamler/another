@@ -3,7 +3,7 @@
 # or, from a local checkout:
 #   herdr plugin link /path/to/another/integrations/herdr
 id = "another.inbox"
-name = "Another: agent inbox"
+name = "Another: agent coordination"
 version = "0.1.0"
 min_herdr_version = "0.7.0"
 description = "Wake Herdr agents that have unread mail in Another, and show the Another activity feed in a pane."

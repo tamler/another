@@ -15,12 +15,12 @@
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Another. Path holds and an inbox for coding agents.">
+  <meta property="og:image:alt" content="Another. Many agents, one project.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Share a model server between coding agents - Another">
   <meta name="twitter:description" content="Stop agents starting a second model server, dev server or GPU job. Register it, borrow it with a lease, release it, and clean up orphans with a human check.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
-  <meta name="twitter:image:alt" content="Another. Path holds and an inbox for coding agents.">
+  <meta name="twitter:image:alt" content="Another. Many agents, one project.">
   <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"One model server, several agents","description":"Stop agents starting a second model server, dev server or GPU job. Register it, borrow it with a lease, release it, and clean up orphans with a human check.","url":"https://toanother.one/guides/share-model-server/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://toanother.one/guides/"},{"@type":"ListItem","position":3,"name":"Share a model server","item":"https://toanother.one/guides/share-model-server/"}]}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -75,7 +75,7 @@ another orphans --no-scan</code></pre>
       <p>Without <code>--confirm</code>, that changes nothing and prints the plan and anything blocking it. A target must have a registered process ID and no live lease, must have been orphaned for the grace period (10 minutes by default) and must belong to you. <code>--confirm</code> sends SIGTERM, and <code>--force</code> adds SIGKILL if the process survives.</p>
       <p>The <code>--confirm</code> flag is for people. The MCP tool can only ask for a reap and hand back the command. An agent with shell access could still run that command itself, because the CLI can't tell who typed it, so your client's permission settings are the real boundary.</p>
     </section>
-    <section class="guide-section" aria-labelledby="related"><h2 id="related">Related guides</h2><nav class="guide-nav" aria-label="Related task guides"><a href="/guides/avoid-agent-file-conflicts/">File holds</a> <a href="/guides/agents-on-two-machines/">Two machines</a> <a href="/guides/local-agent-inbox/">Local inbox</a></nav></section>
+    <section class="guide-section" aria-labelledby="related"><h2 id="related">Related guides</h2><nav class="guide-nav" aria-label="Related task guides"><a href="/guides/avoid-agent-file-conflicts/">File holds</a> <a href="/guides/agents-on-two-machines/">Two machines</a> <a href="/guides/coordinate-local-agents/">Coordinate local agents</a></nav></section>
   </main>
   <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="/docs/faq/">FAQ</a> <a href="/docs/concepts/">Concepts</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>
 </body>

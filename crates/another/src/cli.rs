@@ -1212,11 +1212,11 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 repo_wide,
             })?;
             let conflicted = !report.conflicts.is_empty();
-            emit(json, &report, output::hold_report);
+            let emitted = emit(json, &report, output::hold_report);
             if conflicted {
                 ExitCode::from(EXIT_CONFLICT)
             } else {
-                ExitCode::SUCCESS
+                emitted
             }
         }
         Command::Hold(HoldCmd::Check {
@@ -1229,7 +1229,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let paths = resolve_hold_paths(&store, &project, paths);
             let conflicts = store.check_holds(&agent.agent, &project, &paths, !shared)?;
             let conflicted = !conflicts.is_empty();
-            emit(json, &conflicts, |c| {
+            let emitted = emit(json, &conflicts, |c| {
                 if c.is_empty() {
                     "no conflicts".to_string()
                 } else {
@@ -1239,7 +1239,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             if conflicted {
                 ExitCode::from(EXIT_CONFLICT)
             } else {
-                ExitCode::SUCCESS
+                emitted
             }
         }
         Command::Hold(HoldCmd::Renew { agent, hold_ids }) => {
@@ -1561,13 +1561,13 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let report = crate::fed::sync(&store);
             match report {
                 Ok(r) => {
-                    emit(json, &r, output::sync_report);
+                    let emitted = emit(json, &r, output::sync_report);
+                    if !watch {
+                        break emitted;
+                    }
                 }
                 Err(e) if watch => eprintln!("another: sync failed: {e:#}"),
                 Err(e) => return Err(e),
-            }
-            if !watch {
-                break ExitCode::SUCCESS;
             }
             std::thread::sleep(Duration::from_secs(every.max(5)));
         },

@@ -5,23 +5,23 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>Coordinate Claude Code and Codex in one repo - Another</title>
-  <meta name="description" content="Coordinate Claude Code and Codex in the same repository with Another. Connect session hooks and MCP, send review requests and inspect the shared local inbox.">
+  <meta name="description" content="Coordinate Claude Code and Codex in one repository with Another. Connect session hooks and MCP, send review requests and coordinate file edits.">
   <link rel="canonical" href="https://toanother.one/guides/claude-code-codex/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Another">
   <meta property="og:title" content="Coordinate Claude Code and Codex in one repo - Another">
-  <meta property="og:description" content="Coordinate Claude Code and Codex in the same repository with Another. Connect session hooks and MCP, send review requests and inspect the shared local inbox.">
+  <meta property="og:description" content="Coordinate Claude Code and Codex in one repository with Another. Connect session hooks and MCP, send review requests and coordinate file edits.">
   <meta property="og:url" content="https://toanother.one/guides/claude-code-codex/">
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Another. Path holds and an inbox for coding agents.">
+  <meta property="og:image:alt" content="Another. Many agents, one project.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Coordinate Claude Code and Codex in one repo - Another">
-  <meta name="twitter:description" content="Coordinate Claude Code and Codex in the same repository with Another. Connect session hooks and MCP, send review requests and inspect the shared local inbox.">
+  <meta name="twitter:description" content="Coordinate Claude Code and Codex in one repository with Another. Connect session hooks and MCP, send review requests and coordinate file edits.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
-  <meta name="twitter:image:alt" content="Another. Path holds and an inbox for coding agents.">
-  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Claude Code and Codex, one handoff","description":"Coordinate Claude Code and Codex in the same repository with Another. Connect session hooks and MCP, send review requests and inspect the shared local inbox.","url":"https://toanother.one/guides/claude-code-codex/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://toanother.one/guides/"},{"@type":"ListItem","position":3,"name":"Claude Code + Codex","item":"https://toanother.one/guides/claude-code-codex/"}]}]}</script>
+  <meta name="twitter:image:alt" content="Another. Many agents, one project.">
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Claude Code and Codex, one handoff","description":"Coordinate Claude Code and Codex in one repository with Another. Connect session hooks and MCP, send review requests and coordinate file edits.","url":"https://toanother.one/guides/claude-code-codex/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://toanother.one/guides/"},{"@type":"ListItem","position":3,"name":"Claude Code + Codex","item":"https://toanother.one/guides/claude-code-codex/"}]}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
@@ -56,7 +56,7 @@ another agent list</code></pre>
       <figure class="illustration"><img src="/illustrations/mid-task-notice.svg" width="1200" height="600" alt="Diagram: on bob@shop's session timeline, mail from alice@shop lands between two tool calls. After the next tool call the post-tool hook adds a one-line notice naming the message. An idle agent makes no tool calls, so the loopback daemon wakes an idle Herdr agent; tmux and cmux panes are woken on demand. Each message is announced once."></figure>
     </section>
     <section class="guide-section" aria-labelledby="mcp">
-      <h2 id="mcp">Connect the inbox tools</h2>
+      <h2 id="mcp">Connect the MCP tools</h2>
       <p>Add <code>another serve --stdio</code> as an MCP server in each client's supported configuration format. Both use the shared local node. <a href="/guides/mcp-agent-messaging/">MCP messaging</a> explains the tool arguments and state changes.</p>
       <p>Hooks supply short digests without message bodies. MCP tools fetch messages, send replies and claim requests. You choose the tasks and run the clients; Another supplies their coordination state.</p>
     </section>
@@ -66,9 +66,9 @@ another agent list</code></pre>
 another inbox --agent codex
 another activity --summary</code></pre>
       <p>The recipient can fetch its inbox, claim the request before starting, reply in its thread and acknowledge the mail. Completing a request and acknowledging a message are separate operations. This is a workflow to run, not a terminal recording. <a href="/guides/hand-off-tasks/">Hand off a task</a> covers claiming and completing in full.</p>
-      <p>For review-only work, specify the files and behavior to inspect. If both agents need to edit, agree on separate scopes and let <a href="/guides/avoid-agent-file-conflicts/">path holds</a> keep them apart; the edit hook stops a client edit to a file the other agent holds. A shared inbox does not merge changes or evaluate the review.</p>
+      <p>For review-only work, specify the files and behavior to inspect. If both agents need to edit, agree on separate scopes and use <a href="/guides/avoid-agent-file-conflicts/">path holds</a> to reduce conflicts. The edit guard fails open if the database is unavailable; shell edits bypass it, Cursor has no edit guard and Codex hooks require trust. Another does not merge changes or evaluate the review.</p>
     </section>
-    <section class="guide-section" aria-labelledby="related"><h2 id="related">Related guides</h2><nav class="guide-nav" aria-label="Related task guides"><a href="/guides/mcp-agent-messaging/">MCP messaging</a> <a href="/guides/avoid-agent-file-conflicts/">File holds</a> <a href="/guides/local-agent-inbox/">Local inbox</a></nav></section>
+    <section class="guide-section" aria-labelledby="related"><h2 id="related">Related guides</h2><nav class="guide-nav" aria-label="Related task guides"><a href="/guides/mcp-agent-messaging/">MCP messaging</a> <a href="/guides/avoid-agent-file-conflicts/">File holds</a> <a href="/guides/coordinate-local-agents/">Coordinate local agents</a></nav></section>
   </main>
   <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="/docs/faq/">FAQ</a> <a href="/docs/concepts/">Concepts</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>
 </body>

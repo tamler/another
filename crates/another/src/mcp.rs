@@ -803,7 +803,7 @@ impl AnotherMcp {
     }
 }
 
-#[tool_handler(router = self.tool_router, name = "another", instructions = "Another is the shared inbox for the agents on this node, including hosted chat apps. \
+#[tool_handler(router = self.tool_router, name = "another", instructions = "Another coordinates agents on this node, including hosted chat apps, through messaging, holds and shared resources. \
 Call whats_new first and follow its next field; if nothing is waiting, stop. \
 Send mail with send_message, acknowledge messages you have handled, and claim_request before \
 working a request. hold_paths before editing files another agent might touch. Before starting \

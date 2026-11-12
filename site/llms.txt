@@ -1,8 +1,8 @@
 # Another
 
-> Path holds, a local-first inbox, an activity feed and a resource registry for coding agents. Apache-2.0; hooks and MCP; no telemetry or paid tier.
+> Several agents, one project, one machine. Another is a background messaging system that helps agents work in parallel, reduce file conflicts and share resources. It also works across machines.
 
-Another lets independently run coding agents hold paths (the edit hook takes a hold per edited file and stops a Claude Code, Codex or Grok CLI edit to a file another agent holds, across checkouts of one repository; shell edits get past it), exchange mail, claim node-local requests and borrow registered resources. It does not launch or manage agent teams. State is local SQLite by default. Federation is optional; a self-hosted hub can read relayed mail bodies. Reaping requires human confirmation on the owning node and is never remote.
+Another lets independently run coding agents exchange messages, coordinate file holds, claim node-local requests and borrow registered resources. Hooks deliver mid-task notices and a daemon can wake idle Herdr agents. The edit guard covers Claude Code, Codex and Grok CLI when installed and trusted, but shell edits bypass it, Cursor has no guard and it fails open if the database is unavailable. The resource registry helps agents share servers; it does not impose resource limits. Another does not launch agents. State is local SQLite by default. Remote peers use scoped tokens or OAuth; optional federation uses signed event-log sync through a self-hosted hub that can read relayed mail. End-to-end encryption is future work. Reaping requires human confirmation on the owning node and is never remote. Apache-2.0; no telemetry or paid tier.
 
 ## Start here
 
@@ -11,13 +11,13 @@ Another lets independently run coding agents hold paths (the edit hook takes a h
 - [How I use it](https://toanother.one/building/): Running Claude Code and Codex on this repo.
 - [Getting started](https://toanother.one/docs/getting-started/): Initialize a node, preview hooks, connect MCP and send mail.
 - [Install](https://toanother.one/docs/install/): Rust 1.88+, source builds, release checksums and macOS binary replacement.
-- [Documentation](https://toanother.one/docs/): Hooks, inbox, wake, resources and remote peers.
+- [Documentation](https://toanother.one/docs/): Messaging, hooks, holds, wake, resources and remote peers.
 - [Install on macOS](https://toanother.one/docs/install/macos/): Command line tools, Rust, zsh and client PATH.
 - [Install on Linux](https://toanother.one/docs/install/linux/): C compiler, rustup, PATH and orphan-scan tools.
 - [Another on Windows](https://toanother.one/docs/install/windows/): No native build; WSL 2 route, not yet tested.
 - [FAQ](https://toanother.one/docs/faq/): Cost, privacy, clients, delivery timing, holds, removal.
 - [Concepts](https://toanother.one/docs/concepts/): Glossary of agents, mail, requests, holds, leases and federation.
-- [Compare](https://toanother.one/compare/): Shared inboxes and agent orchestrators serve different needs.
+- [Compare](https://toanother.one/compare/): Compare coordination and orchestration tools.
 - [Alternatives](https://toanother.one/compare/alternatives/): Simpler and larger options, and when not to use Another.
 
 ## Task guides
@@ -32,7 +32,7 @@ Another lets independently run coding agents hold paths (the edit hook takes a h
 - [Share a model server](https://toanother.one/guides/share-model-server/): Register, borrow, release and human-confirmed cleanup.
 - [Wake idle agents](https://toanother.one/guides/wake-idle-agents/): Nudge a tmux pane, and what can go wrong.
 - [Agents on two machines](https://toanother.one/guides/agents-on-two-machines/): Self-hosted hub, what it shares and what stays local.
-- [Local agent inbox](https://toanother.one/guides/local-agent-inbox/): An isolated CLI exchange with recorded output (fetch, read, ack, reply, threads), data location and privacy boundaries.
+- [Coordinate local agents](https://toanother.one/guides/coordinate-local-agents/): An isolated CLI exchange with recorded output (fetch, read, ack, reply, threads), data location and privacy boundaries.
 
 ## Repository guides
 

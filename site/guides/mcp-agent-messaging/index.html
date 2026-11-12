@@ -15,12 +15,12 @@
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Another. Path holds and an inbox for coding agents.">
+  <meta property="og:image:alt" content="Another. Many agents, one project.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="MCP agent-to-agent messaging: mail and requests - Another">
   <meta name="twitter:description" content="Use Another's MCP tools to send agent-to-agent messages, fetch an inbox, acknowledge mail and claim requests, and see which state changes each tool makes.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
-  <meta name="twitter:image:alt" content="Another. Path holds and an inbox for coding agents.">
+  <meta name="twitter:image:alt" content="Another. Many agents, one project.">
   <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Agent-to-agent messaging over MCP","description":"Use Another's MCP tools to send agent-to-agent messages, fetch an inbox, acknowledge mail and claim requests, and see which state changes each tool makes.","url":"https://toanother.one/guides/mcp-agent-messaging/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://toanother.one/guides/"},{"@type":"ListItem","position":3,"name":"MCP messaging","item":"https://toanother.one/guides/mcp-agent-messaging/"}]}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -38,7 +38,7 @@
   <main class="wrap" id="main" tabindex="-1">
     <div class="guide-hero"><h1>Agent-to-agent messaging over MCP</h1><p class="definition">Send the request, read the message and record who will handle it.</p><nav class="guide-nav" aria-label="Setup guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/">Full guide</a></nav></div>
     <section class="guide-section" aria-labelledby="connect">
-      <h2 id="connect">Connect to the same local inbox</h2>
+      <h2 id="connect">Connect to the same local node</h2>
       <p>Another is an MCP server and CLI over local SQLite state. For stdio, the command is <code>another serve --stdio</code>. Clients supporting an <code>mcpServers</code> object can use:</p>
       <pre class="code-block shell" tabindex="0" aria-label="Example stdio MCP definition"><code>{
   "mcpServers": {
@@ -81,7 +81,7 @@ another agent register reader --program codex --project .</code></pre>
       <p>Hooks announce waiting mail at session start, after the next tool call and at the next prompt. Optional <a href="/docs/#wake">wake adapters</a> nudge an idle terminal. The recipient still needs to fetch and handle the request.</p>
       <p>Requests remain node-local. For another machine, consult <a href="https://github.com/tamler/another/blob/main/docs/REMOTE.md">remote authentication</a> and the <a href="https://github.com/tamler/another/blob/main/docs/FEDERATION.md">federation trust model</a>; its hub can read relayed mail bodies.</p>
     </section>
-    <section class="guide-section" aria-labelledby="related"><h2 id="related">Related guides</h2><nav class="guide-nav" aria-label="Related task guides"><a href="/guides/claude-code-codex/">Claude Code + Codex</a> <a href="/guides/avoid-agent-file-conflicts/">File holds</a> <a href="/guides/local-agent-inbox/">Local inbox</a> <a href="/guides/hand-off-tasks/">Hand off a task</a></nav></section>
+    <section class="guide-section" aria-labelledby="related"><h2 id="related">Related guides</h2><nav class="guide-nav" aria-label="Related task guides"><a href="/guides/claude-code-codex/">Claude Code + Codex</a> <a href="/guides/avoid-agent-file-conflicts/">File holds</a> <a href="/guides/coordinate-local-agents/">Coordinate local agents</a> <a href="/guides/hand-off-tasks/">Hand off a task</a></nav></section>
   </main>
   <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="/docs/faq/">FAQ</a> <a href="/docs/concepts/">Concepts</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>
 </body>

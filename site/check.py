@@ -14,7 +14,7 @@ ORIGIN = "https://toanother.one"
 ROUTES = {
     "/", "/docs/", "/docs/getting-started/", "/docs/install/", "/compare/", "/guides/",
     "/guides/claude-code-codex/", "/guides/mcp-agent-messaging/",
-    "/guides/avoid-agent-file-conflicts/", "/guides/local-agent-inbox/",
+    "/guides/avoid-agent-file-conflicts/", "/guides/coordinate-local-agents/",
     "/docs/install/macos/", "/docs/install/linux/", "/docs/install/windows/",
     "/docs/faq/", "/docs/concepts/", "/compare/alternatives/",
     "/guides/git-worktrees/", "/guides/hand-off-tasks/", "/guides/share-model-server/",
@@ -37,11 +37,11 @@ TRAILS = {
 EXPECTED = {
     "index.html", "docs/index.html", "docs/getting-started/index.html",
     "docs/install/index.html", "compare/index.html", "404.html", "style.css",
-    "_headers", "fonts/FragmentMono-Regular.woff2", "fonts/OFL.txt", "og.png",
+    "_headers", "_redirects", "fonts/FragmentMono-Regular.woff2", "fonts/OFL.txt", "og.png",
     "twitter.png", "sitemap.xml", "robots.txt", "llms.txt", "favicon.svg",
     "favicon.ico", "apple-touch-icon.png", "icon-192.png", "icon-512.png", "site.webmanifest",
     "guides/index.html", "guides/claude-code-codex/index.html", "guides/mcp-agent-messaging/index.html",
-    "guides/avoid-agent-file-conflicts/index.html", "guides/local-agent-inbox/index.html",
+    "guides/avoid-agent-file-conflicts/index.html", "guides/coordinate-local-agents/index.html",
     "docs/install/macos/index.html", "docs/install/linux/index.html", "docs/install/windows/index.html",
     "docs/faq/index.html", "docs/concepts/index.html", "compare/alternatives/index.html",
     "guides/git-worktrees/index.html", "guides/hand-off-tasks/index.html", "guides/share-model-server/index.html",
@@ -58,6 +58,9 @@ def page_type(route):
 actual = {str(p.relative_to(ROOT)) for p in ROOT.rglob("*") if p.is_file()}
 assert actual == EXPECTED, f"public allowlist mismatch: {actual ^ EXPECTED}"
 assert not any(p.is_symlink() for p in ROOT.rglob("*")), "no public symlinks"
+assert (ROOT / "_redirects").read_text() == (
+    "/guides/local-agent-inbox/ /guides/coordinate-local-agents/ 301\n"
+), "redirect rules"
 
 
 class Page(HTMLParser):
@@ -150,7 +153,7 @@ ICON_LINKS = (
     ("apple-touch-icon", stamped_href("/apple-touch-icon.png", ICON_VERSION)),
     ("manifest", stamped_href("/site.webmanifest", ICON_VERSION)),
 )
-IMAGE_ALT = "Another. Path holds and an inbox for coding agents."
+IMAGE_ALT = "Another. Many agents, one project."
 for path, page in pages.items():
     for rel, href in ICON_LINKS:
         assert (rel, href) in page.relations, f"{path}: missing link rel={rel} href={href}"

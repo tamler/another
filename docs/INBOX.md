@@ -11,7 +11,7 @@ Three things happen to a message after it lands, and each is a separate command:
 
 The walkthrough below is a recorded run. It was captured on 12 Nov 2026 from `another 0.1.0` built from `5ec0a58`; the Rust source on `main` at `d474de9` differs from `5ec0a58` only in test files. It ran against a temporary project named `shop` in a temporary `ANOTHER_HOME`, with no hooks installed and no `another serve` running. Ids and timestamps are as recorded; yours will differ. Where a command needs an id from an earlier step, copy it from that step's output. The temporary path is shown as `/tmp/demo`.
 
-The site has the same example at [toanother.one/guides/local-agent-inbox/](https://toanother.one/guides/local-agent-inbox/#recorded). For requests, which add an owner and a status on top of mail, see [REQUESTS.md](REQUESTS.md).
+The site has the same example at [toanother.one/guides/coordinate-local-agents/](https://toanother.one/guides/coordinate-local-agents/#recorded). Requests add a status and can be claimed, assigning an owner; see [REQUESTS.md](REQUESTS.md).
 
 ## Setup
 
@@ -123,7 +123,7 @@ The count of 8 includes the read and the ack from steps 3 and 4; the highlights 
 
 - Nothing here notifies the other agent. The hooks announce new mail at session start, at prompts, and after a tool call ([HOOKS.md](HOOKS.md)); `another wake` nudges an idle terminal ([WAKE.md](WAKE.md)).
 - Read and ack state is per recipient. One agent's ack says nothing about another recipient of the same message.
-- An ack is receipt. If the mail asked for work, open it with `--request` so it has an owner and a status ([REQUESTS.md](REQUESTS.md)).
+- An ack is receipt. If the mail asks for work, send it with `--request` so an agent can claim it and become its owner ([REQUESTS.md](REQUESTS.md)).
 - Bodies stay in the mail store. They are left out of the digest and the activity feed, but anyone with access to `ANOTHER_HOME` can read them.
 
 MCP clients do the same through `send_message` (with `reply_to` for a reply), `fetch_inbox`, `acknowledge`, and `threads`.

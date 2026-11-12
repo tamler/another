@@ -1,6 +1,8 @@
-# Another: cross-agent inbox + resource registry - research + v1 spec
+# Another: research and original v1 specification
 
-Clean-room research and v1 specification for **Another** ("From one agent to another"; home [toanother.one](https://toanother.one)) - a free, local, open, standalone product. Cross-agent inbox, activity feed, path holds, resource registry, and a designed-for-v2 federation model so a laptop and a remote agent box stay aware of each other. Hooks-first; Herdr/cmux/tmux optional.
+Another is a background messaging system that helps several coding agents work on the same project on the same machine at the same time, reducing edit conflicts and helping them share resources. It also works across machines today: remote peers use scoped tokens or OAuth, and federation pairs nodes through signed event-log sync and a hub you host. The hub can read relayed mail; end-to-end encryption is future work. Remote peers cannot reap. See [REMOTE.md](REMOTE.md) and [FEDERATION.md](FEDERATION.md) for the shipped behavior. The research and design below are historical and may describe earlier plans.
+
+This is the original clean-room research and v1 specification for **Another**, a free and open product. It records early plans for messaging, activity, path holds, resource coordination and federation. Hooks first; Herdr/cmux/tmux optional.
 
 Living design Page (optional): <https://cursor.com/canvas/store-f97c4d9c-6914-4d0e-b170-0d5f5d7e2a98/f9b88a9b-d8f5-4fb6-b818-fe86475343c7>
 
@@ -36,8 +38,8 @@ Adjacent coding agents still coordinate through stale markdown files. Off-the-sh
 
 | | |
 |---|---|
-| **Name** | Another - cross-agent inbox + resource registry |
-| **Tagline** | From one agent to another. |
+| **Name** | Another - background messaging and coordination for coding agents |
+| **Tagline** | Several agents, one project, one machine. |
 | **Home** | [toanother.one](https://toanother.one) |
 | **Positioning** | Standalone product; free and open source always (every feature in the open repo) |
 | **CLI** | `another` - `serve`, `inbox`, `resources`, `activity`, … |

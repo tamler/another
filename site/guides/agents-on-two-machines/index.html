@@ -15,12 +15,12 @@
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Another. Path holds and an inbox for coding agents.">
+  <meta property="og:image:alt" content="Another. Many agents, one project.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Coding agents on two machines: federation - Another">
   <meta name="twitter:description" content="Connect agents on a laptop and a remote box with a self-hosted Another hub. Pair nodes, sync mail and see what each machine shares and what the hub can read.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
-  <meta name="twitter:image:alt" content="Another. Path holds and an inbox for coding agents.">
+  <meta name="twitter:image:alt" content="Another. Many agents, one project.">
   <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Agents on two machines","description":"Connect agents on a laptop and a remote box with a self-hosted Another hub. Pair nodes, sync mail and see what each machine shares and what the hub can read.","url":"https://toanother.one/guides/agents-on-two-machines/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://toanother.one/guides/"},{"@type":"ListItem","position":3,"name":"Two machines","item":"https://toanother.one/guides/agents-on-two-machines/"}]}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -95,7 +95,7 @@ another sync</code></pre>
       <h2 id="tested">What this page rests on</h2>
       <p>We ran pairing, sync, mail in both directions, the request refusal, the hold warning, borrowing and revocation between two Linux containers on a private Docker network. That gives each node its own file system and network stack, but it is not two physical machines. The hub in that test listened on the Docker network over plain HTTP, using <code>--allow-remote-bind</code>, rather than on loopback behind a tunnel, so the tunnel and TLS setup described above has not been run for this page. <a href="https://github.com/tamler/another/blob/main/docs/FEDERATION.md">The federation reference</a> covers the protocol and permissions in full.</p>
     </section>
-    <section class="guide-section" aria-labelledby="related"><h2 id="related">Related guides</h2><nav class="guide-nav" aria-label="Related task guides"><a href="/guides/share-model-server/">Share a model server</a> <a href="/guides/local-agent-inbox/">Local inbox</a> <a href="/docs/faq/">FAQ</a></nav></section>
+    <section class="guide-section" aria-labelledby="related"><h2 id="related">Related guides</h2><nav class="guide-nav" aria-label="Related task guides"><a href="/guides/share-model-server/">Share a model server</a> <a href="/guides/coordinate-local-agents/">Coordinate local agents</a> <a href="/docs/faq/">FAQ</a></nav></section>
   </main>
   <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="/docs/faq/">FAQ</a> <a href="/docs/concepts/">Concepts</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>
 </body>

@@ -28,11 +28,11 @@ if spec is None or spec.loader is None:
 brand = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(brand)
 
-HEADLINE = "One inbox"
-DETAIL = "for coding agents."
+HEADLINE = "Many agents"
+DETAIL = "one project."
 # What is on main, in the order the README leads with. Kept short so the
 # banner stays legible at README width.
-LINE = "Mail, requests, path holds, a feed, a resource registry."
+LINE = "Coordinate work on one machine."
 
 
 def banner(text_width, draw_text) -> brand.Canvas:
@@ -79,7 +79,7 @@ def social(text_width, draw_text) -> brand.Canvas:
     width, height = 1280, 640
     canvas = brand.Canvas(width, height, brand.PAPER, alpha=255)
     mark = 120
-    word_size, headline_size, detail_size = 52, 168, 88
+    word_size, headline_size, detail_size = 52, 140, 88
     gap_mark, gap_word, gap_head = 18, 34, 18
     headline_w = text_width(HEADLINE, headline_size, 0)
     detail_w = text_width(DETAIL, detail_size, 0)
