@@ -135,6 +135,12 @@ fn codex_status(event: HookEvent) -> &'static str {
 const CODEX_DESCRIPTION: &str =
     "Another coordination hooks (toanother.one): messages and file holds between coding agents";
 
+/// Human trust is a Codex decision; finding config entries cannot establish coverage.
+/// Codex's `--dangerously-bypass-hook-trust` runs enabled hooks without persisted trust for
+/// one invocation, so the note describes the default flow and names the bypass without
+/// recommending it.
+pub const CODEX_TRUST_NOTE: &str = "Codex trust is not checked. In Codex's default trust flow, new or changed hooks provide no automatic mail or edit-hold coverage until you review and trust them yourself in Codex /hooks. Codex's --dangerously-bypass-hook-trust runs enabled hooks without persisted trust for that one invocation; Another does not recommend it. Another does not grant trust.";
+
 /// One hook entry Another installs for a client.
 #[derive(Debug, Clone, Copy)]
 struct HookSpec {
@@ -648,10 +654,7 @@ pub fn install(
     let mut notes = Vec::new();
     if install {
         if clients.contains(&Client::Codex) {
-            notes.push(
-                "Codex runs new or changed hooks only after review: open Codex and trust them under /hooks."
-                    .to_string(),
-            );
+            notes.push(CODEX_TRUST_NOTE.to_string());
         }
         if clients.contains(&Client::Grok) {
             notes.push(
