@@ -13,11 +13,11 @@ use std::path::Path;
 use globset::{Glob, GlobBuilder, GlobMatcher};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::error::{Error, Result};
 use crate::identity::{address, find_project, resolve_agent, Project};
-use crate::mail::{send_automatic_tx, touch, SendMessage};
+use crate::mail::{load_message, send_notice_tx, send_tx, touch, Message, NewRequest, SendMessage};
 use crate::requests::stale_overdue_tx;
 use crate::store::{new_id, Store, Tx};
 use crate::time::fmt_ts;
@@ -131,6 +131,11 @@ pub struct EditGuard {
     pub conflicts: Vec<HoldConflict>,
     /// First notice for a new set of blockers; repeated attempts get a short denial.
     pub first_notice: bool,
+    /// A durable wait is on record for these conflicts, so one inbox ping follows when the
+    /// file is free. False when recording the wait failed: no ping will come, and the
+    /// agent has to check again itself after `retry_after_seconds`. Always false when
+    /// there are no conflicts.
+    pub wait_recorded: bool,
     /// Advisory backoff, in seconds. A wait also sends one inbox ping when the file is free.
     pub retry_after_seconds: i64,
 }
@@ -597,6 +602,27 @@ fn remote_clashes(
     Ok(out)
 }
 
+/// The blocked paths and, per path, the sorted ids of the holds blocking it. This is the
+/// identity of a wait: the same path with a different set of hold ids is a new conflict.
+fn blocker_sets(conflicts: &[HoldConflict]) -> Vec<(&str, Vec<&str>)> {
+    let mut paths: Vec<&str> = conflicts.iter().map(|c| c.path.as_str()).collect();
+    paths.sort_unstable();
+    paths.dedup();
+    paths
+        .into_iter()
+        .map(|path| {
+            let mut blockers: Vec<&str> = conflicts
+                .iter()
+                .filter(|c| c.path == path)
+                .map(|c| c.held.hold_id.as_str())
+                .collect();
+            blockers.sort_unstable();
+            blockers.dedup();
+            (path, blockers)
+        })
+        .collect()
+}
+
 /// Register durable file waits and advance backoff only after its current window ends.
 /// Returns whether any blocker set is new, and the longest remaining backoff.
 fn wait_for_conflicts_tx(
@@ -605,19 +631,9 @@ fn wait_for_conflicts_tx(
     project: &Project,
     conflicts: &[HoldConflict],
 ) -> Result<(bool, i64)> {
-    let mut paths: Vec<&str> = conflicts.iter().map(|c| c.path.as_str()).collect();
-    paths.sort_unstable();
-    paths.dedup();
     let mut first_notice = false;
     let mut retry_after = 0;
-    for path in paths {
-        let mut blockers: Vec<&str> = conflicts
-            .iter()
-            .filter(|c| c.path == path)
-            .map(|c| c.held.hold_id.as_str())
-            .collect();
-        blockers.sort_unstable();
-        blockers.dedup();
+    for (path, blockers) in blocker_sets(conflicts) {
         let signature = serde_json::to_string(&blockers)?;
         let old: Option<(String, i64, i64)> = tx
             .query_row(
@@ -636,15 +652,16 @@ fn wait_for_conflicts_tx(
                     _ => 30,
                 };
                 let until = tx.now + backoff * 1000;
-                let holder = resolve_agent(
-                    tx,
-                    tx.node_id,
-                    &conflicts
-                        .iter()
-                        .find(|c| c.path == path)
-                        .expect("path came from conflicts")
-                        .held
-                        .agent,
+                // The hold row carries the holder's id. Its display address may have become
+                // ambiguous since the hold was taken and is never resolved again here.
+                let first = conflicts
+                    .iter()
+                    .find(|c| c.path == path)
+                    .expect("path came from conflicts");
+                let holder_id: String = tx.query_row(
+                    "SELECT agent_id FROM holds WHERE hold_id = ?1",
+                    [&first.held.hold_id],
+                    |r| r.get(0),
                 )?;
                 tx.emit(
                     &agent.address,
@@ -660,7 +677,7 @@ fn wait_for_conflicts_tx(
                      ON CONFLICT(agent_id, project_id, path) DO UPDATE SET
                        blockers = excluded.blockers, holder_id = excluded.holder_id,
                        retry_at = excluded.retry_at, backoff_seconds = excluded.backoff_seconds",
-                    params![agent.id, project.project_id, path, signature, holder.id, until, backoff],
+                    params![agent.id, project.project_id, path, signature, holder_id, until, backoff],
                 )?;
                 (until, backoff)
             }
@@ -671,14 +688,90 @@ fn wait_for_conflicts_tx(
     Ok((first_notice, retry_after))
 }
 
+/// Whether `blockers` on `path` are a new conflict for this agent when the wait could
+/// not be recorded. Two records can prove the first notice already went out: the wait
+/// row, when there is one, by its stored blocker signature; and the agent's latest wait
+/// event for exactly this path, when it is a `hold.waiting` or `hold.wait_failed` naming
+/// the same hold ids. Both are checked, because a wait row keeps its old signature when
+/// the update to a changed blocker set failed, and the failure event is then the only
+/// record of what was announced. An event that ended the wait (`hold.available`,
+/// `hold.notify_failed`, `hold.wait.finished`), a different set of hold ids in both
+/// records, or no record at all means a first notice is due. Events for other agents,
+/// projects or paths never count, however many of them there are.
+fn failed_wait_is_new(
+    tx: &Tx<'_>,
+    agent_id: &str,
+    project_id: &str,
+    path: &str,
+    blockers: &[&str],
+) -> Result<bool> {
+    let recorded: Option<String> = tx
+        .query_row(
+            "SELECT blockers FROM hold_waits
+             WHERE agent_id = ?1 AND project_id = ?2 AND path = ?3",
+            params![agent_id, project_id, path],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(signature) = recorded {
+        let stored: Vec<String> = serde_json::from_str(&signature).unwrap_or_default();
+        if stored == blockers {
+            return Ok(false);
+        }
+    }
+    let latest: Option<(String, String)> = tx
+        .query_row(
+            "SELECT kind, payload FROM events
+             WHERE kind IN ('hold.waiting', 'hold.wait_failed', 'hold.available',
+                            'hold.notify_failed', 'hold.wait.finished')
+               AND json_extract(payload, '$.agent_id') = ?1
+               AND json_extract(payload, '$.project_id') = ?2
+               AND json_extract(payload, '$.path') = ?3
+             ORDER BY seq DESC LIMIT 1",
+            params![agent_id, project_id, path],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(match latest {
+        Some((kind, payload)) if kind == "hold.waiting" || kind == "hold.wait_failed" => {
+            let announced: Vec<String> = serde_json::from_str::<Value>(&payload)
+                .ok()
+                .and_then(|v| serde_json::from_value(v["blockers"].clone()).ok())
+                .unwrap_or_default();
+            announced != blockers
+        }
+        _ => true,
+    })
+}
+
+/// Run `f` inside a savepoint. On error only its own work is rolled back and the error is
+/// returned; the surrounding transaction stays usable. The event chain is unaffected, since
+/// each emit reads its predecessor from the table.
+fn attempt<T>(tx: &Tx<'_>, name: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    tx.execute_batch(&format!("SAVEPOINT {name}"))?;
+    match f() {
+        Ok(v) => {
+            tx.execute_batch(&format!("RELEASE SAVEPOINT {name}"))?;
+            Ok(v)
+        }
+        Err(e) => {
+            tx.execute_batch(&format!(
+                "ROLLBACK TO SAVEPOINT {name}; RELEASE SAVEPOINT {name}"
+            ))?;
+            Err(e)
+        }
+    }
+}
+
 /// Deliver each free-file ping and remove its wait in the same transaction. Recheck all
-/// current blockers, including replacement holds and holds in sibling worktrees.
+/// current blockers, including replacement holds and holds in sibling worktrees. Waiter and
+/// holder are addressed by the ids the wait row stores. A ping that cannot be delivered is
+/// recorded as `hold.notify_failed` and its wait is dropped anyway, so a release or a sweep
+/// never fails, and never fails again later, because of one notice.
 fn ping_free_waiters_tx(tx: &Tx<'_>) -> Result<()> {
     let mut stmt = tx.prepare(
-        "SELECT w.agent_id, a.address, p.slug, w.project_id, w.path, h.address
-         FROM hold_waits w JOIN agents a ON a.agent_id = w.agent_id
-         JOIN projects p ON p.project_id = w.project_id
-         JOIN agents h ON h.agent_id = w.holder_id",
+        "SELECT w.agent_id, p.slug, w.project_id, w.path, w.holder_id, w.blockers
+         FROM hold_waits w JOIN projects p ON p.project_id = w.project_id",
     )?;
     let waits = stmt
         .query_map([], |r| {
@@ -692,7 +785,7 @@ fn ping_free_waiters_tx(tx: &Tx<'_>) -> Result<()> {
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (agent_id, agent, project_key, project_id, path, holder) in waits {
+    for (agent_id, project_key, project_id, path, holder_id, blockers) in waits {
         let project = find_project(tx, tx.node_id, &project_key)?;
         if !conflicts_for(
             tx,
@@ -705,24 +798,101 @@ fn ping_free_waiters_tx(tx: &Tx<'_>) -> Result<()> {
         {
             continue;
         }
-        tx.emit(
-            "system",
-            "hold.available",
-            json!({
-                "agent_id": agent_id, "project_id": project_id, "path": path,
-            }),
-        )?;
-        send_automatic_tx(tx, &SendMessage {
-            from: holder,
-            to: vec![agent],
+        // Naming the ended holds makes every ping distinct, so the push dedupe never
+        // swallows a second ping for the same file within its five-minute window.
+        let ended: Vec<String> = serde_json::from_str(&blockers).unwrap_or_default();
+        let notice = SendMessage {
             subject: format!("Hold free: {}", path.chars().take(280).collect::<String>()),
-            body: format!("Another automatically checked {project_key}:{path}: no conflicting hold remains. The file is not reserved; check again before editing."),
+            body: format!(
+                "Another automatically checked {project_key}:{path}: no conflicting hold remains (hold {} ended). The file is not reserved; check again before editing.",
+                ended.join(", ")
+            ),
             ..Default::default()
-        })?;
+        };
+        let sent = attempt(tx, "ping", || {
+            tx.emit(
+                "system",
+                "hold.available",
+                json!({
+                    "agent_id": agent_id, "project_id": project_id, "path": path,
+                    "blockers": ended,
+                }),
+            )?;
+            send_notice_tx(tx, &holder_id, &agent_id, &notice)
+        });
+        if let Err(e) = sent {
+            tx.emit(
+                "system",
+                "hold.notify_failed",
+                json!({
+                    "agent_id": agent_id, "project_id": project_id, "path": path,
+                    "error": e.to_string(),
+                }),
+            )?;
+        }
         tx.execute(
             "DELETE FROM hold_waits WHERE agent_id = ?1 AND project_id = ?2 AND path = ?3",
             params![agent_id, project_id, path],
         )?;
+    }
+    Ok(())
+}
+
+/// Fulfil only requests explicitly linked to a hold, without guessing from mail text. The
+/// request closes first; its notice goes from the holder to the requester by id, and a
+/// notice that cannot be delivered is recorded as `request.notify_failed` without failing
+/// the release or the sweep.
+fn complete_hold_requests_tx(tx: &Tx<'_>) -> Result<()> {
+    let mut stmt = tx.prepare(
+        "SELECT r.request_id, r.message_id, r.title, r.created_by, h.hold_id, h.agent_id
+         FROM request_holds rh JOIN requests r ON r.request_id = rh.request_id
+         JOIN holds h ON h.hold_id = rh.hold_id
+         WHERE h.node_id = ?1 AND r.status IN ('open', 'claimed', 'stale')
+           AND (h.released_at IS NOT NULL OR h.expires_at <= ?2)",
+    )?;
+    let pending = stmt
+        .query_map(params![tx.node_id, tx.now], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (rid, mid, title, creator_id, hold_id, owner_id) in pending {
+        let note = format!(
+            "Another automatically closed this release request: hold {hold_id} is no longer live."
+        );
+        tx.emit(
+            "system",
+            "request.completed",
+            json!({
+                "request_id": rid, "hold_id": hold_id, "reason": "hold ended", "note": note,
+            }),
+        )?;
+        tx.execute(
+            "UPDATE requests SET status = 'done', owner_id = coalesce(owner_id, ?2),
+            note = ?3, closed_at = ?4, updated_at = ?4 WHERE request_id = ?1",
+            params![rid, owner_id, note, tx.now],
+        )?;
+        let notice = SendMessage {
+            subject: format!("Done: {title}"),
+            body: note,
+            reply_to: Some(mid),
+            ..Default::default()
+        };
+        if let Err(e) = attempt(tx, "request_notice", || {
+            send_notice_tx(tx, &owner_id, &creator_id, &notice)
+        }) {
+            tx.emit(
+                "system",
+                "request.notify_failed",
+                json!({ "request_id": rid, "hold_id": hold_id, "error": e.to_string() }),
+            )?;
+        }
     }
     Ok(())
 }
@@ -752,6 +922,7 @@ pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
             [hold_id],
         )?;
     }
+    complete_hold_requests_tx(tx)?;
     ping_free_waiters_tx(tx)?;
     let stale_requests = stale_overdue_tx(tx)?;
     let expired_leases = crate::resources::expire_leases_tx(tx)?;
@@ -782,6 +953,7 @@ pub(crate) fn release_tx(
             params![id, tx.now, reason],
         )?;
     }
+    complete_hold_requests_tx(tx)?;
     ping_free_waiters_tx(tx)?;
     Ok(())
 }
@@ -859,6 +1031,37 @@ fn holds_by_id(conn: &Connection, ids: &[String]) -> Result<Vec<Hold>> {
 }
 
 impl Store {
+    /// Ask a live local hold's owner to release it. Reuse an outstanding ask from this
+    /// agent for this hold. The linked request closes automatically when the hold ends.
+    pub fn request_hold_release(&self, agent: &str, hold_id: &str) -> Result<Message> {
+        self.write(|tx| {
+            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let held = tx.query_row(&format!("{HOLD_SELECT} WHERE h.hold_id = ?1
+                AND h.node_id = ?2 AND h.released_at IS NULL AND h.expires_at > ?3"),
+                params![hold_id, tx.node_id, tx.now], hold_from_row).optional()?
+                .ok_or_else(|| Error::NotFound(format!("unknown live local hold {hold_id:?}")))?;
+            if held.agent == me.address {
+                return Err(Error::Invalid("release your own hold with hold release".into()));
+            }
+            let existing: Option<String> = tx.query_row(
+                "SELECT r.message_id FROM request_holds rh JOIN requests r ON r.request_id = rh.request_id
+                 WHERE rh.hold_id = ?1 AND r.created_by = ?2 AND r.status IN ('open', 'claimed', 'stale')",
+                params![hold_id, me.id], |r| r.get(0)).optional()?;
+            if let Some(mid) = existing { return load_message(tx, &mid); }
+            let pattern = literal_pattern(&held.pattern).unwrap_or(held.pattern);
+            let title: String = pattern.chars().take(280).collect();
+            let message = send_tx(tx, &SendMessage {
+                from: me.address, to: vec![held.agent], subject: format!("Release {title}?"),
+                body: format!("Please release hold {hold_id} on {}:{pattern} when your edit is done. Another will close this request when that hold ends.", held.project),
+                request: Some(NewRequest::default()), ..Default::default()
+            })?;
+            let rid = message.request_id.as_ref().expect("request was created");
+            tx.emit(&message.from, "request.hold_linked", json!({ "request_id": rid, "hold_id": hold_id }))?;
+            tx.execute("INSERT INTO request_holds (request_id, hold_id) VALUES (?1, ?2)", params![rid, hold_id])?;
+            Ok(message)
+        })
+    }
+
     /// Expire lapsed holds and mark overdue requests stale.
     pub fn sweep(&self) -> Result<SweepReport> {
         self.write(sweep_tx)
@@ -985,7 +1188,43 @@ impl Store {
                         c.path = literal_pattern(p).expect("edit targets are escaped literals");
                     }
                 }
-                let (first_notice, retry_after_seconds) = wait_for_conflicts_tx(tx, &me, &project, &conflicts)?;
+                // Recording the wait is bookkeeping. A real conflict is denied even when
+                // that fails; the failure is an event, never an open guard.
+                let (first_notice, wait_recorded, retry_after_seconds) =
+                    match attempt(tx, "wait", || {
+                        wait_for_conflicts_tx(tx, &me, &project, &conflicts)
+                    }) {
+                        Ok((first_notice, retry_after)) => (first_notice, true, retry_after),
+                        Err(e) => {
+                            // The savepoint rolled the wait back, so no ping can follow.
+                            // The guard says so (wait_recorded = false) and the hook tells
+                            // the agent to check again itself. One hold.wait_failed per
+                            // path records which hold ids were announced, so a retry with
+                            // the same blockers is a short denial (D59 dedupe) while a new
+                            // path or a replacement hold still gets its first notice.
+                            // Each path is checked before its own failure event is written.
+                            let mut first_notice = false;
+                            for (path, blockers) in blocker_sets(&conflicts) {
+                                first_notice |= failed_wait_is_new(
+                                    tx,
+                                    &me.id,
+                                    &project.project_id,
+                                    path,
+                                    &blockers,
+                                )?;
+                                tx.emit(
+                                    &me.address,
+                                    "hold.wait_failed",
+                                    json!({
+                                        "agent_id": me.id, "project_id": project.project_id,
+                                        "path": path, "blockers": blockers,
+                                        "error": e.to_string(),
+                                    }),
+                                )?;
+                            }
+                            (first_notice, false, 30)
+                        }
+                    };
                 // Count each distinct collision, rather than every retry of the same edit.
                 let repo = crate::repo::link_of(tx, &project)?.map(|l| l.key);
                 if first_notice { tx.emit(
@@ -1014,6 +1253,7 @@ impl Store {
                     covered: Vec::new(),
                     conflicts,
                     first_notice,
+                    wait_recorded,
                     retry_after_seconds,
                 });
             }
@@ -1075,7 +1315,7 @@ impl Store {
                     params![me.id, project.project_id, path], |_| Ok(()),
                 ).optional()?.is_some();
                 if waiting {
-                    tx.emit(&me.address, "hold.wait.finished", json!({ "project_id": project.project_id, "path": path }))?;
+                    tx.emit(&me.address, "hold.wait.finished", json!({ "agent_id": me.id, "project_id": project.project_id, "path": path }))?;
                     tx.execute("DELETE FROM hold_waits WHERE agent_id = ?1 AND project_id = ?2 AND path = ?3",
                         params![me.id, project.project_id, path])?;
                 }
@@ -1087,6 +1327,7 @@ impl Store {
                 covered,
                 conflicts: Vec::new(),
                 first_notice: false,
+                wait_recorded: false,
                 retry_after_seconds: 0,
             })
         })

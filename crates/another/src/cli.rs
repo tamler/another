@@ -715,6 +715,13 @@ pub struct ProjectArg {
 
 #[derive(Debug, Subcommand)]
 pub enum HoldCmd {
+    /// Ask a local hold's owner to release it; reuse an open ask and close it when the hold ends.
+    RequestRelease {
+        #[command(flatten)]
+        agent: AgentArg,
+        /// Hold id from `another holds` or a conflict report.
+        hold_id: String,
+    },
     /// Acquire holds on paths/globs (exit code 3 on conflict; nothing is granted).
     Acquire {
         #[command(flatten)]
@@ -1241,6 +1248,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             } else {
                 ExitCode::SUCCESS
             }
+        }
+        Command::Hold(HoldCmd::RequestRelease { agent, hold_id }) => {
+            let message = store.request_hold_release(&agent.agent, &hold_id)?;
+            emit(json, &message, output::sent)
         }
         Command::Hold(HoldCmd::Renew { agent, hold_ids }) => {
             let holds = store.renew_holds(&agent.agent, &hold_ids)?;

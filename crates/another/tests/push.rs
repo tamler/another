@@ -330,6 +330,60 @@ fn manual_route_directory_holds_block_auto_edits_in_both_orders() {
 }
 
 #[test]
+fn linked_release_requests_close_and_repeated_asks_reuse_the_request() {
+    let env = Env::new();
+    env.start("claude", &env.main, &[]);
+    env.start("codex", &env.wt, &[]);
+    env.hook(
+        "pre-edit",
+        "claude",
+        &tool(&env.main, "Edit", json!({ "file_path": "src/a.rs" })),
+    );
+    let holds = env.holds();
+    let hold_id = holds[0]["hold_id"].as_str().unwrap();
+    let args = [
+        "hold",
+        "request-release",
+        "--agent",
+        "codex@shop-review",
+        hold_id,
+    ];
+    let first = env.json(&args);
+    let again = env.json(&args);
+    assert_eq!(first["message_id"], again["message_id"]);
+    let rid = first["request_id"].as_str().unwrap();
+    env.ok(&["request", "claim", rid, "--agent", "claude@shop"]);
+    let unrelated = env.json(&[
+        "send",
+        "--from",
+        "codex@shop-review",
+        "--to",
+        "claude@shop",
+        "--request",
+        "--subject",
+        "Unrelated work",
+    ]);
+    env.ok(&["hold", "release", "--agent", "claude@shop", hold_id]);
+    let requests = env.json(&["requests"]);
+    let items = requests.as_array().unwrap();
+    assert_eq!(
+        items.iter().find(|r| r["request_id"] == rid).unwrap()["status"],
+        "done"
+    );
+    assert_eq!(
+        items
+            .iter()
+            .find(|r| r["request_id"] == unrelated["request_id"])
+            .unwrap()["status"],
+        "open"
+    );
+    let after = tool(&env.main, "Bash", json!({ "command": "true" }));
+    let notice = context(&env.hook("post-tool", "claude", &after));
+    assert!(notice.contains("Unrelated work"));
+    assert!(!notice.contains("Release src/a.rs"));
+}
+
+#[test]
 fn literal_metacharacter_filenames_are_protected_across_worktrees() {
     let env = Env::new();
     env.start("claude", &env.main, &[]);
@@ -399,6 +453,77 @@ fn repeated_edits_get_a_short_backoff_and_a_free_ping() {
     env.ok(&["hold", "release", "--agent", "claude@shop"]);
     let after = tool(&env.wt, "Bash", json!({ "command": "true" }));
     assert!(context(&env.hook("post-tool", "codex", &after)).contains("Hold free: src/a.rs"));
+    assert_eq!(env.hook("post-tool", "codex", &after), "");
+    assert_eq!(env.hook("pre-edit", "codex", &edit), "");
+}
+
+/// When the wait cannot be recorded the hook must say so and give a fallback, instead of
+/// promising a ping that has no subscription behind it. A second file still gets its
+/// own first notice.
+#[test]
+fn wait_record_failure_tells_the_agent_no_ping_is_coming() {
+    let env = Env::new();
+    env.start("claude", &env.main, &[]);
+    env.start("codex", &env.wt, &[]);
+    for path in ["src/a.rs", "src/b.rs"] {
+        assert_eq!(
+            env.hook(
+                "pre-edit",
+                "claude",
+                &tool(&env.main, "Edit", json!({ "file_path": path }))
+            ),
+            ""
+        );
+    }
+    let db = rusqlite::Connection::open(env.another_home.join("another.db")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER hold_waits_inject_failure BEFORE INSERT ON hold_waits
+         BEGIN SELECT RAISE(ABORT, 'injected wait-record failure'); END;",
+    )
+    .unwrap();
+    drop(db);
+
+    let edit = tool(&env.wt, "Edit", json!({ "file_path": "src/a.rs" }));
+    let first = denial(&env.hook("pre-edit", "codex", &edit));
+    assert!(
+        first.starts_with("Another stopped this edit: src/a.rs is held by claude@shop"),
+        "{first}"
+    );
+    assert!(!first.contains("pinged"), "{first}");
+    assert!(
+        first.contains("could not record your wait for this file, so no inbox ping will come. Retry this edit after 30 seconds"),
+        "{first}"
+    );
+    assert!(first.contains("another hold request-release --agent codex@shop-review"));
+    for _ in 0..3 {
+        let next = denial(&env.hook("pre-edit", "codex", &edit));
+        assert!(
+            next.starts_with(
+                "Another: this edit is still blocked. src/a.rs is held by claude@shop."
+            ),
+            "{next}"
+        );
+        assert!(!next.contains("inbox ping or"), "{next}");
+        assert!(
+            next.contains(
+                "no inbox ping will come. Retry after 30 seconds, or work on other files."
+            ),
+            "{next}"
+        );
+    }
+    let other = denial(&env.hook(
+        "pre-edit",
+        "codex",
+        &tool(&env.wt, "Edit", json!({ "file_path": "src/b.rs" })),
+    ));
+    assert!(
+        other.starts_with("Another stopped this edit: src/b.rs is held by claude@shop"),
+        "{other}"
+    );
+    assert!(other.contains("no inbox ping will come"), "{other}");
+    // Nothing waits, so the release pings nobody; the retry it asked for then succeeds.
+    env.ok(&["hold", "release", "--agent", "claude@shop"]);
+    let after = tool(&env.wt, "Bash", json!({ "command": "true" }));
     assert_eq!(env.hook("post-tool", "codex", &after), "");
     assert_eq!(env.hook("pre-edit", "codex", &edit), "");
 }
@@ -484,13 +609,10 @@ fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
         reason.starts_with("Another stopped this edit: src/a.rs is held by"),
         "paths are project-relative: {reason}"
     );
-    assert!(
-        reason.contains("--subject \"Release src/a.rs?\""),
-        "{reason}"
-    );
+    assert!(reason.contains("hold request-release"), "{reason}");
     assert!(reason.contains("shop:src/a.rs"), "{reason}");
     assert!(
-        reason.contains("another send --from codex@shop-review --to claude@shop --request"),
+        reason.contains("another hold request-release --agent codex@shop-review"),
         "{reason}"
     );
     assert!(!reason.contains('\u{2014}'), "no em dashes in copy");
