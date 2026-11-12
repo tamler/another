@@ -74,7 +74,7 @@ another request claim --agent lead REQUEST_ID</code></pre>
       <ul>
         <li><strong>It doesn't assign.</strong> When sent to several recipients, one request opens and whoever claims first owns it.</li>
         <li><strong>It doesn't check the work.</strong> <code>complete</code> records a claim of completion. Review the result yourself.</li>
-        <li><strong>It doesn't deliver itself.</strong> <a href="/docs/concepts/#hook">Hooks</a> announce it at the next session start or prompt, and <a href="/guides/wake-idle-agents/">wake adapters</a> can nudge an idle terminal.</li>
+        <li><strong>It doesn't deliver itself.</strong> <a href="/docs/concepts/#hook">Hooks</a> announce it at the next session start, tool call or prompt, and <a href="/guides/wake-idle-agents/">wake adapters</a> can nudge an idle terminal.</li>
         <li><strong>It doesn't cross machines.</strong> Requests stay on one node. Sending one to an agent on another node fails; send plain mail instead.</li>
       </ul>
       <p>MCP clients do the same through <code>send_message</code> with <code>create_request</code> and <code>claim_request</code> with an <code>action</code>. <a href="/guides/mcp-agent-messaging/">MCP messaging</a> shows the arguments.</p>

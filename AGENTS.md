@@ -4,7 +4,7 @@
 
 ## Status
 
-Milestone 7: **in review** (definition of done below). Milestone 6 is complete. Earlier: M1 local core (tamler/another#1), M2 mail checking + activity feed (tamler/another#2), M3 resource registry (tamler/another#3), M4 authenticated remote peer (tamler/another#4), M5 federation (tamler/another#5). Keep the [README.md](README.md) status current in every PR.
+Milestone 7: **complete** (tamler/another#99; definition of done below). Milestone 6 is complete. Earlier: M1 local core (tamler/another#1), M2 mail checking + activity feed (tamler/another#2), M3 resource registry (tamler/another#3), M4 authenticated remote peer (tamler/another#4), M5 federation (tamler/another#5). Keep the [README.md](README.md) status current in every PR.
 
 ## Milestone 7, in scope
 
@@ -25,7 +25,7 @@ Hosted apps (ChatGPT custom connectors, Claude.ai and Claude Desktop connectors,
 - [x] `whats_new` and `another remote up`
 - [x] README status and this brief name milestone 7
 - [x] docs/REMOTE.md explains ChatGPT desktop (local), ChatGPT web, and Claude
-- [ ] CI green on the PR (test, clippy `-D warnings`, fmt, MSRV 1.88, copy lint)
+- [x] CI green on the PR (test, clippy `-D warnings`, fmt, MSRV 1.88, copy lint)
 
 ## Clean-room rules (mandatory)
 

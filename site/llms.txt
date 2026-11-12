@@ -2,7 +2,7 @@
 
 > A local-first inbox, activity feed and resource registry for coding agents. Apache-2.0; hooks and MCP; no telemetry or paid tier.
 
-Another lets independently run coding agents exchange mail, claim node-local requests, signal advisory path holds and borrow registered resources. It does not launch or manage agent teams. State is local SQLite by default. Federation is optional; a self-hosted hub can read relayed mail bodies. Reaping requires human confirmation on the owning node and is never remote.
+Another lets independently run coding agents exchange mail, claim node-local requests, hold paths (the edit hook takes a hold per edited file and stops a client edit to a file another agent holds; shell edits get past it) and borrow registered resources. It does not launch or manage agent teams. State is local SQLite by default. Federation is optional; a self-hosted hub can read relayed mail bodies. Reaping requires human confirmation on the owning node and is never remote.
 
 ## Start here
 
@@ -26,8 +26,8 @@ Another lets independently run coding agents exchange mail, claim node-local req
 - [Coordinate Claude Code and Codex](https://toanother.one/guides/claude-code-codex/): Shared project identity, hooks and review handoffs.
 - [Multiple Claude Code sessions](https://toanother.one/guides/multiple-claude-code-sessions/): One client twice in one checkout; shared identity and how to split it.
 - [MCP agent messaging](https://toanother.one/guides/mcp-agent-messaging/): Send, fetch, acknowledge and claim with distinct state transitions.
-- [Avoid file conflicts](https://toanother.one/guides/avoid-agent-file-conflicts/): Advisory holds, conflict exit status and limits.
-- [Agents in git worktrees](https://toanother.one/guides/git-worktrees/): Each worktree is a project; mail crosses, holds don't.
+- [Avoid file conflicts](https://toanother.one/guides/avoid-agent-file-conflicts/): Path holds, the edit guard, conflict exit status and what a shell edit gets past.
+- [Agents in git worktrees](https://toanother.one/guides/git-worktrees/): Each worktree is a project; mail and holds both cross them.
 - [Hand off a task](https://toanother.one/guides/hand-off-tasks/): Request ownership, completion, release and stale takeover.
 - [Share a model server](https://toanother.one/guides/share-model-server/): Register, borrow, release and human-confirmed cleanup.
 - [Wake idle agents](https://toanother.one/guides/wake-idle-agents/): Nudge a tmux pane, and what can go wrong.
@@ -37,9 +37,12 @@ Another lets independently run coding agents exchange mail, claim node-local req
 ## Repository guides
 
 - [Source and CLI reference](https://github.com/tamler/another/blob/main/README.md): Commands, concepts and safe defaults.
-- [Hooks](https://github.com/tamler/another/blob/main/docs/HOOKS.md): User-global lifecycle hooks and client trust steps.
+- [Hooks](https://github.com/tamler/another/blob/main/docs/HOOKS.md): User-global lifecycle hooks, mid-task notices, the edit guard and client trust steps.
+- [Path holds](https://github.com/tamler/another/blob/main/docs/HOLDS.md): Holds across worktrees of one repository, symlinks, letter case and whole-project holds.
+- [Daemon](https://github.com/tamler/another/blob/main/docs/DAEMON.md): The launchd daemon, waking idle Herdr agents, upgrading and another stats.
+- [Dashboard](https://github.com/tamler/another/blob/main/docs/DASHBOARD.md): The loopback web view of one node.
 - [Resources](https://github.com/tamler/another/blob/main/docs/RESOURCES.md): Leases, borrowing and human-approved cleanup.
-- [Remote peers](https://github.com/tamler/another/blob/main/docs/REMOTE.md): Scoped tokens, loopback auth and TLS tunnels.
+- [Remote peers](https://github.com/tamler/another/blob/main/docs/REMOTE.md): Scoped tokens, OAuth for ChatGPT and Claude, loopback auth and TLS tunnels.
 - [Federation](https://github.com/tamler/another/blob/main/docs/FEDERATION.md): Pairing, signed events and trust boundaries.
 - [Wake adapters](https://github.com/tamler/another/blob/main/docs/WAKE.md): Optional tmux, cmux and Herdr nudges.
 

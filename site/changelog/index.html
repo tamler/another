@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>What shipped in Another, and what has not</title>
-  <meta name="description" content="Milestones 1 to 6 are on main. No GitHub Release as of 10 Nov 2026, when I looked. Hosted OAuth is not in this release. The local dashboard is.">
+  <meta name="description" content="Milestones 1 to 7, the dashboard and enforced holds are on main. No GitHub Release as of 12 Nov 2026, when I looked. Hosted OAuth is in this release.">
   <link rel="canonical" href="https://toanother.one/changelog/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Another">
   <meta property="og:title" content="What shipped in Another, and what has not">
-  <meta property="og:description" content="Milestones 1 to 6 are on main. No GitHub Release as of 10 Nov 2026, when I looked. Hosted OAuth is not in this release. The local dashboard is.">
+  <meta property="og:description" content="Milestones 1 to 7, the dashboard and enforced holds are on main. No GitHub Release as of 12 Nov 2026, when I looked. Hosted OAuth is in this release.">
   <meta property="og:url" content="https://toanother.one/changelog/">
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
@@ -18,10 +18,10 @@
   <meta property="og:image:alt" content="Another. One inbox for coding agents.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="What shipped in Another, and what has not">
-  <meta name="twitter:description" content="Milestones 1 to 6 are on main. No GitHub Release as of 10 Nov 2026, when I looked. Hosted OAuth is not in this release. The local dashboard is.">
+  <meta name="twitter:description" content="Milestones 1 to 7, the dashboard and enforced holds are on main. No GitHub Release as of 12 Nov 2026, when I looked. Hosted OAuth is in this release.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
   <meta name="twitter:image:alt" content="Another. One inbox for coding agents.">
-  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"What shipped","description":"Milestones 1 to 6 are on main. No GitHub Release as of 10 Nov 2026, when I looked. Hosted OAuth is not in this release. The local dashboard is.","url":"https://toanother.one/changelog/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"What shipped","description":"Milestones 1 to 7, the dashboard and enforced holds are on main. No GitHub Release as of 12 Nov 2026, when I looked. Hosted OAuth is in this release.","url":"https://toanother.one/changelog/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
@@ -38,7 +38,7 @@
   <main class="wrap" id="main" tabindex="-1">
     <div class="guide-hero">
       <h1>What shipped</h1>
-      <p class="definition">On main as of 10 Nov 2026. I checked the repo that day: 0 stars, 1 fork, and no GitHub Release. If those numbers move, this page should move with them.</p>
+      <p class="definition">On main as of 12 Nov 2026. I checked the repo that day: 0 stars, 1 fork, and no GitHub Release. If those numbers move, this page should move with them.</p>
       <p>Install is still <code>cargo install --locked --git https://github.com/tamler/another another</code> with Rust 1.88 or newer. The release workflow can build macOS and static Linux binaries when a <code>v*</code> tag exists. None has been published.</p>
     </div>
     <section class="guide-section" aria-labelledby="shipped-title">
@@ -50,20 +50,19 @@
         <div class="client"><dt>4. Remote peer</dt><dd>Scoped bearer tokens, an audit log, <code>GET /activity</code>. Loopback unless you opt into a remote bind. <a href="https://github.com/tamler/another/pull/4">PR 4</a>.</dd></div>
         <div class="client"><dt>5. Federation</dt><dd>Signed event logs, pairing, hub-and-spoke sync, cross-node mail. Requests stay on one node. <a href="https://github.com/tamler/another/pull/5">PR 5</a>.</dd></div>
         <div class="client"><dt>6. Wake and release builds</dt><dd><code>another wake</code> for tmux, cmux, and Herdr. Optional Herdr plugin. Release workflow, quickstart, contributing notes. <a href="https://github.com/tamler/another/pull/6">PR 6</a>.</dd></div>
-        <div class="client"><dt>Local dashboard</dt><dd><code>another dashboard</code>, or <code>GET /ui</code> on a loopback <code>another serve</code>. Agents, holds, mail, requests, resources, and the feed. Message bodies stay on that machine. An authenticated server does not serve it unless you ask, and then it is read-only.</dd></div>
+        <div class="client"><dt>7. Hosted connectors</dt><dd>OAuth 2.1 on <code>another serve --auth --public-url</code>, so ChatGPT custom connectors and Claude.ai can attach. A grant exists only after <code>another oauth approve</code> on the machine that holds the database. <code>another remote up</code> prints the URL to paste. <code>whats_new</code> for a one-call catch-up. The ChatGPT desktop app on the same machine uses plain stdio or loopback HTTP, with no tunnel. <a href="https://github.com/tamler/another/pull/99">PR 99</a>.</dd></div>
+        <div class="client"><dt>Local dashboard</dt><dd><code>another dashboard</code>, or <code>GET /ui</code> on a loopback <code>another serve</code>. Agents, holds, mail, requests, resources, and the feed. Message bodies stay on that machine. An authenticated server does not serve it unless you ask, and then it is read-only. <a href="https://github.com/tamler/another/pull/100">PR 100</a>.</dd></div>
+        <div class="client"><dt>Push and enforced holds</dt><dd>A one-line notice after the next tool call when mail lands mid-task. Before each file edit, a hook takes a hold on that file, or stops the edit and names the holder when another agent holds it (Claude Code, Codex, Grok CLI; not Cursor, and not edits made from a shell command). Holds are checked across worktrees and clones of one repository. A launchd daemon on macOS that wakes idle Herdr agents. <code>another stats</code>. <a href="https://github.com/tamler/another/pull/103">PR 103</a>, <a href="https://github.com/tamler/another/pull/104">PR 104</a>, <a href="https://github.com/tamler/another/pull/105">PR 105</a>.</dd></div>
       </dl>
       <p>The project was renamed to Another in <a href="https://github.com/tamler/another/pull/8">PR 8</a>. <a href="https://github.com/tamler/another/pull/95">PR 95</a> closed token-scope bugs (a remote token could reach outside the projects it was minted for). That fix is on main.</p>
     </section>
     <section class="guide-section" aria-labelledby="not-title">
       <h2 id="not-title">In progress, not merged</h2>
-      <p>I am not going to describe these as if you can turn them on.</p>
-      <dl class="clients">
-        <div class="client"><dt>Hosted MCP OAuth</dt><dd>ChatGPT and Claude.ai need OAuth to attach a remote MCP server. That work is underway in other branches. It is not on main.</dd></div>
-      </dl>
+      <p>Nothing on this page comes from an open pull request. Work that is still in review is not described here until it is on main, because I am not going to describe it as if you can turn it on.</p>
     </section>
     <section class="guide-section" aria-labelledby="later-title">
       <h2 id="later-title">Later, not started here</h2>
-      <p>From the spec, still out of scope for the code on main: a pre-commit hold guard, auto-reap policies, mesh federation, end-to-end mail encryption. Holds stay advisory until a guard exists. Reaping stays a human confirm on the owning machine. I would rather ship those late than pretend a hold is a lock.</p>
+      <p>From the spec, still out of scope for the code on main: a pre-commit hold guard, auto-reap policies, mesh federation, end-to-end mail encryption. The edit hook stops a client edit to a held file, but an edit from a shell command still gets through and nothing guards a commit. Reaping stays a human confirm on the owning machine. I would rather ship those late than pretend a hold is a lock.</p>
       <p><a href="/building/">How I run the agent team on this repo</a>. <a href="/docs/getting-started/">Getting started</a> if you want the commands first.</p>
     </section>
   </main>

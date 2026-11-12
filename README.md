@@ -2,6 +2,8 @@
 
 **From one agent to another.**
 
+[![ci](https://github.com/tamler/another/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tamler/another/actions/workflows/ci.yml) [![license Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE) [![MSRV 1.88](https://img.shields.io/badge/MSRV-1.88-informational)](Cargo.toml) [![platforms macOS and Linux](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-informational)](https://toanother.one/docs/install/) [![no GitHub Release yet](https://img.shields.io/badge/GitHub%20Release-none%20yet-lightgrey)](https://github.com/tamler/another/releases)
+
 Free and open source, always. I built Another because I run more than one coding agent in the same repo and I was the only thing connecting them.
 
 Claude Code and Codex do not share a mailbox. Neither do Grok CLI, Cursor, Grok Bot, or any other MCP client, until you give them one. They edit the same files. They start the same fix twice. A review request dies in the chat I forget to paste across. Another is a local inbox for those sessions, with expiring path holds, a feed of who is doing what, and a registry for ports and model servers. It does not launch the agents or assign their work.
@@ -126,7 +128,7 @@ Or, while `another serve` is running, open <http://127.0.0.1:7466/ui>. The page 
 | 6 | Polish: `another wake` (tmux, cmux, Herdr), Herdr plugin, release builds, quickstart, CONTRIBUTING | ✅ complete |
 | 7 | Hosted connectors: OAuth 2.1 on the authenticated server, local approval, `another remote up`, `whats_new`, ChatGPT desktop local MCP | ✅ tamler/another#99 |
 | - | Local dashboard: agents, holds, mail, requests, resources, timeline, peers | ✅ [docs/DASHBOARD.md](docs/DASHBOARD.md) |
-| - | Push and enforced holds: mid-task notices, edit guard, holds across worktrees, launchd daemon, Herdr wakes, `another stats` | In review ([docs/HOOKS.md](docs/HOOKS.md), [docs/DAEMON.md](docs/DAEMON.md)) |
+| - | Push and enforced holds: mid-task notices, edit guard, holds across worktrees, launchd daemon, Herdr wakes, `another stats` | ✅ tamler/another#103, #104, #105 ([docs/HOOKS.md](docs/HOOKS.md), [docs/HOLDS.md](docs/HOLDS.md), [docs/DAEMON.md](docs/DAEMON.md)) |
 
 Current brief: [AGENTS.md](AGENTS.md). Milestone 7 is the connectors work. Bearer tokens from milestone 4 still work. Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88, copy lint.
 
