@@ -689,13 +689,15 @@ fn wait_for_conflicts_tx(
 }
 
 /// Whether `blockers` on `path` are a new conflict for this agent when the wait could
-/// not be recorded. The wait row, when there is one, is compared by its stored blocker
-/// signature. Without a row, the agent's latest wait event for exactly this path decides:
-/// a `hold.waiting` or `hold.wait_failed` that names the same hold ids means the first
-/// notice already went out; an event that ended the wait (`hold.available`,
-/// `hold.notify_failed`, `hold.wait.finished`), a different set of hold ids, or no event
-/// at all means a first notice is due. Events for other agents, projects or paths never
-/// count, however many of them there are.
+/// not be recorded. Two records can prove the first notice already went out: the wait
+/// row, when there is one, by its stored blocker signature; and the agent's latest wait
+/// event for exactly this path, when it is a `hold.waiting` or `hold.wait_failed` naming
+/// the same hold ids. Both are checked, because a wait row keeps its old signature when
+/// the update to a changed blocker set failed, and the failure event is then the only
+/// record of what was announced. An event that ended the wait (`hold.available`,
+/// `hold.notify_failed`, `hold.wait.finished`), a different set of hold ids in both
+/// records, or no record at all means a first notice is due. Events for other agents,
+/// projects or paths never count, however many of them there are.
 fn failed_wait_is_new(
     tx: &Tx<'_>,
     agent_id: &str,
@@ -713,7 +715,9 @@ fn failed_wait_is_new(
         .optional()?;
     if let Some(signature) = recorded {
         let stored: Vec<String> = serde_json::from_str(&signature).unwrap_or_default();
-        return Ok(stored != blockers);
+        if stored == blockers {
+            return Ok(false);
+        }
     }
     let latest: Option<(String, String)> = tx
         .query_row(

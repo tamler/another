@@ -1674,3 +1674,73 @@ fn wait_record_failure_notices_new_paths_and_replacement_holds() {
         .conflicts
         .is_empty());
 }
+
+/// A wait recorded for one hold, then a second overlapping hold whose wait update fails:
+/// the changed blockers get one first notice, every retry with the same blockers is a
+/// short denial, and the wait row's stale signature never stands in for the current
+/// blocker set (D59).
+#[test]
+fn wait_update_failure_does_not_renotice_unchanged_blockers() {
+    let fx = Fx::new();
+    let wt = fx.project(&fx.repos.wt);
+    let edit = |path: &str| {
+        fx.store
+            .guard_edit("bob", &wt, &[path.into()], "auto")
+            .unwrap()
+    };
+    fx.acquire("alice", &fx.repos.main, &["src/**"]).unwrap();
+    let recorded = edit("src/a.rs");
+    assert!(recorded.first_notice && recorded.wait_recorded);
+    assert_eq!(recorded.conflicts.len(), 1);
+    let narrow = fx
+        .acquire("alice", &fx.repos.main, &["src/a.rs"])
+        .unwrap()
+        .granted[0]
+        .hold_id
+        .clone();
+    let db = rusqlite::Connection::open(fx.repos.home.join(DB_FILE)).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER hold_waits_inject_update_failure BEFORE UPDATE ON hold_waits
+         BEGIN SELECT RAISE(ABORT, 'injected wait-update failure'); END;",
+    )
+    .unwrap();
+
+    let changed = edit("src/a.rs");
+    assert_eq!(changed.conflicts.len(), 2);
+    assert!(
+        changed.first_notice,
+        "a second blocking hold is a changed set"
+    );
+    assert!(!changed.wait_recorded);
+    assert_eq!(changed.retry_after_seconds, 30);
+    for _ in 0..3 {
+        let again = edit("src/a.rs");
+        assert_eq!(again.conflicts.len(), 2);
+        assert!(
+            !again.first_notice,
+            "unchanged blockers after a failed update must be a short denial"
+        );
+        assert!(!again.wait_recorded);
+    }
+    assert_eq!(count(&fx, "hold.blocked"), 2);
+
+    // Back to the recorded set: that wait already announced it.
+    fx.store.release_holds("alice", &[narrow]).unwrap();
+    let back = edit("src/a.rs");
+    assert_eq!(back.conflicts.len(), 1);
+    assert!(!back.first_notice, "the recorded wait covers this hold");
+    assert_eq!(count(&fx, "hold.blocked"), 2);
+
+    // Once updates work again the changed set is recorded and the ping comes once.
+    db.execute_batch("DROP TRIGGER hold_waits_inject_update_failure;")
+        .unwrap();
+    drop(db);
+    fx.acquire("alice", &fx.repos.main, &["src/a.rs"]).unwrap();
+    let again = edit("src/a.rs");
+    assert!(again.first_notice && again.wait_recorded);
+    assert_eq!(count(&fx, "hold.blocked"), 3);
+    fx.store.release_holds("alice", &[]).unwrap();
+    let inbox = fx.store.inbox("bob", InboxQuery::default()).unwrap();
+    assert_eq!(inbox.messages.len(), 1);
+    assert_eq!(inbox.messages[0].message.subject, "Hold free: src/a.rs");
+}
