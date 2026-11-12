@@ -41,7 +41,12 @@ $ another send --from claude --to codex --subject "Review the invoice parser" --
 another: agent name "codex" is ambiguous: it is registered in several projects; use name@project, one of: codex@shop, codex@billing
 ```
 
-Both exit with status 1. Nothing was sent. The error lists the candidates, so the fix is a copy from that line. With `--json`, the same failure is `{"error": {"code": "ambiguous", ...}}`, and the MCP tools return the same `ambiguous` code.
+Both exit with status 1. Nothing was sent. The error lists the candidates, so the fix is a copy from that line. With `--json` the same failure is one object on stdout, and the MCP tools return the same `ambiguous` code. This line was captured later in the run, after a third project had registered the name, which is why it lists three:
+
+```text
+$ another inbox --agent codex --json
+{"error":{"code":"ambiguous","message":"agent name \"codex\" is ambiguous: it is registered in several projects; use name@project, one of: codex@shop, codex@billing, codex@shop-2"}}
+```
 
 ## The fix: `name@project`
 
