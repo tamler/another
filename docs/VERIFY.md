@@ -8,7 +8,7 @@ Pushing a tag `vX.Y.Z` runs [`.github/workflows/release.yml`](../.github/workflo
 
 | File | Written by |
 |---|---|
-| `another-VERSION-TARGET.tar.gz` | `tar -czf` of a folder named `another-VERSION-TARGET` holding the `another` binary |
+| `another-VERSION-TARGET.tar.gz` | `tar -czf` of a folder named `another-VERSION-TARGET` holding the `another` binary, `LICENSE`, and `README.md` |
 | `another-VERSION-TARGET.tar.gz.sha256` | `shasum -a 256 another-VERSION-TARGET.tar.gz` |
 
 `TARGET` is `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl`. The checksum file is one line in the format both `shasum` and `sha256sum` write and read: the hex digest, two spaces, the archive's file name. The workflow does not publish a combined `SHA256SUMS` file; if one appears on a release page later, the same commands below read it, and `--ignore-missing` skips the archives you did not download.
