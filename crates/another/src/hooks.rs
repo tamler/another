@@ -136,7 +136,10 @@ const CODEX_DESCRIPTION: &str =
     "Another coordination hooks (toanother.one): messages and file holds between coding agents";
 
 /// Human trust is a Codex decision; finding config entries cannot establish coverage.
-pub const CODEX_TRUST_NOTE: &str = "Codex trust is not checked. New or changed hooks provide no automatic mail or edit-hold coverage until you review and trust them yourself in Codex /hooks. Another does not grant trust.";
+/// Codex's `--dangerously-bypass-hook-trust` runs enabled hooks without persisted trust for
+/// one invocation, so the note describes the default flow and names the bypass without
+/// recommending it.
+pub const CODEX_TRUST_NOTE: &str = "Codex trust is not checked. In Codex's default trust flow, new or changed hooks provide no automatic mail or edit-hold coverage until you review and trust them yourself in Codex /hooks. Codex's --dangerously-bypass-hook-trust runs enabled hooks without persisted trust for that one invocation; Another does not recommend it. Another does not grant trust.";
 
 /// One hook entry Another installs for a client.
 #[derive(Debug, Clone, Copy)]
