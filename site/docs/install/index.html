@@ -63,18 +63,17 @@ cargo build --release --locked
     </section>
     <section class="guide-section" id="verify" aria-labelledby="verify-title">
       <h2 id="verify-title">Verify a release archive</h2>
-      <p>Archives are named <code>another-VERSION-TARGET.tar.gz</code>. The target is <code>aarch64-apple-darwin</code>, <code>x86_64-apple-darwin</code>, <code>x86_64-unknown-linux-musl</code> or <code>aarch64-unknown-linux-musl</code>. An archive's checksum is in a file with the same name plus <code>.sha256</code>, or on its line in a shared <code>SHA256SUMS</code> file.</p>
-      <p>Put the archive and either checksum file in one folder and change to that folder. Set <code>archive</code> on the first line to your file's name, then paste:</p>
+      <p>Archives are named <code>another-VERSION-TARGET.tar.gz</code>. The target is <code>aarch64-apple-darwin</code>, <code>x86_64-apple-darwin</code>, <code>x86_64-unknown-linux-musl</code> or <code>aarch64-unknown-linux-musl</code>. Each archive's checksum is in a file with the same name plus <code>.sha256</code>.</p>
+      <p>Put the archive and its <code>.sha256</code> file in one folder and change to that folder. Set <code>archive</code> on the first line to your file's name, then paste:</p>
       <pre class="code-block shell" tabindex="0" aria-label="Verify a release archive"><code>archive=another-0.1.0-aarch64-apple-darwin.tar.gz
-if [ -f "$archive.sha256" ]; then sums="$archive.sha256"; else sums=SHA256SUMS; fi
-expected=$(awk -v file="$archive" '$2 == file { print $1 }' "$sums")
+expected=$(awk -v file="$archive" '$2 == file { print $1 }' "$archive.sha256")
 actual=$(sha256sum "$archive" 2&gt;/dev/null || shasum -a 256 "$archive")
 if [ -n "$expected" ] &amp;&amp; [ "$expected" = "${actual%% *}" ]; then
   tar -xzf "$archive" &amp;&amp; echo "Verified and unpacked: $archive"
 else
   echo "FAILED: do not install $archive"; false
 fi</code></pre>
-      <p>It hashes the archive with <code>sha256sum</code> where that is installed, or <code>shasum -a 256</code> otherwise, and compares the result with your archive's line. Other archives listed in <code>SHA256SUMS</code> need not be present. It compares the values itself because <code>sha256sum -c</code> on some macOS versions exits successfully when it finds no line it can read.</p>
+      <p>It hashes the archive with <code>sha256sum</code> where that is installed, or <code>shasum -a 256</code> otherwise, and compares the result with your archive's line in its <code>.sha256</code> file. It compares the values itself because <code>sha256sum -c</code> on some macOS versions exits successfully when it finds no line it can read.</p>
       <p>A match prints <code>Verified and unpacked</code> and unpacks the archive into a folder of the same name. If you see <code>FAILED</code>, nothing is unpacked. Stop there and delete the download; do not install it.</p>
       <p>No release exists yet, so this snippet has only run against local fixture archives built the way the release workflows build theirs. Every site build repeats that test. If you would rather run <code>shasum -a 256 -c</code> or <code>sha256sum -c</code> by hand, <a href="https://github.com/tamler/another/blob/main/docs/VERIFY.md">docs/VERIFY.md</a> shows both, with the exit status on a match and on a tampered archive, recorded against a fixture.</p>
     </section>
