@@ -389,6 +389,31 @@ fn manual_globs_under_literal_route_components_conflict_in_both_orders() {
     }
 }
 
+/// r5: `*` and `src/*` name the entries at their own depth. They are granted without
+/// `--repo-wide` and must not hold everything below the way `**` does.
+#[test]
+fn wildcard_only_globs_hold_one_level() {
+    let fx = Fx::new();
+    let wt = fx.project(&fx.repos.wt);
+    for pattern in ["*", "src/*"] {
+        let granted = fx.acquire("alice", &fx.repos.main, &[pattern]).unwrap();
+        assert_eq!(granted.granted.len(), 1, "{pattern}");
+    }
+    for (path, blocked) in [
+        ("top.rs", true),
+        ("src/a.rs", true),
+        ("src/deep/a.rs", false),
+        ("a/b/c.rs", false),
+    ] {
+        let conflicts = fx
+            .store
+            .guard_edit("bob", &wt, &[path.into()], "auto")
+            .unwrap()
+            .conflicts;
+        assert_eq!(!conflicts.is_empty(), blocked, "{path}");
+    }
+}
+
 #[test]
 fn manual_bracket_directory_holds_conflict_with_literal_files_in_both_orders() {
     for pattern in ["app/[id]", "app/[id]/**"] {
