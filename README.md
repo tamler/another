@@ -187,7 +187,7 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 |---|---|
 | Node | `another init`, `another status`, `another node show`, `another node name [<name>]` (no name prints the current one), `another events` |
 | Agents | `another agent register <name> --program claude\|codex\|grok\|cursor\|grok_bot\|other [--project PATH]`, `another agent list` |
-| Mail | `another send`, `another inbox`, `another reply <message-id>`, `another ack <message-id>`, `another threads`, `another thread <id>` (there is no `another mail` command; recorded walkthrough: [docs/INBOX.md](docs/INBOX.md)) |
+| Mail | `another send`, `another inbox`, `another reply <message-id>`, `another ack <message-id>`, `another threads`, `another thread <id>` (there is no `another mail` command) |
 | Requests | `another requests`, `another request claim\|release\|complete\|cancel <id>` (recorded walkthrough: [docs/REQUESTS.md](docs/REQUESTS.md)) |
 | Holds | `another hold acquire\|check\|renew\|release`, `another holds` (conflicts exit with status 3; `--repo-wide` for a whole-project hold) |
 | Sessions and feed | `another heartbeat [--start\|--end [--keep]]`, `another activity [--since 1h] [--kinds mail,request] [--summary]`, `another stats [--since 48h]` |
