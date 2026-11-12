@@ -76,7 +76,7 @@ else
 fi</code></pre>
       <p>It hashes the archive with <code>sha256sum</code> where that is installed, or <code>shasum -a 256</code> otherwise, and compares the result with your archive's line. Other archives listed in <code>SHA256SUMS</code> need not be present. It compares the values itself because <code>sha256sum -c</code> on some macOS versions exits successfully when it finds no line it can read.</p>
       <p>A match prints <code>Verified and unpacked</code> and unpacks the archive into a folder of the same name. If you see <code>FAILED</code>, nothing is unpacked. Stop there and delete the download; do not install it.</p>
-      <p>No release exists yet, so this snippet has only run against local fixture archives built the way the release workflows build theirs. Every site build repeats that test.</p>
+      <p>No release exists yet, so this snippet has only run against local fixture archives built the way the release workflows build theirs. Every site build repeats that test. If you would rather run <code>shasum -a 256 -c</code> or <code>sha256sum -c</code> by hand, <a href="https://github.com/tamler/another/blob/main/docs/VERIFY.md">docs/VERIFY.md</a> shows both, with the exit status on a match and on a tampered archive, recorded against a fixture.</p>
     </section>
     <section class="guide-section" aria-labelledby="replace-title">
       <h2 id="replace-title">Replace a binary safely on macOS</h2>

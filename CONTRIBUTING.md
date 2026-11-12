@@ -64,7 +64,7 @@ cargo +1.88 check --workspace --all-targets --locked
 
 ## Releases
 
-Pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`. It builds macOS (arm64, x86_64) and static Linux (x86_64, arm64) archives and publishes them with SHA-256 checksums as a GitHub Release.
+Pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`. It builds macOS (arm64, x86_64) and static Linux (x86_64, arm64) archives and publishes them with SHA-256 checksums as a GitHub Release. [docs/VERIFY.md](docs/VERIFY.md) names the files it uploads and shows how a user checks one.
 
 ## License
 
