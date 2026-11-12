@@ -70,6 +70,69 @@ another requests --status stale
 another request claim --agent lead REQUEST_ID</code></pre>
       <p>A running <code>another serve</code> sweeps every 30 seconds by default. Without one, <code>another sweep</code> applies the change at once. A claim can set a new deadline with <code>--due</code>; a takeover without one clears the old deadline.</p>
     </section>
+    <section class="guide-section" aria-labelledby="received">
+      <h2 id="received">Received is not done: a recorded run</h2>
+      <p>An ack records receipt. A claim records an owner. Only <code>complete</code> records that the completing agent reports it finished, and only you can check that it did. This run was captured from <code>another 0.1.0</code> built from <code>5ec0a58</code> (then <code>main</code>) against a temporary project named <code>shop</code>, with no hooks and no server. Ids are as recorded. The same walkthrough is in the repository at <a href="https://github.com/tamler/another/blob/main/docs/REQUESTS.md">docs/REQUESTS.md</a>.</p>
+      <p>The lead opens work with a deadline. The worker acks the mail: <code>awaiting ack</code> drops to 0, and the request is still <code>open</code> with no owner.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Open a request and acknowledge the mail"><code><span class="command">$ another send --from lead --to worker --subject "Fix the flaky test" --body "See tests/net.rs" --ack --due 900</span>
+<span class="output">sent 01M77HNNED9HZY6CKDHEZTPNSS to worker@shop
+opened request 01M77HNNEDVZ92ZVSKQEYXYRB5</span>
+<span class="command">$ another ack --agent worker 01M77HNNED9HZY6CKDHEZTPNSS</span>
+<span class="output">1 updated, 0 unchanged</span>
+<span class="command">$ another inbox --agent worker</span>
+<span class="output">worker@shop: 0 unread (0 urgent), 0 awaiting ack, 1 request(s)
+        2026-11-12T09:33:24.813Z  lead@shop        Fix the flaky test  [01M77HNNED9HZY6CKDHEZTPNSS]
+
+requests:
+open      -                Fix the flaky test  (from lead@shop due 2026-11-12T09:48:24.813Z)  [01M77HNNEDVZ92ZVSKQEYXYRB5]</span></code></pre>
+      <p>The worker claims the request, then its session crashes before it runs <code>complete</code>. Nothing arrives in the lead's inbox, because nothing was sent. The request list and the activity feed show a claim with no completion. A sender checks <code>another requests</code>, not its own inbox, to see whether work it opened is still owned.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="The sender sees the work is unfinished"><code><span class="command">$ another request claim --agent worker 01M77HNNEDVZ92ZVSKQEYXYRB5</span>
+<span class="output">claimed   worker@shop      Fix the flaky test  (from lead@shop due 2026-11-12T09:48:24.813Z)  [01M77HNNEDVZ92ZVSKQEYXYRB5]</span>
+<span class="command">$ another inbox --agent lead</span>
+<span class="output">lead@shop: 0 unread (0 urgent), 0 awaiting ack, 0 request(s)</span>
+<span class="command">$ another requests --status claimed</span>
+<span class="output">claimed   worker@shop      Fix the flaky test  (from lead@shop due 2026-11-12T09:48:24.813Z)  [01M77HNNEDVZ92ZVSKQEYXYRB5]</span>
+<span class="command">$ another activity --since 1h --kinds request</span>
+<span class="output">2026-11-12T09:33:24.813Z  request  lead@shop opened request: Fix the flaky test
+2026-11-12T09:33:24.866Z  request  worker@shop claimed request: Fix the flaky test</span></code></pre>
+      <p>When the worker comes back, <code>complete</code> marks the request done and mails the lead a <code>Done:</code> message in the original thread. The note is the body; without one it reads <code>Request &lt;id&gt; is done.</code> That mail is the only thing the sender's inbox receives about the request. While a request is <code>claimed</code>, only its owner can complete it. An <code>open</code> or <code>stale</code> request can be completed by any agent, and that agent becomes the owner.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Complete the request and the Done mail"><code><span class="command">$ another request complete --agent worker 01M77HNNEDVZ92ZVSKQEYXYRB5 --note "Fixed in the retry branch"</span>
+<span class="output">done      worker@shop      Fix the flaky test  (from lead@shop due 2026-11-12T09:48:24.813Z)  [01M77HNNEDVZ92ZVSKQEYXYRB5]</span>
+<span class="command">$ another inbox --agent lead</span>
+<span class="output">lead@shop: 1 unread (0 urgent), 0 awaiting ack, 0 request(s)
+   new  2026-11-12T09:33:24.901Z  worker@shop      Done: Fix the flaky test  [01M77HNNH6XPXEDYZ664XR2PKY]</span></code></pre>
+      <p>Or the worker gives the work back. This second request is opened and claimed, then <code>release</code> returns it to <code>open</code> with no owner. Only the current owner can release, and <code>release</code> does not mail anyone.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Open, claim, and release a second request"><code><span class="command">$ another send --from lead --to worker --subject "Port the fixture" --body "tests/fixtures" --ack --due 900</span>
+<span class="output">sent 01M77HNNJ0B2BD3M5R5EB1AKPC to worker@shop
+opened request 01M77HNNJ0T10Z74VKWG0YWZAX</span>
+<span class="command">$ another request claim --agent worker 01M77HNNJ0T10Z74VKWG0YWZAX</span>
+<span class="output">claimed   worker@shop      Port the fixture  (from lead@shop due 2026-11-12T09:48:24.928Z)  [01M77HNNJ0T10Z74VKWG0YWZAX]</span>
+<span class="command">$ another request release --agent worker 01M77HNNJ0T10Z74VKWG0YWZAX</span>
+<span class="output">open      -                Port the fixture  (from lead@shop due 2026-11-12T09:48:24.928Z)  [01M77HNNJ0T10Z74VKWG0YWZAX]</span></code></pre>
+      <p><code>release</code> does not store a note and does not mail anyone. If instead the worker never comes back, the deadline does the work. This third request was opened with <code>--due 5</code>. The worker acked, claimed, and stopped. Past its due time it is <code>stale</code>: <code>another sweep</code> applies that at once, and <code>another requests</code> and <code>another inbox</code> sweep before they list. A stale request keeps its owner, so another agent cannot release it. Takeover is a claim, and the <code>Done:</code> mail names who finished it.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Stale takeover by another agent"><code><span class="command">$ another send --from lead --to worker --subject "Rotate the log" --body "src/log.rs" --ack --due 5</span>
+<span class="output">sent 01M77HNNKQJVFTPAECB37NZC72 to worker@shop
+opened request 01M77HNNKQAN037F028JXCZKH7</span>
+<span class="command">$ another ack --agent worker 01M77HNNKQJVFTPAECB37NZC72</span>
+<span class="output">1 updated, 0 unchanged</span>
+<span class="command">$ another request claim --agent worker 01M77HNNKQAN037F028JXCZKH7</span>
+<span class="output">claimed   worker@shop      Rotate the log  (from lead@shop due 2026-11-12T09:33:29.983Z)  [01M77HNNKQAN037F028JXCZKH7]</span>
+<span class="command">$ another sweep</span>
+<span class="output">expired 0 hold(s), 1 request(s) went stale</span>
+<span class="command">$ another requests --status stale</span>
+<span class="output">stale     worker@shop      Rotate the log  (from lead@shop due 2026-11-12T09:33:29.983Z)  [01M77HNNKQAN037F028JXCZKH7]</span>
+<span class="command">$ another request release --agent reviewer 01M77HNNKQAN037F028JXCZKH7</span>
+<span class="output">another: request 01M77HNNKQAN037F028JXCZKH7 is owned by worker@shop, not reviewer@shop</span>
+<span class="command">$ another request claim --agent reviewer 01M77HNNKQAN037F028JXCZKH7 --due 600</span>
+<span class="output">claimed   reviewer@shop    Rotate the log  (from lead@shop due 2026-11-12T09:43:31.090Z)  [01M77HNNKQAN037F028JXCZKH7]</span>
+<span class="command">$ another request complete --agent reviewer 01M77HNNKQAN037F028JXCZKH7 --note "Rotated. The worker had not touched src/log.rs."</span>
+<span class="output">done      reviewer@shop    Rotate the log  (from lead@shop due 2026-11-12T09:43:31.090Z)  [01M77HNNKQAN037F028JXCZKH7]</span>
+<span class="command">$ another inbox --agent lead</span>
+<span class="output">lead@shop: 2 unread (0 urgent), 0 awaiting ack, 0 request(s)
+   new  2026-11-12T09:33:31.108Z  reviewer@shop    Done: Rotate the log  [01M77HNVK4EKJ7FJ1XTFKG416H]
+   new  2026-11-12T09:33:24.901Z  worker@shop      Done: Fix the flaky test  [01M77HNNH6XPXEDYZ664XR2PKY]</span></code></pre>
+      <p>A request opened without <code>--due</code> never goes stale on its own. If its owner stops, it stays <code>claimed</code> until the owner releases or completes it, or the creator cancels it. Set a due time on work you may need to take over. Nothing watches the worker: a crash leaves the request exactly as it was, and nothing is pushed to anyone when it goes stale.</p>
+    </section>
     <section class="guide-section" aria-labelledby="limits">
       <h2 id="limits">What a request doesn't do</h2>
       <ul>

@@ -28,7 +28,7 @@ Another lets independently run coding agents hold paths (the edit hook takes a h
 - [MCP agent messaging](https://toanother.one/guides/mcp-agent-messaging/): Send, fetch, acknowledge and claim with distinct state transitions.
 - [Avoid file conflicts](https://toanother.one/guides/avoid-agent-file-conflicts/): Path holds, the edit guard, conflict exit status and what a shell edit gets past.
 - [Agents in git worktrees](https://toanother.one/guides/git-worktrees/): Each worktree is a project; mail and holds both cross them.
-- [Hand off a task](https://toanother.one/guides/hand-off-tasks/): Request ownership, completion, release and stale takeover.
+- [Hand off a task](https://toanother.one/guides/hand-off-tasks/): Request ownership, completion, release and stale takeover, with a recorded run showing that an ack is receipt, not completion.
 - [Share a model server](https://toanother.one/guides/share-model-server/): Register, borrow, release and human-confirmed cleanup.
 - [Wake idle agents](https://toanother.one/guides/wake-idle-agents/): Nudge a tmux pane, and what can go wrong.
 - [Agents on two machines](https://toanother.one/guides/agents-on-two-machines/): Self-hosted hub, what it shares and what stays local.
