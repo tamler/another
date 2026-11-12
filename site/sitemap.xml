@@ -6,7 +6,6 @@
   <url><loc>https://toanother.one/docs/install/</loc></url>
   <url><loc>https://toanother.one/docs/install/macos/</loc></url>
   <url><loc>https://toanother.one/docs/install/linux/</loc></url>
-  <url><loc>https://toanother.one/docs/install/windows/</loc></url>
   <url><loc>https://toanother.one/docs/faq/</loc></url>
   <url><loc>https://toanother.one/docs/concepts/</loc></url>
   <url><loc>https://toanother.one/compare/</loc></url>
@@ -16,7 +15,7 @@
   <url><loc>https://toanother.one/guides/multiple-claude-code-sessions/</loc></url>
   <url><loc>https://toanother.one/guides/mcp-agent-messaging/</loc></url>
   <url><loc>https://toanother.one/guides/avoid-agent-file-conflicts/</loc></url>
-  <url><loc>https://toanother.one/guides/local-agent-inbox/</loc></url>
+  <url><loc>https://toanother.one/guides/coordinate-local-agents/</loc></url>
   <url><loc>https://toanother.one/guides/git-worktrees/</loc></url>
   <url><loc>https://toanother.one/guides/hand-off-tasks/</loc></url>
   <url><loc>https://toanother.one/guides/share-model-server/</loc></url>

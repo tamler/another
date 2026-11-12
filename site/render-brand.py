@@ -44,8 +44,8 @@ TILE_RADIUS = 2
 
 WORDMARK = "another"
 # Short on purpose. At feed size a long line becomes unreadably small.
-HEADLINE = "One inbox"
-DETAIL = "for coding agents."
+HEADLINE = "Many agents"
+DETAIL = "one project."
 
 # Fragment Mono's advance is 618/1000 for every glyph, including the space.
 # Filled in by load_font from JetBrains Mono ExtraBold.
@@ -532,7 +532,7 @@ def build_card(text_width, draw_text, kind: str) -> Canvas:
     crop_bottom = height - crop_top
     if kind == "og":
         mark = 112
-        word_size, headline_size, detail_size = 52, 164, 86
+        word_size, headline_size, detail_size = 52, 138, 86
         gap_mark, gap_word, gap_head = 18, 36, 20
         headline_w = text_width(HEADLINE, headline_size, 0)
         detail_w = text_width(DETAIL, detail_size, 0)
@@ -555,7 +555,7 @@ def build_card(text_width, draw_text, kind: str) -> Canvas:
     elif kind == "twitter":
         # Same words, mark beside them, the whole lockup centered in the frame.
         mark = 128
-        word_size, headline_size, detail_size = 48, 148, 76
+        word_size, headline_size, detail_size = 48, 120, 76
         gap_word, gap_head = 22, 16
         gap_mark = 40
         headline_w = text_width(HEADLINE, headline_size, 0)

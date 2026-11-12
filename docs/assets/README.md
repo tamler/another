@@ -4,7 +4,7 @@ Images used by the repository README and, for the two diagrams, by toanother.one
 
 | File | What it is | How it was made |
 |---|---|---|
-| `banner.png` | 1600x400 README header: the mark, the wordmark, "One inbox for coding agents." and the one-line feature list | `python3 docs/assets/render-assets.py` (needs `fonttools`). Reuses `site/render-brand.py`: palette, mark, JetBrains Mono ExtraBold outlines |
+| `banner.png` | 1600x400 README header: the mark, the wordmark and the coordination message | `python3 docs/assets/render-assets.py` (needs `fonttools`). Reuses `site/render-brand.py`: palette, mark, JetBrains Mono ExtraBold outlines |
 | `social-preview.png` | 1280x640 GitHub social preview, same lockup as the site's `og.png` | Same script. Set it under the repository's Settings, Social preview, after merge; the API does not expose that field |
 | `path-holds.svg` | Diagram: a client edit to a held file is stopped by the edit hook and names the holder; a shell edit is not; the agent sends a release request instead | Hand-written SVG, site palette, monospace text |
 | `handoff.svg` | Diagram: a `--request` message opens a request; ack records receipt only; open, claimed, done, release, stale | Hand-written SVG |

@@ -1,4 +1,6 @@
-# Another: cross-agent inbox + resource registry - research + v1 spec
+# Another: research and original v1 specification
+
+Another is a background coordination layer for several coding agents working on one project on one machine. It also works across machines today: remote peers use scoped tokens or OAuth, and federation pairs nodes through signed event-log sync and a hub you host. The hub can read relayed mail; end-to-end encryption is future work. Remote peers cannot reap. See [REMOTE.md](REMOTE.md) and [FEDERATION.md](FEDERATION.md) for the shipped behavior. The research and design below are historical and may describe earlier plans.
 
 Clean-room research and v1 specification for **Another** ("From one agent to another"; home [toanother.one](https://toanother.one)) - a free, local, open, standalone product. Cross-agent inbox, activity feed, path holds, resource registry, and a designed-for-v2 federation model so a laptop and a remote agent box stay aware of each other. Hooks-first; Herdr/cmux/tmux optional.
 

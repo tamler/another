@@ -1,26 +1,26 @@
 # Promotion
 
-Nothing in this file has been posted. Do not post it from CI, from a pull request, or from any account except the personal X account **@JTamler**. There is no Another account. Do not mention other products, companies, or accounts.
+These are drafts, not authorization to post. Confirm the current account and platform with Jacob before publishing. Do not post from CI or a pull request, and do not assume which accounts exist or who may post from them.
 
-Refresh any number the day you post. The figures below were looked up on 10 Nov 2026 at `github.com/tamler/another`: **0 stars, 1 fork, no GitHub Release**. Milestones 1 through 6 are on main. OAuth for hosted MCP clients (ChatGPT, Claude.ai) is not merged. The local dashboard is loopback only (`another dashboard`). If a draft below is no longer true, edit it before it goes out. Do not ask for stars, upvotes, reposts, or comments-as-a-favor.
+Refresh any number and release status the day you post. Milestones 1 through 7, including OAuth for hosted MCP clients such as ChatGPT and Claude.ai, are on main. The local dashboard is loopback only (`another dashboard`). If a draft below is no longer true, edit it before it goes out. Do not ask for stars, upvotes, reposts, or comments-as-a-favor.
 
 `python3 scripts/check-copy.py` lints this file and `site/`.
 
 ## Ready-to-publish queue
 
-One post per item. Plain text, under 280 characters, so it fits in a single X post from @JTamler. Launch is 1. Post 2 and 3 in the same week if you are around to reply. Then about two a week. Skip a number if the fact went stale. A GIF only if you record one that day. The site has a text transcript of a handoff, not a GIF.
+One post per item. Plain text, under 280 characters, so it fits in a single X post. Launch is 1. Post 2 and 3 in the same week if you are around to reply. Then about two a week. Skip a number if the fact went stale. A GIF only if you record one that day. The site has a text transcript of a handoff, not a GIF.
 
 ### 1. Launch
 
-I kept pasting messages between Claude Code and Codex. They still edited the same files. I built Another so one session can hand work to the other and see which paths are taken. Local, Apache-2.0. https://toanother.one
+Several agents, one project, one machine. Another is a background coordination layer for coding agents: messages, edit holds and shared resource records. It also works across machines. Apache-2.0. https://toanother.one
 
 ### 2. Holds do not lock
 
-A path hold is not a lock. `another hold check` exits 3 when paths overlap, and the other agent can still write the file. I found that out by assuming it would block. Use a second checkout when you need a real boundary.
+A path hold is not a disk lock. The edit hook stops covered Claude Code, Codex and Grok CLI edits on held paths. Shell edits bypass it, Cursor has no edit guard, and hooks can fail open. Use separate checkouts for isolation.
 
-### 3. The public numbers
+### 3. Mid-task notices
 
-Public numbers for github.com/tamler/another on 10 Nov 2026: 0 stars, 1 fork, no GitHub Release. Milestones 1 through 6 are on main. Writing the zero down so I do not inflate it later.
+Mail can arrive while an agent is working. Installed hooks add a short notice after its next tool call, so the agent can check the message without a person copying it between terminals. https://toanother.one
 
 ### 4. The handoff I type
 
@@ -34,9 +34,9 @@ Both agents were about to start a model server on the same port. One runs `anoth
 
 Unread mail sat there until the hook existed. `another hook install --client all` backs up the client config and leaves other hooks alone. In Codex you still open `/hooks` and trust them. I forgot that once.
 
-### 7. What is not shipped
+### 7. Hosted clients
 
-The dashboard is loopback only: `another dashboard`. ChatGPT and Claude.ai cannot connect yet. OAuth for those hosted clients is not merged. Agents still use `another serve --stdio` on the machine where they run.
+ChatGPT and Claude.ai can connect through OAuth to an authenticated Another server you expose. You approve the grant on the node. The dashboard stays loopback only: `another dashboard`.
 
 ### 8. Wake, mis-aimed
 
@@ -48,11 +48,11 @@ Laptop and a box I leave running: federation is a hub I host. Mail crosses. Requ
 
 ### 10. The short try
 
-If you run two coding agents in one repo, the short try is the local inbox guide. Temp directory, no hooks installed. Tell me where the handoff is clumsy. https://toanother.one/guides/local-agent-inbox/
+Try coordinating two coding agents in one project using temporary local state. The short guide installs no hooks: https://toanother.one/guides/coordinate-local-agents/
 
 ## After the queue
 
-Keep going from the same account when something real happens: a release tag, a hold that failed in a way you can describe, a bug number, a star count you just looked up. One post in a quiet week is enough. Two is plenty. Do not invent a cadence you will not keep, and do not backfill days you skipped.
+Keep going when something real happens: a release tag, a hold that failed in a way you can describe, a bug number, a star count you just looked up. One post in a quiet week is enough. Two is plenty. Do not invent a cadence you will not keep, and do not backfill days you skipped.
 
 ## Show HN
 
@@ -69,15 +69,15 @@ A HN moderator note on <https://news.ycombinator.com/item?id=22336638> (the 2026
 Title to consider:
 
 ```
-Show HN: Another, local mail and path holds for coding agents
+Show HN: Another, coordinate coding agents on one project
 ```
 
 Skeleton for the first comment, to rewrite by hand:
 
 ```
-I run Claude Code and Codex on the same repo. They edited the same files and I was pasting messages between them. Another is a local SQLite inbox: mail, requests with an owner, path holds that expire, an activity feed, and a registry for ports and model servers. Apache-2.0. Rust 1.88. cargo install --locked --git https://github.com/tamler/another another
+Several coding agents can work on one project on one machine with Another, a background coordination layer for agents you run. It also works across machines through federation or remote peers. It uses messages, requests, path holds, an activity feed and a registry for shared resources. Apache-2.0. Rust 1.88. cargo install --locked --git https://github.com/tamler/another another
 
-Holds do not block writes. another hold check exits 3 on overlap. Reaping needs --confirm on that machine and cannot be done remotely. No telemetry. No release binary yet. OAuth for ChatGPT or Claude.ai is not merged. The dashboard is loopback only. Loopback by default.
+Holds are not disk locks: the edit hook stops covered client edits, but shell edits bypass it and the hook can fail open. another hold check exits 3 on overlap. Reaping needs --confirm on that machine and cannot be done remotely. A federation hub can read relayed mail. No telemetry. Check release status before posting. OAuth for hosted clients is on main; the dashboard is loopback only.
 
 Repo: https://github.com/tamler/another
 ```
@@ -96,15 +96,15 @@ A scheduled launch goes live at 12:01am Pacific Time on the date you pick. You c
 Tagline draft:
 
 ```
-Local inbox and path holds for coding agents you already run
+Coordinate coding agents on one project
 ```
 
 First comment draft (edit it; do not leave it sounding like a brochure):
 
 ```
-I got tired of being the clipboard between Claude Code and Codex. Another is one SQLite database on the machine: mail, an owner on a request, path holds that expire, and a way to borrow a model server that is already running. It does not start the agents.
+Several agents, one project, one machine. Another is a background coordination layer for coding agents you already run. Messages, requests, expiring path holds and a resource registry help them share work and reuse a running server. It also works across machines through federation or remote peers.
 
-Install is cargo from the git repo. Rust 1.88. No account. Holds do not lock the file. The dashboard is loopback only (`another dashboard`). Hosted clients like ChatGPT need OAuth that is not merged. https://toanother.one
+Install is cargo from the git repo. Rust 1.88. No account. Holds do not lock files; shell edits bypass the edit hook and it can fail open. The dashboard is loopback only (`another dashboard`). Hosted clients like ChatGPT can connect through OAuth. A federation hub can read relayed mail, and remote peers cannot reap. https://toanother.one
 ```
 
 ## Reddit
@@ -124,7 +124,7 @@ Space these. Same paragraph on five subreddits the same afternoon reads as spam 
 r/ClaudeAI draft, only after you re-read Rule 7:
 
 ```
-Two Claude Code sessions in one checkout were saving the same file. I stopped pasting between them and wrote a local inbox the sessions can share with Codex too. Path holds exit 3 on overlap and do not block the write. Apache-2.0, no account. The short try does not install hooks: https://toanother.one/guides/local-agent-inbox/
+Two Claude Code sessions in one checkout were saving the same file. Another helps coordinate them and Codex through messages, holds and shared resource records. Its edit hook stops covered edits on held paths; shell edits bypass it and it can fail open. The short try installs no hooks: https://toanother.one/guides/coordinate-local-agents/
 ```
 
 ## Awesome lists and MCP directories
@@ -152,23 +152,23 @@ Smithery: the same secondary writeup said the hosted proxy was shutting down aro
 
 Code of conduct, last updated 31 July 2023: <https://dev.to/code-of-conduct>. It says to follow their AI guidelines and to disclose AI assistance if it was used to create the post. This file was drafted with an agent. If you post any of it, say so, or rewrite it first. Set the canonical URL to the page on toanother.one you are mirroring, if you are mirroring one. One post. Tags that fit: `rust`, `opensource`, `mcp`. Do not serialize the X queue as ten short DEV posts.
 
-Draft title: `I got tired of pasting between Claude Code and Codex`
+Draft title: `Several agents, one project, one machine`
 
 Draft opener:
 
 ```
-I run both in one repo. They overwrite files and they cannot see each other's tasks. Another is the local SQLite inbox I put between them: a request with an owner, a path hold that expires, and a registry so the second agent borrows the model server instead of starting one.
+I run several coding agents in one repo. They can overwrite files and miss each other's tasks. Another is a background coordination layer: messages, requests, expiring path holds and a resource registry help them share work and find a model server already running. It also works across machines through federation or remote peers.
 
-The hold does not lock the file. another hold check exits 3 on overlap. I had that wrong at first.
+The hold does not lock the file. The edit hook stops covered client edits, but shell edits bypass it and it can fail open. another hold check exits 3 on overlap.
 
 Install, if you want to try the command and not the pitch: cargo install --locked --git https://github.com/tamler/another another
 
-The dashboard is loopback only (`another dashboard`). Hosted clients such as ChatGPT need OAuth that is not on main. 0 GitHub stars on 10 Nov 2026. That number is real and it will be stale, so check it before you repeat it.
+The dashboard is loopback only (`another dashboard`). Hosted clients such as ChatGPT can connect through OAuth. A federation hub can read relayed mail, and remote peers cannot reap.
 ```
 
 ## Bluesky
 
-Do not create a brand account for the launch. If you already post from a personal Bluesky account, the queue above fits in a 300-character post. Cross-post a few of them, not all ten on the same day. If you do not use Bluesky, skip it.
+Do not create a brand account for the launch without authorization. The queue above can be adapted for Bluesky after checking its current limit. Cross-post a few of them, not all ten on the same day.
 
 ## Discord
 
@@ -177,7 +177,7 @@ I do not have a verified channel list for the Anthropic, OpenAI, or Cursor serve
 ## What I will not do
 
 - Post any of this before the site you intend to send people to is actually deployed.
-- Announce OAuth as available before it is merged.
+- Describe OAuth or any other feature without checking the current release and setup instructions.
 - Invent a star count, a download count, or teams using it.
 - Buy votes, ask friends to pile on, or coordinate a launch thread.
 - Mention other products or companies in the same post.

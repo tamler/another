@@ -1,14 +1,16 @@
 # Another
 
-![Another: one inbox for coding agents. Mail, requests, path holds, a feed, a resource registry.](docs/assets/banner.png)
+![Another: several agents, one project, one machine.](docs/assets/banner.png)
 
-**From one agent to another.**
+**Several agents, one project, one machine.**
 
 [![ci](https://github.com/tamler/another/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tamler/another/actions/workflows/ci.yml) [![license Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE) [![MSRV 1.88](https://img.shields.io/badge/MSRV-1.88-informational)](Cargo.toml) [![platforms macOS and Linux](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-informational)](https://toanother.one/docs/install/) [![no GitHub Release yet](https://img.shields.io/badge/GitHub%20Release-none%20yet-lightgrey)](https://github.com/tamler/another/releases)
 
-Free and open source, always. I built Another because I run more than one coding agent in the same repo and I was the only thing connecting them.
+Another is a background coordination layer for coding agents working on the same project on the same machine. It helps them avoid editing conflicts, exchange updates and reuse registered resources. Free and open source, always.
 
-Claude Code and Codex cannot see each other. Neither can Grok CLI, Cursor, Grok Bot, or any other MCP client, until you give them something shared. They edit the same files. They start the same fix twice. A review request dies in the chat I forget to paste across. Another puts path holds on the files those sessions edit, so an edit to a file another agent is in is stopped with that agent's name. Around the holds: a local inbox with requests that have an owner, a feed of who is doing what, and a registry for ports and model servers. It does not launch the agents or assign their work.
+It also works across machines today, through a self-hosted federation hub or authenticated remote peers. The hub can read mail it relays; remote peers cannot reap processes. See [federation](docs/FEDERATION.md) and [remote access](docs/REMOTE.md).
+
+Claude Code and Codex cannot see each other without something shared. They can edit the same files, start the same fix twice, or launch duplicate model servers. Another combines path holds, messages and requests, activity, and a registry for ports and model servers. Its mailbox is a way to address agents and exchange messages. It does not launch agents, assign their work, or enforce a resource limit.
 
 **Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1-6 complete. Hosted connectors (OAuth for ChatGPT, Claude, and other MCP clients) and the loopback dashboard are in this tree. See [docs/REMOTE.md](docs/REMOTE.md) and [docs/DASHBOARD.md](docs/DASHBOARD.md).
 
@@ -24,7 +26,7 @@ This is the failure I kept hitting:
 What they get instead:
 
 - **Path holds, taken at the edit.** With the hook pack, each file an agent edits gets an expiring hold, and a Claude Code, Codex or Grok CLI edit to a file another agent holds is stopped with the holder's name, across worktrees and clones of the same repo. `another hold check` exits 3 on overlap and grants nothing. Edits made from a shell command get past the hook, and Cursor has no edit guard, so use another checkout when you need a real boundary.
-- **Mail and requests.** `another send --request` opens work with an owner. The other agent claims it. There is an ack. If the request goes stale, someone else can take it.
+- **Mail and requests.** `another send --request` opens work for an agent to claim. Claiming assigns an owner. An ack records receipt. If the request goes stale, someone else can take it.
 - **An activity feed**, so a session can ask who is doing what before it starts a duplicate.
 - **A resource registry**, so an agent borrows a running server instead of launching a duplicate. `another reap` needs a human `--confirm` on that machine. Remote peers cannot reap.
 
@@ -202,7 +204,7 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 ## Concepts
 
 - **Agents** are unique per project and addressed as `name@project`, or `name@project@node` on other nodes. A bare `name` works when it is unambiguous; once a second project registers the same name it stops resolving, and [docs/ADDRESSING.md](docs/ADDRESSING.md) shows the error and the fix.
-- **Mail** is immutable messages in threads, with per-recipient read and ack state. **Requests** have an owner and go `open → claimed → done`; they become `stale` past their due time and anyone may take them over. An ack records receipt, not completion: [docs/REQUESTS.md](docs/REQUESTS.md) walks through a worker that acks, claims, and crashes.
+- **Mail** is immutable messages in threads, with per-recipient read and ack state. **Requests** go `open → claimed → done`; claiming assigns an owner. They become `stale` past their due time and anyone may take them over. An ack records receipt, not completion: [docs/REQUESTS.md](docs/REQUESTS.md) walks through a worker that acks, claims, and crashes.
 - **Path holds** are expiring leases on project-relative globs. Exclusive holds conflict with overlapping holds, including holds in other checkouts of the same repository on this machine. The edit hook enforces them for client file edits; across machines, a clash is a warning, never a lock.
 - **Resources** are model and dev servers, ports, GPUs, containers and jobs, held by owner and borrower leases with TTLs. Orphans are listed, and only a human can reap them (`another reap … --confirm`); reaping is never remote.
 - **Event log**: every change is appended to a signed, chained, append-only log, and the query tables are projections of it. That log is what federation syncs.

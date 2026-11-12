@@ -4,24 +4,24 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Local agent inbox: SQLite mail, no hosted account - Another</title>
-  <meta name="description" content="Keep coding-agent mail in a local SQLite inbox with Another. Inspect messages from the CLI, pick a data directory and understand hooks, privacy and limits.">
-  <link rel="canonical" href="https://toanother.one/guides/local-agent-inbox/">
+  <title>Coordinate local coding agents - Another</title>
+  <meta name="description" content="Coordinate several coding agents on one machine with Another. Try a message exchange in temporary local state and learn where hooks and holds fit.">
+  <link rel="canonical" href="https://toanother.one/guides/coordinate-local-agents/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Another">
-  <meta property="og:title" content="Local agent inbox: SQLite mail, no hosted account - Another">
-  <meta property="og:description" content="Keep coding-agent mail in a local SQLite inbox with Another. Inspect messages from the CLI, pick a data directory and understand hooks, privacy and limits.">
-  <meta property="og:url" content="https://toanother.one/guides/local-agent-inbox/">
+  <meta property="og:title" content="Coordinate local coding agents - Another">
+  <meta property="og:description" content="Coordinate several coding agents on one machine with Another. Try a message exchange in temporary local state and learn where hooks and holds fit.">
+  <meta property="og:url" content="https://toanother.one/guides/coordinate-local-agents/">
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Another. Path holds and an inbox for coding agents.">
+  <meta property="og:image:alt" content="Another. Many agents, one project.">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Local agent inbox: SQLite mail, no hosted account - Another">
-  <meta name="twitter:description" content="Keep coding-agent mail in a local SQLite inbox with Another. Inspect messages from the CLI, pick a data directory and understand hooks, privacy and limits.">
+  <meta name="twitter:title" content="Coordinate local coding agents - Another">
+  <meta name="twitter:description" content="Coordinate several coding agents on one machine with Another. Try a message exchange in temporary local state and learn where hooks and holds fit.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
-  <meta name="twitter:image:alt" content="Another. Path holds and an inbox for coding agents.">
-  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"A local agent inbox you can inspect","description":"Keep coding-agent mail in a local SQLite inbox with Another. Inspect messages from the CLI, pick a data directory and understand hooks, privacy and limits.","url":"https://toanother.one/guides/local-agent-inbox/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://toanother.one/guides/"},{"@type":"ListItem","position":3,"name":"Local inbox","item":"https://toanother.one/guides/local-agent-inbox/"}]}]}</script>
+  <meta name="twitter:image:alt" content="Another. Many agents, one project.">
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Coordinate local coding agents","description":"Coordinate several coding agents on one machine with Another. Try a message exchange in temporary local state and learn where hooks and holds fit.","url":"https://toanother.one/guides/coordinate-local-agents/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://toanother.one/guides/"},{"@type":"ListItem","position":3,"name":"Coordinate local agents","item":"https://toanother.one/guides/coordinate-local-agents/"}]}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
@@ -36,7 +36,9 @@
     <nav aria-label="Main"><a href="/docs/getting-started/">Get started</a> <a href="/docs/">Docs</a> <a href="/guides/">Guides</a> <a href="/compare/">Compare</a> <a href="/changelog/">Changelog</a></nav>
   </header>
   <main class="wrap" id="main" tabindex="-1">
-    <div class="guide-hero"><h1>A local agent inbox you can inspect</h1><p class="definition">Start with one node and a terminal. Add clients when you need them.</p><nav class="guide-nav" aria-label="Setup guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/">Full guide</a></nav></div>
+    <div class="guide-hero"><h1>Coordinate local coding agents</h1><p class="definition">Several agents, one project, one machine. Another is a background coordination layer for agents you run.</p><nav class="guide-nav" aria-label="Setup guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/">Full guide</a></nav></div>
+    <p>Another also works across machines through federation or remote peers. A federation hub can read relayed mail, and remote peers cannot reap.</p>
+    <p>Messages are one part of coordination. Path holds help prevent covered edit conflicts, hooks announce new mail after a tool call, and resource records help agents find services already running. Holds are not disk locks: shell edits bypass the guard, Cursor has no edit guard, and hooks can fail open. This guide starts with a message exchange in isolated state.</p>
     <section class="guide-section" aria-labelledby="storage">
       <h2 id="storage">What stays on your machine</h2>
       <p>Another stores agent registration, mail, requests, path holds and resource coordination in local SQLite state. The default home is <code>~/.another</code>; <code>ANOTHER_HOME</code> selects a different directory. CLI mail works without an always-on daemon or hosted account.</p>
@@ -65,7 +67,7 @@ exit</code></pre>
     </section>
     <section class="guide-section" aria-labelledby="recorded">
       <h2 id="recorded">What the run prints</h2>
-      <p>Captured from <code>another 0.1.0</code> built from <code>5ec0a58</code> (the Rust source on <code>main</code> at <code>d474de9</code> differs only in test files) against a temporary project named <code>shop</code>, with no hooks and no server. Ids and timestamps are as recorded. The same walkthrough is in the repository at <a href="https://github.com/tamler/another/blob/main/docs/INBOX.md">docs/INBOX.md</a>.</p>
+      <p>Captured from a source build reporting <code>another 0.1.0</code> at <code>5ec0a58</code>, not a tagged release (the Rust source on <code>main</code> at <code>d474de9</code> differs only in test files), against a temporary project named <code>shop</code>, with no hooks and no server. Ids and timestamps are as recorded. The same walkthrough is in the repository at <a href="https://github.com/tamler/another/blob/main/docs/INBOX.md">docs/INBOX.md</a>.</p>
       <p><code>--ack</code> asks the recipient to acknowledge. No request is opened, so <code>send</code> prints one id. Fetching the inbox twice changes nothing: the message is still <code>new</code> and <code>awaiting ack</code> is still 1.</p>
       <pre class="code-block shell" tabindex="0" aria-label="Send with an ack request and fetch twice"><code><span class="command">$ another send --from writer --to reader --subject "Parser review" --body "Please check the error paths." --ack</span>
 <span class="output">sent 01M77MXG3ADR38R971JAMA7KPV to reader@shop</span>
@@ -116,7 +118,7 @@ exit</code></pre>
     </section>
     <section class="guide-section" aria-labelledby="inspect">
       <h2 id="inspect">Read, acknowledge and follow a thread</h2>
-      <p>In your chosen node, <code>another inbox --agent reader</code> lists messages and relevant requests. Add <code>--unread</code> to filter unread mail. Fetching does not mark it read. Use <code>another ack</code> with the actual message ID and acting agent to record receipt; <code>--read-only</code> marks a read without acknowledgement. Read and ack state is per recipient, and an ack is receipt only: if the mail asked for work, send it with <code>--request</code> so it has an owner (<a href="/guides/hand-off-tasks/">hand off a task</a>).</p>
+      <p>In your chosen node, <code>another inbox --agent reader</code> lists messages and relevant requests. Add <code>--unread</code> to filter unread mail. Fetching does not mark it read. Use <code>another ack</code> with the actual message ID and acting agent to record receipt; <code>--read-only</code> marks a read without acknowledgement. Read and ack state is per recipient, and an ack is receipt only: send work with <code>--request</code> so an agent can claim it and become its owner (<a href="/guides/hand-off-tasks/">hand off a task</a>).</p>
       <p><code>another reply</code> with the message ID and <code>--from</code> answers in the same thread. <code>another threads --agent reader</code> lists conversations; <code>another thread</code> followed by an actual thread ID shows its messages. <code>another activity --summary</code> provides counts and highlights without message bodies. Keep the same home when following up on a message.</p>
       <p>Give sessions the same home and intended project to share state. <a href="/guides/mcp-agent-messaging/">Connect MCP</a> for mail tools and <a href="/guides/claude-code-codex/">client hooks</a> for notices.</p>
     </section>

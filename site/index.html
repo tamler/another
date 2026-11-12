@@ -5,23 +5,23 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>Another: coordinate multiple coding agents</title>
-  <meta name="description" content="Several coding agents in one repo overwrite files and repeat work. I built path holds and an inbox so a session is stopped before editing a file another holds.">
+  <meta name="description" content="Coordinate coding agents on one project and one machine with path holds, background messages and shared resources. Another also works across machines.">
   <link rel="canonical" href="https://toanother.one/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Another">
   <meta property="og:title" content="Another: coordinate multiple coding agents">
-  <meta property="og:description" content="Several coding agents in one repo overwrite files and repeat work. I built path holds and an inbox so a session is stopped before editing a file another holds.">
+  <meta property="og:description" content="Coordinate coding agents on one project and one machine with path holds, background messages and shared resources. Another also works across machines.">
   <meta property="og:url" content="https://toanother.one/">
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Another. Path holds and an inbox for coding agents.">
+  <meta property="og:image:alt" content="Another. Many agents, one project.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Another: coordinate multiple coding agents">
-  <meta name="twitter:description" content="Several coding agents in one repo overwrite files and repeat work. I built path holds and an inbox so a session is stopped before editing a file another holds.">
+  <meta name="twitter:description" content="Coordinate coding agents on one project and one machine with path holds, background messages and shared resources. Another also works across machines.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
-  <meta name="twitter:image:alt" content="Another. Path holds and an inbox for coding agents.">
-  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"WebSite","author":{"@type":"Organization","name":"The Another Authors"},"name":"Another","url":"https://toanother.one/","description":"Several coding agents in one repo overwrite files and repeat work. I built path holds and an inbox so a session is stopped before editing a file another holds."},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","description":"A local path holds layer, inbox, activity feed and resource registry for coding agents, through MCP and a shared CLI.","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}},{"@type":"SoftwareSourceCode","@id":"https://toanother.one/#source","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}}]}</script>
+  <meta name="twitter:image:alt" content="Another. Many agents, one project.">
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"WebSite","author":{"@type":"Organization","name":"The Another Authors"},"name":"Another","url":"https://toanother.one/","description":"Coordinate coding agents on one project and one machine with path holds, background messages and shared resources. Another also works across machines."},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","description":"A background coordination layer for coding agents, with path holds, messaging and a resource registry, through MCP and a shared CLI.","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}},{"@type":"SoftwareSourceCode","@id":"https://toanother.one/#source","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
@@ -37,11 +37,12 @@
   </header>
   <main id="main" class="wrap" tabindex="-1">
     <section class="hero" aria-labelledby="headline">
-      <h1 id="headline">From one agent to another.</h1>
+      <h1 id="headline">Several agents, one project, one machine.</h1>
       <div class="hero-bottom">
         <div>
-          <p class="definition">I run Claude Code and Codex in the same repo. They edit the same files, redo each other's work, and the only handoff is me pasting a paragraph from one terminal into the other.</p>
-          <p>Another puts path holds on the files those sessions edit, so a second agent's edit to a file another holds is stopped with the holder's name. Around the holds: a local inbox with requests that have an owner, a feed of who is doing what, and a registry for ports and model servers, so the next agent borrows the one that is already running. It does not start the agents.</p>
+          <p class="definition">A background coordination layer for coding agents.</p>
+          <p>Another also works across machines today, through remote peers or a federation hub you host.</p>
+          <p>Run agents in parallel with messages and mid-task notices, path holds that help prevent conflicting edits, and a registry that helps them share model servers and ports. The mailbox is how agents address each other; coordination is the job. Another does not start the agents or limit their resource use.</p>
         </div>
         <div class="install">
           <pre class="shell" tabindex="0" aria-label="Install Another"><code>cargo install <span class="token">--locked</span> <span class="token">--git</span> <span class="token">https://github.com/tamler/another</span> another</code></pre>
@@ -60,8 +61,8 @@
     </section>
     <section class="section" aria-labelledby="fix-title">
       <h2 id="fix-title">What I built for that</h2>
-      <p>Path holds, taken at the edit. With the hooks installed, each file an agent edits gets an expiring hold, and a Claude Code, Codex or Grok CLI edit to a file another agent holds is stopped with the holder's name, across worktrees and clones of the same repo. <code>another hold check</code> exits 3 when globs overlap and grants nothing. An edit made from a shell command gets past the hook, and Cursor has no edit guard, so use another checkout when you need a real boundary.</p>
-      <p>Mail with a subject, a thread, and an ack. A request has an owner: open, then claimed, then done. If it goes stale, someone else can take it.</p>
+      <p>Path holds, taken at the edit. With the hooks installed and trusted, a Claude Code, Codex or Grok CLI edit to a file another agent holds is stopped with the holder's name, across worktrees and clones of the same repo. <code>another hold check</code> exits 3 when globs overlap and grants nothing. Shell edits bypass the hook, Cursor has no edit guard, and the guard fails open when its database is unavailable. Use separate checkouts when you need isolation.</p>
+      <p>Mail with a subject, a thread, and an ack. A request starts open; claiming it assigns an owner. If it goes stale, someone else can take it.</p>
       <p>Hooks drop a short digest in at session start, and a one-line notice after the next tool call when mail lands mid-task. That is why the agents look. A loopback daemon can wake an idle Herdr agent, and optional wake can type into an idle tmux pane. Neither interrupts an agent that is mid-turn. State sits in one SQLite file under <code>~/.another</code> (or <code>$ANOTHER_HOME</code>). A second machine can federate through a hub you host. That hub can read the mail it relays.</p>
       <p>Clients I hook up: Claude Code, Codex, Grok CLI, Cursor. Grok Bot can join as a remote peer with a scoped token. ChatGPT and Claude.ai can join through OAuth against a URL you run, with each grant approved on this machine. Anything else that speaks MCP can use the same tools. <a href="/docs/">The longer docs</a> have the sharp edges.</p>
     </section>
@@ -94,7 +95,7 @@ another inbox <span class="token">--agent</span> bob</code></pre>
     </section>
     <section class="section" aria-labelledby="proof-title">
       <h2 id="proof-title">A recorded handoff</h2>
-      <p>This output is from <code>another 0.1.0</code> against a temp project named <code>shop</code>. The inbox line is shortened. Your ids and timestamps will differ. The full columns are in the <a href="/docs/#mail">docs</a>.</p>
+      <p>This output is from an untagged source build reporting <code>another 0.1.0</code> against a temp project named <code>shop</code>; there is no v0.1.0 release tag. The inbox line is shortened. Your ids and timestamps will differ. The full columns are in the <a href="/docs/#mail">docs</a>.</p>
       <figure>
         <div class="terminal">
           <pre class="block shell" tabindex="0" aria-label="Register demo agents"><code><span class="command">$ another agent register alice <span class="token">--program</span> claude <span class="token">--project</span> <span class="token">/tmp/shop</span></span>
@@ -111,7 +112,7 @@ opened request 01M6FMXVS73X1C5HPZKWSC7QZN</span></code></pre>
 <span class="command">$ another ack 01M6FMXVS7KPZV6RR6JTH0VCKJ <span class="token">--agent</span> bob@shop</span>
 <span class="output">1 updated, 0 unchanged</span></code></pre>
         </div>
-        <figcaption><code>another 0.1.0</code>; inbox output excerpted.</figcaption>
+        <figcaption>Untagged source build reporting <code>another 0.1.0</code>; inbox output excerpted.</figcaption>
       </figure>
     </section>
     <section class="section" aria-labelledby="scenarios-title">
@@ -133,7 +134,7 @@ opened request 01M6FMXVS73X1C5HPZKWSC7QZN</span></code></pre>
     <section class="section" aria-labelledby="missing-title">
       <h2 id="missing-title">What is on main, and what is not</h2>
       <p>OAuth for hosted MCP clients such as ChatGPT and Claude.ai is on main: <code>another serve --auth --public-url</code> or <code>another remote up</code>, and a grant exists only after <code>another oauth approve</code> on this machine. So is the local dashboard: <code>another dashboard</code>, or <code>/ui</code> on a loopback <code>another serve</code>. It stays on that machine. Not there: a pre-commit hold guard, end-to-end mail encryption, a packaged release.</p>
-      <p>Public repo on 12 Nov 2026: 0 stars, 1 fork, no GitHub Release. Milestones 1 through 7, the dashboard, and push with enforced holds are on main. <a href="/changelog/">Changelog and what is next</a>. <a href="/building/">How I run the agents on this repo</a>.</p>
+      <p>Milestones 1 through 7, the dashboard, and push with edit holds are on main. <a href="/changelog/">Changelog and what is next</a>. <a href="/building/">How I run the agents on this repo</a>.</p>
     </section>
     <section class="section" aria-labelledby="objections-title">
       <h2 id="objections-title">Before you install</h2>
