@@ -695,10 +695,21 @@ pub fn install(
 pub struct HookInput {
     pub cwd: Option<PathBuf>,
     pub session_id: Option<String>,
+    tool_use_id: Option<ToolUseId>,
+    hook_event_name: Option<String>,
     /// Tool events: the tool's name (`Edit`, `apply_patch`, `search_replace`, ...).
     pub tool_name: Option<String>,
     /// Tool events: the tool's arguments.
     pub tool_input: Option<Value>,
+}
+
+#[derive(Clone)]
+struct ToolUseId(String);
+
+impl std::fmt::Debug for ToolUseId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[redacted]")
+    }
 }
 
 impl HookInput {
@@ -738,9 +749,17 @@ impl HookInput {
         HookInput {
             cwd,
             session_id,
+            tool_use_id: s("tool_use_id")
+                .filter(|id| !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control))
+                .map(ToolUseId),
+            hook_event_name: s("hook_event_name"),
             tool_name,
             tool_input,
         }
+    }
+
+    fn tool_use_id(&self) -> Option<&str> {
+        self.tool_use_id.as_ref().map(|id| id.0.as_str())
     }
 
     /// Files an edit tool is about to change, as given (absolute or relative to `cwd`).
@@ -1627,6 +1646,24 @@ pub fn run_guarded(another_home: Option<&Path>, event: HookEvent, client: Client
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_use_id_is_bounded_top_level_and_redacted() {
+        let input = HookInput::parse(
+            r#"{"tool_use_id":"private-call-42","hook_event_name":"PostToolUse"}"#,
+        );
+        assert_eq!(input.tool_use_id(), Some("private-call-42"));
+        assert_eq!(input.hook_event_name.as_deref(), Some("PostToolUse"));
+        assert!(!format!("{input:?}").contains("private-call-42"));
+        for raw in [
+            json!({"tool_use_id":""}),
+            json!({"tool_use_id":"x\ny"}),
+            json!({"tool_use_id":"x".repeat(513)}),
+            json!({"tool_input":{"tool_use_id":"nested"}}),
+        ] {
+            assert_eq!(HookInput::parse(&raw.to_string()).tool_use_id(), None);
+        }
+    }
 
     #[cfg(unix)]
     #[test]

@@ -11,7 +11,7 @@
 use std::path::Path;
 
 use globset::{Glob, GlobBuilder, GlobMatcher};
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use serde_json::json;
 
@@ -408,14 +408,14 @@ fn conflicts_for(
     // This project's holds, plus holds in any local project of the same repository.
     let mut stmt = tx.prepare(&format!(
         "{HOLD_SELECT_REPO} WHERE h.released_at IS NULL AND h.expires_at > ?3
-           AND h.agent_id != ?2
+           AND (h.agent_id != ?2 OR h.node_id != ?5)
            AND (h.project_id = ?1 OR (?4 != '' AND h.project_id IN
                 (SELECT project_id FROM project_repos WHERE repo_key = ?4)))
          ORDER BY h.created_at"
     ))?;
     let others = stmt
         .query_map(
-            params![project.project_id, agent_id, tx.now, repo_key],
+            params![project.project_id, agent_id, tx.now, repo_key, tx.node_id],
             |r| {
                 Ok((
                     hold_from_row(r)?,
@@ -456,10 +456,46 @@ fn conflicts_for(
 /// One project's share of an edit: its files as hold patterns, and the holds of other
 /// agents that stop it. Computing a plan writes no holds and no events.
 pub(crate) struct GuardPlan {
-    project: Project,
+    pub(crate) project: Project,
     /// `(path as given, normalized pattern)`.
-    patterns: Vec<(String, String)>,
+    pub(crate) patterns: Vec<(String, String)>,
     pub conflicts: Vec<HoldConflict>,
+}
+
+/// Insert new per-edit holds without adopting or renewing any earlier hold.
+pub(crate) fn guard_take_pending_tx(
+    tx: &Tx<'_>,
+    me: &AgentRef,
+    plan: GuardPlan,
+    admission_id: &str,
+    reason: &str,
+) -> Result<Vec<(String, String, String)>> {
+    let mut created = Vec::new();
+    for (_, pattern) in plan.patterns {
+        let id = new_id();
+        let expires_at = tx.now + DEFAULT_HOLD_TTL_SECONDS * 1000;
+        tx.emit(
+            &me.address,
+            "hold.acquired",
+            json!({
+                "hold_id": id, "agent_id": me.id, "project_id": plan.project.project_id,
+                "pattern": pattern, "exclusive": true, "reason": reason,
+                "ttl_seconds": DEFAULT_HOLD_TTL_SECONDS, "expires_at": expires_at, "auto": true
+            }),
+        )?;
+        tx.execute(
+            "INSERT INTO holds (hold_id,node_id,project_id,agent_id,pattern,exclusive,reason,ttl_seconds,created_at,renewed_at,expires_at)
+             VALUES (?1,?2,?3,?4,?5,1,?6,?7,?8,?8,?9)",
+            params![id, tx.node_id, plan.project.project_id, me.id, pattern, reason,
+                DEFAULT_HOLD_TTL_SECONDS, tx.now, expires_at],
+        )?;
+        tx.execute(
+            "INSERT INTO admission_holds(admission_id,hold_id) VALUES (?1,?2)",
+            params![admission_id, id],
+        )?;
+        created.push((id, plan.project.project_id.clone(), pattern));
+    }
+    Ok(created)
 }
 
 pub(crate) fn guard_plan_tx(
@@ -546,18 +582,25 @@ pub(crate) fn guard_take_tx(
     let mut stmt = tx.prepare(
         "SELECT hold_id, pattern, ttl_seconds, expires_at FROM holds
          WHERE agent_id = ?1 AND project_id = ?2 AND exclusive = 1
+           AND node_id = ?4
            AND released_at IS NULL AND expires_at > ?3
+           AND NOT EXISTS (SELECT 1 FROM admission_holds ah JOIN admissions a
+               ON a.admission_id = ah.admission_id
+               WHERE ah.hold_id = holds.hold_id AND a.state = 'pending')
          ORDER BY created_at",
     )?;
     let own = stmt
-        .query_map(params![me.id, project.project_id, tx.now], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, i64>(3)?,
-            ))
-        })?
+        .query_map(
+            params![me.id, project.project_id, tx.now, tx.node_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut renew: Vec<(String, i64)> = Vec::new();
     let mut covered = Vec::new();
@@ -620,11 +663,14 @@ fn upsert_hold_tx(
     let existing: Option<String> = tx
         .query_row(
             "SELECT hold_id FROM holds WHERE agent_id = ?1 AND project_id = ?2
-               AND pattern = ?3 AND released_at IS NULL",
-            params![agent_id, project_id, pattern],
+               AND pattern = ?3 AND node_id = ?4 AND released_at IS NULL
+               AND NOT EXISTS (SELECT 1 FROM admission_holds ah JOIN admissions a
+                   ON a.admission_id = ah.admission_id
+                   WHERE ah.hold_id = holds.hold_id AND a.state = 'pending')",
+            params![agent_id, project_id, pattern, tx.node_id],
             |r| r.get(0),
         )
-        .ok();
+        .optional()?;
     let expires_at = tx.now + ttl * 1000;
     let mut payload = json!({
         "agent_id": agent_id,
@@ -718,9 +764,22 @@ pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
             json!({ "hold_id": hold_id, "pattern": pattern, "agent_id": agent_id }),
         )?;
         tx.execute(
-            "UPDATE holds SET released_at = expires_at, release_reason = 'expired' WHERE hold_id = ?1",
-            [hold_id],
+            "UPDATE holds SET released_at = expires_at, release_reason = 'expired'
+             WHERE hold_id = ?1 AND node_id = ?2 AND released_at IS NULL AND expires_at <= ?3",
+            params![hold_id, tx.node_id, tx.now],
         )?;
+        let settled = tx.execute(
+            "UPDATE admissions SET state='expired', settled_at=?3
+             WHERE node_id=?2 AND state='pending'
+               AND admission_id IN (SELECT admission_id FROM admission_holds WHERE hold_id=?1)
+               AND NOT EXISTS (SELECT 1 FROM admission_holds ah LEFT JOIN holds h ON h.hold_id=ah.hold_id
+                   WHERE ah.admission_id=admissions.admission_id
+                     AND (h.hold_id IS NULL OR (h.released_at IS NULL AND h.expires_at>?3)))",
+            params![hold_id, tx.node_id, tx.now],
+        )?;
+        if settled != 0 {
+            tx.emit("system", "admission.expired", json!({"hold_id": hold_id}))?;
+        }
     }
     let stale_requests = stale_overdue_tx(tx)?;
     let expired_leases = crate::resources::expire_leases_tx(tx)?;
@@ -740,6 +799,13 @@ pub(crate) fn release_tx(
     if hold_ids.is_empty() {
         return Ok(());
     }
+    for id in hold_ids {
+        if is_pending_hold(tx, id)? {
+            return Err(Error::Invalid(
+                "pending admission hold cannot be released".into(),
+            ));
+        }
+    }
     tx.emit(
         actor,
         "hold.released",
@@ -758,6 +824,13 @@ fn renew_tx(tx: &Tx<'_>, actor: &str, holds: &[(String, i64)]) -> Result<()> {
     if holds.is_empty() {
         return Ok(());
     }
+    for (id, _) in holds {
+        if is_pending_hold(tx, id)? {
+            return Err(Error::Invalid(
+                "pending admission hold cannot be renewed".into(),
+            ));
+        }
+    }
     let ids: Vec<&String> = holds.iter().map(|(id, _)| id).collect();
     tx.emit(actor, "hold.renewed", json!({ "hold_ids": ids }))?;
     for (id, ttl) in holds {
@@ -767,6 +840,16 @@ fn renew_tx(tx: &Tx<'_>, actor: &str, holds: &[(String, i64)]) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+fn is_pending_hold(tx: &Tx<'_>, id: &str) -> Result<bool> {
+    Ok(tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM admission_holds ah JOIN admissions a
+         ON a.admission_id = ah.admission_id
+         WHERE ah.hold_id = ?1 AND a.state = 'pending')",
+        [id],
+        |r| r.get(0),
+    )?)
 }
 
 /// Live holds owned by `agent_id` in projects `scope` may see (all of them locally),
@@ -779,10 +862,14 @@ fn owned_holds(
 ) -> Result<Vec<(String, i64)>> {
     let mut stmt = tx.prepare(
         "SELECT hold_id, ttl_seconds, project_id FROM holds
-         WHERE agent_id = ?1 AND released_at IS NULL ORDER BY created_at",
+         WHERE agent_id = ?1 AND node_id = ?2 AND released_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM admission_holds ah JOIN admissions a
+               ON a.admission_id = ah.admission_id
+               WHERE ah.hold_id = holds.hold_id AND a.state = 'pending')
+         ORDER BY created_at",
     )?;
     let rows = stmt
-        .query_map([agent_id], |r| {
+        .query_map(params![agent_id, tx.node_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, i64>(1)?,
@@ -951,10 +1038,16 @@ impl Store {
             let mut stmt = tx.prepare(
                 "SELECT hold_id, ttl_seconds FROM holds
                  WHERE agent_id = ?1 AND released_at IS NULL AND expires_at > ?2
+                   AND node_id = ?3
+                   AND NOT EXISTS (SELECT 1 FROM admission_holds ah JOIN admissions a
+                       ON a.admission_id = ah.admission_id
+                       WHERE ah.hold_id = holds.hold_id AND a.state = 'pending')
                    AND expires_at - ?2 < ttl_seconds * 500",
             )?;
             let due = stmt
-                .query_map(params![me.id, tx.now], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .query_map(params![me.id, tx.now, tx.node_id], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?
                 .collect::<rusqlite::Result<Vec<(String, i64)>>>()?;
             renew_tx(tx, &me.address, &due)?;
             Ok(due.len())

@@ -786,7 +786,280 @@ const MAX_ADMISSION_GROUPS: usize = 32;
 /// Most files one edit may name across all its projects.
 const MAX_ADMISSION_FILES: usize = 128;
 
+fn admission_target_hash(
+    key: &[u8; 32],
+    admission_id: &str,
+    mut targets: Vec<(&str, &str, &str)>,
+) -> Result<[u8; 32]> {
+    use ring::hmac;
+    let count = targets.len();
+    targets.sort_unstable();
+    targets.dedup();
+    if targets.is_empty() || targets.len() > MAX_ADMISSION_FILES || targets.len() != count {
+        return Err(Error::Invalid(
+            "edit has no verifiable protected targets".into(),
+        ));
+    }
+    let key = hmac::Key::new(hmac::HMAC_SHA256, key);
+    let mut digest = hmac::Context::with_key(&key);
+    digest.update(b"another-admission-hold-set-v1\0");
+    digest.update(&(admission_id.len() as u64).to_be_bytes());
+    digest.update(admission_id.as_bytes());
+    digest.update(&(targets.len() as u64).to_be_bytes());
+    for (id, project, path) in targets {
+        for value in [id, project, path] {
+            digest.update(&(value.len() as u64).to_be_bytes());
+            digest.update(value.as_bytes());
+        }
+    }
+    let mut out = [0; 32];
+    out.copy_from_slice(digest.sign().as_ref());
+    Ok(out)
+}
+
+fn validate_tool_use_id(id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 512 || id.chars().any(char::is_control) {
+        return Err(Error::IdentityUnavailable(
+            "invalid edit operation identifier".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn admission_key(tx: &Tx<'_>) -> Result<[u8; 32]> {
+    use rusqlite::types::ValueRef;
+    {
+        let mut stmt = tx.prepare(
+            "SELECT singleton, typeof(secret), CASE WHEN typeof(secret)='blob' THEN length(secret) END
+             FROM admission_secret LIMIT 2",
+        )?;
+        let mut rows = stmt.query([])?;
+        let row = rows
+            .next()?
+            .ok_or_else(|| Error::IdentityUnavailable("admission key unavailable".into()))?;
+        if !matches!(row.get_ref(0)?, ValueRef::Integer(1))
+            || !matches!(row.get_ref(1)?, ValueRef::Text(b"blob"))
+            || !matches!(row.get_ref(2)?, ValueRef::Integer(32))
+            || rows.next()?.is_some()
+        {
+            return Err(Error::IdentityUnavailable(
+                "admission key unavailable".into(),
+            ));
+        }
+    }
+    let secret: Option<Vec<u8>> = tx
+        .query_row(
+            "SELECT CASE WHEN typeof(secret)='blob' AND length(secret)=32 THEN secret END
+         FROM admission_secret WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    let secret = secret
+        .filter(|s| s.len() == 32)
+        .ok_or_else(|| Error::IdentityUnavailable("admission key unavailable".into()))?;
+    secret
+        .try_into()
+        .map_err(|_| Error::IdentityUnavailable("admission key unavailable".into()))
+}
+
+fn admission_correlation(
+    tx: &Tx<'_>,
+    client: &str,
+    agent_id: &str,
+    session_digest: &str,
+    tool_use_id: &str,
+) -> Result<[u8; 32]> {
+    use ring::hmac;
+    validate_tool_use_id(tool_use_id)?;
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &admission_key(tx)?);
+    let mut ctx = hmac::Context::with_key(&key);
+    for value in [
+        "another-admission-v1",
+        tx.node_id,
+        client,
+        agent_id,
+        session_digest,
+        tool_use_id,
+    ] {
+        ctx.update(&(value.len() as u64).to_be_bytes());
+        ctx.update(value.as_bytes());
+    }
+    let mut out = [0; 32];
+    out.copy_from_slice(ctx.sign().as_ref());
+    Ok(out)
+}
+
 impl Store {
+    /// Confirm only the exact live pending operation after a verified successful tool event.
+    /// An absent, stale or already-consumed operation changes no hold.
+    #[allow(clippy::too_many_arguments)]
+    pub fn confirm_pending_edit(
+        &self,
+        client: &str,
+        program: Program,
+        root: &str,
+        requested_actor: Option<(&str, bool)>,
+        session_id: &str,
+        tool_use_id: &str,
+    ) -> Result<bool> {
+        validate_session_id(session_id)?;
+        validate_tool_use_id(tool_use_id)?;
+        if client != "claude" {
+            return Err(Error::IdentityUnavailable(
+                "this client does not have verified edit receipts".into(),
+            ));
+        }
+        self.write_identity(|tx, deadline| {
+            let (agent, session_digest) = resolve_session_actor_tx(
+                tx, deadline, client, program, root, requested_actor, session_id,
+            )?;
+            let me = resolve_agent(tx, tx.node_id, &agent)?;
+            let correlation = admission_correlation(tx, client, &me.id, &session_digest, tool_use_id)?;
+            let admission: Option<(String, Vec<u8>, i64)> = tx.query_row(
+                "SELECT admission_id,targets,created_at FROM admissions WHERE node_id=?1 AND agent_id=?2 AND correlation=?3 AND state='pending'",
+                params![tx.node_id, me.id, &correlation[..]], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            ).optional()?;
+            let Some((admission, target_hash, created_at)) = admission else { return Ok(false) };
+            let holds = {
+                let mut stmt = tx.prepare(
+                    "SELECT h.hold_id,h.node_id,h.agent_id,h.expires_at,h.released_at,h.ttl_seconds,h.project_id,h.pattern,h.exclusive,h.created_at
+                     FROM admission_holds ah JOIN holds h ON h.hold_id=ah.hold_id
+                     WHERE ah.admission_id=?1 ORDER BY h.hold_id LIMIT 129",
+                )?;
+                let rows = stmt.query_map([&admission], |r| Ok((
+                    r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?, r.get::<_, Option<i64>>(4)?, r.get::<_, i64>(5)?,
+                    r.get::<_, String>(6)?, r.get::<_, String>(7)?, r.get::<_, bool>(8)?, r.get::<_, i64>(9)?,
+                )))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let mapped: i64 = tx.query_row(
+                "SELECT count(*) FROM (SELECT hold_id FROM admission_holds WHERE admission_id=?1 LIMIT 129)",
+                [&admission], |r| r.get(0),
+            )?;
+            if holds.is_empty() || holds.len() > MAX_ADMISSION_FILES || mapped as usize != holds.len() || holds.iter().any(|(_, node, owner, expires, released, ttl, _, _, exclusive, created)|
+                node != tx.node_id || owner != &me.id || *expires <= tx.now || released.is_some()
+                    || *ttl != crate::holds::DEFAULT_HOLD_TTL_SECONDS
+                    || !exclusive || *created != created_at
+                    || created_at.checked_add(ttl.saturating_mul(1000)) != Some(*expires)
+            ) {
+                return Ok(false);
+            }
+            let targets = holds.iter().map(|(id, _, _, _, _, _, project, pattern, _, _)| (id.as_str(), project.as_str(), pattern.as_str())).collect();
+            if admission_target_hash(&admission_key(tx)?, &admission, targets).ok().as_ref().map(|v| v.as_slice()) != Some(target_hash.as_slice()) {
+                return Ok(false);
+            }
+            let ids: Vec<&str> = holds.iter().map(|(id, ..)| id.as_str()).collect();
+            tx.emit(&me.address, "admission.confirmed", json!({"admission_id": admission}))?;
+            tx.emit(&me.address, "hold.renewed", json!({"hold_ids": ids}))?;
+            tx.execute("UPDATE admissions SET state='confirmed',settled_at=?2 WHERE admission_id=?1 AND state='pending'",
+                params![admission, tx.now])?;
+            for (id, _, _, _, _, ttl, ..) in &holds {
+                tx.execute("UPDATE holds SET renewed_at=?2,expires_at=?2+?3*1000 WHERE hold_id=?1 AND node_id=?4 AND agent_id=?5 AND released_at IS NULL AND expires_at>?2",
+                    params![id, tx.now, ttl, tx.node_id, me.id])?;
+            }
+            Ok(true)
+        })
+    }
+
+    /// Create separate pending coverage for a protected edit within the identity transaction.
+    /// Callers must verify client protocol and filesystem effects before using this result.
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_pending_edit(
+        &self,
+        client: &str,
+        program: Program,
+        root: &str,
+        requested_actor: Option<(&str, bool)>,
+        session_id: &str,
+        tool_use_id: &str,
+        reason: &str,
+        group: impl FnOnce(&[Project]) -> EditScope,
+    ) -> Result<EditAdmission> {
+        validate_session_id(session_id)?;
+        validate_tool_use_id(tool_use_id)?;
+        if client != "claude" {
+            return Err(Error::IdentityUnavailable(
+                "this client does not have verified edit receipts".into(),
+            ));
+        }
+        self.write_identity(|tx, deadline| {
+            let (agent, session_digest) = resolve_session_actor_tx(
+                tx, deadline, client, program, root, requested_actor, session_id,
+            )?;
+            let me = resolve_agent(tx, tx.node_id, &agent)?;
+            let session_project = find_project(tx, tx.node_id, root)?;
+            let projects = {
+                let mut stmt = tx.prepare(&format!("SELECT {PROJECT_COLUMNS} FROM projects WHERE node_id = ?1 ORDER BY slug"))?;
+                let rows = stmt.query_map([tx.node_id], project_from_row)?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let EditScope { groups, unguarded } = group(&projects);
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::IdentityScanBudgetExceeded("deadline".into()));
+            }
+            if groups.is_empty() {
+                return Ok(EditAdmission { agent, conflicts: Vec::new(), unregistered: Vec::new(), unguarded: Vec::new() });
+            }
+            if !unguarded.is_empty() {
+                return Ok(EditAdmission { agent, conflicts: Vec::new(), unregistered: Vec::new(), unguarded });
+            }
+            if groups.len() > MAX_ADMISSION_GROUPS || groups.iter().map(|(_, files)| files.len()).sum::<usize>() > MAX_ADMISSION_FILES {
+                return Err(Error::Invalid("edit exceeds admission target limits".into()));
+            }
+            let mut plans = Vec::new();
+            for (directory, files) in &groups {
+                let project = find_project(tx, tx.node_id, directory)?;
+                if project.project_id != session_project.project_id {
+                    return Err(Error::IdentityUnavailable("edit reaches another project".into()));
+                }
+                plans.push(crate::holds::guard_plan_tx(tx, &me, project, files)?);
+            }
+            if plans.iter().any(|p| !p.conflicts.is_empty()) {
+                let mut conflicts = Vec::new();
+                for plan in plans {
+                    if !plan.conflicts.is_empty() {
+                        conflicts.extend(crate::holds::guard_blocked_tx(tx, &me, plan)?.conflicts);
+                    }
+                }
+                return Ok(EditAdmission { agent, conflicts, unregistered: Vec::new(), unguarded: Vec::new() });
+            }
+            let correlation = admission_correlation(tx, client, &me.id, &session_digest, tool_use_id)?;
+            let duplicate: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM admissions WHERE node_id=?1 AND agent_id=?2 AND correlation=?3)",
+                params![tx.node_id, me.id, &correlation[..]], |r| r.get(0),
+            )?;
+            if duplicate {
+                return Err(Error::IdentityUnavailable("edit operation was already seen; coordinate before retrying".into()));
+            }
+            let mut targets: Vec<(&str, &str)> = plans.iter().flat_map(|plan| {
+                plan.patterns.iter().map(move |(_, pattern)| (plan.project.project_id.as_str(), pattern.as_str()))
+            }).collect();
+            let target_count = targets.len();
+            targets.sort_unstable();
+            targets.dedup();
+            if targets.is_empty() || targets.len() > MAX_ADMISSION_FILES || targets.len() != target_count {
+                return Err(Error::Invalid("edit has no verifiable protected targets".into()));
+            }
+            let admission_id = new_id();
+            let key = admission_key(tx)?;
+            tx.emit(&me.address, "admission.created", json!({"admission_id": admission_id}))?;
+            tx.execute(
+                "INSERT INTO admissions(admission_id,node_id,agent_id,correlation,targets,state,created_at) VALUES (?1,?2,?3,?4,?5,'pending',?6)",
+                params![admission_id, tx.node_id, me.id, &correlation[..], &[0u8; 32][..], tx.now],
+            )?;
+            let mut created = Vec::new();
+            for plan in plans {
+                created.extend(crate::holds::guard_take_pending_tx(tx, &me, plan, &admission_id, reason)?);
+            }
+            let target_hash = admission_target_hash(&key, &admission_id, created.iter().map(|(id, project, path)| (id.as_str(), project.as_str(), path.as_str())).collect())?;
+            tx.execute("UPDATE admissions SET targets=?2 WHERE admission_id=?1", params![admission_id, &target_hash[..]])?;
+            Ok(EditAdmission { agent, conflicts: Vec::new(), unregistered: Vec::new(), unguarded: Vec::new() })
+        })
+    }
+
     /// Admit one edit atomically: in a single immediate transaction, under one deadline,
     /// resolve the existing session actor (never creating one), map the edited files to
     /// registered projects, check every file against other agents' holds, and only when

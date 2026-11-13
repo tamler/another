@@ -178,7 +178,7 @@ fn strings(v: &Value, key: &str) -> Vec<String> {
 }
 
 fn classify(kind: &str, payload: &Value, origin: &str) -> Share {
-    if kind == "session.binding.v1" {
+    if kind == "session.binding.v1" || kind.starts_with("admission.") {
         return Share::Never;
     }
     let not_origin =
@@ -630,7 +630,11 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10)
                  ON CONFLICT(hold_id) DO UPDATE SET exclusive = excluded.exclusive,
                    reason = excluded.reason, ttl_seconds = excluded.ttl_seconds,
-                   renewed_at = excluded.renewed_at, expires_at = excluded.expires_at",
+                   renewed_at = excluded.renewed_at, expires_at = excluded.expires_at
+                 WHERE holds.node_id = excluded.node_id
+                   AND NOT EXISTS (SELECT 1 FROM admission_holds ah JOIN admissions a
+                       ON a.admission_id = ah.admission_id
+                       WHERE ah.hold_id = holds.hold_id AND a.state = 'pending')",
                 params![hold_id, origin, project, agent, s("pattern"), exclusive, s("reason"), ttl, ts, expires],
             )?;
         }
@@ -638,7 +642,10 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
             for id in strings(p, "hold_ids") {
                 tx.execute(
                     "UPDATE holds SET renewed_at = ?2, expires_at = ?2 + ttl_seconds * 1000
-                     WHERE hold_id = ?1 AND node_id = ?3 AND released_at IS NULL",
+                     WHERE hold_id = ?1 AND node_id = ?3 AND released_at IS NULL
+                       AND NOT EXISTS (SELECT 1 FROM admission_holds ah JOIN admissions a
+                           ON a.admission_id = ah.admission_id
+                           WHERE ah.hold_id = holds.hold_id AND a.state = 'pending')",
                     params![id, ts, origin],
                 )?;
             }
@@ -647,7 +654,10 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
             for id in strings(p, "hold_ids") {
                 tx.execute(
                     "UPDATE holds SET released_at = ?2, release_reason = ?3
-                     WHERE hold_id = ?1 AND node_id = ?4 AND released_at IS NULL",
+                     WHERE hold_id = ?1 AND node_id = ?4 AND released_at IS NULL
+                       AND NOT EXISTS (SELECT 1 FROM admission_holds ah JOIN admissions a
+                           ON a.admission_id = ah.admission_id
+                           WHERE ah.hold_id = holds.hold_id AND a.state = 'pending')",
                     params![id, ts, s("reason"), origin],
                 )?;
             }
@@ -655,7 +665,10 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
         "hold.expired" => {
             tx.execute(
                 "UPDATE holds SET released_at = expires_at, release_reason = 'expired'
-                 WHERE hold_id = ?1 AND node_id = ?2 AND released_at IS NULL",
+                 WHERE hold_id = ?1 AND node_id = ?2 AND released_at IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM admission_holds ah JOIN admissions a
+                       ON a.admission_id = ah.admission_id
+                       WHERE ah.hold_id = holds.hold_id AND a.state = 'pending')",
                 params![s("hold_id"), origin],
             )?;
         }
@@ -1325,6 +1338,19 @@ impl Store {
                     report.rejected.push(reject(e.to_string()));
                     continue;
                 }
+                if matches!(ev.kind.as_str(), "hold.acquired" | "hold.updated") {
+                    let project = payload.get("project_id").and_then(Value::as_str).unwrap_or_default();
+                    let agent = payload.get("agent_id").and_then(Value::as_str).unwrap_or_default();
+                    let mismatched: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM projects WHERE project_id=?1 AND node_id!=?3)
+                             OR EXISTS(SELECT 1 FROM agents WHERE agent_id=?2 AND node_id!=?3)",
+                        params![project, agent, ev.node_id], |r| r.get(0),
+                    )?;
+                    if mismatched {
+                        report.rejected.push(reject("hold project or agent belongs to another origin".into()));
+                        continue;
+                    }
+                }
                 let inserted = tx.execute(
                     "INSERT OR IGNORE INTO events (event_id, node_id, ts, actor, kind, payload, prev_id, sig)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -1349,11 +1375,88 @@ mod tests {
     use super::*;
 
     #[test]
+    fn signed_peer_cannot_project_hold_for_local_actor_and_project() {
+        let (clock, _) = crate::Clock::manual(1_000_000);
+        let store = Store::open_in_memory(clock).unwrap();
+        let (clock, _) = crate::Clock::manual(1_000_000);
+        let peer = Store::open_in_memory(clock).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().to_str().unwrap().to_owned();
+        let actor = store
+            .register_agent(crate::RegisterAgent {
+                name: "local-owner".into(),
+                program: crate::Program::Claude,
+                project: Some(project.clone()),
+                model: None,
+                description: None,
+            })
+            .unwrap()
+            .address;
+        let (project_id, agent_id): (String, String) = store.read(|db| Ok(db.query_row(
+            "SELECT p.project_id,a.agent_id FROM agents a JOIN projects p ON p.project_id=a.project_id WHERE a.address=?1",
+            [&actor], |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)).unwrap();
+        let peer_id = peer.node_id().to_owned();
+        store
+            .write(|tx| {
+                upsert_node(
+                    tx,
+                    &NodeEntry {
+                        node_id: peer_id.clone(),
+                        display_name: "peer".into(),
+                        public_key: crypto::public_of(peer.signing_key()),
+                    },
+                )?;
+                tx.execute(
+                    "INSERT INTO peers(node_id,role,perms,paired_at) VALUES (?1,'spoke','[]',?2)",
+                    params![peer_id, tx.now],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let mut event = WireEvent { seq: 1, event_id: "signed-foreign-hold".into(), node_id: peer_id.clone(), ts: 1_000_100,
+            actor: "peer".into(), kind: "hold.acquired".into(), payload: json!({"hold_id":"fresh-foreign", "project_id":project_id,"agent_id":agent_id,"pattern":"src/a.rs","exclusive":true,"ttl_seconds":1800,"expires_at":2_800_100}).to_string(), prev_id: None, sig: String::new() };
+        event.sig = crypto::sign(
+            peer.signing_key(),
+            &crypto::event_message(
+                &event.event_id,
+                &event.node_id,
+                event.ts,
+                &event.actor,
+                &event.kind,
+                &event.payload,
+            ),
+        );
+        let report = store.ingest(&peer_id, &[event], &[]).unwrap();
+        assert_eq!(
+            report.accepted, 0,
+            "a peer must not claim a local actor or project"
+        );
+        assert_eq!(report.rejected.len(), 1);
+        let count: i64 = store
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT count(*) FROM holds WHERE hold_id='fresh-foreign'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+        let guard = store
+            .guard_edit(&actor, &project, &["src/a.rs".into()], "edit")
+            .unwrap();
+        assert!(guard.covered.is_empty());
+        assert_eq!(guard.held.len(), 1);
+    }
+
+    #[test]
     fn classification() {
         let o = "A";
         assert_eq!(classify("token.created", &json!({}), o), Share::Never);
         assert_eq!(classify("oauth.approved", &json!({}), o), Share::Never);
         assert_eq!(classify("session.binding.v1", &json!({}), o), Share::Never);
+        assert_eq!(classify("admission.created", &json!({}), o), Share::Never);
         assert_eq!(
             classify("agent.registered", &json!({}), o),
             Share::Directory
