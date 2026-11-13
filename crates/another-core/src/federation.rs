@@ -178,6 +178,9 @@ fn strings(v: &Value, key: &str) -> Vec<String> {
 }
 
 fn classify(kind: &str, payload: &Value, origin: &str) -> Share {
+    if kind == "session.binding.v1" {
+        return Share::Never;
+    }
     let not_origin =
         |nodes: Vec<String>| -> Vec<String> { nodes.into_iter().filter(|n| n != origin).collect() };
     match kind.split('.').next().unwrap_or_default() {
@@ -1350,6 +1353,7 @@ mod tests {
         let o = "A";
         assert_eq!(classify("token.created", &json!({}), o), Share::Never);
         assert_eq!(classify("oauth.approved", &json!({}), o), Share::Never);
+        assert_eq!(classify("session.binding.v1", &json!({}), o), Share::Never);
         assert_eq!(
             classify("agent.registered", &json!({}), o),
             Share::Directory

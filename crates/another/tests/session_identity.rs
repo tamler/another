@@ -226,7 +226,7 @@ fn old_home_requires_explicit_fenced_upgrade_and_verified_wal_backup() {
     assert!(command(&["init"]).status.success());
     let db = home.join("another.db");
     let old = Connection::open(&db).unwrap();
-    old.execute_batch("DROP TABLE session_bindings; PRAGMA user_version=8; CREATE TABLE preserved_data(v TEXT); INSERT INTO preserved_data VALUES ('committed-wal');").unwrap();
+    old.execute_batch("DROP TABLE announcements; PRAGMA user_version=7; CREATE TABLE preserved_data(v TEXT); INSERT INTO preserved_data VALUES ('committed-wal');").unwrap();
     let denied = command(&["status"]);
     assert!(!denied.status.success());
     assert!(String::from_utf8_lossy(&denied.stderr).contains("offline upgrade"));
@@ -252,7 +252,7 @@ fn old_home_requires_explicit_fenced_upgrade_and_verified_wal_backup() {
     assert_eq!(
         old.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        8
+        7
     );
     let no_confirmation = command(&[
         "--json",
@@ -312,7 +312,7 @@ fn old_home_requires_explicit_fenced_upgrade_and_verified_wal_backup() {
     assert_eq!(
         copy.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        8
+        7
     );
     assert_eq!(
         copy.query_row("SELECT v FROM preserved_data", [], |r| r
@@ -322,14 +322,14 @@ fn old_home_requires_explicit_fenced_upgrade_and_verified_wal_backup() {
     );
     let meta: serde_json::Value =
         serde_json::from_slice(&std::fs::read(backup.join("backup.json")).unwrap()).unwrap();
-    assert_eq!(meta["schema_version"], 8);
+    assert_eq!(meta["schema_version"], 7);
     assert_eq!(meta["database_sha256"].as_str().unwrap().len(), 64);
     let migrated = Connection::open(&db).unwrap();
     assert_eq!(
         migrated
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        9
+        8
     );
     assert!(command(&["status"]).status.success());
 }
@@ -353,7 +353,7 @@ fn failed_migration_keeps_original_and_verified_backup() {
     assert!(run(&["init"]).status.success());
     let db = home.join("another.db");
     let old = Connection::open(&db).unwrap();
-    old.execute_batch("PRAGMA user_version=8;").unwrap();
+    old.execute_batch("PRAGMA user_version=7;").unwrap();
     drop(old);
     let out = run(&[
         "--json",
@@ -372,7 +372,7 @@ fn failed_migration_keeps_original_and_verified_backup() {
         current
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        8
+        7
     );
     assert!(!run(&["status"]).status.success());
 }
@@ -395,7 +395,7 @@ fn upgrade_commit_write_failure_is_reported_as_uncertain_json() {
     let db = home.join("another.db");
     let keeper = Connection::open(&db).unwrap();
     keeper
-        .execute_batch("PRAGMA wal_autocheckpoint=0; DROP TABLE session_bindings; PRAGMA user_version=8; CREATE TABLE fault_padding(v INTEGER);")
+        .execute_batch("PRAGMA wal_autocheckpoint=0; DROP TABLE announcements; PRAGMA user_version=7; CREATE TABLE fault_padding(v INTEGER);")
         .unwrap();
     for n in 0..256 {
         keeper
@@ -448,15 +448,15 @@ fn upgrade_commit_write_failure_is_reported_as_uncertain_json() {
         saved
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        8
+        7
     );
     let metadata: serde_json::Value =
         serde_json::from_slice(&std::fs::read(backup.join("backup.json")).unwrap()).unwrap();
-    assert_eq!(metadata["schema_version"], 8);
+    assert_eq!(metadata["schema_version"], 7);
     let version: i64 = keeper
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert!(version == 8 || version == 9, "unexpected schema {version}");
+    assert!(version == 7 || version == 8, "unexpected schema {version}");
     assert_eq!(
         keeper
             .query_row("SELECT count(*) FROM fault_padding", [], |r| r

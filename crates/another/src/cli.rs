@@ -1060,6 +1060,12 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }));
     }
 
+    #[cfg(windows)]
+    if matches!(&cli.command, Command::Session(_)) {
+        anyhow::bail!(
+            "session binding is unsupported on native Windows; this route is unprotected"
+        );
+    }
     let store = open(home)?;
     let code = match cli.command {
         Command::Serve { .. }
@@ -1777,23 +1783,33 @@ fn hook_command(
 ) -> anyhow::Result<ExitCode> {
     match cmd {
         HookCmd::Run { event, client } => {
-            // Fail open: whatever happens, print what we have and exit 0.
-            let home = another_home().ok();
-            // Tool hooks run on every tool call: open without migrating, with a short lock
-            // wait, so a busy or missing database costs milliseconds, not seconds.
-            let store = match &home {
-                Some(h) if event.is_tool_event() => {
-                    Store::open_quick(h, event.busy_timeout()).map_err(anyhow::Error::from)
-                }
-                Some(h) => Store::open(h).map_err(anyhow::Error::from),
-                None => Err(anyhow::anyhow!("no Another home directory")),
-            };
-            let env = another_home().and_then(HookEnv::detect);
-            let text = hooks::run_fail_open(store, env, home.as_deref(), *event, *client);
-            if !text.is_empty() {
-                println!("{text}");
+            #[cfg(windows)]
+            {
+                let _ = (event, client);
+                anyhow::bail!(
+                    "session binding is unsupported on native Windows; this route is unprotected"
+                );
             }
-            Ok(ExitCode::SUCCESS)
+            #[cfg(not(windows))]
+            {
+                // Fail open: whatever happens, print what we have and exit 0.
+                let home = another_home().ok();
+                // Tool hooks run on every tool call: open without migrating, with a short lock
+                // wait, so a busy or missing database costs milliseconds, not seconds.
+                let store = match &home {
+                    Some(h) if event.is_tool_event() => {
+                        Store::open_quick(h, event.busy_timeout()).map_err(anyhow::Error::from)
+                    }
+                    Some(h) => Store::open(h).map_err(anyhow::Error::from),
+                    None => Err(anyhow::anyhow!("no Another home directory")),
+                };
+                let env = another_home().and_then(HookEnv::detect);
+                let text = hooks::run_fail_open(store, env, home.as_deref(), *event, *client);
+                if !text.is_empty() {
+                    println!("{text}");
+                }
+                Ok(ExitCode::SUCCESS)
+            }
         }
         HookCmd::Install { client, dry_run } | HookCmd::Uninstall { client, dry_run } => {
             let install = matches!(cmd, HookCmd::Install { .. });

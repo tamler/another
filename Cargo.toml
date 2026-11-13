@@ -17,7 +17,7 @@ anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-rusqlite = { version = "0.37", features = ["bundled", "backup"] }
+rusqlite = { version = "0.39", features = ["bundled", "backup", "hooks", "limits"] }
 ulid = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 globset = "0.4"

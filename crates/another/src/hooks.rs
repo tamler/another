@@ -858,7 +858,8 @@ fn hook_agent(
         Err(
             another_core::Error::Invalid(_)
             | another_core::Error::Forbidden(_)
-            | another_core::Error::NotFound(_),
+            | another_core::Error::NotFound(_)
+            | another_core::Error::IdentityScanBudgetExceeded(_),
         ) => Err(SessionIdentityError.into()),
         Err(e) => Err(e.into()),
     }

@@ -11,7 +11,7 @@
 use std::path::Path;
 
 use globset::{Glob, GlobBuilder, GlobMatcher};
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{params, Connection, Row};
 use serde::Serialize;
 use serde_json::json;
 
@@ -1028,13 +1028,8 @@ impl Store {
             sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, agent)?;
             let owned = owned_holds(tx, &me.id, &[], scope)?;
-            let fingerprint: Option<String> = tx
-                .query_row(
-                    "SELECT digest FROM session_bindings WHERE agent_id = ?1",
-                    [&me.id],
-                    |r| r.get(0),
-                )
-                .optional()?;
+            // Manual lifecycle calls lack the verified hook tuple; do not invent a fingerprint.
+            let fingerprint: Option<String> = None;
             let session_payload = || {
                 json!({
                     "agent_id": me.id,

@@ -2,7 +2,7 @@
 //! append-only event log that every mutation writes to first.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -61,6 +61,10 @@ struct Inner {
     key: ed25519_dalek::SigningKey,
     clock: Clock,
     path: Option<PathBuf>,
+    busy_timeout: std::time::Duration,
+    identity_uncertain: AtomicBool,
+    #[cfg(test)]
+    identity_commit_fault: std::sync::atomic::AtomicU8,
 }
 
 /// Public view of the local node.
@@ -311,20 +315,18 @@ impl Store {
                 MIGRATIONS.len()
             )));
         }
-        let (node_id, secret): (String, Option<String>) = conn.query_row(
-            "SELECT node_id, secret_key FROM nodes WHERE is_local = 1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        let secret = secret
-            .ok_or_else(|| Error::Invalid("node key missing; a normal open creates it".into()))?;
+        let (node_id, key) = load_existing_local_node(&conn)?;
         Ok(Store {
             inner: Arc::new(Inner {
                 conn: Mutex::new(conn),
                 node_id,
-                key: crate::crypto::decode_secret(&secret)?,
+                key,
                 clock: Clock::System,
                 path: Some(path),
+                busy_timeout: busy,
+                identity_uncertain: AtomicBool::new(false),
+                #[cfg(test)]
+                identity_commit_fault: std::sync::atomic::AtomicU8::new(0),
             }),
         })
     }
@@ -337,8 +339,13 @@ impl Store {
     fn init(mut conn: Connection, clock: Clock, path: Option<PathBuf>) -> Result<Store> {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         migrate(&mut conn)?;
-        let (node_id, key) = ensure_local_node(&mut conn, clock.now())?;
+        let (node_id, key) = if version == 0 {
+            ensure_local_node(&mut conn, clock.now())?
+        } else {
+            load_existing_local_node(&conn)?
+        };
         Ok(Store {
             inner: Arc::new(Inner {
                 conn: Mutex::new(conn),
@@ -346,6 +353,10 @@ impl Store {
                 key,
                 clock,
                 path,
+                busy_timeout: std::time::Duration::from_secs(5),
+                identity_uncertain: AtomicBool::new(false),
+                #[cfg(test)]
+                identity_commit_fault: std::sync::atomic::AtomicU8::new(0),
             }),
         })
     }
@@ -415,12 +426,22 @@ impl Store {
     /// Run a read-only closure against the connection.
     pub(crate) fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         let conn = self.lock();
+        if self.inner.identity_uncertain.load(Ordering::Acquire) {
+            return Err(Error::Invalid(
+                "binding commit outcome uncertain; reopen and reconcile identity".into(),
+            ));
+        }
         f(&conn)
     }
 
     /// Run `f` inside an immediate write transaction; commits on `Ok`.
     pub(crate) fn write<T>(&self, f: impl FnOnce(&Tx<'_>) -> Result<T>) -> Result<T> {
         let mut conn = self.lock();
+        if self.inner.identity_uncertain.load(Ordering::Acquire) {
+            return Err(Error::Invalid(
+                "binding commit outcome uncertain; reopen and reconcile identity".into(),
+            ));
+        }
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let ctx = Tx {
             tx,
@@ -433,6 +454,156 @@ impl Store {
         Ok(out)
     }
 
+    /// Run the bounded binding scan and uniqueness decision in one immediate transaction.
+    pub(crate) fn write_identity<T>(
+        &self,
+        f: impl FnOnce(&Tx<'_>, std::time::Instant) -> Result<T>,
+    ) -> Result<T> {
+        use rusqlite::limits::Limit;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut conn = self.lock();
+        if self.inner.identity_uncertain.load(Ordering::Acquire) {
+            let path = self.inner.path.as_ref().ok_or_else(|| {
+                Error::IdentityScanBudgetExceeded("cannot reopen uncertain in-memory store".into())
+            })?;
+            let replacement = Connection::open_with_flags(
+                path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | rusqlite::OpenFlags::SQLITE_OPEN_URI
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(|_| {
+                Error::IdentityScanBudgetExceeded("cannot reopen uncertain store".into())
+            })?;
+            replacement
+                .busy_timeout(self.inner.busy_timeout)
+                .map_err(|_| {
+                    Error::IdentityScanBudgetExceeded("cannot configure reopened store".into())
+                })?;
+            replacement
+                .pragma_update(None, "foreign_keys", "ON")
+                .map_err(|_| {
+                    Error::IdentityScanBudgetExceeded("cannot configure reopened store".into())
+                })?;
+            replacement
+                .pragma_update(None, "synchronous", "NORMAL")
+                .map_err(|_| {
+                    Error::IdentityScanBudgetExceeded("cannot configure reopened store".into())
+                })?;
+            let (node, key) = load_existing_local_node(&replacement).map_err(|_| {
+                Error::IdentityScanBudgetExceeded("cannot verify reopened store".into())
+            })?;
+            if node != self.inner.node_id
+                || crate::crypto::public_of(&key) != crate::crypto::public_of(&self.inner.key)
+            {
+                return Err(Error::Invalid(
+                    "node changed while reconciling identity".into(),
+                ));
+            }
+            *conn = replacement;
+            self.inner
+                .identity_uncertain
+                .store(false, Ordering::Release);
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::IdentityScanBudgetExceeded("deadline".into()));
+        }
+        conn.busy_timeout(
+            self.inner
+                .busy_timeout
+                .min(deadline.saturating_duration_since(Instant::now())),
+        )?;
+        let previous_limit = conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, 8192)?;
+        if conn.limit(Limit::SQLITE_LIMIT_LENGTH)? != 8192 {
+            conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, previous_limit)?;
+            conn.busy_timeout(self.inner.busy_timeout)?;
+            return Err(Error::IdentityScanBudgetExceeded(
+                "SQLite length limit unavailable".into(),
+            ));
+        }
+        let steps = Arc::new(AtomicUsize::new(0));
+        let progress_steps = steps.clone();
+        conn.progress_handler(
+            1,
+            Some(move || {
+                progress_steps.fetch_add(1, Ordering::Relaxed) >= 200_000
+                    || Instant::now() >= deadline
+            }),
+        )?;
+        let result = (|| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let ctx = Tx {
+                tx,
+                node_id: &self.inner.node_id,
+                now: self.inner.clock.now(),
+                key: &self.inner.key,
+            };
+            let out = f(&ctx, deadline)?;
+            if Instant::now() >= deadline {
+                return Err(Error::IdentityScanBudgetExceeded("deadline".into()));
+            }
+            #[cfg(test)]
+            let fault = self.inner.identity_commit_fault.swap(0, Ordering::AcqRel);
+            #[cfg(not(test))]
+            let fault = 0;
+            let commit_result = if fault == 2 {
+                drop(ctx);
+                Err(())
+            } else {
+                ctx.tx.commit().map_err(|_| ())
+            };
+            if commit_result.is_err() || fault == 1 {
+                self.inner.identity_uncertain.store(true, Ordering::Release);
+                return Err(Error::IdentityScanBudgetExceeded(
+                    "binding commit outcome uncertain".into(),
+                ));
+            }
+            if Instant::now() >= deadline {
+                self.inner.identity_uncertain.store(true, Ordering::Release);
+                return Err(Error::IdentityScanBudgetExceeded(
+                    "commit outcome uncertain after deadline".into(),
+                ));
+            }
+            Ok(out)
+        })();
+        let reset = conn
+            .progress_handler(0, None::<fn() -> bool>)
+            .and_then(|_| {
+                conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, previous_limit)
+                    .map(|_| ())
+            })
+            .and_then(|_| conn.busy_timeout(self.inner.busy_timeout));
+        if reset.is_err() {
+            self.inner.identity_uncertain.store(true, Ordering::Release);
+            return Err(Error::IdentityScanBudgetExceeded(
+                "identity connection state uncertain".into(),
+            ));
+        }
+        match result {
+            Err(Error::Db(rusqlite::Error::SqliteFailure(code, _)))
+                if matches!(
+                    code.code,
+                    rusqlite::ErrorCode::TooBig | rusqlite::ErrorCode::OperationInterrupted
+                ) =>
+            {
+                Err(Error::IdentityScanBudgetExceeded(
+                    "SQLite scan limit or interruption".into(),
+                ))
+            }
+            Err(Error::Db(_))
+                if Instant::now() >= deadline || steps.load(Ordering::Relaxed) >= 200_000 =>
+            {
+                Err(Error::IdentityScanBudgetExceeded(
+                    "deadline or SQLite step limit".into(),
+                ))
+            }
+            other => other,
+        }
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         // A poisoned lock only means another thread panicked mid-call; the
         // transaction it held was rolled back, so the connection is still usable.
@@ -441,6 +612,29 @@ impl Store {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+}
+
+fn load_existing_local_node(conn: &Connection) -> Result<(String, ed25519_dalek::SigningKey)> {
+    let mut stmt =
+        conn.prepare("SELECT node_id,secret_key,public_key FROM nodes WHERE is_local=1 LIMIT 2")?;
+    let mut rows = stmt.query([])?;
+    let row = rows
+        .next()?
+        .ok_or_else(|| Error::Invalid("local node missing; preserve and inspect home".into()))?;
+    let node: String = row.get(0)?;
+    let secret: Option<String> = row.get(1)?;
+    let public: Option<String> = row.get(2)?;
+    let key =
+        crate::crypto::decode_secret(secret.as_deref().ok_or_else(|| {
+            Error::Invalid("node key missing; preserve and inspect home".into())
+        })?)?;
+    if public.as_deref() != Some(crate::crypto::public_of(&key).as_str()) || rows.next()?.is_some()
+    {
+        return Err(Error::Invalid(
+            "local node key is inconsistent; preserve and inspect home".into(),
+        ));
+    }
+    Ok((node, key))
 }
 
 /// A write transaction plus the context every mutation needs.
@@ -798,15 +992,6 @@ CREATE TABLE announcements (
     PRIMARY KEY (agent_id, message_id)
 );
 "#,
-    r#"
-CREATE TABLE session_bindings (
-    digest TEXT PRIMARY KEY,
-    agent_id TEXT NOT NULL UNIQUE REFERENCES agents(agent_id),
-    project_id TEXT NOT NULL REFERENCES projects(project_id),
-    client TEXT NOT NULL,
-    base_name TEXT NOT NULL
-);
-"#,
 ];
 
 /// Switch to WAL. While several connections convert a new database at once, SQLite answers
@@ -996,6 +1181,94 @@ mod upgrade_tests {
     use super::*;
 
     #[test]
+    fn uncertain_identity_connection_reopens_before_resolving_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let store = Store::open(&home).unwrap();
+        let root = project.to_str().unwrap();
+        let actor = store
+            .session_actor(
+                "claude",
+                crate::identity::Program::Claude,
+                root,
+                None,
+                "fixture",
+                true,
+            )
+            .unwrap()
+            .0;
+        store
+            .inner
+            .identity_uncertain
+            .store(true, Ordering::Release);
+        assert!(store.events(10).is_err());
+        let resolved = store
+            .session_actor(
+                "claude",
+                crate::identity::Program::Claude,
+                root,
+                None,
+                "fixture",
+                false,
+            )
+            .unwrap()
+            .0;
+        assert_eq!(resolved, actor);
+        assert!(store.events(10).is_ok());
+    }
+
+    #[test]
+    fn uncertain_identity_commit_reconciles_both_simulated_outcomes() {
+        for fault in [1, 2] {
+            let dir = tempfile::tempdir().unwrap();
+            let home = dir.path().join("home");
+            let project = dir.path().join("project");
+            std::fs::create_dir_all(&project).unwrap();
+            let store = Store::open(&home).unwrap();
+            let root = project.to_str().unwrap();
+            store.ensure_project("fixture", root).unwrap();
+            store
+                .inner
+                .identity_commit_fault
+                .store(fault, Ordering::Release);
+            let first = store.session_actor(
+                "claude",
+                crate::identity::Program::Claude,
+                root,
+                None,
+                "fixture",
+                true,
+            );
+            assert!(matches!(first, Err(Error::IdentityScanBudgetExceeded(_))));
+            assert!(store.events(10).is_err());
+            let actor = store
+                .session_actor(
+                    "claude",
+                    crate::identity::Program::Claude,
+                    root,
+                    None,
+                    "fixture",
+                    true,
+                )
+                .unwrap()
+                .0;
+            assert!(store.is_session_actor(&actor).unwrap());
+            assert_eq!(store.agents().unwrap().len(), 1);
+            assert_eq!(
+                store
+                    .events(100)
+                    .unwrap()
+                    .iter()
+                    .filter(|e| e.kind == "session.binding.v1")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
     fn parent_sync_failure_prevents_source_migration() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
@@ -1003,7 +1276,7 @@ mod upgrade_tests {
         drop(Store::open(&home).unwrap());
         let db = home.join(DB_FILE);
         let source = Connection::open(&db).unwrap();
-        source.execute_batch("DROP TABLE session_bindings; PRAGMA user_version=8; CREATE TABLE preserved(v TEXT); INSERT INTO preserved VALUES ('unchanged');").unwrap();
+        source.execute_batch("DROP TABLE announcements; PRAGMA user_version=7; CREATE TABLE preserved(v TEXT); INSERT INTO preserved VALUES ('unchanged');").unwrap();
         drop(source);
         let mut called = false;
         let result = Store::upgrade_offline_with_parent_sync(&home, &backup, true, |parent| {
@@ -1016,7 +1289,7 @@ mod upgrade_tests {
                 source
                     .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                     .unwrap(),
-                8
+                7
             );
             Err(std::io::Error::other("injected sync failure"))
         });
@@ -1030,7 +1303,7 @@ mod upgrade_tests {
             source
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            8
+            7
         );
         assert_eq!(
             source
@@ -1049,7 +1322,7 @@ mod upgrade_tests {
         let db = home.join(DB_FILE);
         let source = Connection::open(&db).unwrap();
         source
-            .execute_batch("DROP TABLE session_bindings; PRAGMA user_version=8;")
+            .execute_batch("DROP TABLE announcements; PRAGMA user_version=7;")
             .unwrap();
         drop(source);
         let mut called = false;
@@ -1062,7 +1335,7 @@ mod upgrade_tests {
                 source
                     .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                     .unwrap(),
-                8
+                7
             );
             std::fs::File::open(parent)?.sync_all()
         })
@@ -1073,7 +1346,7 @@ mod upgrade_tests {
             source
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            9
+            8
         );
     }
 
@@ -1085,7 +1358,7 @@ mod upgrade_tests {
         let db = home.join(DB_FILE);
         let source = Connection::open(&db).unwrap();
         source
-            .execute_batch("DROP TABLE session_bindings; PRAGMA user_version=8;")
+            .execute_batch("DROP TABLE announcements; PRAGMA user_version=7;")
             .unwrap();
         let version: i64 = source
             .pragma_query_value(None, "data_version", |r| r.get(0))
@@ -1102,13 +1375,13 @@ mod upgrade_tests {
             )
             .unwrap();
         let mut source = source;
-        let result = migrate_offline(&mut source, 8, version, &node);
+        let result = migrate_offline(&mut source, 7, version, &node);
         assert!(result.is_err());
         assert_eq!(
             source
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            8
+            7
         );
         assert_eq!(
             source

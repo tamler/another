@@ -15,6 +15,159 @@ use crate::error::{Error, Result};
 use crate::store::{new_id, Store, Tx};
 use crate::time::{fmt_opt, fmt_ts};
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionBinding {
+    version: u8,
+    agent_id: String,
+    project_id: String,
+    client: String,
+    base_name: String,
+    digest: String,
+}
+
+fn binding_scan(tx: &Tx<'_>, deadline: std::time::Instant) -> Result<Vec<SessionBinding>> {
+    binding_scan_inner(tx, deadline).map_err(|err| match err {
+        Error::Db(rusqlite::Error::SqliteFailure(code, _))
+            if matches!(
+                code.code,
+                rusqlite::ErrorCode::TooBig
+                    | rusqlite::ErrorCode::OperationInterrupted
+                    | rusqlite::ErrorCode::DatabaseBusy
+                    | rusqlite::ErrorCode::DatabaseLocked
+            ) =>
+        {
+            Error::IdentityScanBudgetExceeded(
+                "SQLite scan limit, interruption or contention".into(),
+            )
+        }
+        Error::Db(_) => Error::Invalid("invalid or unavailable session binding evidence".into()),
+        other => other,
+    })
+}
+
+fn binding_scan_inner(tx: &Tx<'_>, deadline: std::time::Instant) -> Result<Vec<SessionBinding>> {
+    use rusqlite::types::ValueRef;
+    use std::collections::HashSet;
+    let invalid = || Error::Invalid("invalid session binding evidence".into());
+    let check_deadline = || {
+        if std::time::Instant::now() >= deadline {
+            Err(Error::IdentityScanBudgetExceeded("deadline".into()))
+        } else {
+            Ok(())
+        }
+    };
+    let mut stmt = tx.prepare("SELECT seq,event_id,node_id,ts,actor,kind,payload,prev_id,sig FROM events INDEXED BY events_by_kind WHERE kind=?1 AND node_id=?2 ORDER BY seq LIMIT 50001")?;
+    let mut rows = stmt.query(params!["session.binding.v1", tx.node_id])?;
+    let mut result = Vec::new();
+    let mut bytes = 0usize;
+    let mut ids = HashSet::new();
+    let mut digests = HashSet::new();
+    let public = crate::crypto::public_of(tx.key);
+    loop {
+        check_deadline()?;
+        let Some(row) = rows.next()? else { break };
+        if result.len() == 50_000 {
+            return Err(Error::IdentityScanBudgetExceeded("row limit".into()));
+        }
+        let text = |i, max| -> Result<&str> {
+            match row.get_ref(i)? {
+                ValueRef::Text(value) if value.len() <= max => {
+                    std::str::from_utf8(value).map_err(|_| invalid())
+                }
+                _ => Err(invalid()),
+            }
+        };
+        if !matches!(row.get_ref(0)?, ValueRef::Integer(_)) {
+            return Err(invalid());
+        }
+        let event = text(1, 128)?;
+        let node = text(2, 128)?;
+        let ts = match row.get_ref(3)? {
+            ValueRef::Integer(n) => n,
+            _ => return Err(invalid()),
+        };
+        let actor = text(4, 256)?;
+        let kind = text(5, 64)?;
+        let payload = text(6, 2048)?;
+        let prev = match row.get_ref(7)? {
+            ValueRef::Null => 0,
+            ValueRef::Text(v) if v.len() <= 128 && std::str::from_utf8(v).is_ok() => v.len(),
+            _ => return Err(invalid()),
+        };
+        let signature = text(8, 256)?;
+        bytes = bytes
+            .checked_add(
+                event.len()
+                    + node.len()
+                    + actor.len()
+                    + kind.len()
+                    + payload.len()
+                    + prev
+                    + signature.len(),
+            )
+            .ok_or_else(invalid)?;
+        if bytes > 16 * 1024 * 1024 {
+            return Err(Error::IdentityScanBudgetExceeded("byte limit".into()));
+        }
+        if signature.len() != 86
+            || crate::crypto::unb64(signature)
+                .ok()
+                .filter(|v| v.len() == 64 && crate::crypto::b64(v) == signature)
+                .is_none()
+        {
+            return Err(invalid());
+        }
+        if !crate::crypto::verify(
+            &public,
+            &crate::crypto::event_message(event, node, ts, actor, kind, payload),
+            signature,
+        ) {
+            return Err(invalid());
+        }
+        check_deadline()?;
+        let binding: SessionBinding = serde_json::from_str(payload).map_err(|_| invalid())?;
+        if binding.version != 1
+            || binding.digest.len() != 64
+            || !binding
+                .digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || validate_name(&binding.base_name).is_err()
+            || !matches!(
+                binding.client.as_str(),
+                "claude" | "codex" | "cursor" | "grok"
+            )
+            || !ids.insert(binding.agent_id.clone())
+            || !digests.insert(binding.digest.clone())
+        {
+            return Err(invalid());
+        }
+        let actual: Option<(String,String,String,String,Option<String>,String)> = tx.query_row("SELECT a.node_id,a.name,a.project_id,p.slug,a.address,p.node_id FROM agents a JOIN projects p ON p.project_id=a.project_id WHERE a.agent_id=?1", [&binding.agent_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional()?;
+        let Some((agent_node, name, project_id, slug, stored_address, project_node)) = actual
+        else {
+            return Err(invalid());
+        };
+        let expected = format!(
+            "{}-s{}",
+            &binding.base_name[..binding.base_name.len().min(30)],
+            &binding.digest[..32]
+        );
+        if agent_node != tx.node_id
+            || project_node != tx.node_id
+            || project_id != binding.project_id
+            || name != expected
+            || actor != address(&name, Some(&slug))
+            || stored_address.as_deref() != Some(actor)
+        {
+            return Err(invalid());
+        }
+        check_deadline()?;
+        result.push(binding);
+    }
+    Ok(result)
+}
+
 /// The coding-agent program behind an identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -422,13 +575,22 @@ impl Store {
         session_id: &str,
         create: bool,
     ) -> Result<(String, String)> {
-        if session_id.is_empty()
-            || session_id.len() > 512
-            || session_id.chars().any(char::is_control)
+        #[cfg(windows)]
         {
-            return Err(Error::Invalid("invalid session identifier".into()));
+            let _ = (client, program, root, requested_base, session_id, create);
+            return Err(Error::Invalid(
+                "session binding is unsupported on native Windows".into(),
+            ));
         }
-        self.write(|tx| {
+        #[cfg(not(windows))]
+        {
+            if session_id.is_empty()
+                || session_id.len() > 512
+                || session_id.chars().any(char::is_control)
+            {
+                return Err(Error::Invalid("invalid session identifier".into()));
+            }
+            self.write_identity(|tx, deadline| {
             let project = match find_project(tx, tx.node_id, root) {
                 Ok(project) => project,
                 Err(Error::NotFound(_)) if create => ensure_project_tx(tx, client, root)?,
@@ -444,12 +606,10 @@ impl Store {
                 return Err(Error::Invalid("session base project does not match".into()));
             }
             validate_name(name)?;
-            let existing_binding: Option<(String, String, String)> = tx.query_row(
-                "SELECT b.base_name, b.client, b.digest FROM session_bindings b JOIN agents a ON a.agent_id=b.agent_id WHERE a.node_id=?1 AND a.name=?2 AND b.project_id=?3",
-                params![tx.node_id, name, project.project_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            ).optional()?;
-            let base = existing_binding.as_ref().map_or(name, |binding| binding.0.as_str());
+            let bindings = binding_scan(tx, deadline)?;
+            let requested_id: Option<String> = tx.query_row("SELECT agent_id FROM agents WHERE node_id=?1 AND name=?2 AND project_id=?3", params![tx.node_id,name,project.project_id], |r| r.get(0)).optional()?;
+            let existing_binding = bindings.iter().find(|b| Some(&b.agent_id) == requested_id.as_ref());
+            let base = existing_binding.map_or(name, |binding| binding.base_name.as_str());
             let mut hash = Sha256::new();
             for value in ["another-session-v1", tx.node_id, client, project.project_id.as_str(), base, session_id] {
                 hash.update((value.len() as u64).to_be_bytes());
@@ -457,19 +617,14 @@ impl Store {
             }
             let digest = format!("{:x}", hash.finalize());
             let actor_name = format!("{}-s{}", &base[..base.len().min(30)], &digest[..32]);
-            if let Some((_, bound_client, bound_digest)) = &existing_binding {
-                if bound_client != client || bound_digest != &digest || actor_name != name {
+            if let Some(binding) = existing_binding {
+                if binding.client != client || binding.digest != digest || actor_name != name {
                     return Err(Error::Invalid("session actor does not match this session".into()));
                 }
             }
             let addr = address(&actor_name, Some(&project.slug));
-            let binding: Option<(String, String)> = tx.query_row(
-                "SELECT b.agent_id, b.digest FROM session_bindings b JOIN agents a ON a.agent_id=b.agent_id WHERE a.node_id=?1 AND a.name=?2 AND b.project_id=?3",
-                params![tx.node_id, actor_name, project.project_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            ).optional()?;
-            if let Some((_, saved)) = binding {
-                if saved != digest {
+            if let Some(binding) = bindings.iter().find(|b| b.digest == digest) {
+                if binding.project_id != project.project_id || binding.client != client || binding.base_name != base {
                     return Err(Error::Invalid("session identity collision".into()));
                 }
                 return Ok((addr, digest));
@@ -484,14 +639,6 @@ impl Store {
             if occupied {
                 return Err(Error::Invalid("session identity collision".into()));
             }
-            let digest_used: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM session_bindings WHERE digest=?1)",
-                [&digest],
-                |r| r.get(0),
-            )?;
-            if digest_used {
-                return Err(Error::Invalid("session identity collision".into()));
-            }
             let agent_id = new_id();
             let event_id = tx.emit(&addr, "agent.registered", json!({
                 "agent_id": agent_id, "name": actor_name, "project_id": project.project_id,
@@ -501,42 +648,56 @@ impl Store {
                 "INSERT INTO agents (agent_id,node_id,project_id,name,program,status,created_at,updated_at,last_seen_at,event_id,address) VALUES (?1,?2,?3,?4,?5,'active',?6,?6,?6,?7,?8)",
                 params![agent_id, tx.node_id, project.project_id, actor_name, program.as_str(), tx.now, event_id, addr],
             )?;
-            tx.execute(
-                "INSERT INTO session_bindings(digest,agent_id,project_id,client,base_name) VALUES (?1,?2,?3,?4,?5)",
-                params![digest, agent_id, project.project_id, client, base],
-            )?;
+            tx.emit(&addr, "session.binding.v1", json!({"version":1,"agent_id":agent_id,"project_id":project.project_id,"client":client,"base_name":base,"digest":digest}))?;
             Ok((addr, digest))
         })
+        }
     }
 
     /// Check that an address identifies a locally registered session actor.
     pub fn is_session_actor(&self, who: &str) -> Result<bool> {
-        self.read(|conn| {
-            let actor = resolve_agent(conn, self.node_id(), who)?;
-            Ok(conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM session_bindings WHERE agent_id=?1)",
-                [&actor.id],
-                |r| r.get(0),
-            )?)
-        })
+        #[cfg(windows)]
+        {
+            let _ = who;
+            return Err(Error::Invalid(
+                "session binding is unsupported on native Windows".into(),
+            ));
+        }
+        #[cfg(not(windows))]
+        {
+            self.write_identity(|tx, deadline| {
+                let actor = resolve_agent(tx, self.node_id(), who)?;
+                Ok(binding_scan(tx, deadline)?
+                    .iter()
+                    .any(|b| b.agent_id == actor.id))
+            })
+        }
     }
 
     /// Resolve a session actor to its complete local address.
     pub fn session_actor_address(&self, who: &str) -> Result<String> {
-        self.read(|conn| {
-            let actor = resolve_agent(conn, self.node_id(), who)?;
-            let is_session: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM session_bindings WHERE agent_id=?1)",
-                [&actor.id],
-                |r| r.get(0),
-            )?;
-            if !is_session {
-                return Err(Error::Invalid(
-                    "agent is not a registered session actor".into(),
-                ));
-            }
-            Ok(actor.address)
-        })
+        #[cfg(windows)]
+        {
+            let _ = who;
+            return Err(Error::Invalid(
+                "session binding is unsupported on native Windows".into(),
+            ));
+        }
+        #[cfg(not(windows))]
+        {
+            self.write_identity(|tx, deadline| {
+                let actor = resolve_agent(tx, self.node_id(), who)?;
+                let is_session = binding_scan(tx, deadline)?
+                    .iter()
+                    .any(|b| b.agent_id == actor.id);
+                if !is_session {
+                    return Err(Error::Invalid(
+                        "agent is not a registered session actor".into(),
+                    ));
+                }
+                Ok(actor.address)
+            })
+        }
     }
     /// Register an absolute project path (idempotent).
     pub fn ensure_project(&self, actor: &str, abs_path: &str) -> Result<Project> {
@@ -577,7 +738,7 @@ impl Store {
     /// Register a new agent or update an existing one's details; touches `last_seen_at`.
     pub fn register_agent(&self, input: RegisterAgent) -> Result<Agent> {
         validate_name(&input.name)?;
-        self.write(|tx| {
+        self.write_identity(|tx, deadline| {
             let project = match &input.project {
                 Some(path) => Some(ensure_project_tx(tx, &input.name, path)?),
                 None => None,
@@ -593,6 +754,16 @@ impl Store {
                     |r| r.get(0),
                 )
                 .optional()?;
+            if let Some(id) = &existing {
+                if binding_scan(tx, deadline)?
+                    .iter()
+                    .any(|b| &b.agent_id == id)
+                {
+                    return Err(Error::Invalid(
+                        "cannot update a session actor with agent register".into(),
+                    ));
+                }
+            }
             let agent_id = existing.clone().unwrap_or_else(new_id);
             let event_id = tx.emit(
                 &addr,
@@ -771,7 +942,7 @@ mod tests {
             .unwrap();
         store
             .write(|tx| {
-                tx.execute("DELETE FROM session_bindings", [])?;
+                tx.execute("DELETE FROM events WHERE kind='session.binding.v1'", [])?;
                 Ok(())
             })
             .unwrap();
@@ -780,6 +951,119 @@ mod tests {
             Err(Error::Invalid(_))
         ));
         assert!(store.agent(&actor).is_ok());
+    }
+
+    #[test]
+    fn emitted_binding_roundtrips_and_corruption_denies_without_new_actor() {
+        let store = Store::open_in_memory(crate::store::Clock::System).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let (actor, _) = store
+            .session_actor("claude", Program::Claude, root, None, "one", true)
+            .unwrap();
+        assert_eq!(
+            store
+                .session_actor("claude", Program::Claude, root, None, "one", false)
+                .unwrap()
+                .0,
+            actor
+        );
+        store
+            .read(|conn| {
+                let (kind, sig, ts_type): (String, String, String) = conn.query_row(
+                    "SELECT kind,sig,typeof(ts) FROM events WHERE kind='session.binding.v1'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?;
+                assert_eq!(kind, "session.binding.v1");
+                assert!(!sig.is_empty());
+                assert_eq!(ts_type, "integer");
+                Ok(())
+            })
+            .unwrap();
+        store
+            .write(|tx| {
+                tx.execute(
+                    "UPDATE events SET payload='{}' WHERE kind='session.binding.v1'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(
+            store.session_actor("claude", Program::Claude, root, None, "two", true),
+            Err(Error::Invalid(_))
+        ));
+        assert_eq!(store.agents().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_thousand_valid_binding_events_fit_the_identity_budget() {
+        let store = Store::open_in_memory(crate::store::Clock::System).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        store.write(|tx| {
+            let project = ensure_project_tx(tx, "fixture", root)?;
+            tx.execute("INSERT INTO nodes(node_id,display_name,role,is_local,created_at) VALUES ('foreign-fixture','foreign','home',0,?1)", [tx.now])?;
+            for _ in 0..1000 {
+                tx.execute("INSERT INTO events(event_id,node_id,ts,actor,kind,payload) VALUES (?1,'foreign-fixture',?2,'foreign','session.binding.v1','{}')", params![new_id(),tx.now])?;
+            }
+            for n in 0..1000u64 {
+                // Vary the truncated prefix as the real tuple hash does.
+                let digest = format!("{:032x}{:032x}", n + 1, n);
+                let name = format!("claude-s{}", &digest[..32]);
+                let addr = address(&name, Some(&project.slug));
+                let agent_id = new_id();
+                let event_id = tx.emit(&addr, "agent.registered", json!({"agent_id":agent_id}))?;
+                tx.execute("INSERT INTO agents (agent_id,node_id,project_id,name,program,status,created_at,updated_at,last_seen_at,event_id,address) VALUES (?1,?2,?3,?4,'claude','active',?5,?5,?5,?6,?7)", params![agent_id,tx.node_id,project.project_id,name,tx.now,event_id,addr])?;
+                tx.emit(&addr, "session.binding.v1", json!({"version":1,"agent_id":agent_id,"project_id":project.project_id,"client":"claude","base_name":"claude","digest":digest}))?;
+            }
+            Ok(())
+        }).unwrap();
+        store
+            .session_actor("claude", Program::Claude, root, None, "new-session", true)
+            .unwrap();
+    }
+
+    #[test]
+    fn binding_timestamp_extremes_verify_and_oversize_scan_denies() {
+        let store = Store::open_in_memory(crate::store::Clock::System).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let (actor, _) = store
+            .session_actor("claude", Program::Claude, root, None, "original", true)
+            .unwrap();
+        for timestamp in [i64::MIN, 0, i64::MAX] {
+            store.write(|tx| {
+                let (id,node,who,kind,payload): (String,String,String,String,String) = tx.query_row(
+                    "SELECT event_id,node_id,actor,kind,payload FROM events WHERE kind='session.binding.v1'", [],
+                    |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+                let sig = crate::crypto::sign(tx.key, &crate::crypto::event_message(&id,&node,timestamp,&who,&kind,&payload));
+                tx.execute("UPDATE events SET ts=?1,sig=?2 WHERE event_id=?3", params![timestamp,sig,id])?;
+                Ok(())
+            }).unwrap();
+            assert_eq!(
+                store
+                    .session_actor("claude", Program::Claude, root, None, "original", false)
+                    .unwrap()
+                    .0,
+                actor
+            );
+        }
+        store
+            .write(|tx| {
+                tx.execute(
+                    "UPDATE events SET payload=?1 WHERE kind='session.binding.v1'",
+                    ["x".repeat(9000)],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(
+            store.session_actor("claude", Program::Claude, root, None, "other", true),
+            Err(Error::IdentityScanBudgetExceeded(_))
+        ));
+        assert_eq!(store.agents().unwrap().len(), 1);
     }
 
     #[test]
