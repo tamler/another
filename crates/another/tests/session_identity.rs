@@ -376,3 +376,94 @@ fn failed_migration_keeps_original_and_verified_backup() {
     );
     assert!(!run(&["status"]).status.success());
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn upgrade_commit_write_failure_is_reported_as_uncertain_json() {
+    use rusqlite::Connection;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let backup = dir.path().join("backup");
+    let init = Command::new(env!("CARGO_BIN_EXE_another"))
+        .arg("init")
+        .env("ANOTHER_HOME", &home)
+        .env("HOME", dir.path())
+        .env_remove("ANOTHER_AGENT")
+        .output()
+        .unwrap();
+    assert!(init.status.success());
+    let db = home.join("another.db");
+    let keeper = Connection::open(&db).unwrap();
+    keeper
+        .execute_batch("PRAGMA wal_autocheckpoint=0; DROP TABLE session_bindings; PRAGMA user_version=8; CREATE TABLE fault_padding(v INTEGER);")
+        .unwrap();
+    for n in 0..256 {
+        keeper
+            .execute("INSERT INTO fault_padding(v) VALUES (?1)", [n])
+            .unwrap();
+    }
+    let wal_bytes = std::fs::metadata(home.join("another.db-wal"))
+        .unwrap()
+        .len();
+    let limit_kib = wal_bytes.div_ceil(1024);
+    assert!(wal_bytes > std::fs::metadata(&db).unwrap().len() * 2);
+    let output = Command::new("/bin/bash")
+        .arg("-c")
+        .arg("trap '' XFSZ; ulimit -f \"$1\" || exit 125; shift; exec \"$@\"")
+        .arg("upgrade-fault-test")
+        .arg(limit_kib.to_string())
+        .arg(env!("CARGO_BIN_EXE_another"))
+        .args(["--json", "upgrade", "--backup-dir"])
+        .arg(&backup)
+        .arg("--confirm-writer-fence")
+        .env("ANOTHER_HOME", &home)
+        .env("HOME", dir.path())
+        .env_remove("ANOTHER_AGENT")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let message = response["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("upgrade commit outcome uncertain"),
+        "{message}"
+    );
+    assert!(message.contains("keep the writer fence"), "{message}");
+    assert!(response.get("status").is_none());
+    assert!(backup.join("another.db").is_file());
+    assert!(backup.join("backup.json").is_file());
+    let saved = Connection::open(backup.join("another.db")).unwrap();
+    assert_eq!(
+        saved
+            .pragma_query_value(None, "integrity_check", |r| r.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    assert_eq!(
+        saved
+            .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        8
+    );
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(backup.join("backup.json")).unwrap()).unwrap();
+    assert_eq!(metadata["schema_version"], 8);
+    let version: i64 = keeper
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert!(version == 8 || version == 9, "unexpected schema {version}");
+    assert_eq!(
+        keeper
+            .query_row("SELECT count(*) FROM fault_padding", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        256
+    );
+    eprintln!("commit fault: {message}; source schema after inspection: v{version}");
+    // An uncertain result requires inspection; the test never retries or restores the source.
+}

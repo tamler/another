@@ -1820,20 +1820,3 @@ fn hook_command(
         }
     }
 }
-
-#[cfg(test)]
-mod upgrade_output_tests {
-    #[test]
-    fn uncertain_commit_is_a_structured_error_not_success() {
-        let err = anyhow::Error::new(another_core::Error::Invalid(
-            "upgrade commit outcome uncertain; keep the writer fence".into(),
-        ));
-        let value = serde_json::json!({ "error": super::error_body(&err) });
-        assert_eq!(value["error"]["code"], "invalid");
-        assert!(value["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("uncertain"));
-        assert!(value.get("status").is_none());
-    }
-}
