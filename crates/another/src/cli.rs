@@ -797,13 +797,7 @@ pub fn main() -> ExitCode {
     match run(cli) {
         Ok(code) => code,
         Err(err) => {
-            let body = match err.downcast_ref::<another_core::Error>() {
-                Some(e) => e.body(),
-                None => another_core::ErrorBody {
-                    code: "error",
-                    message: format!("{err:#}"),
-                },
-            };
+            let body = error_body(&err);
             if json {
                 println!("{}", serde_json::json!({ "error": body }));
             } else {
@@ -811,6 +805,16 @@ pub fn main() -> ExitCode {
             }
             ExitCode::FAILURE
         }
+    }
+}
+
+fn error_body(err: &anyhow::Error) -> another_core::ErrorBody {
+    match err.downcast_ref::<another_core::Error>() {
+        Some(e) => e.body(),
+        None => another_core::ErrorBody {
+            code: "error",
+            message: format!("{err:#}"),
+        },
     }
 }
 
@@ -1046,8 +1050,14 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             anyhow::bail!("fence all writers and pass --confirm-writer-fence before upgrading");
         }
         Store::upgrade_offline(&another_home()?, backup_dir, *confirm_writer_fence)?;
-        println!("Backup verified and offline migration completed; retain the writer fence until matching clients are installed.");
-        return Ok(ExitCode::SUCCESS);
+        let result = serde_json::json!({
+            "status": "completed",
+            "backup": "verified",
+            "instruction": "Retain the writer fence until matching clients are installed."
+        });
+        return Ok(emit(json, &result, |_| {
+            "Backup verified and offline migration completed; retain the writer fence until matching clients are installed.".into()
+        }));
     }
 
     let store = open(home)?;
@@ -1808,5 +1818,22 @@ fn hook_command(
                 .collect();
             Ok(emit(json, &rows, |r| output::hook_status(r)))
         }
+    }
+}
+
+#[cfg(test)]
+mod upgrade_output_tests {
+    #[test]
+    fn uncertain_commit_is_a_structured_error_not_success() {
+        let err = anyhow::Error::new(another_core::Error::Invalid(
+            "upgrade commit outcome uncertain; keep the writer fence".into(),
+        ));
+        let value = serde_json::json!({ "error": super::error_body(&err) });
+        assert_eq!(value["error"]["code"], "invalid");
+        assert!(value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("uncertain"));
+        assert!(value.get("status").is_none());
     }
 }

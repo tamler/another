@@ -118,6 +118,18 @@ impl Store {
         backup_dir: &Path,
         writer_fence_confirmed: bool,
     ) -> Result<()> {
+        Self::upgrade_offline_with_parent_sync(home, backup_dir, writer_fence_confirmed, |parent| {
+            std::fs::File::open(parent)?.sync_all()
+        })
+    }
+
+    #[cfg(unix)]
+    fn upgrade_offline_with_parent_sync(
+        home: &Path,
+        backup_dir: &Path,
+        writer_fence_confirmed: bool,
+        sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+    ) -> Result<()> {
         use sha2::{Digest, Sha256};
         use std::io::{Read, Write};
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -258,6 +270,11 @@ impl Store {
         writeln!(record, "{metadata}")?;
         record.sync_all()?;
         std::fs::File::open(&backup_dir)?.sync_all()?;
+        sync_parent(&backup_parent).map_err(|e| {
+            Error::Invalid(format!(
+                "backup parent directory sync failed ({e}); source was not migrated; preserve the backup and writer fence"
+            ))
+        })?;
         migrate_offline(&mut source, version, data_version, &node)
     }
 
@@ -977,6 +994,88 @@ fn sign_unsigned(conn: &Connection, node_id: &str, key: &ed25519_dalek::SigningK
 #[cfg(all(test, unix))]
 mod upgrade_tests {
     use super::*;
+
+    #[test]
+    fn parent_sync_failure_prevents_source_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let backup = dir.path().join("backup");
+        drop(Store::open(&home).unwrap());
+        let db = home.join(DB_FILE);
+        let source = Connection::open(&db).unwrap();
+        source.execute_batch("DROP TABLE session_bindings; PRAGMA user_version=8; CREATE TABLE preserved(v TEXT); INSERT INTO preserved VALUES ('unchanged');").unwrap();
+        drop(source);
+        let mut called = false;
+        let result = Store::upgrade_offline_with_parent_sync(&home, &backup, true, |parent| {
+            called = true;
+            assert_eq!(parent, std::fs::canonicalize(dir.path()).unwrap());
+            assert!(backup.join(DB_FILE).is_file());
+            assert!(backup.join("backup.json").is_file());
+            let source = Connection::open(&db).unwrap();
+            assert_eq!(
+                source
+                    .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                8
+            );
+            Err(std::io::Error::other("injected sync failure"))
+        });
+        assert!(called);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("source was not migrated"));
+        let source = Connection::open(&db).unwrap();
+        assert_eq!(
+            source
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+        assert_eq!(
+            source
+                .query_row("SELECT v FROM preserved", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "unchanged"
+        );
+    }
+
+    #[test]
+    fn parent_sync_finishes_before_source_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let backup = dir.path().join("backup");
+        drop(Store::open(&home).unwrap());
+        let db = home.join(DB_FILE);
+        let source = Connection::open(&db).unwrap();
+        source
+            .execute_batch("DROP TABLE session_bindings; PRAGMA user_version=8;")
+            .unwrap();
+        drop(source);
+        let mut called = false;
+        Store::upgrade_offline_with_parent_sync(&home, &backup, true, |parent| {
+            called = true;
+            assert!(backup.join(DB_FILE).is_file());
+            assert!(backup.join("backup.json").is_file());
+            let source = Connection::open(&db).unwrap();
+            assert_eq!(
+                source
+                    .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                8
+            );
+            std::fs::File::open(parent)?.sync_all()
+        })
+        .unwrap();
+        assert!(called);
+        let source = Connection::open(&db).unwrap();
+        assert_eq!(
+            source
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            9
+        );
+    }
 
     #[test]
     fn intervening_write_refuses_upgrade_without_discarding_it() {

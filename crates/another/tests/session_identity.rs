@@ -254,11 +254,23 @@ fn old_home_requires_explicit_fenced_upgrade_and_verified_wal_backup() {
             .unwrap(),
         8
     );
-    let no_confirmation = command(&["upgrade", "--backup-dir", backup.to_str().unwrap()]);
+    let no_confirmation = command(&[
+        "--json",
+        "upgrade",
+        "--backup-dir",
+        backup.to_str().unwrap(),
+    ]);
     assert!(!no_confirmation.status.success());
+    let refused: serde_json::Value = serde_json::from_slice(&no_confirmation.stdout).unwrap();
+    assert!(refused["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("fence"));
+    assert!(refused.get("status").is_none());
     assert!(!backup.exists());
     drop(old);
     let upgraded = command(&[
+        "--json",
         "upgrade",
         "--backup-dir",
         backup.to_str().unwrap(),
@@ -269,6 +281,13 @@ fn old_home_requires_explicit_fenced_upgrade_and_verified_wal_backup() {
         "{}",
         String::from_utf8_lossy(&upgraded.stderr)
     );
+    let result: serde_json::Value = serde_json::from_slice(&upgraded.stdout).unwrap();
+    assert_eq!(result["status"], "completed");
+    assert_eq!(result["backup"], "verified");
+    assert!(result["instruction"]
+        .as_str()
+        .unwrap()
+        .contains("writer fence"));
     assert_eq!(
         std::fs::metadata(&backup).unwrap().permissions().mode() & 0o077,
         0
@@ -337,12 +356,16 @@ fn failed_migration_keeps_original_and_verified_backup() {
     old.execute_batch("PRAGMA user_version=8;").unwrap();
     drop(old);
     let out = run(&[
+        "--json",
         "upgrade",
         "--backup-dir",
         backup.to_str().unwrap(),
         "--confirm-writer-fence",
     ]);
     assert!(!out.status.success());
+    let failed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(failed["error"]["message"].is_string());
+    assert!(failed.get("status").is_none());
     assert!(backup.join("backup.json").is_file());
     let current = Connection::open(&db).unwrap();
     assert_eq!(
