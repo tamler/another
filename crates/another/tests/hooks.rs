@@ -730,11 +730,12 @@ fn has_key(v: &Value, key: &str) -> bool {
 fn install_changes(env: &Env, client: &str) -> Vec<String> {
     let out: Value =
         serde_json::from_str(&env.ok(&["--json", "hook", "install", "--client", client])).unwrap();
+    let expected = env.home.join(".codex").join("hooks.json");
     out["changes"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|c| c["path"].as_str().unwrap().ends_with(".codex/hooks.json"))
+        .filter(|c| Path::new(c["path"].as_str().unwrap()) == expected)
         .map(|c| c["change"].as_str().unwrap().to_string())
         .collect()
 }
