@@ -272,7 +272,7 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
                 .unwrap_or_default();
             (
                 format!("{actor} {verb} a session{client}"),
-                json!({ "agent_id": s("agent_id"), "session_id": p.get("session_id") }),
+                json!({ "agent_id": s("agent_id"), "session_id": null, "session_fingerprint": p.get("session_fingerprint") }),
             )
         }
         "message.sent" => {
@@ -712,9 +712,14 @@ impl Store {
 
     /// Summarize activity since a point in time (default: the last hour).
     pub fn activity_summary(&self, since: Option<Since>) -> Result<ActivitySummary> {
+        self.sweep()?;
+        self.activity_summary_without_sweep(since)
+    }
+
+    /// Read the activity summary without expiring holds or requests.
+    pub fn activity_summary_without_sweep(&self, since: Option<Since>) -> Result<ActivitySummary> {
         let now = self.now();
         let since = since.unwrap_or(Since::Time(now - 3_600_000));
-        self.sweep()?;
         self.read(|conn| {
             let since_ms = match &since {
                 Since::Time(t) => *t,
@@ -949,6 +954,31 @@ fn digest_next(agent: &str, unread: u32, urgent: u32, requests: usize) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_session_projection_redacts_without_rewriting_event() {
+        let store = Store::open_in_memory(crate::store::Clock::System).unwrap();
+        let raw = "legacy-private-session-402";
+        store
+            .write(|tx| {
+                tx.emit(
+                    "legacy",
+                    "session.started",
+                    json!({
+                        "agent_id": "legacy-actor", "client": "claude", "session_id": raw
+                    }),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let before = serde_json::to_string(&store.events(100).unwrap()).unwrap();
+        assert!(before.contains(raw));
+        let feed =
+            serde_json::to_string(&store.activity(ActivityQuery::default()).unwrap()).unwrap();
+        assert!(!feed.contains(raw));
+        let after = serde_json::to_string(&store.events(100).unwrap()).unwrap();
+        assert_eq!(before, after);
+    }
 
     #[test]
     fn parses_since() {

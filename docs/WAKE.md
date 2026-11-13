@@ -26,7 +26,7 @@ another wake list
 another wake clear --agent codex@shop
 ```
 
-When an Another session hook runs inside Herdr (`$HERDR_PANE_ID`), tmux (`$TMUX_PANE`) or cmux (`$CMUX_SURFACE_ID`), it records that pane automatically; with nested multiplexers, `TERM_PROGRAM` picks the innermost. The session-end hook forgets the capture again if it still points at that pane, and `another wake prune` drops captures whose pane is gone or whose agent has left. Automatic captures never replace a target you set by hand, and pruning never removes one. Herdr agents default to the Another agent's bare name when no target is stored.
+Unfenced session hooks do not capture or clear wake targets; set the target explicitly for the full session address. Existing automatic captures can still be pruned when their pane is gone or their agent has left, and pruning never removes a target set by hand. Herdr defaults to the bare name for ordinary agents without a stored target, but session actors require an explicit target.
 
 ## Waking
 

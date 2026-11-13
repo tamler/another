@@ -16,9 +16,7 @@ use std::io::{IsTerminal, Read};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use another_core::{
-    HoldConflict, InboxQuery, Program, RegisterAgent, SessionInfo, SessionPhase, Since, Store,
-};
+use another_core::{HoldConflict, InboxQuery, Program, Since, Store};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -704,9 +702,20 @@ impl HookInput {
                     .map(str::to_string)
             })
             .map(PathBuf::from);
-        let session_id = s("session_id")
-            .or_else(|| s("sessionId"))
-            .or_else(|| s("conversation_id"));
+        let mut session_id: Option<String> = None;
+        for key in ["session_id", "sessionId", "conversation_id"] {
+            if let Some(value) = v.get(key) {
+                match value.as_str() {
+                    Some(id) if session_id.as_deref().is_none_or(|prior| prior == id) => {
+                        session_id = Some(id.to_owned());
+                    }
+                    _ => {
+                        session_id = None;
+                        break;
+                    }
+                }
+            }
+        }
         let tool_name = s("tool_name").or_else(|| s("toolName"));
         let tool_input = v
             .get("tool_input")
@@ -815,31 +824,49 @@ fn truncate(mut s: String, max: usize) -> String {
     s
 }
 
-/// Resolve (and register on first use) the agent a hook acts for.
-fn hook_agent(store: &Store, client: Client, root: &Path) -> Result<String> {
-    if let Some(agent) = std::env::var("ANOTHER_AGENT")
+#[derive(Debug)]
+struct SessionIdentityError;
+
+impl std::fmt::Display for SessionIdentityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Another cannot identify this session; edit not protected")
+    }
+}
+impl std::error::Error for SessionIdentityError {}
+
+/// Resolve the same actor for all events from a given client session.
+fn hook_agent(
+    store: &Store,
+    client: Client,
+    root: &Path,
+    input: &HookInput,
+    create: bool,
+) -> Result<String> {
+    let id = input.session_id.as_deref().ok_or(SessionIdentityError)?;
+    let base = std::env::var("ANOTHER_AGENT")
         .ok()
-        .filter(|a| !a.trim().is_empty())
-    {
-        return Ok(agent);
+        .filter(|a| !a.trim().is_empty());
+    match store.session_actor(
+        client.as_str(),
+        client.program(),
+        &root.to_string_lossy(),
+        base.as_deref(),
+        id,
+        create,
+    ) {
+        Ok((address, _)) => Ok(address),
+        Err(
+            another_core::Error::Invalid(_)
+            | another_core::Error::Forbidden(_)
+            | another_core::Error::NotFound(_),
+        ) => Err(SessionIdentityError.into()),
+        Err(e) => Err(e.into()),
     }
-    let project = store.ensure_project(client.as_str(), &root.to_string_lossy())?;
-    let address = format!("{}@{}", client.as_str(), project.slug);
-    if store.agent(&address).is_err() {
-        store.register_agent(RegisterAgent {
-            name: client.as_str().to_string(),
-            program: client.program(),
-            project: Some(project.abs_path),
-            model: None,
-            description: None,
-        })?;
-    }
-    Ok(address)
 }
 
 /// Inbox + activity digest for session start, capped at [`MAX_DIGEST_CHARS`].
 pub fn session_digest(store: &Store, agent: &str) -> Result<String> {
-    let inbox = store.inbox(
+    let inbox = store.inbox_without_sweep(
         agent,
         InboxQuery {
             unread_only: true,
@@ -880,7 +907,8 @@ pub fn session_digest(store: &Store, agent: &str) -> Result<String> {
                 .unwrap_or_default()
         ));
     }
-    let summary = store.activity_summary(Some(Since::Time(store.now() - 3_600_000)))?;
+    let summary =
+        store.activity_summary_without_sweep(Some(Since::Time(store.now() - 3_600_000)))?;
     out.push_str("\nLast hour: ");
     out.push_str(summary.text.lines().next().unwrap_or_default());
     for h in summary.highlights.iter().rev().take(3).rev() {
@@ -892,23 +920,6 @@ pub fn session_digest(store: &Store, agent: &str) -> Result<String> {
         inbox.agent
     ));
     Ok(truncate(out, MAX_DIGEST_CHARS))
-}
-
-/// A per-agent state file. The name encodes every character outside `[A-Za-z0-9-]` as
-/// `_XX` hex, so distinct agent addresses (`a.b`, `a_b`) never share a file.
-fn state_path(another_home: &Path, agent: &str, ext: &str) -> PathBuf {
-    let mut safe = String::new();
-    for b in agent.bytes() {
-        if b.is_ascii_alphanumeric() || b == b'-' {
-            safe.push(b as char);
-        } else {
-            safe.push_str(&format!("_{b:02x}"));
-        }
-    }
-    another_home
-        .join("hooks")
-        .join("state")
-        .join(format!("{safe}.{ext}"))
 }
 
 /// A notice and the messages it announced.
@@ -983,60 +994,11 @@ pub fn prompt_notice(
     }))
 }
 
-/// The registered agent a hook acts for, without registering anything: `None` when the
-/// project or agent is not known yet (session start registers them).
-fn known_agent(store: &Store, client: Client, root: &Path) -> Result<Option<String>> {
-    if let Some(agent) = std::env::var("ANOTHER_AGENT")
-        .ok()
-        .filter(|a| !a.trim().is_empty())
-    {
-        return Ok(Some(agent));
-    }
-    let project = match store.project(&root.to_string_lossy()) {
-        Ok(p) => p,
-        Err(another_core::Error::NotFound(_)) => return Ok(None),
-        Err(e) => return Err(e.into()),
-    };
-    match store.agent(&format!("{}@{}", client.as_str(), project.slug)) {
-        Ok(a) => Ok(Some(a.address)),
-        Err(another_core::Error::NotFound(_)) => Ok(None),
-        Err(e) => Err(e.into()),
-    }
-}
-
-/// Seconds between mid-task keepalives for one agent.
-const KEEPALIVE_EVERY: Duration = Duration::from_secs(60);
-
-/// Presence and hold renewal while a task runs, at most once a minute per agent, best
-/// effort: a busy database just skips this round.
-fn keepalive_throttled(store: &Store, another_home: &Path, agent: &str) {
-    let stamp = state_path(another_home, agent, "beat");
-    let fresh = std::fs::metadata(&stamp)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .is_some_and(|age| age < KEEPALIVE_EVERY);
-    if fresh {
-        return;
-    }
-    // Stamp first so parallel tool calls do not all write.
-    if let Some(dir) = stamp.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(&stamp, b"");
-    if let Err(e) = store.keepalive(agent) {
-        tracing::debug!(error = %e, "keepalive skipped");
-    }
-}
-
 /// `post-tool`: mention mail that arrived mid-task, in the client's context format.
 /// Prints nothing when nothing is new or the agent is not registered yet.
-fn post_tool(store: &Store, env: &HookEnv, client: Client, dir: &Path) -> Result<String> {
+fn post_tool(store: &Store, client: Client, dir: &Path, input: &HookInput) -> Result<String> {
     let root = project_root(dir);
-    let Some(agent) = known_agent(store, client, &root)? else {
-        return Ok(String::new());
-    };
-    keepalive_throttled(store, &env.another_home, &agent);
+    let agent = hook_agent(store, client, &root, input, false)?;
     // The claim and its `push.notified` evidence are one transaction: a notice is shown
     // only if it was recorded, and only by the one caller that won it.
     let Some(notice) = prompt_notice(store, &agent, "post_tool", client)? else {
@@ -1212,14 +1174,13 @@ pub fn deny_message(agent: &str, conflicts: &[HoldConflict]) -> String {
 /// would skip the client's own permission prompts).
 fn pre_edit(store: &Store, client: Client, dir: &Path, input: &HookInput) -> Result<String> {
     let paths = input.edit_paths();
+    let root = project_root(dir);
+    let agent = hook_agent(store, client, &root, input, false)?;
     if paths.is_empty() {
         return Ok(String::new());
     }
-    let root = project_root(dir);
-    let agent = match known_agent(store, client, &root)? {
-        Some(a) => a,
-        None => hook_agent(store, client, &root)?,
-    };
+    // Refresh the repository link at admission, never on a passive lifecycle event.
+    store.ensure_project(&agent, &root.to_string_lossy())?;
     // Registered projects with their directories resolved, so a project registered under a
     // symlinked spelling (/tmp vs /private/tmp) is still recognised.
     let projects: Vec<(String, PathBuf)> = store
@@ -1308,24 +1269,21 @@ pub fn run(
         None => std::env::current_dir()?,
     };
     match event {
-        HookEvent::PostTool => return post_tool(store, env, client, &dir),
+        HookEvent::PostTool => return post_tool(store, client, &dir, &input),
         HookEvent::PreEdit => return pre_edit(store, client, &dir, &input),
         _ => {}
     }
     let root = project_root(&dir);
-    let agent = hook_agent(store, client, &root)?;
-    let info = SessionInfo {
-        client: Some(client.as_str().to_string()),
-        session_id: input.session_id,
-        ..Default::default()
-    };
+    let agent = hook_agent(
+        store,
+        client,
+        &root,
+        &input,
+        event == HookEvent::SessionStart,
+    )?;
     let text = match event {
         HookEvent::SessionStart => {
-            store.session(&agent, SessionPhase::Start, info)?;
-            crate::wake::capture_target(store, &agent);
             let digest = session_digest(store, &agent)?;
-            // New mail shown here should not be announced again on the next prompt.
-            let _ = prompt_notice(store, &agent, "session_start", client);
             if client == Client::Cursor {
                 json!({ "additional_context": digest }).to_string()
             } else {
@@ -1333,7 +1291,6 @@ pub fn run(
             }
         }
         HookEvent::Prompt => {
-            store.session(&agent, SessionPhase::Beat, info)?;
             if client == Client::Cursor {
                 // Cursor's prompt hook cannot add context; just let the prompt through.
                 json!({ "continue": true }).to_string()
@@ -1343,11 +1300,7 @@ pub fn run(
                     .unwrap_or_default()
             }
         }
-        HookEvent::SessionEnd => {
-            store.session(&agent, SessionPhase::End, info)?;
-            crate::wake::release_target(store, &agent);
-            String::new()
-        }
+        HookEvent::SessionEnd => String::new(),
         HookEvent::PostTool | HookEvent::PreEdit => unreachable!("handled above"),
     };
     Ok(text)
@@ -1403,6 +1356,9 @@ pub fn run_fail_open(
     match attempt() {
         Ok(text) => text,
         Err(e) => {
+            if event == HookEvent::PreEdit && e.downcast_ref::<SessionIdentityError>().is_some() {
+                return json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "Another cannot identify this session; edit not protected"}}).to_string();
+            }
             let error = format!("{e:#}");
             tracing::warn!(error = %error, "another hook failed; continuing");
             // Tool hooks run silently inside a task; leave a trace for whoever wonders

@@ -94,7 +94,8 @@ fn feed_summarizes_without_bodies() {
         .find(|i| i.kind == "session.started")
         .unwrap();
     assert_eq!(started.category, ActivityKind::Session);
-    assert_eq!(started.refs["session_id"], "s-1");
+    assert!(started.refs["session_id"].is_null());
+    assert!(!serde_json::to_string(&feed).unwrap().contains("s-1"));
     // Oldest first, ending at the cursor.
     assert_eq!(
         feed.next_since.as_deref(),
