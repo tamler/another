@@ -63,6 +63,8 @@ fn missing_binding_for_exact_session_actor_never_creates_a_new_identity() {
             .unwrap()
             .to_owned()
     };
+    // Hooks never create a home: it exists before any session starts.
+    assert!(command(&["init"]).output().unwrap().status.success());
     let actor = start("original-session");
     let sender = start("sender-session");
     let edit = |path: &str| {

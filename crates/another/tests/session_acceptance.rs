@@ -19,11 +19,19 @@ impl Fixture {
         std::fs::write(root.join(".git/config"), "[core]\n\tbare = false\n").unwrap();
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
-        Self {
+        let fixture = Self {
             _dir: dir,
             root,
             home,
-        }
+        };
+        // Hooks never create a home: it exists before any session starts.
+        assert!(fixture
+            .command(&["init"])
+            .stdout(Stdio::null())
+            .status()
+            .unwrap()
+            .success());
+        fixture
     }
 
     fn command(&self, args: &[&str]) -> Command {

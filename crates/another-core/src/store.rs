@@ -62,6 +62,10 @@ struct Inner {
     clock: Clock,
     path: Option<PathBuf>,
     busy_timeout: std::time::Duration,
+    /// Deadline of the single bounded operation this store was opened for, if any.
+    deadline: Option<std::time::Instant>,
+    /// SQLite VM steps the bounded operation has used so far.
+    steps: Arc<std::sync::atomic::AtomicUsize>,
     identity_uncertain: AtomicBool,
     #[cfg(test)]
     identity_commit_fault: std::sync::atomic::AtomicU8,
@@ -101,14 +105,17 @@ impl Store {
 
     pub fn open_with_clock(home: &Path, clock: Clock) -> Result<Store> {
         std::fs::create_dir_all(home)?;
+        let path = home.join(DB_FILE);
+        let conn = Connection::open(&path)?;
+        require_current_or_empty(&conn)?;
+        if conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? != 0 {
+            verify_v8_schema(&conn, None)?;
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700))?;
         }
-        let path = home.join(DB_FILE);
-        let conn = Connection::open(&path)?;
-        require_current_or_empty(&conn)?;
         use_wal(&conn)?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         Self::init(conn, clock, Some(path))
@@ -297,6 +304,32 @@ impl Store {
     /// so a busy database fails fast instead of stalling the agent. Fails when the database
     /// is missing or its schema is not current; an existing old home requires offline upgrade.
     pub fn open_quick(home: &Path, busy: std::time::Duration) -> Result<Store> {
+        Self::open_existing_inner(home, busy, None).map_err(identity_open_error)
+    }
+
+    /// Open an existing database for one bounded operation (a hook run or `session exec`).
+    /// Like [`Store::open_quick`] it creates and migrates nothing. In addition every SQLite
+    /// statement on the returned store, from schema validation at open onward, stops at
+    /// `deadline` or after [`OPERATION_STEP_LIMIT`] VM steps, and lock waits never extend
+    /// past `deadline`.
+    pub fn open_existing(
+        home: &Path,
+        busy: std::time::Duration,
+        deadline: std::time::Instant,
+    ) -> Result<Store> {
+        match Self::open_existing_inner(home, busy, Some(deadline)) {
+            Err(_) if std::time::Instant::now() >= deadline => {
+                Err(Error::IdentityScanBudgetExceeded("deadline".into()))
+            }
+            other => other.map_err(identity_open_error),
+        }
+    }
+
+    fn open_existing_inner(
+        home: &Path,
+        busy: std::time::Duration,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Store> {
         use rusqlite::OpenFlags;
         let path = home.join(DB_FILE);
         let conn = Connection::open_with_flags(
@@ -305,6 +338,14 @@ impl Store {
                 | OpenFlags::SQLITE_OPEN_URI
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        let steps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let busy = match deadline {
+            Some(deadline) => {
+                install_operation_budget(&conn, deadline, steps.clone())?;
+                busy.min(deadline.saturating_duration_since(std::time::Instant::now()))
+            }
+            None => busy,
+        };
         conn.busy_timeout(busy)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -315,6 +356,7 @@ impl Store {
                 MIGRATIONS.len()
             )));
         }
+        verify_v8_schema(&conn, deadline)?;
         let (node_id, key) = load_existing_local_node(&conn)?;
         Ok(Store {
             inner: Arc::new(Inner {
@@ -324,6 +366,8 @@ impl Store {
                 clock: Clock::System,
                 path: Some(path),
                 busy_timeout: busy,
+                deadline,
+                steps,
                 identity_uncertain: AtomicBool::new(false),
                 #[cfg(test)]
                 identity_commit_fault: std::sync::atomic::AtomicU8::new(0),
@@ -354,6 +398,8 @@ impl Store {
                 clock,
                 path,
                 busy_timeout: std::time::Duration::from_secs(5),
+                deadline: None,
+                steps: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 identity_uncertain: AtomicBool::new(false),
                 #[cfg(test)]
                 identity_commit_fault: std::sync::atomic::AtomicU8::new(0),
@@ -443,15 +489,31 @@ impl Store {
             ));
         }
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Every writer honors the durable identity fence: an identity commit whose outcome
+        // was not confirmed is settled here, under the write lock, before anything else.
+        reconcile_fences(&tx, self.inner.path.as_deref())?;
         let ctx = Tx {
             tx,
             node_id: &self.inner.node_id,
             now: self.inner.clock.now(),
             key: &self.inner.key,
+            identity_op: std::cell::RefCell::new(None),
         };
         let out = f(&ctx)?;
         ctx.tx.commit()?;
         Ok(out)
+    }
+
+    /// Settle identity operations whose commit outcome was never confirmed (a failed or
+    /// interrupted commit, or a crash before the fence was cleared). Runs under the write
+    /// lock, so each attempted transaction has ended and is either fully present or fully
+    /// rolled back. Every write does this implicitly; this entry point reports the outcomes.
+    pub fn reconcile_identity_operations(&self) -> Result<Vec<ReconciledOperation>> {
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let settled = reconcile_fences(&tx, self.inner.path.as_deref())?;
+        tx.commit()?;
+        Ok(settled)
     }
 
     /// Run the bounded binding scan and uniqueness decision in one immediate transaction.
@@ -459,11 +521,21 @@ impl Store {
         &self,
         f: impl FnOnce(&Tx<'_>, std::time::Instant) -> Result<T>,
     ) -> Result<T> {
+        self.write_identity_with_step_limit(200_000, f)
+    }
+
+    fn write_identity_with_step_limit<T>(
+        &self,
+        step_limit: usize,
+        f: impl FnOnce(&Tx<'_>, std::time::Instant) -> Result<T>,
+    ) -> Result<T> {
         use rusqlite::limits::Limit;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::{Duration, Instant};
 
-        let deadline = Instant::now() + Duration::from_secs(2);
+        // One identity phase gets two seconds, never more than its operation has left.
+        let phase = Instant::now() + Duration::from_secs(2);
+        let deadline = self.inner.deadline.map_or(phase, |end| end.min(phase));
         let mut conn = self.lock();
         if self.inner.identity_uncertain.load(Ordering::Acquire) {
             let path = self.inner.path.as_ref().ok_or_else(|| {
@@ -529,22 +601,44 @@ impl Store {
         conn.progress_handler(
             1,
             Some(move || {
-                progress_steps.fetch_add(1, Ordering::Relaxed) >= 200_000
+                progress_steps.fetch_add(1, Ordering::Relaxed) + 1 >= step_limit
                     || Instant::now() >= deadline
             }),
         )?;
+        // Identity commits are synced before they are reported, so a confirmed binding
+        // survives power loss.
+        if conn.pragma_update(None, "synchronous", "FULL").is_err() {
+            // Force a fresh connection before this one is used again.
+            self.inner.identity_uncertain.store(true, Ordering::Release);
+            return Err(Error::IdentityScanBudgetExceeded(
+                "identity connection state uncertain".into(),
+            ));
+        }
         let result = (|| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            verify_v8_schema(&tx, Some(deadline))?;
+            if Instant::now() >= deadline {
+                return Err(Error::IdentityScanBudgetExceeded("deadline".into()));
+            }
+            // Settle any earlier identity operation before deciding anything new.
+            reconcile_fences(&tx, self.inner.path.as_deref())?;
             let ctx = Tx {
                 tx,
                 node_id: &self.inner.node_id,
                 now: self.inner.clock.now(),
                 key: &self.inner.key,
+                identity_op: std::cell::RefCell::new(None),
             };
             let out = f(&ctx, deadline)?;
             if Instant::now() >= deadline {
                 return Err(Error::IdentityScanBudgetExceeded("deadline".into()));
             }
+            // A new binding is fenced on disk before its commit is attempted. If publishing
+            // fails nothing was committed: the transaction rolls back on drop.
+            let fence = match (ctx.identity_op.borrow_mut().take(), &self.inner.path) {
+                (Some(operation), Some(path)) => Some(publish_fence(path, &operation)?),
+                _ => None,
+            };
             #[cfg(test)]
             let fault = self.inner.identity_commit_fault.swap(0, Ordering::AcqRel);
             #[cfg(not(test))]
@@ -556,26 +650,48 @@ impl Store {
                 ctx.tx.commit().map_err(|_| ())
             };
             if commit_result.is_err() || fault == 1 {
+                // The fence stays on disk: every later writer, in this or any process,
+                // settles this exact operation before it may write.
                 self.inner.identity_uncertain.store(true, Ordering::Release);
                 return Err(Error::IdentityScanBudgetExceeded(
                     "binding commit outcome uncertain".into(),
                 ));
             }
+            if let Some(fence) = &fence {
+                clear_fence(fence);
+            }
             if Instant::now() >= deadline {
-                self.inner.identity_uncertain.store(true, Ordering::Release);
                 return Err(Error::IdentityScanBudgetExceeded(
-                    "commit outcome uncertain after deadline".into(),
+                    "deadline passed while committing; the operation is committed".into(),
                 ));
             }
             Ok(out)
         })();
+        self.inner
+            .steps
+            .fetch_add(steps.load(Ordering::Relaxed), Ordering::Relaxed);
+        // Cleanup runs with no step limit, so an exhausted budget cannot leave the
+        // transaction open: a rollback the limit interrupted is finished here.
         let reset = conn
             .progress_handler(0, None::<fn() -> bool>)
+            .and_then(|_| {
+                if conn.is_autocommit() {
+                    Ok(())
+                } else {
+                    conn.execute_batch("ROLLBACK")
+                }
+            })
+            .and_then(|_| conn.pragma_update(None, "synchronous", "NORMAL"))
             .and_then(|_| {
                 conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, previous_limit)
                     .map(|_| ())
             })
-            .and_then(|_| conn.busy_timeout(self.inner.busy_timeout));
+            .and_then(|_| conn.busy_timeout(self.inner.busy_timeout))
+            .and_then(|_| match self.inner.deadline {
+                Some(end) => install_operation_budget(&conn, end, self.inner.steps.clone())
+                    .map_err(|_| rusqlite::Error::InvalidQuery),
+                None => Ok(()),
+            });
         if reset.is_err() {
             self.inner.identity_uncertain.store(true, Ordering::Release);
             return Err(Error::IdentityScanBudgetExceeded(
@@ -583,23 +699,49 @@ impl Store {
             ));
         }
         match result {
+            Err(Error::Db(_)) if Instant::now() >= deadline => {
+                Err(Error::IdentityScanBudgetExceeded("deadline".into()))
+            }
+            Err(Error::Db(rusqlite::Error::SqliteFailure(code, _)))
+                if code.code == rusqlite::ErrorCode::OperationInterrupted
+                    && steps.load(Ordering::Relaxed) >= step_limit =>
+            {
+                Err(Error::IdentityScanBudgetExceeded(
+                    "SQLite step limit".into(),
+                ))
+            }
             Err(Error::Db(rusqlite::Error::SqliteFailure(code, _)))
                 if matches!(
                     code.code,
-                    rusqlite::ErrorCode::TooBig | rusqlite::ErrorCode::OperationInterrupted
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
                 ) =>
+            {
+                Err(Error::IdentityScanBudgetExceeded(
+                    "database busy: another writer held the lock".into(),
+                ))
+            }
+            Err(Error::Db(rusqlite::Error::SqliteFailure(code, _)))
+                if code.code == rusqlite::ErrorCode::TooBig =>
+            {
+                Err(Error::IdentityScanBudgetExceeded(
+                    "SQLite value size limit".into(),
+                ))
+            }
+            Err(Error::Db(rusqlite::Error::SqliteFailure(code, _)))
+                if code.code == rusqlite::ErrorCode::OperationInterrupted =>
             {
                 Err(Error::IdentityScanBudgetExceeded(
                     "SQLite scan limit or interruption".into(),
                 ))
             }
             Err(Error::Db(_))
-                if Instant::now() >= deadline || steps.load(Ordering::Relaxed) >= 200_000 =>
+                if Instant::now() >= deadline || steps.load(Ordering::Relaxed) >= step_limit =>
             {
                 Err(Error::IdentityScanBudgetExceeded(
                     "deadline or SQLite step limit".into(),
                 ))
             }
+            Err(error @ Error::Db(_)) => Err(identity_open_error(error)),
             other => other,
         }
     }
@@ -643,6 +785,175 @@ pub(crate) struct Tx<'a> {
     pub node_id: &'a str,
     pub now: i64,
     pub key: &'a ed25519_dalek::SigningKey,
+    /// Set by a transaction that creates a session binding: the new agent id, which names
+    /// the operation in its durable fence. See [`Store::reconcile_identity_operations`].
+    pub identity_op: std::cell::RefCell<Option<String>>,
+}
+
+/// An identity operation settled by [`Store::reconcile_identity_operations`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconciledOperation {
+    /// The agent id the operation was creating.
+    pub operation: String,
+    /// Whether its transaction is present (`true`) or was rolled back (`false`).
+    pub committed: bool,
+}
+
+/// Directory, inside the Another home, of fences for identity commits in flight.
+pub const FENCE_DIR: &str = "identity-ops";
+
+/// More pending fences than this is not a state this build produces; writers refuse.
+const MAX_FENCES: usize = 16;
+
+/// SQLite VM steps one bounded operation may use in total.
+pub const OPERATION_STEP_LIMIT: usize = 2_000_000;
+
+/// Stop every statement on `conn` at `deadline` or once `steps` reaches the limit.
+fn install_operation_budget(
+    conn: &Connection,
+    deadline: std::time::Instant,
+    steps: Arc<std::sync::atomic::AtomicUsize>,
+) -> Result<()> {
+    // Checked on every VM step, so even a statement begun after the deadline stops at once.
+    conn.progress_handler(
+        1,
+        Some(move || {
+            steps.fetch_add(1, Ordering::Relaxed) + 1 >= OPERATION_STEP_LIMIT
+                || std::time::Instant::now() >= deadline
+        }),
+    )?;
+    Ok(())
+}
+
+fn fence_id_ok(id: &str) -> bool {
+    (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+fn fence_error(what: &str) -> Error {
+    Error::IdentityUnavailable(format!(
+        "identity operation fence: {what}; writes are refused until `{FENCE_DIR}` in the Another home is inspected"
+    ))
+}
+
+/// Durably record that the transaction creating agent `operation` is about to commit.
+/// Called inside that transaction, so no other writer can observe the fence before the
+/// commit is attempted.
+#[cfg(unix)]
+fn publish_fence(db_path: &Path, operation: &str) -> Result<PathBuf> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let failed = |what: &str| {
+        Error::IdentityUnavailable(format!(
+            "cannot publish the identity operation fence ({what}); nothing was committed"
+        ))
+    };
+    if !fence_id_ok(operation) {
+        return Err(failed("invalid operation id"));
+    }
+    let home = db_path
+        .parent()
+        .ok_or_else(|| failed("no home directory"))?;
+    let dir = home.join(FENCE_DIR);
+    let created = match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(_) => return Err(failed("cannot create its directory")),
+    };
+    let path = dir.join(format!("{operation}.pending"));
+    let write = || -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
+        file.write_all(b"session.binding.v1\n")?;
+        file.sync_all()?;
+        std::fs::File::open(&dir)?.sync_all()?;
+        if created {
+            std::fs::File::open(home)?.sync_all()?;
+        }
+        Ok(())
+    };
+    if write().is_err() {
+        // Best effort: a fence left behind is settled as rolled back by the next writer.
+        let _ = std::fs::remove_file(&path);
+        return Err(failed("cannot write it durably"));
+    }
+    Ok(path)
+}
+
+#[cfg(not(unix))]
+fn publish_fence(_db_path: &Path, _operation: &str) -> Result<PathBuf> {
+    Err(Error::IdentityUnavailable(
+        "identity operation fences are unsupported on this platform; nothing was committed".into(),
+    ))
+}
+
+/// Remove the fence of a confirmed commit. Best effort: if it stays, the next writer finds
+/// the operation committed and removes it.
+fn clear_fence(path: &Path) {
+    if std::fs::remove_file(path).is_ok() {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+        }
+    }
+}
+
+/// Settle every pending identity fence. `conn` must hold the database write lock: the
+/// fence is published inside its transaction, so once another connection holds the lock
+/// that transaction has ended, and the agent row it created is either visible (committed)
+/// or will never appear (rolled back). Anything unreadable or unrecognized refuses.
+fn reconcile_fences(conn: &Connection, db_path: Option<&Path>) -> Result<Vec<ReconciledOperation>> {
+    let Some(home) = db_path.and_then(Path::parent) else {
+        return Ok(Vec::new());
+    };
+    let dir = home.join(FENCE_DIR);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err(fence_error("its directory is unreadable")),
+    };
+    let mut pending = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|_| fence_error("its directory is unreadable"))?;
+        if pending.len() == MAX_FENCES {
+            return Err(fence_error("too many pending operations"));
+        }
+        let name = entry.file_name();
+        let operation = name
+            .to_str()
+            .and_then(|n| n.strip_suffix(".pending"))
+            .filter(|id| fence_id_ok(id))
+            .ok_or_else(|| fence_error("unrecognized entry"))?
+            .to_string();
+        if !entry.file_type().is_ok_and(|t| t.is_file()) {
+            return Err(fence_error("unrecognized entry"));
+        }
+        pending.push((operation, entry.path()));
+    }
+    let mut settled = Vec::new();
+    for (operation, path) in pending {
+        let committed: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agents WHERE agent_id = ?1)",
+            [&operation],
+            |r| r.get(0),
+        )?;
+        std::fs::remove_file(&path)
+            .map_err(|_| fence_error("a settled operation cannot be cleared"))?;
+        tracing::warn!(
+            operation = %operation,
+            committed,
+            "settled an identity operation whose commit was not confirmed"
+        );
+        settled.push(ReconciledOperation {
+            operation,
+            committed,
+        });
+    }
+    if !settled.is_empty() {
+        let _ = std::fs::File::open(&dir).and_then(|d| d.sync_all());
+    }
+    Ok(settled)
 }
 
 impl std::ops::Deref for Tx<'_> {
@@ -1036,6 +1347,143 @@ fn require_current_or_empty(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Validate the entire catalog and its structural metadata against the checked-in v8 profile.
+/// The candidate was extracted from an isolated home created by the 0403dce executable;
+/// the drift test checks it against the current bundled migrations. Unknown profiles refuse.
+fn verify_v8_schema(conn: &Connection, deadline: Option<std::time::Instant>) -> Result<()> {
+    let result = verify_v8_schema_inner(conn, deadline);
+    check_schema_deadline(deadline)?;
+    result
+}
+
+fn identity_open_error(error: Error) -> Error {
+    match error {
+        Error::IdentityScanBudgetExceeded(_) | Error::IdentityUnavailable(_) => error,
+        other => Error::IdentityUnavailable(other.to_string()),
+    }
+}
+
+fn check_schema_deadline(deadline: Option<std::time::Instant>) -> Result<()> {
+    if deadline.is_some_and(|end| std::time::Instant::now() >= end) {
+        return Err(Error::IdentityScanBudgetExceeded("deadline".into()));
+    }
+    Ok(())
+}
+
+fn verify_v8_schema_inner(conn: &Connection, deadline: Option<std::time::Instant>) -> Result<()> {
+    use rusqlite::types::ValueRef;
+    let invalid = || Error::IdentityScanBudgetExceeded("unsupported database schema".into());
+    check_schema_deadline(deadline)?;
+    let expected: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("v8_schema_manifest.json")).map_err(|_| invalid())?;
+    check_schema_deadline(deadline)?;
+    if expected.len() > 256 {
+        return Err(invalid());
+    }
+    let mut stmt = conn.prepare("SELECT type,name,tbl_name,CASE WHEN length(CAST(sql AS BLOB)) <= 16384 THEN sql END, length(CAST(sql AS BLOB)) FROM sqlite_schema ORDER BY type,name LIMIT 257")?;
+    check_schema_deadline(deadline)?;
+    let mut rows = stmt.query([])?;
+    check_schema_deadline(deadline)?;
+    let mut total = 0usize;
+    let mut count = 0usize;
+    loop {
+        check_schema_deadline(deadline)?;
+        let next = rows.next()?;
+        check_schema_deadline(deadline)?;
+        let Some(row) = next else { break };
+        let Some(item) = expected.get(count) else {
+            return Err(invalid());
+        };
+        count += 1;
+        for (i, key) in [(0, "type"), (1, "name"), (2, "table")] {
+            let ValueRef::Text(raw) = row.get_ref(i)? else {
+                return Err(invalid());
+            };
+            if raw.len() > 1024 || item[key].as_str() != std::str::from_utf8(raw).ok() {
+                return Err(invalid());
+            }
+            total = total.checked_add(raw.len()).ok_or_else(invalid)?;
+        }
+        match (row.get_ref(3)?, row.get_ref(4)?) {
+            (ValueRef::Null, ValueRef::Null) if item["sql"].is_null() => {}
+            (ValueRef::Text(raw), ValueRef::Integer(len))
+                if (0..=16384).contains(&len) && raw.len() == len as usize =>
+            {
+                total = total.checked_add(raw.len()).ok_or_else(invalid)?;
+                if item["sql"].as_str() != std::str::from_utf8(raw).ok() {
+                    return Err(invalid());
+                }
+            }
+            _ => return Err(invalid()),
+        }
+        if total > 1024 * 1024 {
+            return Err(invalid());
+        }
+        check_schema_deadline(deadline)?;
+    }
+    if count != expected.len() {
+        return Err(invalid());
+    }
+    drop(rows);
+    drop(stmt);
+
+    for item in &expected {
+        let kind = item["type"].as_str().ok_or_else(invalid)?;
+        let name = item["name"].as_str().ok_or_else(invalid)?;
+        let probes: &[(&str, &str)] = match kind {
+            "table" => &[
+                ("columns", "SELECT cid,name,type,\"notnull\",dflt_value,pk,hidden FROM pragma_table_xinfo(?1) LIMIT ?2"),
+                ("foreign_keys", "SELECT id,seq,\"table\",\"from\",\"to\",on_update,on_delete,match FROM pragma_foreign_key_list(?1) LIMIT ?2"),
+                ("indexes", "SELECT seq,name,\"unique\",origin,partial FROM pragma_index_list(?1) LIMIT ?2"),
+            ],
+            "index" => &[("index_columns", "SELECT seqno,cid,name,\"desc\",coll,key FROM pragma_index_xinfo(?1) LIMIT ?2")],
+            _ => &[],
+        };
+        for (key, sql) in probes {
+            check_schema_deadline(deadline)?;
+            let expected_rows = item[*key].as_array().ok_or_else(invalid)?;
+            let mut query = conn.prepare(sql)?;
+            check_schema_deadline(deadline)?;
+            let column_count = query.column_count();
+            let mut rows = query.query(params![name, (expected_rows.len() + 1) as i64])?;
+            check_schema_deadline(deadline)?;
+            let mut index = 0usize;
+            loop {
+                check_schema_deadline(deadline)?;
+                let next = rows.next()?;
+                check_schema_deadline(deadline)?;
+                let Some(row) = next else { break };
+                let wanted = expected_rows
+                    .get(index)
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(invalid)?;
+                if wanted.len() != column_count {
+                    return Err(invalid());
+                }
+                for (column, expected_value) in wanted.iter().enumerate() {
+                    let value = match row.get_ref(column)? {
+                        ValueRef::Null => serde_json::Value::Null,
+                        ValueRef::Integer(value) => serde_json::Value::from(value),
+                        ValueRef::Text(raw) if raw.len() <= 1024 => serde_json::Value::from(
+                            std::str::from_utf8(raw).map_err(|_| invalid())?,
+                        ),
+                        _ => return Err(invalid()),
+                    };
+                    if &value != expected_value {
+                        return Err(invalid());
+                    }
+                }
+                check_schema_deadline(deadline)?;
+                index += 1;
+            }
+            if index != expected_rows.len() {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn migrate(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     require_current_or_empty(&tx)?;
@@ -1132,6 +1580,7 @@ fn ensure_local_node(
             node_id: &node_id,
             now,
             key: &key,
+            identity_op: std::cell::RefCell::new(None),
         };
         ctx.emit(
             "system",
@@ -1179,6 +1628,128 @@ fn sign_unsigned(conn: &Connection, node_id: &str, key: &ed25519_dalek::SigningK
 #[cfg(all(test, unix))]
 mod upgrade_tests {
     use super::*;
+
+    #[test]
+    fn schema_interruption_preserves_sqlite_cause_for_step_classification() {
+        let db = Connection::open_in_memory().unwrap();
+        for migration in MIGRATIONS {
+            db.execute_batch(migration).unwrap();
+        }
+        db.progress_handler(1, Some(|| true)).unwrap();
+        let result = verify_v8_schema(&db, None);
+        db.progress_handler(0, None::<fn() -> bool>).unwrap();
+        assert!(
+            matches!(result, Err(Error::Db(rusqlite::Error::SqliteFailure(code, _))) if code.code == rusqlite::ErrorCode::OperationInterrupted)
+        );
+    }
+
+    #[test]
+    fn interrupted_schema_read_is_typed_and_keeps_sqlite_cause() {
+        let db = Connection::open_in_memory().unwrap();
+        for migration in MIGRATIONS {
+            db.execute_batch(migration).unwrap();
+        }
+        db.progress_handler(1, Some(|| true)).unwrap();
+        let result = verify_v8_schema(&db, None).map_err(identity_open_error);
+        db.progress_handler(0, None::<fn() -> bool>).unwrap();
+        assert!(
+            matches!(result, Err(Error::IdentityUnavailable(ref reason)) if reason.to_lowercase().contains("interrupt")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn identity_schema_step_exhaustion_is_classified_before_closure() {
+        let store = Store::open_in_memory(Clock::System).unwrap();
+        let result = store.write_identity_with_step_limit(100, |_, _| -> Result<()> {
+            panic!("identity mutation ran after schema step exhaustion")
+        });
+        assert!(
+            matches!(result, Err(Error::IdentityScanBudgetExceeded(ref reason)) if reason == "SQLite step limit"),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn checked_in_v8_schema_matches_current_migrations() {
+        let db = Connection::open_in_memory().unwrap();
+        for migration in MIGRATIONS {
+            db.execute_batch(migration).unwrap();
+        }
+        verify_v8_schema(&db, None).unwrap();
+        let partial: i64 = db.query_row(
+            "SELECT partial FROM pragma_index_list('resources') WHERE name = 'resources_live_identity'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(partial, 1);
+    }
+
+    #[test]
+    fn schema_validation_refuses_an_elapsed_deadline() {
+        let db = Connection::open_in_memory().unwrap();
+        for migration in MIGRATIONS {
+            db.execute_batch(migration).unwrap();
+        }
+        assert!(matches!(
+            verify_v8_schema(&db, Some(std::time::Instant::now())),
+            Err(Error::IdentityScanBudgetExceeded(ref reason)) if reason == "deadline"
+        ));
+    }
+
+    #[test]
+    fn schema_profile_refuses_unknown_tables_and_triggers() {
+        for extra in [
+            "CREATE TABLE extra_data(value TEXT)",
+            "CREATE TRIGGER unknown_trigger AFTER INSERT ON nodes BEGIN SELECT 1; END",
+        ] {
+            let db = Connection::open_in_memory().unwrap();
+            for migration in MIGRATIONS {
+                db.execute_batch(migration).unwrap();
+            }
+            db.execute_batch(extra).unwrap();
+            assert!(verify_v8_schema(&db, None).is_err());
+        }
+    }
+
+    #[test]
+    fn noncanonical_equivalent_identity_index_is_refused() {
+        let home = tempfile::tempdir().unwrap();
+        drop(Store::open(home.path()).unwrap());
+        let db = Connection::open(home.path().join(DB_FILE)).unwrap();
+        db.execute_batch("DROP INDEX agents_identity; CREATE UNIQUE INDEX agents_identity ON agents (node_id, name, IFNULL(project_id, ''))").unwrap();
+        assert!(Store::open_quick(home.path(), std::time::Duration::from_millis(50)).is_err());
+    }
+
+    #[test]
+    fn damaged_required_indexes_are_refused_without_repair() {
+        for replacement in [
+            "",
+            "CREATE INDEX agents_identity ON agents(node_id, name, project_id)",
+            "CREATE UNIQUE INDEX agents_identity ON agents(node_id, name) WHERE project_id IS NOT NULL",
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            drop(Store::open(home.path()).unwrap());
+            let db = Connection::open(home.path().join(DB_FILE)).unwrap();
+            db.execute_batch("DROP INDEX agents_identity").unwrap();
+            if !replacement.is_empty() {
+                db.execute_batch(replacement).unwrap();
+            }
+            let before: (i64, i64) = db.query_row(
+                "SELECT (SELECT count(*) FROM agents), (SELECT count(*) FROM events)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).unwrap();
+            assert!(Store::open(home.path()).is_err());
+            assert!(Store::open_quick(home.path(), std::time::Duration::from_millis(50)).is_err());
+            let after: (i64, i64) = db.query_row(
+                "SELECT (SELECT count(*) FROM agents), (SELECT count(*) FROM events)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).unwrap();
+            assert_eq!(before, after);
+        }
+    }
 
     #[test]
     fn uncertain_identity_connection_reopens_before_resolving_again() {
@@ -1266,6 +1837,122 @@ mod upgrade_tests {
                 1
             );
         }
+    }
+
+    /// A binding commit whose outcome was not confirmed leaves a fence on disk that names
+    /// the operation. A later process settles exactly that operation, whichever way the
+    /// commit went, before it writes anything.
+    #[test]
+    fn unconfirmed_binding_commit_is_fenced_and_settled_across_restart() {
+        for (fault, committed) in [(1, true), (2, false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let home = dir.path().join("home");
+            let project = dir.path().join("project");
+            std::fs::create_dir_all(&project).unwrap();
+            let root = project.to_str().unwrap();
+            let store = Store::open(&home).unwrap();
+            store.ensure_project("fixture", root).unwrap();
+            store
+                .inner
+                .identity_commit_fault
+                .store(fault, Ordering::Release);
+            let first = store.session_actor(
+                "claude",
+                crate::identity::Program::Claude,
+                root,
+                None,
+                "fixture",
+                true,
+            );
+            assert!(
+                matches!(first, Err(Error::IdentityScanBudgetExceeded(ref why)) if why.contains("uncertain")),
+                "{first:?}"
+            );
+            let fences: Vec<String> = std::fs::read_dir(home.join(FENCE_DIR))
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect();
+            assert_eq!(fences.len(), 1, "{fences:?}");
+            let operation = fences[0].strip_suffix(".pending").unwrap().to_owned();
+            // The process that saw the failure is fenced until it reconciles.
+            assert!(store.ensure_project("fixture", root).is_err());
+            drop(store);
+
+            // A new process: the fence is still there, and its first write settles it.
+            let restarted =
+                Store::open_quick(&home, std::time::Duration::from_millis(200)).unwrap();
+            assert!(home.join(FENCE_DIR).join(&fences[0]).exists());
+            let settled = restarted.reconcile_identity_operations().unwrap();
+            assert_eq!(
+                settled,
+                [ReconciledOperation {
+                    operation: operation.clone(),
+                    committed
+                }]
+            );
+            assert_eq!(std::fs::read_dir(home.join(FENCE_DIR)).unwrap().count(), 0);
+            let agents = restarted.agents().unwrap();
+            assert_eq!(agents.len(), usize::from(committed));
+            assert!(agents.iter().all(|a| a.agent_id == operation));
+
+            // The session then resolves to one actor and one binding, never two.
+            let actor = restarted
+                .session_actor(
+                    "claude",
+                    crate::identity::Program::Claude,
+                    root,
+                    None,
+                    "fixture",
+                    true,
+                )
+                .unwrap()
+                .0;
+            assert!(restarted.is_session_actor(&actor).unwrap());
+            assert_eq!(restarted.agents().unwrap().len(), 1);
+            assert_eq!(
+                restarted
+                    .events(100)
+                    .unwrap()
+                    .iter()
+                    .filter(|e| e.kind == "session.binding.v1")
+                    .count(),
+                1
+            );
+            assert_eq!(std::fs::read_dir(home.join(FENCE_DIR)).unwrap().count(), 0);
+        }
+    }
+
+    /// A fence that cannot be written durably stops the commit: nothing is created.
+    #[test]
+    fn a_binding_is_not_committed_when_its_fence_cannot_be_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let root = project.to_str().unwrap();
+        let store = Store::open(&home).unwrap();
+        store.ensure_project("fixture", root).unwrap();
+        // A file where the fence directory must go.
+        std::fs::write(home.join(FENCE_DIR), b"").unwrap();
+        let result = store.session_actor(
+            "claude",
+            crate::identity::Program::Claude,
+            root,
+            None,
+            "fixture",
+            true,
+        );
+        assert!(
+            matches!(result, Err(Error::IdentityUnavailable(ref why)) if why.contains("fence")),
+            "{result:?}"
+        );
+        std::fs::remove_file(home.join(FENCE_DIR)).unwrap();
+        assert!(store.agents().unwrap().is_empty());
+        assert!(store
+            .events(100)
+            .unwrap()
+            .iter()
+            .all(|e| e.kind != "session.binding.v1"));
     }
 
     #[test]

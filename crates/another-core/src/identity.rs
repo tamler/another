@@ -27,12 +27,15 @@ struct SessionBinding {
 }
 
 fn binding_scan(tx: &Tx<'_>, deadline: std::time::Instant) -> Result<Vec<SessionBinding>> {
-    binding_scan_inner(tx, deadline).map_err(|err| match err {
+    let result = binding_scan_inner(tx, deadline);
+    if std::time::Instant::now() >= deadline {
+        return Err(Error::IdentityScanBudgetExceeded("deadline".into()));
+    }
+    result.map_err(|err| match err {
         Error::Db(rusqlite::Error::SqliteFailure(code, _))
             if matches!(
                 code.code,
                 rusqlite::ErrorCode::TooBig
-                    | rusqlite::ErrorCode::OperationInterrupted
                     | rusqlite::ErrorCode::DatabaseBusy
                     | rusqlite::ErrorCode::DatabaseLocked
             ) =>
@@ -40,6 +43,11 @@ fn binding_scan(tx: &Tx<'_>, deadline: std::time::Instant) -> Result<Vec<Session
             Error::IdentityScanBudgetExceeded(
                 "SQLite scan limit, interruption or contention".into(),
             )
+        }
+        Error::Db(rusqlite::Error::SqliteFailure(code, message))
+            if code.code == rusqlite::ErrorCode::OperationInterrupted =>
+        {
+            Error::Db(rusqlite::Error::SqliteFailure(code, message))
         }
         Error::Db(_) => Error::Invalid("invalid or unavailable session binding evidence".into()),
         other => other,
@@ -66,15 +74,15 @@ fn binding_scan_inner(tx: &Tx<'_>, deadline: std::time::Instant) -> Result<Vec<S
     let public = crate::crypto::public_of(tx.key);
     loop {
         check_deadline()?;
-        let Some(row) = rows.next()? else { break };
+        let next = rows.next()?;
+        check_deadline()?;
+        let Some(row) = next else { break };
         if result.len() == 50_000 {
             return Err(Error::IdentityScanBudgetExceeded("row limit".into()));
         }
-        let text = |i, max| -> Result<&str> {
+        let text = |i, max| -> Result<&[u8]> {
             match row.get_ref(i)? {
-                ValueRef::Text(value) if value.len() <= max => {
-                    std::str::from_utf8(value).map_err(|_| invalid())
-                }
+                ValueRef::Text(value) if value.len() <= max => Ok(value),
                 _ => Err(invalid()),
             }
         };
@@ -92,7 +100,7 @@ fn binding_scan_inner(tx: &Tx<'_>, deadline: std::time::Instant) -> Result<Vec<S
         let payload = text(6, 2048)?;
         let prev = match row.get_ref(7)? {
             ValueRef::Null => 0,
-            ValueRef::Text(v) if v.len() <= 128 && std::str::from_utf8(v).is_ok() => v.len(),
+            ValueRef::Text(v) if v.len() <= 128 => v.len(),
             _ => return Err(invalid()),
         };
         let signature = text(8, 256)?;
@@ -110,6 +118,18 @@ fn binding_scan_inner(tx: &Tx<'_>, deadline: std::time::Instant) -> Result<Vec<S
         if bytes > 16 * 1024 * 1024 {
             return Err(Error::IdentityScanBudgetExceeded("byte limit".into()));
         }
+        check_deadline()?;
+        let decode = |value| std::str::from_utf8(value).map_err(|_| invalid());
+        let event = decode(event)?;
+        let node = decode(node)?;
+        let actor = decode(actor)?;
+        let kind = decode(kind)?;
+        let payload = decode(payload)?;
+        let signature = decode(signature)?;
+        if let ValueRef::Text(value) = row.get_ref(7)? {
+            decode(value)?;
+        }
+        check_deadline()?;
         if signature.len() != 86
             || crate::crypto::unb64(signature)
                 .ok()
@@ -118,6 +138,7 @@ fn binding_scan_inner(tx: &Tx<'_>, deadline: std::time::Instant) -> Result<Vec<S
         {
             return Err(invalid());
         }
+        check_deadline()?;
         if !crate::crypto::verify(
             &public,
             &crate::crypto::event_message(event, node, ts, actor, kind, payload),
@@ -127,6 +148,7 @@ fn binding_scan_inner(tx: &Tx<'_>, deadline: std::time::Instant) -> Result<Vec<S
         }
         check_deadline()?;
         let binding: SessionBinding = serde_json::from_str(payload).map_err(|_| invalid())?;
+        check_deadline()?;
         if binding.version != 1
             || binding.digest.len() != 64
             || !binding
@@ -373,6 +395,10 @@ fn project_from_row(r: &Row<'_>) -> rusqlite::Result<Project> {
 
 const PROJECT_COLUMNS: &str = "project_id, node_id, abs_path, slug, created_at";
 
+/// Highest `-N` suffix tried when a project's directory name is already a slug, so
+/// registering a project is bounded work.
+const MAX_SLUG_SUFFIX: u32 = 1000;
+
 pub(crate) fn ensure_project_tx(tx: &Tx<'_>, actor: &str, raw_path: &str) -> Result<Project> {
     let abs_path = normalize_project_path(raw_path)?;
     let existing = tx
@@ -398,6 +424,11 @@ pub(crate) fn ensure_project_tx(tx: &Tx<'_>, actor: &str, raw_path: &str) -> Res
         .optional()?
         .is_some()
     {
+        if n > MAX_SLUG_SUFFIX {
+            return Err(Error::Invalid(format!(
+                "too many projects are named {base:?}; register this one from a differently named directory"
+            )));
+        }
         slug = format!("{base}-{n}");
         n += 1;
     }
@@ -564,7 +595,314 @@ pub(crate) fn get_agent(conn: &Connection, agent_id: &str) -> Result<Agent> {
     )?)
 }
 
+// This helper is not an authorization token and does not brand the transaction.
+// The public entry point validates the session ID before entering the transaction.
+#[cfg(not(windows))]
+struct SessionResolution<'a> {
+    requested_actor: Option<(&'a str, bool)>,
+    create: bool,
+}
+
+#[cfg(not(windows))]
+fn session_actor_tx(
+    tx: &Tx<'_>,
+    deadline: std::time::Instant,
+    client: &str,
+    program: Program,
+    root: &str,
+    session_id: &str,
+    resolution: SessionResolution<'_>,
+) -> Result<(String, String)> {
+    let SessionResolution {
+        requested_actor,
+        create,
+    } = resolution;
+    let exact_session = requested_actor.is_some_and(|(_, exact)| exact);
+    let project = match find_project(tx, tx.node_id, root) {
+        Ok(project) => project,
+        Err(Error::NotFound(_)) if create && !exact_session => ensure_project_tx(tx, client, root)?,
+        Err(e) => return Err(e),
+    };
+    let requested = requested_actor.map_or(client, |(actor, _)| actor);
+    let (name, slug) = match requested.split_once('@') {
+        Some((name, slug)) if !slug.contains('@') => (name, Some(slug)),
+        Some(_) => return Err(Error::Invalid("invalid session base address".into())),
+        None => (requested, None),
+    };
+    if slug.is_some_and(|slug| slug != project.slug) {
+        return Err(Error::Invalid("session base project does not match".into()));
+    }
+    if exact_session && slug.is_none() {
+        return Err(Error::Invalid(
+            "session actor requires a full address".into(),
+        ));
+    }
+    validate_name(name)?;
+    let bindings = binding_scan(tx, deadline)?;
+    let existing_binding = if exact_session {
+        let requested_id: Option<String> = tx
+            .query_row(
+                "SELECT agent_id FROM agents WHERE node_id=?1 AND name=?2 AND project_id=?3",
+                params![tx.node_id, name, project.project_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        bindings
+            .iter()
+            .find(|b| Some(&b.agent_id) == requested_id.as_ref())
+    } else {
+        None
+    };
+    if exact_session && existing_binding.is_none() {
+        return Err(Error::NotFound("session binding missing".into()));
+    }
+    let base = existing_binding.map_or(name, |binding| binding.base_name.as_str());
+    let mut hash = Sha256::new();
+    for value in [
+        "another-session-v1",
+        tx.node_id,
+        client,
+        project.project_id.as_str(),
+        base,
+        session_id,
+    ] {
+        hash.update((value.len() as u64).to_be_bytes());
+        hash.update(value.as_bytes());
+    }
+    let digest = format!("{:x}", hash.finalize());
+    let actor_name = format!("{}-s{}", &base[..base.len().min(30)], &digest[..32]);
+    if let Some(binding) = existing_binding {
+        if binding.client != client || binding.digest != digest || actor_name != name {
+            return Err(Error::Invalid(
+                "session actor does not match this session".into(),
+            ));
+        }
+    }
+    let addr = address(&actor_name, Some(&project.slug));
+    if let Some(binding) = bindings.iter().find(|b| b.digest == digest) {
+        if binding.project_id != project.project_id
+            || binding.client != client
+            || binding.base_name != base
+        {
+            return Err(Error::Invalid("session identity collision".into()));
+        }
+        return Ok((addr, digest));
+    }
+    if !create || exact_session {
+        return Err(Error::NotFound("session identity has not started".into()));
+    }
+    let occupied: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agents WHERE node_id=?1 AND project_id=?2 AND name=?3)",
+        params![tx.node_id, project.project_id, actor_name],
+        |r| r.get(0),
+    )?;
+    if occupied {
+        return Err(Error::Invalid("session identity collision".into()));
+    }
+    let agent_id = new_id();
+    // Name this operation for its durable fence: the commit is fenced before it is tried.
+    *tx.identity_op.borrow_mut() = Some(agent_id.clone());
+    let event_id = tx.emit(
+        &addr,
+        "agent.registered",
+        json!({
+            "agent_id": agent_id, "name": actor_name, "project_id": project.project_id,
+            "program": program.as_str(), "model": null, "description": null, "new": true
+        }),
+    )?;
+    tx.execute(
+                "INSERT INTO agents (agent_id,node_id,project_id,name,program,status,created_at,updated_at,last_seen_at,event_id,address) VALUES (?1,?2,?3,?4,?5,'active',?6,?6,?6,?7,?8)",
+                params![agent_id, tx.node_id, project.project_id, actor_name, program.as_str(), tx.now, event_id, addr],
+            )?;
+    tx.emit(&addr, "session.binding.v1", json!({"version":1,"agent_id":agent_id,"project_id":project.project_id,"client":client,"base_name":base,"digest":digest}))?;
+    Ok((addr, digest))
+}
+
+#[cfg(not(windows))]
+fn resolve_session_actor_tx(
+    tx: &Tx<'_>,
+    deadline: std::time::Instant,
+    client: &str,
+    program: Program,
+    root: &str,
+    requested_actor: Option<(&str, bool)>,
+    session_id: &str,
+) -> Result<(String, String)> {
+    session_actor_tx(
+        tx,
+        deadline,
+        client,
+        program,
+        root,
+        session_id,
+        SessionResolution {
+            requested_actor,
+            create: false,
+        },
+    )
+}
+
+#[cfg(not(windows))]
+fn validate_session_id(session_id: &str) -> Result<()> {
+    if session_id.is_empty() || session_id.len() > 512 || session_id.chars().any(char::is_control) {
+        return Err(Error::Invalid("invalid session identifier".into()));
+    }
+    Ok(())
+}
+
+/// Outcome of [`Store::admit_edit`].
+#[derive(Debug, Clone)]
+pub struct EditAdmission {
+    /// The session actor the edit was admitted (or stopped) for.
+    pub agent: String,
+    /// Other agents' holds that stop the edit. When not empty, no hold was taken.
+    pub conflicts: Vec<crate::holds::HoldConflict>,
+    /// Directories of unregistered projects the edit reaches. When not empty, no hold was
+    /// taken: admission never registers a project.
+    pub unregistered: Vec<String>,
+}
+
+impl EditAdmission {
+    /// Whether every file is now held by the session actor.
+    pub fn admitted(&self) -> bool {
+        self.conflicts.is_empty() && self.unregistered.is_empty()
+    }
+}
+
+/// Most distinct project groups one edit may span.
+const MAX_ADMISSION_GROUPS: usize = 32;
+/// Most files one edit may name across all its projects.
+const MAX_ADMISSION_FILES: usize = 128;
+
 impl Store {
+    /// Admit one edit atomically: in a single immediate transaction, under one deadline,
+    /// resolve the existing session actor (never creating one), map the edited files to
+    /// registered projects, check every file against other agents' holds, and only when
+    /// nothing conflicts take the session's holds on all of them. Either every file ends up
+    /// held or no hold is taken; a conflict leaves only its `guard.blocked` evidence.
+    ///
+    /// `group` receives the registered local projects, read inside the transaction, and
+    /// returns `(project directory, files relative to it)` for the files that belong to a
+    /// project. It must not write to the store. Admission creates no project: a group whose
+    /// directory is not registered is reported in [`EditAdmission::unregistered`].
+    ///
+    /// Any error means the edit is not protected and the caller must stop it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_edit(
+        &self,
+        client: &str,
+        program: Program,
+        root: &str,
+        requested_actor: Option<(&str, bool)>,
+        session_id: &str,
+        reason: &str,
+        group: impl FnOnce(&[Project]) -> Vec<(String, Vec<String>)>,
+    ) -> Result<EditAdmission> {
+        #[cfg(windows)]
+        {
+            let _ = (
+                client,
+                program,
+                root,
+                requested_actor,
+                session_id,
+                reason,
+                group,
+            );
+            return Err(Error::Invalid(
+                "session binding is unsupported on native Windows".into(),
+            ));
+        }
+        #[cfg(not(windows))]
+        {
+            validate_session_id(session_id)?;
+            self.write_identity(|tx, deadline| {
+                let (agent, _) = resolve_session_actor_tx(
+                    tx,
+                    deadline,
+                    client,
+                    program,
+                    root,
+                    requested_actor,
+                    session_id,
+                )
+                .map_err(|e| match e {
+                    Error::Invalid(_)
+                    | Error::Forbidden(_)
+                    | Error::NotFound(_)
+                    | Error::Ambiguous(_) => Error::IdentityUnavailable(
+                        "the session binding cannot be resolved; check the session address, base and project, then restart or reconcile the session".into(),
+                    ),
+                    other => other,
+                })?;
+                let me = resolve_agent(tx, tx.node_id, &agent)?;
+                // Refresh the session project's repository link at admission, never on a
+                // passive lifecycle event. The project exists: the binding names it.
+                crate::repo::refresh_link(tx, &find_project(tx, tx.node_id, root)?)?;
+                let projects = {
+                    let mut stmt = tx.prepare(&format!(
+                        "SELECT {PROJECT_COLUMNS} FROM projects WHERE node_id = ?1 ORDER BY slug"
+                    ))?;
+                    let rows = stmt.query_map([tx.node_id], project_from_row)?;
+                    rows.collect::<rusqlite::Result<Vec<_>>>()?
+                };
+                let groups = group(&projects);
+                if std::time::Instant::now() >= deadline {
+                    return Err(Error::IdentityScanBudgetExceeded("deadline".into()));
+                }
+                if groups.len() > MAX_ADMISSION_GROUPS
+                    || groups.iter().map(|(_, files)| files.len()).sum::<usize>()
+                        > MAX_ADMISSION_FILES
+                {
+                    return Err(Error::Invalid(format!(
+                        "one edit may name at most {MAX_ADMISSION_FILES} files in {MAX_ADMISSION_GROUPS} projects"
+                    )));
+                }
+                // Decide first, for every project, without writing any hold.
+                let mut plans = Vec::new();
+                let mut unregistered = Vec::new();
+                for (directory, files) in &groups {
+                    match find_project(tx, tx.node_id, directory) {
+                        Ok(project) => {
+                            plans.push(crate::holds::guard_plan_tx(tx, &me, project, files)?)
+                        }
+                        Err(Error::NotFound(_)) => unregistered.push(directory.clone()),
+                        Err(e) => return Err(e),
+                    }
+                }
+                if !unregistered.is_empty() {
+                    return Ok(EditAdmission {
+                        agent,
+                        conflicts: Vec::new(),
+                        unregistered,
+                    });
+                }
+                if plans.iter().any(|plan| !plan.conflicts.is_empty()) {
+                    let mut conflicts = Vec::new();
+                    for plan in plans {
+                        if !plan.conflicts.is_empty() {
+                            conflicts
+                                .extend(crate::holds::guard_blocked_tx(tx, &me, plan)?.conflicts);
+                        }
+                    }
+                    return Ok(EditAdmission {
+                        agent,
+                        conflicts,
+                        unregistered,
+                    });
+                }
+                for plan in plans {
+                    crate::holds::guard_take_tx(tx, &me, plan, reason)?;
+                }
+                Ok(EditAdmission {
+                    agent,
+                    conflicts: Vec::new(),
+                    unregistered,
+                })
+            })
+        }
+    }
+
     /// Resolve a client hook's per-session actor without storing its raw session ID.
     /// `requested_actor` is absent for the client default, or contains an explicit
     /// actor and its provenance: `false` means a base, `true` an exact session address.
@@ -589,82 +927,33 @@ impl Store {
         }
         #[cfg(not(windows))]
         {
-            if session_id.is_empty()
-                || session_id.len() > 512
-                || session_id.chars().any(char::is_control)
-            {
-                return Err(Error::Invalid("invalid session identifier".into()));
-            }
-            let exact_session = requested_actor.is_some_and(|(_, exact)| exact);
+            validate_session_id(session_id)?;
             self.write_identity(|tx, deadline| {
-            let project = match find_project(tx, tx.node_id, root) {
-                Ok(project) => project,
-                Err(Error::NotFound(_)) if create && !exact_session => ensure_project_tx(tx, client, root)?,
-                Err(e) => return Err(e),
-            };
-            let requested = requested_actor.map_or(client, |(actor, _)| actor);
-            let (name, slug) = match requested.split_once('@') {
-                Some((name, slug)) if !slug.contains('@') => (name, Some(slug)),
-                Some(_) => return Err(Error::Invalid("invalid session base address".into())),
-                None => (requested, None),
-            };
-            if slug.is_some_and(|slug| slug != project.slug) {
-                return Err(Error::Invalid("session base project does not match".into()));
-            }
-            if exact_session && slug.is_none() {
-                return Err(Error::Invalid("session actor requires a full address".into()));
-            }
-            validate_name(name)?;
-            let bindings = binding_scan(tx, deadline)?;
-            let existing_binding = if exact_session {
-                let requested_id: Option<String> = tx.query_row("SELECT agent_id FROM agents WHERE node_id=?1 AND name=?2 AND project_id=?3", params![tx.node_id,name,project.project_id], |r| r.get(0)).optional()?;
-                bindings.iter().find(|b| Some(&b.agent_id) == requested_id.as_ref())
-            } else { None };
-            if exact_session && existing_binding.is_none() {
-                return Err(Error::NotFound("session binding missing".into()));
-            }
-            let base = existing_binding.map_or(name, |binding| binding.base_name.as_str());
-            let mut hash = Sha256::new();
-            for value in ["another-session-v1", tx.node_id, client, project.project_id.as_str(), base, session_id] {
-                hash.update((value.len() as u64).to_be_bytes());
-                hash.update(value.as_bytes());
-            }
-            let digest = format!("{:x}", hash.finalize());
-            let actor_name = format!("{}-s{}", &base[..base.len().min(30)], &digest[..32]);
-            if let Some(binding) = existing_binding {
-                if binding.client != client || binding.digest != digest || actor_name != name {
-                    return Err(Error::Invalid("session actor does not match this session".into()));
+                if create {
+                    session_actor_tx(
+                        tx,
+                        deadline,
+                        client,
+                        program,
+                        root,
+                        session_id,
+                        SessionResolution {
+                            requested_actor,
+                            create: true,
+                        },
+                    )
+                } else {
+                    resolve_session_actor_tx(
+                        tx,
+                        deadline,
+                        client,
+                        program,
+                        root,
+                        requested_actor,
+                        session_id,
+                    )
                 }
-            }
-            let addr = address(&actor_name, Some(&project.slug));
-            if let Some(binding) = bindings.iter().find(|b| b.digest == digest) {
-                if binding.project_id != project.project_id || binding.client != client || binding.base_name != base {
-                    return Err(Error::Invalid("session identity collision".into()));
-                }
-                return Ok((addr, digest));
-            }
-            if !create || exact_session {
-                return Err(Error::NotFound("session identity has not started".into()));
-            }
-            let occupied: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM agents WHERE node_id=?1 AND project_id=?2 AND name=?3)",
-                params![tx.node_id, project.project_id, actor_name], |r| r.get(0),
-            )?;
-            if occupied {
-                return Err(Error::Invalid("session identity collision".into()));
-            }
-            let agent_id = new_id();
-            let event_id = tx.emit(&addr, "agent.registered", json!({
-                "agent_id": agent_id, "name": actor_name, "project_id": project.project_id,
-                "program": program.as_str(), "model": null, "description": null, "new": true
-            }))?;
-            tx.execute(
-                "INSERT INTO agents (agent_id,node_id,project_id,name,program,status,created_at,updated_at,last_seen_at,event_id,address) VALUES (?1,?2,?3,?4,?5,'active',?6,?6,?6,?7,?8)",
-                params![agent_id, tx.node_id, project.project_id, actor_name, program.as_str(), tx.now, event_id, addr],
-            )?;
-            tx.emit(&addr, "session.binding.v1", json!({"version":1,"agent_id":agent_id,"project_id":project.project_id,"client":client,"base_name":base,"digest":digest}))?;
-            Ok((addr, digest))
-        })
+            })
         }
     }
 
@@ -855,6 +1144,308 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(windows))]
+    #[test]
+    fn borrowed_session_resolution_sees_uncommitted_binding_and_rolls_back() {
+        let store = Store::open_in_memory(crate::store::Clock::System).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let before = store
+            .read(|conn| {
+                Ok((
+                    conn.query_row("SELECT count(*) FROM projects", [], |r| r.get::<_, i64>(0))?,
+                    conn.query_row("SELECT count(*) FROM agents", [], |r| r.get::<_, i64>(0))?,
+                    conn.query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))?,
+                ))
+            })
+            .unwrap();
+        let result: Result<()> = store.write_identity(|tx, deadline| {
+            let created = session_actor_tx(
+                tx,
+                deadline,
+                "claude",
+                Program::Claude,
+                root,
+                "private-session",
+                SessionResolution {
+                    requested_actor: None,
+                    create: true,
+                },
+            )?;
+            let changes_before: i64 = tx.query_row("SELECT total_changes()", [], |r| r.get(0))?;
+            let by_base = resolve_session_actor_tx(
+                tx,
+                deadline,
+                "claude",
+                Program::Claude,
+                root,
+                None,
+                "private-session",
+            )?;
+            let by_exact = resolve_session_actor_tx(
+                tx,
+                deadline,
+                "claude",
+                Program::Claude,
+                root,
+                Some((&created.0, true)),
+                "private-session",
+            )?;
+            assert_eq!(created, by_base);
+            assert_eq!(created, by_exact);
+            assert!(matches!(
+                resolve_session_actor_tx(
+                    tx,
+                    deadline,
+                    "claude",
+                    Program::Claude,
+                    root,
+                    Some((&created.0, true)),
+                    "other-session"
+                ),
+                Err(Error::Invalid(_))
+            ));
+            assert!(matches!(
+                resolve_session_actor_tx(
+                    tx,
+                    deadline,
+                    "claude",
+                    Program::Claude,
+                    root,
+                    None,
+                    "other-session"
+                ),
+                Err(Error::NotFound(_))
+            ));
+            let changes_after: i64 = tx.query_row("SELECT total_changes()", [], |r| r.get(0))?;
+            assert_eq!(changes_before, changes_after);
+            Err(Error::Invalid("test rollback".into()))
+        });
+        assert!(matches!(result, Err(Error::Invalid(ref s)) if s == "test rollback"));
+        let after = store
+            .read(|conn| {
+                Ok((
+                    conn.query_row("SELECT count(*) FROM projects", [], |r| r.get::<_, i64>(0))?,
+                    conn.query_row("SELECT count(*) FROM agents", [], |r| r.get::<_, i64>(0))?,
+                    conn.query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(before, after);
+        assert!(matches!(
+            store.session_actor(
+                "claude",
+                Program::Claude,
+                root,
+                None,
+                "private-session",
+                false
+            ),
+            Err(Error::NotFound(_))
+        ));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn session_resolution_contends_across_processes_with_parent_timeout() {
+        use std::time::{Duration, Instant};
+        struct ChildGuard {
+            child: std::process::Child,
+            fixture: Option<tempfile::TempDir>,
+            reaped: bool,
+        }
+        impl ChildGuard {
+            fn path(&self) -> &std::path::Path {
+                self.fixture.as_ref().unwrap().path()
+            }
+
+            fn stop_and_reap(&mut self) -> std::io::Result<std::process::ExitStatus> {
+                if let Some(status) = self.child.try_wait()? {
+                    self.reaped = true;
+                    return Ok(status);
+                }
+                std::fs::write(self.path().join("cancel"), b"cancel")?;
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    if let Some(status) = self.child.try_wait()? {
+                        self.reaped = true;
+                        return Ok(status);
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "cooperative child exit not verified",
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                if self.reaped {
+                    return;
+                }
+                if let Err(error) = self.stop_and_reap() {
+                    let path = self.fixture.take().unwrap().keep();
+                    eprintln!(
+                        "owned child {} exit not verified: {}; preserved fixture {}",
+                        self.child.id(),
+                        error,
+                        path.display()
+                    );
+                }
+            }
+        }
+        if let Some(fixture) = std::env::var_os("ANOTHER_RESOLVER_CONTENTION_FIXTURE") {
+            let fixture = std::path::PathBuf::from(fixture);
+            let store = Store::open(&fixture.join("home")).unwrap();
+            std::fs::write(fixture.join("ready"), b"ready").unwrap();
+            let end = Instant::now() + Duration::from_secs(10);
+            while !fixture.join("go").exists() {
+                if fixture.join("cancel").exists() {
+                    return;
+                }
+                assert!(Instant::now() < end, "parent did not signal");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let root = fixture.join("work");
+            assert!(matches!(
+                store.session_actor(
+                    "claude",
+                    Program::Claude,
+                    root.to_str().unwrap(),
+                    None,
+                    "session",
+                    false
+                ),
+                Err(Error::IdentityScanBudgetExceeded(_))
+            ));
+            return;
+        }
+
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("work");
+        std::fs::create_dir(&root).unwrap();
+        let store = Store::open(&fixture.path().join("home")).unwrap();
+        let expected = store
+            .session_actor(
+                "claude",
+                Program::Claude,
+                root.to_str().unwrap(),
+                None,
+                "session",
+                true,
+            )
+            .unwrap();
+        let child_process = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "identity::tests::session_resolution_contends_across_processes_with_parent_timeout",
+                "--nocapture",
+            ])
+            .env("ANOTHER_RESOLVER_CONTENTION_FIXTURE", fixture.path())
+            .spawn()
+            .unwrap();
+        let mut child = ChildGuard {
+            child: child_process,
+            fixture: Some(fixture),
+            reaped: false,
+        };
+        let ready_deadline = Instant::now() + Duration::from_secs(10);
+        while !child.path().join("ready").exists() {
+            if Instant::now() >= ready_deadline {
+                panic!("child did not become ready");
+            }
+            assert!(
+                child.child.try_wait().unwrap().is_none(),
+                "child exited before ready"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        store
+            .write(|_tx| {
+                std::fs::write(child.path().join("go"), b"go").unwrap();
+                let deadline = Instant::now() + Duration::from_secs(8);
+                loop {
+                    if let Some(status) = child.child.try_wait().unwrap() {
+                        child.reaped = true;
+                        assert!(status.success(), "child failed: {status}");
+                        println!("contention child exited and was reaped");
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        panic!("child exceeded parent timeout");
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .session_actor(
+                    "claude",
+                    Program::Claude,
+                    root.to_str().unwrap(),
+                    None,
+                    "session",
+                    false
+                )
+                .unwrap(),
+            expected
+        );
+        std::fs::remove_file(child.path().join("ready")).unwrap();
+        std::fs::remove_file(child.path().join("go")).unwrap();
+        let fixture = child.fixture.take().unwrap();
+        drop(child);
+        let child_process = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "identity::tests::session_resolution_contends_across_processes_with_parent_timeout",
+                "--nocapture",
+            ])
+            .env("ANOTHER_RESOLVER_CONTENTION_FIXTURE", fixture.path())
+            .spawn()
+            .unwrap();
+        let mut cancelled = ChildGuard {
+            child: child_process,
+            fixture: Some(fixture),
+            reaped: false,
+        };
+        let ready_deadline = Instant::now() + Duration::from_secs(10);
+        while !cancelled.path().join("ready").exists() {
+            assert!(
+                Instant::now() < ready_deadline,
+                "cancellation child did not become ready"
+            );
+            assert!(
+                cancelled.child.try_wait().unwrap().is_none(),
+                "cancellation child exited early"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(cancelled.stop_and_reap().unwrap().success());
+        println!("waiting child cooperatively cancelled and was reaped");
+    }
+
+    #[test]
+    fn interrupted_fetch_reports_elapsed_deadline() {
+        let store = Store::open_in_memory(crate::store::Clock::System).unwrap();
+        let outcome = store.write_identity(|tx, _| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1);
+            tx.progress_handler(1, Some(|| {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                true
+            }))?;
+            let result = binding_scan(tx, deadline);
+            tx.progress_handler(0, None::<fn() -> bool>)?;
+            assert!(matches!(result, Err(Error::IdentityScanBudgetExceeded(ref reason)) if reason == "deadline"));
+            Ok(())
+        });
+        assert!(outcome.is_ok());
+    }
 
     #[test]
     fn session_bindings_are_distinct_stable_and_do_not_persist_raw_ids() {

@@ -21,6 +21,14 @@ impl Fixture {
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(root.join(".git/config"), "[core]\n bare = false\n").unwrap();
+        // Hooks never create a home: it exists before any session starts.
+        assert!(Command::new(env!("CARGO_BIN_EXE_another"))
+            .arg("init")
+            .env("ANOTHER_HOME", home.join(".another"))
+            .output()
+            .unwrap()
+            .status
+            .success());
         Self {
             _temp: temp,
             root,

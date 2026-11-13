@@ -42,6 +42,14 @@ fn hook_environment_pair_requires_explicit_provenance() {
             .unwrap();
         child.wait_with_output().unwrap()
     };
+    // Hooks never create a home: it exists before any session starts.
+    assert!(Command::new(env!("CARGO_BIN_EXE_another"))
+        .arg("init")
+        .env("ANOTHER_HOME", home.join(".another"))
+        .output()
+        .unwrap()
+        .status
+        .success());
     let start = run("session-start", None, None);
     assert!(start.status.success());
     let text = String::from_utf8(start.stdout).unwrap();

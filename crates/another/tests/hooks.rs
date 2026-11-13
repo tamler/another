@@ -21,12 +21,15 @@ impl Env {
         let repo = dir.path().join("work").join("shop");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         std::fs::create_dir_all(repo.join("src")).unwrap();
-        Env {
+        let env = Env {
             _dir: dir,
             home,
             another_home,
             repo,
-        }
+        };
+        // Hooks never create a home: it exists before any session starts.
+        env.ok(&["init"]);
+        env
     }
 
     fn cmd(&self, args: &[&str]) -> Command {
@@ -493,14 +496,19 @@ fn cursor_and_grok_specifics() {
 #[test]
 fn hook_run_fails_open() {
     let env = Env::new();
-    // Garbage stdin, an explicit unknown agent, and an unwritable home all exit 0.
+    // Garbage stdin, an explicit unknown agent, and an unwritable home all exit 0. A
+    // session that cannot be identified says so and starts nothing.
     let out = env.hook(
         "session-start",
         "codex",
         &json!("garbage"),
         &[("ANOTHER_AGENT", "nobody-registered")],
     );
-    assert_eq!(out, "");
+    assert!(
+        out.starts_with("Another cannot identify this session"),
+        "{out}"
+    );
+    assert_eq!(env.ok(&["--json", "agent", "list"]).trim(), "[]");
     let mut cmd = env.cmd(&["hook", "run", "prompt", "--client", "claude"]);
     let status = cmd
         .env("ANOTHER_HOME", "/dev/null/not-a-dir")

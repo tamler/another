@@ -6,6 +6,23 @@ use rusqlite::Connection;
 #[test]
 fn new_home_preserves_v8_schema() {
     let home = tempfile::tempdir().unwrap();
+    let info = Command::new(env!("CARGO_BIN_EXE_another"))
+        .args(["sqlite-info", "--json"])
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .env("ANOTHER_HOME", home.path().join(".another"))
+        .output()
+        .unwrap();
+    assert!(info.status.success(), "SQLite diagnostic: {info:?}");
+    assert!(
+        !home.path().join(".another").exists(),
+        "diagnostic created a home"
+    );
+    let info: serde_json::Value = serde_json::from_slice(&info.stdout).unwrap();
+    let executable_engine = (
+        info["version"].as_str().unwrap().to_owned(),
+        info["source_id"].as_str().unwrap().to_owned(),
+    );
     let output = Command::new(env!("CARGO_BIN_EXE_another"))
         .arg("init")
         .env("HOME", home.path())
@@ -22,7 +39,6 @@ fn new_home_preserves_v8_schema() {
         .unwrap();
     eprintln!("SQLite {sqlite_version} source {sqlite_source}");
     assert_eq!(sqlite_version, "3.51.3");
-    db.execute_batch("CREATE TABLE executable_sqlite_probe(version TEXT NOT NULL, source TEXT NOT NULL); CREATE TRIGGER executable_sqlite_probe_trigger AFTER INSERT ON events BEGIN INSERT INTO executable_sqlite_probe VALUES (sqlite_version(),sqlite_source_id()); END;").unwrap();
     let probe = Command::new(env!("CARGO_BIN_EXE_another"))
         .args(["agent", "register", "fixture", "--program", "claude"])
         .env("HOME", home.path())
@@ -31,13 +47,6 @@ fn new_home_preserves_v8_schema() {
         .output()
         .unwrap();
     assert!(probe.status.success(), "executable probe: {probe:?}");
-    let executable_engine: (String, String) = db
-        .query_row(
-            "SELECT version,source FROM executable_sqlite_probe",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .unwrap();
     eprintln!(
         "Another executable SQLite {} source {}",
         executable_engine.0, executable_engine.1
@@ -82,6 +91,14 @@ fn real_hooks_reject_a_corrupted_signed_binding() {
             .unwrap();
         child.wait_with_output().unwrap()
     };
+    // Hooks never create a home: it exists before any session starts.
+    assert!(Command::new(env!("CARGO_BIN_EXE_another"))
+        .arg("init")
+        .env("ANOTHER_HOME", home.join(".another"))
+        .output()
+        .unwrap()
+        .status
+        .success());
     let start = hook(
         "session-start",
         serde_json::json!({"session_id":"private-fixture-session", "cwd":root}),

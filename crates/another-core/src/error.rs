@@ -15,6 +15,8 @@ pub enum Error {
     Forbidden(String),
     #[error("identity scan incomplete: {0}")]
     IdentityScanBudgetExceeded(String),
+    #[error("identity unavailable: {0}")]
+    IdentityUnavailable(String),
     #[error("database error: {0}")]
     Db(#[from] rusqlite::Error),
     #[error("io error: {0}")]
@@ -41,6 +43,7 @@ impl Error {
             Error::Ambiguous(_) => "ambiguous",
             Error::Forbidden(_) => "forbidden",
             Error::IdentityScanBudgetExceeded(_) => "identity_scan_budget_exceeded",
+            Error::IdentityUnavailable(_) => "identity_unavailable",
             Error::Db(_) => "db",
             Error::Io(_) => "io",
             Error::Json(_) => "json",

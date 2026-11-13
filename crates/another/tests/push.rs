@@ -160,6 +160,8 @@ impl Env {
     }
 
     fn start(&self, client: &str, dir: &Path, extra_env: &[(&str, &str)]) -> String {
+        // Hooks never create a home: it exists before any session starts.
+        self.ok(&["init"]);
         let stdin = json!({ "session_id": format!("{client}-s1"), "cwd": dir });
         let out = self
             .hook_timed("session-start", client, &stdin, extra_env)
@@ -484,20 +486,25 @@ fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
 }
 
 #[test]
-fn tool_hooks_fail_open_fast_when_the_database_is_missing_or_locked() {
+fn tool_hooks_are_fast_when_the_database_is_missing_or_locked() {
+    let denied = |out: &str| {
+        serde_json::from_str::<Value>(out).unwrap()["hookSpecificOutput"]["permissionDecision"]
+            == "deny"
+    };
     let env = Env::new();
     let edit = tool(
         &env.main,
         "Edit",
         json!({ "file_path": env.main.join("src/a.rs") }),
     );
-    // No database yet: silent, quick, and nothing is created.
+    // No database yet: the notice hook is silent, the edit guard stops the edit it cannot
+    // protect, both are quick, and nothing is created.
     let (out, took) = env.hook_timed("post-tool", "claude", &edit, &[]);
     assert_eq!(out, "");
     assert!(took < Duration::from_secs(2), "{took:?}");
     let (out, _) = env.hook_timed("pre-edit", "claude", &edit, &[]);
-    assert_eq!(out, "");
-    assert!(!env.another_home.join("another.db").exists());
+    assert!(denied(&out), "{out}");
+    assert!(!env.another_home.exists());
 
     let claude = env.start("claude", &env.main, &[]);
     let codex = env.start("codex", &env.wt, &[]);
@@ -511,9 +518,9 @@ fn tool_hooks_fail_open_fast_when_the_database_is_missing_or_locked() {
     let (out, took) = env.hook_timed("post-tool", "claude", &after, &[]);
     assert_eq!(out, "");
     assert!(took < Duration::from_secs(2), "{took:?}");
-    // The edit guard cannot write: it lets the edit through and logs why.
+    // The edit guard cannot write, so it cannot hold the file: the edit is stopped.
     let (out, took) = env.hook_timed("pre-edit", "claude", &edit, &[]);
-    assert_eq!(out, "");
+    assert!(denied(&out), "{out}");
     assert!(took < Duration::from_secs(3), "{took:?}");
     db.execute_batch("ROLLBACK").unwrap();
     drop(db);
@@ -533,14 +540,16 @@ fn tool_hooks_fail_open_fast_when_the_database_is_missing_or_locked() {
     assert_eq!(out, "");
     assert!(took < Duration::from_secs(2), "{took:?}");
     let (out, took) = env.hook_timed("pre-edit", "claude", &edit, &[]);
-    assert_eq!(out, "");
+    assert!(denied(&out), "{out}");
     assert!(took < Duration::from_secs(3), "{took:?}");
     db.execute_batch("ROLLBACK").unwrap();
     drop(db);
 
+    // Only the hook that failed open leaves a trace; a stopped edit says why itself.
     let log = std::fs::read_to_string(env.another_home.join("logs/hooks.log")).unwrap();
-    assert!(log.contains("pre-edit --client claude"), "{log}");
+    assert!(log.contains("post-tool --client claude"), "{log}");
     assert!(log.contains("failing open"), "{log}");
+    assert!(!log.contains("pre-edit"), "{log}");
 }
 
 impl Env {

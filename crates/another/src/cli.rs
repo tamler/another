@@ -43,6 +43,8 @@ pub struct AgentArg {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Show the SQLite version and source ID linked into this executable without opening a home.
+    SqliteInfo,
     /// Create the data directory and database if needed; show the local node.
     Init,
     /// Upgrade a fenced existing home after creating a verified backup.
@@ -934,6 +936,21 @@ fn emit<T: Serialize>(json: bool, value: &T, human: impl FnOnce(&T) -> String) -
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     let json = cli.json;
     let home = cli.home.as_deref();
+    if matches!(&cli.command, Command::SqliteInfo) {
+        let connection = rusqlite::Connection::open_in_memory()?;
+        let (version, source_id): (String, String) =
+            connection.query_row("SELECT sqlite_version(), sqlite_source_id()", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
+        let info = serde_json::json!({ "version": version, "source_id": source_id });
+        return Ok(emit(json, &info, |value| {
+            format!(
+                "SQLite {}\nSource ID {}",
+                value["version"].as_str().unwrap_or_default(),
+                value["source_id"].as_str().unwrap_or_default()
+            )
+        }));
+    }
     if let Command::Serve {
         stdio,
         bind,
@@ -1066,6 +1083,27 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             "session binding is unsupported on native Windows; this route is unprotected"
         );
     }
+    #[cfg(not(windows))]
+    if let Command::Session(SessionCmd::Exec { agent, command }) = &cli.command {
+        // Resolving a session actor never creates or migrates a home, and is bounded.
+        let home = another_home()?;
+        let budget = std::time::Duration::from_secs(5);
+        let store = Store::open_existing(&home, budget, std::time::Instant::now() + budget)?;
+        let address = store.session_actor_address(&agent.agent)?;
+        drop(store);
+        let status = std::process::Command::new(&command[0])
+            .args(&command[1..])
+            .env("ANOTHER_AGENT", &address)
+            .env("ANOTHER_AGENT_MODE", "session")
+            .env("ANOTHER_HOME", &home)
+            .status()?;
+        return Ok(ExitCode::from(
+            status
+                .code()
+                .and_then(|n| u8::try_from(n).ok())
+                .unwrap_or(1),
+        ));
+    }
     let store = open(home)?;
     let code = match cli.command {
         Command::Serve { .. }
@@ -1073,6 +1111,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         | Command::Hook(_)
         | Command::Daemon(_)
         | Command::Upgrade { .. }
+        | Command::SqliteInfo
         | Command::Remote(_) => {
             unreachable!("handled above")
         }
@@ -1088,24 +1127,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             };
             emit(json, &status, output::status)
         }
-        Command::Session(SessionCmd::Exec { agent, command }) => {
-            let address = store.session_actor_address(&agent.agent)?;
-            let mut child = std::process::Command::new(&command[0]);
-            child
-                .args(&command[1..])
-                .env("ANOTHER_AGENT", &address)
-                .env("ANOTHER_AGENT_MODE", "session");
-            if let Some(home) = store.db_path().and_then(Path::parent) {
-                child.env("ANOTHER_HOME", home);
-            }
-            let status = child.status()?;
-            return Ok(ExitCode::from(
-                status
-                    .code()
-                    .and_then(|n| u8::try_from(n).ok())
-                    .unwrap_or(1),
-            ));
-        }
+        Command::Session(_) => unreachable!("handled above"),
         Command::Project(ProjectCmd::Ensure { path }) => {
             let path = match path {
                 Some(p) => abs(&p)?,
@@ -1795,19 +1817,10 @@ fn hook_command(
             }
             #[cfg(not(windows))]
             {
-                // Fail open: whatever happens, print what we have and exit 0.
+                // Whatever happens, print what we have and exit 0. The run passes its
+                // safety gates before any route, never creates a home, and is bounded.
                 let home = another_home().ok();
-                // Tool hooks run on every tool call: open without migrating, with a short lock
-                // wait, so a busy or missing database costs milliseconds, not seconds.
-                let store = match &home {
-                    Some(h) if event.is_tool_event() => {
-                        Store::open_quick(h, event.busy_timeout()).map_err(anyhow::Error::from)
-                    }
-                    Some(h) => Store::open(h).map_err(anyhow::Error::from),
-                    None => Err(anyhow::anyhow!("no Another home directory")),
-                };
-                let env = another_home().and_then(HookEnv::detect);
-                let text = hooks::run_fail_open(store, env, home.as_deref(), *event, *client);
+                let text = hooks::run_guarded(home.as_deref(), *event, *client);
                 if !text.is_empty() {
                     println!("{text}");
                 }
@@ -1817,6 +1830,10 @@ fn hook_command(
         HookCmd::Install { client, dry_run } | HookCmd::Uninstall { client, dry_run } => {
             let install = matches!(cmd, HookCmd::Install { .. });
             let env = HookEnv::detect(another_home()?)?;
+            if install && !*dry_run {
+                // Hooks never create a home; installing them is the explicit step that does.
+                Store::open(&env.another_home)?;
+            }
             let report = hooks::install(&env, &clients(client), install, *dry_run)?;
             Ok(emit(json, &report, output::hook_report))
         }

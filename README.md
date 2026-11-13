@@ -76,7 +76,7 @@ another hook install --client all
 
 For Codex, review and trust Another's new or changed hooks yourself in `/hooks`. In Codex's default trust flow, automatic mail delivery and edit holds do not run there until you do. Codex also offers `--dangerously-bypass-hook-trust`, which runs enabled hooks without persisted trust for that one invocation; Another does not recommend it. `another hook status` checks configuration presence, not trust or execution. Another cannot grant trust. See [Codex trust and coverage](docs/HOOKS.md#codex-trust-and-coverage).
 
-Besides session start, prompts and session end, the pack adds a hook after each tool call (new mail shows up mid-task) and, for Claude Code, Codex and Grok, one before each file edit (the edit takes a hold, or is stopped when another agent holds the file). A missing session identity denies a matched edit when the client honors the response; database and wrapper failures still fail open. See [docs/HOOKS.md](docs/HOOKS.md).
+Besides session start, prompts and session end, the pack adds a hook after each tool call (new mail shows up mid-task) and, for Claude Code, Codex and Grok, one before each file edit (the edit takes a hold, or is stopped when another agent holds the file). An edit the guard cannot protect (no started session, a missing, locked or damaged database) is stopped when the client honors the response; a missing or crashed wrapper is unprotected. Hooks never create the home: run `another init` or `another hook install` first. See [docs/HOOKS.md](docs/HOOKS.md).
 
 **Optional: keep the daemon running** (macOS). It expires holds in the background and wakes idle Herdr agents when mail arrives:
 
@@ -180,6 +180,8 @@ Tool errors are `{"error": {"code", "message", "hint?"}}` with codes `not_found`
 ## CLI at a glance
 
 Every command takes `--json`. `--agent` and `--from` default to `$ANOTHER_AGENT`, and `--project` defaults to the current directory.
+
+`another sqlite-info` reports the SQLite version and source ID used by that executable; it uses an in-memory database and does not open or create an Another home.
 
 Logs go to stderr: `info` and above for `another serve`, `warn` and above for every other command. Set `$ANOTHER_LOG` to a [tracing filter](https://docs.rs/tracing-subscriber/0.3/tracing_subscriber/filter/struct.EnvFilter.html#directives) such as `debug` or `another::serve=warn` to change this; a value that does not parse is ignored.
 

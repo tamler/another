@@ -226,7 +226,8 @@ fn old_home_requires_explicit_fenced_upgrade_and_verified_wal_backup() {
     assert!(command(&["init"]).status.success());
     let db = home.join("another.db");
     let old = Connection::open(&db).unwrap();
-    old.execute_batch("DROP TABLE announcements; PRAGMA user_version=7; CREATE TABLE preserved_data(v TEXT); INSERT INTO preserved_data VALUES ('committed-wal');").unwrap();
+    // The marker lives in a catalog table: a table the schema does not define is refused.
+    old.execute_batch("DROP TABLE announcements; PRAGMA user_version=7; UPDATE nodes SET display_name='committed-wal';").unwrap();
     let denied = command(&["status"]);
     assert!(!denied.status.success());
     assert!(String::from_utf8_lossy(&denied.stderr).contains("offline upgrade"));
@@ -315,7 +316,7 @@ fn old_home_requires_explicit_fenced_upgrade_and_verified_wal_backup() {
         7
     );
     assert_eq!(
-        copy.query_row("SELECT v FROM preserved_data", [], |r| r
+        copy.query_row("SELECT display_name FROM nodes", [], |r| r
             .get::<_, String>(0))
             .unwrap(),
         "committed-wal"

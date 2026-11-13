@@ -16,7 +16,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::error::{Error, Result};
-use crate::identity::{address, find_project, resolve_agent, Project};
+use crate::identity::{address, find_project, resolve_agent, AgentRef, Project};
 use crate::mail::touch;
 use crate::requests::stale_overdue_tx;
 use crate::store::{new_id, Store, Tx};
@@ -453,6 +453,156 @@ fn conflicts_for(
     Ok(conflicts)
 }
 
+/// One project's share of an edit: its files as hold patterns, and the holds of other
+/// agents that stop it. Computing a plan writes no holds and no events.
+pub(crate) struct GuardPlan {
+    project: Project,
+    /// `(path as given, normalized pattern)`.
+    patterns: Vec<(String, String)>,
+    pub conflicts: Vec<HoldConflict>,
+}
+
+pub(crate) fn guard_plan_tx(
+    tx: &Tx<'_>,
+    me: &AgentRef,
+    project: Project,
+    paths: &[String],
+) -> Result<GuardPlan> {
+    let mut patterns: Vec<(String, String)> = Vec::new();
+    for raw in paths {
+        let p = normalize_pattern(&project, raw)?;
+        if p == "**" {
+            return Err(Error::Invalid(format!(
+                "{raw:?} is the project directory, not a file"
+            )));
+        }
+        if !patterns.iter().any(|(_, q)| *q == p) {
+            patterns.push((raw.clone(), p));
+        }
+    }
+    let mut conflicts = conflicts_for(tx, &project, &me.id, &patterns, true)?;
+    // Report project-relative paths, like hold patterns, not what the tool sent
+    // (often an absolute path).
+    for c in &mut conflicts {
+        if let Some((_, p)) = patterns.iter().find(|(raw, _)| *raw == c.path) {
+            c.path = p.clone();
+        }
+    }
+    Ok(GuardPlan {
+        project,
+        patterns,
+        conflicts,
+    })
+}
+
+/// Record a stopped edit (evidence for `another stats`: who was stopped, by whose hold,
+/// where) and report its conflicts. Takes no holds.
+pub(crate) fn guard_blocked_tx(tx: &Tx<'_>, me: &AgentRef, plan: GuardPlan) -> Result<EditGuard> {
+    let GuardPlan {
+        project,
+        patterns,
+        conflicts,
+    } = plan;
+    let repo = crate::repo::link_of(tx, &project)?.map(|l| l.key);
+    tx.emit(
+        &me.address,
+        crate::stats::BLOCKED_EVENT,
+        json!({
+            "agent_id": me.id,
+            "agent": me.address,
+            "project_id": project.project_id,
+            "project": project.slug,
+            "repo": repo,
+            "paths": patterns.iter().map(|(_, p)| p).collect::<Vec<_>>(),
+            "conflicts": conflicts.iter().map(|c| json!({
+                "path": c.path,
+                "holder": c.held.agent,
+                "hold_id": c.held.hold_id,
+                "pattern": c.held.pattern,
+                "project": c.held.project,
+            })).collect::<Vec<_>>(),
+        }),
+    )?;
+    Ok(EditGuard {
+        agent: me.address.clone(),
+        project: project.slug,
+        held: Vec::new(),
+        covered: Vec::new(),
+        conflicts,
+    })
+}
+
+/// Hold every path of a conflict-free plan: paths under a live exclusive hold of the
+/// agent's own are left alone (renewed past half their TTL), the rest get a narrow one.
+pub(crate) fn guard_take_tx(
+    tx: &Tx<'_>,
+    me: &AgentRef,
+    plan: GuardPlan,
+    reason: &str,
+) -> Result<EditGuard> {
+    let GuardPlan {
+        project, patterns, ..
+    } = plan;
+    let mut stmt = tx.prepare(
+        "SELECT hold_id, pattern, ttl_seconds, expires_at FROM holds
+         WHERE agent_id = ?1 AND project_id = ?2 AND exclusive = 1
+           AND released_at IS NULL AND expires_at > ?3
+         ORDER BY created_at",
+    )?;
+    let own = stmt
+        .query_map(params![me.id, project.project_id, tx.now], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut renew: Vec<(String, i64)> = Vec::new();
+    let mut covered = Vec::new();
+    let mut needed = Vec::new();
+    for (raw, pattern) in &patterns {
+        match own
+            .iter()
+            .find(|(_, held, _, _)| hold_covers(held, pattern))
+        {
+            Some((id, _, ttl, expires_at)) if expires_at - tx.now < ttl * 500 => {
+                if !renew.iter().any(|(r, _)| r == id) {
+                    renew.push((id.clone(), *ttl));
+                }
+            }
+            Some(_) => covered.push(raw.clone()),
+            None => needed.push(pattern.clone()),
+        }
+    }
+    renew_tx(tx, &me.address, &renew)?;
+    let mut ids: Vec<String> = renew.into_iter().map(|(id, _)| id).collect();
+    for pattern in &needed {
+        ids.push(upsert_hold_tx(
+            tx,
+            &me.id,
+            &me.address,
+            &project.project_id,
+            pattern,
+            true,
+            Some(reason),
+            DEFAULT_HOLD_TTL_SECONDS,
+            true,
+        )?);
+    }
+    if !ids.is_empty() {
+        touch(tx, &me.id)?;
+    }
+    Ok(EditGuard {
+        agent: me.address.clone(),
+        project: project.slug,
+        held: holds_by_id(tx, &ids)?,
+        covered,
+        conflicts: Vec::new(),
+    })
+}
+
 /// Create a hold, or update and renew the agent's existing hold on the same pattern.
 /// Returns the hold id.
 #[allow(clippy::too_many_arguments)]
@@ -781,114 +931,12 @@ impl Store {
         self.write(|tx| {
             let me = resolve_agent(tx, tx.node_id, agent)?;
             let project = find_project(tx, tx.node_id, project)?;
-            let mut patterns: Vec<(String, String)> = Vec::new();
-            for raw in paths {
-                let p = normalize_pattern(&project, raw)?;
-                if p == "**" {
-                    return Err(Error::Invalid(format!(
-                        "{raw:?} is the project directory, not a file"
-                    )));
-                }
-                if !patterns.iter().any(|(_, q)| *q == p) {
-                    patterns.push((raw.clone(), p));
-                }
+            let plan = guard_plan_tx(tx, &me, project, paths)?;
+            if plan.conflicts.is_empty() {
+                guard_take_tx(tx, &me, plan, reason)
+            } else {
+                guard_blocked_tx(tx, &me, plan)
             }
-            let mut conflicts = conflicts_for(tx, &project, &me.id, &patterns, true)?;
-            if !conflicts.is_empty() {
-                // Report project-relative paths, like hold patterns, not what the tool sent
-                // (often an absolute path).
-                for c in &mut conflicts {
-                    if let Some((_, p)) = patterns.iter().find(|(raw, _)| *raw == c.path) {
-                        c.path = p.clone();
-                    }
-                }
-                // Evidence for `another stats`: who was stopped, by whose hold, where.
-                let repo = crate::repo::link_of(tx, &project)?.map(|l| l.key);
-                tx.emit(
-                    &me.address,
-                    crate::stats::BLOCKED_EVENT,
-                    json!({
-                        "agent_id": me.id,
-                        "agent": me.address,
-                        "project_id": project.project_id,
-                        "project": project.slug,
-                        "repo": repo,
-                        "paths": patterns.iter().map(|(_, p)| p).collect::<Vec<_>>(),
-                        "conflicts": conflicts.iter().map(|c| json!({
-                            "path": c.path,
-                            "holder": c.held.agent,
-                            "hold_id": c.held.hold_id,
-                            "pattern": c.held.pattern,
-                            "project": c.held.project,
-                        })).collect::<Vec<_>>(),
-                    }),
-                )?;
-                return Ok(EditGuard {
-                    agent: me.address,
-                    project: project.slug,
-                    held: Vec::new(),
-                    covered: Vec::new(),
-                    conflicts,
-                });
-            }
-            let mut stmt = tx.prepare(
-                "SELECT hold_id, pattern, ttl_seconds, expires_at FROM holds
-                 WHERE agent_id = ?1 AND project_id = ?2 AND exclusive = 1
-                   AND released_at IS NULL AND expires_at > ?3
-                 ORDER BY created_at",
-            )?;
-            let own = stmt
-                .query_map(params![me.id, project.project_id, tx.now], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, i64>(2)?,
-                        r.get::<_, i64>(3)?,
-                    ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let mut renew: Vec<(String, i64)> = Vec::new();
-            let mut covered = Vec::new();
-            let mut needed = Vec::new();
-            for (raw, pattern) in &patterns {
-                match own
-                    .iter()
-                    .find(|(_, held, _, _)| hold_covers(held, pattern))
-                {
-                    Some((id, _, ttl, expires_at)) if expires_at - tx.now < ttl * 500 => {
-                        if !renew.iter().any(|(r, _)| r == id) {
-                            renew.push((id.clone(), *ttl));
-                        }
-                    }
-                    Some(_) => covered.push(raw.clone()),
-                    None => needed.push(pattern.clone()),
-                }
-            }
-            renew_tx(tx, &me.address, &renew)?;
-            let mut ids: Vec<String> = renew.into_iter().map(|(id, _)| id).collect();
-            for pattern in &needed {
-                ids.push(upsert_hold_tx(
-                    tx,
-                    &me.id,
-                    &me.address,
-                    &project.project_id,
-                    pattern,
-                    true,
-                    Some(reason),
-                    DEFAULT_HOLD_TTL_SECONDS,
-                    true,
-                )?);
-            }
-            if !ids.is_empty() {
-                touch(tx, &me.id)?;
-            }
-            Ok(EditGuard {
-                agent: me.address,
-                project: project.slug,
-                held: holds_by_id(tx, &ids)?,
-                covered,
-                conflicts: Vec::new(),
-            })
         })
     }
 

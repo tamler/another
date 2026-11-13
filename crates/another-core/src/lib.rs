@@ -42,7 +42,7 @@ pub use holds::{
     HoldFilter, HoldReport, SessionInfo, SessionPhase, SweepReport, DEFAULT_HOLD_TTL_SECONDS,
     MAX_HOLD_TTL_SECONDS, MIN_HOLD_TTL_SECONDS,
 };
-pub use identity::{Agent, Program, Project, RegisterAgent};
+pub use identity::{Agent, EditAdmission, Program, Project, RegisterAgent};
 pub use mail::{
     AckOutcome, Importance, Inbox, InboxItem, InboxQuery, Message, NewRequest, Reply, SendMessage,
     Thread, ThreadSummary, UnreadAfter, UnreadItem,
@@ -61,7 +61,10 @@ pub use resources::{
     MIN_LEASE_TTL_SECONDS,
 };
 pub use stats::{BlockedEdit, TrialStats, WakeRecord};
-pub use store::{default_home, Clock, Event, NodeInfo, Store, DB_FILE};
+pub use store::{
+    default_home, Clock, Event, NodeInfo, ReconciledOperation, Store, DB_FILE, FENCE_DIR,
+    OPERATION_STEP_LIMIT,
+};
 pub use time::{fmt_ts, parse_ts};
 pub use tokens::{AuditEntry, AuditRecord, NewToken, Token, TokenScope};
 pub use wake::{WakeTarget, WakeVia};

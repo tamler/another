@@ -10,11 +10,14 @@
 //! `post-tool` mentions new mail mid-task (read only, nothing printed when nothing is new),
 //! and `pre-edit` takes a narrow hold on each file about to be edited, or stops the edit
 //! when another agent holds it. Both open the database without migrating and with a short
-//! lock timeout, and both fail open: an error never blocks the agent.
+//! lock timeout. `post-tool` fails open; `pre-edit` fails closed: an edit that cannot be
+//! protected is stopped.
+//!
+//! No hook event creates an Another home, and every run is bounded: see [`run_guarded`].
 
 use std::io::{IsTerminal, Read};
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use another_core::{HoldConflict, InboxQuery, Program, Since, Store};
 use anyhow::{bail, Context, Result};
@@ -185,6 +188,16 @@ impl HookEvent {
             HookEvent::PostTool => Duration::from_millis(50),
             HookEvent::PreEdit => Duration::from_millis(300),
             _ => Duration::from_secs(5),
+        }
+    }
+
+    /// Wall-clock budget for the whole hook run: reading the envelope, opening and
+    /// validating the home, identity, and the event's own work.
+    pub fn budget(self) -> Duration {
+        if self.is_tool_event() {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_secs(5)
         }
     }
 }
@@ -778,14 +791,27 @@ impl HookInput {
         out
     }
 
-    fn read_stdin() -> HookInput {
-        let stdin = std::io::stdin();
-        if stdin.is_terminal() {
-            return HookInput::default();
+    /// Read the client's envelope from stdin, giving up at `deadline`. `None` when stdin
+    /// was not closed in time: a launcher that keeps the pipe open cannot stall the hook.
+    fn read_stdin(deadline: Instant) -> Option<HookInput> {
+        if std::io::stdin().is_terminal() {
+            return Some(HookInput::default());
         }
-        let mut raw = String::new();
-        let _ = stdin.lock().take(MAX_STDIN_BYTES).read_to_string(&mut raw);
-        HookInput::parse(&raw)
+        let (sender, receiver) = std::sync::mpsc::channel();
+        // The reader may block forever on an open pipe; it is abandoned at the deadline
+        // and ends with the process.
+        std::thread::spawn(move || {
+            let mut raw = String::new();
+            let _ = std::io::stdin()
+                .lock()
+                .take(MAX_STDIN_BYTES)
+                .read_to_string(&mut raw);
+            let _ = sender.send(raw);
+        });
+        receiver
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .ok()
+            .map(|raw| HookInput::parse(&raw))
     }
 }
 
@@ -828,6 +854,7 @@ fn truncate(mut s: String, max: usize) -> String {
 enum SessionIdentityError {
     Environment,
     ClientSessionId,
+    ProjectPath,
     Binding,
 }
 
@@ -836,11 +863,64 @@ impl std::fmt::Display for SessionIdentityError {
         f.write_str(match self {
             Self::Environment => "Another cannot identify this session; set a valid nonempty ANOTHER_AGENT and ANOTHER_AGENT_MODE to base or session, or unset both, then relaunch",
             Self::ClientSessionId => "Another cannot identify this session: client session ID is missing, invalid or inconsistent; check client hook configuration and restart the session",
+            Self::ProjectPath => "Another cannot identify this session: project path is not valid UTF-8; move the project to a UTF-8 path and restart the session",
             Self::Binding => "Another cannot resolve the session binding; check the session address, base and project, then restart or reconcile the session",
         })
     }
 }
 impl std::error::Error for SessionIdentityError {}
+
+/// What a hook event claims about its session, validated without touching any store.
+struct IdentityRequest<'a> {
+    session_id: &'a str,
+    /// Explicit actor from the environment and whether it is an exact session address.
+    actor: Option<(String, bool)>,
+    root: &'a str,
+}
+
+impl IdentityRequest<'_> {
+    fn actor(&self) -> Option<(&str, bool)> {
+        self.actor
+            .as_ref()
+            .map(|(name, exact)| (name.as_str(), *exact))
+    }
+}
+
+/// The safety gate every hook route passes before a home is opened: a usable client
+/// session ID, consistent provenance variables and a UTF-8 project root.
+fn identity_request<'a>(
+    root: &'a Path,
+    input: &'a HookInput,
+) -> std::result::Result<IdentityRequest<'a>, SessionIdentityError> {
+    let session_id = input
+        .session_id
+        .as_deref()
+        .filter(|id| !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control))
+        .ok_or(SessionIdentityError::ClientSessionId)?;
+    let agent = std::env::var_os("ANOTHER_AGENT");
+    let mode = std::env::var_os("ANOTHER_AGENT_MODE");
+    let actor = match (agent.as_deref(), mode.as_deref()) {
+        (None, None) => None,
+        (Some(agent), Some(mode)) => {
+            let agent = agent
+                .to_str()
+                .filter(|s| !s.trim().is_empty())
+                .ok_or(SessionIdentityError::Environment)?;
+            match mode.to_str() {
+                Some("base") => Some((agent.to_owned(), false)),
+                Some("session") => Some((agent.to_owned(), true)),
+                _ => return Err(SessionIdentityError::Environment),
+            }
+        }
+        _ => return Err(SessionIdentityError::Environment),
+    };
+    let root = root.to_str().ok_or(SessionIdentityError::ProjectPath)?;
+    Ok(IdentityRequest {
+        session_id,
+        actor,
+        root,
+    })
+}
 
 /// Resolve the same actor for all events from a given client session.
 fn hook_agent(
@@ -850,34 +930,13 @@ fn hook_agent(
     input: &HookInput,
     create: bool,
 ) -> Result<String> {
-    let id = input
-        .session_id
-        .as_deref()
-        .filter(|id| !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control))
-        .ok_or(SessionIdentityError::ClientSessionId)?;
-    let agent = std::env::var_os("ANOTHER_AGENT");
-    let mode = std::env::var_os("ANOTHER_AGENT_MODE");
-    let (base, exact_session) = match (agent.as_deref(), mode.as_deref()) {
-        (None, None) => (None, false),
-        (Some(agent), Some(mode)) => {
-            let agent = agent
-                .to_str()
-                .filter(|s| !s.trim().is_empty())
-                .ok_or(SessionIdentityError::Environment)?;
-            match mode.to_str() {
-                Some("base") => (Some(agent), false),
-                Some("session") => (Some(agent), true),
-                _ => return Err(SessionIdentityError::Environment.into()),
-            }
-        }
-        _ => return Err(SessionIdentityError::Environment.into()),
-    };
+    let request = identity_request(root, input)?;
     match store.session_actor(
         client.as_str(),
         client.program(),
-        &root.to_string_lossy(),
-        base.map(|name| (name, exact_session)),
-        id,
+        request.root,
+        request.actor(),
+        request.session_id,
         create,
     ) {
         Ok((address, _)) => Ok(address),
@@ -885,9 +944,9 @@ fn hook_agent(
             another_core::Error::Invalid(_)
             | another_core::Error::Forbidden(_)
             | another_core::Error::NotFound(_)
-            | another_core::Error::IdentityScanBudgetExceeded(_)
             | another_core::Error::Ambiguous(_),
         ) => Err(SessionIdentityError::Binding.into()),
+        // Budget and availability failures keep their first cause.
         Err(e) => Err(e.into()),
     }
 }
@@ -1203,20 +1262,74 @@ pub fn deny_message(agent: &str, conflicts: &[HoldConflict]) -> String {
 fn pre_edit(store: &Store, client: Client, dir: &Path, input: &HookInput) -> Result<String> {
     let paths = input.edit_paths();
     let root = project_root(dir);
-    let agent = hook_agent(store, client, &root, input, false)?;
     if paths.is_empty() {
+        hook_agent(store, client, &root, input, false)?;
         return Ok(String::new());
     }
-    // Refresh the repository link at admission, never on a passive lifecycle event.
-    store.ensure_project(&agent, &root.to_string_lossy())?;
+    if paths.len() > MAX_EDIT_PATHS {
+        bail!(
+            "one edit names {} files; at most {MAX_EDIT_PATHS} can be protected at once",
+            paths.len()
+        );
+    }
+    let request = identity_request(&root, input)?;
+    // Identity, project lookup, the conflict check and the holds are one transaction
+    // under one deadline: the edit is held completely or stopped.
+    let admission = store.admit_edit(
+        client.as_str(),
+        client.program(),
+        request.root,
+        request.actor(),
+        request.session_id,
+        AUTO_HOLD_REASON,
+        |projects| group_edit(dir, &paths, projects),
+    )?;
+    if admission.admitted() {
+        return Ok(String::new());
+    }
+    let reason = if admission.unregistered.is_empty() {
+        deny_message(&admission.agent, &admission.conflicts)
+    } else {
+        truncate(
+            format!(
+                "Another stopped this edit: it reaches a project that is not registered ({}), so its holds cannot be checked. Register it with `another project ensure <directory>` and try again.",
+                admission.unregistered.join(", ")
+            ),
+            1000,
+        )
+    };
+    Ok(deny(&reason))
+}
+
+/// Most files one edit may name.
+const MAX_EDIT_PATHS: usize = 128;
+
+/// The pre-edit response that stops the edit.
+fn deny(reason: &str) -> String {
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    })
+    .to_string()
+}
+
+/// Group the files of an edit by the project they belong to, as `(project directory,
+/// files relative to it)`. Reads the filesystem only.
+fn group_edit(
+    dir: &Path,
+    paths: &[String],
+    registered: &[another_core::Project],
+) -> Vec<(String, Vec<String>)> {
     // Registered projects with their directories resolved, so a project registered under a
     // symlinked spelling (/tmp vs /private/tmp) is still recognised.
-    let projects: Vec<(String, PathBuf)> = store
-        .projects()?
-        .into_iter()
+    let projects: Vec<(String, PathBuf)> = registered
+        .iter()
         .map(|p| {
             let real = resolve_existing(Path::new(&p.abs_path));
-            (p.abs_path, real)
+            (p.abs_path.clone(), real)
         })
         .collect();
     // Group files by the project they belong to: the deeper of their git checkout and the
@@ -1224,7 +1337,7 @@ fn pre_edit(store: &Store, client: Client, dir: &Path, input: &HookInput) -> Res
     // is checked against the holds on the file it really reaches. Files in neither (scratch
     // space, /tmp) are not held.
     let mut groups: Vec<(String, Vec<String>)> = Vec::new();
-    for raw in &paths {
+    for raw in paths {
         // Not normalized lexically: `..` must apply after symlinks (review N1).
         for target in edit_targets(&dir.join(raw)) {
             let git = git_root_above(&target);
@@ -1256,29 +1369,7 @@ fn pre_edit(store: &Store, client: Client, dir: &Path, input: &HookInput) -> Res
             }
         }
     }
-    let mut conflicts = Vec::new();
-    for (project_dir, files) in &groups {
-        let project = match store.project(project_dir) {
-            Ok(p) => p.abs_path,
-            Err(another_core::Error::NotFound(_)) => {
-                store.ensure_project(&agent, project_dir)?.abs_path
-            }
-            Err(e) => return Err(e.into()),
-        };
-        let guard = store.guard_edit(&agent, &project, files, AUTO_HOLD_REASON)?;
-        conflicts.extend(guard.conflicts);
-    }
-    if conflicts.is_empty() {
-        return Ok(String::new());
-    }
-    Ok(json!({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": deny_message(&agent, &conflicts),
-        }
-    })
-    .to_string())
+    groups
 }
 
 /// Run a hook event. Returns the text to print on stdout (possibly empty).
@@ -1296,17 +1387,28 @@ pub fn run(
         Some(d) => d.clone(),
         None => std::env::current_dir()?,
     };
+    run_event(store, event, client, &dir, &input)
+}
+
+/// Run one event for the client that acts on it, in the directory it happened in.
+fn run_event(
+    store: &Store,
+    event: HookEvent,
+    client: Client,
+    dir: &Path,
+    input: &HookInput,
+) -> Result<String> {
     match event {
-        HookEvent::PostTool => return post_tool(store, client, &dir, &input),
-        HookEvent::PreEdit => return pre_edit(store, client, &dir, &input),
+        HookEvent::PostTool => return post_tool(store, client, dir, input),
+        HookEvent::PreEdit => return pre_edit(store, client, dir, input),
         _ => {}
     }
-    let root = project_root(&dir);
+    let root = project_root(dir);
     let agent = hook_agent(
         store,
         client,
         &root,
-        &input,
+        input,
         event == HookEvent::SessionStart,
     )?;
     let text = match event {
@@ -1338,11 +1440,18 @@ pub fn run(
 const MAX_HOOK_LOG: u64 = 256 * 1024;
 
 /// Append one line to `$ANOTHER_HOME/logs/hooks.log` (best effort, size capped).
+///
+/// Never creates the home itself: a hook on a machine without one leaves no trace.
 pub fn log_hook_error(another_home: &Path, event: HookEvent, client: Client, error: &str) {
     use std::io::Write;
     let dir = another_home.join("logs");
-    if std::fs::create_dir_all(&dir).is_err() {
+    if !another_home.is_dir() {
         return;
+    }
+    match std::fs::create_dir(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return,
     }
     let path = dir.join("hooks.log");
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_HOOK_LOG) {
@@ -1371,62 +1480,157 @@ pub fn log_hook_error(another_home: &Path, event: HookEvent, client: Client, err
     }
 }
 
-/// Entry point used by the CLI: never fails, so hooks always fail open.
-pub fn run_fail_open(
-    store: Result<Store>,
-    env: Result<HookEnv>,
-    another_home: Option<&Path>,
-    event: HookEvent,
-    client: Client,
-) -> String {
-    let input = HookInput::read_stdin();
-    let attempt = || -> Result<String> { run(&store?, &env?, event, client, input) };
-    match attempt() {
-        Ok(text) => text,
-        Err(e) => {
-            if e.downcast_ref::<SessionIdentityError>().is_some() {
-                let message = e.to_string();
-                if event == HookEvent::PreEdit {
-                    return json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": message}}).to_string();
-                }
-                return match (event, client) {
-                    (HookEvent::SessionStart, Client::Cursor)
-                    | (HookEvent::PostTool, Client::Cursor) => {
-                        json!({"additional_context": message}).to_string()
-                    }
-                    (HookEvent::SessionStart, _)
-                    | (HookEvent::Prompt, Client::Claude | Client::Codex | Client::Grok) => message,
-                    (HookEvent::PostTool, _) => json!({"hookSpecificOutput": {
-                        "hookEventName": "PostToolUse", "additionalContext": message
-                    }})
-                    .to_string(),
-                    // Neither route has a verified context output channel.
-                    (HookEvent::Prompt, Client::Cursor) | (HookEvent::SessionEnd, _) => {
-                        String::new()
-                    }
-                    (HookEvent::PreEdit, _) => unreachable!(),
-                };
-            }
-            let error = format!("{e:#}");
-            tracing::warn!(error = %error, "another hook failed; continuing");
-            // Tool hooks run silently inside a task; leave a trace for whoever wonders
-            // why an edit was not held or a notice did not arrive.
-            if event.is_tool_event() {
-                if let Some(home) = another_home {
-                    log_hook_error(home, event, client, &error);
-                }
-            }
-            match (event, client) {
-                (HookEvent::Prompt, Client::Cursor) => json!({ "continue": true }).to_string(),
-                _ => String::new(),
-            }
+/// An identity or budget diagnostic in the shape `client` shows for `event`. Pre-edit
+/// stops the edit; routes without a verified context channel stay silent.
+fn refusal(event: HookEvent, client: Client, message: &str) -> String {
+    match (event, client) {
+        (HookEvent::PreEdit, _) => deny(message),
+        (HookEvent::SessionStart | HookEvent::PostTool, Client::Cursor) => {
+            json!({"additional_context": message}).to_string()
         }
+        (HookEvent::SessionStart, _)
+        | (HookEvent::Prompt, Client::Claude | Client::Codex | Client::Grok) => message.to_owned(),
+        (HookEvent::PostTool, _) => json!({"hookSpecificOutput": {
+            "hookEventName": "PostToolUse", "additionalContext": message
+        }})
+        .to_string(),
+        (HookEvent::Prompt, Client::Cursor) | (HookEvent::SessionEnd, _) => String::new(),
+    }
+}
+
+/// Open the home a hook event acts on. Never creates or migrates one: a hook on a machine
+/// without an initialized home is refused, whatever the event.
+fn open_home(home: &Path, event: HookEvent, deadline: Instant) -> Result<Store> {
+    if std::fs::symlink_metadata(home.join(another_core::DB_FILE)).is_err() {
+        return Err(another_core::Error::IdentityUnavailable(
+            "there is no Another database in the home directory; run `another init`, then restart the session"
+                .into(),
+        )
+        .into());
+    }
+    Ok(Store::open_existing(home, event.busy_timeout(), deadline)?)
+}
+
+/// Entry point used by the CLI. It never fails, never creates an Another home, and
+/// finishes within [`HookEvent::budget`].
+///
+/// Every event passes the same gates, in order, before its route runs:
+///
+/// 1. the client's envelope arrives complete before the deadline;
+/// 2. a duplicate route stands down;
+/// 3. the session claims are valid on their own (session ID, provenance, project path);
+/// 4. an initialized home of the current schema opens, bounded by the same deadline.
+///
+/// `pre-edit` fails closed: whenever the edit cannot be protected it is stopped. The
+/// passive events mutate nothing they cannot verify; an identity failure is reported
+/// where the client shows it, and any other failure prints nothing.
+pub fn run_guarded(another_home: Option<&Path>, event: HookEvent, client: Client) -> String {
+    let deadline = Instant::now() + event.budget();
+    let Some(input) = HookInput::read_stdin(deadline) else {
+        return refusal(
+            event,
+            client,
+            "Another did not receive the complete hook input in time; this event was not processed",
+        );
+    };
+    // The client that acts, once known: a refusal is shaped for it.
+    let mut acting = client;
+    // Whether a valid home was opened: only then may a failure be logged into it.
+    let mut opened = false;
+    let outcome = (|| -> Result<String> {
+        let home = another_home.context("no Another home directory")?;
+        let env = HookEnv::detect(home.to_path_buf())?;
+        let Some(client) = effective_client(client, &env) else {
+            return Ok(String::new());
+        };
+        acting = client;
+        let dir = match &input.cwd {
+            Some(d) => d.clone(),
+            None => std::env::current_dir()?,
+        };
+        identity_request(&project_root(&dir), &input)?;
+        let store = open_home(home, event, deadline)?;
+        opened = true;
+        run_event(&store, event, client, &dir, &input)
+    })();
+    let error = match outcome {
+        Ok(text) => return text,
+        Err(error) => error,
+    };
+    let typed = error.downcast_ref::<SessionIdentityError>().is_some()
+        || matches!(
+            error.downcast_ref::<another_core::Error>(),
+            Some(
+                another_core::Error::IdentityScanBudgetExceeded(_)
+                    | another_core::Error::IdentityUnavailable(_)
+            )
+        );
+    if event == HookEvent::PreEdit {
+        let message = if typed {
+            error.to_string()
+        } else {
+            format!("Another stopped this edit because it could not be protected: {error:#}")
+        };
+        // The reason reaches the agent in the denial itself; a refusal writes nothing.
+        return deny(&truncate(message, 1000));
+    }
+    // Post-tool runs on every tool call. A session that has not started here, or a home
+    // that is missing, busy or over budget, is not news there: session start, each prompt
+    // and every edit already report it. A misconfigured launcher is still reported.
+    let quiet = event == HookEvent::PostTool
+        && !matches!(
+            error.downcast_ref::<SessionIdentityError>(),
+            Some(
+                SessionIdentityError::Environment
+                    | SessionIdentityError::ClientSessionId
+                    | SessionIdentityError::ProjectPath
+            )
+        );
+    if typed && !quiet {
+        return refusal(event, acting, &error.to_string());
+    }
+    let error = format!("{error:#}");
+    tracing::warn!(error = %error, "another hook failed; continuing");
+    // The post-tool hook runs silently inside a task; leave a trace for whoever wonders
+    // why a notice did not arrive. A home that could not be opened is left untouched.
+    if event.is_tool_event() && opened {
+        if let Some(home) = another_home {
+            log_hook_error(home, event, acting, &error);
+        }
+    }
+    match (event, acting) {
+        (HookEvent::Prompt, Client::Cursor) => json!({ "continue": true }).to_string(),
+        _ => String::new(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_identity_root_is_rejected_before_resolution() {
+        use std::os::unix::ffi::OsStringExt;
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("home")).unwrap();
+        let root = temp
+            .path()
+            .join(std::ffi::OsString::from_vec(b"repo-\xff".to_vec()));
+        let input = HookInput {
+            session_id: Some("fixture-session".into()),
+            ..HookInput::default()
+        };
+        let error = hook_agent(&store, Client::Claude, &root, &input, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("project path") && error.contains("UTF-8"),
+            "{error}"
+        );
+        assert!(!error.contains("fixture-session"));
+        assert!(store.projects().unwrap().is_empty());
+    }
 
     #[test]
     fn parses_client_payloads() {

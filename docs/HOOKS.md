@@ -105,12 +105,20 @@ Holds are checked across every checkout of the same repository on this machine: 
 
 The guard never prints "allow": that would skip the client's own permission prompts. It only ever adds a denial.
 
-## Failing open
+## When a hook cannot do its job
 
-Both tool hooks open the database without creating or migrating it and wait at most 50 ms (`post-tool`) or 300 ms (`pre-edit`) for a lock. The rule:
+No hook event creates an Another home or migrates one. `another init` and `another hook install` create it; until then session start says so and every guarded edit is stopped. Each hook run has one time budget for everything it does (reading the client's input, opening and checking the database, identity, its own queries): 2 seconds for `post-tool` and `pre-edit`, 5 seconds for the others. A client that never finishes sending input cannot stall a hook. Within that budget the tool hooks wait at most 50 ms (`post-tool`) or 300 ms (`pre-edit`) for a database lock. The rule:
 
-- **Push fails open.** Missing database, old schema, locked database, unknown agent: the hook prints nothing and exits 0.
-- **The edit guard denies a known conflict or an invalid session identity.** If the database is missing or locked it still lets the edit through and appends a line to `$ANOTHER_HOME/logs/hooks.log` saying why. That log is capped at 256 KB (one older copy is kept as `hooks.log.1`). The session-identity denial requires the client to invoke the hook and honor its denial response; that has not been established for every client or platform.
+- **Push fails open.** Missing database, old schema, locked database, unknown session: `post-tool` prints nothing and exits 0. If an opened database then fails, it appends a line to `$ANOTHER_HOME/logs/hooks.log`, capped at 256 KB (one older copy is kept as `hooks.log.1`).
+- **The edit guard fails closed.** It allows an edit only after it holds every file the edit names. A conflict, an unknown or invalid session, a missing, locked, damaged or over-budget database, or input that did not arrive in time stops the edit and gives the reason. A stopped edit writes nothing to the home. This requires the client to invoke the hook and honor its denial; that has not been established for every client or platform, and a client whose hook wrapper is missing or crashes is unprotected.
+- **An edit is held completely or not at all.** Resolving the session, finding each file's project, checking other agents' holds and taking the holds happen in one database transaction. If one file of a multi-file edit is held by someone else, none of the others is left held. At most 128 files per edit.
+- **An edit never registers a project.** A file in a git checkout that is not a registered project stops the edit; run `another project ensure <directory>` once. Files outside any checkout or registered project are not guarded, as before.
+
+### Unconfirmed session commits
+
+Starting a session writes a new actor. Just before that commit, Another writes a small synced file, `identity-ops/<id>.pending`, in the home, and removes it once the commit is confirmed. If the commit fails, is interrupted, or the process dies, the file stays. Every writer of that home (hooks, the CLI, the daemon, MCP) settles pending files first, while holding the database write lock: the operation is then either fully present or fully absent, and the file is removed. Anything in that directory Another does not recognize, or more than 16 pending files, stops all writes until you inspect and clear the directory; reads keep working.
+
+Native Windows is not supported: `hook run` and `session` refuse there before opening a home, and none of the above has been run on Windows.
 
 With nothing new, `post-tool` only reads, and SQLite in WAL mode lets readers past a writer. Announcing needs the claim write: if another writer holds the database for longer than 50 ms, the notice is not shown on that call and arrives on the next one.
 
