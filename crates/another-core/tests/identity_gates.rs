@@ -446,6 +446,17 @@ fn a_partly_guarded_edit_is_not_admitted() {
         )
     };
 
+    // Round-2 review: admission refreshes the project's repository-link cache, a write
+    // that emits no event. Empty the cache so that refresh has something to write, and
+    // check that a refused edit commits none of it and leaves no fence.
+    let db = rusqlite::Connection::open(fixture.home.join("another.db")).unwrap();
+    db.execute("DELETE FROM project_repos", []).unwrap();
+    let links = |db: &rusqlite::Connection| -> i64 {
+        db.query_row("SELECT count(*) FROM project_repos", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(links(&db), 0);
+
     // Guarded and unguarded targets in one edit: stopped, named, nothing held or written.
     let mixed = scope(
         vec![(fixture.shop.clone(), vec!["src/a.rs".into()])],
@@ -456,10 +467,23 @@ fn a_partly_guarded_edit_is_not_admitted() {
     assert_eq!(mixed.unguarded, ["/scratch/b.rs"]);
     assert!(held_by(&store, &alice).is_empty());
     assert_eq!(counts(&fixture.home), before);
+    assert_eq!(links(&db), 0, "a refused edit committed an unfenced write");
 
     // Only unguarded targets: nobody guards that edit, and nothing claims to.
     let scratch = scope(Vec::new(), vec!["/scratch/b.rs".into()]).unwrap();
     assert!(scratch.admitted());
     assert!(held_by(&store, &alice).is_empty());
+    assert_eq!(
+        links(&db),
+        0,
+        "an unguarded edit committed an unfenced write"
+    );
+    assert!(
+        !fixture.home.join(FENCE_DIR).exists()
+            || std::fs::read_dir(fixture.home.join(FENCE_DIR))
+                .unwrap()
+                .count()
+                == 0
+    );
     assert_eq!(counts(&fixture.home), before);
 }

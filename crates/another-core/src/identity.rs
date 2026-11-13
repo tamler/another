@@ -939,12 +939,15 @@ impl Store {
                     let mut stmt = tx.prepare(
                         "SELECT hold_id FROM holds
                          WHERE agent_id = ?1 AND project_id = ?2 AND exclusive = 1
+                           AND node_id = ?4
                            AND released_at IS NULL AND expires_at > ?3
                            AND expires_at < ?3 + ttl_seconds * 1000
                          ORDER BY created_at",
                     )?;
                     let ids = stmt
-                        .query_map(params![me.id, project_id, tx.now], |r| r.get(0))?
+                        .query_map(params![me.id, project_id, tx.now, tx.node_id], |r| {
+                            r.get(0)
+                        })?
                         .collect::<rusqlite::Result<Vec<String>>>()?;
                     for id in ids {
                         if !stale.contains(&id) {

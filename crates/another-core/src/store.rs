@@ -109,7 +109,7 @@ impl Store {
         let conn = Connection::open(&path)?;
         require_current_or_empty(&conn)?;
         if conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? != 0 {
-            verify_v8_schema(&conn, None)?;
+            verify_schema(&conn, None)?;
         }
         #[cfg(unix)]
         {
@@ -356,7 +356,7 @@ impl Store {
                 MIGRATIONS.len()
             )));
         }
-        verify_v8_schema(&conn, deadline)?;
+        verify_schema(&conn, deadline)?;
         let (node_id, key) = load_existing_local_node(&conn)?;
         Ok(Store {
             inner: Arc::new(Inner {
@@ -616,7 +616,7 @@ impl Store {
         }
         let result = (|| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            verify_v8_schema(&tx, Some(deadline))?;
+            verify_schema(&tx, Some(deadline))?;
             if Instant::now() >= deadline {
                 return Err(Error::IdentityScanBudgetExceeded("deadline".into()));
             }
@@ -633,12 +633,20 @@ impl Store {
             if Instant::now() >= deadline {
                 return Err(Error::IdentityScanBudgetExceeded("deadline".into()));
             }
-            // Any transaction that wrote (a new binding, an edit admission, a registration)
-            // is fenced on disk before its commit is attempted. If publishing fails nothing
-            // was committed: the transaction rolls back on drop.
-            let fence = match (ctx.last_event.borrow_mut().take(), &self.inner.path) {
-                (Some(operation), Some(path)) => Some(publish_fence(path, &operation)?),
-                _ => None,
+            // Every durable effect of an identity-phase transaction is announced by an
+            // event, and the last event names the operation in its fence. A transaction
+            // that emitted nothing has nothing to keep: whatever it touched (a refreshed
+            // repository-link cache on a refused edit, say) is rolled back, so no write
+            // can commit outside a fence.
+            let Some(operation) = ctx.last_event.borrow_mut().take() else {
+                ctx.tx.rollback()?;
+                return Ok(out);
+            };
+            // The fence is on disk before the commit is attempted. If publishing fails
+            // nothing was committed: the transaction rolls back on drop.
+            let fence = match &self.inner.path {
+                Some(path) => Some(publish_fence(path, &operation)?),
+                None => None,
             };
             #[cfg(test)]
             let fault = self.inner.identity_commit_fault.swap(0, Ordering::AcqRel);
@@ -1316,7 +1324,65 @@ CREATE TABLE announcements (
     PRIMARY KEY (agent_id, message_id)
 );
 "#,
+    // v9: per-edit admissions. Each guarded edit gets its own pending holds, confirmed by
+    // the tool's receipt. Node-local. A pending hold's deadline is `holds.expires_at`
+    // alone; there is no second copy to disagree with it. `correlation` is a keyed digest
+    // of the client's tool-use ID (the raw ID is never stored) and `targets` a digest of
+    // the admitted file set. The 32-byte key is created with this migration, in its
+    // transaction (see `apply_migration`).
+    r#"
+CREATE TABLE admission_secret (
+    singleton INTEGER NOT NULL PRIMARY KEY CHECK (singleton = 1),
+    secret    BLOB NOT NULL CHECK (typeof(secret) = 'blob' AND length(secret) = 32)
+);
+CREATE TABLE admissions (
+    admission_id TEXT NOT NULL PRIMARY KEY,
+    node_id      TEXT NOT NULL REFERENCES nodes(node_id),
+    agent_id     TEXT NOT NULL REFERENCES agents(agent_id),
+    correlation  BLOB NOT NULL CHECK (typeof(correlation) = 'blob' AND length(correlation) = 32),
+    targets      BLOB NOT NULL CHECK (typeof(targets) = 'blob' AND length(targets) = 32),
+    state        TEXT NOT NULL CHECK (state IN ('pending', 'confirmed', 'expired')),
+    created_at   INTEGER NOT NULL,
+    settled_at   INTEGER,
+    UNIQUE (node_id, agent_id, correlation)
+);
+CREATE TABLE admission_holds (
+    admission_id TEXT NOT NULL REFERENCES admissions(admission_id),
+    hold_id      TEXT NOT NULL UNIQUE REFERENCES holds(hold_id),
+    PRIMARY KEY (admission_id, hold_id)
+);
+CREATE INDEX admissions_open ON admissions(state, created_at);
+"#,
 ];
+
+/// Index in [`MIGRATIONS`] of the migration that creates `admission_secret`.
+const ADMISSION_MIGRATION: usize = 8;
+
+/// Apply one migration inside `tx`, with the data it must create atomically.
+fn apply_migration(tx: &rusqlite::Transaction<'_>, index: usize) -> Result<()> {
+    apply_migration_with(tx, index, |bytes| {
+        getrandom::fill(bytes)
+            .map_err(|_| Error::Invalid("system randomness is unavailable".into()))
+    })
+}
+
+fn apply_migration_with(
+    tx: &rusqlite::Transaction<'_>,
+    index: usize,
+    fill: impl FnOnce(&mut [u8]) -> Result<()>,
+) -> Result<()> {
+    tx.execute_batch(MIGRATIONS[index])?;
+    if index == ADMISSION_MIGRATION {
+        // The key exists exactly when its table does: a failure here fails the migration.
+        let mut secret = [0u8; 32];
+        fill(&mut secret)?;
+        tx.execute(
+            "INSERT INTO admission_secret (singleton, secret) VALUES (1, ?1)",
+            [&secret[..]],
+        )?;
+    }
+    Ok(())
+}
 
 /// Switch to WAL. While several connections convert a new database at once, SQLite answers
 /// busy without calling the busy handler, so retry for up to the usual busy timeout.
@@ -1336,6 +1402,15 @@ fn use_wal(conn: &Connection) -> Result<()> {
 }
 
 fn require_current_or_empty(conn: &Connection) -> Result<()> {
+    // Count the objects before reading the version. The two reads are separate
+    // statements, and a concurrent first open commits its objects and its version
+    // together: in this order "objects but no version" can only be a real unversioned
+    // database, never another opener's commit landing between the reads.
+    let objects: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
+        [],
+        |r| r.get(0),
+    )?;
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if version > MIGRATIONS.len() as i64 {
         return Err(Error::Invalid(format!(
@@ -1345,26 +1420,41 @@ fn require_current_or_empty(conn: &Connection) -> Result<()> {
     if version > 0 && version < MIGRATIONS.len() as i64 {
         return Err(Error::Invalid("existing home requires offline upgrade: fence all writers, then run `another upgrade --backup-dir <new-directory> --confirm-writer-fence`".into()));
     }
-    if version == 0 {
-        let objects: i64 = conn.query_row(
-            "SELECT count(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
-            [],
-            |r| r.get(0),
-        )?;
-        if objects != 0 {
-            return Err(Error::Invalid(
-                "unversioned nonempty database; preserve it and inspect before upgrade".into(),
-            ));
-        }
+    if version == 0 && objects != 0 {
+        return Err(Error::Invalid(
+            "unversioned nonempty database; preserve it and inspect before upgrade".into(),
+        ));
     }
     Ok(())
 }
 
-/// Validate the entire catalog and its structural metadata against the checked-in v8 profile.
-/// The candidate was extracted from an isolated home created by the 0403dce executable;
-/// the drift test checks it against the current bundled migrations. Unknown profiles refuse.
-fn verify_v8_schema(conn: &Connection, deadline: Option<std::time::Instant>) -> Result<()> {
-    let result = verify_v8_schema_inner(conn, deadline);
+/// The checked-in catalog for schema `version`, for the versions that have one.
+///
+/// v8 was extracted from an isolated home created by the 0403dce executable and is kept so
+/// a v8 home is verified before it is upgraded. v9 is generated from the bundled migrations
+/// by `regenerate_schema_manifest` (a test) and held to them by the drift test.
+fn schema_manifest(version: i64) -> Option<&'static str> {
+    match version {
+        8 => Some(include_str!("v8_schema_manifest.json")),
+        9 => Some(include_str!("v9_schema_manifest.json")),
+        _ => None,
+    }
+}
+
+/// Validate the entire catalog and its structural metadata against the checked-in profile
+/// of the schema this build opens. Unknown profiles refuse.
+fn verify_schema(conn: &Connection, deadline: Option<std::time::Instant>) -> Result<()> {
+    let manifest = schema_manifest(MIGRATIONS.len() as i64)
+        .ok_or_else(|| Error::IdentityScanBudgetExceeded("unsupported database schema".into()))?;
+    verify_schema_against(conn, manifest, deadline)
+}
+
+fn verify_schema_against(
+    conn: &Connection,
+    manifest: &str,
+    deadline: Option<std::time::Instant>,
+) -> Result<()> {
+    let result = verify_schema_inner(conn, manifest, deadline);
     check_schema_deadline(deadline)?;
     result
 }
@@ -1383,12 +1473,15 @@ fn check_schema_deadline(deadline: Option<std::time::Instant>) -> Result<()> {
     Ok(())
 }
 
-fn verify_v8_schema_inner(conn: &Connection, deadline: Option<std::time::Instant>) -> Result<()> {
+fn verify_schema_inner(
+    conn: &Connection,
+    manifest: &str,
+    deadline: Option<std::time::Instant>,
+) -> Result<()> {
     use rusqlite::types::ValueRef;
     let invalid = || Error::IdentityScanBudgetExceeded("unsupported database schema".into());
     check_schema_deadline(deadline)?;
-    let expected: Vec<serde_json::Value> =
-        serde_json::from_str(include_str!("v8_schema_manifest.json")).map_err(|_| invalid())?;
+    let expected: Vec<serde_json::Value> = serde_json::from_str(manifest).map_err(|_| invalid())?;
     check_schema_deadline(deadline)?;
     if expected.len() > 256 {
         return Err(invalid());
@@ -1502,8 +1595,8 @@ fn migrate(conn: &mut Connection) -> Result<()> {
     require_current_or_empty(&tx)?;
     let current: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if current == 0 {
-        for sql in MIGRATIONS {
-            tx.execute_batch(sql)?;
+        for index in 0..MIGRATIONS.len() {
+            apply_migration(&tx, index)?;
         }
         tx.pragma_update(None, "user_version", MIGRATIONS.len() as i64)?;
     }
@@ -1531,9 +1624,15 @@ fn migrate_offline(
                 .into(),
         ));
     }
-    for sql in &MIGRATIONS[version as usize..] {
-        tx.execute_batch(sql)?;
+    // A home at a version with a checked-in catalog is migrated only if it matches it.
+    if let Some(manifest) = schema_manifest(version) {
+        verify_schema_against(&tx, manifest, None)?;
     }
+    for index in version as usize..MIGRATIONS.len() {
+        apply_migration(&tx, index)?;
+    }
+    // The result must be exactly the schema this build opens.
+    verify_schema(&tx, None)?;
     tx.pragma_update(None, "user_version", MIGRATIONS.len() as i64)?;
     tx.commit().map_err(|e| Error::Invalid(format!("upgrade commit outcome uncertain ({e}); keep the writer fence and preserve both source and backup")))?;
     Ok(())
@@ -1649,7 +1748,7 @@ mod upgrade_tests {
             db.execute_batch(migration).unwrap();
         }
         db.progress_handler(1, Some(|| true)).unwrap();
-        let result = verify_v8_schema(&db, None);
+        let result = verify_schema(&db, None);
         db.progress_handler(0, None::<fn() -> bool>).unwrap();
         assert!(
             matches!(result, Err(Error::Db(rusqlite::Error::SqliteFailure(code, _))) if code.code == rusqlite::ErrorCode::OperationInterrupted)
@@ -1663,7 +1762,7 @@ mod upgrade_tests {
             db.execute_batch(migration).unwrap();
         }
         db.progress_handler(1, Some(|| true)).unwrap();
-        let result = verify_v8_schema(&db, None).map_err(identity_open_error);
+        let result = verify_schema(&db, None).map_err(identity_open_error);
         db.progress_handler(0, None::<fn() -> bool>).unwrap();
         assert!(
             matches!(result, Err(Error::IdentityUnavailable(ref reason)) if reason.to_lowercase().contains("interrupt")),
@@ -1683,13 +1782,244 @@ mod upgrade_tests {
         );
     }
 
+    /// The catalog of `db` in the manifest's format: every `sqlite_schema` row in
+    /// `type, name` order with the structural probes `verify_schema_inner` compares.
+    fn dump_schema_manifest(db: &Connection) -> String {
+        use rusqlite::types::ValueRef;
+        let probe = |sql: &str, name: &str| -> serde_json::Value {
+            let mut stmt = db.prepare(sql).unwrap();
+            let columns = stmt.column_count();
+            let mut rows = stmt.query(params![name, 1024]).unwrap();
+            let mut out = Vec::new();
+            while let Some(row) = rows.next().unwrap() {
+                let values: Vec<serde_json::Value> = (0..columns)
+                    .map(|i| match row.get_ref(i).unwrap() {
+                        ValueRef::Null => serde_json::Value::Null,
+                        ValueRef::Integer(n) => serde_json::Value::from(n),
+                        ValueRef::Text(raw) => {
+                            serde_json::Value::from(std::str::from_utf8(raw).unwrap())
+                        }
+                        other => panic!("unexpected catalog value {other:?}"),
+                    })
+                    .collect();
+                out.push(serde_json::Value::from(values));
+            }
+            serde_json::Value::from(out)
+        };
+        let mut stmt = db
+            .prepare("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name")
+            .unwrap();
+        let objects: Vec<(String, String, String, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let null = serde_json::Value::Null;
+        let items: Vec<serde_json::Value> = objects
+            .iter()
+            .map(|(kind, name, table, sql)| {
+                let table_probe = |sql: &str| {
+                    if kind == "table" {
+                        probe(sql, name)
+                    } else {
+                        null.clone()
+                    }
+                };
+                serde_json::json!({
+                    "type": kind,
+                    "name": name,
+                    "table": table,
+                    "sql": sql,
+                    "columns": table_probe("SELECT cid,name,type,\"notnull\",dflt_value,pk,hidden FROM pragma_table_xinfo(?1) LIMIT ?2"),
+                    "foreign_keys": table_probe("SELECT id,seq,\"table\",\"from\",\"to\",on_update,on_delete,match FROM pragma_foreign_key_list(?1) LIMIT ?2"),
+                    "indexes": table_probe("SELECT seq,name,\"unique\",origin,partial FROM pragma_index_list(?1) LIMIT ?2"),
+                    "index_columns": if kind == "index" {
+                        probe("SELECT seqno,cid,name,\"desc\",coll,key FROM pragma_index_xinfo(?1) LIMIT ?2", name)
+                    } else {
+                        null.clone()
+                    },
+                })
+            })
+            .collect();
+        serde_json::to_string_pretty(&items).unwrap() + "\n"
+    }
+
+    /// Rewrites the current schema's manifest from the bundled migrations. Run it on
+    /// purpose after adding a migration:
+    /// `ANOTHER_REGENERATE_MANIFEST=1 cargo test -p another-core --lib regenerate_schema_manifest`.
     #[test]
-    fn checked_in_v8_schema_matches_current_migrations() {
+    fn regenerate_schema_manifest() {
+        if std::env::var_os("ANOTHER_REGENERATE_MANIFEST").is_none() {
+            return;
+        }
         let db = Connection::open_in_memory().unwrap();
         for migration in MIGRATIONS {
             db.execute_batch(migration).unwrap();
         }
-        verify_v8_schema(&db, None).unwrap();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join(format!("v{}_schema_manifest.json", MIGRATIONS.len()));
+        std::fs::write(path, dump_schema_manifest(&db)).unwrap();
+    }
+
+    /// The frozen v8 catalog still describes the first eight migrations exactly, so a v8
+    /// home is recognised before it is upgraded; and the dumper reproduces the format the
+    /// independently extracted v8 manifest was checked in with.
+    #[test]
+    fn frozen_v8_catalog_matches_the_first_eight_migrations() {
+        let db = Connection::open_in_memory().unwrap();
+        for migration in &MIGRATIONS[..8] {
+            db.execute_batch(migration).unwrap();
+        }
+        let v8 = schema_manifest(8).unwrap();
+        verify_schema_against(&db, v8, None).unwrap();
+        let dumped: serde_json::Value = serde_json::from_str(&dump_schema_manifest(&db)).unwrap();
+        let frozen: serde_json::Value = serde_json::from_str(v8).unwrap();
+        assert_eq!(dumped, frozen);
+        // A v9 database is not a v8 one, and the reverse.
+        db.execute_batch(MIGRATIONS[8]).unwrap();
+        assert!(verify_schema_against(&db, v8, None).is_err());
+        verify_schema(&db, None).unwrap();
+    }
+
+    #[test]
+    fn admission_key_is_created_with_its_table_or_not_at_all() {
+        let mut db = Connection::open_in_memory().unwrap();
+        for migration in &MIGRATIONS[..ADMISSION_MIGRATION] {
+            db.execute_batch(migration).unwrap();
+        }
+        // Randomness fails: the migration fails and leaves no admission tables behind.
+        {
+            let tx = db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            let failed = apply_migration_with(&tx, ADMISSION_MIGRATION, |_| {
+                Err(Error::Invalid("no randomness".into()))
+            });
+            assert!(failed.is_err());
+            drop(tx);
+        }
+        let tables: i64 = db
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name LIKE 'admission%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 0);
+
+        // A fresh home has exactly one 32-byte key, and two homes do not share it.
+        let key = |db: &Connection| -> Vec<u8> {
+            db.query_row(
+                "SELECT secret FROM admission_secret WHERE singleton = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let mut first = Connection::open_in_memory().unwrap();
+        let mut second = Connection::open_in_memory().unwrap();
+        migrate(&mut first).unwrap();
+        migrate(&mut second).unwrap();
+        assert_eq!(key(&first).len(), 32);
+        assert_ne!(key(&first), key(&second));
+        assert_ne!(key(&first), vec![0u8; 32]);
+
+        // Opening a current home never creates or replaces the key.
+        first.execute("DELETE FROM admission_secret", []).unwrap();
+        migrate(&mut first).unwrap();
+        let rows: i64 = first
+            .query_row("SELECT count(*) FROM admission_secret", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+        assert!(second
+            .execute(
+                "INSERT INTO admission_secret (singleton, secret) VALUES (2, zeroblob(32))",
+                []
+            )
+            .is_err());
+    }
+
+    /// A transaction in the identity phase that emits no event keeps nothing, so no write
+    /// can commit outside a fence.
+    #[test]
+    fn an_identity_transaction_without_an_event_is_rolled_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let store = Store::open(&home).unwrap();
+        let project = store
+            .ensure_project("fixture", dir.path().to_str().unwrap())
+            .unwrap();
+        let links = |store: &Store| -> i64 {
+            store
+                .read(
+                    |db| Ok(db.query_row("SELECT count(*) FROM project_repos", [], |r| r.get(0))?),
+                )
+                .unwrap()
+        };
+        let before = links(&store);
+        let answer = store
+            .write_identity(|tx, _| {
+                tx.execute(
+                    "INSERT OR REPLACE INTO project_repos (project_id, repo_key, repo_prefix, checked_at)
+                     VALUES (?1, 'v0:elsewhere', '', 1)",
+                    [&project.project_id],
+                )?;
+                Ok(7)
+            })
+            .unwrap();
+        assert_eq!(answer, 7, "the closure's answer is still returned");
+        assert_eq!(links(&store), before);
+        let stale: i64 = store
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT count(*) FROM project_repos WHERE repo_key = 'v0:elsewhere'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(stale, 0);
+        assert!(!home.join(FENCE_DIR).exists());
+        // With an event, the same write is kept and its fence is cleared on success.
+        store
+            .write_identity(|tx, _| {
+                tx.execute(
+                    "INSERT OR REPLACE INTO project_repos (project_id, repo_key, repo_prefix, checked_at)
+                     VALUES (?1, 'v0:elsewhere', '', 1)",
+                    [&project.project_id],
+                )?;
+                tx.emit("fixture", "fixture.noted", serde_json::json!({}))?;
+                Ok(())
+            })
+            .unwrap();
+        let kept: i64 = store
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT count(*) FROM project_repos WHERE repo_key = 'v0:elsewhere'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(kept, 1);
+        assert_eq!(std::fs::read_dir(home.join(FENCE_DIR)).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn checked_in_schema_matches_current_migrations() {
+        let db = Connection::open_in_memory().unwrap();
+        for migration in MIGRATIONS {
+            db.execute_batch(migration).unwrap();
+        }
+        verify_schema(&db, None).unwrap();
+        let checked_in: serde_json::Value =
+            serde_json::from_str(schema_manifest(MIGRATIONS.len() as i64).unwrap()).unwrap();
+        let dumped: serde_json::Value = serde_json::from_str(&dump_schema_manifest(&db)).unwrap();
+        assert_eq!(
+            dumped, checked_in,
+            "regenerate the manifest after changing migrations"
+        );
         let partial: i64 = db.query_row(
             "SELECT partial FROM pragma_index_list('resources') WHERE name = 'resources_live_identity'",
             [],
@@ -1705,7 +2035,7 @@ mod upgrade_tests {
             db.execute_batch(migration).unwrap();
         }
         assert!(matches!(
-            verify_v8_schema(&db, Some(std::time::Instant::now())),
+            verify_schema(&db, Some(std::time::Instant::now())),
             Err(Error::IdentityScanBudgetExceeded(ref reason)) if reason == "deadline"
         ));
     }
@@ -1721,7 +2051,7 @@ mod upgrade_tests {
                 db.execute_batch(migration).unwrap();
             }
             db.execute_batch(extra).unwrap();
-            assert!(verify_v8_schema(&db, None).is_err());
+            assert!(verify_schema(&db, None).is_err());
         }
     }
 
@@ -2081,7 +2411,7 @@ mod upgrade_tests {
         drop(Store::open(&home).unwrap());
         let db = home.join(DB_FILE);
         let source = Connection::open(&db).unwrap();
-        source.execute_batch("DROP TABLE announcements; PRAGMA user_version=7; CREATE TABLE preserved(v TEXT); INSERT INTO preserved VALUES ('unchanged');").unwrap();
+        source.execute_batch("DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE announcements; PRAGMA user_version=7; CREATE TABLE preserved(v TEXT); INSERT INTO preserved VALUES ('unchanged');").unwrap();
         drop(source);
         let mut called = false;
         let result = Store::upgrade_offline_with_parent_sync(&home, &backup, true, |parent| {
@@ -2127,7 +2457,7 @@ mod upgrade_tests {
         let db = home.join(DB_FILE);
         let source = Connection::open(&db).unwrap();
         source
-            .execute_batch("DROP TABLE announcements; PRAGMA user_version=7;")
+            .execute_batch("DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE announcements; PRAGMA user_version=7;")
             .unwrap();
         drop(source);
         let mut called = false;
@@ -2151,7 +2481,7 @@ mod upgrade_tests {
             source
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            8
+            MIGRATIONS.len() as i64
         );
     }
 
@@ -2163,7 +2493,7 @@ mod upgrade_tests {
         let db = home.join(DB_FILE);
         let source = Connection::open(&db).unwrap();
         source
-            .execute_batch("DROP TABLE announcements; PRAGMA user_version=7;")
+            .execute_batch("DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE announcements; PRAGMA user_version=7;")
             .unwrap();
         let version: i64 = source
             .pragma_query_value(None, "data_version", |r| r.get(0))

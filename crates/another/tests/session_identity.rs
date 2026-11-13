@@ -227,7 +227,7 @@ fn old_home_requires_explicit_fenced_upgrade_and_verified_wal_backup() {
     let db = home.join("another.db");
     let old = Connection::open(&db).unwrap();
     // The marker lives in a catalog table: a table the schema does not define is refused.
-    old.execute_batch("DROP TABLE announcements; PRAGMA user_version=7; UPDATE nodes SET display_name='committed-wal';").unwrap();
+    old.execute_batch("DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE announcements; PRAGMA user_version=7; UPDATE nodes SET display_name='committed-wal';").unwrap();
     let denied = command(&["status"]);
     assert!(!denied.status.success());
     assert!(String::from_utf8_lossy(&denied.stderr).contains("offline upgrade"));
@@ -330,9 +330,193 @@ fn old_home_requires_explicit_fenced_upgrade_and_verified_wal_backup() {
         migrated
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        8
+        9
     );
     assert!(command(&["status"]).status.success());
+}
+
+/// The upgrade every existing home takes: a real v8 schema, with sessions and holds in
+/// it, becomes v9 only through the fenced offline upgrade, keeps every historical event
+/// byte, and gains exactly one admission key.
+#[cfg(unix)]
+#[test]
+fn v8_home_upgrades_to_v9_keeping_history_and_gaining_one_admission_key() {
+    use rusqlite::Connection;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let backup = dir.path().join("backup");
+    let root = dir.path().join("shop");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::write(root.join(".git/config"), "[core]\n\tbare = false\n").unwrap();
+    let command = |args: &[&str]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_another"));
+        cmd.args(args)
+            .env("ANOTHER_HOME", &home)
+            .env("HOME", dir.path())
+            .env_remove("ANOTHER_AGENT")
+            .env_remove("ANOTHER_AGENT_MODE")
+            .env_remove("GROK_HOOK_EVENT");
+        cmd
+    };
+    let hook = |event: &str, input: serde_json::Value| -> String {
+        let mut child = command(&["hook", "run", event, "--client", "claude"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.to_string().as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert!(command(&["init"]).output().unwrap().status.success());
+    let started = hook(
+        "session-start",
+        json!({"session_id": "before-upgrade", "cwd": root}),
+    );
+    let actor = started
+        .strip_prefix("Another: ")
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+
+    // Take the home back to exactly the v8 schema: v9 added these objects and nothing else.
+    let db = Connection::open(home.join("another.db")).unwrap();
+    db.execute_batch(
+        "DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; PRAGMA user_version=8;",
+    )
+    .unwrap();
+    let events = |db: &Connection| -> Vec<String> {
+        let mut stmt = db
+            .prepare("SELECT event_id||':'||hex(payload)||':'||coalesce(sig,'') FROM events ORDER BY seq")
+            .unwrap();
+        let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+        rows.map(Result::unwrap).collect()
+    };
+    let history = events(&db);
+    drop(db);
+
+    // A v8 home is refused by every route until it is upgraded, and is not changed.
+    let status = command(&["status"]).output().unwrap();
+    assert!(!status.status.success());
+    assert!(String::from_utf8_lossy(&status.stderr).contains("offline upgrade"));
+    let edit = hook(
+        "pre-edit",
+        json!({"session_id": "before-upgrade", "cwd": root, "tool_use_id": "t1",
+            "tool_name": "Edit", "tool_input": {"file_path": root.join("a.rs")}}),
+    );
+    assert!(edit.contains("\"deny\""), "{edit}");
+    let db = Connection::open(home.join("another.db")).unwrap();
+    assert_eq!(
+        db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        8
+    );
+    assert_eq!(events(&db), history);
+    drop(db);
+
+    let upgraded = command(&[
+        "--json",
+        "upgrade",
+        "--backup-dir",
+        backup.to_str().unwrap(),
+        "--confirm-writer-fence",
+    ])
+    .output()
+    .unwrap();
+    assert!(
+        upgraded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&upgraded.stderr)
+    );
+    let saved = Connection::open(backup.join("another.db")).unwrap();
+    assert_eq!(
+        saved
+            .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        8
+    );
+    assert_eq!(events(&saved), history);
+
+    let db = Connection::open(home.join("another.db")).unwrap();
+    assert_eq!(
+        db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        9
+    );
+    assert_eq!(events(&db), history, "the upgrade rewrote history");
+    let (keys, length): (i64, i64) = db
+        .query_row(
+            "SELECT count(*), max(length(secret)) FROM admission_secret",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((keys, length), (1, 32));
+    let admissions: i64 = db
+        .query_row("SELECT count(*) FROM admissions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(admissions, 0);
+
+    // The upgraded home opens, and the session from before the upgrade is still itself.
+    assert!(command(&["status"]).output().unwrap().status.success());
+    let resumed = hook(
+        "session-start",
+        json!({"session_id": "before-upgrade", "cwd": root}),
+    );
+    assert!(
+        resumed.starts_with(&format!("Another: {actor} ")),
+        "{resumed}"
+    );
+
+    // A v8 home that is not the v8 schema is not migrated.
+    let other = dir.path().join("other-home");
+    let other_backup = dir.path().join("other-backup");
+    let other_command = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_another"))
+            .args(args)
+            .env("ANOTHER_HOME", &other)
+            .env("HOME", dir.path())
+            .env_remove("ANOTHER_AGENT")
+            .output()
+            .unwrap()
+    };
+    assert!(other_command(&["init"]).status.success());
+    let db = Connection::open(other.join("another.db")).unwrap();
+    db.execute_batch(
+        "DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; PRAGMA user_version=8; CREATE TABLE stray(v TEXT);",
+    )
+    .unwrap();
+    drop(db);
+    let refused = other_command(&[
+        "upgrade",
+        "--backup-dir",
+        other_backup.to_str().unwrap(),
+        "--confirm-writer-fence",
+    ]);
+    assert!(!refused.status.success());
+    let db = Connection::open(other.join("another.db")).unwrap();
+    assert_eq!(
+        db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        8
+    );
+    let stray: i64 = db
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name='stray'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stray, 1);
 }
 
 #[cfg(unix)]
@@ -396,11 +580,13 @@ fn upgrade_commit_write_failure_is_reported_as_uncertain_json() {
     let db = home.join("another.db");
     let keeper = Connection::open(&db).unwrap();
     keeper
-        .execute_batch("PRAGMA wal_autocheckpoint=0; DROP TABLE announcements; PRAGMA user_version=7; CREATE TABLE fault_padding(v INTEGER);")
+        .execute_batch("PRAGMA wal_autocheckpoint=0; DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE announcements; PRAGMA user_version=7;")
         .unwrap();
+    // Grow the WAL through a catalog table: a table the schema does not define would be
+    // refused before the commit this test is about.
     for n in 0..256 {
         keeper
-            .execute("INSERT INTO fault_padding(v) VALUES (?1)", [n])
+            .execute("UPDATE nodes SET display_name = ?1", [format!("pad-{n}")])
             .unwrap();
     }
     let wal_bytes = std::fs::metadata(home.join("another.db-wal"))
@@ -457,13 +643,13 @@ fn upgrade_commit_write_failure_is_reported_as_uncertain_json() {
     let version: i64 = keeper
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert!(version == 7 || version == 8, "unexpected schema {version}");
+    assert!(version == 7 || version == 9, "unexpected schema {version}");
     assert_eq!(
         keeper
-            .query_row("SELECT count(*) FROM fault_padding", [], |r| r
-                .get::<_, i64>(0))
+            .query_row("SELECT display_name FROM nodes", [], |r| r
+                .get::<_, String>(0))
             .unwrap(),
-        256
+        "pad-255"
     );
     eprintln!("commit fault: {message}; source schema after inspection: v{version}");
     // An uncertain result requires inspection; the test never retries or restores the source.

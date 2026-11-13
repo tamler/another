@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use rusqlite::Connection;
 
 #[test]
-fn new_home_preserves_v8_schema() {
+fn new_home_has_the_current_schema_and_pinned_sqlite() {
     let home = tempfile::tempdir().unwrap();
     let info = Command::new(env!("CARGO_BIN_EXE_another"))
         .args(["sqlite-info", "--json"])
@@ -56,8 +56,8 @@ fn new_home_preserves_v8_schema() {
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
     assert_eq!(
-        version, 8,
-        "identity bindings must not require a schema migration"
+        version, 9,
+        "a fresh home is created at the current schema (v9: per-edit admissions)"
     );
 }
 
@@ -168,7 +168,7 @@ fn bundled_sqlite_concurrent_wal_and_checkpoints_preserve_integrity() {
 }
 
 #[test]
-fn existing_v8_home_keeps_schema_and_historical_event_bytes() {
+fn starting_a_session_keeps_schema_and_historical_event_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     let root = dir.path().join("repo");
@@ -231,7 +231,7 @@ fn existing_v8_home_keeps_schema_and_historical_event_bytes() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        8
+        9
     );
     assert_eq!(
         snapshot(

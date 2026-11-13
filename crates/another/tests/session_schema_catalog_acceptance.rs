@@ -146,6 +146,8 @@ fn frozen_historical_schema_and_legitimate_partial_index_are_accepted() {
     let mut stmt = db
         .prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name")
         .unwrap();
+    // v9 only added the admission tables and their indexes. Everything else in a fresh
+    // home must still be the frozen v8 catalog, object for object.
     let rows = stmt
         .query_map([], |r| {
             Ok(json!([
@@ -158,11 +160,24 @@ fn frozen_historical_schema_and_legitimate_partial_index_are_accepted() {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
+    let (added, kept): (Vec<Value>, Vec<Value>) = rows
+        .into_iter()
+        .partition(|row| row[2].as_str().unwrap().starts_with("admission"));
+    let mut added_tables: Vec<&str> = added
+        .iter()
+        .filter(|row| row[0] == "table")
+        .map(|row| row[1].as_str().unwrap())
+        .collect();
+    added_tables.sort_unstable();
+    assert_eq!(
+        added_tables,
+        ["admission_holds", "admission_secret", "admissions"]
+    );
     let historical: Value = serde_json::from_str(HISTORICAL_V8_SCHEMA).unwrap();
     assert_eq!(
-        Value::Array(rows),
+        Value::Array(kept),
         historical,
-        "fresh schema diverges from frozen historical v8 catalogs"
+        "fresh schema diverges from frozen historical v8 catalogs outside the v9 additions"
     );
     let partial: i64 = db.query_row("SELECT partial FROM pragma_index_list('resources') WHERE name='resources_live_identity'", [], |r| r.get(0)).unwrap();
     assert_eq!(
