@@ -194,7 +194,13 @@ fn clamp_ttl(ttl: Option<i64>) -> Result<i64> {
 /// Normalize a requested path or glob to a project-relative pattern.
 pub(crate) fn normalize_pattern(project: &Project, raw: &str) -> Result<String> {
     let raw = raw.trim();
-    let root = project.abs_path.trim_end_matches('/');
+    #[cfg(windows)]
+    let (raw, root_path) = (raw.replace('\\', "/"), project.abs_path.replace('\\', "/"));
+    #[cfg(windows)]
+    let (raw, root_path) = (raw.as_str(), root_path.as_str());
+    #[cfg(not(windows))]
+    let root_path = project.abs_path.as_str();
+    let root = root_path.trim_end_matches('/');
     let rel = if Path::new(raw).is_absolute() {
         match raw.strip_prefix(root) {
             Some(rest) if rest.is_empty() || rest.starts_with('/') => rest.trim_start_matches('/'),

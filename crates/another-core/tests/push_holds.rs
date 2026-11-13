@@ -454,7 +454,7 @@ fn unannounced_cursor_includes_later_backdated_deliveries() {
         })
         .unwrap();
     assert_eq!(violations, 0);
-    let tied = fx.store.unannounced("alice", &inserted[0], 10).unwrap();
+    let tied = fx.store.unannounced("alice", inserted[0], 10).unwrap();
     assert_eq!(tied.count, 1);
     assert_eq!(tied.items[0].message_id, inserted[1]);
     db.execute(
@@ -476,14 +476,14 @@ fn unannounced_cursor_includes_later_backdated_deliveries() {
             .collect::<Vec<_>>(),
         vec![&inserted[1], &inserted[0]]
     );
-    let after = fx.store.unannounced("alice", &inserted[0], 10).unwrap();
+    let after = fx.store.unannounced("alice", inserted[0], 10).unwrap();
     assert_eq!(after.count, 1);
     assert_eq!(after.items[0].message_id, inserted[1]);
     db.execute(
         "INSERT INTO deliveries (message_id, agent_id, node_id, role) SELECT ?1, agent_id, node_id, 'to' FROM agents WHERE name = 'alice'",
         [&older.message_id],
     ).unwrap();
-    let after = fx.store.unannounced("alice", &inserted[1], 10).unwrap();
+    let after = fx.store.unannounced("alice", inserted[1], 10).unwrap();
     assert_eq!(after.count, 1);
     assert_eq!(after.items[0].message_id, older.message_id);
 }
