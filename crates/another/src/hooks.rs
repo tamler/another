@@ -825,11 +825,19 @@ fn truncate(mut s: String, max: usize) -> String {
 }
 
 #[derive(Debug)]
-struct SessionIdentityError;
+enum SessionIdentityError {
+    Environment,
+    ClientSessionId,
+    Binding,
+}
 
 impl std::fmt::Display for SessionIdentityError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Another cannot identify this session; edit not protected")
+        f.write_str(match self {
+            Self::Environment => "Another cannot identify this session; set a valid nonempty ANOTHER_AGENT and ANOTHER_AGENT_MODE to base or session, or unset both, then relaunch",
+            Self::ClientSessionId => "Another cannot identify this session: client session ID is missing, invalid or inconsistent; check client hook configuration and restart the session",
+            Self::Binding => "Another cannot resolve the session binding; check the session address, base and project, then restart or reconcile the session",
+        })
     }
 }
 impl std::error::Error for SessionIdentityError {}
@@ -842,15 +850,33 @@ fn hook_agent(
     input: &HookInput,
     create: bool,
 ) -> Result<String> {
-    let id = input.session_id.as_deref().ok_or(SessionIdentityError)?;
-    let base = std::env::var("ANOTHER_AGENT")
-        .ok()
-        .filter(|a| !a.trim().is_empty());
+    let id = input
+        .session_id
+        .as_deref()
+        .filter(|id| !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control))
+        .ok_or(SessionIdentityError::ClientSessionId)?;
+    let agent = std::env::var_os("ANOTHER_AGENT");
+    let mode = std::env::var_os("ANOTHER_AGENT_MODE");
+    let (base, exact_session) = match (agent.as_deref(), mode.as_deref()) {
+        (None, None) => (None, false),
+        (Some(agent), Some(mode)) => {
+            let agent = agent
+                .to_str()
+                .filter(|s| !s.trim().is_empty())
+                .ok_or(SessionIdentityError::Environment)?;
+            match mode.to_str() {
+                Some("base") => (Some(agent), false),
+                Some("session") => (Some(agent), true),
+                _ => return Err(SessionIdentityError::Environment.into()),
+            }
+        }
+        _ => return Err(SessionIdentityError::Environment.into()),
+    };
     match store.session_actor(
         client.as_str(),
         client.program(),
         &root.to_string_lossy(),
-        base.as_deref(),
+        base.map(|name| (name, exact_session)),
         id,
         create,
     ) {
@@ -859,8 +885,9 @@ fn hook_agent(
             another_core::Error::Invalid(_)
             | another_core::Error::Forbidden(_)
             | another_core::Error::NotFound(_)
-            | another_core::Error::IdentityScanBudgetExceeded(_),
-        ) => Err(SessionIdentityError.into()),
+            | another_core::Error::IdentityScanBudgetExceeded(_)
+            | another_core::Error::Ambiguous(_),
+        ) => Err(SessionIdentityError::Binding.into()),
         Err(e) => Err(e.into()),
     }
 }
@@ -1357,8 +1384,28 @@ pub fn run_fail_open(
     match attempt() {
         Ok(text) => text,
         Err(e) => {
-            if event == HookEvent::PreEdit && e.downcast_ref::<SessionIdentityError>().is_some() {
-                return json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "Another cannot identify this session; edit not protected"}}).to_string();
+            if e.downcast_ref::<SessionIdentityError>().is_some() {
+                let message = e.to_string();
+                if event == HookEvent::PreEdit {
+                    return json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": message}}).to_string();
+                }
+                return match (event, client) {
+                    (HookEvent::SessionStart, Client::Cursor)
+                    | (HookEvent::PostTool, Client::Cursor) => {
+                        json!({"additional_context": message}).to_string()
+                    }
+                    (HookEvent::SessionStart, _)
+                    | (HookEvent::Prompt, Client::Claude | Client::Codex | Client::Grok) => message,
+                    (HookEvent::PostTool, _) => json!({"hookSpecificOutput": {
+                        "hookEventName": "PostToolUse", "additionalContext": message
+                    }})
+                    .to_string(),
+                    // Neither route has a verified context output channel.
+                    (HookEvent::Prompt, Client::Cursor) | (HookEvent::SessionEnd, _) => {
+                        String::new()
+                    }
+                    (HookEvent::PreEdit, _) => unreachable!(),
+                };
             }
             let error = format!("{e:#}");
             tracing::warn!(error = %error, "another hook failed; continuing");

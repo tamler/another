@@ -381,7 +381,7 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum SessionCmd {
-    /// Run a program with its exact session identity in ANOTHER_AGENT.
+    /// Run a program with its exact session identity and session provenance.
     Exec {
         #[command(flatten)]
         agent: AgentArg,
@@ -1091,7 +1091,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Session(SessionCmd::Exec { agent, command }) => {
             let address = store.session_actor_address(&agent.agent)?;
             let mut child = std::process::Command::new(&command[0]);
-            child.args(&command[1..]).env("ANOTHER_AGENT", &address);
+            child
+                .args(&command[1..])
+                .env("ANOTHER_AGENT", &address)
+                .env("ANOTHER_AGENT_MODE", "session");
             if let Some(home) = store.db_path().and_then(Path::parent) {
                 child.env("ANOTHER_HOME", home);
             }

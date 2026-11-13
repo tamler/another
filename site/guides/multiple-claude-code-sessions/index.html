@@ -48,8 +48,8 @@
     </section>
     <section class="guide-section" aria-labelledby="names">
       <h2 id="names">Use the address shown at start</h2>
-      <p>Start two client sessions after installing their hooks. Each start digest names its full session address. A client must supply a stable session ID to the hook; missing or invalid IDs cannot safely use a shared base. Setting <code>ANOTHER_AGENT</code> before the client starts selects a base name, not the final session address.</p>
-      <p>For commands outside the hook, pass the exact address shown in the digest or run <code>another session exec --agent &lt;full-address&gt; -- &lt;program&gt;</code> so child commands inherit it. The hook cannot change the environment of its parent shell. MCP tools also need the full address; <a href="/guides/mcp-agent-messaging/">MCP messaging</a> lists the arguments. The address is an identifier, not authentication.</p>
+      <p>Start two client sessions after installing their hooks. Each start digest names its full session address. A client must supply a stable session ID to the hook; missing or invalid IDs cannot safely use a shared base. To choose a base before the client starts, set <code>ANOTHER_AGENT</code> to that base and <code>ANOTHER_AGENT_MODE=base</code>. Set both values and restart older launchers; an agent without a mode is denied.</p>
+      <p>For commands outside the hook, pass the exact address shown in the digest or run <code>another session exec --agent &lt;full-address&gt; -- &lt;program&gt;</code> so child commands inherit the address and <code>ANOTHER_AGENT_MODE=session</code>. The hook cannot change the environment of its parent shell. Verify that your client preserves both values: if both are dropped the hook cannot distinguish that from an unconfigured launch. MCP tools also need the full address; <a href="/guides/mcp-agent-messaging/">MCP messaging</a> lists the arguments. The address is an identifier, not authentication.</p>
     </section>
     <section class="guide-section" aria-labelledby="coordinate">
       <h2 id="coordinate">Mail and holds between the two</h2>

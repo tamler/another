@@ -158,7 +158,7 @@ codex@billing: 1 unread (0 urgent), 0 awaiting ack, 0 request(s)
    new  2026-11-12T09:39:52.261Z  claude@shop      Review the invoice parser  [01M77J1FT561NTTVYQPS8FBM9S]
 ```
 
-The installed hooks never hit this: a hook acts as `<client>@<project>` for the checkout the client is running in, which is already a full address ([HOOKS.md](HOOKS.md)). Two Claude Code sessions in two repositories are `claude@shop` and `claude@billing` without any setup. The ambiguity appears when a person or a script types the bare name, and when `ANOTHER_AGENT` is set to a bare name that later stops being unique; in that case the hook fails open and the session gets no digest.
+Hooks derive a distinct full address for each supported client session and show it in the start digest ([HOOKS.md](HOOKS.md)). To set a custom hook base, configure both `ANOTHER_AGENT` and `ANOTHER_AGENT_MODE=base` before starting the client; an older launcher that sets only the agent needs updating and restarting. To run children with an existing exact session address, use `another session exec --agent <full-address> -- <program>`, which sets session mode as well. For ordinary non-hook CLI commands, `ANOTHER_AGENT` remains an exact address and requires no mode.
 
 ## Other resolution errors
 

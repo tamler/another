@@ -566,18 +566,23 @@ pub(crate) fn get_agent(conn: &Connection, agent_id: &str) -> Result<Agent> {
 
 impl Store {
     /// Resolve a client hook's per-session actor without storing its raw session ID.
+    /// `requested_actor` is absent for the client default, or contains an explicit
+    /// actor and its provenance: `false` means a base, `true` an exact session address.
+    /// The tuple is required; this API does not infer provenance from existing bindings.
+    /// The earlier unmerged identity branch accepted `Option<&str>`; callers of that
+    /// branch must supply provenance explicitly. This method did not exist on main.
     pub fn session_actor(
         &self,
         client: &str,
         program: Program,
         root: &str,
-        requested_base: Option<&str>,
+        requested_actor: Option<(&str, bool)>,
         session_id: &str,
         create: bool,
     ) -> Result<(String, String)> {
         #[cfg(windows)]
         {
-            let _ = (client, program, root, requested_base, session_id, create);
+            let _ = (client, program, root, requested_actor, session_id, create);
             return Err(Error::Invalid(
                 "session binding is unsupported on native Windows".into(),
             ));
@@ -590,13 +595,14 @@ impl Store {
             {
                 return Err(Error::Invalid("invalid session identifier".into()));
             }
+            let exact_session = requested_actor.is_some_and(|(_, exact)| exact);
             self.write_identity(|tx, deadline| {
             let project = match find_project(tx, tx.node_id, root) {
                 Ok(project) => project,
-                Err(Error::NotFound(_)) if create => ensure_project_tx(tx, client, root)?,
+                Err(Error::NotFound(_)) if create && !exact_session => ensure_project_tx(tx, client, root)?,
                 Err(e) => return Err(e),
             };
-            let requested = requested_base.unwrap_or(client);
+            let requested = requested_actor.map_or(client, |(actor, _)| actor);
             let (name, slug) = match requested.split_once('@') {
                 Some((name, slug)) if !slug.contains('@') => (name, Some(slug)),
                 Some(_) => return Err(Error::Invalid("invalid session base address".into())),
@@ -605,10 +611,18 @@ impl Store {
             if slug.is_some_and(|slug| slug != project.slug) {
                 return Err(Error::Invalid("session base project does not match".into()));
             }
+            if exact_session && slug.is_none() {
+                return Err(Error::Invalid("session actor requires a full address".into()));
+            }
             validate_name(name)?;
             let bindings = binding_scan(tx, deadline)?;
-            let requested_id: Option<String> = tx.query_row("SELECT agent_id FROM agents WHERE node_id=?1 AND name=?2 AND project_id=?3", params![tx.node_id,name,project.project_id], |r| r.get(0)).optional()?;
-            let existing_binding = bindings.iter().find(|b| Some(&b.agent_id) == requested_id.as_ref());
+            let existing_binding = if exact_session {
+                let requested_id: Option<String> = tx.query_row("SELECT agent_id FROM agents WHERE node_id=?1 AND name=?2 AND project_id=?3", params![tx.node_id,name,project.project_id], |r| r.get(0)).optional()?;
+                bindings.iter().find(|b| Some(&b.agent_id) == requested_id.as_ref())
+            } else { None };
+            if exact_session && existing_binding.is_none() {
+                return Err(Error::NotFound("session binding missing".into()));
+            }
             let base = existing_binding.map_or(name, |binding| binding.base_name.as_str());
             let mut hash = Sha256::new();
             for value in ["another-session-v1", tx.node_id, client, project.project_id.as_str(), base, session_id] {
@@ -629,7 +643,7 @@ impl Store {
                 }
                 return Ok((addr, digest));
             }
-            if !create {
+            if !create || exact_session {
                 return Err(Error::NotFound("session identity has not started".into()));
             }
             let occupied: bool = tx.query_row(
@@ -852,7 +866,14 @@ mod tests {
             .session_actor("claude", Program::Claude, root, None, raw, true)
             .unwrap();
         let (same, _) = store
-            .session_actor("claude", Program::Claude, root, Some(&a), raw, false)
+            .session_actor(
+                "claude",
+                Program::Claude,
+                root,
+                Some((&a, true)),
+                raw,
+                false,
+            )
             .unwrap();
         let (b, _) = store
             .session_actor("claude", Program::Claude, root, None, "other-session", true)
@@ -882,7 +903,7 @@ mod tests {
                 "claude",
                 Program::Claude,
                 root,
-                Some(&a),
+                Some((&a, true)),
                 "other-session",
                 false
             )
