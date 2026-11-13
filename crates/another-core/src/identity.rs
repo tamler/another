@@ -700,8 +700,6 @@ fn session_actor_tx(
         return Err(Error::Invalid("session identity collision".into()));
     }
     let agent_id = new_id();
-    // Name this operation for its durable fence: the commit is fenced before it is tried.
-    *tx.identity_op.borrow_mut() = Some(agent_id.clone());
     let event_id = tx.emit(
         &addr,
         "agent.registered",
@@ -760,13 +758,27 @@ pub struct EditAdmission {
     /// Directories of unregistered projects the edit reaches. When not empty, no hold was
     /// taken: admission never registers a project.
     pub unregistered: Vec<String>,
+    /// Targets outside every project in an edit that also has guarded files. When not
+    /// empty, no hold was taken: a partly guarded edit is not admitted.
+    pub unguarded: Vec<String>,
 }
 
 impl EditAdmission {
-    /// Whether every file is now held by the session actor.
+    /// Whether the edit may proceed: every guarded file is now held by the session actor
+    /// with a full TTL, and no target of a guarded edit is left unguarded.
     pub fn admitted(&self) -> bool {
-        self.conflicts.is_empty() && self.unregistered.is_empty()
+        self.conflicts.is_empty() && self.unregistered.is_empty() && self.unguarded.is_empty()
     }
+}
+
+/// How the files of one edit map onto projects, as decided by the caller of
+/// [`Store::admit_edit`] from the registered projects it was given.
+#[derive(Debug, Clone, Default)]
+pub struct EditScope {
+    /// `(project directory, files relative to it)` for targets inside a project.
+    pub groups: Vec<(String, Vec<String>)>,
+    /// Targets that belong to no git checkout and no registered project.
+    pub unguarded: Vec<String>,
 }
 
 /// Most distinct project groups one edit may span.
@@ -781,10 +793,17 @@ impl Store {
     /// nothing conflicts take the session's holds on all of them. Either every file ends up
     /// held or no hold is taken; a conflict leaves only its `guard.blocked` evidence.
     ///
+    /// Coverage is fresh for each admitted edit: new holds start with a full TTL and every
+    /// live exclusive hold the session already has in the edited projects is renewed to its
+    /// full TTL in the same transaction. The commit is fenced like a new binding's, by its
+    /// last event ID (see [`Store::reconcile_identity_operations`]).
+    ///
     /// `group` receives the registered local projects, read inside the transaction, and
-    /// returns `(project directory, files relative to it)` for the files that belong to a
-    /// project. It must not write to the store. Admission creates no project: a group whose
-    /// directory is not registered is reported in [`EditAdmission::unregistered`].
+    /// returns the edit's [`EditScope`]. It must not write to the store. Admission creates
+    /// no project: a group whose directory is not registered is reported in
+    /// [`EditAdmission::unregistered`]. An edit with both guarded files and targets outside
+    /// every project is stopped and reported in [`EditAdmission::unguarded`]; an edit with
+    /// only such targets is admitted with nothing held.
     ///
     /// Any error means the edit is not protected and the caller must stop it.
     #[allow(clippy::too_many_arguments)]
@@ -796,7 +815,7 @@ impl Store {
         requested_actor: Option<(&str, bool)>,
         session_id: &str,
         reason: &str,
-        group: impl FnOnce(&[Project]) -> Vec<(String, Vec<String>)>,
+        group: impl FnOnce(&[Project]) -> EditScope,
     ) -> Result<EditAdmission> {
         #[cfg(windows)]
         {
@@ -846,9 +865,20 @@ impl Store {
                     let rows = stmt.query_map([tx.node_id], project_from_row)?;
                     rows.collect::<rusqlite::Result<Vec<_>>>()?
                 };
-                let groups = group(&projects);
+                let EditScope { groups, unguarded } = group(&projects);
                 if std::time::Instant::now() >= deadline {
                     return Err(Error::IdentityScanBudgetExceeded("deadline".into()));
+                }
+                // A target outside every project cannot be held. Alone that is an edit
+                // nobody guards; next to guarded files it would be a partly protected
+                // edit reported as protected, so the whole edit is stopped.
+                if !groups.is_empty() && !unguarded.is_empty() {
+                    return Ok(EditAdmission {
+                        agent,
+                        conflicts: Vec::new(),
+                        unregistered: Vec::new(),
+                        unguarded,
+                    });
                 }
                 if groups.len() > MAX_ADMISSION_GROUPS
                     || groups.iter().map(|(_, files)| files.len()).sum::<usize>()
@@ -860,10 +890,12 @@ impl Store {
                 }
                 // Decide first, for every project, without writing any hold.
                 let mut plans = Vec::new();
+                let mut project_ids = Vec::new();
                 let mut unregistered = Vec::new();
                 for (directory, files) in &groups {
                     match find_project(tx, tx.node_id, directory) {
                         Ok(project) => {
+                            project_ids.push(project.project_id.clone());
                             plans.push(crate::holds::guard_plan_tx(tx, &me, project, files)?)
                         }
                         Err(Error::NotFound(_)) => unregistered.push(directory.clone()),
@@ -875,6 +907,7 @@ impl Store {
                         agent,
                         conflicts: Vec::new(),
                         unregistered,
+                        unguarded: Vec::new(),
                     });
                 }
                 if plans.iter().any(|plan| !plan.conflicts.is_empty()) {
@@ -889,15 +922,51 @@ impl Store {
                         agent,
                         conflicts,
                         unregistered,
+                        unguarded: Vec::new(),
                     });
                 }
                 for plan in plans {
                     crate::holds::guard_take_tx(tx, &me, plan, reason)?;
                 }
+                // Fresh coverage for this operation: an own hold that already covered a
+                // file was left as it was above unless past half its TTL. Renew every live
+                // exclusive hold of this session in the edited projects that this
+                // transaction has not just written, so the edit never starts on coverage
+                // that is about to lapse. (Kept here rather than in `guard_take_tx` so the
+                // manual `guard_edit` callers keep their renewal rule.)
+                let mut stale: Vec<String> = Vec::new();
+                for project_id in &project_ids {
+                    let mut stmt = tx.prepare(
+                        "SELECT hold_id FROM holds
+                         WHERE agent_id = ?1 AND project_id = ?2 AND exclusive = 1
+                           AND released_at IS NULL AND expires_at > ?3
+                           AND expires_at < ?3 + ttl_seconds * 1000
+                         ORDER BY created_at",
+                    )?;
+                    let ids = stmt
+                        .query_map(params![me.id, project_id, tx.now], |r| r.get(0))?
+                        .collect::<rusqlite::Result<Vec<String>>>()?;
+                    for id in ids {
+                        if !stale.contains(&id) {
+                            stale.push(id);
+                        }
+                    }
+                }
+                if !stale.is_empty() {
+                    tx.emit(&me.address, "hold.renewed", json!({ "hold_ids": stale }))?;
+                    for id in &stale {
+                        tx.execute(
+                            "UPDATE holds SET renewed_at = ?2, expires_at = ?2 + ttl_seconds * 1000
+                             WHERE hold_id = ?1",
+                            params![id, tx.now],
+                        )?;
+                    }
+                }
                 Ok(EditAdmission {
                     agent,
                     conflicts: Vec::new(),
                     unregistered,
+                    unguarded: Vec::new(),
                 })
             })
         }

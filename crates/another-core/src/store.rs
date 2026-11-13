@@ -497,7 +497,7 @@ impl Store {
             node_id: &self.inner.node_id,
             now: self.inner.clock.now(),
             key: &self.inner.key,
-            identity_op: std::cell::RefCell::new(None),
+            last_event: std::cell::RefCell::new(None),
         };
         let out = f(&ctx)?;
         ctx.tx.commit()?;
@@ -627,15 +627,16 @@ impl Store {
                 node_id: &self.inner.node_id,
                 now: self.inner.clock.now(),
                 key: &self.inner.key,
-                identity_op: std::cell::RefCell::new(None),
+                last_event: std::cell::RefCell::new(None),
             };
             let out = f(&ctx, deadline)?;
             if Instant::now() >= deadline {
                 return Err(Error::IdentityScanBudgetExceeded("deadline".into()));
             }
-            // A new binding is fenced on disk before its commit is attempted. If publishing
-            // fails nothing was committed: the transaction rolls back on drop.
-            let fence = match (ctx.identity_op.borrow_mut().take(), &self.inner.path) {
+            // Any transaction that wrote (a new binding, an edit admission, a registration)
+            // is fenced on disk before its commit is attempted. If publishing fails nothing
+            // was committed: the transaction rolls back on drop.
+            let fence = match (ctx.last_event.borrow_mut().take(), &self.inner.path) {
                 (Some(operation), Some(path)) => Some(publish_fence(path, &operation)?),
                 _ => None,
             };
@@ -670,10 +671,15 @@ impl Store {
         self.inner
             .steps
             .fetch_add(steps.load(Ordering::Relaxed), Ordering::Relaxed);
-        // Cleanup runs with no step limit, so an exhausted budget cannot leave the
-        // transaction open: a rollback the limit interrupted is finished here.
+        // Cleanup has its own small step reserve, separate from the exhausted budget, so
+        // a rollback the limit interrupted is finished here without unbounded work. If
+        // even the reserve runs out, the connection is treated as uncertain below.
+        let cleanup = Arc::new(AtomicUsize::new(0));
         let reset = conn
-            .progress_handler(0, None::<fn() -> bool>)
+            .progress_handler(
+                1,
+                Some(move || cleanup.fetch_add(1, Ordering::Relaxed) + 1 >= CLEANUP_STEP_RESERVE),
+            )
             .and_then(|_| {
                 if conn.is_autocommit() {
                     Ok(())
@@ -690,7 +696,7 @@ impl Store {
             .and_then(|_| match self.inner.deadline {
                 Some(end) => install_operation_budget(&conn, end, self.inner.steps.clone())
                     .map_err(|_| rusqlite::Error::InvalidQuery),
-                None => Ok(()),
+                None => conn.progress_handler(0, None::<fn() -> bool>),
             });
         if reset.is_err() {
             self.inner.identity_uncertain.store(true, Ordering::Release);
@@ -785,15 +791,17 @@ pub(crate) struct Tx<'a> {
     pub node_id: &'a str,
     pub now: i64,
     pub key: &'a ed25519_dalek::SigningKey,
-    /// Set by a transaction that creates a session binding: the new agent id, which names
-    /// the operation in its durable fence. See [`Store::reconcile_identity_operations`].
-    pub identity_op: std::cell::RefCell<Option<String>>,
+    /// ID of the last event this transaction emitted, if it wrote anything. Every mutation
+    /// emits an event first, so this names the operation in its durable fence. See
+    /// [`Store::reconcile_identity_operations`].
+    pub last_event: std::cell::RefCell<Option<String>>,
 }
 
-/// An identity operation settled by [`Store::reconcile_identity_operations`].
+/// An identity or edit-admission operation settled by
+/// [`Store::reconcile_identity_operations`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconciledOperation {
-    /// The agent id the operation was creating.
+    /// ID of the last event the operation's transaction emitted.
     pub operation: String,
     /// Whether its transaction is present (`true`) or was rolled back (`false`).
     pub committed: bool,
@@ -807,6 +815,10 @@ const MAX_FENCES: usize = 16;
 
 /// SQLite VM steps one bounded operation may use in total.
 pub const OPERATION_STEP_LIMIT: usize = 2_000_000;
+
+/// SQLite VM steps reserved for cleanup after an identity transaction (finishing a
+/// rollback, restoring connection settings), counted apart from the operation's budget.
+const CLEANUP_STEP_RESERVE: usize = 10_000;
 
 /// Stop every statement on `conn` at `deadline` or once `steps` reaches the limit.
 fn install_operation_budget(
@@ -835,7 +847,7 @@ fn fence_error(what: &str) -> Error {
     ))
 }
 
-/// Durably record that the transaction creating agent `operation` is about to commit.
+/// Durably record that the transaction whose last event is `operation` is about to commit.
 /// Called inside that transaction, so no other writer can observe the fence before the
 /// commit is attempted.
 #[cfg(unix)]
@@ -901,8 +913,8 @@ fn clear_fence(path: &Path) {
 
 /// Settle every pending identity fence. `conn` must hold the database write lock: the
 /// fence is published inside its transaction, so once another connection holds the lock
-/// that transaction has ended, and the agent row it created is either visible (committed)
-/// or will never appear (rolled back). Anything unreadable or unrecognized refuses.
+/// that transaction has ended, and the event it emitted is either visible (committed) or
+/// will never appear (rolled back). Anything unreadable or unrecognized refuses.
 fn reconcile_fences(conn: &Connection, db_path: Option<&Path>) -> Result<Vec<ReconciledOperation>> {
     let Some(home) = db_path.and_then(Path::parent) else {
         return Ok(Vec::new());
@@ -934,7 +946,7 @@ fn reconcile_fences(conn: &Connection, db_path: Option<&Path>) -> Result<Vec<Rec
     let mut settled = Vec::new();
     for (operation, path) in pending {
         let committed: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM agents WHERE agent_id = ?1)",
+            "SELECT EXISTS(SELECT 1 FROM events WHERE event_id = ?1)",
             [&operation],
             |r| r.get(0),
         )?;
@@ -993,6 +1005,7 @@ impl Tx<'_> {
                 sig
             ],
         )?;
+        *self.last_event.borrow_mut() = Some(event_id.clone());
         Ok(event_id)
     }
 }
@@ -1580,7 +1593,7 @@ fn ensure_local_node(
             node_id: &node_id,
             now,
             key: &key,
-            identity_op: std::cell::RefCell::new(None),
+            last_event: std::cell::RefCell::new(None),
         };
         ctx.emit(
             "system",
@@ -1891,9 +1904,23 @@ mod upgrade_tests {
                 }]
             );
             assert_eq!(std::fs::read_dir(home.join(FENCE_DIR)).unwrap().count(), 0);
-            let agents = restarted.agents().unwrap();
-            assert_eq!(agents.len(), usize::from(committed));
-            assert!(agents.iter().all(|a| a.agent_id == operation));
+            // The fence names the transaction's last event, the binding itself.
+            assert_eq!(restarted.agents().unwrap().len(), usize::from(committed));
+            let bindings: Vec<String> = restarted
+                .events(100)
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.kind == "session.binding.v1")
+                .map(|e| e.event_id)
+                .collect();
+            assert_eq!(
+                bindings,
+                if committed {
+                    vec![operation]
+                } else {
+                    Vec::new()
+                }
+            );
 
             // The session then resolves to one actor and one binding, never two.
             let actor = restarted
@@ -1918,6 +1945,97 @@ mod upgrade_tests {
                     .count(),
                 1
             );
+            assert_eq!(std::fs::read_dir(home.join(FENCE_DIR)).unwrap().count(), 0);
+        }
+    }
+
+    /// An edit admission whose commit was not confirmed is fenced the same way: the edit
+    /// is refused, the fence names the admission's last event, a later process settles
+    /// exactly that event, and the next admission gives the file fresh coverage whichever
+    /// way the commit went.
+    #[test]
+    fn unconfirmed_edit_admission_is_fenced_and_settled_across_restart() {
+        for (fault, committed) in [(1, true), (2, false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let home = dir.path().join("home");
+            let project = dir.path().join("project");
+            std::fs::create_dir_all(&project).unwrap();
+            let root = project.to_str().unwrap().to_owned();
+            let store = Store::open(&home).unwrap();
+            let actor = store
+                .session_actor(
+                    "claude",
+                    crate::identity::Program::Claude,
+                    &root,
+                    None,
+                    "fixture",
+                    true,
+                )
+                .unwrap()
+                .0;
+            let admit = |store: &Store| {
+                store.admit_edit(
+                    "claude",
+                    crate::identity::Program::Claude,
+                    &root,
+                    None,
+                    "fixture",
+                    "editing (test)",
+                    |_| crate::identity::EditScope {
+                        groups: vec![(root.clone(), vec!["src/a.rs".into()])],
+                        unguarded: Vec::new(),
+                    },
+                )
+            };
+            let held = |store: &Store| {
+                store
+                    .holds(crate::holds::HoldFilter {
+                        project: None,
+                        agent: Some(actor.clone()),
+                    })
+                    .unwrap()
+            };
+            store
+                .inner
+                .identity_commit_fault
+                .store(fault, Ordering::Release);
+            let first = admit(&store);
+            assert!(
+                matches!(first, Err(Error::IdentityScanBudgetExceeded(ref why)) if why.contains("uncertain")),
+                "{:?}",
+                first.err()
+            );
+            let fences: Vec<String> = std::fs::read_dir(home.join(FENCE_DIR))
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect();
+            assert_eq!(fences.len(), 1, "{fences:?}");
+            let operation = fences[0].strip_suffix(".pending").unwrap().to_owned();
+            drop(store);
+
+            let restarted =
+                Store::open_quick(&home, std::time::Duration::from_millis(200)).unwrap();
+            let settled = restarted.reconcile_identity_operations().unwrap();
+            assert_eq!(
+                settled,
+                [ReconciledOperation {
+                    operation: operation.clone(),
+                    committed
+                }]
+            );
+            let present = restarted
+                .events(100)
+                .unwrap()
+                .iter()
+                .any(|e| e.event_id == operation);
+            assert_eq!(present, committed);
+            assert_eq!(held(&restarted).len(), usize::from(committed));
+
+            // Admitted again, the file is held once, with a full TTL from now.
+            assert!(admit(&restarted).unwrap().admitted());
+            let holds = held(&restarted);
+            assert_eq!(holds.len(), 1);
+            assert_eq!(holds[0].pattern, "src/a.rs");
             assert_eq!(std::fs::read_dir(home.join(FENCE_DIR)).unwrap().count(), 0);
         }
     }

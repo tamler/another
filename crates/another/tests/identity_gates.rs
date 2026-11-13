@@ -539,3 +539,76 @@ fn session_exec_never_creates_a_home_or_runs_unidentified() {
     assert!(exec(&alice).status.success());
     assert!(marker.exists());
 }
+
+/// Round-1 review reproduction: a second edit of a held file must not start on the old
+/// hold's remaining time.
+#[test]
+fn a_repeated_edit_gets_fresh_coverage() {
+    let fixture = Fixture::initialized();
+    fixture.start("alice");
+    let a = fixture.root.join("src/a.rs");
+    assert_eq!(fixture.edit("alice", &[&a]), "");
+
+    let db = rusqlite::Connection::open(fixture.another_home().join("another.db")).unwrap();
+    let hold = |db: &rusqlite::Connection| -> (String, i64, i64) {
+        db.query_row(
+            "SELECT hold_id, expires_at, ttl_seconds FROM holds WHERE released_at IS NULL",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    };
+    let (id, _, ttl) = hold(&db);
+    assert_eq!(ttl, 1800);
+    // 901 seconds left: more than half the TTL, so the old rule left it alone.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    db.execute(
+        "UPDATE holds SET expires_at = ?1 WHERE hold_id = ?2",
+        rusqlite::params![now + 901_000, id],
+    )
+    .unwrap();
+
+    assert_eq!(fixture.edit("alice", &[&a]), "");
+    let (same, expires_at, _) = hold(&db);
+    assert_eq!(same, id, "the file keeps one hold");
+    assert!(
+        expires_at >= now + 1_800_000,
+        "the hold has {} s left after a fresh admission",
+        (expires_at - now) / 1000
+    );
+}
+
+/// Round-1 review reproduction: one patch with a project file and a file outside any
+/// project must not be reported as protected.
+#[test]
+fn a_partly_guarded_edit_is_stopped() {
+    let fixture = Fixture::initialized();
+    let alice = fixture.start("alice");
+    let scratch = fixture.home.join("scratch");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let a = fixture.root.join("src/a.rs");
+    let b = scratch.join("b.rs");
+
+    let out = fixture.edit("alice", &[&a, &b]);
+    let reason = deny_reason(&out).unwrap_or_else(|| panic!("{out}"));
+    assert!(
+        reason.contains("outside any project") && reason.contains("b.rs"),
+        "{reason}"
+    );
+    assert!(fixture.holds().is_empty());
+
+    // A link inside the project to a file outside it is the same mixed edit.
+    std::os::unix::fs::symlink(&b, fixture.root.join("src/link.rs")).unwrap();
+    let out = fixture.edit("alice", &[&fixture.root.join("src/link.rs")]);
+    assert!(deny_reason(&out).is_some(), "{out}");
+    assert!(fixture.holds().is_empty());
+
+    // Each part alone: the scratch file is nobody's to guard, the project file is held.
+    assert_eq!(fixture.edit("alice", &[&b]), "");
+    assert!(fixture.holds().is_empty());
+    assert_eq!(fixture.edit("alice", &[&a]), "");
+    assert_eq!(fixture.holds(), [format!("{alice} src/a.rs")]);
+}

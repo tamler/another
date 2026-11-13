@@ -427,23 +427,20 @@ fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
         "{patterns:?}"
     );
 
-    // Editing a file one already holds writes nothing new.
-    let events_before = env
-        .json(&["events", "--limit", "1000"])
-        .as_array()
-        .unwrap()
-        .len();
+    // Editing a file one already holds takes no new hold: it renews the session's holds
+    // so the edit starts with a full TTL, and records that once.
+    let events_before = env.json(&["events", "--limit", "1000"]);
+    let holds_before = env.holds().len();
     env.hook(
         "pre-edit",
         "claude",
         &tool(&env.main, "Edit", json!({ "file_path": a })),
     );
-    let events_after = env
-        .json(&["events", "--limit", "1000"])
-        .as_array()
-        .unwrap()
-        .len();
-    assert_eq!(events_before, events_after);
+    let events_after = env.json(&["events", "--limit", "1000"]);
+    let added = &events_after.as_array().unwrap()[events_before.as_array().unwrap().len()..];
+    assert_eq!(added.len(), 1, "{added:?}");
+    assert_eq!(added[0]["kind"], "hold.renewed");
+    assert_eq!(env.holds().len(), holds_before);
 
     // An unfenced hook End does not release holds; explicit exact-actor End does.
     env.hook(

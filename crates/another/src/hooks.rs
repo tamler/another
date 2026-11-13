@@ -1287,7 +1287,15 @@ fn pre_edit(store: &Store, client: Client, dir: &Path, input: &HookInput) -> Res
     if admission.admitted() {
         return Ok(String::new());
     }
-    let reason = if admission.unregistered.is_empty() {
+    let reason = if !admission.unguarded.is_empty() {
+        truncate(
+            format!(
+                "Another stopped this edit: it changes files inside a project together with files outside any project ({}), which cannot be held. Edit them separately.",
+                admission.unguarded.join(", ")
+            ),
+            1000,
+        )
+    } else if admission.unregistered.is_empty() {
         deny_message(&admission.agent, &admission.conflicts)
     } else {
         truncate(
@@ -1317,12 +1325,13 @@ fn deny(reason: &str) -> String {
 }
 
 /// Group the files of an edit by the project they belong to, as `(project directory,
-/// files relative to it)`. Reads the filesystem only.
+/// files relative to it)`, and list every target that belongs to none. No target is
+/// dropped: admission decides on all of them. Reads the filesystem only.
 fn group_edit(
     dir: &Path,
     paths: &[String],
     registered: &[another_core::Project],
-) -> Vec<(String, Vec<String>)> {
+) -> another_core::EditScope {
     // Registered projects with their directories resolved, so a project registered under a
     // symlinked spelling (/tmp vs /private/tmp) is still recognised.
     let projects: Vec<(String, PathBuf)> = registered
@@ -1335,8 +1344,15 @@ fn group_edit(
     // Group files by the project they belong to: the deeper of their git checkout and the
     // closest registered project, judged on the resolved path, so an edit through a symlink
     // is checked against the holds on the file it really reaches. Files in neither (scratch
-    // space, /tmp) are not held.
+    // space, /tmp) cannot be held and are reported as unguarded.
     let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    let mut unguarded: Vec<String> = Vec::new();
+    let mut outside = |target: &Path| {
+        let target = target.to_string_lossy().into_owned();
+        if !unguarded.contains(&target) {
+            unguarded.push(target);
+        }
+    };
     for raw in paths {
         // Not normalized lexically: `..` must apply after symlinks (review N1).
         for target in edit_targets(&dir.join(raw)) {
@@ -1351,9 +1367,13 @@ fn group_edit(
                 }
                 (Some(g), _) => g,
                 (None, Some((_, r))) => r.clone(),
-                (None, None) => continue,
+                (None, None) => {
+                    outside(&target);
+                    continue;
+                }
             };
             let Ok(rel) = target.strip_prefix(&root) else {
+                outside(&target);
                 continue;
             };
             let rel = rel.to_string_lossy().into_owned();
@@ -1369,7 +1389,7 @@ fn group_edit(
             }
         }
     }
-    groups
+    another_core::EditScope { groups, unguarded }
 }
 
 /// Run a hook event. Returns the text to print on stdout (possibly empty).

@@ -42,7 +42,7 @@ pub use holds::{
     HoldFilter, HoldReport, SessionInfo, SessionPhase, SweepReport, DEFAULT_HOLD_TTL_SECONDS,
     MAX_HOLD_TTL_SECONDS, MIN_HOLD_TTL_SECONDS,
 };
-pub use identity::{Agent, EditAdmission, Program, Project, RegisterAgent};
+pub use identity::{Agent, EditAdmission, EditScope, Program, Project, RegisterAgent};
 pub use mail::{
     AckOutcome, Importance, Inbox, InboxItem, InboxQuery, Message, NewRequest, Reply, SendMessage,
     Thread, ThreadSummary, UnreadAfter, UnreadItem,

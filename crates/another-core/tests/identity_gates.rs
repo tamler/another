@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use another_core::{Error, HoldFilter, Program, Store, FENCE_DIR};
+use another_core::{EditScope, Error, HoldFilter, Program, Store, FENCE_DIR};
 
 struct Fixture {
     _dir: tempfile::TempDir,
@@ -61,8 +61,26 @@ fn admit(
         None,
         session,
         "editing (test)",
-        |_| groups,
+        |_| EditScope {
+            groups,
+            unguarded: Vec::new(),
+        },
     )
+}
+
+/// Expiry of every live hold of `agent`, in milliseconds, straight from the database.
+fn expiries(home: &Path, agent: &str) -> Vec<(String, i64)> {
+    let db = rusqlite::Connection::open(home.join("another.db")).unwrap();
+    let mut stmt = db
+        .prepare(
+            "SELECT h.hold_id, h.expires_at FROM holds h JOIN agents a ON a.agent_id = h.agent_id
+             WHERE a.address = ?1 AND h.released_at IS NULL ORDER BY h.pattern",
+        )
+        .unwrap();
+    let rows = stmt
+        .query_map([agent], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap();
+    rows.map(Result::unwrap).collect()
 }
 
 fn held_by(store: &Store, agent: &str) -> Vec<String> {
@@ -146,8 +164,9 @@ fn a_bounded_store_stops_at_its_deadline() {
 #[test]
 fn a_pending_fence_is_settled_exactly_by_the_next_writer() {
     let (fixture, store) = Fixture::new();
-    let actor = start(&store, &fixture.shop, "one");
-    let agent_id = store.agent(&actor).unwrap().agent_id;
+    start(&store, &fixture.shop, "one");
+    // A fence names the last event of its transaction: here, the binding just written.
+    let agent_id = store.events(1).unwrap().remove(0).event_id;
     // A confirmed commit leaves no fence behind.
     assert!(
         !fixture.home.join(FENCE_DIR).exists()
@@ -345,6 +364,102 @@ fn admission_creates_no_project_and_no_session() {
         vec![(fixture.shop.clone(), files)]
     )
     .is_err());
+    assert!(held_by(&store, &alice).is_empty());
+    assert_eq!(counts(&fixture.home), before);
+}
+
+#[test]
+fn every_admission_gives_fresh_coverage() {
+    let (fixture, store) = Fixture::new();
+    let alice = start(&store, &fixture.shop, "alice");
+    let edit = |files: &[&str]| {
+        admit(
+            &store,
+            &fixture.shop,
+            "alice",
+            vec![(
+                fixture.shop.clone(),
+                files.iter().map(|f| f.to_string()).collect(),
+            )],
+        )
+        .unwrap()
+    };
+    assert!(edit(&["src/a.rs", "src/b.rs"]).admitted());
+    let first = expiries(&fixture.home, &alice);
+    assert_eq!(first.len(), 2);
+
+    // Age both holds: one just inside the old "past half its TTL" rule, one outside it
+    // with a second of life left. Neither would protect an edit that starts now.
+    let now = store.now();
+    let db = rusqlite::Connection::open(fixture.home.join("another.db")).unwrap();
+    db.execute(
+        "UPDATE holds SET expires_at = ?1 WHERE hold_id = ?2",
+        rusqlite::params![now + 901_000, first[0].0],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE holds SET expires_at = ?1 WHERE hold_id = ?2",
+        rusqlite::params![now + 1_000, first[1].0],
+    )
+    .unwrap();
+    drop(db);
+
+    // A new edit of one of the files: the same holds, both with a full TTL from now.
+    assert!(edit(&["src/a.rs"]).admitted());
+    let second = expiries(&fixture.home, &alice);
+    assert_eq!(
+        second.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+        first.iter().map(|(id, _)| id).collect::<Vec<_>>()
+    );
+    for (id, expires_at) in &second {
+        assert!(
+            *expires_at >= now + 1_800_000,
+            "{id} expires {} ms after the admission",
+            expires_at - now
+        );
+    }
+    let renewed = store
+        .events(10)
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find(|e| e.kind == "hold.renewed")
+        .expect("the renewal is recorded");
+    assert_eq!(renewed.actor, alice);
+    assert_eq!(renewed.payload["hold_ids"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn a_partly_guarded_edit_is_not_admitted() {
+    let (fixture, store) = Fixture::new();
+    let alice = start(&store, &fixture.shop, "alice");
+    let before = counts(&fixture.home);
+    let scope = |groups: Vec<(String, Vec<String>)>, unguarded: Vec<String>| {
+        store.admit_edit(
+            "claude",
+            Program::Claude,
+            &fixture.shop,
+            None,
+            "alice",
+            "editing (test)",
+            |_| EditScope { groups, unguarded },
+        )
+    };
+
+    // Guarded and unguarded targets in one edit: stopped, named, nothing held or written.
+    let mixed = scope(
+        vec![(fixture.shop.clone(), vec!["src/a.rs".into()])],
+        vec!["/scratch/b.rs".into()],
+    )
+    .unwrap();
+    assert!(!mixed.admitted());
+    assert_eq!(mixed.unguarded, ["/scratch/b.rs"]);
+    assert!(held_by(&store, &alice).is_empty());
+    assert_eq!(counts(&fixture.home), before);
+
+    // Only unguarded targets: nobody guards that edit, and nothing claims to.
+    let scratch = scope(Vec::new(), vec!["/scratch/b.rs".into()]).unwrap();
+    assert!(scratch.admitted());
     assert!(held_by(&store, &alice).is_empty());
     assert_eq!(counts(&fixture.home), before);
 }
