@@ -19,12 +19,15 @@ struct Running {
 
 async fn serve(opts: HttpOptions) -> Running {
     let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("shop");
+    std::fs::create_dir(&project).unwrap();
+    let project = project.to_str().unwrap().to_owned();
     let store = Store::open(dir.path()).unwrap();
     store
         .register_agent(RegisterAgent {
             name: "alice".into(),
             program: Program::Claude,
-            project: Some("/work/shop".into()),
+            project: Some(project.clone()),
             model: None,
             description: None,
         })
@@ -33,7 +36,7 @@ async fn serve(opts: HttpOptions) -> Running {
         .register_agent(RegisterAgent {
             name: "bob".into(),
             program: Program::Codex,
-            project: Some("/work/shop".into()),
+            project: Some(project),
             model: None,
             description: None,
         })
