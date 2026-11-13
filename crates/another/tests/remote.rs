@@ -19,16 +19,30 @@ struct Server {
     store: Store,
     base: String,
     ct: CancellationToken,
+    work: String,
+    secret: String,
+    work_glob: String,
 }
 
 async fn start() -> Server {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    store.ensure_project("t", "/work/shop").unwrap();
-    store.ensure_project("t", "/secret/vault").unwrap();
+    let work = dir.path().join("work/shop").to_string_lossy().into_owned();
+    let secret = dir
+        .path()
+        .join("secret/vault")
+        .to_string_lossy()
+        .into_owned();
+    let work_glob = dir
+        .path()
+        .join("work/*")
+        .to_string_lossy()
+        .replace('\\', "/");
+    store.ensure_project("t", &work).unwrap();
+    store.ensure_project("t", &secret).unwrap();
     for (name, program, project) in [
         ("grok-bot", Program::GrokBot, None),
-        ("alice", Program::Claude, Some("/work/shop")),
+        ("alice", Program::Claude, Some(work.as_str())),
     ] {
         store
             .register_agent(RegisterAgent {
@@ -63,6 +77,9 @@ async fn start() -> Server {
         _dir: dir,
         store,
         base: format!("http://{addr}"),
+        work,
+        secret,
+        work_glob,
         ct,
     }
 }
@@ -132,7 +149,12 @@ async fn bearer_tokens_scope_and_audit_remote_calls() {
 
     let token = srv
         .store
-        .create_token("grok-bot", &["/work/*".into()], Some("bot".into()), None)
+        .create_token(
+            "grok-bot",
+            std::slice::from_ref(&srv.work_glob),
+            Some("bot".into()),
+            None,
+        )
         .unwrap();
     let client = connect(&srv.base, &token.secret).await;
 
@@ -162,19 +184,24 @@ async fn bearer_tokens_scope_and_audit_remote_calls() {
     let ok = call(
         &client,
         "hold_paths",
-        json!({ "project": "/work/shop", "paths": ["docs/**"] }),
+        json!({ "project": srv.work, "paths": ["docs/**"] }),
     )
     .await;
     assert_eq!(error_code(&ok), None);
     for args in [
-        json!({ "project": "/secret/vault", "paths": ["a"] }),
+        json!({ "project": srv.secret, "paths": ["a"] }),
         json!({ "project": "vault", "paths": ["a"] }),
         json!({ "action": "list" }),
     ] {
         let denied = call(&client, "hold_paths", args).await;
         assert_eq!(error_code(&denied).as_deref(), Some("forbidden"));
     }
-    let denied = call(&client, "ensure_project", json!({ "path": "/elsewhere/x" })).await;
+    let denied = call(
+        &client,
+        "ensure_project",
+        json!({ "path": srv._dir.path().join("elsewhere/x") }),
+    )
+    .await;
     assert_eq!(error_code(&denied).as_deref(), Some("forbidden"));
 
     // Never reap remotely; orphan listing never scans processes.
@@ -261,7 +288,7 @@ async fn expired_and_unscoped_tokens() {
     let hold = call(
         &client,
         "hold_paths",
-        json!({ "project": "/work/shop", "paths": ["a"] }),
+        json!({ "project": srv.work, "paths": ["a"] }),
     )
     .await;
     assert_eq!(error_code(&hold).as_deref(), Some("forbidden"));

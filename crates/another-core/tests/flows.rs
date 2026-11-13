@@ -8,6 +8,7 @@ use another_core::*;
 const T0: i64 = 1_800_000_000_000;
 
 struct Fixture {
+    dir: tempfile::TempDir,
     store: Store,
     clock: Arc<AtomicI64>,
     project: Project,
@@ -15,9 +16,11 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("work/app").to_string_lossy().into_owned();
         let (clock, handle) = Clock::manual(T0);
         let store = Store::open_in_memory(clock).unwrap();
-        let project = store.ensure_project("test", "/work/app").unwrap();
+        let project = store.ensure_project("test", &path).unwrap();
         for (name, program) in [
             ("alice", Program::Claude),
             ("bob", Program::Codex),
@@ -34,6 +37,7 @@ impl Fixture {
                 .unwrap();
         }
         Fixture {
+            dir,
             store,
             clock: handle,
             project,
@@ -136,12 +140,15 @@ fn register_agent_is_idempotent_and_touches_last_seen() {
 #[test]
 fn agent_names_disambiguate_with_project() {
     let fx = Fixture::new();
-    for path in ["/work/one", "/work/two"] {
+    for path in [
+        fx.dir.path().join("work/one"),
+        fx.dir.path().join("work/two"),
+    ] {
         fx.store
             .register_agent(RegisterAgent {
                 name: "dave".into(),
                 program: Program::Cursor,
-                project: Some(path.into()),
+                project: Some(path.to_string_lossy().into_owned()),
                 model: None,
                 description: None,
             })
@@ -177,6 +184,18 @@ fn agent_names_disambiguate_with_project() {
 #[test]
 fn bare_name_resolves_when_unique_across_projects() {
     let fx = Fixture::new();
+    let one = fx
+        .dir
+        .path()
+        .join("work/one")
+        .to_string_lossy()
+        .into_owned();
+    let two = fx
+        .dir
+        .path()
+        .join("work/two")
+        .to_string_lossy()
+        .into_owned();
     let register = |project: &str| {
         fx.store
             .register_agent(RegisterAgent {
@@ -188,10 +207,10 @@ fn bare_name_resolves_when_unique_across_projects() {
             })
             .unwrap()
     };
-    let erin = register("/work/one");
+    let erin = register(&one);
     assert_eq!(erin.address, "erin@one");
     // Unique per project: registering again in the same project updates, not duplicates.
-    assert_eq!(register("/work/one").agent_id, erin.agent_id);
+    assert_eq!(register(&one).agent_id, erin.agent_id);
 
     // The bare name and name@project both resolve to the one agent.
     assert_eq!(fx.store.agent("erin").unwrap().agent_id, erin.agent_id);
@@ -208,7 +227,7 @@ fn bare_name_resolves_when_unique_across_projects() {
     assert_eq!(fx.store.agent("erin@two").unwrap_err().code(), "not_found");
 
     // A second project with the same name makes the bare name ambiguous.
-    register("/work/two");
+    register(&two);
     assert_eq!(fx.store.agent("erin").unwrap_err().code(), "ambiguous");
     assert_eq!(fx.store.agent("erin@two").unwrap().address, "erin@two");
 }
