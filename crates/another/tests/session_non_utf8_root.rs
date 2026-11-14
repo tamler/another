@@ -71,7 +71,7 @@ fn non_utf8_project_root_is_denied_without_creating_identity() {
     let edit = hook(
         &home,
         &root,
-        "pre-edit",
+        "pre-native-edit",
         r#"{"session_id":"test-session","tool_name":"Edit","tool_input":{"file_path":"a.rs"}}"#,
     );
     assert!(edit.status.success());

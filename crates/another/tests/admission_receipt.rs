@@ -97,7 +97,7 @@ impl Fixture {
         if let Some(id) = id {
             payload["tool_use_id"] = json!(id);
         }
-        self.hook("pre-edit", &payload)
+        self.hook("pre-native-edit", &payload)
     }
 
     fn edit(&self) -> ControlledEdit {

@@ -1,6 +1,6 @@
 # Hook packs
 
-This development branch denies native edit tools and adds a separate checked-handle tool hook. [Controlled edits](CONTROLLED-EDITS.md) describes the unfinished route and supersedes the native edit-allow behavior below. Client and native Windows acceptance remain pending.
+The default pack uses advisory path-hold checks for native edits and permits file creation. It does not retain the file object the client writes. An experimental strict pack, installed explicitly with `another hook install --client claude --strict-controlled`, denies every native edit and uses a restricted checked-handle tool instead. It recognizes only Claude Code 2.1.325, cannot create or delete files, and has pending integrated-client and native Windows acceptance. [Controlled edits](CONTROLLED-EDITS.md) lists its limits and recovery behavior. Reinstall without the flag to return to advisory hooks.
 
 Another is hooks-first (see [DECISIONS.md](DECISIONS.md)): agents learn about new mail because a client lifecycle hook injects a short digest, not because they poll or rely on MCP resource subscriptions. Every supported client gets the same hooks, calling the same wrapper script.
 
@@ -9,10 +9,14 @@ Another is hooks-first (see [DECISIONS.md](DECISIONS.md)): agents learn about ne
 | Session start | Registers the session actor if needed, with no hold, presence or wake-target lifecycle changes | Inbox + last-hour activity digest (≤ 1500 characters) |
 | Each prompt | Checks for unannounced mail without a heartbeat | One line, only for mail not announced before; otherwise nothing |
 | After each tool call (`post-tool`) | Checks for mail not announced yet, without renewing holds | One line of context mid-task when there is new mail; otherwise nothing |
-| Before a file edit (`pre-edit`) | Takes a narrow hold on each file about to change, or stops the edit if another agent holds it | Nothing when the edit may go ahead; a denial naming the holder when it may not |
+| Before a native file edit (default `pre-advisory-edit`) | Checks project path holds and takes narrow advisory holds, or names a conflicting holder | Nothing on no conflict or unavailable coverage; a denial for a conflict |
+| Before a native file edit (strict `pre-native-edit`) | Denies the edit before invoking Another | Denial for every native edit, including creation and scratch files |
+| Before `mcp__another__controlled_edit` (strict `pre-controlled-edit`) | Checks an existing session and creates a durable per-call admission | No output on admission, otherwise a denial |
 | Session end | Does not release holds, change presence or clear wake targets without an incarnation fence | Nothing |
 
-The two tool hooks run inside a task, so mail sent to a busy agent reaches it at its next tool call, without waiting for the next prompt, and two agents editing the same file find out before the second one writes.
+Tool hooks run inside a task, so mail sent to a busy agent reaches it at its next tool call without waiting for the next prompt. Advisory holds are checked before a native edit; the client later reopens the path and other writers can still race it. Strict controlled edits use the separate checked-object contract.
+
+The older `pre-edit` command remains an alias for advisory checks, so upgrading the binary does not silently opt existing packs into strict denial. The unreleased development pack that denied in its wrapper must be reinstalled to choose a mode explicitly.
 
 ## Install
 
@@ -73,7 +77,7 @@ Codex shows a hook's `statusMessage` while the hook runs. Another sets one on ea
 | `SessionStart` | Another: registering this session |
 | `UserPromptSubmit` | Another: checking for new messages |
 | `PostToolUse` | Another: delivering messages mid-task |
-| `PreToolUse` | Another: checking file holds before an edit |
+| `PreToolUse` | Another: checking advisory file holds |
 | `SessionEnd` | Another: closing this session |
 
 If `~/.codex/hooks.json` has no top-level `description` (or an empty one), install adds "Another coordination hooks (toanother.one): messages and file holds between coding agents". A description you wrote yourself is left as it is, and uninstall never removes one, since it may describe your other hooks too. Installs from before the labels existed get them the next time you run `another hook install --client codex`. Codex records trust against each hook's hash and skips a changed hook until you trust it again, so after that install open `/hooks` and trust Another's hooks again; until you do, mail and holds do not reach Codex sessions through hooks in the default trust flow. The other clients' files get neither field.
@@ -92,7 +96,7 @@ Each message is announced once, by whichever channel claims it first: a mid-task
 
 ## The edit guard
 
-`pre-edit` runs before each file edit. For every file the tool is about to change it resolves the path the way the filesystem does (symlinks are followed before any `..` after them; a new file is resolved through its existing parent directories; a dangling link is followed to the file it would create; when the file is itself a link, both the link and the file it points at are checked; on a volume that ignores letter case, a new file matches holds spelled in any case; see [HOLDS.md](HOLDS.md)), works out the file's project from that real path (the deeper of its git checkout and the closest registered project; files in neither, such as scratch space, are left alone), then in one transaction:
+The default `pre-advisory-edit` resolves path aliases using existing filesystem observations, including existing parents for new files, and groups targets by the deeper of their git checkout and registered project. Scratch paths outside both remain unguarded. The session must already have started for holds to be checked. For each project separately, it checks and takes holds in one transaction:
 
 - if another agent holds an overlapping path, nothing is taken and the edit is denied with a message like this one:
 
@@ -109,20 +113,18 @@ The guard never prints "allow": that would skip the client's own permission prom
 
 ## When a hook cannot do its job
 
-No hook event creates an Another home or migrates one. `another init` and `another hook install` create it; until then session start says so and every guarded edit is stopped. Each hook run has one time budget for everything it does (reading the client's input, opening and checking the database, identity, its own queries): 2 seconds for `post-tool` and `pre-edit`, 5 seconds for the others. A client that never finishes sending input cannot stall a hook. Within that budget the tool hooks wait at most 50 ms (`post-tool`) or 300 ms (`pre-edit`) for a database lock. The rule:
+No hook event creates an Another home or migrates one. `another init` and `another hook install` create it. Each hook run has a time budget for reading input, database checks and its own work: 2 seconds for tool hooks and 5 seconds for lifecycle hooks. Tool hooks wait at most 50 ms (`post-tool`) or 300 ms (edit hooks) for a database lock. The rule:
 
 - **Push fails open.** Missing database, old schema, locked database, unknown session: `post-tool` prints nothing and exits 0. If an opened database then fails, it appends a line to `$ANOTHER_HOME/logs/hooks.log`, capped at 256 KB (one older copy is kept as `hooks.log.1`).
-- **The edit guard fails closed.** It allows an edit only after it holds every file the edit names. A conflict, an unknown or invalid session, a missing, locked, damaged or over-budget database, or input that did not arrive in time stops the edit and gives the reason. A stopped edit writes nothing to the home. This requires the client to invoke the hook and honor its denial; that has not been established for every client or platform, and a client whose hook wrapper is missing or crashes is unprotected.
-- **An edit is held completely or not at all.** Resolving the session, finding each file's project, checking other agents' holds and taking the holds happen in one database transaction. If one file of a multi-file edit is held by someone else, none of the others is left held. At most 128 files per edit.
-- **Every edit starts with a full TTL.** A file the session already holds keeps that hold, and each allowed edit renews the session's exclusive holds in the edited projects to their full TTL, writing one `hold.renewed` event. An edit never starts on a hold that is about to lapse. A hold still expires if the edit runs longer than the TTL with no further hook call.
-- **An edit never registers a project.** A file in a git checkout that is not a registered project stops the edit; run `another project ensure <directory>` once.
-- **A partly guarded edit is stopped.** Files outside any checkout or registered project cannot be held. An edit of only such files is not guarded and is let through. An edit that mixes them with project files, including through a symlink that leaves the project, is stopped; make the two edits separately.
+- **Default edits are advisory.** Conflicts produce a denial when checked successfully. Missing, invalid or unavailable identity/database/input produces no coverage and no denial; a missing wrapper also provides no coverage. A multi-project edit can acquire holds in one project before finding a conflict in another. Scratch paths remain unguarded even when mixed with project paths. At most 128 target names are inspected; larger calls have no advisory coverage.
+- **Advisory holds keep their lifecycle.** New paths receive exclusive holds; already covered paths retain their holds, renewing past half their TTL. Pending, claimed and unknown controlled-operation holds cannot be renewed by this route. A discovered checkout can be registered under the existing actor. The hook does not create or modify the target file and cannot make the client's later path open safe.
+- **Strict edits fail closed.** The strict wrapper denies every native edit. The controlled hook admits only a supported client, existing bound session and one existing bounded file with a call ID; it denies missing input, unavailable state or any mismatch. Only the controlled server can confirm the checked-object operation. Its exact new hold is not substituted for a manual or earlier hold. See [controlled recovery](CONTROLLED-EDITS.md#confirmation-and-recovery) for fixed expiry and permanent unknown outcomes.
 
 ### Unconfirmed commits
 
-Starting a session, admitting an edit and `agent register` each write in one transaction. Just before that commit, Another writes a small synced file, `identity-ops/<id>.pending`, in the home, named after the transaction's last event, and removes it once the commit is confirmed. If the commit fails, is interrupted, or the process dies, the file stays, and an edit whose admission was not confirmed is stopped. Every writer of that home (hooks, the CLI, the daemon, MCP) settles pending files first, while holding the database write lock: that exact event is then either present or will never appear, and the file is removed. This costs each guarded edit two file syncs and a synced commit. Binaries from before this change do not look at these files, so do not run them against the same home. Anything in that directory Another does not recognize, or more than 16 pending files, stops all writes until you inspect and clear the directory; reads keep working.
+Starting a session, controlled admission/settlement and `agent register` use fenced identity transactions. Before commit, Another publishes a synced `identity-ops/<id>.pending` file named after the transaction's last event and removes it once commit is confirmed. An interrupted file stays for reconciliation under the database write lock: the exact event is then present or will never appear. Unknown directory entries or more than 16 files stop writes pending inspection; reads remain possible. Advisory native edits are not durably admitted operations and can proceed without coverage on a write failure. Older binaries do not honor these fences; do not mix them against the home.
 
-Native Windows is not supported: `hook run` and `session` refuse there before opening a home, and none of the above has been run on Windows.
+Native Windows paths now include private home/sidecar checks, retained handles, durable publication and a PowerShell launcher. They compile against the Windows SDK, but native execution remains unverified and is required before shipping.
 
 With nothing new, `post-tool` only reads, and SQLite in WAL mode lets readers past a writer. Announcing needs the claim write: if another writer holds the database for longer than 50 ms, the notice is not shown on that call and arrives on the next one.
 
@@ -138,7 +140,7 @@ Hooks derive a session-specific address from the effective client, project, base
 
 New session events omit the raw client session ID and may include a session fingerprint. Historical signed events and replicated legacy events retain their original bytes: raw event listings, federation traffic and authorized database access can still reveal historical IDs. Activity and dashboard views redact those IDs. Upgrading requires a verified quiescent writer fence and a consistent SQLite backup including WAL content, as described in the session identity spec; mixed old and new binaries do not guarantee protection. This does not authorize an installation or restart.
 
-An invalid hook identity returns a bounded configuration diagnostic through the start and supported prompt or post-tool output format; a matched pre-edit returns a denial. Visible identity diagnostics are unsupported on Grok prompt, Cursor prompt and every session-end route until actual client invocation and display are proven. The reviewed Grok prompt route can discard allowing output; Cursor prompt and session-end have no verified context channel. Client display of other outputs has not been verified for every client and platform; a missing or unlaunched hook cannot report an error.
+An invalid hook identity returns a bounded diagnostic through supported lifecycle/context routes. Strict edit hooks deny on identity failure; the default advisory edit hook provides no coverage and emits no denial in that case. Visible identity diagnostics are unsupported on Grok prompt, Cursor prompt and every session-end route until actual client invocation and display are proven. Client display has not been verified for every client and platform; a missing hook cannot report an error.
 
 ## The digest
 
@@ -165,6 +167,6 @@ another hook run session-start --client claude < event.json
 ```
 
 - stdin may carry the client's JSON event; Another reads `cwd` (or `workspaceRoot` / `workspace_roots[0]`) and `session_id` (or `sessionId` / `conversation_id`) when present.
-- `post-tool` and `pre-edit` also read `tool_name` / `toolName` and `tool_input` / `toolInput`. The edit guard takes file names from `file_path`, `filePath`, `notebook_path`, `path` or `target_notebook`, and from the `*** Add File:`, `*** Update File:`, `*** Delete File:` and `*** Move to:` lines of a patch in `command`.
+- Tool hooks also read `tool_name` / `toolName` and `tool_input` / `toolInput`. The default advisory hook takes native file names from `file_path`, `filePath`, `notebook_path`, `path` or `target_notebook`, and from patch file headers in `command`. The strict controlled hook parses the separate typed operation described in [controlled edits](CONTROLLED-EDITS.md).
 - Exit status is always 0; on any error nothing is printed.
 - Scripts that prefer explicit calls can use `another --json heartbeat --agent NAME --start|--end`, `another --json inbox --agent NAME --unread`, and `another --json activity --summary`.

@@ -38,7 +38,7 @@ fn missing_home_denies_pre_edit_without_creating_it() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("missing");
     let mut child = Command::new(env!("CARGO_BIN_EXE_another"))
-        .args(["hook", "run", "pre-edit", "--client", "claude"])
+        .args(["hook", "run", "pre-native-edit", "--client", "claude"])
         .env("ANOTHER_HOME", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -77,7 +77,7 @@ fn corrupt_database_denies_pre_edit_without_changing_home() {
     let before_home = std::fs::metadata(&home).unwrap();
     let before_names = std::fs::read_dir(&home).unwrap().count();
     let mut child = Command::new(env!("CARGO_BIN_EXE_another"))
-        .args(["hook", "run", "pre-edit", "--client", "claude"])
+        .args(["hook", "run", "pre-native-edit", "--client", "claude"])
         .env("ANOTHER_HOME", &home)
         .env_remove("ANOTHER_AGENT")
         .env_remove("ANOTHER_AGENT_MODE")
@@ -157,7 +157,7 @@ fn malformed_schema_is_denied_without_repair() {
     let meta = std::fs::metadata(&db).unwrap();
     let home_meta = std::fs::metadata(&home).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_another"))
-        .args(["hook", "run", "pre-edit", "--client", "claude"])
+        .args(["hook", "run", "pre-native-edit", "--client", "claude"])
         .env("ANOTHER_HOME", &home)
         .env_remove("ANOTHER_AGENT")
         .env_remove("ANOTHER_AGENT_MODE")

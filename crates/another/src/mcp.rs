@@ -853,7 +853,6 @@ impl ServerHandler for AnotherMcp {
                 info.client_info.version.as_str(),
             ) {
                 ("claude-code", "2.1.325") => ("claude", "claudecode/toolUseId"),
-                ("codex-mcp-client", "0.169.0") => ("codex", "callId"),
                 _ => {
                     return Err(ErrorData::invalid_params(
                         "unsupported controlled client version",

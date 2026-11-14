@@ -12,7 +12,7 @@ It also works across machines today, through a self-hosted federation hub or aut
 
 Claude Code and Codex cannot see each other without something shared. They can edit the same files, start the same fix twice, or launch duplicate model servers. Another combines path holds, messages and requests, activity, and a registry for ports and model servers. Its mailbox is a way to address agents and exchange messages. It does not launch agents, assign their work, or enforce a resource limit.
 
-**Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1-7 complete. Hosted connectors (OAuth for ChatGPT, Claude, and other MCP clients) and the loopback dashboard are in this tree. This branch's [controlled edit route](docs/CONTROLLED-EDITS.md) is unfinished and not released; native client edits are denied. Native Windows and integrated client acceptance remain pending. See [docs/REMOTE.md](docs/REMOTE.md) and [docs/DASHBOARD.md](docs/DASHBOARD.md).
+**Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1-7 complete. Hosted connectors (OAuth for ChatGPT, Claude, and other MCP clients) and the loopback dashboard are in this tree. Default hooks use advisory path holds. The experimental [strict controlled-edit pack](docs/CONTROLLED-EDITS.md) requires explicit opt-in and denies native edits; native Windows and integrated client acceptance remain pending. See [docs/REMOTE.md](docs/REMOTE.md) and [docs/DASHBOARD.md](docs/DASHBOARD.md).
 
 ## Why
 
@@ -25,7 +25,7 @@ This is the failure I kept hitting:
 
 What they get instead:
 
-- **Path holds, taken at the edit.** With the hook pack, each file an agent edits gets an expiring hold, and a Claude Code, Codex or Grok CLI edit to a file another agent holds is stopped with the holder's name, across worktrees and clones of the same repo. `another hold check` exits 3 on overlap and grants nothing. Edits made from a shell command get past the hook, and Cursor has no edit guard, so use another checkout when you need a real boundary.
+- **Advisory path holds, checked before an edit.** The default hook pack checks native file edits and takes expiring holds on project paths. A Claude Code, Codex or Grok CLI edit that conflicts is stopped when the client honors the hook response. The client reopens the path afterwards, so this is advisory coordination with no checked-object guarantee. `another hold check` exits 3 on overlap and grants nothing. Shell edits bypass hooks, and Cursor has no edit guard; use another checkout when you need a real boundary.
 - **Mail and requests.** `another send --request` opens work for an agent to claim. Claiming assigns an owner. An ack records receipt. If the request goes stale, someone else can take it.
 - **An activity feed**, so a session can ask who is doing what before it starts a duplicate.
 - **A resource registry**, so an agent borrows a running server instead of launching a duplicate. `another reap` needs a human `--confirm` on that machine. Remote peers cannot reap.
@@ -76,7 +76,7 @@ another hook install --client all
 
 For Codex, review and trust Another's new or changed hooks yourself in `/hooks`. In Codex's default trust flow, automatic mail delivery and edit holds do not run there until you do. Codex also offers `--dangerously-bypass-hook-trust`, which runs enabled hooks without persisted trust for that one invocation; Another does not recommend it. `another hook status` checks configuration presence, not trust or execution. Another cannot grant trust. See [Codex trust and coverage](docs/HOOKS.md#codex-trust-and-coverage).
 
-Besides session start, prompts and session end, the pack adds a hook after each tool call (new mail shows up mid-task) and, for Claude Code, Codex and Grok, one before each file edit (the edit takes a hold, or is stopped when another agent holds the file). An edit the guard cannot protect (no started session, a missing, locked or damaged database) is stopped when the client honors the response; a missing or crashed wrapper is unprotected. Hooks never create the home: run `another init` or `another hook install` first. See [docs/HOOKS.md](docs/HOOKS.md).
+Besides session start, prompts and session end, the default pack adds a hook after each tool call for new mail and, for Claude Code, Codex and Grok, an advisory check before native file edits. Conflicts produce a denial; unavailable identity, database or wrapper means no advisory coverage. Scratch files outside projects remain unguarded. Hooks never create the home: run `another init` or `another hook install` first. `another hook install --client claude --strict-controlled` instead opts into blanket native-edit denial and a restricted tool for one existing file; only Claude Code 2.1.325 is recognized, with no creation, deletion or multi-file support. See [docs/HOOKS.md](docs/HOOKS.md) before opting in.
 
 **Optional: keep the daemon running** (macOS). It expires holds in the background and wakes idle Herdr agents when mail arrives:
 

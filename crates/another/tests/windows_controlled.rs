@@ -18,7 +18,13 @@ fn powershell_hooks_admit_only_the_controlled_existing_file() {
     let root = std::fs::canonicalize(root).unwrap();
     let mut install = Command::new(env!("CARGO_BIN_EXE_another"));
     let installed = install
-        .args(["hook", "install", "--client", "claude"])
+        .args([
+            "hook",
+            "install",
+            "--client",
+            "claude",
+            "--strict-controlled",
+        ])
         .env("HOME", &home)
         .env("USERPROFILE", &home)
         .env("ANOTHER_HOME", &data)
@@ -98,4 +104,39 @@ fn powershell_hooks_admit_only_the_controlled_existing_file() {
     assert!(result.is_ok(), "native controlled edit failed");
     assert_eq!(std::fs::read(root.join("a.rs")).unwrap(), b"after");
     assert!(another::controlled_edit::execute(&store, "claude", "windows-call", &edit).is_err());
+    drop(store);
+    let restored = Command::new(env!("CARGO_BIN_EXE_another"))
+        .args(["hook", "install", "--client", "claude"])
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("ANOTHER_HOME", &data)
+        .output()
+        .unwrap();
+    assert!(restored.status.success());
+    let advisory: Value =
+        serde_json::from_slice(&std::fs::read(home.join(".claude/settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(advisory["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+    let command = advisory["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(run(command, json!({"session_id":"windows-session","cwd":root,"tool_name":"Write","tool_input":{"file_path":root.join("new.rs")}})).trim().is_empty());
+    let status = Command::new(env!("CARGO_BIN_EXE_another"))
+        .args(["--json", "hook", "status"])
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("ANOTHER_HOME", &data)
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(
+        status
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["client"] == "claude")
+            .unwrap()["installed"],
+        true
+    );
 }

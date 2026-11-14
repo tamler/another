@@ -85,7 +85,7 @@ fn identity_lock_contention_denies_pre_edit() {
     let db = env.db();
     db.execute_batch("BEGIN IMMEDIATE").unwrap();
     let began = Instant::now();
-    let output = env.hook("pre-edit", json!({"session_id":"existing-session", "cwd":env.root,
+    let output = env.hook("pre-native-edit", json!({"session_id":"existing-session", "cwd":env.root,
         "hook_event_name":"PreToolUse", "tool_name":"Edit", "tool_input":{"file_path":env.root.join("src/a.rs")}}));
     let elapsed = began.elapsed();
     db.execute_batch("ROLLBACK").unwrap();

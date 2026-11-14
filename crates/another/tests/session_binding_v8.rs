@@ -114,7 +114,7 @@ fn real_hooks_reject_a_corrupted_signed_binding() {
     )
     .unwrap();
     let edit = hook(
-        "pre-edit",
+        "pre-native-edit",
         serde_json::json!({"session_id":"private-fixture-session", "cwd":root, "hook_event_name":"PreToolUse", "tool_name":"Edit", "tool_input":{"file_path":root.join("src/a.rs")}}),
     );
     let reply: serde_json::Value = serde_json::from_slice(&edit.stdout).unwrap();

@@ -682,6 +682,9 @@ pub enum HookCmd {
         /// Show what would change without writing anything.
         #[arg(long)]
         dry_run: bool,
+        /// Opt into native edit denial and the restricted Claude checked-handle route.
+        #[arg(long)]
+        strict_controlled: bool,
     },
     /// Remove Another hooks from client configs, leaving other hooks untouched.
     Uninstall {
@@ -1822,14 +1825,25 @@ fn hook_command(
                 Ok(ExitCode::SUCCESS)
             }
         }
-        HookCmd::Install { client, dry_run } | HookCmd::Uninstall { client, dry_run } => {
+        HookCmd::Install {
+            client, dry_run, ..
+        }
+        | HookCmd::Uninstall { client, dry_run } => {
             let install = matches!(cmd, HookCmd::Install { .. });
+            let strict_controlled = matches!(
+                cmd,
+                HookCmd::Install {
+                    strict_controlled: true,
+                    ..
+                }
+            );
             let env = HookEnv::detect(another_home()?)?;
             if install && !*dry_run {
                 // Hooks never create a home; installing them is the explicit step that does.
                 Store::open(&env.another_home)?;
             }
-            let report = hooks::install(&env, &clients(client), install, *dry_run)?;
+            let report =
+                hooks::install(&env, &clients(client), install, *dry_run, strict_controlled)?;
             Ok(emit(json, &report, output::hook_report))
         }
         HookCmd::Status => {
@@ -1841,7 +1855,7 @@ fn hook_command(
                     output::HookStatus {
                         client: c.as_str().to_string(),
                         installed: std::fs::read_to_string(&path)
-                            .is_ok_and(|t| t.contains(hooks::MARKER)),
+                            .is_ok_and(|t| hooks::contains_ours_text(&t)),
                         config: path.display().to_string(),
                         trust_note: (*c == Client::Codex).then_some(hooks::CODEX_TRUST_NOTE),
                     }

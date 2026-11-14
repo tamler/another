@@ -83,7 +83,7 @@ fn missing_identity_denies_and_lifecycle_does_not_persist_raw_id() {
         let mut conflicting = base_input.clone();
         conflicting["sessionId"] = bad_value;
         let blocked = run(
-            &["hook", "run", "pre-edit", "--client", "claude"],
+            &["hook", "run", "pre-native-edit", "--client", "claude"],
             Some(conflicting.to_string()),
         );
         assert!(blocked.status.success());
@@ -194,7 +194,7 @@ fn missing_identity_denies_and_lifecycle_does_not_persist_raw_id() {
     assert_eq!(targets[0]["target"], "w1:p9");
     let input = json!({"cwd":root,"tool_name":"Edit","tool_input":{"file_path":"test.rs"}});
     let out = run(
-        &["hook", "run", "pre-edit", "--client", "claude"],
+        &["hook", "run", "pre-native-edit", "--client", "claude"],
         Some(input.to_string()),
     );
     assert!(out.status.success());
@@ -418,7 +418,7 @@ fn v8_home_upgrades_to_v10_keeping_history_and_gaining_one_admission_key() {
     assert!(!status.status.success());
     assert!(String::from_utf8_lossy(&status.stderr).contains("offline upgrade"));
     let edit = hook(
-        "pre-edit",
+        "pre-native-edit",
         json!({"session_id": "before-upgrade", "cwd": root, "tool_use_id": "t1",
             "tool_name": "Edit", "tool_input": {"file_path": root.join("a.rs")}}),
     );

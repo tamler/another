@@ -43,7 +43,7 @@ fn native_edit_is_denied_before_it_can_reopen_the_checked_path() {
         "session start did not succeed: {start}"
     );
     let result = invoke(
-        "pre-edit",
+        "pre-native-edit",
         serde_json::json!({
             "session_id":"session-a", "cwd":project, "tool_use_id":"call-a",
             "hook_event_name":"PreToolUse", "tool_name":"Edit",

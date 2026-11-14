@@ -41,7 +41,7 @@
       <h2 id="catch">A separate actor for each session</h2>
       <p>A supported hook uses the client session ID, project and base name to derive its actor. The start digest names the full address. Check the actual client and hook coverage before relying on it:</p>
       <ul>
-        <li><strong>Holds distinguish session actors.</strong> Another checks a client edit against the other actor's holds when the guard runs and the client honors its response.</li>
+        <li><strong>Advisory holds distinguish session actors.</strong> The default hook checks native edit paths against other actors' holds when coverage is available; the client must honor a conflict denial. The optional strict pack instead denies every native edit and uses a restricted checked-handle tool. Neither mode guards shell edits. See the <a href="https://github.com/tamler/another/blob/main/docs/CONTROLLED-EDITS.md">strict pack's limits and acceptance status</a>.</li>
         <li><strong>Unfenced end hooks leave holds alone.</strong> A hold remains until expiry or explicit release, so a delayed hook cannot release a resumed session's hold.</li>
         <li><strong>Mail belongs to the addressed actor.</strong> Mail sent to a legacy base address is not moved to the new session address. Cursor gets no prompt notices.</li>
       </ul>

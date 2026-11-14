@@ -130,7 +130,7 @@ fn assert_refused_without_data_changes(fixture: &Fixture, db: &Connection) {
         .unwrap();
     let status = fixture.command().arg("status").output().unwrap();
     assert!(!status.status.success(), "unexpected status success");
-    let pre = fixture.hook("pre-edit");
+    let pre = fixture.hook("pre-native-edit");
     assert!(pre.status.success(), "hook process failed");
     let reply: Value = serde_json::from_slice(&pre.stdout).expect("expected client denial JSON");
     assert_eq!(reply["hookSpecificOutput"]["permissionDecision"], "deny");

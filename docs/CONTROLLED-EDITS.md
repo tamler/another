@@ -1,6 +1,8 @@
 # Controlled edits
 
-Status: unfinished development branch, not released. Independent review, integrated client runs and native Windows evidence are pending. A compiled target or synthetic MCP client does not establish native client support.
+Status: experimental, explicit opt-in. Independent review, integrated client runs and native Windows evidence are pending. A compiled target or synthetic MCP client does not establish native client support.
+
+`another hook install --client claude --strict-controlled` installs the strict pack. It denies every native edit tool call, including scratch files and file creation, and admits only the restricted existing-file tool below. Only Claude Code 2.1.325 is recognized. Other versions and clients refuse; Codex, Grok and Cursor cannot install the strict pack. Shell edits remain outside this protocol. Reinstall without `--strict-controlled` to restore the default advisory pack. Default hooks preserve native file editing and creation with advisory path-hold checks and do not provide the checked-object guarantee.
 
 The boundary is cooperating local sessions. A hostile process running as the same operating-system user is outside it. Session identifiers and client tool-call IDs identify and correlate; they do not authenticate a caller. Another does not exclude a writer that ignores its protocol.
 
@@ -14,7 +16,7 @@ Controlled literals conservatively conflict with case aliases in hold patterns, 
 
 The native pre-edit wrapper denies native edit tools before invoking Another. A separate pre-tool hook matches exactly `mcp__another__controlled_edit`. It resolves the already-started session, checks the target and creates one new pending hold. A node-local unique keyed call digest prevents reuse across sessions, and a canonical operation digest binds the tool, project identity, path, preimage and replacement. Admission never replaces or renews an older manual hold.
 
-The server requires matching protocol call metadata and a pinned client version. Candidate shapes are Claude Code 2.1.325 (`claudecode/toolUseId`) and Codex 0.169.0 (`callId`). Earlier isolated probes observed these shapes; the integrated route is not yet accepted for either client. Absent, ambiguous, unsupported, mismatched and repeated calls refuse. Claim must begin within 120 seconds of admission. A longer permission prompt requires inspection and a fresh call, not replay.
+The server requires matching protocol call metadata and a pinned client version. Only Claude Code 2.1.325 (`claude-code`, metadata `claudecode/toolUseId`) is recognized; its integrated route is not yet accepted. Codex is unsupported: an earlier 0.169.0 probe observed `callId` correlation but did not capture the initialize name or exact controlled hook tool name. Grok and Cursor have no controlled route. Absent, ambiguous, unsupported, mismatched and repeated calls refuse. Claim must begin within 120 seconds of admission. A longer permission prompt requires inspection and a fresh call, not replay.
 
 ## Confirmation and recovery
 
@@ -29,6 +31,10 @@ Schema v10 preserves v9, its admission key, signed events, holds and admissions.
 `pending` becomes `claimed` once before I/O. Partial writes, failed syncs and failed post-write checks become terminal `unknown`. A crash leaves an unconfirmed claim; when its holds lapse, sweep changes it to `unknown`, never to confirmed or retryable pending. Unclaimed admissions expire without writing. Unknown outcomes stay permanently and appear in `another status` (first 1000 IDs plus total count). Call-key records remain to prevent replay after hold expiry. Never retry automatically, infer rollback, or promote unknown by rereading a pathname after restart.
 
 The holds of pending, claimed and unknown operations are excluded from ordinary renewal, release and adoption. Unknown coverage keeps its original deadline; it cannot become an indefinitely renewed blocker through heartbeat.
+
+Admission takes a new exclusive hold for 30 minutes. A declined permission prompt, an abandoned call, a stale preimage or a claim delayed beyond 120 seconds leaves that hold until its fixed expiry; it cannot be manually released. Inspect the file and coordinate with the holder before another call. Each confirmed call retains its own hold, so repeated edits can leave multiple holds on the same file. Real-client ordering of hooks and permission prompts remains unverified.
+
+After the durable claim, even an editor refusal known to occur before writing is conservatively recorded as `unknown`. Such records remain visible permanently, with no acknowledgment or clearing command. They do not prove that any bytes changed. Inspect the result; do not automatically retry or infer rollback from the state.
 
 ## Platform and privacy evidence
 

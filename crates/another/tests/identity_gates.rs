@@ -119,7 +119,7 @@ impl Fixture {
             }
         };
         self.hook(
-            "pre-edit",
+            "pre-native-edit",
             "claude",
             &json!({"session_id": session, "cwd": self.root, "hook_event_name": "PreToolUse",
                 "tool_name": "Edit", "tool_input": input}),
@@ -206,7 +206,7 @@ fn no_hook_event_creates_a_home() {
             "prompt",
             "session-end",
             "post-tool",
-            "pre-edit",
+            "pre-native-edit",
         ] {
             let out = fixture.hook(event, client, &edit);
             assert!(
@@ -215,7 +215,7 @@ fn no_hook_event_creates_a_home() {
             );
             match event {
                 // An edit that cannot be protected is stopped, and says how to fix it.
-                "pre-edit" => {
+                "pre-native-edit" => {
                     let reason = deny_reason(&out).unwrap_or_else(|| panic!("{client}: {out}"));
                     assert!(reason.contains("another init"), "{reason}");
                 }
@@ -234,7 +234,7 @@ fn no_hook_event_creates_a_home() {
         "prompt",
         "session-end",
         "post-tool",
-        "pre-edit",
+        "pre-native-edit",
     ] {
         fixture.hook(event, "claude", &edit);
         assert_eq!(
@@ -248,7 +248,7 @@ fn no_hook_event_creates_a_home() {
 #[test]
 fn a_stalled_launcher_cannot_stall_a_hook() {
     let fixture = Fixture::initialized();
-    for (event, limit) in [("pre-edit", 4), ("post-tool", 4), ("prompt", 7)] {
+    for (event, limit) in [("pre-native-edit", 4), ("post-tool", 4), ("prompt", 7)] {
         let mut child = fixture
             .command(&["hook", "run", event, "--client", "claude"])
             .stdin(Stdio::piped())
@@ -276,7 +276,7 @@ fn a_stalled_launcher_cannot_stall_a_hook() {
         assert!(out.status.success());
         let text = String::from_utf8(out.stdout).unwrap();
         match event {
-            "pre-edit" => assert!(deny_reason(&text).is_some(), "{text}"),
+            "pre-native-edit" => assert!(deny_reason(&text).is_some(), "{text}"),
             // A launcher fault is reported wherever the client shows context.
             _ => assert!(text.contains("did not receive"), "{text}"),
         }
@@ -322,12 +322,12 @@ fn refusals_leave_an_existing_home_untouched() {
         for event in ["session-start", "prompt", "session-end", "post-tool"] {
             fixture.hook(event, "claude", input);
         }
-        let out = fixture.hook("pre-edit", "claude", input);
+        let out = fixture.hook("pre-native-edit", "claude", input);
         assert!(deny_reason(&out).is_some(), "{input}: {out}");
     }
     // A provenance pair that is half set fails the same gate.
     let mut child = fixture
-        .command(&["hook", "run", "pre-edit", "--client", "claude"])
+        .command(&["hook", "run", "pre-native-edit", "--client", "claude"])
         .env("ANOTHER_AGENT", "someone")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

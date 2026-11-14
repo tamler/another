@@ -8,10 +8,10 @@
 //!
 //! Two hooks run inside a task, between tool calls, where the client supports them:
 //! `post-tool` mentions new mail mid-task (read only, nothing printed when nothing is new),
-//! and `pre-edit` takes a narrow hold on each file about to be edited, or stops the edit
-//! when another agent holds it. Both open the database without migrating and with a short
-//! lock timeout. `post-tool` fails open; `pre-edit` fails closed: an edit that cannot be
-//! protected is stopped.
+//! and the default `pre-advisory-edit` checks path holds before native edits. These
+//! advisory checks fail open on unavailable coverage. The explicit strict pack instead
+//! denies native edits and admits only the separate checked-handle tool, failing closed.
+//! Hooks open the database without migrating and use a short lock timeout.
 //!
 //! No hook event creates an Another home, and every run is bounded: see [`run_guarded`].
 
@@ -102,7 +102,7 @@ impl Client {
     }
 
     /// The hook entries Another installs for this client.
-    fn specs(self) -> Vec<HookSpec> {
+    fn specs(self, strict_controlled: bool) -> Vec<HookSpec> {
         let spec = |key, event, timeout, matcher| HookSpec {
             key,
             event,
@@ -124,19 +124,31 @@ impl Client {
                 } else {
                     EDIT_TOOLS
                 };
-                vec![
+                let mut specs = vec![
                     spec("SessionStart", HookEvent::SessionStart, 10, None),
                     spec("UserPromptSubmit", HookEvent::Prompt, 5, None),
                     spec("SessionEnd", HookEvent::SessionEnd, 3, None),
                     spec("PostToolUse", HookEvent::PostTool, 5, None),
-                    spec("PreToolUse", HookEvent::PreEdit, 5, Some(edits)),
                     spec(
+                        "PreToolUse",
+                        if strict_controlled {
+                            HookEvent::PreEdit
+                        } else {
+                            HookEvent::PreAdvisoryEdit
+                        },
+                        5,
+                        Some(edits),
+                    ),
+                ];
+                if strict_controlled {
+                    specs.push(spec(
                         "PreToolUse",
                         HookEvent::PreControlledEdit,
                         5,
                         Some("^mcp__another__controlled_edit$"),
-                    ),
-                ]
+                    ));
+                }
+                specs
             }
         }
     }
@@ -155,7 +167,8 @@ fn codex_status(event: HookEvent) -> &'static str {
         HookEvent::SessionStart => "Another: registering this session",
         HookEvent::Prompt => "Another: checking for new messages",
         HookEvent::PostTool => "Another: delivering messages mid-task",
-        HookEvent::PreEdit => "Another: checking file holds before an edit",
+        HookEvent::PreEdit => "Another: refusing native edits in strict mode",
+        HookEvent::PreAdvisoryEdit => "Another: checking advisory file holds",
         HookEvent::PreControlledEdit => "Another: admitting a controlled edit",
         HookEvent::SessionEnd => "Another: closing this session",
     }
@@ -190,8 +203,12 @@ pub enum HookEvent {
     SessionEnd,
     /// After each tool call: mention mail that arrived mid-task.
     PostTool,
-    /// Before a file edit: hold the file, or stop the edit if another agent holds it.
+    /// Strict pack: refuse native path edits.
+    #[value(name = "pre-native-edit")]
     PreEdit,
+    /// Advisory pack: check holds; the client performs its own path-based edit.
+    #[value(alias = "pre-edit")]
+    PreAdvisoryEdit,
     /// Admit only the Another-owned controlled tool; native edits remain denied.
     PreControlledEdit,
 }
@@ -203,7 +220,8 @@ impl HookEvent {
             HookEvent::Prompt => "prompt",
             HookEvent::SessionEnd => "session-end",
             HookEvent::PostTool => "post-tool",
-            HookEvent::PreEdit => "pre-edit",
+            HookEvent::PreEdit => "pre-native-edit",
+            HookEvent::PreAdvisoryEdit => "pre-advisory-edit",
             HookEvent::PreControlledEdit => "pre-controlled-edit",
         }
     }
@@ -212,7 +230,10 @@ impl HookEvent {
     pub fn is_tool_event(self) -> bool {
         matches!(
             self,
-            HookEvent::PostTool | HookEvent::PreEdit | HookEvent::PreControlledEdit
+            HookEvent::PostTool
+                | HookEvent::PreEdit
+                | HookEvent::PreControlledEdit
+                | HookEvent::PreAdvisoryEdit
         )
     }
 
@@ -221,7 +242,9 @@ impl HookEvent {
         match self {
             // Runs on every tool call: even a fully locked database must cost under ~100 ms.
             HookEvent::PostTool => Duration::from_millis(50),
-            HookEvent::PreEdit | HookEvent::PreControlledEdit => Duration::from_millis(300),
+            HookEvent::PreEdit | HookEvent::PreControlledEdit | HookEvent::PreAdvisoryEdit => {
+                Duration::from_millis(300)
+            }
             _ => Duration::from_secs(5),
         }
     }
@@ -305,7 +328,11 @@ fn script_text(env: &HookEnv) -> String {
         "#!/bin/sh\n\
          # Another hook wrapper, written by `another hook install`; removed by `another hook uninstall`.\n\
          # Native edits are refused before invoking a binary or reading input.\n\
-         if [ \"${{1:-}}\" = pre-edit ]; then\n\
+         if [ \"${{1:-}}\" = pre-native-edit ] && [ -n \"${{GROK_HOOK_EVENT:-}}\" ]; then\n\
+         \x20 shift\n\
+         \x20 set -- pre-advisory-edit \"$@\"\n\
+         fi\n\
+         if [ \"${{1:-}}\" = pre-native-edit ]; then\n\
          \x20 printf '%s\\n' {edit_denial}\n\
          \x20 exit 0\n\
          fi\n\
@@ -338,7 +365,8 @@ fn script_text(env: &HookEnv) -> String {
 $Event = $args[0]
 $Client = $args[1]
 $Denial = {denial}
-if ($Event -eq 'pre-edit') {{ Write-Output $Denial; exit 0 }}
+if ($Event -eq 'pre-native-edit' -and $env:GROK_HOOK_EVENT) {{ $Event = 'pre-advisory-edit' }}
+if ($Event -eq 'pre-native-edit') {{ Write-Output $Denial; exit 0 }}
 $ErrorActionPreference = 'Stop'
 try {{
     $AnotherBin = {exe}
@@ -438,7 +466,12 @@ fn array_entry<'a>(map: &'a mut Map<String, Value>, key: &str) -> Result<&'a mut
 }
 
 /// Add or refresh our entries in a config, leaving every other key and hook alone.
-fn install_into(client: Client, env: &HookEnv, root: &mut Map<String, Value>) -> Result<()> {
+fn install_into(
+    client: Client,
+    env: &HookEnv,
+    root: &mut Map<String, Value>,
+    strict_controlled: bool,
+) -> Result<()> {
     // Refresh all our entries once. More than one route can share an event key;
     // refreshing per event would replace the native guard with the controlled hook.
     uninstall_from(client, root);
@@ -457,7 +490,7 @@ fn install_into(client: Client, env: &HookEnv, root: &mut Map<String, Value>) ->
         }
     }
     let hooks = object_entry(root, "hooks")?;
-    for spec in client.specs() {
+    for spec in client.specs(strict_controlled) {
         let command = command_for(env, client, spec.event);
         let groups = array_entry(hooks, spec.key)?;
         let timeout = spec.timeout;
@@ -489,7 +522,7 @@ fn uninstall_from(client: Client, root: &mut Map<String, Value>) {
     let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) else {
         return;
     };
-    for spec in client.specs() {
+    for spec in client.specs(false) {
         let key = spec.key;
         let Some(groups) = hooks.get_mut(key).and_then(Value::as_array_mut) else {
             continue;
@@ -529,7 +562,12 @@ fn render(root: &Map<String, Value>) -> Result<String> {
     Ok(serde_json::to_string_pretty(root)? + "\n")
 }
 
-fn plan_config(client: Client, env: &HookEnv, install: bool) -> Result<FileChange> {
+fn plan_config(
+    client: Client,
+    env: &HookEnv,
+    install: bool,
+    strict_controlled: bool,
+) -> Result<FileChange> {
     let path = client.config_path(&env.home);
     let existing = read_json(&path)?;
     let (before, mut root) = match existing {
@@ -543,7 +581,7 @@ fn plan_config(client: Client, env: &HookEnv, install: bool) -> Result<FileChang
         );
     }
     let (change, after) = if install {
-        install_into(client, env, &mut root)?;
+        install_into(client, env, &mut root, strict_controlled)?;
         let after = render(&root)?;
         let change = match &before {
             None => ChangeKind::Create,
@@ -582,7 +620,8 @@ fn plan_config(client: Client, env: &HookEnv, install: bool) -> Result<FileChang
     })
 }
 
-fn contains_ours_text(text: &str) -> bool {
+/// Detect owned hooks in JSON, including encoded PowerShell command entries.
+pub fn contains_ours_text(text: &str) -> bool {
     serde_json::from_str::<Map<String, Value>>(text)
         .map_or_else(|_| mentions_ours(text), |root| contains_ours(&root))
 }
@@ -687,11 +726,15 @@ pub fn install(
     clients: &[Client],
     install: bool,
     dry_run: bool,
+    strict_controlled: bool,
 ) -> Result<HookReport> {
+    if strict_controlled && (!install || clients.iter().any(|client| *client != Client::Claude)) {
+        bail!("--strict-controlled is available only when installing the Claude pack; Codex, Grok and Cursor controlled edits are unsupported");
+    }
     // Plan everything first so a bad config aborts before anything is written.
     let mut changes = clients
         .iter()
-        .map(|c| plan_config(*c, env, install))
+        .map(|c| plan_config(*c, env, install, strict_controlled))
         .collect::<Result<Vec<_>>>()?;
     let still_used = !install
         && Client::ALL
@@ -737,6 +780,11 @@ pub fn install(
     }
     let mut notes = Vec::new();
     if install {
+        notes.push(if strict_controlled {
+            "Strict controlled pack: every native edit is denied, including scratch files and creation. Only Claude Code 2.1.325 is recognized; one existing bounded file per call. Native Windows and integrated-client acceptance remain pending. Reinstall without --strict-controlled to restore advisory hooks."
+        } else {
+            "Default advisory pack: native edits and creation remain available. Conflicts are denied when checked; unavailable identity/database/wrapper means no coverage. The client reopens paths; no checked-object guarantee."
+        }.to_owned());
         if clients.contains(&Client::Codex) {
             notes.push(CODEX_TRUST_NOTE.to_string());
         }
@@ -1382,12 +1430,54 @@ fn pre_edit(store: &Store, _client: Client, dir: &Path, input: &HookInput) -> Re
     Ok(deny(reason))
 }
 
+/// Advisory policy only. The client later reopens paths; no checked-object guarantee.
+fn pre_advisory_edit(
+    store: &Store,
+    client: Client,
+    dir: &Path,
+    input: &HookInput,
+) -> Result<String> {
+    let paths = input.edit_paths();
+    if paths.is_empty() {
+        return Ok(String::new());
+    }
+    if paths.len() > MAX_EDIT_PATHS {
+        bail!("too many advisory edit targets");
+    }
+    let scope = group_edit(dir, &paths, &store.projects()?);
+    if scope.groups.is_empty() {
+        return Ok(String::new());
+    }
+    let agent = hook_agent(store, client, &project_root(dir), input, false)?;
+    let mut conflicts = Vec::new();
+    for (project, paths) in scope.groups {
+        let project = match store.project(&project) {
+            Ok(project) => project,
+            Err(another_core::Error::NotFound(_)) => store.ensure_project(&agent, &project)?,
+            Err(error) => return Err(error.into()),
+        };
+        conflicts.extend(
+            store
+                .guard_edit(&agent, &project.abs_path, &paths, AUTO_HOLD_REASON)?
+                .conflicts,
+        );
+    }
+    Ok(if conflicts.is_empty() {
+        String::new()
+    } else {
+        deny(&deny_message(&agent, &conflicts))
+    })
+}
+
 fn pre_controlled_edit(
     store: &Store,
     client: Client,
     dir: &Path,
     input: &HookInput,
 ) -> Result<String> {
+    if client != Client::Claude {
+        bail!("controlled edit client is unsupported");
+    }
     if input.tool_name.as_deref() != Some("mcp__another__controlled_edit") {
         bail!("unsupported controlled tool name");
     }
@@ -1524,6 +1614,7 @@ fn run_event(
     match event {
         HookEvent::PostTool => return post_tool(store, client, dir, input),
         HookEvent::PreEdit => return pre_edit(store, client, dir, input),
+        HookEvent::PreAdvisoryEdit => return pre_advisory_edit(store, client, dir, input),
         HookEvent::PreControlledEdit => return pre_controlled_edit(store, client, dir, input),
         _ => {}
     }
@@ -1555,7 +1646,10 @@ fn run_event(
             }
         }
         HookEvent::SessionEnd => String::new(),
-        HookEvent::PostTool | HookEvent::PreEdit | HookEvent::PreControlledEdit => {
+        HookEvent::PostTool
+        | HookEvent::PreEdit
+        | HookEvent::PreControlledEdit
+        | HookEvent::PreAdvisoryEdit => {
             unreachable!("handled above")
         }
     };
@@ -1611,6 +1705,7 @@ pub fn log_hook_error(another_home: &Path, event: HookEvent, client: Client, err
 fn refusal(event: HookEvent, client: Client, message: &str) -> String {
     match (event, client) {
         (HookEvent::PreEdit | HookEvent::PreControlledEdit, _) => deny(message),
+        (HookEvent::PreAdvisoryEdit, _) => String::new(),
         (HookEvent::SessionStart | HookEvent::PostTool, Client::Cursor) => {
             json!({"additional_context": message}).to_string()
         }
@@ -1748,7 +1843,7 @@ mod tests {
         for client in ["claude", "codex", "grok"] {
             let output = std::process::Command::new("/bin/sh")
                 .arg(&script)
-                .args(["pre-edit", "--client", client])
+                .args(["pre-native-edit", "--client", client])
                 .env_clear()
                 .env("PATH", temp.path())
                 .output()
@@ -1759,6 +1854,17 @@ mod tests {
             assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny");
         }
         use std::os::unix::fs::PermissionsExt;
+        // Grok also loads Claude configs. Its native calls use advisory policy.
+        let grok = std::process::Command::new("/bin/sh")
+            .arg(&script)
+            .args(["pre-native-edit", "--client", "claude"])
+            .env_clear()
+            .env("PATH", temp.path())
+            .env("GROK_HOOK_EVENT", "PreToolUse")
+            .output()
+            .unwrap();
+        assert!(grok.status.success());
+        assert!(grok.stdout.is_empty());
         let marker = temp.path().join("executed");
         std::fs::write(
             &env.exe,
@@ -1771,7 +1877,7 @@ mod tests {
         std::fs::set_permissions(&env.exe, std::fs::Permissions::from_mode(0o755)).unwrap();
         let output = std::process::Command::new("/bin/sh")
             .arg(&script)
-            .args(["pre-edit", "--client", "claude"])
+            .args(["pre-native-edit", "--client", "claude"])
             .env_clear()
             .env("PATH", temp.path())
             .output()
@@ -1864,7 +1970,7 @@ mod tests {
             exe: PathBuf::from("/test/another"),
         };
         let mut root = Map::new();
-        install_into(Client::Grok, &env, &mut root).unwrap();
+        install_into(Client::Grok, &env, &mut root, false).unwrap();
         assert!(contains_ours(&root));
         assert!(contains_ours_text(&render(&root).unwrap()));
         uninstall_from(Client::Grok, &mut root);
@@ -1942,9 +2048,9 @@ mod tests {
     #[test]
     fn every_client_gets_post_tool_and_only_safe_clients_get_the_edit_guard() {
         for client in Client::ALL {
-            let specs = client.specs();
+            let specs = client.specs(false);
             assert!(specs.iter().any(|s| s.event == HookEvent::PostTool));
-            let guard = specs.iter().find(|s| s.event == HookEvent::PreEdit);
+            let guard = specs.iter().find(|s| s.event == HookEvent::PreAdvisoryEdit);
             match client {
                 Client::Cursor => assert!(guard.is_none()),
                 Client::Codex => assert_eq!(guard.unwrap().matcher, Some(CODEX_EDIT_TOOLS)),

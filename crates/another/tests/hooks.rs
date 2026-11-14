@@ -6,6 +6,33 @@ use std::process::{Command, Output, Stdio};
 
 use serde_json::{json, Value};
 
+// Compare the event/client arguments in both shell and encoded PowerShell commands.
+fn command_text(command: &str) -> String {
+    #[cfg(windows)]
+    if let Some((_, token)) = command.split_once("-EncodedCommand ") {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(token)
+            .unwrap();
+        assert_eq!(bytes.len() % 2, 0);
+        let words: Vec<_> = bytes
+            .chunks_exact(2)
+            .map(|p| u16::from_le_bytes([p[0], p[1]]))
+            .collect();
+        let decoded = String::from_utf16(&words).unwrap();
+        assert!(decoded.starts_with("& '"));
+        let args: Vec<_> = decoded.rsplitn(3, " '").collect();
+        assert_eq!(args.len(), 3);
+        return format!(
+            "{} {} --client {}",
+            args[2],
+            args[1].strip_suffix('\'').unwrap(),
+            args[0].strip_suffix('\'').unwrap()
+        );
+    }
+    command.to_owned()
+}
+
 struct Env {
     _dir: tempfile::TempDir,
     home: PathBuf,
@@ -14,6 +41,9 @@ struct Env {
 }
 
 impl Env {
+    fn script(&self) -> PathBuf {
+        self.another_home.join("hooks").join(another::hooks::MARKER)
+    }
     fn new() -> Env {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
@@ -118,7 +148,7 @@ fn commands(v: &Value) -> Vec<String> {
         match v {
             Value::Object(m) => {
                 if let Some(Value::String(c)) = m.get("command") {
-                    out.push(c.clone());
+                    out.push(command_text(c));
                 }
                 m.values().for_each(|x| walk(x, out));
             }
@@ -133,18 +163,111 @@ fn commands(v: &Value) -> Vec<String> {
 fn ours(v: &Value) -> usize {
     commands(v)
         .iter()
-        .filter(|c| c.contains("another-hook.sh"))
+        .filter(|c| c.contains(another::hooks::MARKER))
         .count()
 }
 
 /// Entries Another installs in one client config: session start, prompt, session end and
-/// post-tool everywhere, plus separate native-denial and controlled-edit hooks except for Cursor.
+/// post-tool everywhere, plus an advisory edit hook except for Cursor.
 fn installed(rel: &str) -> usize {
     if rel.contains(".cursor") {
         4
     } else {
-        6
+        5
     }
+}
+
+#[test]
+fn strict_pack_is_explicit_and_switching_back_restores_advisory_pack() {
+    let env = Env::new();
+    env.ok(&["hook", "install", "--client", "claude"]);
+    let default = env.read(".claude/settings.json");
+    assert_eq!(default["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+    assert!(commands(&default)
+        .iter()
+        .any(|s| s.contains("pre-advisory-edit")));
+    env.ok(&[
+        "hook",
+        "install",
+        "--client",
+        "claude",
+        "--strict-controlled",
+    ]);
+    let strict = env.read(".claude/settings.json");
+    assert_eq!(strict["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
+    assert!(strict["hooks"]["PreToolUse"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|g| g["matcher"] == "^mcp__another__controlled_edit$"));
+    env.ok(&["hook", "install", "--client", "claude"]);
+    assert_eq!(env.read(".claude/settings.json"), default);
+    for client in ["codex", "grok", "cursor", "all"] {
+        assert!(!env
+            .run(&["hook", "install", "--client", client, "--strict-controlled"])
+            .status
+            .success());
+        assert_eq!(env.read(".claude/settings.json"), default);
+    }
+}
+
+#[test]
+fn default_advisory_route_allows_new_and_scratch_files_but_names_conflicts() {
+    let env = Env::new();
+    let input = json!({"session_id":"advisory-session","cwd":env.repo});
+    env.hook("session-start", "claude", &input, &[]);
+    let edit = |path: PathBuf| json!({"session_id":"advisory-session","cwd":env.repo,"tool_name":"Write","tool_input":{"file_path":path}});
+    assert!(env
+        .hook("pre-edit", "claude", &edit(env.repo.join("new.rs")), &[])
+        .is_empty());
+    assert!(
+        !env.repo.join("new.rs").exists(),
+        "advisory hook must not write the file"
+    );
+    assert!(env
+        .hook(
+            "pre-advisory-edit",
+            "claude",
+            &edit(env.home.join("scratch.txt")),
+            &[]
+        )
+        .is_empty());
+    let repo = env.repo.to_str().unwrap();
+    env.ok(&[
+        "agent",
+        "register",
+        "other",
+        "--program",
+        "other",
+        "--project",
+        repo,
+    ]);
+    env.ok(&[
+        "hold",
+        "acquire",
+        "--agent",
+        "other@shop",
+        "--project",
+        repo,
+        "held.rs",
+    ]);
+    let refusal = env.hook(
+        "pre-advisory-edit",
+        "claude",
+        &edit(env.repo.join("held.rs")),
+        &[],
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&refusal).unwrap()["hookSpecificOutput"]
+            ["permissionDecision"],
+        "deny"
+    );
+    assert!(refusal.contains("other@shop"));
+    let legacy = env.hook("pre-edit", "claude", &edit(env.repo.join("held.rs")), &[]);
+    assert_eq!(
+        serde_json::from_str::<Value>(&legacy).unwrap()["hookSpecificOutput"]["permissionDecision"],
+        "deny"
+    );
 }
 
 #[test]
@@ -172,7 +295,7 @@ fn claude_install_preserves_existing_config_and_is_idempotent() {
     let dry: Value = serde_json::from_str(&dry).unwrap();
     assert_eq!(dry["dry_run"], true);
     assert_eq!(env.read(".claude/settings.json"), original);
-    assert!(!env.another_home.join("hooks/another-hook.sh").exists());
+    assert!(!env.script().exists());
 
     env.ok(&["hook", "install", "--client", "claude"]);
     let after = env.read(".claude/settings.json");
@@ -182,27 +305,22 @@ fn claude_install_preserves_existing_config_and_is_idempotent() {
     // a matcher for the edit tools.
     let pre = after["hooks"]["PreToolUse"].as_array().unwrap();
     assert_eq!(pre[0], original["hooks"]["PreToolUse"][0]);
-    assert_eq!(pre.len(), 3);
+    assert_eq!(pre.len(), 2);
     assert_eq!(pre[1]["matcher"], "Edit|Write|MultiEdit|NotebookEdit");
-    assert!(pre[1]["hooks"][0]["command"]
-        .as_str()
-        .unwrap()
-        .ends_with("pre-edit --client claude"));
-    assert_eq!(pre[2]["matcher"], "^mcp__another__controlled_edit$");
-    assert!(pre[2]["hooks"][0]["command"]
-        .as_str()
-        .unwrap()
-        .ends_with("pre-controlled-edit --client claude"));
+    assert!(
+        command_text(pre[1]["hooks"][0]["command"].as_str().unwrap())
+            .ends_with("pre-advisory-edit --client claude")
+    );
     let post = after["hooks"]["PostToolUse"].as_array().unwrap();
     assert_eq!(post.len(), 1);
     assert!(
         post[0].get("matcher").is_none(),
         "post-tool runs after every tool"
     );
-    assert!(post[0]["hooks"][0]["command"]
-        .as_str()
-        .unwrap()
-        .ends_with("post-tool --client claude"));
+    assert!(
+        command_text(post[0]["hooks"][0]["command"].as_str().unwrap())
+            .ends_with("post-tool --client claude")
+    );
     let start = after["hooks"]["SessionStart"].as_array().unwrap();
     assert_eq!(
         start[0]["hooks"][0]["command"], "echo mine",
@@ -210,16 +328,19 @@ fn claude_install_preserves_existing_config_and_is_idempotent() {
     );
     assert_eq!(
         ours(&after),
-        6,
-        "SessionStart, UserPromptSubmit, SessionEnd, PostToolUse, native and controlled PreToolUse"
+        5,
+        "SessionStart, UserPromptSubmit, SessionEnd, PostToolUse and advisory PreToolUse"
     );
     assert!(commands(&after)
         .iter()
         .any(|c| c.ends_with("session-start --client claude")));
     assert_eq!(env.backups(".claude/settings.json"), 1);
-    let script = env.another_home.join("hooks/another-hook.sh");
+    let script = env.script();
     let text = std::fs::read_to_string(&script).unwrap();
+    #[cfg(unix)]
     assert!(text.starts_with("#!/bin/sh"));
+    #[cfg(windows)]
+    assert!(text.contains("[Console]::In.ReadToEnd()"));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -284,11 +405,13 @@ fn installs_every_client_format() {
         .any(|n| n.as_str().unwrap().contains("/hooks")));
 
     let codex = env.read(".codex/hooks.json");
-    assert_eq!(ours(&codex), 6);
-    assert!(codex["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
-        .as_str()
-        .unwrap()
-        .ends_with("prompt --client codex"));
+    assert_eq!(ours(&codex), 5);
+    assert!(command_text(
+        codex["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+    )
+    .ends_with("prompt --client codex"));
     // Codex edits files through apply_patch.
     assert_eq!(
         codex["hooks"]["PreToolUse"][0]["matcher"],
@@ -296,7 +419,7 @@ fn installs_every_client_format() {
     );
 
     let grok = env.read(".grok/hooks/another.json");
-    assert_eq!(ours(&grok), 6);
+    assert_eq!(ours(&grok), 5);
     assert_eq!(
         grok["hooks"]["SessionEnd"][0]["hooks"][0]["type"],
         "command"
@@ -310,15 +433,19 @@ fn installs_every_client_format() {
     assert_eq!(cursor["version"], 1);
     assert_eq!(ours(&cursor), 4);
     assert_eq!(cursor["hooks"]["afterFileEdit"][0]["command"], "fmt.sh");
-    assert!(cursor["hooks"]["sessionStart"][0]["command"]
-        .as_str()
-        .unwrap()
-        .ends_with("session-start --client cursor"));
+    assert!(command_text(
+        cursor["hooks"]["sessionStart"][0]["command"]
+            .as_str()
+            .unwrap()
+    )
+    .ends_with("session-start --client cursor"));
     assert!(cursor["hooks"]["beforeSubmitPrompt"].is_array());
-    assert!(cursor["hooks"]["postToolUse"][0]["command"]
-        .as_str()
-        .unwrap()
-        .ends_with("post-tool --client cursor"));
+    assert!(command_text(
+        cursor["hooks"]["postToolUse"][0]["command"]
+            .as_str()
+            .unwrap()
+    )
+    .ends_with("post-tool --client cursor"));
     assert!(
         cursor["hooks"].get("preToolUse").is_none(),
         "no edit guard for Cursor"
@@ -334,13 +461,13 @@ fn installs_every_client_format() {
     // Uninstalling one client keeps the shared script for the others.
     env.ok(&["hook", "uninstall", "--client", "grok"]);
     assert!(!env.home.join(".grok/hooks/another.json").exists());
-    assert!(env.another_home.join("hooks/another-hook.sh").exists());
+    assert!(env.script().exists());
     env.ok(&["hook", "uninstall", "--client", "all"]);
     assert_eq!(
         env.read(".cursor/hooks.json"),
         json!({ "version": 1, "hooks": { "afterFileEdit": [{ "command": "fmt.sh" }] } })
     );
-    assert!(!env.another_home.join("hooks/another-hook.sh").exists());
+    assert!(!env.script().exists());
 }
 
 fn stdin_for(repo: &Path, session: &str) -> Value {
@@ -601,10 +728,7 @@ fn install_and_uninstall_preserve_config_permissions() {
     // A config Another creates is private.
     assert_eq!(mode(&env.home.join(".grok/hooks/another.json")), 0o600);
     // The wrapper script is executable.
-    assert_eq!(
-        mode(&env.another_home.join("hooks/another-hook.sh")) & 0o111,
-        0o111
-    );
+    assert_eq!(mode(&env.script()) & 0o111, 0o111);
 
     env.ok(&["hook", "uninstall", "--client", "all"]);
     for (rel, value, m) in &fixtures {
@@ -737,7 +861,7 @@ const CODEX_LABELS: [(&str, &str); 5] = [
     ("SessionStart", "Another: registering this session"),
     ("UserPromptSubmit", "Another: checking for new messages"),
     ("PostToolUse", "Another: delivering messages mid-task"),
-    ("PreToolUse", "Another: checking file holds before an edit"),
+    ("PreToolUse", "Another: checking advisory file holds"),
     ("SessionEnd", "Another: closing this session"),
 ];
 const CODEX_DESCRIPTION: &str =
@@ -750,7 +874,7 @@ fn our_handler(config: &Value, event: &str) -> Value {
         .unwrap()
         .iter()
         .flat_map(|g| g["hooks"].as_array().unwrap().iter())
-        .find(|h| h["command"].as_str().unwrap().contains("another-hook.sh"))
+        .find(|h| command_text(h["command"].as_str().unwrap()).contains(another::hooks::MARKER))
         .unwrap_or_else(|| panic!("no Another hook for {event}: {config}"))
         .clone()
 }
@@ -855,7 +979,7 @@ fn codex_fresh_install_writes_labels_and_description() {
     let env = Env::new();
     assert_eq!(install_changes(&env, "codex"), ["create"]);
     let after = env.read(".codex/hooks.json");
-    assert_eq!(ours(&after), 6);
+    assert_eq!(ours(&after), 5);
     for (event, label) in CODEX_LABELS {
         assert_eq!(our_handler(&after, event)["statusMessage"], label);
     }
@@ -904,7 +1028,7 @@ fn codex_refresh_labels_hooks_installed_before_labels() {
     assert!(!has_key(&old, "statusMessage"));
     assert_eq!(install_changes(&env, "codex"), ["update"]);
     let after = env.read(".codex/hooks.json");
-    assert_eq!(ours(&after), 6);
+    assert_eq!(ours(&after), 5);
     for (event, label) in CODEX_LABELS {
         assert_eq!(our_handler(&after, event)["statusMessage"], label);
     }

@@ -164,7 +164,7 @@ impl Env {
     /// Deny the real native call first; separately inspect the legacy advisory API.
     /// Its result is never presented to a client and never writes a file.
     fn advisory(&self, client: &str, input: &Value) -> String {
-        let native = self.hook("pre-edit", client, input);
+        let native = self.hook("pre-native-edit", client, input);
         assert!(
             native.contains("\"permissionDecision\":\"deny\""),
             "native path edits must remain denied"
@@ -546,7 +546,7 @@ fn advisory_projection_holds_files_and_reports_sibling_worktree_conflicts() {
 fn controlled_admissions_conflict_across_worktrees_and_keep_distinct_holds() {
     let env = Env::new();
     let claude = env.start("claude", &env.main, &[]);
-    let codex = env.start("codex", &env.wt, &[]);
+    let reviewer = env.start("claude", &env.wt, &[]);
     for root in [&env.main, &env.wt] {
         for file in ["src/a.rs", "src/b.rs"] {
             std::fs::write(root.join(file), b"x").unwrap();
@@ -566,14 +566,14 @@ fn controlled_admissions_conflict_across_worktrees_and_keep_distinct_holds() {
     let first = env.holds();
     assert_eq!(first.len(), 1);
     assert_eq!(first[0]["agent"], claude);
-    assert!(denial(&admit("codex", &env.wt, "src/a.rs", "codex-a")).contains(&claude));
+    assert!(denial(&admit("claude", &env.wt, "src/a.rs", "reviewer-a")).contains(&claude));
     assert_eq!(
         env.holds(),
         first,
         "conflict must not leave partial coverage"
     );
-    assert_eq!(admit("codex", &env.wt, "src/b.rs", "codex-b"), "");
-    assert!(denial(&admit("claude", &env.main, "src/b.rs", "claude-b")).contains(&codex));
+    assert_eq!(admit("claude", &env.wt, "src/b.rs", "reviewer-b"), "");
+    assert!(denial(&admit("claude", &env.main, "src/b.rs", "claude-b")).contains(&reviewer));
     assert_eq!(admit("claude", &env.main, "src/a.rs", "claude-a2"), "");
     let held = env.holds();
     assert_eq!(held.len(), 3, "each operation needs its own pending hold");
@@ -615,7 +615,7 @@ fn tool_hooks_are_fast_when_the_database_is_missing_or_locked() {
     let (out, took) = env.hook_timed("post-tool", "claude", &edit, &[]);
     assert_eq!(out, "");
     assert!(took < Duration::from_secs(2), "{took:?}");
-    let (out, _) = env.hook_timed("pre-edit", "claude", &edit, &[]);
+    let (out, _) = env.hook_timed("pre-native-edit", "claude", &edit, &[]);
     assert!(denied(&out), "{out}");
     assert!(!env.another_home.exists());
 
@@ -632,7 +632,7 @@ fn tool_hooks_are_fast_when_the_database_is_missing_or_locked() {
     assert_eq!(out, "");
     assert!(took < Duration::from_secs(2), "{took:?}");
     // The edit guard cannot write, so it cannot hold the file: the edit is stopped.
-    let (out, took) = env.hook_timed("pre-edit", "claude", &edit, &[]);
+    let (out, took) = env.hook_timed("pre-native-edit", "claude", &edit, &[]);
     assert!(denied(&out), "{out}");
     assert!(took < Duration::from_secs(3), "{took:?}");
     db.execute_batch("ROLLBACK").unwrap();
@@ -652,7 +652,7 @@ fn tool_hooks_are_fast_when_the_database_is_missing_or_locked() {
     let (out, took) = env.hook_timed("post-tool", "claude", &after, &[]);
     assert_eq!(out, "");
     assert!(took < Duration::from_secs(2), "{took:?}");
-    let (out, took) = env.hook_timed("pre-edit", "claude", &edit, &[]);
+    let (out, took) = env.hook_timed("pre-native-edit", "claude", &edit, &[]);
     assert!(denied(&out), "{out}");
     assert!(took < Duration::from_secs(3), "{took:?}");
     db.execute_batch("ROLLBACK").unwrap();
@@ -662,7 +662,7 @@ fn tool_hooks_are_fast_when_the_database_is_missing_or_locked() {
     let log = std::fs::read_to_string(env.another_home.join("logs/hooks.log")).unwrap();
     assert!(log.contains("post-tool --client claude"), "{log}");
     assert!(log.contains("failing open"), "{log}");
-    assert!(!log.contains("pre-edit"), "{log}");
+    assert!(!log.contains("pre-native-edit"), "{log}");
 }
 
 impl Env {
@@ -1241,7 +1241,7 @@ fn advisory_dangling_symlink_to_a_held_new_file_is_stopped() {
     std::os::unix::fs::symlink(env.wt.join("loop2"), env.wt.join("loop1")).unwrap();
     std::os::unix::fs::symlink(env.wt.join("loop1"), env.wt.join("loop2")).unwrap();
     let (out, took) = env.hook_timed(
-        "pre-edit",
+        "pre-native-edit",
         "codex",
         &tool(
             &env.wt,

@@ -102,7 +102,7 @@ fn hook_environment_pair_requires_explicit_provenance() {
             "start diagnostic missing: {agent:?} {mode:?}"
         );
         assert_eq!(snapshot(), before, "start mutated: {agent:?} {mode:?}");
-        let denied = run("pre-edit", agent, mode);
+        let denied = run("pre-native-edit", agent, mode);
         let response: Value = serde_json::from_slice(&denied.stdout).unwrap();
         assert_eq!(response["hookSpecificOutput"]["permissionDecision"], "deny");
         assert_eq!(snapshot(), before, "pre-edit mutated: {agent:?} {mode:?}");
@@ -202,7 +202,7 @@ fn installed_wrapper_exposes_session_start_identity_diagnostic() {
         (Some("private-agent"), Some("")),
         (Some("private-agent"), Some("wrong")),
     ] {
-        for event in ["session-start", "pre-edit", "pre-controlled-edit"] {
+        for event in ["session-start", "pre-native-edit", "pre-controlled-edit"] {
             let mut cmd = Command::new(home.join(".another/hooks/another-hook.sh"));
             cmd.args([event, "--client", "claude"])
                 .env("HOME", &home)
@@ -242,7 +242,7 @@ fn installed_wrapper_exposes_session_start_identity_diagnostic() {
             } else {
                 stdout
             };
-            if event != "pre-edit" {
+            if event != "pre-native-edit" {
                 assert!(
                     message.contains("nonempty ANOTHER_AGENT")
                         && message.contains("ANOTHER_AGENT_MODE"),
