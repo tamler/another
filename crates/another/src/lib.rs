@@ -4,6 +4,7 @@ pub mod cli;
 pub mod daemon;
 pub mod dashboard;
 pub mod fed;
+pub mod handle_edit;
 pub mod hooks;
 pub mod mcp;
 pub mod oauth_http;

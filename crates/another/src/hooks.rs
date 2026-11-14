@@ -266,7 +266,12 @@ fn script_text(env: &HookEnv) -> String {
     format!(
         "#!/bin/sh\n\
          # Another hook wrapper, written by `another hook install`; removed by `another hook uninstall`.\n\
-         # It always exits 0, so a missing or failing another never blocks the agent.\n\
+         # Native edits are refused before invoking a binary or reading input.\n\
+         if [ \"${{1:-}}\" = pre-edit ]; then\n\
+         \x20 printf '%s\\n' {edit_denial}\n\
+         \x20 exit 0\n\
+         fi\n\
+         # Other hook events continue when another cannot run.\n\
          ANOTHER_BIN={exe}\n\
          if [ ! -x \"$ANOTHER_BIN\" ]; then\n\
          \x20 ANOTHER_BIN=$(command -v another 2>/dev/null) || exit 0\n\
@@ -279,6 +284,7 @@ fn script_text(env: &HookEnv) -> String {
          exit 0\n",
         exe = sh_quote(&env.exe.to_string_lossy()),
         home = sh_quote(&env.another_home.to_string_lossy()),
+        edit_denial = sh_quote(&deny("Another stopped this edit because native path-based edits cannot use the file handle checked by Another.")),
     )
 }
 
@@ -1275,15 +1281,14 @@ pub fn deny_message(agent: &str, conflicts: &[HoldConflict]) -> String {
     truncate(out, 1000)
 }
 
-/// `pre-edit`: hold each file about to be edited, or stop the edit when another agent
-/// holds it. Prints a deny only for a real conflict; nothing otherwise (printing "allow"
-/// would skip the client's own permission prompts).
-fn pre_edit(store: &Store, client: Client, dir: &Path, input: &HookInput) -> Result<String> {
+/// Native client edits reopen paths outside Another's control, so they cannot use an
+/// open file retained by this process. Refuse them until a controlled route exists.
+fn pre_edit(store: &Store, _client: Client, dir: &Path, input: &HookInput) -> Result<String> {
     let paths = input.edit_paths();
-    let root = project_root(dir);
     if paths.is_empty() {
-        hook_agent(store, client, &root, input, false)?;
-        return Ok(String::new());
+        return Ok(deny(
+            "Another stopped this edit because its file targets could not be established.",
+        ));
     }
     if paths.len() > MAX_EDIT_PATHS {
         bail!(
@@ -1291,41 +1296,13 @@ fn pre_edit(store: &Store, client: Client, dir: &Path, input: &HookInput) -> Res
             paths.len()
         );
     }
-    let request = identity_request(&root, input)?;
-    // Identity, project lookup, the conflict check and the holds are one transaction
-    // under one deadline: the edit is held completely or stopped.
-    let admission = store.admit_edit(
-        client.as_str(),
-        client.program(),
-        request.root,
-        request.actor(),
-        request.session_id,
-        AUTO_HOLD_REASON,
-        |projects| group_edit(dir, &paths, projects),
-    )?;
-    if admission.admitted() {
-        return Ok(String::new());
-    }
-    let reason = if !admission.unguarded.is_empty() {
-        truncate(
-            format!(
-                "Another stopped this edit: it changes files inside a project together with files outside any project ({}), which cannot be held. Edit them separately.",
-                admission.unguarded.join(", ")
-            ),
-            1000,
-        )
-    } else if admission.unregistered.is_empty() {
-        deny_message(&admission.agent, &admission.conflicts)
+    let scope = group_edit(dir, &paths, &store.projects()?);
+    let reason = if scope.groups.is_empty() {
+        "Another stopped this edit because its file scope cannot be proven safe for a native path-based editor."
     } else {
-        truncate(
-            format!(
-                "Another stopped this edit: it reaches a project that is not registered ({}), so its holds cannot be checked. Register it with `another project ensure <directory>` and try again.",
-                admission.unregistered.join(", ")
-            ),
-            1000,
-        )
+        "Another stopped this edit because the native editor cannot use the file handle checked by Another."
     };
-    Ok(deny(&reason))
+    Ok(deny(reason))
 }
 
 /// Most files one edit may name.
@@ -1646,6 +1623,57 @@ pub fn run_guarded(another_home: Option<&Path>, event: HookEvent, client: Client
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_edit_wrapper_denies_even_if_another_is_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = HookEnv {
+            home: temp.path().to_path_buf(),
+            another_home: temp.path().join("home"),
+            exe: temp.path().join("missing-another"),
+        };
+        let script = temp.path().join("wrapper.sh");
+        std::fs::write(&script, script_text(&env)).unwrap();
+        for client in ["claude", "codex", "grok"] {
+            let output = std::process::Command::new("/bin/sh")
+                .arg(&script)
+                .args(["pre-edit", "--client", client])
+                .env_clear()
+                .env("PATH", temp.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let value: Value = serde_json::from_slice(&output.stdout)
+                .expect("wrapper must deny without the binary");
+            assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny");
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let marker = temp.path().join("executed");
+        std::fs::write(
+            &env.exe,
+            format!(
+                "#!/bin/sh\nprintf called > {}\nexit 1\n",
+                sh_quote(&marker.to_string_lossy())
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&env.exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = std::process::Command::new("/bin/sh")
+            .arg(&script)
+            .args(["pre-edit", "--client", "claude"])
+            .env_clear()
+            .env("PATH", temp.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(
+            !marker.exists(),
+            "pre-edit must not depend on the executable"
+        );
+    }
 
     #[test]
     fn tool_use_id_is_bounded_top_level_and_redacted() {
