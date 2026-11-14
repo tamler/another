@@ -365,6 +365,62 @@ async fn fetch_inbox_is_not_an_ack_and_acknowledge_is_per_agent() {
 }
 
 #[tokio::test]
+async fn mark_read_only_preserves_other_recipient_unread() {
+    let client = in_process(Store::open_in_memory(Clock::System).unwrap()).await;
+    for name in ["sender", "a", "b"] {
+        call_ok(
+            &client,
+            "register_agent",
+            json!({ "name": name, "program": "codex" }),
+        )
+        .await;
+    }
+    let sent = call_ok(
+        &client,
+        "send_message",
+        json!({
+            "from": "sender", "to": ["a", "b"], "subject": "Shared",
+            "body": "Read separately", "ack_required": true
+        }),
+    )
+    .await;
+    let id = sent["message_id"].as_str().unwrap();
+    // fetch_inbox defaults to unread_only: true.
+    let before = call_ok(&client, "fetch_inbox", json!({ "agent": "b" })).await;
+    assert_eq!(before["unread"], 1);
+    assert_eq!(before["messages"][0]["message_id"], id);
+    let marked = call_ok(
+        &client,
+        "acknowledge",
+        json!({
+            "agent": "a", "message_ids": [id], "ack": false
+        }),
+    )
+    .await;
+    assert_eq!(marked["updated"], json!([id]));
+    let a = call_ok(&client, "fetch_inbox", json!({ "agent": "a" })).await;
+    assert_eq!(a["unread"], 0);
+    assert!(a["messages"].as_array().unwrap().is_empty());
+    let a = call_ok(
+        &client,
+        "fetch_inbox",
+        json!({ "agent": "a", "unread_only": false }),
+    )
+    .await;
+    assert!(a["messages"][0]["read_at"].is_string());
+    assert!(a["messages"][0]["acked_at"].is_null());
+    assert_eq!(a["awaiting_ack"], 1);
+    let b = call_ok(&client, "fetch_inbox", json!({ "agent": "b" })).await;
+    assert_eq!(b["unread"], 1);
+    assert_eq!(b["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(b["messages"][0]["message_id"], id);
+    assert!(b["messages"][0]["read_at"].is_null());
+    assert!(b["messages"][0]["acked_at"].is_null());
+    assert_eq!(b["awaiting_ack"], 1);
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
 async fn streamable_http_on_loopback() {
     let dir = tempfile::tempdir().unwrap();
     let project_path = dir.path().join("site");

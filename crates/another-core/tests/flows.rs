@@ -461,7 +461,7 @@ fn ack_records_receipt_only_for_the_acting_agent() {
     );
 }
 
-/// Read-only (`another ack --read-only`, MCP `ack: false`) marks the delivery read and emits a
+/// Mark read only (`another ack --mark-read-only`, MCP `ack: false`) marks the delivery read and emits a
 /// read receipt, but never an acknowledgement; a later real ack still goes through.
 #[test]
 fn read_only_marks_read_without_acking() {

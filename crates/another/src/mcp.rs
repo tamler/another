@@ -171,7 +171,8 @@ pub struct ThreadsOut {
 pub struct AcknowledgeArgs {
     pub agent: String,
     pub message_ids: Vec<String>,
-    /// true: mark read and acknowledged (default); false: only mark read.
+    /// true: mark read and acknowledged (default); false: mark read without acknowledging.
+    /// Both values change delivery state for the acting recipient only.
     pub ack: Option<bool>,
 }
 
@@ -485,7 +486,9 @@ impl AnotherMcp {
         .await
     }
 
-    #[tool(description = "Mark delivered messages read and (by default) acknowledged.")]
+    #[tool(
+        description = "Change the acting recipient's delivery state: mark messages read and, by default, acknowledged. Set ack: false to mark read without acknowledging; other recipients are unchanged."
+    )]
     async fn acknowledge(
         &self,
         Parameters(a): Parameters<AcknowledgeArgs>,
