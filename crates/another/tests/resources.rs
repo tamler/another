@@ -1,5 +1,8 @@
 //! Resource CLI, orphan scanning, and human-approved reaping against real processes.
 
+#[path = "common/hosted_ci.rs"]
+mod hosted_ci;
+
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 
@@ -173,6 +176,7 @@ fn reap_requires_lapse_grace_and_confirmation() {
 
 #[tokio::test]
 async fn mcp_reap_never_terminates() {
+    hosted_ci::require_hosted_runner();
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().to_path_buf();
     setup(&home);

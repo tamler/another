@@ -3,6 +3,9 @@
 //! `wake prune`, and the daemon's waker against a fake `herdr`.
 #![cfg(unix)]
 
+#[path = "common/hosted_ci.rs"]
+mod hosted_ci;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -567,6 +570,7 @@ fn herdr_panes_are_captured_at_start_and_released_at_end() {
 
 #[test]
 fn wake_prune_drops_dead_automatic_targets_only() {
+    hosted_ci::require_hosted_runner();
     let env = Env::new();
     env.start("claude", &env.main, &[("HERDR_PANE_ID", "w1:p1")]);
     env.start("codex", &env.wt, &[("HERDR_PANE_ID", "w1:p2")]);
@@ -625,6 +629,7 @@ struct Daemon {
 
 impl Daemon {
     fn start(env: &Env) -> Daemon {
+        hosted_ci::require_hosted_runner();
         let log = env.root.join("serve.log");
         let file = std::fs::File::create(&log).unwrap();
         let child = env
@@ -965,6 +970,7 @@ fn a_hung_adapter_does_not_block_sigterm() {
 /// F5: a probe that hangs times out, and the pass moves on.
 #[test]
 fn adapter_commands_are_bounded() {
+    hosted_ci::require_hosted_runner();
     let started = Instant::now();
     let mut cmd = Command::new("sleep");
     cmd.arg("30");
@@ -1155,6 +1161,7 @@ fn glob_holds_through_a_symlinked_directory_are_resolved() {
 /// N4: an adapter that leaves a process behind on its stdout does not stall the caller.
 #[test]
 fn a_descendant_holding_stdout_does_not_outlast_the_deadline() {
+    hosted_ci::require_hosted_runner();
     let mut cmd = Command::new("sh");
     cmd.args(["-c", "sleep 20 & echo '{\"result\":{}}'"]);
     let started = Instant::now();

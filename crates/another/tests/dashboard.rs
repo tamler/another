@@ -1,5 +1,8 @@
 //! Dashboard HTTP: loopback UI, redacted auth mode, and the confirm gate.
 
+#[path = "common/hosted_ci.rs"]
+mod hosted_ci;
+
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::process::{Command, Stdio};
@@ -601,6 +604,7 @@ fn resolve_matrix_matches_the_loopback_rule() {
 
 #[tokio::test]
 async fn dashboard_command_refuses_remote_bind_and_serves_loopback() {
+    hosted_ci::require_hosted_runner();
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
     let bad = Command::new(env!("CARGO_BIN_EXE_another"))
