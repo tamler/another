@@ -36,11 +36,22 @@ fn json(home: &Path, args: &[&str]) -> Value {
 }
 
 fn sleeper() -> Child {
-    Command::new("sleep")
-        .arg("300")
-        .stdin(Stdio::null())
+    Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "resource_cli_flow", "--nocapture"])
+        .env("ANOTHER_RESOURCE_TEST_CHILD", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .unwrap()
+}
+
+#[test]
+fn process_fixture_exits_when_its_input_closes() {
+    let mut child = sleeper();
+    assert!(child.try_wait().unwrap().is_none());
+    drop(child.stdin.take());
+    assert!(child.wait().unwrap().success());
 }
 
 fn setup(home: &Path) {
@@ -50,6 +61,11 @@ fn setup(home: &Path) {
 
 #[test]
 fn resource_cli_flow() {
+    if std::env::var_os("ANOTHER_RESOURCE_TEST_CHILD").as_deref() == Some(std::ffi::OsStr::new("1"))
+    {
+        std::io::copy(&mut std::io::stdin(), &mut std::io::sink()).unwrap();
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
     setup(home);
@@ -157,7 +173,10 @@ fn reap_requires_lapse_grace_and_confirmation() {
     let plan = json(home, &["reap", &id, "--grace", "0"]);
     assert_eq!(plan["eligible"], true, "{plan}");
     assert_eq!(plan["executed"], false);
-    assert!(plan["command"].as_str().unwrap().contains("sleep 300"));
+    assert!(plan["command"]
+        .as_str()
+        .unwrap()
+        .contains("resource_cli_flow"));
     assert!(child.try_wait().unwrap().is_none(), "plan must not signal");
 
     let done = json(home, &["reap", &id, "--grace", "0", "--confirm"]);
