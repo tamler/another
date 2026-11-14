@@ -407,6 +407,88 @@ fn keepalive_renews_only_aging_holds() {
 }
 
 #[test]
+fn unannounced_cursor_includes_later_backdated_deliveries() {
+    let fx = Fx::new();
+    let older = fx
+        .store
+        .send_message(SendMessage {
+            from: "bob".into(),
+            to: vec!["carol".into()],
+            subject: "delayed delivery".into(),
+            body: "body".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let send = || {
+        fx.store
+            .send_message(SendMessage {
+                from: "bob".into(),
+                to: vec!["alice".into()],
+                subject: "same millisecond".into(),
+                body: "body".into(),
+                ..Default::default()
+            })
+            .unwrap()
+    };
+    let original = [send().message_id, send().message_id];
+    let db = rusqlite::Connection::open(fx.store.db_path().unwrap()).unwrap();
+    // Make insertion order the opposite of ULID lexical order deterministically.
+    let inserted = ["00000000000000000000000002", "00000000000000000000000001"];
+    db.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+    for (old, new) in original.iter().zip(inserted) {
+        db.execute(
+            "UPDATE messages SET message_id=?1 WHERE message_id=?2",
+            rusqlite::params![new, old],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE deliveries SET message_id=?1 WHERE message_id=?2",
+            rusqlite::params![new, old],
+        )
+        .unwrap();
+    }
+    db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+    let violations: i64 = db
+        .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(violations, 0);
+    let tied = fx.store.unannounced("alice", inserted[0], 10).unwrap();
+    assert_eq!(tied.count, 1);
+    assert_eq!(tied.items[0].message_id, inserted[1]);
+    db.execute(
+        "UPDATE messages SET created_at = ?1 WHERE message_id = ?2",
+        rusqlite::params![T0, inserted[0]],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE messages SET created_at = ?1 WHERE message_id = ?2",
+        rusqlite::params![T0 - 1, inserted[1]],
+    )
+    .unwrap();
+
+    let all = fx.store.unannounced("alice", "", 10).unwrap();
+    assert_eq!(
+        all.items
+            .iter()
+            .map(|item| &item.message_id)
+            .collect::<Vec<_>>(),
+        vec![&inserted[1], &inserted[0]]
+    );
+    let after = fx.store.unannounced("alice", inserted[0], 10).unwrap();
+    assert_eq!(after.count, 1);
+    assert_eq!(after.items[0].message_id, inserted[1]);
+    db.execute(
+        "INSERT INTO deliveries (message_id, agent_id, node_id, role) SELECT ?1, agent_id, node_id, 'to' FROM agents WHERE name = 'alice'",
+        [&older.message_id],
+    ).unwrap();
+    let after = fx.store.unannounced("alice", inserted[1], 10).unwrap();
+    assert_eq!(after.count, 1);
+    assert_eq!(after.items[0].message_id, older.message_id);
+}
+
+#[test]
 fn unannounced_mail_is_claimed_once() {
     let fx = Fx::new();
     let send = |subject: &str, importance: Importance, request: bool| {

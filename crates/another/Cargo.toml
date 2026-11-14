@@ -28,6 +28,9 @@ clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }
+
 [dev-dependencies]
 reqwest = { version = "0.13", default-features = false }
 # Hook tests hold a SQLite write lock to prove the hooks fail open when the database is busy.

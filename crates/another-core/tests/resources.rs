@@ -8,9 +8,11 @@ use another_core::*;
 const T0: i64 = 1_800_000_000_000;
 
 fn setup() -> (Store, Arc<AtomicI64>) {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("work/lab").to_string_lossy().into_owned();
     let (clock, handle) = Clock::manual(T0);
     let store = Store::open_in_memory(clock).unwrap();
-    store.ensure_project("t", "/work/lab").unwrap();
+    store.ensure_project("t", &project).unwrap();
     for (name, program) in [
         ("alice", Program::Claude),
         ("bob", Program::Codex),
@@ -285,6 +287,7 @@ fn reap_requests_and_records_are_logged() {
     store
         .note_reap_request("bob", "model_server:ollama@11434", "lease lapsed")
         .unwrap();
+    store.release_resource("alice", &name_ref(), false).unwrap();
     store
         .record_reap(
             "human (another reap --confirm)",

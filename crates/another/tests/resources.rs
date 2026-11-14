@@ -1,5 +1,8 @@
 //! Resource CLI, orphan scanning, and human-approved reaping against real processes.
 
+#[path = "common/hosted_ci.rs"]
+mod hosted_ci;
+
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 
@@ -33,11 +36,32 @@ fn json(home: &Path, args: &[&str]) -> Value {
 }
 
 fn sleeper() -> Child {
-    Command::new("sleep")
-        .arg("300")
-        .stdin(Stdio::null())
+    Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "resource_cli_flow", "--nocapture"])
+        .env("ANOTHER_RESOURCE_TEST_CHILD", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .unwrap()
+}
+
+#[test]
+fn process_fixture_exits_when_its_input_closes() {
+    let mut child = sleeper();
+    assert!(child.try_wait().unwrap().is_none());
+    let info = another::scan::process_info(child.id()).expect("child process must be inspectable");
+    assert_eq!(info.pid, child.id());
+    assert_eq!(Some(info.user), another::scan::current_user());
+    let executable = std::env::current_exe().unwrap();
+    let name = executable.file_name().unwrap().to_str().unwrap();
+    assert!(
+        info.command.contains(name),
+        "unexpected process image: {}",
+        info.command
+    );
+    drop(child.stdin.take());
+    assert!(child.wait().unwrap().success());
 }
 
 fn setup(home: &Path) {
@@ -47,6 +71,11 @@ fn setup(home: &Path) {
 
 #[test]
 fn resource_cli_flow() {
+    if std::env::var_os("ANOTHER_RESOURCE_TEST_CHILD").as_deref() == Some(std::ffi::OsStr::new("1"))
+    {
+        std::io::copy(&mut std::io::stdin(), &mut std::io::sink()).unwrap();
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
     setup(home);
@@ -119,6 +148,8 @@ fn resource_cli_flow() {
 
 #[test]
 fn reap_requires_lapse_grace_and_confirmation() {
+    #[cfg(windows)]
+    hosted_ci::require_hosted_runner();
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
     setup(home);
@@ -154,13 +185,27 @@ fn reap_requires_lapse_grace_and_confirmation() {
     let plan = json(home, &["reap", &id, "--grace", "0"]);
     assert_eq!(plan["eligible"], true, "{plan}");
     assert_eq!(plan["executed"], false);
-    assert!(plan["command"].as_str().unwrap().contains("sleep 300"));
+    #[cfg(not(windows))]
+    assert!(plan["command"]
+        .as_str()
+        .unwrap()
+        .contains("resource_cli_flow"));
+    #[cfg(windows)]
+    assert_eq!(
+        std::path::Path::new(plan["command"].as_str().unwrap()),
+        std::env::current_exe().unwrap()
+    );
     assert!(child.try_wait().unwrap().is_none(), "plan must not signal");
 
     let done = json(home, &["reap", &id, "--grace", "0", "--confirm"]);
     assert_eq!(done["executed"], true);
     let status = child.wait().unwrap();
-    assert!(!status.success(), "terminated by signal");
+    assert!(!status.success(), "confirmed stop must terminate the child");
+    #[cfg(windows)]
+    assert!(done["outcome"]
+        .as_str()
+        .unwrap()
+        .contains("Windows hard stop"));
     let all = json(home, &["resources", "--all"]);
     assert_eq!(all[0]["status"], "released");
     let feed = json(home, &["activity", "--kinds", "resource"]);
@@ -173,6 +218,7 @@ fn reap_requires_lapse_grace_and_confirmation() {
 
 #[tokio::test]
 async fn mcp_reap_never_terminates() {
+    hosted_ci::require_hosted_runner();
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().to_path_buf();
     setup(&home);

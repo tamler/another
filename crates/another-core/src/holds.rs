@@ -194,7 +194,13 @@ fn clamp_ttl(ttl: Option<i64>) -> Result<i64> {
 /// Normalize a requested path or glob to a project-relative pattern.
 pub(crate) fn normalize_pattern(project: &Project, raw: &str) -> Result<String> {
     let raw = raw.trim();
-    let root = project.abs_path.trim_end_matches('/');
+    #[cfg(windows)]
+    let (raw, root_path) = (raw.replace('\\', "/"), project.abs_path.replace('\\', "/"));
+    #[cfg(windows)]
+    let (raw, root_path) = (raw.as_str(), root_path.as_str());
+    #[cfg(not(windows))]
+    let root_path = project.abs_path.as_str();
+    let root = root_path.trim_end_matches('/');
     let rel = if Path::new(raw).is_absolute() {
         match raw.strip_prefix(root) {
             Some(rest) if rest.is_empty() || rest.starts_with('/') => rest.trim_start_matches('/'),
@@ -1135,20 +1141,27 @@ mod tests {
 
     #[test]
     fn normalizes_patterns() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("work/repo");
+        let repo_path = repo.to_string_lossy().into_owned();
         let project = Project {
             project_id: "p".into(),
             node_id: "n".into(),
-            abs_path: "/work/repo".into(),
+            abs_path: repo_path.clone(),
             slug: "repo".into(),
             created_at: String::new(),
         };
         assert_eq!(normalize_pattern(&project, "./src/").unwrap(), "src");
         assert_eq!(
-            normalize_pattern(&project, "/work/repo/src/a.rs").unwrap(),
+            normalize_pattern(&project, &repo.join("src/a.rs").to_string_lossy()).unwrap(),
             "src/a.rs"
         );
-        assert_eq!(normalize_pattern(&project, "/work/repo").unwrap(), "**");
-        assert!(normalize_pattern(&project, "/work/repository/a").is_err());
+        assert_eq!(normalize_pattern(&project, &repo_path).unwrap(), "**");
+        assert!(normalize_pattern(
+            &project,
+            &dir.path().join("work/repository/a").to_string_lossy()
+        )
+        .is_err());
         assert!(normalize_pattern(&project, "../x").is_err());
         assert!(normalize_pattern(&project, "src/[").is_err());
     }

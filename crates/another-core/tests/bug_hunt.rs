@@ -17,26 +17,42 @@ fn scope(globs: &[&str]) -> TokenScope {
 fn bh1_project_allowed_judges_the_path_the_store_will_use() {
     let (clock, _) = Clock::manual(1_795_219_200_000);
     let s = Store::open_in_memory(clock).unwrap();
-    s.ensure_project("t", "/private/data").unwrap();
-    let sandbox = scope(&["/sandbox/w/**"]);
+    let dir = tempfile::tempdir().unwrap();
+    let path = |relative: &str| dir.path().join(relative).to_string_lossy().into_owned();
+    let glob = |relative: &str| path(relative).replace('\\', "/");
+    s.ensure_project("t", &path("private/data")).unwrap();
+    let sandbox_glob = glob("sandbox/w/**");
+    let sandbox = scope(&[&sandbox_glob]);
 
-    assert!(!s.project_allowed(&sandbox, "/private/data").unwrap());
+    assert!(!s.project_allowed(&sandbox, &path("private/data")).unwrap());
     assert!(
-        !s.project_allowed(&sandbox, "/sandbox/w/../../private/data")
+        !s.project_allowed(&sandbox, &path("sandbox/w/../../private/data"))
             .unwrap(),
         "`..` reaches a project the globs exclude"
     );
     assert!(
-        !s.project_allowed(&sandbox, "/sandbox/w/../../brand/new")
+        !s.project_allowed(&sandbox, &path("sandbox/w/../../brand/new"))
             .unwrap(),
         "`..` reaches a new project the globs exclude"
     );
     assert!(
-        !s.project_allowed(&scope(&["/work/*"]), "/work/..").unwrap(),
+        !s.project_allowed(&scope(&[&glob("work/*")]), &path("work/.."))
+            .unwrap(),
+        "`*` matches `..`, which leaves the work directory"
+    );
+    let root = dir.path().ancestors().last().unwrap();
+    let root_work = root.join("work");
+    let root_glob = format!("{}/*", root_work.to_string_lossy().replace('\\', "/"));
+    let root_traversal = root_work.join("..");
+    assert!(
+        !s.project_allowed(&scope(&[&root_glob]), root_traversal.to_str().unwrap())
+            .unwrap(),
         "`*` matches `..`, which is the filesystem root"
     );
     // A path that stays inside after normalizing is still fine.
-    assert!(s.project_allowed(&sandbox, "/sandbox/w/x/../y").unwrap());
+    assert!(s
+        .project_allowed(&sandbox, &path("sandbox/w/x/../y"))
+        .unwrap());
 }
 
 /// BH-2. Several processes opening a new home at once each ran the migrations, because the

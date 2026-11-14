@@ -404,12 +404,22 @@ mod tests {
         assert!(text.contains("<string>serve</string>"));
         assert!(text.contains("<key>KeepAlive</key>\n  <true/>"));
         assert!(text.contains("<key>RunAtLoad</key>\n  <true/>"));
-        assert!(text.contains("<string>/Users/someone/.another/logs/serve.log</string>"));
+        let expected_log = Path::new("/Users/someone/.another")
+            .join("logs")
+            .join("serve.log");
+        assert_eq!(
+            text.matches(&format!("<string>{}</string>", expected_log.display()))
+                .count(),
+            2
+        );
         assert!(text.contains("<key>PATH</key>"));
         assert_eq!(bind_in(&text).as_deref(), Some("127.0.0.1:7466"));
         assert_eq!(
             e.plist_path(),
-            Path::new("/Users/someone/Library/LaunchAgents/one.toanother.another.plist")
+            Path::new("/Users/someone")
+                .join("Library")
+                .join("LaunchAgents")
+                .join("one.toanother.another.plist")
         );
     }
 
