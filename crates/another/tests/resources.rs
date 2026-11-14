@@ -148,6 +148,8 @@ fn resource_cli_flow() {
 
 #[test]
 fn reap_requires_lapse_grace_and_confirmation() {
+    #[cfg(windows)]
+    hosted_ci::require_hosted_runner();
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
     setup(home);
@@ -183,16 +185,27 @@ fn reap_requires_lapse_grace_and_confirmation() {
     let plan = json(home, &["reap", &id, "--grace", "0"]);
     assert_eq!(plan["eligible"], true, "{plan}");
     assert_eq!(plan["executed"], false);
+    #[cfg(not(windows))]
     assert!(plan["command"]
         .as_str()
         .unwrap()
         .contains("resource_cli_flow"));
+    #[cfg(windows)]
+    assert_eq!(
+        std::path::Path::new(plan["command"].as_str().unwrap()),
+        std::env::current_exe().unwrap()
+    );
     assert!(child.try_wait().unwrap().is_none(), "plan must not signal");
 
     let done = json(home, &["reap", &id, "--grace", "0", "--confirm"]);
     assert_eq!(done["executed"], true);
     let status = child.wait().unwrap();
-    assert!(!status.success(), "terminated by signal");
+    assert!(!status.success(), "confirmed stop must terminate the child");
+    #[cfg(windows)]
+    assert!(done["outcome"]
+        .as_str()
+        .unwrap()
+        .contains("Windows hard stop"));
     let all = json(home, &["resources", "--all"]);
     assert_eq!(all[0]["status"], "released");
     let feed = json(home, &["activity", "--kinds", "resource"]);

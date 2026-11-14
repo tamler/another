@@ -64,7 +64,7 @@ another reap model_server:ollama@11434 --confirm
   - it has been orphaned for at least the **grace period** (`--grace`, default 600 seconds); for a pid target, the process must be at least that old;
   - its process is owned by the **current user**;
   - it is **not** a protected system process.
-- `--confirm` sends SIGTERM and waits up to 5 seconds. SIGKILL is sent only with `--force`.
+- On Linux and macOS, `--confirm` sends SIGTERM and waits up to 5 seconds. Linux sends SIGKILL only with `--force`; macOS never sends SIGKILL. On Windows, `--confirm` terminates the verified process immediately: Windows drops hard. There is no graceful Windows equivalent, and `--force` does not change that behavior.
 - Agents cannot reap. The MCP `resource_reap` tool returns the same plan, records `resource.reap_requested` in the activity feed, and hands back the exact command for a human to run.
 - Another never reaps automatically.
 

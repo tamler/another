@@ -91,6 +91,10 @@ pub struct ReapPlan {
     pub blockers: Vec<String>,
     pub executed: bool,
     pub outcome: Option<String>,
+    #[cfg(windows)]
+    #[serde(skip)]
+    #[schemars(skip)]
+    windows_identity: Option<scan::WindowsProcessIdentity>,
 }
 
 fn listener_for(pid: u32, listeners: &[Listener]) -> Option<&Listener> {
@@ -110,10 +114,9 @@ pub fn plan(store: &Store, target: &str, grace_seconds: i64) -> anyhow::Result<R
         blockers: Vec::new(),
         executed: false,
         outcome: None,
+        #[cfg(windows)]
+        windows_identity: None,
     };
-    #[cfg(windows)]
-    plan.blockers
-        .push("process termination is not available on native Windows".into());
     if grace_seconds < 0 {
         anyhow::bail!("grace must not be negative");
     }
@@ -214,21 +217,56 @@ pub fn plan(store: &Store, target: &str, grace_seconds: i64) -> anyhow::Result<R
             }
         }
     }
+    #[cfg(windows)]
+    if let Some(pid) = plan.pid {
+        match scan::windows_process_identity(pid) {
+            Some(identity)
+                if scan::current_user().as_deref() == Some(identity.owner.as_str())
+                    && !scan::is_system(&identity.image) =>
+            {
+                plan.windows_identity = Some(identity)
+            }
+            _ => plan
+                .blockers
+                .push("process identity or ownership could not be verified".into()),
+        }
+    }
     plan.eligible = plan.blockers.is_empty();
     Ok(plan)
 }
 
-/// Terminate the planned process (SIGTERM, then SIGKILL only with `force`). Callers must
-/// only invoke this on explicit human confirmation.
+/// Stop the verified process on Windows. This is a hard termination.
 #[cfg(windows)]
-pub fn execute(_store: &Store, _plan: ReapPlan, _force: bool) -> anyhow::Result<ReapPlan> {
-    anyhow::bail!("process termination is not available on native Windows")
+pub fn execute(store: &Store, mut plan: ReapPlan, _force: bool) -> anyhow::Result<ReapPlan> {
+    if !plan.eligible {
+        anyhow::bail!("not eligible for reaping: {}", plan.blockers.join("; "));
+    }
+    let pid = plan
+        .pid
+        .ok_or_else(|| anyhow::anyhow!("no pid to terminate"))?;
+    let identity = plan
+        .windows_identity
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("process identity was not verified"))?;
+    scan::windows_terminate_exact(pid, identity)?;
+    let detail = format!("pid {pid} {}", plan.command.as_deref().unwrap_or_default());
+    store.record_reap(
+        "human (another reap --confirm)",
+        plan.resource_id.as_deref(),
+        Some(pid),
+        detail.trim(),
+    )?;
+    plan.executed = true;
+    plan.outcome = Some(format!("pid {pid} terminated (Windows hard stop)"));
+    Ok(plan)
 }
 
 /// Terminate the planned process (SIGTERM, then SIGKILL only with `force`). Callers must
 /// only invoke this on explicit human confirmation.
 #[cfg(not(windows))]
 pub fn execute(store: &Store, mut plan: ReapPlan, force: bool) -> anyhow::Result<ReapPlan> {
+    #[cfg(target_os = "macos")]
+    let _ = force;
     if !plan.eligible {
         anyhow::bail!("not eligible for reaping: {}", plan.blockers.join("; "));
     }
@@ -248,16 +286,29 @@ pub fn execute(store: &Store, mut plan: ReapPlan, force: bool) -> anyhow::Result
     while scan::alive(pid) && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    #[cfg(target_os = "macos")]
+    let how = "terminated (SIGTERM)";
+    #[cfg(not(target_os = "macos"))]
     let mut how = "terminated (SIGTERM)";
     if scan::alive(pid) {
-        if !force {
+        #[cfg(target_os = "macos")]
+        {
             plan.outcome = Some(format!(
-                "pid {pid} is still running after SIGTERM; re-run with --force to send SIGKILL"
+                "pid {pid} is still running after SIGTERM; stop it manually"
             ));
             return Ok(plan);
         }
-        signal("-KILL");
-        how = "killed (SIGKILL)";
+        #[cfg(not(target_os = "macos"))]
+        {
+            if !force {
+                plan.outcome = Some(format!(
+                    "pid {pid} is still running after SIGTERM; re-run with --force to send SIGKILL"
+                ));
+                return Ok(plan);
+            }
+            signal("-KILL");
+            how = "killed (SIGKILL)";
+        }
     }
     let detail = format!("pid {pid} {}", plan.command.as_deref().unwrap_or_default());
     store.record_reap(
@@ -276,7 +327,7 @@ mod windows_tests {
     use super::*;
 
     #[test]
-    fn confirmed_termination_without_windows_implementation_is_refused() {
+    fn termination_without_verified_identity_is_refused() {
         let home = tempfile::tempdir().unwrap();
         let store = Store::open(home.path()).unwrap();
         let plan = ReapPlan {
@@ -290,6 +341,7 @@ mod windows_tests {
             blockers: vec![],
             executed: false,
             outcome: None,
+            windows_identity: None,
         };
         assert!(execute(&store, plan, false).is_err());
     }

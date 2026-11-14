@@ -9,7 +9,8 @@ use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, OpenProcess, OpenProcessToken,
-    QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
 };
 
 use super::ProcInfo;
@@ -27,15 +28,19 @@ fn elapsed_seconds(created_ticks: u64, unix_ticks: u64) -> Option<i64> {
     i64::try_from(now_ticks.checked_sub(created_ticks)? / TICKS_PER_SECOND).ok()
 }
 
-fn open_process(pid: u32) -> Option<OwnedHandle> {
+fn open_process_with_access(pid: u32, access: u32) -> Option<OwnedHandle> {
     // SAFETY: OpenProcess takes a numeric PID, no inherited handle, and returns either
     // null or a new owned process handle. OwnedHandle closes it exactly once.
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    let handle = unsafe { OpenProcess(access, 0, pid) };
     if handle.is_null() {
         None
     } else {
         Some(unsafe { OwnedHandle::from_raw_handle(handle) })
     }
+}
+
+fn open_process(pid: u32) -> Option<OwnedHandle> {
+    open_process_with_access(pid, PROCESS_QUERY_LIMITED_INFORMATION)
 }
 
 fn token_sid(process: HANDLE) -> Option<String> {
@@ -105,9 +110,14 @@ pub(super) fn current_user() -> Option<String> {
     token_sid(unsafe { GetCurrentProcess() })
 }
 
-pub(super) fn process_info(pid: u32) -> Option<ProcInfo> {
-    let process = open_process(pid)?;
-    let handle = process.as_raw_handle();
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcessIdentity {
+    pub created_ticks: u64,
+    pub owner: String,
+    pub image: String,
+}
+
+fn inspect_handle(handle: HANDLE) -> Option<(ProcessIdentity, i64)> {
     let mut exit = 0u32;
     // Treat any failed query or exited process as unavailable, never as authorized.
     if unsafe { GetExitCodeProcess(handle, &mut exit) } == 0 || exit != 259 {
@@ -150,12 +160,75 @@ pub(super) fn process_info(pid: u32) -> Option<ProcInfo> {
     if unsafe { GetExitCodeProcess(handle, &mut exit) } == 0 || exit != 259 {
         return None;
     }
+    Some((
+        ProcessIdentity {
+            created_ticks: filetime_ticks(created),
+            owner: user,
+            image: command,
+        },
+        elapsed_seconds,
+    ))
+}
+
+pub(super) fn process_identity(pid: u32) -> Option<ProcessIdentity> {
+    let process = open_process(pid)?;
+    inspect_handle(process.as_raw_handle()).map(|(identity, _)| identity)
+}
+
+pub(super) fn process_info(pid: u32) -> Option<ProcInfo> {
+    let process = open_process(pid)?;
+    let (identity, elapsed_seconds) = inspect_handle(process.as_raw_handle())?;
     Some(ProcInfo {
         pid,
-        user,
+        user: identity.owner,
         elapsed_seconds,
-        command,
+        command: identity.image,
     })
+}
+
+fn authorized_identity(
+    actual: &ProcessIdentity,
+    expected: &ProcessIdentity,
+    current_user: Option<&str>,
+) -> bool {
+    actual == expected
+        && current_user == Some(actual.owner.as_str())
+        && !super::is_system(&actual.image)
+}
+
+/// Open and inspect the target again, then terminate that exact handle and wait for exit.
+pub(super) fn terminate_exact(pid: u32, expected: &ProcessIdentity) -> std::io::Result<()> {
+    use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+    let refused = || {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "process identity could not be verified",
+        )
+    };
+    if pid <= 1 || pid == std::process::id() {
+        return Err(refused());
+    }
+    let process = open_process_with_access(
+        pid,
+        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | PROCESS_SYNCHRONIZE,
+    )
+    .ok_or_else(refused)?;
+    let (actual, _) = inspect_handle(process.as_raw_handle()).ok_or_else(refused)?;
+    if !authorized_identity(&actual, expected, current_user().as_deref()) {
+        return Err(refused());
+    }
+    // SAFETY: the validated handle identifies the exact process, not a reused PID.
+    if unsafe { TerminateProcess(process.as_raw_handle(), 1) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: waiting on the retained process handle does not affect any other process.
+    if unsafe { WaitForSingleObject(process.as_raw_handle(), 5_000) } != WAIT_OBJECT_0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "termination was not confirmed",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn alive_or_unknown(pid: u32) -> bool {
@@ -191,5 +264,27 @@ mod tests {
         assert_eq!(Some(info.user), current_user());
         assert!(!info.command.is_empty());
         assert!(alive_or_unknown(pid));
+    }
+
+    #[test]
+    fn current_process_cannot_be_terminated() {
+        let pid = std::process::id();
+        let identity = process_identity(pid).expect("current process must be inspectable");
+        assert!(terminate_exact(pid, &identity).is_err());
+    }
+
+    #[test]
+    fn changed_creation_or_owner_is_not_authorized() {
+        let identity = ProcessIdentity {
+            created_ticks: 10,
+            owner: "S-1-1".into(),
+            image: r"C:\Users\agent\worker.exe".into(),
+        };
+        assert!(authorized_identity(&identity, &identity, Some("S-1-1")));
+        let mut changed = identity.clone();
+        changed.created_ticks += 1;
+        assert!(!authorized_identity(&changed, &identity, Some("S-1-1")));
+        assert!(!authorized_identity(&identity, &identity, Some("S-1-2")));
+        assert!(!authorized_identity(&identity, &identity, None));
     }
 }
