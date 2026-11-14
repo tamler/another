@@ -50,6 +50,16 @@ fn sleeper() -> Child {
 fn process_fixture_exits_when_its_input_closes() {
     let mut child = sleeper();
     assert!(child.try_wait().unwrap().is_none());
+    let info = another::scan::process_info(child.id()).expect("child process must be inspectable");
+    assert_eq!(info.pid, child.id());
+    assert_eq!(Some(info.user), another::scan::current_user());
+    let executable = std::env::current_exe().unwrap();
+    let name = executable.file_name().unwrap().to_str().unwrap();
+    assert!(
+        info.command.contains(name),
+        "unexpected process image: {}",
+        info.command
+    );
     drop(child.stdin.take());
     assert!(child.wait().unwrap().success());
 }

@@ -7,6 +7,9 @@ use std::process::Command;
 
 use serde::Serialize;
 
+#[cfg(windows)]
+mod windows;
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, schemars::JsonSchema)]
 pub struct Listener {
     pub pid: u32,
@@ -212,7 +215,8 @@ pub fn parse_etime(raw: &str) -> Option<i64> {
     Some(days * 86_400 + h * 3600 + m * 60 + s)
 }
 
-/// Owner, age and full command line of a running process.
+/// Owner, age and command of a running process. On Windows, command is the executable path.
+#[cfg(not(windows))]
 pub fn process_info(pid: u32) -> Option<ProcInfo> {
     let out = run(
         "ps",
@@ -232,7 +236,13 @@ pub fn process_info(pid: u32) -> Option<ProcInfo> {
     })
 }
 
+#[cfg(windows)]
+pub fn process_info(pid: u32) -> Option<ProcInfo> {
+    windows::process_info(pid)
+}
+
 /// Whether a process is running (exited-but-unreaped zombies count as gone).
+#[cfg(not(windows))]
 pub fn alive(pid: u32) -> bool {
     run("ps", &["-o", "stat=", "-p", &pid.to_string()])
         .map(|out| {
@@ -242,12 +252,23 @@ pub fn alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(windows)]
+pub fn alive(pid: u32) -> bool {
+    windows::alive_or_unknown(pid)
+}
+
 /// The user running another.
+#[cfg(not(windows))]
 pub fn current_user() -> Option<String> {
     run("id", &["-un"])
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+#[cfg(windows)]
+pub fn current_user() -> Option<String> {
+    windows::current_user()
 }
 
 #[cfg(test)]

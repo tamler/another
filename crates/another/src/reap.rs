@@ -111,6 +111,9 @@ pub fn plan(store: &Store, target: &str, grace_seconds: i64) -> anyhow::Result<R
         executed: false,
         outcome: None,
     };
+    #[cfg(windows)]
+    plan.blockers
+        .push("process termination is not available on native Windows".into());
     if grace_seconds < 0 {
         anyhow::bail!("grace must not be negative");
     }
@@ -217,6 +220,14 @@ pub fn plan(store: &Store, target: &str, grace_seconds: i64) -> anyhow::Result<R
 
 /// Terminate the planned process (SIGTERM, then SIGKILL only with `force`). Callers must
 /// only invoke this on explicit human confirmation.
+#[cfg(windows)]
+pub fn execute(_store: &Store, _plan: ReapPlan, _force: bool) -> anyhow::Result<ReapPlan> {
+    anyhow::bail!("process termination is not available on native Windows")
+}
+
+/// Terminate the planned process (SIGTERM, then SIGKILL only with `force`). Callers must
+/// only invoke this on explicit human confirmation.
+#[cfg(not(windows))]
 pub fn execute(store: &Store, mut plan: ReapPlan, force: bool) -> anyhow::Result<ReapPlan> {
     if !plan.eligible {
         anyhow::bail!("not eligible for reaping: {}", plan.blockers.join("; "));
@@ -258,4 +269,28 @@ pub fn execute(store: &Store, mut plan: ReapPlan, force: bool) -> anyhow::Result
     plan.executed = true;
     plan.outcome = Some(format!("pid {pid} {how}"));
     Ok(plan)
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn confirmed_termination_without_windows_implementation_is_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let plan = ReapPlan {
+            target: "pid:123".into(),
+            resource_id: None,
+            pid: Some(123),
+            command: None,
+            age_seconds: Some(100),
+            grace_seconds: 0,
+            eligible: true,
+            blockers: vec![],
+            executed: false,
+            outcome: None,
+        };
+        assert!(execute(&store, plan, false).is_err());
+    }
 }
