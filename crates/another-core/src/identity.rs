@@ -740,6 +740,37 @@ fn resolve_session_actor_tx(
     )
 }
 
+/// Look up an already-bound session actor by its exact local `name@project` address,
+/// inside the caller's identity transaction. Never creates an agent, project or binding.
+/// An address is an identifier, not a credential: this says which session actor an
+/// address names, not that the caller is that session.
+/// Its caller is the controlled-edit admission built on this commit.
+#[cfg(not(windows))]
+#[allow(dead_code)]
+pub(crate) fn resolve_bound_session_tx(
+    tx: &Tx<'_>,
+    deadline: std::time::Instant,
+    address: &str,
+) -> Result<AgentRef> {
+    let exact = || Error::Invalid("session actor requires an exact name@project address".into());
+    if address.split('@').count() != 2 {
+        return Err(exact());
+    }
+    let agent = resolve_agent(tx, tx.node_id, address)?;
+    if agent.address != address {
+        return Err(exact());
+    }
+    if !binding_scan(tx, deadline)?
+        .iter()
+        .any(|b| b.agent_id == agent.id)
+    {
+        return Err(Error::Invalid(
+            "agent is not a registered session actor".into(),
+        ));
+    }
+    Ok(agent)
+}
+
 #[cfg(not(windows))]
 fn validate_session_id(session_id: &str) -> Result<()> {
     if session_id.is_empty() || session_id.len() > 512 || session_id.chars().any(char::is_control) {
@@ -1952,6 +1983,93 @@ mod tests {
             Err(Error::Invalid(_))
         ));
         assert_eq!(store.agents().unwrap().len(), 1);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn bound_session_lookup_resolves_only_exact_local_session_actors_and_creates_nothing() {
+        let store = Store::open_in_memory(crate::store::Clock::System).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let (actor, _) = store
+            .session_actor("claude", Program::Claude, root, None, "one", true)
+            .unwrap();
+        let plain = store
+            .register_agent(RegisterAgent {
+                name: "plain".into(),
+                program: Program::Claude,
+                project: Some(root.into()),
+                model: None,
+                description: None,
+            })
+            .unwrap();
+        store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO nodes (node_id,display_name,role,is_local,created_at) VALUES ('peer-node','peer','home',0,?1)",
+                    params![tx.now],
+                )?;
+                tx.execute(
+                    "INSERT INTO agents (agent_id,node_id,project_id,name,program,status,created_at,updated_at,last_seen_at,event_id,address) VALUES ('peer-agent','peer-node',NULL,'ghost','claude','active',?1,?1,?1,'peer-event','ghost@@peer')",
+                    params![tx.now],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let counts = || {
+            store
+                .read(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT (SELECT count(*) FROM events),(SELECT count(*) FROM agents),(SELECT count(*) FROM projects)",
+                        [],
+                        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
+                    )?)
+                })
+                .unwrap()
+        };
+        let before = counts();
+        let lookup = |who: &str| {
+            store.write_identity(|tx, deadline| resolve_bound_session_tx(tx, deadline, who))
+        };
+
+        let found = lookup(&actor).unwrap();
+        assert_eq!(found.address, actor);
+        assert_eq!(found.id, store.agent(&actor).unwrap().agent_id);
+        assert_eq!(found.node_id, store.node_id());
+
+        let (name, slug) = actor.split_once('@').unwrap();
+        assert!(matches!(lookup(name), Err(Error::Invalid(_))));
+        assert!(matches!(
+            lookup(&format!("{name}@{root}")),
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            lookup(&format!("{name}@{slug}@peer")),
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            lookup(&format!(" {actor}")),
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(lookup(&plain.address), Err(Error::Invalid(_))));
+        assert!(matches!(
+            lookup(&format!("nobody@{slug}")),
+            Err(Error::NotFound(_))
+        ));
+        assert!(matches!(lookup("ghost@peer"), Err(Error::Forbidden(_))));
+        assert_eq!(counts(), before);
+
+        store
+            .write(|tx| {
+                tx.execute(
+                    "UPDATE events SET payload='{}' WHERE kind='session.binding.v1'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(lookup(&actor), Err(Error::Invalid(_))));
+        assert_eq!(counts(), before);
     }
 
     #[test]
