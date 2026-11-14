@@ -379,8 +379,24 @@ mod tests {
     #[test]
     fn system_allowlist() {
         assert!(is_system("launchd"));
-        assert!(is_system("/usr/sbin/sshd -D"));
         assert!(!is_system("ollama"));
         assert!(!is_system("llama-server"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_system_allowlist_recognizes_command_arguments() {
+        assert!(is_system("/usr/sbin/sshd -D"));
+        assert!(!is_system("/usr/local/bin/sshd-helper -D"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_system_allowlist_recognizes_native_image_paths() {
+        assert!(is_system(r"C:\Windows\System32\SvChOsT.ExE"));
+        assert!(is_system(r"C:\Program Files\PowerShell\7\PwSh.ExE"));
+        assert!(is_system("C:/Windows/System32/CSRSS.EXE"));
+        assert!(!is_system(r"C:\Program Files\PowerShell\7\pwsh-helper.exe"));
+        assert!(!is_system(r"C:\Program Files\Ollama\ollama.exe"));
     }
 }
