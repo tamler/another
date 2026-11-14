@@ -14,8 +14,8 @@ mod windows;
 pub(crate) use windows::ProcessIdentity as WindowsProcessIdentity;
 
 #[cfg(windows)]
-pub(crate) fn windows_process_identity(pid: u32) -> Option<WindowsProcessIdentity> {
-    windows::process_identity(pid)
+pub(crate) fn windows_observe_process(pid: u32) -> Option<(ProcInfo, WindowsProcessIdentity)> {
+    windows::observe_process(pid)
 }
 
 #[cfg(windows)]

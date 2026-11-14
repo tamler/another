@@ -101,6 +101,20 @@ fn listener_for(pid: u32, listeners: &[Listener]) -> Option<&Listener> {
     listeners.iter().find(|l| l.pid == pid)
 }
 
+fn observe_for_plan(plan: &mut ReapPlan, pid: u32) -> Option<scan::ProcInfo> {
+    #[cfg(windows)]
+    {
+        let (info, identity) = scan::windows_observe_process(pid)?;
+        plan.windows_identity = Some(identity);
+        Some(info)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = plan;
+        scan::process_info(pid)
+    }
+}
+
 /// Work out what a reap of `target` (a resource id, `kind:name`, or `pid:N`) would do.
 pub fn plan(store: &Store, target: &str, grace_seconds: i64) -> anyhow::Result<ReapPlan> {
     let mut plan = ReapPlan {
@@ -143,7 +157,7 @@ pub fn plan(store: &Store, target: &str, grace_seconds: i64) -> anyhow::Result<R
                 }
             }
         }
-        match scan::process_info(pid) {
+        match observe_for_plan(&mut plan, pid) {
             Some(info) => {
                 plan.age_seconds = Some(info.elapsed_seconds);
                 plan.command = Some(info.command);
@@ -184,7 +198,7 @@ pub fn plan(store: &Store, target: &str, grace_seconds: i64) -> anyhow::Result<R
                 "no pid is registered for this resource; stop it by hand, then `another release --stopped`"
                     .into(),
             ),
-            Some(pid) => match scan::process_info(pid) {
+            Some(pid) => match observe_for_plan(&mut plan, pid) {
                 Some(info) => plan.command = Some(info.command),
                 None => plan.blockers.push(format!(
                     "pid {pid} is not running; mark it gone with `another release {} --stopped`",
@@ -203,6 +217,7 @@ pub fn plan(store: &Store, target: &str, grace_seconds: i64) -> anyhow::Result<R
         if pid <= 1 || pid == std::process::id() {
             plan.blockers.push(format!("refusing to signal pid {pid}"));
         }
+        #[cfg(not(windows))]
         if let Some(info) = scan::process_info(pid) {
             if scan::is_system(&info.command) {
                 plan.blockers
@@ -218,14 +233,11 @@ pub fn plan(store: &Store, target: &str, grace_seconds: i64) -> anyhow::Result<R
         }
     }
     #[cfg(windows)]
-    if let Some(pid) = plan.pid {
-        match scan::windows_process_identity(pid) {
+    if plan.pid.is_some() {
+        match plan.windows_identity.as_ref() {
             Some(identity)
                 if scan::current_user().as_deref() == Some(identity.owner.as_str())
-                    && !scan::is_system(&identity.image) =>
-            {
-                plan.windows_identity = Some(identity)
-            }
+                    && !scan::is_system(&identity.image) => {}
             _ => plan
                 .blockers
                 .push("process identity or ownership could not be verified".into()),
@@ -248,13 +260,17 @@ pub fn execute(store: &Store, mut plan: ReapPlan, _force: bool) -> anyhow::Resul
         .windows_identity
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("process identity was not verified"))?;
-    scan::windows_terminate_exact(pid, identity)?;
     let detail = format!("pid {pid} {}", plan.command.as_deref().unwrap_or_default());
-    store.record_reap(
-        "human (another reap --confirm)",
+    store.guarded_reap(
         plan.resource_id.as_deref(),
-        Some(pid),
+        pid,
+        plan.grace_seconds,
         detail.trim(),
+        || {
+            scan::windows_terminate_exact(pid, identity)
+                .map(|()| true)
+                .map_err(another_core::Error::Io)
+        },
     )?;
     plan.executed = true;
     plan.outcome = Some(format!("pid {pid} terminated (Windows hard stop)"));
@@ -273,53 +289,109 @@ pub fn execute(store: &Store, mut plan: ReapPlan, force: bool) -> anyhow::Result
     let pid = plan
         .pid
         .ok_or_else(|| anyhow::anyhow!("no pid to signal"))?;
+    let detail = format!("pid {pid} {}", plan.command.as_deref().unwrap_or_default());
+    let mut how = String::new();
+    let terminated = store.guarded_reap(plan.resource_id.as_deref(), pid, plan.grace_seconds, detail.trim(), || {
     let signal = |sig: &str| {
         std::process::Command::new("kill")
             .args([sig, &pid.to_string()])
             .status()
             .is_ok_and(|s| s.success())
     };
-    if !signal("-TERM") && scan::alive(pid) {
-        anyhow::bail!("could not signal pid {pid}");
+    if !signal("-TERM") && process_running_or_unknown(pid) {
+        return Err(another_core::Error::Invalid(format!("could not signal pid {pid}")));
     }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while scan::alive(pid) && std::time::Instant::now() < deadline {
+    while process_running_or_unknown(pid) && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     #[cfg(target_os = "macos")]
-    let how = "terminated (SIGTERM)";
+    let stop_description = "terminated (SIGTERM)";
     #[cfg(not(target_os = "macos"))]
-    let mut how = "terminated (SIGTERM)";
-    if scan::alive(pid) {
+    let mut stop_description = "terminated (SIGTERM)";
+    if process_running_or_unknown(pid) {
         #[cfg(target_os = "macos")]
         {
-            plan.outcome = Some(format!(
-                "pid {pid} is still running after SIGTERM; stop it manually"
-            ));
-            return Ok(plan);
+            how = format!("pid {pid} is still running after SIGTERM; stop it manually");
+            return Ok(false);
         }
         #[cfg(not(target_os = "macos"))]
         {
             if !force {
-                plan.outcome = Some(format!(
-                    "pid {pid} is still running after SIGTERM; re-run with --force to send SIGKILL"
-                ));
-                return Ok(plan);
+                how = format!("pid {pid} is still running after SIGTERM; re-run with --force to send SIGKILL");
+                return Ok(false);
             }
-            signal("-KILL");
-            how = "killed (SIGKILL)";
+            if !signal("-KILL") && !linux_process_gone(std::path::Path::new("/proc"), pid) {
+                return Err(another_core::Error::Invalid(format!("could not force-stop pid {pid}")));
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !linux_process_gone(std::path::Path::new("/proc"), pid) && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            if !linux_process_gone(std::path::Path::new("/proc"), pid) {
+                how = format!("pid {pid} termination could not be confirmed");
+                return Ok(false);
+            }
+            stop_description = "killed (SIGKILL)";
         }
     }
-    let detail = format!("pid {pid} {}", plan.command.as_deref().unwrap_or_default());
-    store.record_reap(
-        "human (another reap --confirm)",
-        plan.resource_id.as_deref(),
-        Some(pid),
-        detail.trim(),
-    )?;
+    how = stop_description.into();
+    Ok(true)
+    })?;
+    if !terminated {
+        plan.outcome = Some(how);
+        return Ok(plan);
+    }
     plan.executed = true;
     plan.outcome = Some(format!("pid {pid} {how}"));
     Ok(plan)
+}
+
+#[cfg(target_os = "linux")]
+fn process_running_or_unknown(pid: u32) -> bool {
+    !linux_process_gone(std::path::Path::new("/proc"), pid)
+}
+
+#[cfg(all(not(windows), not(target_os = "linux")))]
+fn process_running_or_unknown(pid: u32) -> bool {
+    scan::alive(pid)
+}
+
+#[cfg(any(all(not(windows), not(target_os = "macos")), test))]
+fn linux_process_gone(proc_root: &std::path::Path, pid: u32) -> bool {
+    if std::fs::metadata(proc_root.join("self/stat")).is_err() {
+        return false;
+    }
+    match std::fs::read_to_string(proc_root.join(pid.to_string()).join("stat")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Ok(stat) => {
+            stat.rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().next())
+                == Some("Z")
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod process_exit_tests {
+    use super::*;
+
+    #[test]
+    fn missing_proc_or_unknown_state_cannot_confirm_exit() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(!linux_process_gone(temp.path(), 42));
+        std::fs::create_dir(temp.path().join("self")).unwrap();
+        std::fs::write(temp.path().join("self/stat"), "self").unwrap();
+        std::fs::create_dir(temp.path().join("42")).unwrap();
+        std::fs::write(temp.path().join("42/stat"), "42 (name) R 0").unwrap();
+        assert!(!linux_process_gone(temp.path(), 42));
+        std::fs::write(temp.path().join("42/stat"), "bad").unwrap();
+        assert!(!linux_process_gone(temp.path(), 42));
+        std::fs::write(temp.path().join("42/stat"), "42 (name with ) paren) Z 0").unwrap();
+        assert!(linux_process_gone(temp.path(), 42));
+        assert!(linux_process_gone(temp.path(), 99));
+    }
 }
 
 #[cfg(all(test, windows))]

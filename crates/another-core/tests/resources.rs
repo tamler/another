@@ -287,6 +287,7 @@ fn reap_requests_and_records_are_logged() {
     store
         .note_reap_request("bob", "model_server:ollama@11434", "lease lapsed")
         .unwrap();
+    store.release_resource("alice", &name_ref(), false).unwrap();
     store
         .record_reap(
             "human (another reap --confirm)",

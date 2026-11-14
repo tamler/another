@@ -170,20 +170,20 @@ fn inspect_handle(handle: HANDLE) -> Option<(ProcessIdentity, i64)> {
     ))
 }
 
-pub(super) fn process_identity(pid: u32) -> Option<ProcessIdentity> {
+pub(super) fn observe_process(pid: u32) -> Option<(ProcInfo, ProcessIdentity)> {
     let process = open_process(pid)?;
-    inspect_handle(process.as_raw_handle()).map(|(identity, _)| identity)
+    let (identity, elapsed_seconds) = inspect_handle(process.as_raw_handle())?;
+    let info = ProcInfo {
+        pid,
+        user: identity.owner.clone(),
+        elapsed_seconds,
+        command: identity.image.clone(),
+    };
+    Some((info, identity))
 }
 
 pub(super) fn process_info(pid: u32) -> Option<ProcInfo> {
-    let process = open_process(pid)?;
-    let (identity, elapsed_seconds) = inspect_handle(process.as_raw_handle())?;
-    Some(ProcInfo {
-        pid,
-        user: identity.owner,
-        elapsed_seconds,
-        command: identity.image,
-    })
+    observe_process(pid).map(|(info, _)| info)
 }
 
 fn authorized_identity(
@@ -259,8 +259,10 @@ mod tests {
     #[test]
     fn current_process_owner_matches_current_user() {
         let pid = std::process::id();
-        let info = process_info(pid).expect("current process must be inspectable");
+        let (info, identity) = observe_process(pid).expect("current process must be inspectable");
         assert_eq!(info.pid, pid);
+        assert_eq!(info.user, identity.owner);
+        assert_eq!(info.command, identity.image);
         assert_eq!(Some(info.user), current_user());
         assert!(!info.command.is_empty());
         assert!(alive_or_unknown(pid));
@@ -269,7 +271,7 @@ mod tests {
     #[test]
     fn current_process_cannot_be_terminated() {
         let pid = std::process::id();
-        let identity = process_identity(pid).expect("current process must be inspectable");
+        let (_, identity) = observe_process(pid).expect("current process must be inspectable");
         assert!(terminate_exact(pid, &identity).is_err());
     }
 

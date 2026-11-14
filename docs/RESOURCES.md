@@ -65,6 +65,7 @@ another reap model_server:ollama@11434 --confirm
   - its process is owned by the **current user**;
   - it is **not** a protected system process.
 - On Linux and macOS, `--confirm` sends SIGTERM and waits up to 5 seconds. Linux sends SIGKILL only with `--force`; macOS never sends SIGKILL. On Windows, `--confirm` terminates the verified process immediately: Windows drops hard. There is no graceful Windows equivalent, and `--force` does not change that behavior.
+- Reaping holds the local database write transaction while rechecking the resource and stopping the process, so local database writers cannot acquire a lease during that operation. A crash or failed database commit after the stop can leave the outcome unknown: inspect the process and resource before retrying. This is not a durable recovery fence, and does not coordinate disconnected nodes or processes that do not use this database.
 - Agents cannot reap. The MCP `resource_reap` tool returns the same plan, records `resource.reap_requested` in the activity feed, and hands back the exact command for a human to run.
 - Another never reaps automatically.
 
