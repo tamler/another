@@ -53,7 +53,7 @@ another agent register writer --program claude --project .
 another agent register reader --program codex --project .
 another send --from writer --to reader --subject "Parser review" --body "Please check the error paths." --ack
 another inbox --agent reader --unread
-another ack --agent reader MESSAGE_ID --read-only
+another ack --agent reader MESSAGE_ID --mark-read-only
 another inbox --agent reader
 another ack --agent reader MESSAGE_ID
 another reply MESSAGE_ID --from reader --body "Looked. The timeout path has no test yet."
@@ -77,8 +77,9 @@ exit</code></pre>
 <span class="command">$ another inbox --agent reader --unread</span>
 <span class="output">reader@shop: 1 unread (0 urgent), 1 awaiting ack, 0 request(s)
    new  2026-11-12T10:30:07.209Z  writer@shop      Parser review  [01M77MXG3ADR38R971JAMA7KPV]</span></code></pre>
-      <p><code>--read-only</code> marks the message read and nothing more. It leaves the <code>--unread</code> list, and the full inbox shows it as <code>ack?</code> because an ack is still owed. A plain <code>ack</code> records receipt: the marker clears and <code>awaiting ack</code> drops to 0. The message stays in the inbox.</p>
-      <pre class="code-block shell" tabindex="0" aria-label="Mark read, then acknowledge"><code><span class="command">$ another ack --agent reader 01M77MXG3ADR38R971JAMA7KPV --read-only</span>
+      <p>The flag spelling here has been updated to <code>--mark-read-only</code>; outputs remain from the recorded run. The old <code>--read-only</code> spelling remains a compatibility alias with no removal scheduled. Both spellings change the acting recipient's read state without acknowledging; other recipients are unchanged.</p>
+      <p><code>--mark-read-only</code> marks the message read without acknowledging. It leaves the <code>--unread</code> list, and the full inbox shows it as <code>ack?</code> because an ack is still owed. A plain <code>ack</code> records receipt: the marker clears and <code>awaiting ack</code> drops to 0. The message stays in the inbox.</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Mark read, then acknowledge"><code><span class="command">$ another ack --agent reader 01M77MXG3ADR38R971JAMA7KPV --mark-read-only</span>
 <span class="output">1 updated, 0 unchanged</span>
 <span class="command">$ another inbox --agent reader</span>
 <span class="output">reader@shop: 0 unread (0 urgent), 1 awaiting ack, 0 request(s)
@@ -118,7 +119,7 @@ exit</code></pre>
     </section>
     <section class="guide-section" aria-labelledby="inspect">
       <h2 id="inspect">Read, acknowledge and follow a thread</h2>
-      <p>In your chosen node, <code>another inbox --agent reader</code> lists messages and relevant requests. Add <code>--unread</code> to filter unread mail. Fetching does not mark it read. Use <code>another ack</code> with the actual message ID and acting agent to record receipt; <code>--read-only</code> marks a read without acknowledgement. Read and ack state is per recipient, and an ack is receipt only: send work with <code>--request</code> so an agent can claim it and become its owner (<a href="/guides/hand-off-tasks/">hand off a task</a>).</p>
+      <p>In your chosen node, <code>another inbox --agent reader</code> lists messages and relevant requests. Add <code>--unread</code> to filter unread mail. Fetching does not mark it read. Use <code>another ack</code> with the actual message ID and acting agent to record receipt; <code>--mark-read-only</code> marks a read without acknowledgement. MCP uses <code>acknowledge</code> with <code>ack: false</code> for the same state change. Read and ack state is per recipient, and an ack is receipt only: send work with <code>--request</code> so an agent can claim it and become its owner (<a href="/guides/hand-off-tasks/">hand off a task</a>).</p>
       <p><code>another reply</code> with the message ID and <code>--from</code> answers in the same thread. <code>another threads --agent reader</code> lists conversations; <code>another thread</code> followed by an actual thread ID shows its messages. <code>another activity --summary</code> provides counts and highlights without message bodies. Keep the same home when following up on a message.</p>
       <p>Give sessions the same home and intended project to share state. <a href="/guides/mcp-agent-messaging/">Connect MCP</a> for mail tools and <a href="/guides/claude-code-codex/">client hooks</a> for notices.</p>
     </section>

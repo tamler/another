@@ -152,9 +152,9 @@ fn mail_requests_and_holds_from_the_cli() {
 }
 
 /// `another inbox` is not an ack, `another ack` only records the acting agent's receipt, and
-/// `--read-only` marks read without acknowledging.
+/// `--mark-read-only` marks read without acknowledging.
 #[test]
-fn inbox_fetch_is_not_an_ack_and_read_only_does_not_ack() {
+fn inbox_fetch_is_not_an_ack_and_mark_read_only_does_not_ack() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("h");
     for (name, program) in [("alice", "claude"), ("bob", "codex"), ("carol", "grok")] {
@@ -193,8 +193,8 @@ fn inbox_fetch_is_not_an_ack_and_read_only_does_not_ack() {
     assert_eq!(unread["messages"].as_array().unwrap().len(), 1);
     assert_eq!(json(&home, &["inbox", "--agent", "bob"])["unread"], 1);
 
-    // --read-only: read, not acknowledged.
-    let read = json(&home, &["ack", "--agent", "bob", "--read-only", &mid]);
+    // --mark-read-only: read, not acknowledged.
+    let read = json(&home, &["ack", "--agent", "bob", "--mark-read-only", &mid]);
     assert_eq!(read["updated"].as_array().unwrap().len(), 1);
     let bob = json(&home, &["inbox", "--agent", "bob"]);
     assert_eq!(
@@ -226,8 +226,11 @@ fn inbox_fetch_is_not_an_ack_and_read_only_does_not_ack() {
     );
     assert!(carol["messages"][0]["acked_at"].is_null());
 
-    // Human output names the counts; Carol's read-only call is her own.
-    let text = another(&home, &["ack", "--agent", "carol", "--read-only", &mid]);
+    // Human output names the counts; Carol's mark-read call is her own.
+    let text = another(
+        &home,
+        &["ack", "--agent", "carol", "--mark-read-only", &mid],
+    );
     assert!(text.status.success());
     assert!(String::from_utf8_lossy(&text.stdout).contains("1 updated, 0 unchanged"));
     let carol = json(&home, &["inbox", "--agent", "carol"]);
@@ -235,6 +238,73 @@ fn inbox_fetch_is_not_an_ack_and_read_only_does_not_ack() {
         (carol["unread"].as_u64(), carol["awaiting_ack"].as_u64()),
         (Some(0), Some(1))
     );
+}
+
+#[test]
+fn mark_read_only_preserves_other_recipient_unread() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    for name in ["sender", "a", "b"] {
+        json(home, &["agent", "register", name, "--program", "codex"]);
+    }
+    let sent = json(
+        home,
+        &[
+            "send",
+            "--from",
+            "sender",
+            "--to",
+            "a,b",
+            "--subject",
+            "Shared",
+            "--body",
+            "Read separately",
+            "--ack",
+        ],
+    );
+    let id = sent["message_id"].as_str().unwrap();
+    let before = json(home, &["inbox", "--agent", "b", "--unread"]);
+    assert_eq!(before["unread"], 1);
+    assert_eq!(before["messages"][0]["message_id"], id);
+    let marked = json(home, &["ack", "--agent", "a", "--mark-read-only", id]);
+    assert_eq!(marked["updated"], serde_json::json!([id]));
+    let a = json(home, &["inbox", "--agent", "a", "--unread"]);
+    assert_eq!(a["unread"], 0);
+    assert!(a["messages"].as_array().unwrap().is_empty());
+    let a = json(home, &["inbox", "--agent", "a"]);
+    assert!(a["messages"][0]["read_at"].is_string());
+    assert!(a["messages"][0]["acked_at"].is_null());
+    assert_eq!(a["awaiting_ack"], 1);
+    let b = json(home, &["inbox", "--agent", "b", "--unread"]);
+    assert_eq!(b["unread"], 1);
+    assert_eq!(b["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(b["messages"][0]["message_id"], id);
+    assert!(b["messages"][0]["read_at"].is_null());
+    assert!(b["messages"][0]["acked_at"].is_null());
+    assert_eq!(b["awaiting_ack"], 1);
+
+    // The compatibility alias produces the same receipt result for B.
+    let legacy = json(home, &["ack", "--agent", "b", "--read-only", id]);
+    assert_eq!(legacy["updated"], marked["updated"]);
+    assert_eq!(legacy["unchanged"], marked["unchanged"]);
+    let b = json(home, &["inbox", "--agent", "b"]);
+    assert_eq!(b["unread"], 0);
+    assert!(b["messages"][0]["read_at"].is_string());
+    assert!(b["messages"][0]["acked_at"].is_null());
+    assert_eq!(b["awaiting_ack"], 1);
+}
+
+#[test]
+fn ack_help_names_state_change_and_compatibility_alias() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = another(dir.path(), &["ack", "--help"]);
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(help.contains("--mark-read-only"));
+    assert!(help.contains("--read-only"));
+    assert!(help.contains("changes state"));
+    assert!(help.contains("without acknowledging"));
+    assert!(help.contains("compatibility alias"));
 }
 
 #[test]

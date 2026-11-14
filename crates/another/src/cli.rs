@@ -164,9 +164,9 @@ pub enum Command {
         agent: AgentArg,
         #[arg(required = true)]
         message_ids: Vec<String>,
-        /// Only mark read; do not acknowledge.
-        #[arg(long)]
-        read_only: bool,
+        /// Mark messages read (changes state) without acknowledging. --read-only is a compatibility alias.
+        #[arg(long, visible_alias = "read-only")]
+        mark_read_only: bool,
     },
     /// List threads an agent is part of.
     Threads {
@@ -1144,9 +1144,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Ack {
             agent,
             message_ids,
-            read_only,
+            mark_read_only,
         } => {
-            let out = store.acknowledge(&agent.agent, &message_ids, !read_only)?;
+            let out = store.acknowledge(&agent.agent, &message_ids, !mark_read_only)?;
             emit(json, &out, |o| {
                 format!(
                     "{} updated, {} unchanged",
