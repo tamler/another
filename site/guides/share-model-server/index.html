@@ -55,14 +55,14 @@ another resource register model_server ollama@11434 --agent claude --endpoint ht
       <h2 id="borrow">Find it and borrow it</h2>
       <pre class="code-block shell" tabindex="0" aria-label="Find and borrow a resource"><code>another resources -q ollama
 another borrow model_server:ollama@11434 --agent codex</code></pre>
-      <p>The listing shows the endpoint, and the agent connects to that endpoint itself. A borrow lasts 30 minutes unless you pass <code>--ttl</code>. <code>another heartbeat --agent codex</code> and the session hooks renew it. Agents with MCP use <code>resource_find</code> and <code>resource_borrow</code>.</p>
+      <p>The listing shows the endpoint, and the agent connects to that endpoint itself. A borrow lasts 30 minutes unless you pass <code>--ttl</code>. An explicit <code>another heartbeat --agent codex</code> renews it; unfenced session hooks do not. Agents with MCP use <code>resource_find</code> and <code>resource_borrow</code>.</p>
     </section>
     <section class="guide-section" aria-labelledby="release">
       <h2 id="release">Release it when you finish</h2>
       <pre class="code-block shell" tabindex="0" aria-label="Release a lease"><code>another release model_server:ollama@11434 --agent codex
 another release model_server:ollama@11434 --agent claude</code></pre>
       <p>Releasing ends a lease and does not stop the server. If the owner leaves while others borrow, the oldest borrower becomes the owner. Once the last lease ends, the resource shows as <code>lapsed</code>, and the next agent to borrow it adopts it as owner, so check that it is still answering first. After you really shut it down, the owner runs <code>another release</code> with <code>--stopped</code>.</p>
-      <p>The session-end hook releases an agent's leases. If your server should outlive the session, end the session by hand with <code>--keep</code>, which holds on to the lease:</p>
+      <p>An unfenced session-end hook leaves leases in place until expiry or explicit release. To end an agent's session explicitly while keeping its resource leases, use:</p>
       <pre class="code-block shell" tabindex="0" aria-label="End a session and keep leases"><code>another heartbeat --agent claude --end --keep</code></pre>
       <p><a href="https://github.com/tamler/another/blob/main/docs/RESOURCES.md">The resource reference</a> has the details.</p>
     </section>

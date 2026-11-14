@@ -344,12 +344,16 @@ fn hook_run_records_sessions_and_injects_a_capped_digest() {
     let env = Env::new();
     let repo = env.repo.to_str().unwrap();
 
-    // First session start registers claude@shop from the git root of cwd.
+    // First session start registers a distinct actor from the git root of cwd.
     let digest = env.hook("session-start", "claude", &stdin_for(&env.repo, "s1"), &[]);
-    assert!(
-        digest.contains("Another: claude@shop has 0 unread"),
-        "{digest}"
-    );
+    let actor = digest
+        .strip_prefix("Another: ")
+        .unwrap()
+        .split(' ')
+        .next()
+        .unwrap();
+    assert!(actor.starts_with("claude-s") && actor.ends_with("@shop"));
+    assert!(digest.contains("has 0 unread"), "{digest}");
 
     // Another agent mails it; the next prompt mentions it exactly once.
     env.ok(&[
@@ -366,7 +370,7 @@ fn hook_run_records_sessions_and_injects_a_capped_digest() {
         "--from",
         "codex@shop",
         "--to",
-        "claude@shop",
+        actor,
         "--subject",
         "Rebase please",
         "-i",
@@ -376,7 +380,7 @@ fn hook_run_records_sessions_and_injects_a_capped_digest() {
     ]);
     let notice = env.hook("prompt", "claude", &stdin_for(&env.repo, "s1"), &[]);
     assert!(
-        notice.contains("1 new message(s) for claude@shop (1 urgent)"),
+        notice.contains(&format!("1 new message(s) for {actor} (1 urgent)")),
         "{notice}"
     );
     assert!(notice.contains("Rebase please"));
@@ -393,29 +397,40 @@ fn hook_run_records_sessions_and_injects_a_capped_digest() {
             "--from",
             "codex@shop",
             "--to",
-            "claude@shop",
+            actor,
             "--subject",
             &format!("{i} {}", "x".repeat(200)),
         ]);
     }
-    let digest = env.hook("session-start", "claude", &stdin_for(&env.repo, "s2"), &[]);
-    assert!(digest.chars().count() <= 1501, "{}", digest.len());
-    assert!(digest.contains("41 unread (1 urgent)"), "{digest}");
+    let second_digest = env.hook("session-start", "claude", &stdin_for(&env.repo, "s1"), &[]);
+    assert!(
+        second_digest.chars().count() <= 1501,
+        "{}",
+        second_digest.len()
+    );
+    assert!(
+        second_digest.contains("41 unread (1 urgent)"),
+        "{second_digest}"
+    );
 
-    // Holds are released at session end, which is recorded.
+    // Unfenced hook End leaves holds intact; explicit heartbeat End releases them.
     env.ok(&[
         "hold",
         "acquire",
         "--agent",
-        "claude@shop",
+        actor,
         "--project",
         repo,
         "src/**",
     ]);
     assert_eq!(
-        env.hook("session-end", "claude", &stdin_for(&env.repo, "s2"), &[]),
+        env.hook("session-end", "claude", &stdin_for(&env.repo, "s1"), &[]),
         ""
     );
+    let holds: Value = serde_json::from_str(&env.ok(&["--json", "holds"])).unwrap();
+    assert_eq!(holds.as_array().unwrap().len(), 1);
+    env.ok(&["heartbeat", "--agent", actor, "--start"]);
+    env.ok(&["heartbeat", "--agent", actor, "--end"]);
     let holds: Value = serde_json::from_str(&env.ok(&["--json", "holds"])).unwrap();
     assert!(holds.as_array().unwrap().is_empty());
     let feed: Value =
@@ -426,8 +441,8 @@ fn hook_run_records_sessions_and_injects_a_capped_digest() {
         .iter()
         .map(|i| i["summary"].as_str().unwrap())
         .collect();
-    assert!(summaries.contains(&"claude@shop started a session (claude)"));
-    assert!(summaries.contains(&"claude@shop ended a session (claude)"));
+    assert!(summaries.contains(&format!("{actor} started a session").as_str()));
+    assert!(summaries.contains(&format!("{actor} ended a session").as_str()));
 }
 
 #[test]
@@ -443,8 +458,13 @@ fn cursor_and_grok_specifics() {
     assert!(v["additional_context"]
         .as_str()
         .unwrap()
-        .contains("cursor@shop"));
-    let prompt = env.hook("prompt", "cursor", &json!({}), &[]);
+        .contains("cursor-s"));
+    let prompt = env.hook(
+        "prompt",
+        "cursor",
+        &json!({ "conversation_id": "c1", "workspace_roots": [env.repo] }),
+        &[],
+    );
     assert_eq!(
         serde_json::from_str::<Value>(prompt.trim()).unwrap()["continue"],
         true
@@ -458,7 +478,7 @@ fn cursor_and_grok_specifics() {
         &grok_stdin,
         &[("GROK_HOOK_EVENT", "SessionStart")],
     );
-    assert!(out.contains("grok@shop"), "{out}");
+    assert!(out.contains("grok-s"), "{out}");
     // ...and stands down once the Grok pack is installed, so events run once.
     env.ok(&["hook", "install", "--client", "grok"]);
     let out = env.hook(
@@ -520,7 +540,10 @@ fn installed_wrapper_script_runs_under_sh() {
     let out = child.wait_with_output().unwrap();
     assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("Another: codex@shop has"), "{text}");
+    assert!(
+        text.contains("Another: codex-s") && text.contains("@shop has"),
+        "{text}"
+    );
     // ANOTHER_HOME baked in at install time was used.
     assert!(env.another_home.join("another.db").exists());
 }

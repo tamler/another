@@ -9,6 +9,7 @@ use std::path::{Component, Path};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 use crate::store::{new_id, Store, Tx};
@@ -411,6 +412,132 @@ pub(crate) fn get_agent(conn: &Connection, agent_id: &str) -> Result<Agent> {
 }
 
 impl Store {
+    /// Resolve a client hook's per-session actor without storing its raw session ID.
+    pub fn session_actor(
+        &self,
+        client: &str,
+        program: Program,
+        root: &str,
+        requested_base: Option<&str>,
+        session_id: &str,
+        create: bool,
+    ) -> Result<(String, String)> {
+        if session_id.is_empty()
+            || session_id.len() > 512
+            || session_id.chars().any(char::is_control)
+        {
+            return Err(Error::Invalid("invalid session identifier".into()));
+        }
+        self.write(|tx| {
+            let project = match find_project(tx, tx.node_id, root) {
+                Ok(project) => project,
+                Err(Error::NotFound(_)) if create => ensure_project_tx(tx, client, root)?,
+                Err(e) => return Err(e),
+            };
+            let requested = requested_base.unwrap_or(client);
+            let (name, slug) = match requested.split_once('@') {
+                Some((name, slug)) if !slug.contains('@') => (name, Some(slug)),
+                Some(_) => return Err(Error::Invalid("invalid session base address".into())),
+                None => (requested, None),
+            };
+            if slug.is_some_and(|slug| slug != project.slug) {
+                return Err(Error::Invalid("session base project does not match".into()));
+            }
+            validate_name(name)?;
+            let existing_binding: Option<(String, String, String)> = tx.query_row(
+                "SELECT b.base_name, b.client, b.digest FROM session_bindings b JOIN agents a ON a.agent_id=b.agent_id WHERE a.node_id=?1 AND a.name=?2 AND b.project_id=?3",
+                params![tx.node_id, name, project.project_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            ).optional()?;
+            let base = existing_binding.as_ref().map_or(name, |binding| binding.0.as_str());
+            let mut hash = Sha256::new();
+            for value in ["another-session-v1", tx.node_id, client, project.project_id.as_str(), base, session_id] {
+                hash.update((value.len() as u64).to_be_bytes());
+                hash.update(value.as_bytes());
+            }
+            let digest = format!("{:x}", hash.finalize());
+            let actor_name = format!("{}-s{}", &base[..base.len().min(30)], &digest[..32]);
+            if let Some((_, bound_client, bound_digest)) = &existing_binding {
+                if bound_client != client || bound_digest != &digest || actor_name != name {
+                    return Err(Error::Invalid("session actor does not match this session".into()));
+                }
+            }
+            let addr = address(&actor_name, Some(&project.slug));
+            let binding: Option<(String, String)> = tx.query_row(
+                "SELECT b.agent_id, b.digest FROM session_bindings b JOIN agents a ON a.agent_id=b.agent_id WHERE a.node_id=?1 AND a.name=?2 AND b.project_id=?3",
+                params![tx.node_id, actor_name, project.project_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            ).optional()?;
+            if let Some((_, saved)) = binding {
+                if saved != digest {
+                    return Err(Error::Invalid("session identity collision".into()));
+                }
+                return Ok((addr, digest));
+            }
+            if !create {
+                return Err(Error::NotFound("session identity has not started".into()));
+            }
+            let occupied: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM agents WHERE node_id=?1 AND project_id=?2 AND name=?3)",
+                params![tx.node_id, project.project_id, actor_name], |r| r.get(0),
+            )?;
+            if occupied {
+                return Err(Error::Invalid("session identity collision".into()));
+            }
+            let digest_used: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_bindings WHERE digest=?1)",
+                [&digest],
+                |r| r.get(0),
+            )?;
+            if digest_used {
+                return Err(Error::Invalid("session identity collision".into()));
+            }
+            let agent_id = new_id();
+            let event_id = tx.emit(&addr, "agent.registered", json!({
+                "agent_id": agent_id, "name": actor_name, "project_id": project.project_id,
+                "program": program.as_str(), "model": null, "description": null, "new": true
+            }))?;
+            tx.execute(
+                "INSERT INTO agents (agent_id,node_id,project_id,name,program,status,created_at,updated_at,last_seen_at,event_id,address) VALUES (?1,?2,?3,?4,?5,'active',?6,?6,?6,?7,?8)",
+                params![agent_id, tx.node_id, project.project_id, actor_name, program.as_str(), tx.now, event_id, addr],
+            )?;
+            tx.execute(
+                "INSERT INTO session_bindings(digest,agent_id,project_id,client,base_name) VALUES (?1,?2,?3,?4,?5)",
+                params![digest, agent_id, project.project_id, client, base],
+            )?;
+            Ok((addr, digest))
+        })
+    }
+
+    /// Check that an address identifies a locally registered session actor.
+    pub fn is_session_actor(&self, who: &str) -> Result<bool> {
+        self.read(|conn| {
+            let actor = resolve_agent(conn, self.node_id(), who)?;
+            Ok(conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_bindings WHERE agent_id=?1)",
+                [&actor.id],
+                |r| r.get(0),
+            )?)
+        })
+    }
+
+    /// Resolve a session actor to its complete local address.
+    pub fn session_actor_address(&self, who: &str) -> Result<String> {
+        self.read(|conn| {
+            let actor = resolve_agent(conn, self.node_id(), who)?;
+            let is_session: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_bindings WHERE agent_id=?1)",
+                [&actor.id],
+                |r| r.get(0),
+            )?;
+            if !is_session {
+                return Err(Error::Invalid(
+                    "agent is not a registered session actor".into(),
+                ));
+            }
+            Ok(actor.address)
+        })
+    }
     /// Register an absolute project path (idempotent).
     pub fn ensure_project(&self, actor: &str, abs_path: &str) -> Result<Project> {
         self.write(|tx| ensure_project_tx(tx, actor, abs_path))
@@ -543,6 +670,117 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_bindings_are_distinct_stable_and_do_not_persist_raw_ids() {
+        let store = Store::open_in_memory(crate::store::Clock::System).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let raw = "unique-private-session-98";
+        let (a, fingerprint) = store
+            .session_actor("claude", Program::Claude, root, None, raw, true)
+            .unwrap();
+        let (same, _) = store
+            .session_actor("claude", Program::Claude, root, Some(&a), raw, false)
+            .unwrap();
+        let (b, _) = store
+            .session_actor("claude", Program::Claude, root, None, "other-session", true)
+            .unwrap();
+        assert_eq!(a, same);
+        assert_ne!(a, b);
+        assert!(store.is_session_actor(&a).unwrap());
+        let bare = a.split('@').next().unwrap();
+        assert_eq!(store.session_actor_address(bare).unwrap(), a);
+        let other = tempfile::tempdir().unwrap();
+        store
+            .register_agent(RegisterAgent {
+                name: bare.into(),
+                program: Program::Claude,
+                project: Some(other.path().to_str().unwrap().into()),
+                model: None,
+                description: None,
+            })
+            .unwrap();
+        assert!(matches!(
+            store.session_actor_address(bare),
+            Err(Error::Ambiguous(_))
+        ));
+        assert_eq!(store.session_actor_address(&a).unwrap(), a);
+        assert!(store
+            .session_actor(
+                "claude",
+                Program::Claude,
+                root,
+                Some(&a),
+                "other-session",
+                false
+            )
+            .is_err());
+        assert!(store
+            .session_actor("claude", Program::Claude, root, None, "", true)
+            .is_err());
+        store
+            .session(
+                &a,
+                crate::holds::SessionPhase::Start,
+                crate::holds::SessionInfo {
+                    client: Some("claude".into()),
+                    session_id: Some(raw.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let events = serde_json::to_string(&store.events(100).unwrap()).unwrap();
+        assert!(!events.contains(raw));
+        assert!(events.contains(&fingerprint));
+    }
+
+    #[test]
+    fn concurrent_connections_converge_on_one_session_actor() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("work");
+        std::fs::create_dir(&root).unwrap();
+        let home = dir.path().join("home");
+        let first = Store::open(&home).unwrap();
+        let second = Store::open(&home).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let root = root.to_str().unwrap().to_owned();
+        let spawn = |store: Store| {
+            let barrier = barrier.clone();
+            let root = root.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                store
+                    .session_actor("codex", Program::Codex, &root, None, "same-session", true)
+                    .unwrap()
+                    .0
+            })
+        };
+        let a = spawn(first);
+        let b = spawn(second);
+        assert_eq!(a.join().unwrap(), b.join().unwrap());
+    }
+
+    #[test]
+    fn existing_unbound_actor_is_never_reused() {
+        let store = Store::open_in_memory(crate::store::Clock::System).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let (actor, _) = store
+            .session_actor("claude", Program::Claude, root, None, "session", true)
+            .unwrap();
+        store
+            .write(|tx| {
+                tx.execute("DELETE FROM session_bindings", [])?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(
+            store.session_actor("claude", Program::Claude, root, None, "session", true),
+            Err(Error::Invalid(_))
+        ));
+        assert!(store.agent(&actor).is_ok());
+    }
 
     #[test]
     fn normalizes_paths() {

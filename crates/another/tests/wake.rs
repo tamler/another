@@ -1,6 +1,7 @@
 //! `another wake` adapters, exercised with fake tmux / cmux / herdr binaries on PATH.
 #![cfg(unix)]
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -190,7 +191,7 @@ fn adapters_and_targets() {
         "cmux [notify] [--title] [Another] [--body] [ping]"
     );
 
-    // A session-start hook inside tmux records the pane automatically...
+    // Unfenced session-start hooks do not capture or replace wake targets.
     let mut hook = env
         .cmd(&["hook", "run", "session-start", "--client", "codex"])
         .env("TMUX_PANE", "%9")
@@ -199,12 +200,16 @@ fn adapters_and_targets() {
         .stdout(Stdio::null())
         .spawn()
         .unwrap();
-    drop(hook.stdin.take());
+    let input = serde_json::json!({"session_id": "one", "cwd": env._dir.path()});
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(input.to_string().as_bytes())
+        .unwrap();
     assert!(hook.wait().unwrap().success());
     let targets = env.json(&["wake", "list"]);
-    assert_eq!(targets[0]["target"], "%9");
-    assert_eq!(targets[0]["auto"], true);
-    // ...but never replaces a target set by hand.
+    assert!(targets.as_array().unwrap().is_empty());
+    // An explicit target remains unchanged after another hook Start.
     env.json(&[
         "wake", "set", "--agent", "bob", "--via", "tmux", "--target", "work:1.0",
     ]);
@@ -212,9 +217,14 @@ fn adapters_and_targets() {
         .cmd(&["hook", "run", "session-start", "--client", "codex"])
         .env("TMUX_PANE", "%10")
         .env("ANOTHER_AGENT", "bob")
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .spawn()
+        .unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(input.to_string().as_bytes())
         .unwrap();
     assert!(hook.wait().unwrap().success());
     assert_eq!(env.json(&["wake", "list"])[0]["target"], "work:1.0");

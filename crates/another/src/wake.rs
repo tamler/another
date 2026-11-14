@@ -148,7 +148,7 @@ pub fn wake(store: &Store, agent: &str, opts: &WakeOptions) -> Result<WakePlan> 
         ));
         return Ok(plan);
     };
-    if plan.target.is_none() && via == WakeVia::Herdr {
+    if plan.target.is_none() && via == WakeVia::Herdr && !store.is_session_actor(&address)? {
         // Herdr addresses agents by name; default to the Another agent's name.
         plan.target = Some(address.split('@').next().unwrap_or(&address).to_string());
     }
@@ -290,35 +290,6 @@ pub fn wake_all(store: &Store, opts: &WakeOptions) -> Result<Vec<WakePlan>> {
         .into_iter()
         .map(|t| wake(store, &t.agent, opts))
         .collect()
-}
-
-/// The terminal this process runs in. When multiplexers are nested, `TERM_PROGRAM` names
-/// the innermost one; otherwise Herdr wins, then tmux, then cmux.
-pub fn current_target() -> Option<(WakeVia, String)> {
-    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
-    let herdr = var("HERDR_PANE_ID").map(|p| (WakeVia::Herdr, p));
-    let tmux = var("TMUX_PANE").map(|p| (WakeVia::Tmux, p));
-    let cmux = var("CMUX_SURFACE_ID").map(|p| (WakeVia::Cmux, p));
-    match var("TERM_PROGRAM").as_deref() {
-        Some("tmux") if tmux.is_some() => tmux,
-        Some("herdr") if herdr.is_some() => herdr,
-        _ => herdr.or(tmux).or(cmux),
-    }
-}
-
-/// Record the terminal a hook runs in, so `another wake` can find the agent later.
-pub fn capture_target(store: &Store, agent: &str) {
-    if let Some((via, target)) = current_target() {
-        let _ = store.set_wake_target(agent, via, &target, true);
-    }
-}
-
-/// At session end, forget the captured target if it is still this terminal, so nothing
-/// is typed into the pane after the agent has left it.
-pub fn release_target(store: &Store, agent: &str) {
-    if let Some((via, target)) = current_target() {
-        let _ = store.clear_auto_wake_target(agent, Some((via, &target)));
-    }
 }
 
 /// The herdr binary: `$HERDR_BIN_PATH`, else `herdr` on PATH.

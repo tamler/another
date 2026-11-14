@@ -60,9 +60,7 @@ git clone https://github.com/tamler/another && cd another && cargo build --relea
 
 Once v0.1.0 is published, prebuilt binaries for macOS (arm64, x86_64) and Linux (static, x86_64, arm64) will be on [GitHub Releases](https://github.com/tamler/another/releases): unpack one and put `another` on your `PATH`. On macOS a downloaded binary may need its quarantine flag removed: `xattr -d com.apple.quarantine ./another`.
 
-On macOS, when replacing an existing `another` with a new build, **remove the old binary first** (`rm "$(command -v another)"`) and then copy the new one in. Copying over the old file in place leaves a stale code signature cached, and macOS kills the new binary on launch. `cargo install` replaces it safely.
-
-After upgrading, restart every `another` process that was already running, since it keeps the old code: run `another daemon restart` on macOS (or `another daemon install` from the new binary if it lives at a different path; on Linux, restart your service), restart each client that runs `another serve --stdio` (or reconnect its MCP server), and restart any `another remote up`, `another serve --auth` or hand-started `another serve`. This matters most when the upgrade changes how repository keys are cached, as the one after #103 does: an old process reading keys written by the new one does not see holds in sibling worktrees and lets those edits through. See [docs/DAEMON.md](docs/DAEMON.md#upgrading).
+Before upgrading an existing home, fence all writers: stop the daemon, clients, hooks and MCP processes you own, prevent them restarting, and verify no old process can write that home. If you cannot establish and maintain that fence, stop. Back up other required home metadata and user configuration separately. The new binary refuses to migrate an older populated home during normal open. While the fence is held, use `another upgrade --backup-dir <new-directory-outside-home> --confirm-writer-fence`; it creates and checks a protected SQLite online backup before migrating. The flag records your confirmation; it does not detect old clients for you. Keep the fence until matching binaries and hooks are installed, then restart clients and verify behavior. See [the upgrade and recovery procedure](docs/DAEMON.md#upgrading). Windows offline upgrade is currently unavailable until private backup ACL support is verified.
 
 **2. Create the local node** (`~/.another`, or `$ANOTHER_HOME`):
 
@@ -76,9 +74,9 @@ another init
 another hook install --client all
 ```
 
-For Codex, review and trust Another's new or changed hooks yourself in `/hooks`. In Codex's default trust flow, automatic mail delivery, heartbeats and edit holds do not run there until you do. Codex also offers `--dangerously-bypass-hook-trust`, which runs enabled hooks without persisted trust for that one invocation; Another does not recommend it. `another hook status` checks configuration presence, not trust or execution. Another cannot grant trust. See [Codex trust and coverage](docs/HOOKS.md#codex-trust-and-coverage).
+For Codex, review and trust Another's new or changed hooks yourself in `/hooks`. In Codex's default trust flow, automatic mail delivery and edit holds do not run there until you do. Codex also offers `--dangerously-bypass-hook-trust`, which runs enabled hooks without persisted trust for that one invocation; Another does not recommend it. `another hook status` checks configuration presence, not trust or execution. Another cannot grant trust. See [Codex trust and coverage](docs/HOOKS.md#codex-trust-and-coverage).
 
-Besides session start, prompts and session end, the pack adds a hook after each tool call (new mail shows up mid-task) and, for Claude Code, Codex and Grok, one before each file edit (the edit takes a hold, or is stopped when another agent holds the file). Both fail open. See [docs/HOOKS.md](docs/HOOKS.md).
+Besides session start, prompts and session end, the pack adds a hook after each tool call (new mail shows up mid-task) and, for Claude Code, Codex and Grok, one before each file edit (the edit takes a hold, or is stopped when another agent holds the file). A missing session identity denies a matched edit when the client honors the response; database and wrapper failures still fail open. See [docs/HOOKS.md](docs/HOOKS.md).
 
 **Optional: keep the daemon running** (macOS). It expires holds in the background and wakes idle Herdr agents when mail arrives:
 

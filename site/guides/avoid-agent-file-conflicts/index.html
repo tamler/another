@@ -60,7 +60,7 @@ another hold acquire --agent editor --project . 'src/parser.rs' --ttl 1800</code
       <pre class="code-block shell" tabindex="0" aria-label="Renew and release editor holds"><code>another hold renew --agent editor
 another hold release --agent editor</code></pre>
       <p>Without hold IDs, these affect all live holds owned by that agent. Supply specific hold IDs to change only one scope. After release, the peer can check again and acquire its own scope.</p>
-      <p>Session-start and prompt hooks renew the agent's live holds, and the hook after each tool call renews holds past half their TTL at most once a minute; session-end hooks release them, including the ones the edit hook took. Expired holds stop conflicting. An open terminal does not guarantee those hooks are running; inspect live state with <code>another holds</code>.</p>
+      <p>Unfenced session hooks do not renew all holds or release them at session end. A pre-edit check can renew an existing hold on the path it checks; an inactive hold expires at its TTL or can be released by its exact actor. An open terminal does not guarantee hooks are running; inspect live state with <code>another holds</code>.</p>
     </section>
     <section class="guide-section" aria-labelledby="limits">
       <h2 id="limits">Keep the boundary visible</h2>

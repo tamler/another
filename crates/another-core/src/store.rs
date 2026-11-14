@@ -104,15 +104,194 @@ impl Store {
         }
         let path = home.join(DB_FILE);
         let conn = Connection::open(&path)?;
+        require_current_or_empty(&conn)?;
         use_wal(&conn)?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         Self::init(conn, clock, Some(path))
     }
 
+    /// Back up and upgrade an existing home after the operator has fenced all writers.
+    /// This cannot verify or maintain the operator's process fence.
+    #[cfg(unix)]
+    pub fn upgrade_offline(
+        home: &Path,
+        backup_dir: &Path,
+        writer_fence_confirmed: bool,
+    ) -> Result<()> {
+        Self::upgrade_offline_with_parent_sync(home, backup_dir, writer_fence_confirmed, |parent| {
+            std::fs::File::open(parent)?.sync_all()
+        })
+    }
+
+    #[cfg(unix)]
+    fn upgrade_offline_with_parent_sync(
+        home: &Path,
+        backup_dir: &Path,
+        writer_fence_confirmed: bool,
+        sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+    ) -> Result<()> {
+        use sha2::{Digest, Sha256};
+        use std::io::{Read, Write};
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+
+        if !writer_fence_confirmed {
+            return Err(Error::Invalid(
+                "operator writer-fence confirmation is required".into(),
+            ));
+        }
+        let source_home = std::fs::canonicalize(home)?;
+        let parent = backup_dir
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let name = backup_dir
+            .file_name()
+            .ok_or_else(|| Error::Invalid("invalid backup directory".into()))?;
+        let backup_parent = std::fs::canonicalize(parent)?;
+        if backup_parent.starts_with(&source_home) {
+            return Err(Error::Invalid(
+                "backup directory must be outside the Another home".into(),
+            ));
+        }
+        let backup_dir = backup_parent.join(name);
+        let mut source = Connection::open_with_flags(
+            source_home.join(DB_FILE),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        source.busy_timeout(std::time::Duration::from_secs(5))?;
+        let version: i64 = source.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let data_version: i64 = source.pragma_query_value(None, "data_version", |r| r.get(0))?;
+        if version <= 0 || version >= MIGRATIONS.len() as i64 {
+            return Err(Error::Invalid(
+                "home is not an older initialized schema".into(),
+            ));
+        }
+        let node: String =
+            source.query_row("SELECT node_id FROM nodes WHERE is_local = 1", [], |r| {
+                r.get(0)
+            })?;
+        if node.is_empty() {
+            return Err(Error::Invalid("local node identity is missing".into()));
+        }
+        let key_material: Option<(Option<String>, Option<String>)> = if version >= 4 {
+            let pair: (Option<String>, Option<String>) = source.query_row(
+                "SELECT public_key, secret_key FROM nodes WHERE is_local = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            if pair.0.as_deref().is_none_or(str::is_empty)
+                || pair.1.as_deref().is_none_or(str::is_empty)
+            {
+                return Err(Error::Invalid(
+                    "local node key metadata is missing; home was not migrated".into(),
+                ));
+            }
+            let secret =
+                crate::crypto::decode_secret(pair.1.as_deref().unwrap()).map_err(|_| {
+                    Error::Invalid("local node key is invalid; home was not migrated".into())
+                })?;
+            if crate::crypto::public_of(&secret) != pair.0.as_deref().unwrap() {
+                return Err(Error::Invalid(
+                    "local node keys do not match; home was not migrated".into(),
+                ));
+            }
+            Some(pair)
+        } else {
+            None
+        };
+        std::fs::DirBuilder::new().mode(0o700).create(&backup_dir)?;
+        let backup_path = backup_dir.join(DB_FILE);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&backup_path)?;
+        let mut destination = Connection::open(&backup_path)?;
+        {
+            let backup = rusqlite::backup::Backup::new(&source, &mut destination)?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                match backup.step(128)? {
+                    rusqlite::backup::StepResult::Done => break,
+                    _ if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(10))
+                    }
+                    _ => {
+                        return Err(Error::Invalid(
+                            "backup timed out; original home was not migrated".into(),
+                        ))
+                    }
+                }
+            }
+        }
+        let check: String =
+            destination.pragma_query_value(None, "integrity_check", |r| r.get(0))?;
+        let backup_version: i64 =
+            destination.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let backup_node: String =
+            destination.query_row("SELECT node_id FROM nodes WHERE is_local = 1", [], |r| {
+                r.get(0)
+            })?;
+        if check != "ok" || backup_version != version || backup_node != node {
+            return Err(Error::Invalid(
+                "backup verification failed; original home was not migrated".into(),
+            ));
+        }
+        if let Some(expected) = key_material {
+            let actual: (Option<String>, Option<String>) = destination.query_row(
+                "SELECT public_key, secret_key FROM nodes WHERE is_local = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            if actual != expected {
+                return Err(Error::Invalid(
+                    "backup node key verification failed; original home was not migrated".into(),
+                ));
+            }
+        }
+        drop(destination);
+        let mut file = std::fs::File::open(&backup_path)?;
+        file.sync_all()?;
+        let mut hash = Sha256::new();
+        let mut bytes = [0_u8; 8192];
+        loop {
+            let n = file.read(&mut bytes)?;
+            if n == 0 {
+                break;
+            }
+            hash.update(&bytes[..n]);
+        }
+        let metadata = serde_json::json!({"schema_version": version, "node_id": node, "database_sha256": format!("{:x}", hash.finalize())});
+        let mut record = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(backup_dir.join("backup.json"))?;
+        writeln!(record, "{metadata}")?;
+        record.sync_all()?;
+        std::fs::File::open(&backup_dir)?.sync_all()?;
+        sync_parent(&backup_parent).map_err(|e| {
+            Error::Invalid(format!(
+                "backup parent directory sync failed ({e}); source was not migrated; preserve the backup and writer fence"
+            ))
+        })?;
+        migrate_offline(&mut source, version, data_version, &node)
+    }
+
+    /// Windows upgrade is blocked until a private backup ACL is implemented and verified.
+    #[cfg(not(unix))]
+    pub fn upgrade_offline(
+        _home: &Path,
+        _backup_dir: &Path,
+        _writer_fence_confirmed: bool,
+    ) -> Result<()> {
+        Err(Error::Invalid("offline upgrade is unavailable on this platform; preserve the home and use a verified private backup workflow".into()))
+    }
+
     /// Open an existing database for a hook that runs on every tool call: nothing is created,
     /// nothing is migrated, opening writes nothing, and `busy` bounds every wait for a lock
     /// so a busy database fails fast instead of stalling the agent. Fails when the database
-    /// is missing or its schema is not current; a normal [`Store::open`] fixes both.
+    /// is missing or its schema is not current; an existing old home requires offline upgrade.
     pub fn open_quick(home: &Path, busy: std::time::Duration) -> Result<Store> {
         use rusqlite::OpenFlags;
         let path = home.join(DB_FILE);
@@ -128,7 +307,7 @@ impl Store {
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version != MIGRATIONS.len() as i64 {
             return Err(Error::Invalid(format!(
-                "database schema is v{version}, this build expects v{}; a normal open migrates it",
+                "database schema is v{version}, this build expects v{}; an existing home requires offline upgrade",
                 MIGRATIONS.len()
             )));
         }
@@ -619,6 +798,15 @@ CREATE TABLE announcements (
     PRIMARY KEY (agent_id, message_id)
 );
 "#,
+    r#"
+CREATE TABLE session_bindings (
+    digest TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL UNIQUE REFERENCES agents(agent_id),
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    client TEXT NOT NULL,
+    base_name TEXT NOT NULL
+);
+"#,
 ];
 
 /// Switch to WAL. While several connections convert a new database at once, SQLite answers
@@ -638,26 +826,71 @@ fn use_wal(conn: &Connection) -> Result<()> {
     }
 }
 
-fn migrate(conn: &mut Connection) -> Result<()> {
-    // Read the version inside each write transaction: another process may have applied a
-    // step while this one waited for the lock (several sessions opening a new home at once).
-    loop {
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        let current = usize::try_from(current).unwrap_or(0);
-        if current > MIGRATIONS.len() {
-            return Err(Error::Invalid(format!(
-                "database schema v{current} is newer than this another build supports (v{}); upgrade another",
-                MIGRATIONS.len()
-            )));
-        }
-        let Some(sql) = MIGRATIONS.get(current) else {
-            return Ok(());
-        };
-        tx.execute_batch(sql)?;
-        tx.pragma_update(None, "user_version", (current + 1) as i64)?;
-        tx.commit()?;
+fn require_current_or_empty(conn: &Connection) -> Result<()> {
+    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if version > MIGRATIONS.len() as i64 {
+        return Err(Error::Invalid(format!(
+            "database schema v{version} is newer than this build"
+        )));
     }
+    if version > 0 && version < MIGRATIONS.len() as i64 {
+        return Err(Error::Invalid("existing home requires offline upgrade: fence all writers, then run `another upgrade --backup-dir <new-directory> --confirm-writer-fence`".into()));
+    }
+    if version == 0 {
+        let objects: i64 = conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
+            [],
+            |r| r.get(0),
+        )?;
+        if objects != 0 {
+            return Err(Error::Invalid(
+                "unversioned nonempty database; preserve it and inspect before upgrade".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn migrate(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    require_current_or_empty(&tx)?;
+    let current: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if current == 0 {
+        for sql in MIGRATIONS {
+            tx.execute_batch(sql)?;
+        }
+        tx.pragma_update(None, "user_version", MIGRATIONS.len() as i64)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn migrate_offline(
+    conn: &mut Connection,
+    version: i64,
+    data_version: i64,
+    node: &str,
+) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let actual: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    let data: i64 = tx.pragma_query_value(None, "data_version", |r| r.get(0))?;
+    let actual_node: String =
+        tx.query_row("SELECT node_id FROM nodes WHERE is_local = 1", [], |r| {
+            r.get(0)
+        })?;
+    if actual != version || data != data_version || actual_node != node {
+        return Err(Error::Invalid(
+            "source changed during backup; preserve both homes and repeat after fencing writers"
+                .into(),
+        ));
+    }
+    for sql in &MIGRATIONS[version as usize..] {
+        tx.execute_batch(sql)?;
+    }
+    tx.pragma_update(None, "user_version", MIGRATIONS.len() as i64)?;
+    tx.commit().map_err(|e| Error::Invalid(format!("upgrade commit outcome uncertain ({e}); keep the writer fence and preserve both source and backup")))?;
+    Ok(())
 }
 
 fn ensure_local_node(
@@ -756,4 +989,132 @@ fn sign_unsigned(conn: &Connection, node_id: &str, key: &ed25519_dalek::SigningK
         )?;
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod upgrade_tests {
+    use super::*;
+
+    #[test]
+    fn parent_sync_failure_prevents_source_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let backup = dir.path().join("backup");
+        drop(Store::open(&home).unwrap());
+        let db = home.join(DB_FILE);
+        let source = Connection::open(&db).unwrap();
+        source.execute_batch("DROP TABLE session_bindings; PRAGMA user_version=8; CREATE TABLE preserved(v TEXT); INSERT INTO preserved VALUES ('unchanged');").unwrap();
+        drop(source);
+        let mut called = false;
+        let result = Store::upgrade_offline_with_parent_sync(&home, &backup, true, |parent| {
+            called = true;
+            assert_eq!(parent, std::fs::canonicalize(dir.path()).unwrap());
+            assert!(backup.join(DB_FILE).is_file());
+            assert!(backup.join("backup.json").is_file());
+            let source = Connection::open(&db).unwrap();
+            assert_eq!(
+                source
+                    .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                8
+            );
+            Err(std::io::Error::other("injected sync failure"))
+        });
+        assert!(called);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("source was not migrated"));
+        let source = Connection::open(&db).unwrap();
+        assert_eq!(
+            source
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+        assert_eq!(
+            source
+                .query_row("SELECT v FROM preserved", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "unchanged"
+        );
+    }
+
+    #[test]
+    fn parent_sync_finishes_before_source_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let backup = dir.path().join("backup");
+        drop(Store::open(&home).unwrap());
+        let db = home.join(DB_FILE);
+        let source = Connection::open(&db).unwrap();
+        source
+            .execute_batch("DROP TABLE session_bindings; PRAGMA user_version=8;")
+            .unwrap();
+        drop(source);
+        let mut called = false;
+        Store::upgrade_offline_with_parent_sync(&home, &backup, true, |parent| {
+            called = true;
+            assert!(backup.join(DB_FILE).is_file());
+            assert!(backup.join("backup.json").is_file());
+            let source = Connection::open(&db).unwrap();
+            assert_eq!(
+                source
+                    .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                8
+            );
+            std::fs::File::open(parent)?.sync_all()
+        })
+        .unwrap();
+        assert!(called);
+        let source = Connection::open(&db).unwrap();
+        assert_eq!(
+            source
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            9
+        );
+    }
+
+    #[test]
+    fn intervening_write_refuses_upgrade_without_discarding_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        drop(Store::open(&home).unwrap());
+        let db = home.join(DB_FILE);
+        let source = Connection::open(&db).unwrap();
+        source
+            .execute_batch("DROP TABLE session_bindings; PRAGMA user_version=8;")
+            .unwrap();
+        let version: i64 = source
+            .pragma_query_value(None, "data_version", |r| r.get(0))
+            .unwrap();
+        let node: String = source
+            .query_row("SELECT node_id FROM nodes WHERE is_local=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let writer = Connection::open(&db).unwrap();
+        writer
+            .execute_batch(
+                "CREATE TABLE intervening(v TEXT); INSERT INTO intervening VALUES ('newer');",
+            )
+            .unwrap();
+        let mut source = source;
+        let result = migrate_offline(&mut source, 8, version, &node);
+        assert!(result.is_err());
+        assert_eq!(
+            source
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+        assert_eq!(
+            source
+                .query_row("SELECT v FROM intervening", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "newer"
+        );
+    }
 }

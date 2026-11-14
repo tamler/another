@@ -4,11 +4,11 @@ Another is hooks-first (see [DECISIONS.md](DECISIONS.md)): agents learn about ne
 
 | Moment | What Another does | Output |
 |---|---|---|
-| Session start | Registers the agent if needed, records `session.started`, renews holds, records the terminal pane for wakes | Inbox + last-hour activity digest (≤ 1500 characters) |
-| Each prompt | Heartbeat (renews holds, marks the agent active) | One line, only for mail not announced before; otherwise nothing |
-| After each tool call (`post-tool`) | Checks for mail not announced yet; at most once a minute marks the agent active and renews holds past half their TTL | One line of context mid-task when there is new mail; otherwise nothing |
+| Session start | Registers the session actor if needed, with no hold, presence or wake-target lifecycle changes | Inbox + last-hour activity digest (≤ 1500 characters) |
+| Each prompt | Checks for unannounced mail without a heartbeat | One line, only for mail not announced before; otherwise nothing |
+| After each tool call (`post-tool`) | Checks for mail not announced yet, without renewing holds | One line of context mid-task when there is new mail; otherwise nothing |
 | Before a file edit (`pre-edit`) | Takes a narrow hold on each file about to change, or stops the edit if another agent holds it | Nothing when the edit may go ahead; a denial naming the holder when it may not |
-| Session end | Records `session.ended`, releases the agent's holds, forgets the pane, marks it offline | Nothing |
+| Session end | Does not release holds, change presence or clear wake targets without an incarnation fence | Nothing |
 
 The two tool hooks run inside a task, so mail sent to a busy agent reaches it at its next tool call, without waiting for the next prompt, and two agents editing the same file find out before the second one writes.
 
@@ -50,13 +50,13 @@ Uninstall removes only entries that reference `another-hook.sh`, and deletes the
 | Claude Code | `~/.claude/settings.json` | `SessionStart`, `UserPromptSubmit`, `SessionEnd`, `PostToolUse` (all tools), `PreToolUse` (`Edit\|Write\|MultiEdit\|NotebookEdit`) | Plain stdout is added to context at session start and prompts. Tool hooks answer in JSON: `additionalContext` after a tool, `permissionDecision: "deny"` before an edit. |
 | Codex CLI | `~/.codex/hooks.json` | Same five; `PreToolUse` matches `apply_patch\|Edit\|Write` | In the default trust flow, new hooks run only after you trust them: open Codex and review them under `/hooks` (see "Codex trust and coverage" below for the bypass flag). Each Another entry carries a `statusMessage` that says what it does, so it has a clear label and not only a bare command (see "Codex labels" below). The edit guard reads the file names from the `apply_patch` patch text. |
 | Grok CLI | `~/.grok/hooks/another.json` | Same five as Claude Code | User-level hooks need no trust step (`/hooks-trust` applies to project hooks). Grok maps `Edit`, `Write` and `MultiEdit` onto its own edit tools. See "Grok and shared hook files" below. |
-| Cursor (best effort) | `~/.cursor/hooks.json` | `sessionStart`, `beforeSubmitPrompt`, `sessionEnd`, `postToolUse` | Context is injected at session start and after tool calls (`additional_context`); the prompt hook just renews holds and lets the prompt through. No edit guard: Cursor blocks a tool call when a `preToolUse` reply is not valid JSON, and a hook that fails open prints nothing. |
+| Cursor (best effort) | `~/.cursor/hooks.json` | `sessionStart`, `beforeSubmitPrompt`, `sessionEnd`, `postToolUse` | Context is injected at session start and after tool calls (`additional_context`); the prompt hook lets the prompt through without renewing holds. No edit guard: Cursor blocks a tool call when a `preToolUse` reply is not valid JSON, and a hook that fails open prints nothing. |
 
 ### Codex trust and coverage
 
-Installing the pack only configures hooks. In Codex's default trust flow, Codex skips new or changed non-managed hooks until you review and trust them yourself in `/hooks`, as described in the [official OpenAI hook documentation](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks). Until that step, automatic mail delivery, heartbeats and edit holds do not cover Codex sessions through these hooks. An update can require review again.
+Installing the pack only configures hooks. In Codex's default trust flow, Codex skips new or changed non-managed hooks until you review and trust them yourself in `/hooks`, as described in the [official OpenAI hook documentation](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks). Until that step, automatic mail delivery and edit holds do not cover Codex sessions through these hooks. An update can require review again.
 
-The same documentation describes `--dangerously-bypass-hook-trust`, which runs enabled hooks without persisted trust for that one invocation. A Codex session started with that flag executes Another's hooks before you have reviewed them, so it can deliver mail, send heartbeats or block an edit on a held file even though trust was never granted. Another does not recommend the flag and never passes it for you; the warnings in this document and in `another hook status` describe the default flow only.
+The same documentation describes `--dangerously-bypass-hook-trust`, which runs enabled hooks without persisted trust for that one invocation. A Codex session started with that flag executes Another's hooks before you have reviewed them, so it can deliver mail or block an edit on a held file even though trust was never granted. Another does not recommend the flag and never passes it for you; the warnings in this document and in `another hook status` describe the default flow only.
 
 `another hook status` looks for Another's wrapper marker in client config. Its `installed` flag is configuration evidence only; the Codex `trust_note` in JSON and text says trust is not checked. Neither that flag, a passing test nor manually running `another hook run` proves that Codex executed a hook. Check `/hooks` yourself. While hooks are awaiting trust, use `another inbox`, `hold acquire` and `hold check` explicitly.
 
@@ -86,7 +86,7 @@ Edits made through a shell command (`sed -i`, `echo >`, a script) are not seen b
 Another: 1 new message(s) for claude@shop (1 urgent): "Release src/api?" from codex@shop-review (opens request 01J...). Read them with fetch_inbox (or `another inbox --agent claude@shop --unread`).
 ```
 
-Each message is announced once, by whichever channel claims it first: a mid-task notice, a prompt notice, or a daemon wake (see [DAEMON.md](DAEMON.md)). The claim is a row per agent and message in the database, written in one transaction with the `push.notified` evidence, so hooks running in parallel and the daemon never announce the same message twice. A large burst is announced in full (up to 1000 messages per notice, the rest on the next call); the line lists three subjects. At most once a minute the hook also marks the agent active and renews its holds that are past half their TTL, so a long task without prompts keeps its holds and shows as live on the dashboard.
+Each message is announced once, by whichever channel claims it first: a mid-task notice, a prompt notice, or a daemon wake (see [DAEMON.md](DAEMON.md)). The claim is a row per agent and message in the database, written in one transaction with the `push.notified` evidence, so hooks running in parallel and the daemon never announce the same message twice. A large burst is announced in full (up to 1000 messages per notice, the rest on the next call); the line lists three subjects. Unfenced hook events do not renew holds or update presence.
 
 ## The edit guard
 
@@ -101,7 +101,7 @@ Another stopped this edit: src/api/routes.rs is held by codex@shop-review (exclu
 - if the agent already holds the file (or a directory or glob covering it) exclusively, nothing is written, unless that hold is past half its TTL, which renews it;
 - otherwise the agent gets a narrow exclusive hold on that one file, with the default 30 minute TTL and the reason "editing (taken by the edit hook)".
 
-Holds are checked across every checkout of the same repository on this machine: sibling worktrees and separate clones of one origin see each other's holds (see [HOLDS.md](HOLDS.md)). A session's holds, including the ones the guard took, are released at session end.
+Holds are checked across every checkout of the same repository on this machine: sibling worktrees and separate clones of one origin see each other's holds (see [HOLDS.md](HOLDS.md)). A hook session end cannot prove it belongs to the current incarnation, so it leaves holds in place. Inactive holds expire at their TTL or may be released explicitly by their exact actor.
 
 The guard never prints "allow": that would skip the client's own permission prompts. It only ever adds a denial.
 
@@ -110,7 +110,7 @@ The guard never prints "allow": that would skip the client's own permission prom
 Both tool hooks open the database without creating or migrating it and wait at most 50 ms (`post-tool`) or 300 ms (`pre-edit`) for a lock. The rule:
 
 - **Push fails open.** Missing database, old schema, locked database, unknown agent: the hook prints nothing and exits 0.
-- **The edit guard denies only a known conflict.** If it cannot check (the database is missing or locked), it lets the edit through and appends a line to `$ANOTHER_HOME/logs/hooks.log` saying why. That log is capped at 256 KB (one older copy is kept as `hooks.log.1`).
+- **The edit guard denies a known conflict or an invalid session identity.** If the database is missing or locked it still lets the edit through and appends a line to `$ANOTHER_HOME/logs/hooks.log` saying why. That log is capped at 256 KB (one older copy is kept as `hooks.log.1`). The session-identity denial requires the client to invoke the hook and honor its denial response; that has not been established for every client or platform.
 
 With nothing new, `post-tool` only reads, and SQLite in WAL mode lets readers past a writer. Announcing needs the claim write: if another writer holds the database for longer than 50 ms, the notice is not shown on that call and arrives on the next one.
 
@@ -122,7 +122,9 @@ Grok also executes hooks from Claude Code and Cursor config files. To keep one G
 
 ## Identity
 
-By default a hook acts as `<client>@<project>`, where the project is the nearest directory containing `.git` above the client's working directory (or that directory itself). The agent is registered on first use with the matching program. To use a different identity, set `ANOTHER_AGENT` (for example `ANOTHER_AGENT=reviewer@shop`) in the environment the client runs hooks with; that agent must already be registered.
+Hooks derive a session-specific address from the effective client, project, base name and the client's session ID. The session-start digest gives the full address. It reads without sweeping, so request or hold counts can include expired items until a separate sweep. A missing or invalid ID cannot silently use a shared identity. For commands outside hooks, pass the full address explicitly or run `another session exec --agent <full-address> -- <program> [args...]` so child processes inherit it as `ANOTHER_AGENT`; a hook cannot set its parent shell's environment. `ANOTHER_AGENT` supplied to a hook is a base name unless it is a registered session address, in which case the hook verifies it against the event's session ID. The derived address is an identifier, not an authentication credential. Existing base-address mail and holds are not moved. A session's Herdr target must be explicitly set; its derived name is not a pane target. Actual client session ID and denial behavior must be verified before claiming coverage. Duplicate imported Grok admission handling remains a separate integration dependency.
+
+New session events omit the raw client session ID and may include a session fingerprint. Historical signed events and replicated legacy events retain their original bytes: raw event listings, federation traffic and authorized database access can still reveal historical IDs. Activity and dashboard views redact those IDs. Upgrading requires a verified quiescent writer fence and a consistent SQLite backup including WAL content, as described in the session identity spec; mixed old and new binaries do not guarantee protection. This does not authorize an installation or restart.
 
 ## The digest
 

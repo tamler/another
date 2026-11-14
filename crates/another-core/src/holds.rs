@@ -11,7 +11,7 @@
 use std::path::Path;
 
 use globset::{Glob, GlobBuilder, GlobMatcher};
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use serde_json::json;
 
@@ -95,7 +95,7 @@ pub enum SessionPhase {
 pub struct SessionInfo {
     /// Client program, e.g. `claude` or `codex`.
     pub client: Option<String>,
-    /// The client's own session identifier, if it has one.
+    /// A caller-supplied session identifier; never persisted in lifecycle events.
     pub session_id: Option<String>,
     /// At session end, keep resource leases (e.g. a server meant to outlive the session).
     pub keep_resources: bool,
@@ -1028,11 +1028,19 @@ impl Store {
             sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, agent)?;
             let owned = owned_holds(tx, &me.id, &[], scope)?;
+            let fingerprint: Option<String> = tx
+                .query_row(
+                    "SELECT digest FROM session_bindings WHERE agent_id = ?1",
+                    [&me.id],
+                    |r| r.get(0),
+                )
+                .optional()?;
             let session_payload = || {
                 json!({
                     "agent_id": me.id,
                     "client": info.client,
-                    "session_id": info.session_id,
+                    "session_id": null,
+                    "session_fingerprint": fingerprint,
                 })
             };
             let release_leases = phase == SessionPhase::End && !info.keep_resources;

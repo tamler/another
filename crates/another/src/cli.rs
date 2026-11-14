@@ -45,6 +45,15 @@ pub struct AgentArg {
 pub enum Command {
     /// Create the data directory and database if needed; show the local node.
     Init,
+    /// Upgrade a fenced existing home after creating a verified backup.
+    Upgrade {
+        /// New directory outside the Another home for the protected backup.
+        #[arg(long)]
+        backup_dir: PathBuf,
+        /// Confirm that all writers are stopped and prevented from restarting.
+        #[arg(long)]
+        confirm_writer_fence: bool,
+    },
     /// Show the local node, database location and registered agents.
     Status,
     /// Run the daemon: MCP over loopback streamable HTTP (default) or stdio.
@@ -99,6 +108,9 @@ pub enum Command {
     /// Register agents, list them, or show one.
     #[command(subcommand)]
     Agent(AgentCmd),
+    /// Run a child with a registered session actor.
+    #[command(subcommand)]
+    Session(SessionCmd),
     /// Send a message.
     Send {
         /// Sender: name or name@project (default: $ANOTHER_AGENT).
@@ -364,6 +376,17 @@ pub enum Command {
     Events {
         #[arg(long, default_value_t = 20)]
         limit: u32,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SessionCmd {
+    /// Run a program with its exact session identity in ANOTHER_AGENT.
+    Exec {
+        #[command(flatten)]
+        agent: AgentArg,
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<std::ffi::OsString>,
     },
 }
 
@@ -774,13 +797,7 @@ pub fn main() -> ExitCode {
     match run(cli) {
         Ok(code) => code,
         Err(err) => {
-            let body = match err.downcast_ref::<another_core::Error>() {
-                Some(e) => e.body(),
-                None => another_core::ErrorBody {
-                    code: "error",
-                    message: format!("{err:#}"),
-                },
-            };
+            let body = error_body(&err);
             if json {
                 println!("{}", serde_json::json!({ "error": body }));
             } else {
@@ -788,6 +805,16 @@ pub fn main() -> ExitCode {
             }
             ExitCode::FAILURE
         }
+    }
+}
+
+fn error_body(err: &anyhow::Error) -> another_core::ErrorBody {
+    match err.downcast_ref::<another_core::Error>() {
+        Some(e) => e.body(),
+        None => another_core::ErrorBody {
+            code: "error",
+            message: format!("{err:#}"),
+        },
     }
 }
 
@@ -1014,6 +1041,24 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     if let Command::Daemon(cmd) = &cli.command {
         return daemon_command(cmd, json, another_home()?);
     }
+    if let Command::Upgrade {
+        backup_dir,
+        confirm_writer_fence,
+    } = &cli.command
+    {
+        if !confirm_writer_fence {
+            anyhow::bail!("fence all writers and pass --confirm-writer-fence before upgrading");
+        }
+        Store::upgrade_offline(&another_home()?, backup_dir, *confirm_writer_fence)?;
+        let result = serde_json::json!({
+            "status": "completed",
+            "backup": "verified",
+            "instruction": "Retain the writer fence until matching clients are installed."
+        });
+        return Ok(emit(json, &result, |_| {
+            "Backup verified and offline migration completed; retain the writer fence until matching clients are installed.".into()
+        }));
+    }
 
     let store = open(home)?;
     let code = match cli.command {
@@ -1021,6 +1066,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         | Command::Dashboard { .. }
         | Command::Hook(_)
         | Command::Daemon(_)
+        | Command::Upgrade { .. }
         | Command::Remote(_) => {
             unreachable!("handled above")
         }
@@ -1035,6 +1081,21 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 agents: store.agents()?,
             };
             emit(json, &status, output::status)
+        }
+        Command::Session(SessionCmd::Exec { agent, command }) => {
+            let address = store.session_actor_address(&agent.agent)?;
+            let mut child = std::process::Command::new(&command[0]);
+            child.args(&command[1..]).env("ANOTHER_AGENT", &address);
+            if let Some(home) = store.db_path().and_then(Path::parent) {
+                child.env("ANOTHER_HOME", home);
+            }
+            let status = child.status()?;
+            return Ok(ExitCode::from(
+                status
+                    .code()
+                    .and_then(|n| u8::try_from(n).ok())
+                    .unwrap_or(1),
+            ));
         }
         Command::Project(ProjectCmd::Ensure { path }) => {
             let path = match path {
