@@ -382,10 +382,12 @@ pub fn reap_plan(p: &crate::reap::ReapPlan) -> String {
     if let Some(o) = &p.outcome {
         let _ = writeln!(out, "{o}");
     } else if p.eligible {
-        let _ = writeln!(
-            out,
+        let message = if cfg!(windows) {
+            "eligible; nothing was done. Re-run with --confirm to terminate the process. Windows drops hard."
+        } else {
             "eligible; nothing was done. Re-run with --confirm to send SIGTERM."
-        );
+        };
+        let _ = writeln!(out, "{message}");
     } else {
         for b in &p.blockers {
             let _ = writeln!(out, "blocked: {b}");

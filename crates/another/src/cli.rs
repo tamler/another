@@ -290,10 +290,10 @@ pub enum Command {
         /// Seconds the target must have been orphaned (or alive, for pid targets).
         #[arg(long, default_value_t = crate::reap::DEFAULT_GRACE_SECONDS)]
         grace: i64,
-        /// Human confirmation: actually send SIGTERM. Agents never pass this.
+        /// Human confirmation: stop the process (Windows drops hard). Agents never pass this.
         #[arg(long)]
         confirm: bool,
-        /// With --confirm: SIGKILL if the process survives SIGTERM.
+        /// On Linux, with --confirm: SIGKILL if the process survives SIGTERM.
         #[arg(long, requires = "confirm")]
         force: bool,
     },

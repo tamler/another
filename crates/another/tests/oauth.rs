@@ -28,19 +28,32 @@ struct Server {
     base: String,
     addr: SocketAddr,
     ct: CancellationToken,
+    secret: String,
+    work_glob: String,
 }
 
 async fn start() -> Server {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
+    let work = dir.path().join("work/shop").to_string_lossy().into_owned();
+    let secret = dir
+        .path()
+        .join("secret/vault")
+        .to_string_lossy()
+        .into_owned();
+    let work_glob = dir
+        .path()
+        .join("work/*")
+        .to_string_lossy()
+        .replace('\\', "/");
     // Keep the temp dir alive by leaking it for the process. The test is short.
     std::mem::forget(dir);
-    store.ensure_project("t", "/work/shop").unwrap();
-    store.ensure_project("t", "/secret/vault").unwrap();
+    store.ensure_project("t", &work).unwrap();
+    store.ensure_project("t", &secret).unwrap();
     for (name, program, project) in [
         ("chatgpt", Program::Other, None),
         ("grok-bot", Program::GrokBot, None),
-        ("alice", Program::Claude, Some("/work/shop")),
+        ("alice", Program::Claude, Some(work.as_str())),
     ] {
         store
             .register_agent(RegisterAgent {
@@ -78,6 +91,8 @@ async fn start() -> Server {
         base,
         addr,
         ct,
+        secret,
+        work_glob,
     }
 }
 
@@ -184,6 +199,16 @@ async fn raw_exchange(
 async fn start_open(allowed_hosts: Vec<String>) -> Server {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
+    let secret = dir
+        .path()
+        .join("secret/vault")
+        .to_string_lossy()
+        .into_owned();
+    let work_glob = dir
+        .path()
+        .join("work/*")
+        .to_string_lossy()
+        .replace('\\', "/");
     std::mem::forget(dir);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -210,6 +235,8 @@ async fn start_open(allowed_hosts: Vec<String>) -> Server {
         base,
         addr,
         ct,
+        secret,
+        work_glob,
     }
 }
 
@@ -397,7 +424,7 @@ async fn oauth_pkce_then_mcp_client_and_bearer_still_works() {
         .approve_oauth(Approval {
             user_code,
             agent: "chatgpt".into(),
-            project_globs: vec!["/work/*".into()],
+            project_globs: vec![srv.work_glob.clone()],
             label: Some("chatgpt".into()),
         })
         .unwrap();
@@ -504,7 +531,7 @@ async fn oauth_pkce_then_mcp_client_and_bearer_still_works() {
     assert!(!rendered.contains("secret body"));
     assert!(body["next"].as_str().unwrap().contains("unread"));
 
-    let outside = call(&client, "ensure_project", json!({"path": "/secret/vault"})).await;
+    let outside = call(&client, "ensure_project", json!({"path": srv.secret})).await;
     assert_eq!(error_code(&outside).as_deref(), Some("forbidden"));
     let as_alice = call(&client, "fetch_inbox", json!({"agent": "alice"})).await;
     assert_eq!(error_code(&as_alice).as_deref(), Some("forbidden"));
@@ -512,7 +539,12 @@ async fn oauth_pkce_then_mcp_client_and_bearer_still_works() {
     // Bearer tokens keep working on the same server.
     let bearer = srv
         .store
-        .create_token("grok-bot", &["/work/*".into()], Some("bot".into()), None)
+        .create_token(
+            "grok-bot",
+            std::slice::from_ref(&srv.work_glob),
+            Some("bot".into()),
+            None,
+        )
         .unwrap();
     let bot = connect(&srv.base, &bearer.secret).await;
     let inbox = call(&bot, "fetch_inbox", json!({})).await;

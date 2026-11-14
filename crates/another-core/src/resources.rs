@@ -1057,6 +1057,17 @@ impl Store {
         detail: &str,
     ) -> Result<()> {
         self.write(|tx| {
+            if let Some(rid) = resource_id {
+                let resource = get_resource(tx, rid, tx.now)?;
+                if resource_node(tx, rid)? != tx.node_id
+                    || resource.status != "lapsed"
+                    || resource.pid != pid
+                {
+                    return Err(Error::Conflict(
+                        "resource is no longer the lapsed process that was checked".into(),
+                    ));
+                }
+            }
             tx.emit(
                 actor,
                 "resource.reaped",
@@ -1075,6 +1086,57 @@ impl Store {
                 )?;
             }
             Ok(())
+        })
+    }
+
+    /// Recheck the local resource and every same-PID alias under the writer lock, then
+    /// perform the stop while that lock is retained. The callback must not call Store.
+    /// A crash or failed commit after the callback can leave the external outcome unknown;
+    /// this method does not provide a durable recovery fence against that condition.
+    pub fn guarded_reap(
+        &self,
+        resource_id: Option<&str>,
+        pid: u32,
+        grace_seconds: i64,
+        detail: &str,
+        stop: impl FnOnce() -> Result<bool>,
+    ) -> Result<bool> {
+        if grace_seconds < 0 {
+            return Err(Error::Invalid("grace must not be negative".into()));
+        }
+        let stop_started = std::cell::Cell::new(false);
+        let result = self.write(|tx| {
+            let aliases: i64 = tx.query_row(
+                "SELECT count(*) FROM resources WHERE node_id=?1 AND pid=?2 AND released_at IS NULL AND (?3 IS NULL OR resource_id != ?3)",
+                params![tx.node_id, pid, resource_id], |row| row.get(0),
+            )?;
+            if aliases != 0 { return Err(Error::Conflict("another registered resource uses this pid".into())); }
+            if let Some(rid) = resource_id {
+                let resource = get_resource(tx, rid, tx.now)?;
+                let lapsed_at: Option<i64> = tx.query_row("SELECT lapsed_at FROM resources WHERE resource_id=?1", [rid], |row| row.get(0))?;
+                let grace_ms = grace_seconds.checked_mul(1000).ok_or_else(|| Error::Invalid("grace is too large".into()))?;
+                if resource_node(tx, rid)? != tx.node_id || resource.status != "lapsed" || resource.pid != Some(pid)
+                    || lapsed_at.and_then(|at| tx.now.checked_sub(at)).is_none_or(|elapsed| elapsed < grace_ms) {
+                    return Err(Error::Conflict("resource is no longer the eligible lapsed process".into()));
+                }
+            }
+            stop_started.set(true);
+            if !stop()? { return Ok(false); }
+            tx.emit("human (another reap --confirm)", "resource.reaped", json!({ "resource_id": resource_id, "pid": pid, "detail": detail }))?;
+            if let Some(rid) = resource_id {
+                tx.execute("UPDATE resource_leases SET released_at=?2, release_reason='reaped' WHERE resource_id=?1 AND released_at IS NULL", params![rid, tx.now])?;
+                tx.execute("UPDATE resources SET released_at=?2, release_reason='reaped' WHERE resource_id=?1", params![rid, tx.now])?;
+            }
+            Ok(true)
+        });
+        result.map_err(|error| {
+            if stop_started.get() {
+                Error::Invalid(format!(
+                    "reap outcome may be unknown after the stop began: {error}"
+                ))
+            } else {
+                error
+            }
         })
     }
 }

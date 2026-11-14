@@ -7,6 +7,25 @@ use std::process::Command;
 
 use serde::Serialize;
 
+#[cfg(windows)]
+mod windows;
+
+#[cfg(windows)]
+pub(crate) use windows::ProcessIdentity as WindowsProcessIdentity;
+
+#[cfg(windows)]
+pub(crate) fn windows_observe_process(pid: u32) -> Option<(ProcInfo, WindowsProcessIdentity)> {
+    windows::observe_process(pid)
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_terminate_exact(
+    pid: u32,
+    identity: &WindowsProcessIdentity,
+) -> std::io::Result<()> {
+    windows::terminate_exact(pid, identity)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, schemars::JsonSchema)]
 pub struct Listener {
     pub pid: u32,
@@ -67,16 +86,53 @@ const SYSTEM_PROCESSES: &[&str] = &[
     "another",
 ];
 
+#[cfg(windows)]
+const WINDOWS_SYSTEM_PROCESSES: &[&str] = &[
+    "system",
+    "registry",
+    "smss",
+    "csrss",
+    "wininit",
+    "winlogon",
+    "services",
+    "lsass",
+    "svchost",
+    "explorer",
+    "dwm",
+    "sihost",
+    "taskhostw",
+    "conhost",
+    "powershell",
+    "pwsh",
+    "cmd",
+    "windowsterminal",
+];
+
 /// True for processes that must never be listed or reaped as orphans.
 pub fn is_system(command: &str) -> bool {
-    let base = command
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .rsplit('/')
-        .next()
-        .unwrap_or_default();
-    SYSTEM_PROCESSES.contains(&base)
+    #[cfg(windows)]
+    {
+        let base = command.rsplit(['/', '\\']).next().unwrap_or_default();
+        let stem = match base.get(base.len().saturating_sub(4)..) {
+            Some(suffix) if suffix.eq_ignore_ascii_case(".exe") => &base[..base.len() - 4],
+            _ => base,
+        };
+        SYSTEM_PROCESSES
+            .iter()
+            .chain(WINDOWS_SYSTEM_PROCESSES)
+            .any(|name| name.eq_ignore_ascii_case(stem))
+    }
+    #[cfg(not(windows))]
+    {
+        let base = command
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .rsplit('/')
+            .next()
+            .unwrap_or_default();
+        SYSTEM_PROCESSES.contains(&base)
+    }
 }
 
 fn port_of(address: &str) -> Option<u16> {
@@ -212,7 +268,8 @@ pub fn parse_etime(raw: &str) -> Option<i64> {
     Some(days * 86_400 + h * 3600 + m * 60 + s)
 }
 
-/// Owner, age and full command line of a running process.
+/// Owner, age and command of a running process. On Windows, command is the executable path.
+#[cfg(not(windows))]
 pub fn process_info(pid: u32) -> Option<ProcInfo> {
     let out = run(
         "ps",
@@ -232,7 +289,13 @@ pub fn process_info(pid: u32) -> Option<ProcInfo> {
     })
 }
 
+#[cfg(windows)]
+pub fn process_info(pid: u32) -> Option<ProcInfo> {
+    windows::process_info(pid)
+}
+
 /// Whether a process is running (exited-but-unreaped zombies count as gone).
+#[cfg(not(windows))]
 pub fn alive(pid: u32) -> bool {
     run("ps", &["-o", "stat=", "-p", &pid.to_string()])
         .map(|out| {
@@ -242,7 +305,13 @@ pub fn alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(windows)]
+pub fn alive(pid: u32) -> bool {
+    windows::alive_or_unknown(pid)
+}
+
 /// The user running another.
+#[cfg(not(windows))]
 pub fn current_user() -> Option<String> {
     run("id", &["-un"])
         .ok()
@@ -250,9 +319,22 @@ pub fn current_user() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+#[cfg(windows)]
+pub fn current_user() -> Option<String> {
+    windows::current_user()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn protected_windows_images_ignore_case_and_exe_extension() {
+        assert!(is_system(r"C:\Program Files\Another\AnOtHeR.ExE"));
+        assert!(is_system(r"C:\Windows\System32\SvChOsT.eXe"));
+        assert!(!is_system(r"C:\Users\me\my-worker.exe"));
+    }
 
     #[test]
     fn parses_lsof_fields() {
@@ -297,8 +379,24 @@ mod tests {
     #[test]
     fn system_allowlist() {
         assert!(is_system("launchd"));
-        assert!(is_system("/usr/sbin/sshd -D"));
         assert!(!is_system("ollama"));
         assert!(!is_system("llama-server"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_system_allowlist_recognizes_command_arguments() {
+        assert!(is_system("/usr/sbin/sshd -D"));
+        assert!(!is_system("/usr/local/bin/sshd-helper -D"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_system_allowlist_recognizes_native_image_paths() {
+        assert!(is_system(r"C:\Windows\System32\SvChOsT.ExE"));
+        assert!(is_system(r"C:\Program Files\PowerShell\7\PwSh.ExE"));
+        assert!(is_system("C:/Windows/System32/CSRSS.EXE"));
+        assert!(!is_system(r"C:\Program Files\PowerShell\7\pwsh-helper.exe"));
+        assert!(!is_system(r"C:\Program Files\Ollama\ollama.exe"));
     }
 }

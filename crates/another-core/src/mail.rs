@@ -530,16 +530,20 @@ impl Store {
     }
 
     /// Unread messages for `who` that no channel has announced yet (see
-    /// [`Store::claim_announcement`]), newest first, with ids after `floor` (ULIDs sort by
-    /// time; an empty floor means no floor). Read only (no sweep, no presence update), so a
-    /// hook can afford it on every tool call.
+    /// [`Store::claim_announcement`]), newest first. For a known `floor` message, return
+    /// deliveries inserted after it locally for that agent; an empty floor means
+    /// no floor. An unknown floor retains the legacy ULID comparison. Read only (no sweep,
+    /// no presence update), so a hook can afford it on every tool call.
     pub fn unannounced(&self, who: &str, floor: &str, limit: u32) -> Result<UnreadAfter> {
         self.read(|conn| {
             let me = resolve_agent(conn, self.node_id(), who)?;
             let (count, urgent): (u32, u32) = conn.query_row(
                 "SELECT count(*), count(*) FILTER (WHERE m.importance IN ('high', 'urgent'))
                  FROM deliveries d JOIN messages m ON m.message_id = d.message_id
-                 WHERE d.agent_id = ?1 AND d.read_at IS NULL AND d.message_id > ?2
+                 WHERE d.agent_id = ?1 AND d.read_at IS NULL
+                   AND (?2 = '' OR CASE WHEN EXISTS (SELECT 1 FROM deliveries WHERE message_id = ?2 AND agent_id = ?1)
+                        THEN d.rowid > (SELECT rowid FROM deliveries WHERE message_id = ?2 AND agent_id = ?1)
+                        ELSE d.message_id > ?2 END)
                    AND NOT EXISTS (SELECT 1 FROM announcements a
                                    WHERE a.agent_id = d.agent_id AND a.message_id = d.message_id)",
                 params![me.id, floor],
@@ -554,11 +558,14 @@ impl Store {
                         LIMIT 1)
                      FROM deliveries d JOIN messages m ON m.message_id = d.message_id
                      JOIN agents s ON s.agent_id = m.sender_id
-                     WHERE d.agent_id = ?1 AND d.read_at IS NULL AND d.message_id > ?2
+                     WHERE d.agent_id = ?1 AND d.read_at IS NULL
+                       AND (?2 = '' OR CASE WHEN EXISTS (SELECT 1 FROM deliveries WHERE message_id = ?2 AND agent_id = ?1)
+                            THEN d.rowid > (SELECT rowid FROM deliveries WHERE message_id = ?2 AND agent_id = ?1)
+                            ELSE d.message_id > ?2 END)
                        AND NOT EXISTS (SELECT 1 FROM announcements a
                                        WHERE a.agent_id = d.agent_id
                                          AND a.message_id = d.message_id)
-                     ORDER BY d.message_id DESC LIMIT ?3",
+                     ORDER BY d.rowid DESC LIMIT ?3",
                 )?;
                 items = stmt
                     .query_map(params![me.id, floor, limit.max(1)], |r| {

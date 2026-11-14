@@ -178,8 +178,22 @@ fn mail_feed_resources_and_holds_across_nodes() {
     join(&hub, &runner, &[Perm::SendMail]);
     join(&hub, &quiet, &[Perm::ReadFeed]);
 
-    register(&hub.node.store, "alice", Program::Claude, Some("/h/shop"));
-    register(&laptop.store, "bob", Program::Codex, Some("/b/shop"));
+    let hub_project = hub.node._dir.path().join("shop");
+    let laptop_project = laptop._dir.path().join("shop");
+    std::fs::create_dir(&hub_project).unwrap();
+    std::fs::create_dir(&laptop_project).unwrap();
+    register(
+        &hub.node.store,
+        "alice",
+        Program::Claude,
+        Some(hub_project.to_str().unwrap()),
+    );
+    register(
+        &laptop.store,
+        "bob",
+        Program::Codex,
+        Some(laptop_project.to_str().unwrap()),
+    );
     register(&runner.store, "carol", Program::GrokBot, None);
     register(&quiet.store, "dave", Program::Grok, None);
     for n in [&laptop, &runner, &quiet, &laptop] {

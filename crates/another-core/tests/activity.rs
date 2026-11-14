@@ -7,6 +7,8 @@ use another_core::*;
 const T0: i64 = 1_800_000_000_000;
 
 fn setup() -> (Store, std::sync::Arc<std::sync::atomic::AtomicI64>) {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("work/app").to_string_lossy().into_owned();
     let (clock, handle) = Clock::manual(T0);
     let store = Store::open_in_memory(clock).unwrap();
     for (name, program) in [("alice", Program::Claude), ("bob", Program::Grok)] {
@@ -14,7 +16,7 @@ fn setup() -> (Store, std::sync::Arc<std::sync::atomic::AtomicI64>) {
             .register_agent(RegisterAgent {
                 name: name.into(),
                 program,
-                project: Some("/work/app".into()),
+                project: Some(project.clone()),
                 model: None,
                 description: None,
             })

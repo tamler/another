@@ -1451,6 +1451,225 @@ mod tests {
     }
 
     #[test]
+    fn foreign_hold_update_cannot_rewrite_a_local_hold() {
+        let (clock, _) = crate::Clock::manual(1_000_000);
+        let store = Store::open_in_memory(clock).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().to_str().unwrap().to_owned();
+        let actor = store
+            .register_agent(crate::RegisterAgent {
+                name: "local-owner".into(),
+                program: crate::Program::Claude,
+                project: Some(project.clone()),
+                model: None,
+                description: None,
+            })
+            .unwrap()
+            .address;
+        let hold_id = store
+            .acquire_holds(crate::AcquireHolds {
+                agent: actor,
+                project,
+                paths: vec!["src/local.rs".into()],
+                ttl_seconds: Some(1800),
+                exclusive: true,
+                reason: None,
+                repo_wide: false,
+            })
+            .unwrap()
+            .granted[0]
+            .hold_id
+            .clone();
+        store.write(|tx| {
+            let (project_id, agent_id, expiry): (String, String, i64) = tx.query_row(
+                "SELECT project_id, agent_id, expires_at FROM holds WHERE hold_id=?1", [&hold_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            let event = WireEvent { seq: 1, event_id: "foreign-event".into(), node_id: "foreign-node".into(),
+                ts: tx.now, actor: "foreign".into(), kind: "hold.updated".into(), payload: String::new(),
+                prev_id: None, sig: String::new() };
+            let payload = json!({"hold_id": hold_id, "project_id": project_id, "agent_id": agent_id,
+                "pattern": "src/local.rs", "expires_at": expiry + 5000, "exclusive": false});
+            project_foreign(tx, &event, &payload)?;
+            let actual: (i64, bool) = tx.query_row("SELECT expires_at, exclusive FROM holds WHERE hold_id=?1",
+                [&hold_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            assert_eq!(actual, (expiry, true));
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn signed_peer_collision_cannot_rewrite_local_hold() {
+        let (clock, _) = crate::Clock::manual(1_000_000);
+        let store = Store::open_in_memory(clock).unwrap();
+        let (peer_clock, peer_now) = crate::Clock::manual(1_000_000);
+        let peer = Store::open_in_memory(peer_clock).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().to_str().unwrap().to_owned();
+        let actor = store
+            .register_agent(crate::RegisterAgent {
+                name: "local-owner".into(),
+                program: crate::Program::Claude,
+                project: Some(project.clone()),
+                model: None,
+                description: None,
+            })
+            .unwrap()
+            .address;
+        let id = store
+            .acquire_holds(crate::AcquireHolds {
+                agent: actor,
+                project,
+                paths: vec!["src/local.rs".into()],
+                ttl_seconds: Some(1800),
+                exclusive: true,
+                reason: Some("local reason".into()),
+                repo_wide: false,
+            })
+            .unwrap()
+            .granted[0]
+            .hold_id
+            .clone();
+        let expiry: i64 = store
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT expires_at FROM holds WHERE hold_id=?1",
+                    [&id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        let peer_id = peer.node_id().to_owned();
+        store
+            .write(|tx| {
+                upsert_node(
+                    tx,
+                    &NodeEntry {
+                        node_id: peer_id.clone(),
+                        display_name: "peer".into(),
+                        public_key: crypto::public_of(peer.signing_key()),
+                    },
+                )?;
+                tx.execute(
+                    "INSERT INTO peers(node_id,role,perms,paired_at) VALUES (?1,'spoke','[]',?2)",
+                    params![peer_id, tx.now],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        // The colliding event names the peer's own actor and project. That makes it
+        // pass the ownership check and exercise the separate hold-ID origin guard.
+        let peer_project = dir.path().join("peer-project");
+        std::fs::create_dir_all(&peer_project).unwrap();
+        let peer_root = peer_project.to_str().unwrap().to_owned();
+        let peer_actor = peer
+            .register_agent(crate::RegisterAgent {
+                name: "peer-owner".into(),
+                program: crate::Program::Claude,
+                project: Some(peer_root.clone()),
+                model: None,
+                description: None,
+            })
+            .unwrap()
+            .address;
+        let peer_hold = peer
+            .acquire_holds(crate::AcquireHolds {
+                agent: peer_actor.clone(),
+                project: peer_root.clone(),
+                paths: vec!["src/peer.rs".into()],
+                ttl_seconds: Some(1800),
+                exclusive: true,
+                reason: None,
+                repo_wide: false,
+            })
+            .unwrap()
+            .granted[0]
+            .hold_id
+            .clone();
+        let (project_id, agent_id): (String, String) = peer
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT project_id, agent_id FROM holds WHERE hold_id=?1",
+                    [&peer_hold],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .unwrap();
+        let (events, _) = peer.outbound_events(0, 100).unwrap();
+        let report = store.ingest(&peer_id, &events, &[]).unwrap();
+        assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+        let payload = json!({"hold_id": id, "project_id": project_id, "agent_id": agent_id,
+            "pattern": "src/local.rs", "expires_at": expiry + 5000, "exclusive": false,
+            "ttl_seconds": 42, "reason": "foreign reason"})
+        .to_string();
+        let mut event = WireEvent {
+            seq: 1,
+            event_id: "signed-peer-event".into(),
+            node_id: peer_id.clone(),
+            ts: 1_000_100,
+            actor: "peer".into(),
+            kind: "hold.updated".into(),
+            payload,
+            prev_id: None,
+            sig: String::new(),
+        };
+        event.sig = crypto::sign(
+            peer.signing_key(),
+            &crypto::event_message(
+                &event.event_id,
+                &event.node_id,
+                event.ts,
+                &event.actor,
+                &event.kind,
+                &event.payload,
+            ),
+        );
+        let report = store.ingest(&peer_id, &[event], &[]).unwrap();
+        assert_eq!(report.accepted, 1);
+        assert!(report.rejected.is_empty());
+        let actual: (i64, bool, i64, Option<String>, i64) = store
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT expires_at, exclusive, ttl_seconds, reason, renewed_at FROM holds WHERE hold_id=?1",
+                    [&id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            actual,
+            (expiry, true, 1800, Some("local reason".into()), 1_000_000)
+        );
+
+        // A real peer-owned hold still synchronizes subsequent same-origin updates.
+        peer_now.store(1_001_000, std::sync::atomic::Ordering::SeqCst);
+        let updated = peer
+            .acquire_holds(crate::AcquireHolds {
+                agent: peer_actor,
+                project: peer_root,
+                paths: vec!["src/peer.rs".into()],
+                ttl_seconds: Some(1800),
+                exclusive: true,
+                reason: Some("peer update".into()),
+                repo_wide: false,
+            })
+            .unwrap();
+        assert_eq!(updated.granted[0].hold_id, peer_hold);
+        let (events, _) = peer.outbound_events(0, 100).unwrap();
+        let report = store.ingest(&peer_id, &events, &[]).unwrap();
+        assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+        let peer_expiry: i64 = store
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT expires_at FROM holds WHERE hold_id=?1",
+                    [&peer_hold],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(peer_expiry, 2_801_000);
+    }
+
+    #[test]
     fn classification() {
         let o = "A";
         assert_eq!(classify("token.created", &json!({}), o), Share::Never);

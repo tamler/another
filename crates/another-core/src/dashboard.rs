@@ -1005,6 +1005,7 @@ mod overlap_tests {
     #[test]
     fn a_forced_overlap_shows_up_as_a_conflict() {
         let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("work/shop").to_str().unwrap().to_owned();
         let (clock, _handle) = Clock::manual(T0_TEST);
         let store = Store::open_with_clock(dir.path(), clock).unwrap();
         for (name, program) in [("alice", Program::Claude), ("bob", Program::Codex)] {
@@ -1012,7 +1013,7 @@ mod overlap_tests {
                 .register_agent(RegisterAgent {
                     name: name.into(),
                     program,
-                    project: Some("/work/shop".into()),
+                    project: Some(project.clone()),
                     model: None,
                     description: None,
                 })
@@ -1068,12 +1069,13 @@ mod overlap_tests {
     #[test]
     fn active_with_no_last_seen_is_live_and_keeps_the_hold() {
         let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("work/shop").to_str().unwrap().to_owned();
         let store = Store::open(dir.path()).unwrap();
         store
             .register_agent(RegisterAgent {
                 name: "alice".into(),
                 program: Program::Claude,
-                project: Some("/work/shop".into()),
+                project: Some(project),
                 model: None,
                 description: None,
             })

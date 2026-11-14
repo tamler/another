@@ -2143,8 +2143,20 @@ mod tests {
 
     #[test]
     fn normalizes_paths() {
-        assert_eq!(normalize_project_path("/a/b/").unwrap(), "/a/b");
-        assert_eq!(normalize_project_path("/a/./b/../c").unwrap(), "/a/c");
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = a.join("b");
+        let c = a.join("c");
+        let b_normalized = normalize_project_path(&b.to_string_lossy()).unwrap();
+        let c_normalized = normalize_project_path(&c.to_string_lossy()).unwrap();
+        assert_eq!(
+            normalize_project_path(&format!("{}/", b.display())).unwrap(),
+            b_normalized
+        );
+        assert_eq!(
+            normalize_project_path(&a.join("./b/../c").to_string_lossy()).unwrap(),
+            c_normalized
+        );
         assert!(normalize_project_path("rel/path").is_err());
     }
 

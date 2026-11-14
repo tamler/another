@@ -1,6 +1,9 @@
 //! `another wake` adapters, exercised with fake tmux / cmux / herdr binaries on PATH.
 #![cfg(unix)]
 
+#[path = "common/hosted_ci.rs"]
+mod hosted_ci;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -16,6 +19,7 @@ struct Env {
 
 impl Env {
     fn new() -> Env {
+        hosted_ci::require_hosted_runner();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();

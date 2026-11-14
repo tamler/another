@@ -38,11 +38,17 @@ fn agent(store: &Store, name: &str, program: Program, project: Option<&str>) {
 async fn start() -> Server {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    store.ensure_project("t", "/sandbox/w/a").unwrap();
-    store.ensure_project("t", "/private/data").unwrap();
-    agent(&store, "worker", Program::Claude, Some("/sandbox/w/a"));
-    agent(&store, "insider", Program::Claude, Some("/private/data"));
-    agent(&store, "colleague", Program::Claude, Some("/private/data"));
+    let inside = dir.path().join("sandbox/w/a");
+    let outside = dir.path().join("private/data");
+    std::fs::create_dir_all(&inside).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let inside = inside.to_str().unwrap();
+    let outside = outside.to_str().unwrap();
+    store.ensure_project("t", inside).unwrap();
+    store.ensure_project("t", outside).unwrap();
+    agent(&store, "worker", Program::Claude, Some(inside));
+    agent(&store, "insider", Program::Claude, Some(outside));
+    agent(&store, "colleague", Program::Claude, Some(outside));
     let ct = CancellationToken::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -74,10 +80,15 @@ async fn start() -> Server {
 }
 
 impl Server {
-    /// A token for `worker@a` that the project globs keep inside `/sandbox/w`.
+    fn path(&self, relative: &str) -> String {
+        self._dir.path().join(relative).to_str().unwrap().to_owned()
+    }
+
+    /// A token for `worker@a` restricted to this fixture's `sandbox/w`.
     fn token(&self) -> another_core::NewToken {
+        let scope = format!("{}/**", self.path("sandbox/w").replace('\\', "/"));
         self.store
-            .create_token("worker@a", &["/sandbox/w/**".to_string()], None, None)
+            .create_token("worker@a", &[scope], None, None)
             .unwrap()
     }
 }
@@ -104,17 +115,19 @@ fn text(result: &CallToolResult) -> String {
 }
 
 /// BH-1. The token's globs are checked against the raw string and the store then normalizes it,
-/// so `/sandbox/w/../../private/data` passes the check and lands in `/private/data`.
+/// so an apparently in-scope `sandbox/w/../../private/data` escapes the scope.
 #[tokio::test]
 async fn bh1_dot_dot_does_not_escape_a_tokens_project_globs() {
     let srv = start().await;
     let client = connect(&srv.base, &srv.token().secret).await;
-    let escape = "/sandbox/w/../../private/data";
+    let escape = srv.path("sandbox/w/../../private/data");
+    let outside = srv.path("private/data");
+    let new_outside = srv.path("sandbox/w/../../brand/new");
 
     let refused = call(
         &client,
         "hold_paths",
-        json!({ "project": "/private/data", "paths": ["x"] }),
+        json!({ "project": outside, "paths": ["x"] }),
     )
     .await;
     assert_eq!(refused.is_error, Some(true), "the plain path is refused");
@@ -144,7 +157,7 @@ async fn bh1_dot_dot_does_not_escape_a_tokens_project_globs() {
         "resource outside the globs: {resource:?}"
     );
 
-    for path in [escape, "/sandbox/w/../../brand/new"] {
+    for path in [&escape, &new_outside] {
         let ensured = call(&client, "ensure_project", json!({ "path": path })).await;
         assert_eq!(
             ensured.is_error,
@@ -153,11 +166,7 @@ async fn bh1_dot_dot_does_not_escape_a_tokens_project_globs() {
         );
     }
     assert!(
-        !srv.store
-            .projects()
-            .unwrap()
-            .iter()
-            .any(|p| p.abs_path == "/brand/new"),
+        srv.store.projects().unwrap().len() == 2,
         "project created outside the globs"
     );
 
@@ -165,7 +174,7 @@ async fn bh1_dot_dot_does_not_escape_a_tokens_project_globs() {
     let inside = call(
         &client,
         "hold_paths",
-        json!({ "project": "/sandbox/w/x/../a", "paths": ["y"] }),
+        json!({ "project": srv.path("sandbox/w/x/../a"), "paths": ["y"] }),
     )
     .await;
     assert_ne!(inside.is_error, Some(true), "{inside:?}");
@@ -326,16 +335,16 @@ async fn bh13_renew_and_release_stay_inside_the_tokens_globs() {
     let srv = start().await;
     let client = connect(&srv.base, &srv.token().secret).await;
     let hold = |project: &str, path: &str| acquire(&srv.store, "worker@a", project, path);
-    let outside = hold("/private/data", "local-work.rs");
+    let outside = hold(&srv.path("private/data"), "local-work.rs");
     let outside_expiry = live_holds(&srv.store)[0].1.clone();
     let untouched = || vec![(outside.clone(), outside_expiry.clone())];
-    let inside = hold("/sandbox/w/a", "remote-work.rs");
+    let inside = hold(&srv.path("sandbox/w/a"), "remote-work.rs");
 
     // Renew all: only the in-scope hold, and the other one's expiry does not move.
     let renew = call(
         &client,
         "hold_paths",
-        json!({ "action": "renew", "project": "/sandbox/w/a" }),
+        json!({ "action": "renew", "project": srv.path("sandbox/w/a") }),
     )
     .await;
     assert_ne!(renew.is_error, Some(true), "{renew:?}");
@@ -350,8 +359,7 @@ async fn bh13_renew_and_release_stay_inside_the_tokens_globs() {
     // Naming the hidden hold looks exactly like naming an unknown one.
     let unknown = "01JZZZZZZZZZZZZZZZZZZZZZZZ";
     for action in ["renew", "release"] {
-        let by_id =
-            |id: &str| json!({ "action": action, "project": "/sandbox/w/a", "hold_ids": [id] });
+        let by_id = |id: &str| json!({ "action": action, "project": srv.path("sandbox/w/a"), "hold_ids": [id] });
         let named = call(&client, "hold_paths", by_id(&outside)).await;
         let absent = call(&client, "hold_paths", by_id(unknown)).await;
         assert_eq!(named.is_error, Some(true), "{action} by id: {named:?}");
@@ -367,7 +375,7 @@ async fn bh13_renew_and_release_stay_inside_the_tokens_globs() {
     let release = call(
         &client,
         "hold_paths",
-        json!({ "action": "release", "project": "/sandbox/w/a" }),
+        json!({ "action": "release", "project": srv.path("sandbox/w/a") }),
     )
     .await;
     assert_ne!(release.is_error, Some(true), "{release:?}");
@@ -375,7 +383,7 @@ async fn bh13_renew_and_release_stay_inside_the_tokens_globs() {
     assert_eq!(live_holds(&srv.store), untouched(), "release");
 
     // Heartbeat, on its own: renews and then ends only the in-scope hold.
-    let again = hold("/sandbox/w/a", "remote-work.rs");
+    let again = hold(&srv.path("sandbox/w/a"), "remote-work.rs");
     let beat = call(&client, "heartbeat", json!({})).await;
     assert_ne!(beat.is_error, Some(true), "{beat:?}");
     assert_eq!(
@@ -415,8 +423,8 @@ async fn bh13_heartbeat_leases_stay_inside_the_tokens_globs() {
             .resource
             .resource_id
     };
-    let hidden = register("/private/data", "local-job");
-    let visible = register("/sandbox/w/a", "remote-job");
+    let hidden = register(&srv.path("private/data"), "local-job");
+    let visible = register(&srv.path("sandbox/w/a"), "remote-job");
     let leases = |id: &str| {
         srv.store
             .resource(&another_core::ResourceRef::Id(id.into()))

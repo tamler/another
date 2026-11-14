@@ -89,9 +89,11 @@ async fn exposes_the_tool_surface() {
 
 #[tokio::test]
 async fn full_flow_over_mcp() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("site");
     let client = in_process(Store::open_in_memory(Clock::System).unwrap()).await;
 
-    let project = call_ok(&client, "ensure_project", json!({ "path": "/work/site" })).await;
+    let project = call_ok(&client, "ensure_project", json!({ "path": project_path })).await;
     assert_eq!(project["slug"], "site");
     for (name, program) in [("claude-1", "claude"), ("codex-1", "codex")] {
         let a = call_ok(
@@ -194,7 +196,7 @@ async fn full_flow_over_mcp() {
     let got = call_ok(
         &client,
         "hold_paths",
-        json!({ "agent": "claude-1", "project": "/work/site", "paths": ["src/**"], "ttl_seconds": 600 }),
+        json!({ "agent": "claude-1", "project": project_path, "paths": ["src/**"], "ttl_seconds": 600 }),
     )
     .await;
     assert_eq!(got["granted"].as_array().unwrap().len(), 1);
@@ -365,6 +367,7 @@ async fn fetch_inbox_is_not_an_ack_and_acknowledge_is_per_agent() {
 #[tokio::test]
 async fn streamable_http_on_loopback() {
     let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("site");
     let store = Store::open(dir.path()).unwrap();
     let ct = CancellationToken::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -394,7 +397,7 @@ async fn streamable_http_on_loopback() {
     let agent = call_ok(
         &client,
         "register_agent",
-        json!({ "name": "grok-bot", "program": "grok_bot", "project": "/work/site" }),
+        json!({ "name": "grok-bot", "program": "grok_bot", "project": project_path }),
     )
     .await;
     assert_eq!(agent["address"], "grok-bot@site");

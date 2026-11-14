@@ -1,5 +1,8 @@
 //! Dashboard HTTP: loopback UI, redacted auth mode, and the confirm gate.
 
+#[path = "common/hosted_ci.rs"]
+mod hosted_ci;
+
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::process::{Command, Stdio};
@@ -19,12 +22,15 @@ struct Running {
 
 async fn serve(opts: HttpOptions) -> Running {
     let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("shop");
+    std::fs::create_dir(&project).unwrap();
+    let project = project.to_str().unwrap().to_owned();
     let store = Store::open(dir.path()).unwrap();
     store
         .register_agent(RegisterAgent {
             name: "alice".into(),
             program: Program::Claude,
-            project: Some("/work/shop".into()),
+            project: Some(project.clone()),
             model: None,
             description: None,
         })
@@ -33,7 +39,7 @@ async fn serve(opts: HttpOptions) -> Running {
         .register_agent(RegisterAgent {
             name: "bob".into(),
             program: Program::Codex,
-            project: Some("/work/shop".into()),
+            project: Some(project),
             model: None,
             description: None,
         })
@@ -598,6 +604,7 @@ fn resolve_matrix_matches_the_loopback_rule() {
 
 #[tokio::test]
 async fn dashboard_command_refuses_remote_bind_and_serves_loopback() {
+    hosted_ci::require_hosted_runner();
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
     let bad = Command::new(env!("CARGO_BIN_EXE_another"))
