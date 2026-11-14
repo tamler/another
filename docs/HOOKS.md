@@ -1,5 +1,7 @@
 # Hook packs
 
+This development branch denies native edit tools and adds a separate checked-handle tool hook. [Controlled edits](CONTROLLED-EDITS.md) describes the unfinished route and supersedes the native edit-allow behavior below. Client and native Windows acceptance remain pending.
+
 Another is hooks-first (see [DECISIONS.md](DECISIONS.md)): agents learn about new mail because a client lifecycle hook injects a short digest, not because they poll or rely on MCP resource subscriptions. Every supported client gets the same hooks, calling the same wrapper script.
 
 | Moment | What Another does | Output |

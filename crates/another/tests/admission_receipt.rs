@@ -6,6 +6,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+use another_core::{controlled_sha256, ControlledEdit, Store};
 use serde_json::{json, Value};
 
 struct Fixture {
@@ -24,6 +25,8 @@ impl Fixture {
         std::fs::create_dir_all(project.join(".git")).unwrap();
         std::fs::create_dir_all(project.join("src")).unwrap();
         std::fs::write(project.join(".git/config"), "[core]\n bare = false\n").unwrap();
+        std::fs::write(project.join("src/a.rs"), "before").unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
         let mut f = Self {
             _temp: temp,
             home,
@@ -96,6 +99,28 @@ impl Fixture {
         }
         self.hook("pre-edit", &payload)
     }
+
+    fn edit(&self) -> ControlledEdit {
+        ControlledEdit {
+            project: std::fs::canonicalize(&self.project)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .into(),
+            path: "src/a.rs".into(),
+            expected_sha256: controlled_sha256(b"before"),
+            replacement: "after".into(),
+        }
+    }
+
+    fn controlled(&self, id: Option<&str>) -> String {
+        let mut payload = json!({"session_id":"session-a","cwd":self.project,
+            "tool_name":"mcp__another__controlled_edit","tool_input":self.edit()});
+        if let Some(id) = id {
+            payload["tool_use_id"] = json!(id);
+        }
+        self.hook("pre-controlled-edit", &payload)
+    }
 }
 
 fn assert_denied(output: &str) {
@@ -107,24 +132,25 @@ fn assert_denied(output: &str) {
 fn protected_edit_without_tool_id_is_denied() {
     let f = Fixture::new();
     assert_denied(&f.pre_edit(None));
+    assert_denied(&f.controlled(None));
 }
 
 #[test]
 fn duplicate_tool_id_cannot_authorize_a_second_edit() {
     let f = Fixture::new();
     assert_eq!(
-        f.pre_edit(Some("call-1")),
+        f.controlled(Some("call-1")),
         "",
         "first edit should be admitted"
     );
-    assert_denied(&f.pre_edit(Some("call-1")));
+    assert_denied(&f.controlled(Some("call-1")));
 }
 
 #[test]
 fn distinct_edits_of_one_file_get_distinct_pending_holds() {
     let f = Fixture::new();
-    assert_eq!(f.pre_edit(Some("call-a")), "");
-    assert_eq!(f.pre_edit(Some("call-b")), "");
+    assert_eq!(f.controlled(Some("call-a")), "");
+    assert_eq!(f.controlled(Some("call-b")), "");
     let db = rusqlite::Connection::open(f.home.join(".another/another.db")).unwrap();
     let mut query = db
         .prepare(
@@ -173,7 +199,7 @@ fn admission_does_not_renew_or_replace_an_existing_manual_hold() {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap();
-    assert_eq!(f.pre_edit(Some("separate-edit")), "");
+    assert_eq!(f.controlled(Some("separate-edit")), "");
     let retained: (String, i64, Option<i64>) = db
         .query_row(
             "SELECT hold_id, expires_at, released_at FROM holds WHERE hold_id=?1",
@@ -191,7 +217,7 @@ fn admission_does_not_renew_or_replace_an_existing_manual_hold() {
 #[test]
 fn only_matching_successful_completion_confirms_pending_hold_once() {
     let f = Fixture::new();
-    assert_eq!(f.pre_edit(Some("call-a")), "");
+    assert_eq!(f.controlled(Some("call-a")), "");
     let db = rusqlite::Connection::open(f.home.join(".another/another.db")).unwrap();
     let read = || -> (String, String, i64) {
         db.query_row(
@@ -235,6 +261,15 @@ fn only_matching_successful_completion_confirms_pending_hold_once() {
         "a failed tool call must not confirm coverage"
     );
     f.hook("post-tool", &receipt("session-a", "call-a"));
+    assert_eq!(
+        read(),
+        original,
+        "a hook assertion must never confirm a controlled edit"
+    );
+    let store = Store::open(&f.home.join(".another")).unwrap();
+    assert!(another::controlled_edit::execute(&store, "claude", "wrong-call", &f.edit()).is_err());
+    assert!(another::controlled_edit::execute(&store, "claude", "call-a", &f.edit()).is_ok());
+    assert_eq!(std::fs::read(f.project.join("src/a.rs")).unwrap(), b"after");
     let confirmed = read();
     assert_eq!(confirmed.0, "confirmed");
     assert_eq!(

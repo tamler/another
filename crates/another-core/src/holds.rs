@@ -406,6 +406,17 @@ fn conflicts_for(
     patterns: &[(String, String)],
     exclusive: bool,
 ) -> Result<Vec<HoldConflict>> {
+    conflicts_for_policy(tx, project, agent_id, patterns, exclusive, false)
+}
+
+fn conflicts_for_policy(
+    tx: &Tx<'_>,
+    project: &Project,
+    agent_id: &str,
+    patterns: &[(String, String)],
+    exclusive: bool,
+    controlled_literal: bool,
+) -> Result<Vec<HoldConflict>> {
     link_unlinked(tx)?;
     let (repo_key, my_prefix) = crate::repo::link_of(tx, project)?
         .map_or((String::new(), String::new()), |l| {
@@ -432,7 +443,15 @@ fn conflicts_for(
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let fold = folds_case(Path::new(&project.abs_path));
-    let overlaps = |a: &str, b: &str| overlap_on_volume(a, b, fold);
+    let overlaps = |a: &str, b: &str| {
+        if controlled_literal {
+            // Controlled paths are ASCII literals. Widen conservatively even when
+            // volume case rules are unknown, including positive character classes.
+            patterns_overlap(a, b) || patterns_overlap(&a.to_lowercase(), &b.to_lowercase())
+        } else {
+            overlap_on_volume(a, b, fold)
+        }
+    };
     let mut conflicts = Vec::new();
     for (requested, pattern) in patterns {
         for (held, held_project, held_prefix) in &others {
@@ -466,6 +485,17 @@ pub(crate) struct GuardPlan {
     /// `(path as given, normalized pattern)`.
     pub(crate) patterns: Vec<(String, String)>,
     pub conflicts: Vec<HoldConflict>,
+}
+
+pub(crate) fn guard_plan_controlled_tx(
+    tx: &Tx<'_>,
+    me: &AgentRef,
+    project: Project,
+    paths: &[String],
+) -> Result<GuardPlan> {
+    let mut plan = guard_plan_tx(tx, me, project, paths)?;
+    plan.conflicts = conflicts_for_policy(tx, &plan.project, &me.id, &plan.patterns, true, true)?;
+    Ok(plan)
 }
 
 /// Insert new per-edit holds without adopting or renewing any earlier hold.
@@ -592,7 +622,7 @@ pub(crate) fn guard_take_tx(
            AND released_at IS NULL AND expires_at > ?3
            AND NOT EXISTS (SELECT 1 FROM admission_holds ah JOIN admissions a
                ON a.admission_id = ah.admission_id
-               WHERE ah.hold_id = holds.hold_id AND a.state = 'pending')
+               WHERE ah.hold_id = holds.hold_id AND a.state IN ('pending','claimed','unknown'))
          ORDER BY created_at",
     )?;
     let own = stmt
@@ -672,7 +702,7 @@ fn upsert_hold_tx(
                AND pattern = ?3 AND node_id = ?4 AND released_at IS NULL
                AND NOT EXISTS (SELECT 1 FROM admission_holds ah JOIN admissions a
                    ON a.admission_id = ah.admission_id
-                   WHERE ah.hold_id = holds.hold_id AND a.state = 'pending')",
+                   WHERE ah.hold_id = holds.hold_id AND a.state IN ('pending','claimed','unknown'))",
             params![agent_id, project_id, pattern, tx.node_id],
             |r| r.get(0),
         )
@@ -775,8 +805,8 @@ pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
             params![hold_id, tx.node_id, tx.now],
         )?;
         let settled = tx.execute(
-            "UPDATE admissions SET state='expired', settled_at=?3
-             WHERE node_id=?2 AND state='pending'
+            "UPDATE admissions SET state=CASE WHEN state='claimed' THEN 'unknown' ELSE 'expired' END, settled_at=?3
+             WHERE node_id=?2 AND state IN ('pending','claimed')
                AND admission_id IN (SELECT admission_id FROM admission_holds WHERE hold_id=?1)
                AND NOT EXISTS (SELECT 1 FROM admission_holds ah LEFT JOIN holds h ON h.hold_id=ah.hold_id
                    WHERE ah.admission_id=admissions.admission_id
@@ -784,7 +814,7 @@ pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
             params![hold_id, tx.node_id, tx.now],
         )?;
         if settled != 0 {
-            tx.emit("system", "admission.expired", json!({"hold_id": hold_id}))?;
+            tx.emit("system", "admission.settled", json!({"hold_id": hold_id}))?;
         }
     }
     let stale_requests = stale_overdue_tx(tx)?;
@@ -852,7 +882,7 @@ fn is_pending_hold(tx: &Tx<'_>, id: &str) -> Result<bool> {
     Ok(tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM admission_holds ah JOIN admissions a
          ON a.admission_id = ah.admission_id
-         WHERE ah.hold_id = ?1 AND a.state = 'pending')",
+         WHERE ah.hold_id = ?1 AND a.state IN ('pending','claimed','unknown'))",
         [id],
         |r| r.get(0),
     )?)
@@ -871,7 +901,7 @@ fn owned_holds(
          WHERE agent_id = ?1 AND node_id = ?2 AND released_at IS NULL
            AND NOT EXISTS (SELECT 1 FROM admission_holds ah JOIN admissions a
                ON a.admission_id = ah.admission_id
-               WHERE ah.hold_id = holds.hold_id AND a.state = 'pending')
+               WHERE ah.hold_id = holds.hold_id AND a.state IN ('pending','claimed','unknown'))
          ORDER BY created_at",
     )?;
     let rows = stmt
@@ -1047,7 +1077,7 @@ impl Store {
                    AND node_id = ?3
                    AND NOT EXISTS (SELECT 1 FROM admission_holds ah JOIN admissions a
                        ON a.admission_id = ah.admission_id
-                       WHERE ah.hold_id = holds.hold_id AND a.state = 'pending')
+                       WHERE ah.hold_id = holds.hold_id AND a.state IN ('pending','claimed','unknown'))
                    AND expires_at - ?2 < ttl_seconds * 500",
             )?;
             let due = stmt

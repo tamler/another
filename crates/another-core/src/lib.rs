@@ -22,6 +22,8 @@ mod store;
 mod time;
 mod tokens;
 mod wake;
+#[cfg(windows)]
+pub mod windows_home;
 
 pub use activity::{
     ActivityFeed, ActivityItem, ActivityKind, ActivityQuery, ActivitySummary, AgentPresence,
@@ -42,7 +44,10 @@ pub use holds::{
     HoldFilter, HoldReport, SessionInfo, SessionPhase, SweepReport, DEFAULT_HOLD_TTL_SECONDS,
     MAX_HOLD_TTL_SECONDS, MIN_HOLD_TTL_SECONDS,
 };
-pub use identity::{Agent, EditAdmission, EditScope, Program, Project, RegisterAgent};
+pub use identity::{
+    controlled_sha256, Agent, ControlledClaim, ControlledEdit, EditAdmission, EditScope, Program,
+    Project, RegisterAgent, CONTROLLED_EDIT_TOOL, MAX_CONTROLLED_BYTES,
+};
 pub use mail::{
     AckOutcome, Importance, Inbox, InboxItem, InboxQuery, Message, NewRequest, Reply, SendMessage,
     Thread, ThreadSummary, UnreadAfter, UnreadItem,

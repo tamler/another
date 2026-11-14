@@ -24,6 +24,10 @@ impl Fixture {
         std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join(".git/config"), "[core]\n\tbare = false\n").unwrap();
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            std::fs::write(root.join("src").join(name), "before").unwrap();
+        }
+        let root = std::fs::canonicalize(root).unwrap();
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
         Fixture {
@@ -120,6 +124,13 @@ impl Fixture {
             &json!({"session_id": session, "cwd": self.root, "hook_event_name": "PreToolUse",
                 "tool_name": "Edit", "tool_input": input}),
         )
+    }
+
+    fn controlled(&self, session: &str, path: &Path, call: &str) -> String {
+        self.hook("pre-controlled-edit","claude",&json!({"session_id":session,"cwd":self.root,
+            "tool_name":"mcp__another__controlled_edit","tool_use_id":call,
+            "tool_input":{"project":self.root,"path":path.strip_prefix(&self.root).unwrap_or(path),
+                "expected_sha256":another_core::controlled_sha256(b"before"),"replacement":"after"}}))
     }
 
     fn holds(&self) -> Vec<String> {
@@ -347,21 +358,20 @@ fn an_edit_is_held_completely_or_not_at_all() {
     let b = fixture.root.join("src/b.rs");
     let c = fixture.root.join("src/c.rs");
 
-    assert_eq!(fixture.edit("bob", &[&b]), "");
+    assert_eq!(fixture.controlled("bob", &b, "bob-b"), "");
     assert_eq!(fixture.holds(), [format!("{bob} src/b.rs")]);
 
     // Alice's patch touches a free file and Bob's file: stopped, and the free file is
     // not left held.
     let out = fixture.edit("alice", &[&a, &b, &c]);
     let reason = deny_reason(&out).unwrap_or_else(|| panic!("{out}"));
-    assert!(
-        reason.contains(&bob) && reason.contains("src/b.rs"),
-        "{reason}"
-    );
+    assert!(reason.contains("native"), "{reason}");
     assert_eq!(fixture.holds(), [format!("{bob} src/b.rs")]);
 
-    // The free files alone are held together.
-    assert_eq!(fixture.edit("alice", &[&a, &c]), "");
+    // Multi-file native edits stay denied. Each free file needs its own controlled call.
+    assert!(deny_reason(&fixture.edit("alice", &[&a, &c])).is_some());
+    assert_eq!(fixture.controlled("alice", &a, "alice-a"), "");
+    assert_eq!(fixture.controlled("alice", &c, "alice-c"), "");
     let mut expected = [
         format!("{alice} src/a.rs"),
         format!("{alice} src/c.rs"),
@@ -372,11 +382,8 @@ fn an_edit_is_held_completely_or_not_at_all() {
 
     // A session that never started is stopped and registers nothing.
     let agents = fixture.json(&["agent", "list"]);
-    let out = fixture.edit("never-started", &[&a]);
-    assert!(
-        deny_reason(&out).unwrap().contains("session binding"),
-        "{out}"
-    );
+    let out = fixture.controlled("never-started", &a, "never-a");
+    assert!(deny_reason(&out).unwrap().contains("session"), "{out}");
     assert_eq!(fixture.json(&["agent", "list"]), agents);
 }
 
@@ -386,6 +393,7 @@ fn an_edit_never_registers_a_project() {
     let alice = fixture.start("alice");
     let nested = fixture.root.join("vendor/lib");
     std::fs::create_dir_all(nested.join(".git")).unwrap();
+    std::fs::write(nested.join("lib.rs"), "before").unwrap();
     let projects = fixture.json(&["project", "list"]);
 
     // One file in the session's project, one in a checkout nobody registered.
@@ -394,14 +402,11 @@ fn an_edit_never_registers_a_project() {
         &[&fixture.root.join("src/a.rs"), &nested.join("lib.rs")],
     );
     let reason = deny_reason(&out).unwrap_or_else(|| panic!("{out}"));
-    assert!(
-        reason.contains("not registered") && reason.contains("another project ensure"),
-        "{reason}"
-    );
+    assert!(reason.contains("native"), "{reason}");
     assert_eq!(fixture.json(&["project", "list"]), projects);
     assert!(fixture.holds().is_empty());
 
-    // Registering it is the operator's explicit step; then the same edit is held.
+    // Registration does not turn a native or cross-project edit into a controlled call.
     assert!(fixture
         .run(&["project", "ensure", nested.to_str().unwrap()])
         .status
@@ -410,11 +415,12 @@ fn an_edit_never_registers_a_project() {
         "alice",
         &[&fixture.root.join("src/a.rs"), &nested.join("lib.rs")],
     );
-    assert_eq!(out, "");
-    assert_eq!(
-        fixture.holds(),
-        [format!("{alice} lib.rs"), format!("{alice} src/a.rs")]
+    assert!(deny_reason(&out).is_some());
+    assert!(
+        deny_reason(&fixture.controlled("alice", &nested.join("lib.rs"), "nested-call")).is_some()
     );
+    assert!(fixture.holds().is_empty());
+    assert_eq!(fixture.start("alice"), alice);
 }
 
 #[test]
@@ -425,14 +431,14 @@ fn an_unconfirmed_identity_commit_fences_every_writer() {
 
     // A pending operation is settled by whichever writer comes next: here an edit.
     let pending = fixture.fence("01HZZZZZZZZZZZZZZZZZZZZZZZ.pending");
-    assert_eq!(fixture.edit("alice", &[&a]), "");
+    assert_eq!(fixture.controlled("alice", &a, "fence-a"), "");
     assert!(!pending.exists());
     assert_eq!(fixture.holds(), [format!("{alice} src/a.rs")]);
 
     // A fence this build cannot interpret stops every writer, hook or not, and stays.
     let stray = fixture.fence("unreadable");
     let events = fixture.json(&["events", "--limit", "500"]);
-    let out = fixture.edit("alice", &[&fixture.root.join("src/b.rs")]);
+    let out = fixture.controlled("alice", &fixture.root.join("src/b.rs"), "fence-b");
     assert!(deny_reason(&out).unwrap().contains("fence"), "{out}");
     let out = fixture.hook(
         "session-start",
@@ -462,7 +468,10 @@ fn an_unconfirmed_identity_commit_fences_every_writer() {
     // Cleared by the operator, writers proceed from exactly the earlier state.
     std::fs::remove_file(&stray).unwrap();
     assert_eq!(fixture.holds(), [format!("{alice} src/a.rs")]);
-    assert_eq!(fixture.edit("alice", &[&fixture.root.join("src/b.rs")]), "");
+    assert_eq!(
+        fixture.controlled("alice", &fixture.root.join("src/b.rs"), "after-fence-b"),
+        ""
+    );
 }
 
 #[test]
@@ -547,7 +556,7 @@ fn a_repeated_edit_gets_fresh_coverage() {
     let fixture = Fixture::initialized();
     fixture.start("alice");
     let a = fixture.root.join("src/a.rs");
-    assert_eq!(fixture.edit("alice", &[&a]), "");
+    assert_eq!(fixture.controlled("alice", &a, "fresh-a"), "");
 
     let db = rusqlite::Connection::open(fixture.another_home().join("another.db")).unwrap();
     let hold = |db: &rusqlite::Connection| -> (String, i64, i64) {
@@ -566,14 +575,29 @@ fn a_repeated_edit_gets_fresh_coverage() {
         .unwrap()
         .as_millis() as i64;
     db.execute(
-        "UPDATE holds SET expires_at = ?1 WHERE hold_id = ?2",
+        "UPDATE holds SET expires_at = ?1,created_at=?1-ttl_seconds*1000,renewed_at=?1-ttl_seconds*1000 WHERE hold_id = ?2",
         rusqlite::params![now + 901_000, id],
     )
     .unwrap();
-
-    assert_eq!(fixture.edit("alice", &[&a]), "");
-    let (same, expires_at, _) = hold(&db);
-    assert_eq!(same, id, "the file keeps one hold");
+    db.execute("UPDATE admissions SET created_at=(SELECT created_at FROM holds WHERE hold_id=?1) WHERE admission_id=(SELECT admission_id FROM admission_holds WHERE hold_id=?1)",[&id]).unwrap();
+    assert_eq!(fixture.controlled("alice", &a, "fresh-b"), "");
+    let (new_id, expires_at): (String, i64) = db
+        .query_row(
+            "SELECT hold_id,expires_at FROM holds WHERE hold_id!=?1",
+            [&id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_ne!(new_id, id, "a new operation gets a distinct pending hold");
+    assert_eq!(
+        db.query_row(
+            "SELECT expires_at FROM holds WHERE hold_id=?1",
+            [&id],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        now + 901_000
+    );
     assert!(
         expires_at >= now + 1_800_000,
         "the hold has {} s left after a fresh admission",
@@ -594,10 +618,7 @@ fn a_partly_guarded_edit_is_stopped() {
 
     let out = fixture.edit("alice", &[&a, &b]);
     let reason = deny_reason(&out).unwrap_or_else(|| panic!("{out}"));
-    assert!(
-        reason.contains("outside any project") && reason.contains("b.rs"),
-        "{reason}"
-    );
+    assert!(reason.contains("native"), "{reason}");
     assert!(fixture.holds().is_empty());
 
     // A link inside the project to a file outside it is the same mixed edit.
@@ -606,9 +627,10 @@ fn a_partly_guarded_edit_is_stopped() {
     assert!(deny_reason(&out).is_some(), "{out}");
     assert!(fixture.holds().is_empty());
 
-    // Each part alone: the scratch file is nobody's to guard, the project file is held.
-    assert_eq!(fixture.edit("alice", &[&b]), "");
+    // Scratch and native edits stay denied; a project file has a controlled route.
+    assert!(deny_reason(&fixture.edit("alice", &[&b])).is_some());
+    assert!(deny_reason(&fixture.controlled("alice", &b, "scratch-call")).is_some());
     assert!(fixture.holds().is_empty());
-    assert_eq!(fixture.edit("alice", &[&a]), "");
+    assert_eq!(fixture.controlled("alice", &a, "guarded-a"), "");
     assert_eq!(fixture.holds(), [format!("{alice} src/a.rs")]);
 }

@@ -35,6 +35,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "clap",
+ "libc",
  "reqwest",
  "rmcp",
  "rusqlite",
@@ -70,6 +71,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "ulid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -88,6 +88,97 @@ async fn exposes_the_tool_surface() {
 }
 
 #[tokio::test]
+async fn controlled_tool_requires_stdio_metadata_and_exact_admission() {
+    use another_core::{controlled_sha256, ControlledEdit, Program};
+    use rmcp::model::{ClientCapabilities, Implementation};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("project");
+    std::fs::create_dir(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::write(root.join("a.rs"), "before").unwrap();
+    let store = Store::open(&temp.path().join("home")).unwrap();
+    let root = root.to_str().unwrap();
+    store
+        .session_actor("claude", Program::Claude, root, None, "session", true)
+        .unwrap();
+    let edit = ControlledEdit {
+        project: root.into(),
+        path: "a.rs".into(),
+        expected_sha256: controlled_sha256(b"before"),
+        replacement: "after".into(),
+    };
+    store
+        .prepare_controlled_edit(
+            "claude",
+            Program::Claude,
+            root,
+            None,
+            "session",
+            "call",
+            &edit,
+        )
+        .unwrap();
+    let public = in_process(store.clone()).await;
+    assert!(!public
+        .list_all_tools()
+        .await
+        .unwrap()
+        .iter()
+        .any(|t| t.name == "controlled_edit"));
+    assert!(public
+        .call_tool(CallToolRequestParams::new("controlled_edit"))
+        .await
+        .is_err());
+    public.cancel().await.unwrap();
+    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(async move {
+        let server = AnotherMcp::for_stdio(store).serve(server_io).await.unwrap();
+        let _ = server.waiting().await;
+    });
+    let client = ClientConfig::new(
+        ClientCapabilities::default(),
+        Implementation::new("claude-code", "2.1.325"),
+    )
+    .serve(client_io)
+    .await
+    .unwrap();
+    assert!(client
+        .list_all_tools()
+        .await
+        .unwrap()
+        .iter()
+        .any(|t| t.name == "controlled_edit"));
+    let args = serde_json::to_value(&edit)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .clone();
+    assert!(client
+        .call_tool(CallToolRequestParams::new("controlled_edit").with_arguments(args.clone()))
+        .await
+        .is_err());
+    let mut request = CallToolRequestParams::new("controlled_edit").with_arguments(args);
+    request.meta = Some(
+        json!({"claudecode/toolUseId":"call"})
+            .as_object()
+            .unwrap()
+            .clone()
+            .into(),
+    );
+    let response = client.call_tool(request.clone()).await.unwrap();
+    assert_ne!(response.is_error, Some(true), "{response:?}");
+    assert_eq!(
+        std::fs::read(edit.project.clone() + "/a.rs").unwrap(),
+        b"after"
+    );
+    assert_eq!(
+        client.call_tool(request).await.unwrap().is_error,
+        Some(true)
+    );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
 async fn full_flow_over_mcp() {
     let dir = tempfile::tempdir().unwrap();
     let project_path = dir.path().join("site");

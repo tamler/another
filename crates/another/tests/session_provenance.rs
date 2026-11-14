@@ -152,6 +152,8 @@ fn installed_wrapper_exposes_session_start_identity_diagnostic() {
     let home = dir.path().join("home");
     let root = dir.path().join("project");
     std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::write(root.join("file.rs"), "before").unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
     std::fs::create_dir_all(&home).unwrap();
     let mut install = Command::new(env!("CARGO_BIN_EXE_another"));
     let result = install
@@ -200,7 +202,7 @@ fn installed_wrapper_exposes_session_start_identity_diagnostic() {
         (Some("private-agent"), Some("")),
         (Some("private-agent"), Some("wrong")),
     ] {
-        for event in ["session-start", "pre-edit"] {
+        for event in ["session-start", "pre-edit", "pre-controlled-edit"] {
             let mut cmd = Command::new(home.join(".another/hooks/another-hook.sh"));
             cmd.args([event, "--client", "claude"])
                 .env("HOME", &home)
@@ -230,7 +232,7 @@ fn installed_wrapper_exposes_session_start_identity_diagnostic() {
             let output = child.wait_with_output().unwrap();
             assert!(output.status.success());
             let stdout = String::from_utf8(output.stdout).unwrap();
-            let message = if event == "pre-edit" {
+            let message = if event != "session-start" {
                 let response: Value = serde_json::from_str(&stdout).unwrap();
                 assert_eq!(response["hookSpecificOutput"]["permissionDecision"], "deny");
                 response["hookSpecificOutput"]["permissionDecisionReason"]
@@ -240,11 +242,13 @@ fn installed_wrapper_exposes_session_start_identity_diagnostic() {
             } else {
                 stdout
             };
-            assert!(
-                message.contains("nonempty ANOTHER_AGENT")
-                    && message.contains("ANOTHER_AGENT_MODE"),
-                "incorrect advice: {message}"
-            );
+            if event != "pre-edit" {
+                assert!(
+                    message.contains("nonempty ANOTHER_AGENT")
+                        && message.contains("ANOTHER_AGENT_MODE"),
+                    "incorrect advice: {message}"
+                );
+            }
             assert!(!message.contains("private-agent") && !message.contains("private-id"));
             assert!(output.stderr.is_empty());
         }
@@ -286,7 +290,7 @@ fn installed_wrapper_exposes_session_start_identity_diagnostic() {
         .split_whitespace()
         .next()
         .unwrap();
-    for event in ["session-start", "pre-edit"] {
+    for event in ["session-start", "pre-controlled-edit"] {
         for input in [
             json!({"cwd":root}),
             json!({"cwd":root, "session_id":""}),
@@ -301,11 +305,12 @@ fn installed_wrapper_exposes_session_start_identity_diagnostic() {
         }
         let result = wrapper(
             event,
-            json!({"cwd":root, "session_id":"private-other"}),
+            json!({"cwd":root, "session_id":"private-other","tool_use_id":"provenance-call","tool_name":"mcp__another__controlled_edit",
+                "tool_input":{"project":root,"path":"file.rs","expected_sha256":another_core::controlled_sha256(b"before"),"replacement":"after"}}),
             Some(actor),
         );
         assert!(
-            result.contains("binding"),
+            result.contains("binding") || result.contains("session actor"),
             "wrong binding diagnostic: {result}"
         );
         assert!(!result.contains("private-other"));

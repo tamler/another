@@ -25,7 +25,10 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 /// Substring that identifies hook entries Another owns inside client configs.
+#[cfg(not(windows))]
 pub const MARKER: &str = "another-hook.sh";
+#[cfg(windows)]
+pub const MARKER: &str = "another-hook.ps1";
 /// Hook script and Grok file names used before the project was renamed to Another
 /// (see DECISIONS D35). They are recognised only so `hook install` / `hook uninstall`
 /// replace or remove entries left by development builds; nothing new is written with them.
@@ -33,6 +36,25 @@ const LEGACY_MARKERS: &[&str] = &["wyres-hook.sh"];
 const LEGACY_GROK_FILE: &str = "wyres.json";
 
 fn mentions_ours(text: &str) -> bool {
+    #[cfg(windows)]
+    if let Some((_, encoded)) = text.split_once("-EncodedCommand ") {
+        use base64::Engine;
+        if let Some(token) = encoded.split_whitespace().next() {
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(token) {
+                if bytes.len() % 2 == 0 {
+                    let words: Vec<_> = bytes
+                        .chunks_exact(2)
+                        .map(|p| u16::from_le_bytes([p[0], p[1]]))
+                        .collect();
+                    if let Ok(command) = String::from_utf16(&words) {
+                        if command.contains(MARKER) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
     text.contains(MARKER) || LEGACY_MARKERS.iter().any(|m| text.contains(m))
 }
 /// Upper bound on injected digest text.
@@ -108,6 +130,12 @@ impl Client {
                     spec("SessionEnd", HookEvent::SessionEnd, 3, None),
                     spec("PostToolUse", HookEvent::PostTool, 5, None),
                     spec("PreToolUse", HookEvent::PreEdit, 5, Some(edits)),
+                    spec(
+                        "PreToolUse",
+                        HookEvent::PreControlledEdit,
+                        5,
+                        Some("^mcp__another__controlled_edit$"),
+                    ),
                 ]
             }
         }
@@ -128,6 +156,7 @@ fn codex_status(event: HookEvent) -> &'static str {
         HookEvent::Prompt => "Another: checking for new messages",
         HookEvent::PostTool => "Another: delivering messages mid-task",
         HookEvent::PreEdit => "Another: checking file holds before an edit",
+        HookEvent::PreControlledEdit => "Another: admitting a controlled edit",
         HookEvent::SessionEnd => "Another: closing this session",
     }
 }
@@ -163,6 +192,8 @@ pub enum HookEvent {
     PostTool,
     /// Before a file edit: hold the file, or stop the edit if another agent holds it.
     PreEdit,
+    /// Admit only the Another-owned controlled tool; native edits remain denied.
+    PreControlledEdit,
 }
 
 impl HookEvent {
@@ -173,12 +204,16 @@ impl HookEvent {
             HookEvent::SessionEnd => "session-end",
             HookEvent::PostTool => "post-tool",
             HookEvent::PreEdit => "pre-edit",
+            HookEvent::PreControlledEdit => "pre-controlled-edit",
         }
     }
 
     /// Runs between tool calls inside a task (as opposed to once per session or prompt).
     pub fn is_tool_event(self) -> bool {
-        matches!(self, HookEvent::PostTool | HookEvent::PreEdit)
+        matches!(
+            self,
+            HookEvent::PostTool | HookEvent::PreEdit | HookEvent::PreControlledEdit
+        )
     }
 
     /// How long a hook waits for a database lock before giving up (and failing open).
@@ -186,7 +221,7 @@ impl HookEvent {
         match self {
             // Runs on every tool call: even a fully locked database must cost under ~100 ms.
             HookEvent::PostTool => Duration::from_millis(50),
-            HookEvent::PreEdit => Duration::from_millis(300),
+            HookEvent::PreEdit | HookEvent::PreControlledEdit => Duration::from_millis(300),
             _ => Duration::from_secs(5),
         }
     }
@@ -216,6 +251,7 @@ pub struct HookEnv {
 impl HookEnv {
     pub fn detect(another_home: PathBuf) -> Result<HookEnv> {
         let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
             .filter(|h| !h.is_empty())
             .map(PathBuf::from)
             .context("HOME is not set")?;
@@ -258,10 +294,12 @@ pub struct HookReport {
     pub notes: Vec<String>,
 }
 
+#[cfg(not(windows))]
 fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+#[cfg(not(windows))]
 fn script_text(env: &HookEnv) -> String {
     format!(
         "#!/bin/sh\n\
@@ -288,7 +326,63 @@ fn script_text(env: &HookEnv) -> String {
     )
 }
 
+#[cfg(windows)]
+fn ps_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
+}
+
+#[cfg(windows)]
+fn script_text(env: &HookEnv) -> String {
+    format!(
+        r#"# Another hook wrapper, written by `another hook install`.
+$Event = $args[0]
+$Client = $args[1]
+$Denial = {denial}
+if ($Event -eq 'pre-edit') {{ Write-Output $Denial; exit 0 }}
+$ErrorActionPreference = 'Stop'
+try {{
+    $AnotherBin = {exe}
+    if (-not (Test-Path -LiteralPath $AnotherBin -PathType Leaf)) {{
+        $AnotherBin = (Get-Command another -ErrorAction Stop).Source
+    }}
+    if (-not $env:ANOTHER_HOME) {{ $env:ANOTHER_HOME = {home} }}
+    $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $Payload = [Console]::In.ReadToEnd()
+    $Reply = $Payload | & $AnotherBin hook run $Event --client $Client 2>$null
+    if ($LASTEXITCODE -ne 0) {{ throw 'Another hook failed' }}
+    $Reply | Write-Output
+}} catch {{
+    if ($Event -eq 'pre-controlled-edit') {{ Write-Output $Denial }}
+}}
+exit 0
+"#,
+        exe = ps_quote(&env.exe.to_string_lossy()),
+        home = ps_quote(&env.another_home.to_string_lossy()),
+        denial = ps_quote(&deny(
+            "Another stopped this edit because its checked-handle route is unavailable."
+        ))
+    )
+}
+
 fn command_for(env: &HookEnv, client: Client, event: HookEvent) -> String {
+    #[cfg(windows)]
+    {
+        use base64::Engine;
+        let command = format!(
+            "& {} {} {}",
+            ps_quote(&env.script_path().to_string_lossy()),
+            ps_quote(event.as_str()),
+            ps_quote(client.as_str())
+        );
+        let bytes: Vec<_> = command.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        format!(
+            "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        )
+    }
+    #[cfg(not(windows))]
     format!(
         "{} {} --client {}",
         sh_quote(&env.script_path().to_string_lossy()),
@@ -345,6 +439,9 @@ fn array_entry<'a>(map: &'a mut Map<String, Value>, key: &str) -> Result<&'a mut
 
 /// Add or refresh our entries in a config, leaving every other key and hook alone.
 fn install_into(client: Client, env: &HookEnv, root: &mut Map<String, Value>) -> Result<()> {
+    // Refresh all our entries once. More than one route can share an event key;
+    // refreshing per event would replace the native guard with the controlled hook.
+    uninstall_from(client, root);
     if client == Client::Cursor && !root.contains_key("version") {
         root.insert("version".into(), json!(1));
     }
@@ -378,49 +475,10 @@ fn install_into(client: Client, env: &HookEnv, root: &mut Map<String, Value>) ->
             groups.retain(|h| !is_ours(h) || !std::mem::replace(&mut kept, true));
             continue;
         }
-        // Claude / Codex / Grok: matcher groups, each with a `hooks` array.
-        let mut found = false;
-        for group in groups.iter_mut() {
-            let Some(hs) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
-                continue;
-            };
-            let Some(h) = hs.iter_mut().find(|h| is_ours(h)) else {
-                continue;
-            };
-            *h = ours.clone();
-            // A group holding only our entry is ours: keep its tool matcher current. A group
-            // someone else also uses keeps whatever matcher they gave it.
-            if spec.event.is_tool_event() && hs.len() == 1 {
-                if let Some(g) = group.as_object_mut() {
-                    match spec.matcher {
-                        Some(m) => {
-                            g.insert("matcher".into(), json!(m));
-                        }
-                        None => {
-                            g.remove("matcher");
-                        }
-                    }
-                }
-            }
-            found = true;
-            break;
-        }
-        if !found {
-            groups.push(match spec.matcher {
-                Some(m) => json!({ "matcher": m, "hooks": [ours] }),
-                None => json!({ "hooks": [ours] }),
-            });
-        }
-        // Keep one entry: drop older copies (e.g. pre-rename entries), and any group that
-        // held only such a copy.
-        let mut kept = false;
-        groups.retain_mut(|g| {
-            let Some(hs) = g.get_mut("hooks").and_then(Value::as_array_mut) else {
-                return true;
-            };
-            let n = hs.len();
-            hs.retain(|h| !is_ours(h) || !std::mem::replace(&mut kept, true));
-            !(hs.is_empty() && n > 0)
+        // Claude / Codex / Grok: each route owns its matcher group.
+        groups.push(match spec.matcher {
+            Some(m) => json!({ "matcher": m, "hooks": [ours] }),
+            None => json!({ "hooks": [ours] }),
         });
     }
     Ok(())
@@ -456,7 +514,15 @@ fn uninstall_from(client: Client, root: &mut Map<String, Value>) {
 }
 
 fn contains_ours(root: &Map<String, Value>) -> bool {
-    serde_json::to_string(root).is_ok_and(|s| mentions_ours(&s))
+    fn visit(value: &Value) -> bool {
+        match value {
+            Value::String(text) => mentions_ours(text),
+            Value::Array(values) => values.iter().any(visit),
+            Value::Object(values) => values.values().any(visit),
+            _ => false,
+        }
+    }
+    root.values().any(visit)
 }
 
 fn render(root: &Map<String, Value>) -> Result<String> {
@@ -517,7 +583,8 @@ fn plan_config(client: Client, env: &HookEnv, install: bool) -> Result<FileChang
 }
 
 fn contains_ours_text(text: &str) -> bool {
-    mentions_ours(text)
+    serde_json::from_str::<Map<String, Value>>(text)
+        .map_or_else(|_| mentions_ours(text), |root| contains_ours(&root))
 }
 
 fn timestamp() -> String {
@@ -697,16 +764,27 @@ pub fn install(
 // `another hook run`
 
 /// What the client told us on stdin (all optional; clients differ).
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct HookInput {
     pub cwd: Option<PathBuf>,
     pub session_id: Option<String>,
     tool_use_id: Option<ToolUseId>,
-    hook_event_name: Option<String>,
     /// Tool events: the tool's name (`Edit`, `apply_patch`, `search_replace`, ...).
     pub tool_name: Option<String>,
     /// Tool events: the tool's arguments.
     pub tool_input: Option<Value>,
+}
+
+impl std::fmt::Debug for HookInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HookInput")
+            .field("cwd", &self.cwd)
+            .field("session_present", &self.session_id.is_some())
+            .field("tool_use_id", &self.tool_use_id)
+            .field("tool_name", &self.tool_name)
+            .field("input_present", &self.tool_input.is_some())
+            .finish()
+    }
 }
 
 #[derive(Clone)]
@@ -758,7 +836,6 @@ impl HookInput {
             tool_use_id: s("tool_use_id")
                 .filter(|id| !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control))
                 .map(ToolUseId),
-            hook_event_name: s("hook_event_name"),
             tool_name,
             tool_input,
         }
@@ -1305,6 +1382,36 @@ fn pre_edit(store: &Store, _client: Client, dir: &Path, input: &HookInput) -> Re
     Ok(deny(reason))
 }
 
+fn pre_controlled_edit(
+    store: &Store,
+    client: Client,
+    dir: &Path,
+    input: &HookInput,
+) -> Result<String> {
+    if input.tool_name.as_deref() != Some("mcp__another__controlled_edit") {
+        bail!("unsupported controlled tool name");
+    }
+    let edit: another_core::ControlledEdit =
+        serde_json::from_value(input.tool_input.clone().unwrap_or(Value::Null))
+            .map_err(|_| anyhow::anyhow!("invalid controlled edit arguments"))?;
+    let root = project_root(dir);
+    let request = identity_request(&root, input)?;
+    let id = input
+        .tool_use_id()
+        .context("controlled edit requires a client call ID")?;
+    crate::controlled_edit::preflight(&edit)?;
+    store.prepare_controlled_edit(
+        client.as_str(),
+        client.program(),
+        request.root,
+        request.actor(),
+        request.session_id,
+        id,
+        &edit,
+    )?;
+    Ok(String::new())
+}
+
 /// Most files one edit may name.
 const MAX_EDIT_PATHS: usize = 128;
 
@@ -1417,6 +1524,7 @@ fn run_event(
     match event {
         HookEvent::PostTool => return post_tool(store, client, dir, input),
         HookEvent::PreEdit => return pre_edit(store, client, dir, input),
+        HookEvent::PreControlledEdit => return pre_controlled_edit(store, client, dir, input),
         _ => {}
     }
     let root = project_root(dir);
@@ -1447,7 +1555,9 @@ fn run_event(
             }
         }
         HookEvent::SessionEnd => String::new(),
-        HookEvent::PostTool | HookEvent::PreEdit => unreachable!("handled above"),
+        HookEvent::PostTool | HookEvent::PreEdit | HookEvent::PreControlledEdit => {
+            unreachable!("handled above")
+        }
     };
     Ok(text)
 }
@@ -1500,7 +1610,7 @@ pub fn log_hook_error(another_home: &Path, event: HookEvent, client: Client, err
 /// stops the edit; routes without a verified context channel stay silent.
 fn refusal(event: HookEvent, client: Client, message: &str) -> String {
     match (event, client) {
-        (HookEvent::PreEdit, _) => deny(message),
+        (HookEvent::PreEdit | HookEvent::PreControlledEdit, _) => deny(message),
         (HookEvent::SessionStart | HookEvent::PostTool, Client::Cursor) => {
             json!({"additional_context": message}).to_string()
         }
@@ -1581,7 +1691,7 @@ pub fn run_guarded(another_home: Option<&Path>, event: HookEvent, client: Client
                     | another_core::Error::IdentityUnavailable(_)
             )
         );
-    if event == HookEvent::PreEdit {
+    if matches!(event, HookEvent::PreEdit | HookEvent::PreControlledEdit) {
         let message = if typed {
             error.to_string()
         } else {
@@ -1681,7 +1791,6 @@ mod tests {
             r#"{"tool_use_id":"private-call-42","hook_event_name":"PostToolUse"}"#,
         );
         assert_eq!(input.tool_use_id(), Some("private-call-42"));
-        assert_eq!(input.hook_event_name.as_deref(), Some("PostToolUse"));
         assert!(!format!("{input:?}").contains("private-call-42"));
         for raw in [
             json!({"tool_use_id":""}),
@@ -1735,6 +1844,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn quotes_for_sh() {
         assert_eq!(sh_quote("/a b/c"), "'/a b/c'");
         assert_eq!(sh_quote("it's"), r"'it'\''s'");
@@ -1744,6 +1854,21 @@ mod tests {
     fn truncates_on_char_boundary() {
         assert_eq!(truncate("ééééé".into(), 3), "éé…");
         assert_eq!(truncate("abc".into(), 3), "abc");
+    }
+
+    #[test]
+    fn recognises_owned_commands_inside_serialized_config() {
+        let env = HookEnv {
+            home: PathBuf::from("/test/profile"),
+            another_home: PathBuf::from("/test/data"),
+            exe: PathBuf::from("/test/another"),
+        };
+        let mut root = Map::new();
+        install_into(Client::Grok, &env, &mut root).unwrap();
+        assert!(contains_ours(&root));
+        assert!(contains_ours_text(&render(&root).unwrap()));
+        uninstall_from(Client::Grok, &mut root);
+        assert!(!contains_ours(&root));
     }
 
     #[test]

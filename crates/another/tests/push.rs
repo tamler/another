@@ -1,6 +1,5 @@
-//! Mid-task push and enforced holds, through the real binary: the post-tool and pre-edit
-//! hooks, failing open when the database is missing or locked, Herdr target capture,
-//! `wake prune`, and the daemon's waker against a fake `herdr`.
+//! Real CLI mail, native denial and wake checks. Legacy advisory path projections
+//! remain separately exercised; they are not authorization for a native editor.
 #![cfg(unix)]
 
 #[path = "common/hosted_ci.rs"]
@@ -162,6 +161,72 @@ impl Env {
         self.hook_timed(event, client, stdin, &[]).0
     }
 
+    /// Deny the real native call first; separately inspect the legacy advisory API.
+    /// Its result is never presented to a client and never writes a file.
+    fn advisory(&self, client: &str, input: &Value) -> String {
+        let native = self.hook("pre-edit", client, input);
+        assert!(
+            native.contains("\"permissionDecision\":\"deny\""),
+            "native path edits must remain denied"
+        );
+        let parsed = another::hooks::HookInput::parse(&input.to_string());
+        let cwd = parsed.cwd.as_ref().unwrap();
+        let root = another::hooks::project_root(cwd);
+        let physical_root = another::hooks::resolve_existing(&root);
+        let mut files = Vec::new();
+        for raw in parsed.edit_paths() {
+            let raw = PathBuf::from(raw);
+            let full = if raw.is_absolute() {
+                raw
+            } else {
+                cwd.join(raw)
+            };
+            let mut targets = vec![another::hooks::resolve_existing(&full)];
+            if let (Some(parent), Some(name)) = (full.parent(), full.file_name()) {
+                let entry = another::hooks::resolve_existing(parent).join(name);
+                if !targets.contains(&entry) {
+                    targets.push(entry);
+                }
+            }
+            for target in targets {
+                if let Ok(relative) = target.strip_prefix(&physical_root) {
+                    let relative = relative.to_str().unwrap().to_owned();
+                    if !files.contains(&relative) {
+                        files.push(relative);
+                    }
+                }
+            }
+        }
+        if files.is_empty() {
+            return String::new();
+        }
+        let store = another_core::Store::open(&self.another_home).unwrap();
+        let program = serde_json::from_value(json!(client)).unwrap();
+        let result = store.admit_edit(
+            client,
+            program,
+            root.to_str().unwrap(),
+            None,
+            &format!("{client}-s1"),
+            another::hooks::AUTO_HOLD_REASON,
+            |_| another_core::EditScope {
+                groups: vec![(root.to_str().unwrap().into(), files)],
+                unguarded: vec![],
+            },
+        );
+        let result=match result {
+            Ok(result)=>result,
+            Err(another_core::Error::Invalid(message))=>return json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":message}}).to_string(),
+            Err(error)=>panic!("unexpected advisory failure: {error}"),
+        };
+        if result.conflicts.is_empty() {
+            String::new()
+        } else {
+            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny",
+                "permissionDecisionReason":another::hooks::deny_message(&result.agent,&result.conflicts)}}).to_string()
+        }
+    }
+
     fn start(&self, client: &str, dir: &Path, extra_env: &[(&str, &str)]) -> String {
         // Hooks never create a home: it exists before any session starts.
         self.ok(&["init"]);
@@ -321,15 +386,14 @@ fn post_tool_mentions_new_mail_once_and_is_silent_otherwise() {
 }
 
 #[test]
-fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
+fn advisory_projection_holds_files_and_reports_sibling_worktree_conflicts() {
     let env = Env::new();
     let claude = env.start("claude", &env.main, &[]);
     let codex = env.start("codex", &env.wt, &[]);
     let a = env.main.join("src/a.rs");
 
     // Claude edits: allowed silently, and the file is now held.
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "claude",
         &tool(
             &env.main,
@@ -348,8 +412,7 @@ fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
     // Codex, in a sibling worktree of the same repository, patches the same file: stopped,
     // with the holder named and a way to ask.
     let patch = "*** Begin Patch\n*** Update File: src/a.rs\n@@\n-x\n+y\n*** End Patch\n";
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(&env.wt, "apply_patch", json!({ "command": patch })),
     );
@@ -374,8 +437,7 @@ fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
 
     // A different file is fine, and gets its own hold in the worktree's project.
     let patch = "*** Begin Patch\n*** Add File: src/b.rs\n+fn b() {}\n*** End Patch\n";
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(&env.wt, "apply_patch", json!({ "command": patch })),
     );
@@ -386,8 +448,7 @@ fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
         .any(|h| h["agent"] == codex && h["pattern"] == "src/b.rs"));
 
     // Relative paths resolve against cwd; Claude is now the one stopped.
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "claude",
         &tool(
             &env.main,
@@ -398,8 +459,7 @@ fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
     assert!(denial(&out).contains(&format!("held by {codex}")));
 
     // Notebooks, files outside any project, and tools without a path.
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "claude",
         &tool(
             &env.main,
@@ -409,14 +469,13 @@ fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
     );
     assert_eq!(out, "");
     let scratch = env.root.join("scratch/x.txt");
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "claude",
         &tool(&env.main, "Write", json!({ "file_path": scratch })),
     );
     assert_eq!(out, "");
     assert_eq!(
-        env.hook("pre-edit", "claude", &tool(&env.main, "Edit", json!({}))),
+        env.advisory("claude", &tool(&env.main, "Edit", json!({}))),
         ""
     );
     let patterns: Vec<String> = env
@@ -434,8 +493,7 @@ fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
     // so the edit starts with a full TTL, and records that once.
     let events_before = env.json(&["events", "--limit", "1000"]);
     let holds_before = env.holds().len();
-    env.hook(
-        "pre-edit",
+    env.advisory(
         "claude",
         &tool(&env.main, "Edit", json!({ "file_path": a })),
     );
@@ -454,8 +512,7 @@ fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
     assert!(env.holds().iter().any(|h| h["agent"] == claude));
     env.ok(&["heartbeat", "--agent", &claude, "--end"]);
     let patch = "*** Begin Patch\n*** Update File: src/a.rs\n@@\n-x\n+y\n*** End Patch\n";
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(&env.wt, "apply_patch", json!({ "command": patch })),
     );
@@ -483,6 +540,62 @@ fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
         )),
         "{human}"
     );
+}
+
+#[test]
+fn controlled_admissions_conflict_across_worktrees_and_keep_distinct_holds() {
+    let env = Env::new();
+    let claude = env.start("claude", &env.main, &[]);
+    let codex = env.start("codex", &env.wt, &[]);
+    for root in [&env.main, &env.wt] {
+        for file in ["src/a.rs", "src/b.rs"] {
+            std::fs::write(root.join(file), b"x").unwrap();
+        }
+    }
+    let admit = |client: &str, root: &Path, path: &str, id: &str| {
+        let mut input = tool(
+            root,
+            "mcp__another__controlled_edit",
+            json!({"project":root,"path":path,
+            "expected_sha256":another_core::controlled_sha256(b"x"),"replacement":"y"}),
+        );
+        input["tool_use_id"] = json!(id);
+        env.hook("pre-controlled-edit", client, &input)
+    };
+    assert_eq!(admit("claude", &env.main, "src/a.rs", "claude-a"), "");
+    let first = env.holds();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0]["agent"], claude);
+    assert!(denial(&admit("codex", &env.wt, "src/a.rs", "codex-a")).contains(&claude));
+    assert_eq!(
+        env.holds(),
+        first,
+        "conflict must not leave partial coverage"
+    );
+    assert_eq!(admit("codex", &env.wt, "src/b.rs", "codex-b"), "");
+    assert!(denial(&admit("claude", &env.main, "src/b.rs", "claude-b")).contains(&codex));
+    assert_eq!(admit("claude", &env.main, "src/a.rs", "claude-a2"), "");
+    let held = env.holds();
+    assert_eq!(held.len(), 3, "each operation needs its own pending hold");
+    assert!(
+        held.contains(&first[0]),
+        "older pending coverage must remain unchanged"
+    );
+    env.hook(
+        "session-end",
+        "claude",
+        &json!({"session_id":"claude-s1","cwd":env.main}),
+    );
+    assert_eq!(env.holds(), held);
+    env.ok(&["heartbeat", "--agent", &claude, "--end"]);
+    assert_eq!(
+        env.holds(),
+        held,
+        "explicit end must not release pending admissions"
+    );
+    let stats = env.json(&["stats", "--since", "1h"]);
+    assert_eq!(stats["edits_blocked"], 2);
+    assert_eq!(stats["holds_auto_acquired"], 3);
 }
 
 #[test]
@@ -832,13 +945,12 @@ fn daemon_wakes_idle_herdr_agents_and_leaves_working_ones_to_hooks() {
 
 /// F1: an edit through a symlink is checked against the file it really reaches.
 #[test]
-fn symlinked_paths_do_not_bypass_a_hold() {
+fn advisory_symlinked_paths_do_not_bypass_a_hold() {
     let env = Env::new();
     let claude = env.start("claude", &env.main, &[]);
     let codex = env.start("codex", &env.wt, &[]);
     std::fs::write(env.wt.join("src/a.rs"), "x").unwrap();
-    let held = env.hook(
-        "pre-edit",
+    let held = env.advisory(
         "claude",
         &tool(
             &env.main,
@@ -850,8 +962,7 @@ fn symlinked_paths_do_not_bypass_a_hold() {
 
     // An alias inside the worktree pointing at its src/.
     std::os::unix::fs::symlink(env.wt.join("src"), env.wt.join("alias")).unwrap();
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(
             &env.wt,
@@ -869,8 +980,7 @@ fn symlinked_paths_do_not_bypass_a_hold() {
     // An alias outside any checkout pointing into it.
     let outside = env.root.join("outside-link");
     std::os::unix::fs::symlink(env.wt.join("src"), &outside).unwrap();
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(
             &env.wt,
@@ -881,8 +991,7 @@ fn symlinked_paths_do_not_bypass_a_hold() {
     assert!(denial(&out).contains(&format!("held by {claude}")));
     // A file that is itself a symlink to the held file.
     std::os::unix::fs::symlink(env.wt.join("src/a.rs"), env.wt.join("src/link.rs")).unwrap();
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(
             &env.wt,
@@ -1050,15 +1159,14 @@ fn adapter_commands_are_bounded() {
 
 /// N1: `..` after a symlink is applied where the link points, not lexically.
 #[test]
-fn dot_dot_after_a_symlink_does_not_escape_the_guard() {
+fn advisory_dot_dot_after_a_symlink_does_not_escape_the_guard() {
     let env = Env::new();
     let claude = env.start("claude", &env.main, &[]);
     env.start("codex", &env.wt, &[]);
     std::fs::create_dir_all(env.wt.join("src/deep")).unwrap();
     std::fs::write(env.wt.join("src/a.rs"), "x").unwrap();
     std::os::unix::fs::symlink(env.wt.join("src/deep"), env.wt.join("deeplink")).unwrap();
-    let held = env.hook(
-        "pre-edit",
+    let held = env.advisory(
         "claude",
         &tool(
             &env.main,
@@ -1072,8 +1180,7 @@ fn dot_dot_after_a_symlink_does_not_escape_the_guard() {
         "deeplink/../a.rs".to_string(),
         format!("{}/deeplink/../a.rs", env.wt.display()),
     ] {
-        let out = env.hook(
-            "pre-edit",
+        let out = env.advisory(
             "codex",
             &tool(&env.wt, "Edit", json!({ "file_path": path })),
         );
@@ -1083,8 +1190,7 @@ fn dot_dot_after_a_symlink_does_not_escape_the_guard() {
         );
     }
     // A plain `..` with no symlink still resolves the ordinary way.
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(&env.wt, "Edit", json!({ "file_path": "src/deep/../a.rs" })),
     );
@@ -1093,12 +1199,11 @@ fn dot_dot_after_a_symlink_does_not_escape_the_guard() {
 
 /// N2: a dangling symlink to a held, not yet existing file is checked at its target.
 #[test]
-fn a_dangling_symlink_to_a_held_new_file_is_stopped() {
+fn advisory_dangling_symlink_to_a_held_new_file_is_stopped() {
     let env = Env::new();
     let claude = env.start("claude", &env.main, &[]);
     let codex = env.start("codex", &env.wt, &[]);
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "claude",
         &tool(
             &env.main,
@@ -1109,8 +1214,7 @@ fn a_dangling_symlink_to_a_held_new_file_is_stopped() {
     assert_eq!(out, "");
     assert!(!env.wt.join("src/new.rs").exists());
     std::os::unix::fs::symlink(env.wt.join("src/new.rs"), env.wt.join("dangle.rs")).unwrap();
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(
             &env.wt,
@@ -1125,8 +1229,7 @@ fn a_dangling_symlink_to_a_held_new_file_is_stopped() {
     assert!(!env.holds().iter().any(|h| h["agent"] == codex));
     // A chain of links, and a loop, do not hang or crash the hook.
     std::os::unix::fs::symlink(env.wt.join("dangle.rs"), env.wt.join("chain.rs")).unwrap();
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(
             &env.wt,
@@ -1147,13 +1250,13 @@ fn a_dangling_symlink_to_a_held_new_file_is_stopped() {
         ),
         &[],
     );
-    assert_eq!(out, "");
+    assert!(out.contains("\"permissionDecision\":\"deny\""));
     assert!(took < Duration::from_secs(2));
 }
 
 /// N5: a glob hold taken through a symlinked directory protects the real files.
 #[test]
-fn glob_holds_through_a_symlinked_directory_are_resolved() {
+fn advisory_glob_holds_through_a_symlinked_directory_are_resolved() {
     let env = Env::new();
     let claude = env.start("claude", &env.main, &[]);
     env.start("codex", &env.wt, &[]);
@@ -1189,8 +1292,7 @@ fn glob_holds_through_a_symlinked_directory_are_resolved() {
         .collect();
     assert_eq!(patterns, ["src/*.toml", "*.md"]);
     // The sibling worktree's edit of a file under src/ is now stopped.
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(
             &env.wt,
@@ -1237,12 +1339,11 @@ fn a_descendant_holding_stdout_does_not_outlast_the_deadline() {
 }
 
 #[test]
-fn a_dangling_link_after_a_missing_directory_and_dot_dot_is_followed() {
+fn advisory_dangling_link_after_a_missing_directory_and_dot_dot_is_followed() {
     let env = Env::new();
     let claude = env.start("claude", &env.main, &[]);
     env.start("codex", &env.wt, &[]);
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "claude",
         &tool(
             &env.main,
@@ -1254,8 +1355,7 @@ fn a_dangling_link_after_a_missing_directory_and_dot_dot_is_followed() {
     std::os::unix::fs::symlink(env.wt.join("src/new.rs"), env.wt.join("dangle.rs")).unwrap();
     // `nope` does not exist; a client that creates parent directories before writing
     // ends up writing through `dangle.rs`.
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(
             &env.wt,
@@ -1279,12 +1379,11 @@ fn volume_folds_case(dir: &Path) -> bool {
 }
 
 #[test]
-fn a_new_file_in_another_letter_case_matches_only_where_the_volume_folds_case() {
+fn advisory_new_file_case_matches_only_where_the_volume_folds_case() {
     let env = Env::new();
     let claude = env.start("claude", &env.main, &[]);
     env.start("codex", &env.wt, &[]);
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "claude",
         &tool(
             &env.main,
@@ -1293,8 +1392,7 @@ fn a_new_file_in_another_letter_case_matches_only_where_the_volume_folds_case() 
         ),
     );
     assert_eq!(out, "");
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(
             &env.wt,
@@ -1313,7 +1411,7 @@ fn a_new_file_in_another_letter_case_matches_only_where_the_volume_folds_case() 
 }
 
 #[test]
-fn a_symlink_loop_does_not_register_a_second_project() {
+fn advisory_symlink_loop_does_not_register_a_second_project() {
     let env = Env::new();
     env.start("codex", &env.wt, &[]);
     std::os::unix::fs::symlink(env.wt.join("loop2"), env.wt.join("loop1")).unwrap();
@@ -1323,8 +1421,7 @@ fn a_symlink_loop_does_not_register_a_second_project() {
     let alias = env.root.join("alias");
     std::os::unix::fs::symlink(env.wt.parent().unwrap(), &alias).unwrap();
     let raw = alias.join(env.wt.file_name().unwrap()).join("loop1/x.rs");
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(&env.wt, "Write", json!({ "file_path": raw })),
     );
@@ -1338,7 +1435,7 @@ fn a_symlink_loop_does_not_register_a_second_project() {
 }
 
 #[test]
-fn case_folding_keeps_glob_character_classes_exact() {
+fn advisory_case_folding_keeps_glob_character_classes_exact() {
     let env = Env::new();
     let claude = env.start("claude", &env.main, &[]);
     let codex = env.start("codex", &env.wt, &[]);
@@ -1363,8 +1460,7 @@ fn case_folding_keeps_glob_character_classes_exact() {
             &main,
             glob,
         ]);
-        let out = env.hook(
-            "pre-edit",
+        let out = env.advisory(
             "codex",
             &tool(&env.wt, "Write", json!({ "file_path": env.wt.join(file) })),
         );
@@ -1383,7 +1479,7 @@ fn case_folding_keeps_glob_character_classes_exact() {
 }
 
 #[test]
-fn a_symlink_loop_then_dot_dot_does_not_register_a_second_project() {
+fn advisory_symlink_loop_then_dot_dot_does_not_register_a_second_project() {
     let env = Env::new();
     env.start("codex", &env.wt, &[]);
     std::os::unix::fs::symlink(env.wt.join("loop2"), env.wt.join("loop1")).unwrap();
@@ -1393,8 +1489,7 @@ fn a_symlink_loop_then_dot_dot_does_not_register_a_second_project() {
     let raw = alias
         .join(env.wt.file_name().unwrap())
         .join("loop1/../src/a.rs");
-    env.hook(
-        "pre-edit",
+    env.advisory(
         "codex",
         &tool(&env.wt, "Write", json!({ "file_path": raw })),
     );

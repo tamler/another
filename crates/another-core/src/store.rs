@@ -61,6 +61,8 @@ struct Inner {
     key: ed25519_dalek::SigningKey,
     clock: Clock,
     path: Option<PathBuf>,
+    #[cfg(windows)]
+    _windows_home: Option<crate::windows_home::PinnedHome>,
     busy_timeout: std::time::Duration,
     /// Deadline of the single bounded operation this store was opened for, if any.
     deadline: Option<std::time::Instant>,
@@ -104,7 +106,10 @@ impl Store {
     }
 
     pub fn open_with_clock(home: &Path, clock: Clock) -> Result<Store> {
+        #[cfg(not(windows))]
         std::fs::create_dir_all(home)?;
+        #[cfg(windows)]
+        let _windows_home = crate::windows_home::prepare_database(home, true)?;
         let path = home.join(DB_FILE);
         let conn = Connection::open(&path)?;
         require_current_or_empty(&conn)?;
@@ -134,7 +139,7 @@ impl Store {
         })
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn upgrade_offline_with_parent_sync(
         home: &Path,
         backup_dir: &Path,
@@ -143,6 +148,7 @@ impl Store {
     ) -> Result<()> {
         use sha2::{Digest, Sha256};
         use std::io::{Read, Write};
+        #[cfg(unix)]
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 
         if !writer_fence_confirmed {
@@ -151,6 +157,8 @@ impl Store {
             ));
         }
         let source_home = std::fs::canonicalize(home)?;
+        #[cfg(windows)]
+        let _source_pin = crate::windows_home::prepare_database(&source_home, false)?;
         let parent = backup_dir
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
@@ -210,13 +218,18 @@ impl Store {
         } else {
             None
         };
+        #[cfg(unix)]
         std::fs::DirBuilder::new().mode(0o700).create(&backup_dir)?;
+        #[cfg(windows)]
+        let backup_pin = crate::windows_home::create_private_directory(&backup_dir)?;
         let backup_path = backup_dir.join(DB_FILE);
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&backup_path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        options.open(&backup_path)?;
+        #[cfg(windows)]
+        let backup_database_pin = crate::windows_home::prepare_database(&backup_dir, false)?;
         let mut destination = Connection::open(&backup_path)?;
         {
             let backup = rusqlite::backup::Backup::new(&source, &mut destination)?;
@@ -273,14 +286,22 @@ impl Store {
             hash.update(&bytes[..n]);
         }
         let metadata = serde_json::json!({"schema_version": version, "node_id": node, "database_sha256": format!("{:x}", hash.finalize())});
-        let mut record = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(backup_dir.join("backup.json"))?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut record = options.open(backup_dir.join("backup.json"))?;
         writeln!(record, "{metadata}")?;
         record.sync_all()?;
+        drop(record);
+        drop(file);
+        #[cfg(unix)]
         std::fs::File::open(&backup_dir)?.sync_all()?;
+        #[cfg(windows)]
+        {
+            drop(backup_database_pin);
+            drop(backup_pin);
+        }
         sync_parent(&backup_parent).map_err(|e| {
             Error::Invalid(format!(
                 "backup parent directory sync failed ({e}); source was not migrated; preserve the backup and writer fence"
@@ -289,8 +310,65 @@ impl Store {
         migrate_offline(&mut source, version, data_version, &node)
     }
 
-    /// Windows upgrade is blocked until a private backup ACL is implemented and verified.
-    #[cfg(not(unix))]
+    /// Publish a verified private staging backup before changing the Windows source.
+    #[cfg(windows)]
+    pub fn upgrade_offline(
+        home: &Path,
+        backup_dir: &Path,
+        writer_fence_confirmed: bool,
+    ) -> Result<()> {
+        use crate::windows_home::{
+            inspect_private_handle, pin_directory, publish_file, ObjectKind,
+        };
+        use std::os::windows::io::AsHandle;
+        use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
+        if !writer_fence_confirmed {
+            return Err(Error::Invalid(
+                "operator writer-fence confirmation is required".into(),
+            ));
+        }
+        if backup_dir.try_exists()? {
+            return Err(Error::Invalid("backup directory already exists".into()));
+        }
+        let parent = backup_dir
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let parent = std::fs::canonicalize(parent)?;
+        let _parent_pin = pin_directory(&parent)?;
+        let destination = parent.join(
+            backup_dir
+                .file_name()
+                .ok_or_else(|| Error::Invalid("invalid backup directory".into()))?,
+        );
+        let staging = parent.join(format!(".another-backup-{}", new_id()));
+        Self::upgrade_offline_with_parent_sync(home, &staging, true, |_| {
+            let before = pin_directory(&staging)?;
+            before.verify_private()?;
+            let identity = inspect_private_handle(
+                before.file.as_handle(),
+                ObjectKind::Directory,
+                FILE_GENERIC_READ,
+            )?;
+            drop(before);
+            publish_file(&staging, &destination)?;
+            let after = pin_directory(&destination)?;
+            after.verify_private()?;
+            if inspect_private_handle(
+                after.file.as_handle(),
+                ObjectKind::Directory,
+                FILE_GENERIC_READ,
+            )? != identity
+            {
+                return Err(std::io::Error::other(
+                    "backup identity changed during publication",
+                ));
+            }
+            Ok(())
+        })
+    }
+
+    #[cfg(not(any(unix, windows)))]
     pub fn upgrade_offline(
         _home: &Path,
         _backup_dir: &Path,
@@ -331,6 +409,8 @@ impl Store {
         deadline: Option<std::time::Instant>,
     ) -> Result<Store> {
         use rusqlite::OpenFlags;
+        #[cfg(windows)]
+        let windows_home = crate::windows_home::prepare_database(home, false)?;
         let path = home.join(DB_FILE);
         let conn = Connection::open_with_flags(
             &path,
@@ -365,6 +445,8 @@ impl Store {
                 key,
                 clock: Clock::System,
                 path: Some(path),
+                #[cfg(windows)]
+                _windows_home: Some(windows_home),
                 busy_timeout: busy,
                 deadline,
                 steps,
@@ -381,6 +463,13 @@ impl Store {
     }
 
     fn init(mut conn: Connection, clock: Clock, path: Option<PathBuf>) -> Result<Store> {
+        #[cfg(windows)]
+        let windows_home = path
+            .as_ref()
+            .map(|p| {
+                crate::windows_home::prepare_database(p.parent().expect("database parent"), false)
+            })
+            .transpose()?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -397,6 +486,8 @@ impl Store {
                 key,
                 clock,
                 path,
+                #[cfg(windows)]
+                _windows_home: windows_home,
                 busy_timeout: std::time::Duration::from_secs(5),
                 deadline: None,
                 steps: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -902,7 +993,42 @@ fn publish_fence(db_path: &Path, operation: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn publish_fence(db_path: &Path, operation: &str) -> Result<PathBuf> {
+    use crate::windows_home::{create_private_directory, pin_directory, publish_file};
+    use std::io::{Read, Write};
+    if !fence_id_ok(operation) {
+        return Err(fence_error("invalid operation id"));
+    }
+    let home = db_path
+        .parent()
+        .ok_or_else(|| fence_error("missing home"))?;
+    let directory = home.join(FENCE_DIR);
+    let pinned = if directory.try_exists()? {
+        pin_directory(&directory)?
+    } else {
+        create_private_directory(&directory)?
+    };
+    pinned.verify_private()?;
+    let temporary = format!("{operation}.preparing");
+    let published = format!("{operation}.pending");
+    let mut file = pinned.file(std::ffi::OsStr::new(&temporary), true, true)?;
+    file.write_all(b"session.binding.v1\n")?;
+    file.sync_all()?;
+    drop(file);
+    publish_file(&directory.join(&temporary), &directory.join(&published))?;
+    let mut observed = Vec::new();
+    pinned
+        .file(std::ffi::OsStr::new(&published), false, false)?
+        .take(64)
+        .read_to_end(&mut observed)?;
+    if observed != b"session.binding.v1\n" {
+        return Err(fence_error("published fence content changed"));
+    }
+    Ok(directory.join(published))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn publish_fence(_db_path: &Path, _operation: &str) -> Result<PathBuf> {
     Err(Error::IdentityUnavailable(
         "identity operation fences are unsupported on this platform; nothing was committed".into(),
@@ -1353,6 +1479,42 @@ CREATE TABLE admission_holds (
 );
 CREATE INDEX admissions_open ON admissions(state, created_at);
 "#,
+    // v10 preserves v9 rows and their key while adding controlled-tool claim evidence.
+    r#"
+CREATE TABLE admissions_v10 (
+    admission_id TEXT NOT NULL PRIMARY KEY,
+    node_id TEXT NOT NULL REFERENCES nodes(node_id),
+    agent_id TEXT NOT NULL REFERENCES agents(agent_id),
+    correlation BLOB NOT NULL CHECK (typeof(correlation)='blob' AND length(correlation)=32),
+    targets BLOB NOT NULL CHECK (typeof(targets)='blob' AND length(targets)=32),
+    state TEXT NOT NULL CHECK (state IN ('pending','claimed','confirmed','expired','unknown')),
+    created_at INTEGER NOT NULL,
+    settled_at INTEGER,
+    call_key BLOB CHECK (call_key IS NULL OR (typeof(call_key)='blob' AND length(call_key)=32)),
+    operation BLOB CHECK (operation IS NULL OR (typeof(operation)='blob' AND length(operation)=32)),
+    client TEXT,
+    session_digest TEXT,
+    claimed_at INTEGER,
+    object_identity TEXT,
+    preimage TEXT,
+    replacement TEXT,
+    UNIQUE (node_id, agent_id, correlation),
+    UNIQUE (node_id, call_key)
+);
+INSERT INTO admissions_v10(admission_id,node_id,agent_id,correlation,targets,state,created_at,settled_at)
+SELECT admission_id,node_id,agent_id,correlation,targets,state,created_at,settled_at FROM admissions;
+CREATE TABLE admission_holds_v10 (
+    admission_id TEXT NOT NULL REFERENCES admissions_v10(admission_id),
+    hold_id TEXT NOT NULL UNIQUE REFERENCES holds(hold_id),
+    PRIMARY KEY (admission_id, hold_id)
+);
+INSERT INTO admission_holds_v10 SELECT admission_id,hold_id FROM admission_holds;
+DROP TABLE admission_holds;
+DROP TABLE admissions;
+ALTER TABLE admissions_v10 RENAME TO admissions;
+ALTER TABLE admission_holds_v10 RENAME TO admission_holds;
+CREATE INDEX admissions_open ON admissions(state, created_at);
+"#,
 ];
 
 /// Index in [`MIGRATIONS`] of the migration that creates `admission_secret`.
@@ -1437,6 +1599,7 @@ fn schema_manifest(version: i64) -> Option<&'static str> {
     match version {
         8 => Some(include_str!("v8_schema_manifest.json")),
         9 => Some(include_str!("v9_schema_manifest.json")),
+        10 => Some(include_str!("v10_schema_manifest.json")),
         _ => None,
     }
 }
@@ -1604,7 +1767,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn migrate_offline(
     conn: &mut Connection,
     version: i64,
@@ -1879,7 +2042,102 @@ mod upgrade_tests {
         // A v9 database is not a v8 one, and the reverse.
         db.execute_batch(MIGRATIONS[8]).unwrap();
         assert!(verify_schema_against(&db, v8, None).is_err());
+        verify_schema_against(&db, schema_manifest(9).unwrap(), None).unwrap();
+        let frozen_v9: serde_json::Value =
+            serde_json::from_str(schema_manifest(9).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&dump_schema_manifest(&db)).unwrap(),
+            frozen_v9
+        );
+        db.execute_batch(MIGRATIONS[9]).unwrap();
         verify_schema(&db, None).unwrap();
+    }
+
+    #[test]
+    fn v9_offline_upgrade_preserves_secret_events_and_admission_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        #[cfg(unix)]
+        std::fs::create_dir(&home).unwrap();
+        #[cfg(windows)]
+        let private = crate::windows_home::create_private_directory(&home).unwrap();
+        let mut db = Connection::open(home.join(DB_FILE)).unwrap();
+        db.pragma_update(None, "foreign_keys", "ON").unwrap();
+        let tx = db.transaction().unwrap();
+        for index in 0..9 {
+            apply_migration(&tx, index).unwrap();
+        }
+        tx.pragma_update(None, "user_version", 9).unwrap();
+        tx.commit().unwrap();
+        let (node, _) = ensure_local_node(&mut db, 1_000_000).unwrap();
+        db.execute("INSERT INTO agents(agent_id,node_id,name,program,status,created_at,updated_at,event_id) VALUES('old-agent',?1,'old','claude','active',1,1,'fixture')",[&node]).unwrap();
+        db.execute("INSERT INTO admissions(admission_id,node_id,agent_id,correlation,targets,state,created_at) VALUES('old-admission',?1,'old-agent',zeroblob(32),zeroblob(32),'pending',1)",[&node]).unwrap();
+        let secret: Vec<u8> = db
+            .query_row("SELECT secret FROM admission_secret", [], |r| r.get(0))
+            .unwrap();
+        let events: Vec<(String, String, String)> = db
+            .prepare("SELECT event_id,payload,sig FROM events ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        drop(db);
+        #[cfg(windows)]
+        drop(private);
+        let backup = temp.path().join("backup");
+        Store::upgrade_offline(&home, &backup, true).unwrap();
+        let upgraded = Store::open(&home).unwrap();
+        upgraded
+            .read(|db| {
+                assert_eq!(
+                    db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))?,
+                    10
+                );
+                assert!(
+                    db.query_row("SELECT secret FROM admission_secret", [], |r| r
+                        .get::<_, Vec<u8>>(0))?
+                        == secret,
+                    "admission secret changed"
+                );
+                assert_eq!(
+                    db.query_row(
+                        "SELECT state FROM admissions WHERE admission_id='old-admission'",
+                        [],
+                        |r| r.get::<_, String>(0)
+                    )?,
+                    "pending"
+                );
+                let after: Vec<(String, String, String)> = db
+                    .prepare("SELECT event_id,payload,sig FROM events ORDER BY seq")?
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                    .collect::<rusqlite::Result<_>>()?;
+                assert_eq!(after, events);
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+                        .get::<_, i64>(
+                        0
+                    ))?,
+                    0
+                );
+                Ok(())
+            })
+            .unwrap();
+        let saved = Connection::open(backup.join(DB_FILE)).unwrap();
+        assert_eq!(
+            saved
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            9
+        );
+        assert!(
+            saved
+                .query_row("SELECT secret FROM admission_secret", [], |r| r
+                    .get::<_, Vec<u8>>(0))
+                .unwrap()
+                == secret,
+            "backup admission secret changed"
+        );
     }
 
     #[test]

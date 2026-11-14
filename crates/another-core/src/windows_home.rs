@@ -1,4 +1,4 @@
-//! Windows handle security observations. This is not a home or SQLite VFS gate.
+//! Windows handle security and retained directory observations.
 //!
 //! The caller must retain the exact handle and separately establish trusted ancestry,
 //! local filesystem identity, durable publication and SQLite main/sidecar confinement.
@@ -36,6 +36,296 @@ const INHERITANCE_TARGETS: u8 = 0x03;
 const NO_PROPAGATE: u8 = 0x04;
 const SID_MAX_BYTES: usize = 68;
 const ACE_LIMIT: usize = 512;
+
+use std::fs::{File, OpenOptions};
+use std::os::windows::ffi::OsStrExt;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+use std::os::windows::io::AsHandle;
+use std::path::{Component, Path, PathBuf, Prefix};
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateDirectoryW, GetDriveTypeW, MoveFileExW, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE, MOVEFILE_WRITE_THROUGH,
+};
+
+fn wide(path: &Path) -> io::Result<Vec<u16>> {
+    let mut text: Vec<_> = path.as_os_str().encode_wide().collect();
+    if text.contains(&0) {
+        return Err(refused());
+    }
+    text.push(0);
+    Ok(text)
+}
+
+/// Every opened ancestor omits FILE_SHARE_DELETE and rejects reparse points.
+/// Keep this value alive while opening descendants by the retained spelling.
+pub struct PinnedDirectory {
+    pub file: File,
+    pub path: PathBuf,
+    ancestors: Vec<File>,
+}
+
+fn directory_file(path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let info = file.metadata()?;
+    if !info.is_dir() || info.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(refused());
+    }
+    Ok(file)
+}
+
+fn exact_name(parent: &Path, name: &std::ffi::OsStr) -> io::Result<()> {
+    let text = name.to_str().ok_or_else(refused)?;
+    if text.is_empty() || text.trim() != text || text.ends_with('.') || text.contains(':') {
+        return Err(refused());
+    }
+    let mut matches = 0;
+    let mut exact = false;
+    for (count, entry) in std::fs::read_dir(parent)?.enumerate() {
+        if count >= 100_000 {
+            return Err(refused());
+        }
+        let entry = entry?;
+        let found = entry.file_name();
+        let found = found.to_str().ok_or_else(refused)?;
+        if found.to_lowercase() == text.to_lowercase() {
+            matches += 1;
+        }
+        exact |= found == text;
+    }
+    if !exact || matches != 1 {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+pub fn pin_directory(path: &Path) -> io::Result<PinnedDirectory> {
+    let mut components = path.components();
+    let drive = match components.next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
+            _ => return Err(refused()),
+        },
+        _ => return Err(refused()),
+    };
+    if components.next() != Some(Component::RootDir) {
+        return Err(refused());
+    }
+    let mut spelling = PathBuf::from(format!("{}:\\", char::from(drive)));
+    // SAFETY: wide returns a live NUL-terminated drive root. 3 is DRIVE_FIXED.
+    if unsafe { GetDriveTypeW(wide(&spelling)?.as_ptr()) } != 3 {
+        return Err(refused());
+    }
+    let mut file = directory_file(&spelling)?;
+    let mut ancestors = Vec::new();
+    for component in components {
+        let Component::Normal(name) = component else {
+            return Err(refused());
+        };
+        exact_name(&spelling, name)?;
+        spelling.push(name);
+        let next = directory_file(&spelling)?;
+        ancestors.push(file);
+        file = next;
+    }
+    Ok(PinnedDirectory {
+        file,
+        path: spelling,
+        ancestors,
+    })
+}
+
+impl PinnedDirectory {
+    pub fn child(&self, name: &std::ffi::OsStr) -> io::Result<Self> {
+        exact_name(&self.path, name)?;
+        let path = self.path.join(name);
+        let file = directory_file(&path)?;
+        let mut ancestors = self
+            .ancestors
+            .iter()
+            .map(File::try_clone)
+            .collect::<io::Result<Vec<_>>>()?;
+        ancestors.push(self.file.try_clone()?);
+        Ok(Self {
+            file,
+            path,
+            ancestors,
+        })
+    }
+
+    pub fn file(&self, name: &std::ffi::OsStr, write: bool, create: bool) -> io::Result<File> {
+        if create {
+            let text = name.to_str().ok_or_else(refused)?;
+            if text.is_empty()
+                || text.contains(['/', '\\', ':'])
+                || text.trim() != text
+                || text.ends_with('.')
+            {
+                return Err(refused());
+            }
+        } else {
+            exact_name(&self.path, name)?;
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(write)
+            .create_new(create)
+            .share_mode(if write {
+                FILE_SHARE_READ
+            } else {
+                FILE_SHARE_READ | FILE_SHARE_WRITE
+            })
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(self.path.join(name))?;
+        let info = file.metadata()?;
+        if !info.is_file() || info.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(refused());
+        }
+        Ok(file)
+    }
+
+    pub fn verify_private(&self) -> io::Result<()> {
+        inspect_private_handle(
+            self.file.as_handle(),
+            ObjectKind::Directory,
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+        )?;
+        Ok(())
+    }
+}
+
+/// Create only a new directory, with an explicit owner/SYSTEM/Administrators DACL.
+/// Existing directories are checked, never silently re-permissioned.
+pub fn create_private_directory(path: &Path) -> io::Result<PinnedDirectory> {
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+    };
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    let parent = pin_directory(path.parent().ok_or_else(refused)?)?;
+    let sid = current_user_sid()?;
+    let mut raw = ptr::null_mut();
+    // SAFETY: sid is live and validated; the API returns a LocalFree-owned string.
+    if unsafe { ConvertSidToStringSidW(sid.as_ptr(), &mut raw) } == 0 {
+        return Err(refused());
+    }
+    let owned = SecurityDescriptor(raw.cast());
+    let mut count = 0;
+    // SAFETY: a successful conversion returns a NUL-terminated SID string.
+    while count < 256 && unsafe { *raw.add(count) } != 0 {
+        count += 1;
+    }
+    if count == 256 {
+        return Err(refused());
+    }
+    let text = String::from_utf16(unsafe { std::slice::from_raw_parts(raw, count) })
+        .map_err(|_| refused())?;
+    let sddl: Vec<u16> = format!("O:{text}D:P(A;OICI;FA;;;{text})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    drop(owned);
+    let mut descriptor = ptr::null_mut();
+    // SAFETY: input is NUL-terminated; output is released below by LocalFree.
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            1,
+            &mut descriptor,
+            ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(refused());
+    }
+    let descriptor = SecurityDescriptor(descriptor);
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    // SAFETY: the descriptor and path remain live for this call.
+    if unsafe { CreateDirectoryW(wide(path)?.as_ptr(), &attributes) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let child = parent.child(path.file_name().ok_or_else(refused)?)?;
+    child.verify_private()?;
+    Ok(child)
+}
+
+/// The source file must already have been flushed. Never replaces an existing target.
+pub fn publish_file(source: &Path, target: &Path) -> io::Result<()> {
+    // SAFETY: both paths are live NUL-terminated buffers; no replacement flag is used.
+    if unsafe {
+        MoveFileExW(
+            wide(source)?.as_ptr(),
+            wide(target)?.as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+pub struct PinnedHome {
+    _directory: PinnedDirectory,
+    _database: File,
+}
+
+/// Pin the private home and main file. Existing sidecars must also be private regular
+/// single-linked files. Normal SQLite sidecar creation remains inside this pinned home;
+/// this does not defend against a hostile same-user process or replace an offline fence.
+pub fn prepare_database(home: &Path, create: bool) -> io::Result<PinnedHome> {
+    let directory = if create && !home.try_exists()? {
+        match create_private_directory(home) {
+            Ok(directory) => directory,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => pin_directory(home)?,
+            Err(error) => return Err(error),
+        }
+    } else {
+        pin_directory(home)?
+    };
+    directory.verify_private()?;
+    let name = std::ffi::OsStr::new("another.db");
+    if create && !home.join(name).try_exists()? {
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(directory.path.join(name))
+        {
+            Ok(file) => drop(file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let database = directory.file(name, false, false)?;
+    inspect_private_handle(
+        database.as_handle(),
+        ObjectKind::RegularFile,
+        FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+    )?;
+    for name in ["another.db-wal", "another.db-shm", "another.db-journal"] {
+        if directory.path.join(name).try_exists()? {
+            let file = directory.file(std::ffi::OsStr::new(name), false, false)?;
+            inspect_private_handle(
+                file.as_handle(),
+                ObjectKind::RegularFile,
+                FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+            )?;
+        }
+    }
+    Ok(PinnedHome {
+        _directory: directory,
+        _database: database,
+    })
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObjectKind {

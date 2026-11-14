@@ -353,7 +353,12 @@ pub(crate) fn normalize_project_path(raw: &str) -> Result<String> {
         }
     }
     let prefix = match path.components().next() {
-        Some(Component::Prefix(p)) => format!("{}\\", p.as_os_str().to_string_lossy()),
+        Some(Component::Prefix(p)) => match p.kind() {
+            // canonicalize returns a verbatim drive path on Windows. Do not combine
+            // that prefix with the legacy forward-slash project key representation.
+            std::path::Prefix::VerbatimDisk(drive) => format!("{}:\\", char::from(drive)),
+            _ => format!("{}\\", p.as_os_str().to_string_lossy()),
+        },
         _ => "/".to_string(),
     };
     Ok(format!("{prefix}{}", parts.join("/")))
@@ -597,13 +602,11 @@ pub(crate) fn get_agent(conn: &Connection, agent_id: &str) -> Result<Agent> {
 
 // This helper is not an authorization token and does not brand the transaction.
 // The public entry point validates the session ID before entering the transaction.
-#[cfg(not(windows))]
 struct SessionResolution<'a> {
     requested_actor: Option<(&'a str, bool)>,
     create: bool,
 }
 
-#[cfg(not(windows))]
 fn session_actor_tx(
     tx: &Tx<'_>,
     deadline: std::time::Instant,
@@ -716,7 +719,6 @@ fn session_actor_tx(
     Ok((addr, digest))
 }
 
-#[cfg(not(windows))]
 fn resolve_session_actor_tx(
     tx: &Tx<'_>,
     deadline: std::time::Instant,
@@ -745,7 +747,6 @@ fn resolve_session_actor_tx(
 /// An address is an identifier, not a credential: this says which session actor an
 /// address names, not that the caller is that session.
 /// Its caller is the controlled-edit admission built on this commit.
-#[cfg(not(windows))]
 #[allow(dead_code)]
 pub(crate) fn resolve_bound_session_tx(
     tx: &Tx<'_>,
@@ -771,7 +772,6 @@ pub(crate) fn resolve_bound_session_tx(
     Ok(agent)
 }
 
-#[cfg(not(windows))]
 fn validate_session_id(session_id: &str) -> Result<()> {
     if session_id.is_empty() || session_id.len() > 512 || session_id.chars().any(char::is_control) {
         return Err(Error::Invalid("invalid session identifier".into()));
@@ -816,6 +816,12 @@ pub struct EditScope {
 const MAX_ADMISSION_GROUPS: usize = 32;
 /// Most files one edit may name across all its projects.
 const MAX_ADMISSION_FILES: usize = 128;
+
+#[path = "controlled.rs"]
+mod controlled;
+pub use controlled::{
+    controlled_sha256, ControlledClaim, ControlledEdit, CONTROLLED_EDIT_TOOL, MAX_CONTROLLED_BYTES,
+};
 
 fn admission_target_hash(
     key: &[u8; 32],
@@ -949,7 +955,7 @@ impl Store {
             let me = resolve_agent(tx, tx.node_id, &agent)?;
             let correlation = admission_correlation(tx, client, &me.id, &session_digest, tool_use_id)?;
             let admission: Option<(String, Vec<u8>, i64)> = tx.query_row(
-                "SELECT admission_id,targets,created_at FROM admissions WHERE node_id=?1 AND agent_id=?2 AND correlation=?3 AND state='pending'",
+                "SELECT admission_id,targets,created_at FROM admissions WHERE node_id=?1 AND agent_id=?2 AND correlation=?3 AND state='pending' AND call_key IS NULL",
                 params![tx.node_id, me.id, &correlation[..]], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             ).optional()?;
             let Some((admission, target_hash, created_at)) = admission else { return Ok(false) };
@@ -1121,22 +1127,6 @@ impl Store {
         reason: &str,
         group: impl FnOnce(&[Project]) -> EditScope,
     ) -> Result<EditAdmission> {
-        #[cfg(windows)]
-        {
-            let _ = (
-                client,
-                program,
-                root,
-                requested_actor,
-                session_id,
-                reason,
-                group,
-            );
-            return Err(Error::Invalid(
-                "session binding is unsupported on native Windows".into(),
-            ));
-        }
-        #[cfg(not(windows))]
         {
             validate_session_id(session_id)?;
             self.write_identity(|tx, deadline| {
@@ -1294,14 +1284,6 @@ impl Store {
         session_id: &str,
         create: bool,
     ) -> Result<(String, String)> {
-        #[cfg(windows)]
-        {
-            let _ = (client, program, root, requested_actor, session_id, create);
-            return Err(Error::Invalid(
-                "session binding is unsupported on native Windows".into(),
-            ));
-        }
-        #[cfg(not(windows))]
         {
             validate_session_id(session_id)?;
             self.write_identity(|tx, deadline| {
@@ -1335,14 +1317,6 @@ impl Store {
 
     /// Check that an address identifies a locally registered session actor.
     pub fn is_session_actor(&self, who: &str) -> Result<bool> {
-        #[cfg(windows)]
-        {
-            let _ = who;
-            return Err(Error::Invalid(
-                "session binding is unsupported on native Windows".into(),
-            ));
-        }
-        #[cfg(not(windows))]
         {
             self.write_identity(|tx, deadline| {
                 let actor = resolve_agent(tx, self.node_id(), who)?;
@@ -1355,14 +1329,6 @@ impl Store {
 
     /// Resolve a session actor to its complete local address.
     pub fn session_actor_address(&self, who: &str) -> Result<String> {
-        #[cfg(windows)]
-        {
-            let _ = who;
-            return Err(Error::Invalid(
-                "session binding is unsupported on native Windows".into(),
-            ));
-        }
-        #[cfg(not(windows))]
         {
             self.write_identity(|tx, deadline| {
                 let actor = resolve_agent(tx, self.node_id(), who)?;
@@ -2158,6 +2124,15 @@ mod tests {
             c_normalized
         );
         assert!(normalize_project_path("rel/path").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn canonical_drive_prefix_keeps_the_same_project_key() {
+        assert_eq!(
+            normalize_project_path(r"\\?\C:\work\project").unwrap(),
+            normalize_project_path(r"C:\work\project").unwrap()
+        );
     }
 
     #[test]

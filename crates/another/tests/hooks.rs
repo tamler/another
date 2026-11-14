@@ -138,12 +138,12 @@ fn ours(v: &Value) -> usize {
 }
 
 /// Entries Another installs in one client config: session start, prompt, session end and
-/// post-tool everywhere, plus the pre-edit guard except for Cursor.
+/// post-tool everywhere, plus separate native-denial and controlled-edit hooks except for Cursor.
 fn installed(rel: &str) -> usize {
     if rel.contains(".cursor") {
         4
     } else {
-        5
+        6
     }
 }
 
@@ -182,12 +182,17 @@ fn claude_install_preserves_existing_config_and_is_idempotent() {
     // a matcher for the edit tools.
     let pre = after["hooks"]["PreToolUse"].as_array().unwrap();
     assert_eq!(pre[0], original["hooks"]["PreToolUse"][0]);
-    assert_eq!(pre.len(), 2);
+    assert_eq!(pre.len(), 3);
     assert_eq!(pre[1]["matcher"], "Edit|Write|MultiEdit|NotebookEdit");
     assert!(pre[1]["hooks"][0]["command"]
         .as_str()
         .unwrap()
         .ends_with("pre-edit --client claude"));
+    assert_eq!(pre[2]["matcher"], "^mcp__another__controlled_edit$");
+    assert!(pre[2]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .ends_with("pre-controlled-edit --client claude"));
     let post = after["hooks"]["PostToolUse"].as_array().unwrap();
     assert_eq!(post.len(), 1);
     assert!(
@@ -205,8 +210,8 @@ fn claude_install_preserves_existing_config_and_is_idempotent() {
     );
     assert_eq!(
         ours(&after),
-        5,
-        "SessionStart, UserPromptSubmit, SessionEnd, PostToolUse, PreToolUse"
+        6,
+        "SessionStart, UserPromptSubmit, SessionEnd, PostToolUse, native and controlled PreToolUse"
     );
     assert!(commands(&after)
         .iter()
@@ -279,7 +284,7 @@ fn installs_every_client_format() {
         .any(|n| n.as_str().unwrap().contains("/hooks")));
 
     let codex = env.read(".codex/hooks.json");
-    assert_eq!(ours(&codex), 5);
+    assert_eq!(ours(&codex), 6);
     assert!(codex["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap()
@@ -291,7 +296,7 @@ fn installs_every_client_format() {
     );
 
     let grok = env.read(".grok/hooks/another.json");
-    assert_eq!(ours(&grok), 5);
+    assert_eq!(ours(&grok), 6);
     assert_eq!(
         grok["hooks"]["SessionEnd"][0]["hooks"][0]["type"],
         "command"
@@ -850,7 +855,7 @@ fn codex_fresh_install_writes_labels_and_description() {
     let env = Env::new();
     assert_eq!(install_changes(&env, "codex"), ["create"]);
     let after = env.read(".codex/hooks.json");
-    assert_eq!(ours(&after), 5);
+    assert_eq!(ours(&after), 6);
     for (event, label) in CODEX_LABELS {
         assert_eq!(our_handler(&after, event)["statusMessage"], label);
     }
@@ -899,7 +904,7 @@ fn codex_refresh_labels_hooks_installed_before_labels() {
     assert!(!has_key(&old, "statusMessage"));
     assert_eq!(install_changes(&env, "codex"), ["update"]);
     let after = env.read(".codex/hooks.json");
-    assert_eq!(ours(&after), 5);
+    assert_eq!(ours(&after), 6);
     for (event, label) in CODEX_LABELS {
         assert_eq!(our_handler(&after, event)["statusMessage"], label);
     }

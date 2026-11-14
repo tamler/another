@@ -634,7 +634,7 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                  WHERE holds.node_id = excluded.node_id
                    AND NOT EXISTS (SELECT 1 FROM admission_holds ah JOIN admissions a
                        ON a.admission_id = ah.admission_id
-                       WHERE ah.hold_id = holds.hold_id AND a.state = 'pending')",
+                       WHERE ah.hold_id = holds.hold_id AND a.state IN ('pending','claimed','unknown'))",
                 params![hold_id, origin, project, agent, s("pattern"), exclusive, s("reason"), ttl, ts, expires],
             )?;
         }
@@ -645,7 +645,7 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                      WHERE hold_id = ?1 AND node_id = ?3 AND released_at IS NULL
                        AND NOT EXISTS (SELECT 1 FROM admission_holds ah JOIN admissions a
                            ON a.admission_id = ah.admission_id
-                           WHERE ah.hold_id = holds.hold_id AND a.state = 'pending')",
+                           WHERE ah.hold_id = holds.hold_id AND a.state IN ('pending','claimed','unknown'))",
                     params![id, ts, origin],
                 )?;
             }
@@ -657,7 +657,7 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                      WHERE hold_id = ?1 AND node_id = ?4 AND released_at IS NULL
                        AND NOT EXISTS (SELECT 1 FROM admission_holds ah JOIN admissions a
                            ON a.admission_id = ah.admission_id
-                           WHERE ah.hold_id = holds.hold_id AND a.state = 'pending')",
+                           WHERE ah.hold_id = holds.hold_id AND a.state IN ('pending','claimed','unknown'))",
                     params![id, ts, s("reason"), origin],
                 )?;
             }
@@ -668,7 +668,7 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                  WHERE hold_id = ?1 AND node_id = ?2 AND released_at IS NULL
                    AND NOT EXISTS (SELECT 1 FROM admission_holds ah JOIN admissions a
                        ON a.admission_id = ah.admission_id
-                       WHERE ah.hold_id = holds.hold_id AND a.state = 'pending')",
+                       WHERE ah.hold_id = holds.hold_id AND a.state IN ('pending','claimed','unknown'))",
                 params![s("hold_id"), origin],
             )?;
         }

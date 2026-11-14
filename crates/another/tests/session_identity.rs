@@ -9,6 +9,8 @@ fn missing_identity_denies_and_lifecycle_does_not_persist_raw_id() {
     let home = dir.path().join("another-home");
     let root = dir.path().join("work");
     std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("test.rs"), "before").unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
     let run = |args: &[&str], input: Option<String>| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_another"));
         command
@@ -61,12 +63,13 @@ fn missing_identity_denies_and_lifecycle_does_not_persist_raw_id() {
     )
     .status
     .success());
-    let base_input = json!({"cwd": root, "session_id": raw, "tool_name":"Edit", "tool_input":{"file_path":"test.rs"}});
+    let base_input = json!({"cwd": root, "session_id": raw,"tool_use_id":"alias-call","tool_name":"mcp__another__controlled_edit",
+        "tool_input":{"project":root,"path":"test.rs","expected_sha256":another_core::controlled_sha256(b"before"),"replacement":"after"}});
     let mut equal_alias = base_input.clone();
     equal_alias["sessionId"] = json!(raw);
     equal_alias["conversation_id"] = json!(raw);
     let allowed = run(
-        &["hook", "run", "pre-edit", "--client", "claude"],
+        &["hook", "run", "pre-controlled-edit", "--client", "claude"],
         Some(equal_alias.to_string()),
     );
     assert!(allowed.status.success());
@@ -95,7 +98,11 @@ fn missing_identity_denies_and_lifecycle_does_not_persist_raw_id() {
     let first_holds = run(&["--json", "holds"], None);
     assert!(first_holds.status.success());
     let first_holds: serde_json::Value = serde_json::from_slice(&first_holds.stdout).unwrap();
-    let expiry = first_holds[0]["expires_at"].clone();
+    assert_eq!(
+        first_holds.as_array().unwrap().len(),
+        2,
+        "manual and pending coverage are separate"
+    );
     for name in ["session-start", "prompt", "post-tool"] {
         let result = run(
             &["hook", "run", name, "--client", "claude"],
@@ -177,8 +184,10 @@ fn missing_identity_denies_and_lifecycle_does_not_persist_raw_id() {
     let after_holds = run(&["--json", "holds"], None);
     assert!(after_holds.status.success());
     let after_holds: serde_json::Value = serde_json::from_slice(&after_holds.stdout).unwrap();
-    assert_eq!(after_holds.as_array().unwrap().len(), 1);
-    assert_eq!(after_holds[0]["expires_at"], expiry);
+    assert_eq!(
+        after_holds, first_holds,
+        "passive lifecycle hooks must not change either hold"
+    );
     let targets = run(&["--json", "wake", "list"], None);
     assert!(targets.status.success());
     let targets: serde_json::Value = serde_json::from_slice(&targets.stdout).unwrap();
@@ -330,7 +339,7 @@ fn old_home_requires_explicit_fenced_upgrade_and_verified_wal_backup() {
         migrated
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        9
+        10
     );
     assert!(command(&["status"]).status.success());
 }
@@ -340,7 +349,7 @@ fn old_home_requires_explicit_fenced_upgrade_and_verified_wal_backup() {
 /// byte, and gains exactly one admission key.
 #[cfg(unix)]
 #[test]
-fn v8_home_upgrades_to_v9_keeping_history_and_gaining_one_admission_key() {
+fn v8_home_upgrades_to_v10_keeping_history_and_gaining_one_admission_key() {
     use rusqlite::Connection;
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
@@ -450,7 +459,7 @@ fn v8_home_upgrades_to_v9_keeping_history_and_gaining_one_admission_key() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        9
+        10
     );
     assert_eq!(events(&db), history, "the upgrade rewrote history");
     let (keys, length): (i64, i64) = db

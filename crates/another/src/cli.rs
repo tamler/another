@@ -826,10 +826,18 @@ fn init_tracing(serving: bool) {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default));
     // Colour only on a terminal: the daemon's log is a file under launchd.
     use std::io::IsTerminal;
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
+    use tracing_subscriber::prelude::*;
+    // rmcp debug events contain complete arguments and metadata. This layer filter
+    // cannot be overridden by a more specific ANOTHER_LOG directive.
+    let output = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
+        .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
+            !meta.target().starts_with("rmcp")
+        }));
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(output)
         .try_init();
 }
 
@@ -1077,13 +1085,6 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }));
     }
 
-    #[cfg(windows)]
-    if matches!(&cli.command, Command::Session(_)) {
-        anyhow::bail!(
-            "session binding is unsupported on native Windows; this route is unprotected"
-        );
-    }
-    #[cfg(not(windows))]
     if let Command::Session(SessionCmd::Exec { agent, command }) = &cli.command {
         // Resolving a session actor never creates or migrates a home, and is bounded.
         let home = another_home()?;
@@ -1124,6 +1125,8 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     .unwrap_or_default(),
                 projects: store.projects()?,
                 agents: store.agents()?,
+                unknown_controlled_edits: store.unknown_controlled_edits()?,
+                unknown_controlled_edit_count: store.unknown_controlled_edit_count()?,
             };
             emit(json, &status, output::status)
         }
@@ -1808,14 +1811,6 @@ fn hook_command(
 ) -> anyhow::Result<ExitCode> {
     match cmd {
         HookCmd::Run { event, client } => {
-            #[cfg(windows)]
-            {
-                let _ = (event, client);
-                anyhow::bail!(
-                    "session binding is unsupported on native Windows; this route is unprotected"
-                );
-            }
-            #[cfg(not(windows))]
             {
                 // Whatever happens, print what we have and exit 0. The run passes its
                 // safety gates before any route, never creates a home, and is bounded.

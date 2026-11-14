@@ -26,6 +26,8 @@ impl Fixture {
         let home = temp.path().join("home");
         std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/file.rs"), "before").unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
         std::fs::create_dir_all(&home).unwrap();
         let fixture = Self {
             _temp: temp,
@@ -70,9 +72,14 @@ impl Fixture {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let input = json!({"session_id":"catalog-fixture-session", "cwd":self.root,
+        let mut input = json!({"session_id":"catalog-fixture-session", "cwd":self.root,
             "hook_event_name":"PreToolUse", "tool_name":"Edit",
             "tool_input":{"file_path":self.root.join("src/file.rs")}});
+        if event == "pre-controlled-edit" {
+            input["tool_name"] = json!("mcp__another__controlled_edit");
+            input["tool_use_id"] = json!("catalog-call");
+            input["tool_input"] = json!({"project":self.root,"path":"src/file.rs","expected_sha256":another_core::controlled_sha256(b"before"),"replacement":"after"});
+        }
         child
             .stdin
             .take()
@@ -191,7 +198,7 @@ fn frozen_historical_schema_and_legitimate_partial_index_are_accepted() {
         .unwrap()
         .status
         .success());
-    let output = fixture.hook("pre-edit");
+    let output = fixture.hook("pre-controlled-edit");
     assert!(
         output.status.success() && output.stdout.is_empty(),
         "valid partial-index schema should permit the unconflicted guard"

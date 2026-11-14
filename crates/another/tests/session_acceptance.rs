@@ -17,6 +17,9 @@ impl Fixture {
         std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join(".git/config"), "[core]\n\tbare = false\n").unwrap();
+        std::fs::write(root.join("src/shared.rs"), "before").unwrap();
+        std::fs::write(root.join("src/resumed.rs"), "before").unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
         let fixture = Self {
@@ -79,10 +82,10 @@ impl Fixture {
 
     fn edit(&self, session: &str, path: &Path) -> String {
         self.hook(
-            "pre-edit",
+            "pre-controlled-edit",
             &json!({"session_id": session, "cwd": self.root,
-            "hook_event_name": "PreToolUse", "tool_name": "Edit",
-            "tool_input": {"file_path": path}}),
+            "tool_use_id":format!("{session}-{}",path.display()),"tool_name":"mcp__another__controlled_edit",
+            "tool_input": {"project":self.root,"path":path.strip_prefix(&self.root).unwrap(),"expected_sha256":another_core::controlled_sha256(b"before"),"replacement":"after"}}),
         )
     }
 

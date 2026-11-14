@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 pub struct AnotherMcp {
     store: Store,
     tool_router: ToolRouter<Self>,
+    controlled_stdio: bool,
 }
 
 type ToolResult<T> = Result<Json<T>, String>;
@@ -55,9 +56,20 @@ fn tool_error(e: &another_core::Error) -> String {
 
 impl AnotherMcp {
     pub fn new(store: Store) -> Self {
+        let mut tool_router = Self::tool_router();
+        tool_router.remove_route(another_core::CONTROLLED_EDIT_TOOL);
+        Self {
+            store,
+            tool_router,
+            controlled_stdio: false,
+        }
+    }
+
+    pub fn for_stdio(store: Store) -> Self {
         Self {
             store,
             tool_router: Self::tool_router(),
+            controlled_stdio: true,
         }
     }
 
@@ -366,6 +378,16 @@ fn resource_ref(raw: &str) -> another_core::Result<ResourceRef> {
 
 #[tool_router(router = tool_router)]
 impl AnotherMcp {
+    #[tool(
+        description = "Replace one existing literal file through its checked open handle. Requires Another pre-tool admission and matching client call metadata. Call IDs correlate cooperating sessions, not authentication. A confirmed result means full write and sync plus a second checked resolution of the same object and root; pathname stability and later aliases are not guaranteed. Never retry an unknown outcome automatically."
+    )]
+    async fn controlled_edit(
+        &self,
+        Parameters(_edit): Parameters<another_core::ControlledEdit>,
+    ) -> ToolResult<String> {
+        Err("controlled edit requires verified stdio call metadata".into())
+    }
+
     #[tool(description = "Register a project by its absolute path (idempotent). Returns its slug.")]
     async fn ensure_project(
         &self,
@@ -816,6 +838,69 @@ impl ServerHandler for AnotherMcp {
         mut request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        if request.name == another_core::CONTROLLED_EDIT_TOOL {
+            if !self.controlled_stdio {
+                return Err(ErrorData::invalid_params(
+                    "controlled edit is available only on dedicated stdio",
+                    None,
+                ));
+            }
+            let info = context.peer.peer_info().ok_or_else(|| {
+                ErrorData::invalid_params("missing controlled client metadata", None)
+            })?;
+            let (client, field) = match (
+                info.client_info.name.as_str(),
+                info.client_info.version.as_str(),
+            ) {
+                ("claude-code", "2.1.325") => ("claude", "claudecode/toolUseId"),
+                ("codex-mcp-client", "0.169.0") => ("codex", "callId"),
+                _ => {
+                    return Err(ErrorData::invalid_params(
+                        "unsupported controlled client version",
+                        None,
+                    ))
+                }
+            };
+            let meta = &context.meta;
+            if meta
+                .get(if field == "callId" {
+                    "claudecode/toolUseId"
+                } else {
+                    "callId"
+                })
+                .is_some()
+            {
+                return Err(ErrorData::invalid_params(
+                    "ambiguous controlled call metadata",
+                    None,
+                ));
+            }
+            let call = meta
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty() && s.len() <= 512 && !s.chars().any(char::is_control))
+                .ok_or_else(|| ErrorData::invalid_params("invalid controlled call metadata", None))?
+                .to_owned();
+            let edit: another_core::ControlledEdit = serde_json::from_value(
+                serde_json::Value::Object(request.arguments.take().unwrap_or_default()),
+            )
+            .map_err(|_| ErrorData::invalid_params("invalid controlled edit arguments", None))?;
+            let store = self.store.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                crate::controlled_edit::execute(&store, client, &call, &edit)
+            })
+            .await;
+            let content = match result {
+                Ok(Ok(message)) => CallToolResult::success(vec![ContentBlock::text(message)]),
+                Ok(Err(error)) => {
+                    CallToolResult::error(vec![ContentBlock::text(error.to_string())])
+                }
+                Err(_) => CallToolResult::error(vec![ContentBlock::text(
+                    "controlled edit outcome unverified; inspect admissions before retrying",
+                )]),
+            };
+            return Ok(content.into());
+        }
         let peer = context
             .extensions
             .get::<axum::http::request::Parts>()

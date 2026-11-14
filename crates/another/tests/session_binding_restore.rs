@@ -13,6 +13,9 @@ fn missing_binding_for_exact_session_actor_never_creates_a_new_identity() {
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(root.join(".git/config"), "[core]\n\tbare = false\n").unwrap();
+    std::fs::write(root.join("src/original.rs"), "before").unwrap();
+    std::fs::write(root.join("src/other.rs"), "before").unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
 
     let command = |args: &[&str]| {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_another"));
@@ -69,9 +72,10 @@ fn missing_binding_for_exact_session_actor_never_creates_a_new_identity() {
     let sender = start("sender-session");
     let edit = |path: &str| {
         json!({"session_id":"original-session", "cwd":root,
-        "hook_event_name":"PreToolUse", "tool_name":"Edit", "tool_input":{"file_path":root.join(path)}})
+        "tool_use_id":format!("restore-{path}"),"tool_name":"mcp__another__controlled_edit",
+        "tool_input":{"project":root,"path":path,"expected_sha256":another_core::controlled_sha256(b"before"),"replacement":"after"}})
     };
-    let initial = hook("pre-edit", edit("src/original.rs"), None);
+    let initial = hook("pre-controlled-edit", edit("src/original.rs"), None);
     assert!(initial.status.success());
     assert_eq!(initial.stdout, b"");
     let sent = command(&[
@@ -92,8 +96,8 @@ fn missing_binding_for_exact_session_actor_never_creates_a_new_identity() {
     let db = Connection::open(home.join(".another/another.db")).unwrap();
     let actor_id: String = db
         .query_row(
-            "SELECT agent_id FROM agents WHERE address = ?1",
-            [&actor],
+            "SELECT agent_id FROM agents WHERE name=?1 AND project_id=(SELECT project_id FROM projects WHERE slug=?2)",
+            params![actor.split_once('@').unwrap().0,actor.split_once('@').unwrap().1],
             |r| r.get(0),
         )
         .unwrap();
@@ -142,7 +146,7 @@ fn missing_binding_for_exact_session_actor_never_creates_a_new_identity() {
         Some(&actor),
     );
     let after_start = counts(&db);
-    let attempted_edit = hook("pre-edit", edit("src/other.rs"), Some(&actor));
+    let attempted_edit = hook("pre-controlled-edit", edit("src/other.rs"), Some(&actor));
     let after_edit = counts(&db);
     let output = String::from_utf8_lossy(&attempted_edit.stdout);
     assert!(resumed.status.success() && attempted_edit.status.success() && after_start == before && after_edit == before
