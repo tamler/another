@@ -127,3 +127,22 @@ fn looking_up_an_unknown_message_is_not_found() {
     let err = s.message("01NOSUCHMESSAGE0000000000").unwrap_err();
     assert_eq!(err.code(), "not_found", "{err}");
 }
+
+/// adv242: the urgent counts follow the unread state and both readers agree. Reading the
+/// urgent message drops `urgent_unread`, and the hook's `unannounced` digest counts high and
+/// urgent alike, as the inbox does.
+#[test]
+fn adv242_urgent_counts_follow_reads_and_the_hook_digest_counts_high_too() {
+    let s = store();
+    let sent: Vec<Message> = LEVELS.iter().map(|&i| send(&s, i)).collect();
+    let digest = s.unannounced("bob", "", 10).unwrap();
+    assert_eq!((digest.count, digest.urgent), (4, 2), "{digest:?}");
+
+    let urgent_id = sent[3].message_id.clone();
+    s.acknowledge("bob", &[urgent_id], false).unwrap();
+    let inbox = s.inbox("bob", InboxQuery::default()).unwrap();
+    assert_eq!(inbox.unread, 3);
+    assert_eq!(inbox.urgent_unread, 1, "a read urgent message still counts");
+    let digest = s.unannounced("bob", "", 10).unwrap();
+    assert_eq!((digest.count, digest.urgent), (3, 1), "{digest:?}");
+}
