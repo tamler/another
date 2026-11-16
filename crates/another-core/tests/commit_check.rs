@@ -373,6 +373,47 @@ fn a_budget_that_runs_out_while_matching_stops_the_check() {
         .all(|c| c.held.agent == "bob@shop-current"));
 }
 
+/// Review IMPL-R3-1: a lock taken after the open is waited on for at most the cap given to
+/// `open`, not for the whole time the deadline leaves; the read then fails as busy, and the
+/// database is unchanged.
+#[test]
+fn a_lock_wait_keeps_its_cap_under_a_longer_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(Store::open(dir.path()).unwrap());
+    let lock = Connection::open(dir.path().join(DB_FILE)).unwrap();
+    // Rollback journal, so an exclusive lock blocks readers too (WAL readers never wait).
+    lock.pragma_update(None, "journal_mode", "DELETE").unwrap();
+    let count = |db: &Connection| -> i64 {
+        db.query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+            .unwrap()
+    };
+    let events = count(&lock);
+    let reader = CommitReader::open(dir.path(), Duration::from_millis(100)).unwrap();
+    lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let groups = [CommitGroup {
+        dir: path(dir.path()),
+        paths: vec!["a.rs".into()],
+    }];
+    for read in ["project_dirs", "check"] {
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(2);
+        let err = match read {
+            "project_dirs" => reader.project_dirs(deadline).map(|_| ()).unwrap_err(),
+            _ => reader
+                .check(None, &groups, deadline)
+                .map(|_| ())
+                .unwrap_err(),
+        };
+        let took = started.elapsed();
+        assert!(another_core::is_busy_error(&err), "{read}: {err:?}");
+        // 100 ms cap; the slack covers a slow runner, far below the 2 s deadline.
+        assert!(took < Duration::from_millis(700), "{read} waited {took:?}");
+    }
+    lock.execute_batch("ROLLBACK").unwrap();
+    drop(reader);
+    assert_eq!(events, count(&lock), "the check wrote");
+}
+
 #[test]
 fn open_refuses_a_missing_database_and_a_schema_mismatch() {
     let dir = tempfile::tempdir().unwrap();

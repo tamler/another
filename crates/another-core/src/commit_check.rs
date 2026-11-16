@@ -32,6 +32,8 @@ pub const MAX_NAME_BYTES: usize = 4096;
 pub struct CommitReader {
     conn: Connection,
     node_id: String,
+    /// The longest any one lock wait may last, as given to [`CommitReader::open`].
+    busy: Duration,
 }
 
 /// One group of staged paths: the project directory they were grouped under (a registered
@@ -196,7 +198,11 @@ impl CommitReader {
             conn.query_row("SELECT node_id FROM nodes WHERE is_local = 1", [], |r| {
                 r.get(0)
             })?;
-        Ok(CommitReader { conn, node_id })
+        Ok(CommitReader {
+            conn,
+            node_id,
+            busy,
+        })
     }
 
     /// Whether the connection is read-only (always true for a handle from [`Self::open`]).
@@ -224,15 +230,17 @@ impl CommitReader {
         }
     }
 
-    /// Bound this connection's work by `deadline`: lock waits get the time left, and a
-    /// watchdog interrupts statements once it has passed. `None` when the deadline has
+    /// Bound this connection's work by `deadline`: a lock wait lasts at most the cap given
+    /// to [`Self::open`] or the time left, whichever is shorter, and a watchdog interrupts
+    /// statements once the deadline has passed. `None` when the deadline has
     /// already passed or no watchdog could be started; then nothing may be queried.
     fn arm(&self, deadline: Instant) -> Result<Option<Watchdog>> {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             return Ok(None);
         }
-        self.conn.busy_timeout(left)?;
+        // Each lock wait keeps its own cap; the deadline only shortens it (review IMPL-R3-1).
+        self.conn.busy_timeout(self.busy.min(left))?;
         Ok(Watchdog::start(self.conn.get_interrupt_handle(), deadline))
     }
 
@@ -494,16 +502,19 @@ mod tests {
     }
 
     /// A home with `n` projects whose repository links are not cached and whose git
-    /// configs are large (about 240 KB, under the 256 KiB read cap), so working out
-    /// their links takes time. Each has a live hold.
+    /// configs are large but under the 256 KiB read cap, so working out their links
+    /// really parses them and takes time. Each has a live hold.
     fn slow_links(n: usize) -> (tempfile::TempDir, PathBuf, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         let home = root.join("home");
         let store = Store::open(&home).unwrap();
         let config: String = std::iter::once("[core]\n".to_string())
-            .chain((0..60_000).map(|i| format!("\tk{i} = v\n")))
+            .chain((0..20_000).map(|i| format!("\tk{i} = v\n")))
             .collect();
+        // 228,897 bytes. Over the cap, the file would be refused unread (review IMPL-R3-2).
+        assert_eq!(config.len(), 228_897);
+        assert!(config.len() < 256 * 1024);
         let register = |name: &str, project: &Path| {
             store
                 .register_agent(RegisterAgent {
@@ -547,7 +558,7 @@ mod tests {
     /// has passed, whether it passed before the check or during the link work.
     #[test]
     fn no_query_starts_after_the_deadline() {
-        // 40 configs of 240 KB: well over the 1 ms budget below to work out on any machine
+        // 40 configs of 229 KB: well over the 1 ms budget below to parse on any machine
         // (the assertion on `links` makes sure the budget did run out during that work).
         let (_dir, home, main) = slow_links(40);
         let groups = [CommitGroup {
