@@ -214,9 +214,20 @@ pub(crate) fn normalize_pattern(project: &Project, raw: &str) -> Result<String> 
     Ok(pattern)
 }
 
+/// The longest path or glob a hold accepts, in bytes: the usual `PATH_MAX`. Far longer
+/// patterns overflow globset's regex limits, and it panics on those instead of erring.
+pub const MAX_HOLD_PATH_BYTES: usize = 4096;
+
 /// Normalize a path without interpreting filename characters as glob syntax.
 fn normalize_path(project: &Project, raw: &str) -> Result<String> {
     let raw = raw.trim();
+    // Before anything else, and without echoing it: the path may be megabytes long.
+    if raw.len() > MAX_HOLD_PATH_BYTES {
+        return Err(Error::Invalid(format!(
+            "a held path is longer than {MAX_HOLD_PATH_BYTES} bytes ({} bytes)",
+            raw.len()
+        )));
+    }
     #[cfg(windows)]
     let (raw, root_path) = (raw.replace('\\', "/"), project.abs_path.replace('\\', "/"));
     #[cfg(windows)]
