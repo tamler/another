@@ -211,3 +211,39 @@ async fn threads_without_an_id_and_unknown_tools() {
         message(&unknown)
     );
 }
+
+/// The token's own project must also be inside its globs: a token for `alice@shop` whose
+/// globs leave out `shop` cannot register `alice` there, though the slug matches.
+#[tokio::test]
+async fn a_token_cannot_register_into_its_project_outside_its_globs() {
+    let srv = start().await;
+    let elsewhere = std::path::Path::new(&srv.work)
+        .parent()
+        .unwrap()
+        .with_file_name("elsewhere")
+        .join("*")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let token = srv
+        .store
+        .create_token("alice@shop", &[elsewhere], None, None)
+        .unwrap();
+    let client = connect(&srv.base, &token.secret).await;
+    let res = call(
+        &client,
+        "register_agent",
+        json!({ "name": "alice", "program": "claude", "project": srv.work }),
+    )
+    .await;
+    assert_eq!(
+        error_code(&res).as_deref(),
+        Some("forbidden"),
+        "{}",
+        message(&res)
+    );
+    assert!(
+        message(&res).contains("outside this connection's project globs"),
+        "{}",
+        message(&res)
+    );
+}
