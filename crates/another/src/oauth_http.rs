@@ -930,12 +930,38 @@ fn ip_allowed(ip: IpAddr, allow_loopback: bool) -> bool {
             if allow_loopback && v.is_loopback() {
                 return true;
             }
-            !(v.is_loopback()
-                || v.is_unspecified()
-                || v.is_multicast()
+            if v.is_loopback() || v.is_unspecified() {
+                return false;
+            }
+            // Never a loopback allowance here: only `::ffff:127.0.0.1` reaches loopback.
+            if let Some(v4) = embedded_ipv4(v) {
+                return ip_allowed(IpAddr::V4(v4), false);
+            }
+            let s = v.segments();
+            !(v.is_multicast()
                 || v.is_unicast_link_local()
-                || v.is_unique_local())
+                || v.is_unique_local()
+                // Local-use NAT64, 64:ff9b:1::/48 (RFC 8215): never global, and its IPv4
+                // address is not in the last 32 bits, so refuse it all.
+                || (s[0] == 0x64 && s[1] == 0xff9b && s[2] == 1)
+                // Site-local, fec0::/10 (deprecated, RFC 3879).
+                || (s[0] & 0xffc0) == 0xfec0)
         }
+    }
+}
+
+/// The IPv4 address an IPv6 address carries and routes to, other than `::ffff:a.b.c.d`:
+/// NAT64 64:ff9b::/96 (RFC 6052), IPv4-compatible ::/96 (deprecated, RFC 4291) and 6to4
+/// 2002::/16 (RFC 3056). A DNS64 resolver turns an A-only host into the NAT64 form (queue
+/// item 52, FINDINGS-195-b).
+fn embedded_ipv4(v: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
+    let s = v.segments();
+    let last = || std::net::Ipv4Addr::from(((s[6] as u32) << 16) | s[7] as u32);
+    match s {
+        [0x64, 0xff9b, 0, 0, 0, 0, _, _] => Some(last()),
+        [0, 0, 0, 0, 0, 0, _, _] => Some(last()),
+        [0x2002, hi, lo, ..] => Some(std::net::Ipv4Addr::from(((hi as u32) << 16) | lo as u32)),
+        _ => None,
     }
 }
 
@@ -1494,6 +1520,44 @@ mod tests {
         assert!(map.len() <= RATE_LIMIT_CAP);
         assert!(map.contains_key("live"));
         assert_eq!(map["live"].tokens, 0);
+    }
+
+    /// FINDINGS-195-b (queue item 52): IPv6 forms that carry an IPv4 address get the IPv4
+    /// rules, local-use NAT64 and site-local are refused, and loopback mode does not admit a
+    /// loopback address hidden inside them.
+    #[test]
+    fn ipv6_forms_that_embed_a_local_ipv4_address_are_refused() {
+        let allowed = |ip: &str, loopback: bool| ip_allowed(ip.parse().unwrap(), loopback);
+        for (ip, what) in [
+            ("64:ff9b::a9fe:a9fe", "NAT64 -> 169.254.169.254"),
+            ("64:ff9b::7f00:1", "NAT64 -> 127.0.0.1"),
+            ("64:ff9b::a00:1", "NAT64 -> 10.0.0.1"),
+            ("64:ff9b:1::a00:1", "local-use NAT64 (RFC 8215)"),
+            ("64:ff9b:1:a9fe:a9:fe00::", "local-use NAT64, /48 layout"),
+            ("::7f00:1", "IPv4-compatible -> 127.0.0.1"),
+            ("::a9fe:a9fe", "IPv4-compatible -> 169.254.169.254"),
+            ("2002:a9fe:a9fe::1", "6to4 -> 169.254.169.254"),
+            ("2002:7f00:1::1", "6to4 -> 127.0.0.1"),
+            ("2002:c0a8:105::1", "6to4 -> 192.168.1.5"),
+            ("fec0::1", "site-local (deprecated)"),
+            ("feff::1", "site-local, top of fec0::/10"),
+        ] {
+            assert!(!allowed(ip, false), "{ip} ({what}) must be refused");
+        }
+        // Only `::ffff:127.0.0.1` is really loopback; the other spellings are not.
+        assert!(allowed("::ffff:127.0.0.1", true));
+        for ip in ["64:ff9b::7f00:1", "::7f00:1", "2002:7f00:1::1"] {
+            assert!(!allowed(ip, true), "{ip} is not loopback");
+        }
+        // Public addresses in the same spaces stay allowed.
+        for ip in [
+            "64:ff9b::808:808",
+            "2002:808:808::1",
+            "2606:4700:4700::1111",
+            "fe00::1",
+        ] {
+            assert!(allowed(ip, false), "{ip} is public");
+        }
     }
 
     #[test]
