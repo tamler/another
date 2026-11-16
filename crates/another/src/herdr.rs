@@ -16,18 +16,22 @@
 //! show up in `herdr pane get` and `herdr agent list` and can be rendered in the sidebar as
 //! `$another_state` and `$another`.
 //!
-//! Reports run in the background and their failures are ignored. The latest state per pane
-//! is cached under `$ANOTHER_HOME/hooks/state/`, so an unchanged state is not sent again
-//! (only refreshed before its tokens expire) and every report's `--seq` is higher than the
-//! last one.
+//! Reports run in the background and their failures are ignored. The last report per pane
+//! is kept in a small SQLite file, `$ANOTHER_HOME/hooks/state/herdr-status.sqlite`
+//! (separate from Another's database). Deciding whether to send and reserving the
+//! sequence number happen in one write transaction, so parallel hooks in a pane never send
+//! the same `--seq` and a backward clock step never lowers it:
+//! `seq = max(now in microseconds, last + 1)`. An unchanged state is not sent again (only
+//! refreshed before its tokens expire), and a report whose `herdr` could not be started is
+//! sent again by the next hook.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use another_core::{AgentState, AgentStatus};
-use serde::{Deserialize, Serialize};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 /// The `--source` of every report.
 pub const SOURCE: &str = "another";
@@ -39,6 +43,10 @@ pub const NOTE_TOKEN: &str = "another";
 pub const TOKEN_TTL_MS: u64 = 30 * 60 * 1000;
 /// An unchanged state is reported again after this long, before its tokens expire.
 const REFRESH_MS: u64 = 10 * 60 * 1000;
+/// Longest a hook waits for another hook's reservation; past it the report is skipped.
+const LOCK_WAIT: Duration = Duration::from_millis(200);
+/// The cache of last reports, one row per pane.
+const CACHE_FILE: &str = "herdr-status.sqlite";
 
 /// The Herdr pane this process runs in.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,14 +73,6 @@ impl Pane {
         }
         Some(Pane { bin, id })
     }
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct Last {
-    state: Option<String>,
-    note: Option<String>,
-    seq: u64,
-    at_ms: u64,
 }
 
 /// What to send: the state token and the blocked note, or `None` to clear both.
@@ -126,19 +126,27 @@ fn args(pane: &str, state: Option<&str>, note: Option<&str>, seq: u64) -> Vec<St
     a
 }
 
-fn cache_path(another_home: &Path, pane: &str) -> PathBuf {
-    let mut safe = String::from("herdr-");
-    for b in pane.bytes() {
-        if b.is_ascii_alphanumeric() || b == b'-' {
-            safe.push(b as char);
-        } else {
-            safe.push_str(&format!("_{b:02x}"));
-        }
+fn cache_path(another_home: &Path) -> PathBuf {
+    another_home.join("hooks").join("state").join(CACHE_FILE)
+}
+
+fn open_cache(path: &Path) -> rusqlite::Result<Connection> {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
     }
-    another_home
-        .join("hooks")
-        .join("state")
-        .join(format!("{safe}.json"))
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(LOCK_WAIT)?;
+    // `at_ms` 0 marks a report whose `herdr` could not be started: send it again.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS panes (
+             pane  TEXT PRIMARY KEY,
+             state TEXT,
+             note  TEXT,
+             seq   INTEGER NOT NULL,
+             at_ms INTEGER NOT NULL
+         )",
+    )?;
+    Ok(conn)
 }
 
 fn now_micros() -> u64 {
@@ -148,40 +156,81 @@ fn now_micros() -> u64 {
         .unwrap_or(0)
 }
 
+/// In one write transaction: decide whether `state`/`note` must be sent for `pane`, and if
+/// so record it and reserve its sequence number, `max(now_us, last + 1)`. Parallel callers
+/// are serialized by SQLite's write lock, so each reservation is above every earlier one,
+/// whatever the clock says.
+fn reserve(
+    conn: &mut Connection,
+    pane: &str,
+    state: Option<&str>,
+    note: Option<&str>,
+    now_us: u64,
+) -> rusqlite::Result<Option<u64>> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let last: Option<(Option<String>, Option<String>, i64, i64)> = tx
+        .query_row(
+            "SELECT state, note, seq, at_ms FROM panes WHERE pane = ?1",
+            [pane],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    let now_ms = now_us / 1000;
+    let last_seq = match &last {
+        Some((last_state, last_note, seq, at_ms)) => {
+            let unchanged = last_state.as_deref() == state && last_note.as_deref() == note;
+            let delivered = *at_ms != 0;
+            let fresh = state.is_none() || now_ms.saturating_sub(*at_ms as u64) < REFRESH_MS;
+            if unchanged && delivered && fresh {
+                return Ok(None);
+            }
+            u64::try_from(*seq).unwrap_or(0)
+        }
+        None => 0,
+    };
+    // Sequence numbers are stored as SQLite integers; past `i64::MAX` nothing can follow.
+    let Some(seq) = last_seq
+        .checked_add(1)
+        .map(|next| next.max(now_us))
+        .filter(|s| i64::try_from(*s).is_ok())
+    else {
+        return Ok(None);
+    };
+    tx.execute(
+        "INSERT INTO panes (pane, state, note, seq, at_ms) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(pane) DO UPDATE SET state = excluded.state, note = excluded.note,
+           seq = excluded.seq, at_ms = excluded.at_ms",
+        params![pane, state, note, seq as i64, now_ms.max(1) as i64],
+    )?;
+    tx.commit()?;
+    Ok(Some(seq))
+}
+
 /// Report `status` for `pane` (`None`, or an `unknown` state, clears the tokens). Returns
-/// the arguments sent, or `None` when nothing needed sending. Never fails: a missing or
-/// failing `herdr` is ignored.
+/// the arguments sent, or `None` when nothing needed sending or the cache could not be
+/// used within [`LOCK_WAIT`]. Never fails: a missing or failing `herdr` is ignored.
 pub fn report(
     another_home: &Path,
     pane: &Pane,
     status: Option<&AgentStatus>,
 ) -> Option<Vec<String>> {
     let (state, note) = tokens(status);
-    let path = cache_path(another_home, &pane.id);
-    let last: Last = std::fs::read(&path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default();
-    let now_us = now_micros();
-    let now_ms = now_us / 1000;
-    let unchanged = last.state.as_deref() == state && last.note == note;
-    if unchanged && (state.is_none() || now_ms.saturating_sub(last.at_ms) < REFRESH_MS) {
-        return None;
-    }
-    let seq = now_us.max(last.seq + 1);
-    // Record first, so parallel hooks in the same pane do not all send.
-    let next = Last {
-        state: state.map(str::to_string),
-        note: note.clone(),
-        seq,
-        at_ms: now_ms,
+    let path = cache_path(another_home);
+    let mut conn = match open_cache(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!(error = %e, "herdr status cache unavailable");
+            return None;
+        }
     };
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(bytes) = serde_json::to_vec(&next) {
-        let _ = std::fs::write(&path, bytes);
-    }
+    let seq = match reserve(&mut conn, &pane.id, state, note.as_deref(), now_micros()) {
+        Ok(Some(seq)) => seq,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::debug!(error = %e, "herdr status report skipped");
+            return None;
+        }
+    };
     let argv = args(&pane.id, state, note.as_deref(), seq);
     // In the background: the hook does not wait for Herdr, and Herdr's answer is unused.
     let spawned = Command::new(&pane.bin)
@@ -191,7 +240,12 @@ pub fn report(
         .stderr(Stdio::null())
         .spawn();
     if let Err(e) = spawned {
-        tracing::debug!(error = %e, "herdr status report skipped");
+        tracing::debug!(error = %e, "herdr status report not started");
+        // Not delivered: let the next hook send it again, unless a later report followed.
+        let _ = conn.execute(
+            "UPDATE panes SET at_ms = 0 WHERE pane = ?1 AND seq = ?2",
+            params![pane.id, seq as i64],
+        );
     }
     Some(argv)
 }
@@ -298,11 +352,34 @@ mod tests {
         }
     }
 
+    /// A `herdr` that starts and exits 0.
+    fn fake_herdr(dir: &Path) -> PathBuf {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let bin = dir.join("herdr");
+            std::fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            bin
+        }
+        #[cfg(windows)]
+        {
+            let bin = dir.join("herdr.cmd");
+            std::fs::write(&bin, "@exit /b 0\r\n").unwrap();
+            bin
+        }
+    }
+
+    fn seq_of(argv: &[String]) -> u64 {
+        let i = argv.iter().position(|x| x == "--seq").unwrap();
+        argv[i + 1].parse().unwrap()
+    }
+
     #[test]
     fn reports_coalesce_and_sequence_numbers_only_grow() {
         let dir = tempfile::tempdir().unwrap();
         let pane = Pane {
-            bin: dir.path().join("no-such-herdr"),
+            bin: fake_herdr(dir.path()),
             id: "w1:p1".into(),
         };
         let working = status(AgentState::Working, None);
@@ -315,31 +392,106 @@ mod tests {
         let second = report(dir.path(), &pane, Some(&blocked)).expect("a change is sent");
         let cleared = report(dir.path(), &pane, None).expect("clearing is sent");
         assert!(report(dir.path(), &pane, None).is_none(), "already clear");
-        let seq = |a: &[String]| -> u64 {
-            let i = a.iter().position(|x| x == "--seq").unwrap();
-            a[i + 1].parse().unwrap()
-        };
-        assert!(seq(&first) < seq(&second) && seq(&second) < seq(&cleared));
+        assert!(seq_of(&first) < seq_of(&second) && seq_of(&second) < seq_of(&cleared));
 
-        // A cached sequence number from a clock that ran ahead still only grows.
-        let path = cache_path(dir.path(), &pane.id);
-        let ahead = Last {
-            state: None,
-            note: None,
-            seq: u64::MAX / 2,
-            at_ms: 0,
+        // Panes are sequenced separately; a pane id is only a key, never a path.
+        let other = Pane {
+            bin: pane.bin.clone(),
+            id: "w1:p2/../x".into(),
         };
-        std::fs::write(&path, serde_json::to_vec(&ahead).unwrap()).unwrap();
-        let next = report(dir.path(), &pane, Some(&working)).unwrap();
-        assert_eq!(seq(&next), u64::MAX / 2 + 1);
+        assert!(report(dir.path(), &other, Some(&working)).is_some());
+        assert!(report(dir.path(), &other, Some(&working)).is_none());
+        let state_dir = dir.path().join("hooks").join("state");
+        let files: Vec<String> = std::fs::read_dir(&state_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.starts_with(CACHE_FILE) || n == CACHE_FILE)
+            .collect();
+        assert_eq!(files, [CACHE_FILE]);
     }
 
     #[test]
-    fn a_pane_id_is_a_safe_file_name() {
-        let p = cache_path(Path::new("/h"), "w1:p1/../x");
-        assert_eq!(
-            p.file_name().unwrap().to_str().unwrap(),
-            "herdr-w1_3ap1_2f_2e_2e_2fx.json"
+    fn a_cached_sequence_ahead_of_the_clock_only_grows_until_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let pane = Pane {
+            bin: fake_herdr(dir.path()),
+            id: "w1:p1".into(),
+        };
+        let working = status(AgentState::Working, None);
+        let ahead = i64::MAX as u64 - 1;
+        seed_last(dir.path(), "w1:p1", ahead);
+        let next = report(dir.path(), &pane, Some(&working)).unwrap();
+        assert_eq!(seq_of(&next), ahead + 1);
+        // At the largest storable number nothing more can be sent; nothing panics.
+        assert!(report(dir.path(), &pane, None).is_none());
+    }
+
+    #[test]
+    fn a_report_whose_herdr_cannot_start_is_sent_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = Pane {
+            bin: dir.path().join("no-such-herdr"),
+            id: "w1:p1".into(),
+        };
+        let working = status(AgentState::Working, None);
+        let first = report(dir.path(), &missing, Some(&working)).expect("sent");
+        let again = report(dir.path(), &missing, Some(&working)).expect("not delivered: resent");
+        assert!(seq_of(&again) > seq_of(&first));
+        let found = Pane {
+            bin: fake_herdr(dir.path()),
+            id: "w1:p1".into(),
+        };
+        assert!(report(dir.path(), &found, Some(&working)).is_some());
+        assert!(
+            report(dir.path(), &found, Some(&working)).is_none(),
+            "delivered: coalesced"
         );
+    }
+
+    /// Record `seq` as the pane's last report, as an earlier run would have.
+    fn seed_last(another_home: &Path, pane: &str, seq: u64) {
+        let conn = open_cache(&cache_path(another_home)).unwrap();
+        conn.execute(
+            "INSERT INTO panes (pane, state, note, seq, at_ms) VALUES (?1, NULL, NULL, ?2, 1)",
+            params![pane, seq as i64],
+        )
+        .unwrap();
+    }
+
+    /// #144 review R1 (P2): parallel hooks in one pane, after the clock stepped back an
+    /// hour, must still send distinct sequence numbers above the last one sent.
+    #[test]
+    fn parallel_reports_after_a_backward_clock_step_get_unique_increasing_seqs() {
+        use std::sync::{Arc, Barrier};
+        let dir = tempfile::tempdir().unwrap();
+        let ahead = now_micros() + 3_600_000_000;
+        seed_last(dir.path(), "w1:p1", ahead);
+        let callers = 32;
+        let barrier = Arc::new(Barrier::new(callers));
+        let threads: Vec<_> = (0..callers)
+            .map(|i| {
+                let home = dir.path().to_owned();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let pane = Pane {
+                        bin: home.join("no-such-herdr"),
+                        id: "w1:p1".into(),
+                    };
+                    let blocked = status(AgentState::Blocked, Some(&format!("block {i}")));
+                    barrier.wait();
+                    let argv = report(&home, &pane, Some(&blocked)).expect("a new state is sent");
+                    let at = argv.iter().position(|a| a == "--seq").unwrap();
+                    argv[at + 1].parse::<u64>().unwrap()
+                })
+            })
+            .collect();
+        let mut seqs: Vec<u64> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        assert!(
+            seqs.iter().all(|s| *s > ahead),
+            "a sequence fell back to the clock: {seqs:?}"
+        );
+        seqs.sort_unstable();
+        seqs.dedup();
+        assert_eq!(seqs.len(), callers, "parallel reports reused a sequence");
     }
 }
