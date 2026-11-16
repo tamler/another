@@ -1855,8 +1855,8 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let r = store.sweep()?;
             emit(json, &r, |r| {
                 format!(
-                    "expired {} hold(s), {} request(s) went stale",
-                    r.expired_holds, r.stale_requests
+                    "expired {} hold(s) and {} resource lease(s), {} request(s) went stale",
+                    r.expired_holds, r.expired_leases, r.stale_requests
                 )
             })
         }

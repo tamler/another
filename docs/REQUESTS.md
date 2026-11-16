@@ -136,7 +136,7 @@ Past the due time the request becomes `stale`. `another sweep` applies that now;
 
 ```text
 $ another sweep
-expired 0 hold(s), 1 request(s) went stale
+expired 0 hold(s) and 0 resource lease(s), 1 request(s) went stale
 $ another requests --status stale
 stale     worker@shop      Rotate the log  (from lead@shop due 2026-11-12T09:33:29.983Z)  [01M77HNNKQAN037F028JXCZKH7]
 ```
