@@ -318,21 +318,24 @@ fn an_older_schema_warns_and_a_newer_one_fails_without_touching_the_file() {
 fn a_negative_schema_version_fails_and_is_not_offered_a_migration() {
     let fx = Fx::new();
     fx.init();
-    set_user_version(&fx.db(), -1);
-    let before = sha(&fx.db());
-    let (code, r) = fx.doctor();
-    assert_eq!(code, Some(1), "{r}");
-    assert_eq!(status(&r, "database"), "fail", "{r}");
-    let detail = row(&r, "database")["detail"].as_str().unwrap().to_string();
-    let fix = row(&r, "database")["fix"].as_str().unwrap().to_string();
-    assert!(detail.contains("-1 is not valid"), "{detail}");
-    assert!(
-        !detail.contains("migrates") && !fix.contains("migrates"),
-        "{r}"
-    );
-    assert!(fix.contains("--home or ANOTHER_HOME"), "{fix}");
-    assert_eq!(sha(&fx.db()), before, "doctor changed the database");
-    assert_eq!(user_version(&fx.db()), -1);
+    // `user_version` is a signed 32-bit value: test past -1 down to its minimum.
+    for v in [-1, -2, i64::from(i32::MIN)] {
+        set_user_version(&fx.db(), v);
+        let before = sha(&fx.db());
+        let (code, r) = fx.doctor();
+        assert_eq!(code, Some(1), "{v}: {r}");
+        assert_eq!(status(&r, "database"), "fail", "{v}: {r}");
+        let detail = row(&r, "database")["detail"].as_str().unwrap().to_string();
+        let fix = row(&r, "database")["fix"].as_str().unwrap().to_string();
+        assert!(detail.contains(&format!("{v} is not valid")), "{detail}");
+        assert!(
+            !detail.contains("migrates") && !fix.contains("migrates"),
+            "{v}: {r}"
+        );
+        assert!(fix.contains("--home or ANOTHER_HOME"), "{fix}");
+        assert_eq!(sha(&fx.db()), before, "doctor changed the database");
+        assert_eq!(user_version(&fx.db()), v);
+    }
 }
 
 #[test]
