@@ -3,8 +3,9 @@
 //! capped inbox + activity digest.
 //!
 //! Every client is treated the same way: session start registers the agent (if needed),
-//! records `session.started` and prints a digest; each prompt renews holds and mentions
-//! only mail that arrived since the last notice; session end releases holds.
+//! records `session.started` and prints a digest; prompts mention mail that arrived since
+//! the last notice. Passive lifecycle hooks do not renew or release holds. Explicit
+//! releases and expiry end holds and recheck waits.
 //!
 //! Two hooks run inside a task, between tool calls, where the client supports them:
 //! `post-tool` mentions new mail mid-task (read only, nothing printed when nothing is new),

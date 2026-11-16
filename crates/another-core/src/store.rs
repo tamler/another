@@ -150,6 +150,10 @@ impl Store {
         use std::io::{Read, Write};
         #[cfg(unix)]
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        #[cfg(windows)]
+        use std::os::windows::io::AsHandle;
+        #[cfg(windows)]
+        use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_READ, FILE_GENERIC_WRITE};
 
         if !writer_fence_confirmed {
             return Err(Error::Invalid(
@@ -188,13 +192,12 @@ impl Store {
         // Refuse a home whose schema is foreign at its stated version (for example one
         // made by a build that numbered admissions v9/v10) before any backup is written.
         // `migrate_offline` checks again inside its transaction.
-        if let Some(manifest) = schema_manifest(version) {
-            verify_schema_against(&source, manifest, None).map_err(|_| {
-                Error::Invalid(format!(
-                    "home schema does not match v{version} as this build knows it; nothing was written. Preserve the home and inspect it before upgrading"
-                ))
-            })?;
-        }
+        let manifest = upgrade_source_manifest(version)?;
+        verify_schema_against(&source, manifest, None).map_err(|_| {
+            Error::Invalid(format!(
+                "home schema does not match v{version} as this build knows it; nothing was written. Preserve the home and inspect it before upgrading"
+            ))
+        })?;
         let node: String =
             source.query_row("SELECT node_id FROM nodes WHERE is_local = 1", [], |r| {
                 r.get(0)
@@ -284,7 +287,20 @@ impl Store {
             }
         }
         drop(destination);
+        #[cfg(unix)]
         let mut file = std::fs::File::open(&backup_path)?;
+        // SQLite's write handle is closed before taking this read/write, non-share-write
+        // handle. The retained directory and database pins prevent replacement.
+        #[cfg(windows)]
+        let mut file = {
+            let file = backup_pin.file(std::ffi::OsStr::new(DB_FILE), true, false)?;
+            crate::windows_home::inspect_private_handle(
+                file.as_handle(),
+                crate::windows_home::ObjectKind::RegularFile,
+                FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+            )?;
+            file
+        };
         file.sync_all()?;
         let mut hash = Sha256::new();
         let mut bytes = [0_u8; 8192];
@@ -296,11 +312,22 @@ impl Store {
             hash.update(&bytes[..n]);
         }
         let metadata = serde_json::json!({"schema_version": version, "node_id": node, "database_sha256": format!("{:x}", hash.finalize())});
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
         #[cfg(unix)]
-        options.mode(0o600);
-        let mut record = options.open(backup_dir.join("backup.json"))?;
+        let mut record = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(backup_dir.join("backup.json"))?;
+        #[cfg(windows)]
+        let mut record = {
+            let file = backup_pin.file(std::ffi::OsStr::new("backup.json"), true, true)?;
+            crate::windows_home::inspect_private_handle(
+                file.as_handle(),
+                crate::windows_home::ObjectKind::RegularFile,
+                FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+            )?;
+            file
+        };
         writeln!(record, "{metadata}")?;
         record.sync_all()?;
         drop(record);
@@ -1643,6 +1670,14 @@ fn schema_manifest(version: i64) -> Option<&'static str> {
     }
 }
 
+fn upgrade_source_manifest(version: i64) -> Result<&'static str> {
+    schema_manifest(version).ok_or_else(|| {
+        Error::Invalid(format!(
+            "source schema v{version} has no recognized catalog; preserve the home and inspect it before upgrading"
+        ))
+    })
+}
+
 /// Validate the entire catalog and its structural metadata against the checked-in profile
 /// of the schema this build opens. Unknown profiles refuse.
 fn verify_schema(conn: &Connection, deadline: Option<std::time::Instant>) -> Result<()> {
@@ -1826,10 +1861,8 @@ fn migrate_offline(
                 .into(),
         ));
     }
-    // A home at a version with a checked-in catalog is migrated only if it matches it.
-    if let Some(manifest) = schema_manifest(version) {
-        verify_schema_against(&tx, manifest, None)?;
-    }
+    // Require the source catalog again under the writer lock, even for direct callers.
+    verify_schema_against(&tx, upgrade_source_manifest(version)?, None)?;
     for index in version as usize..MIGRATIONS.len() {
         apply_migration(&tx, index)?;
     }
@@ -2821,7 +2854,10 @@ mod upgrade_tests {
         drop(Store::open(&home).unwrap());
         let db = home.join(DB_FILE);
         let source = Connection::open(&db).unwrap();
-        source.execute_batch("DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE request_holds; DROP TABLE hold_waits; DROP TABLE announcements; PRAGMA user_version=7; CREATE TABLE preserved(v TEXT); INSERT INTO preserved VALUES ('unchanged');").unwrap();
+        super::hold_upgrade_tests::reduce_to_v8(&source);
+        source
+            .execute("UPDATE nodes SET display_name='unchanged'", [])
+            .unwrap();
         drop(source);
         let mut called = false;
         let result = Store::upgrade_offline_with_parent_sync(&home, &backup, true, |parent| {
@@ -2834,7 +2870,7 @@ mod upgrade_tests {
                 source
                     .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                     .unwrap(),
-                7
+                8
             );
             Err(std::io::Error::other("injected sync failure"))
         });
@@ -2848,11 +2884,12 @@ mod upgrade_tests {
             source
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            7
+            8
         );
         assert_eq!(
             source
-                .query_row("SELECT v FROM preserved", [], |r| r.get::<_, String>(0))
+                .query_row("SELECT display_name FROM nodes WHERE is_local=1", [], |r| r
+                    .get::<_, String>(0))
                 .unwrap(),
             "unchanged"
         );
@@ -2866,9 +2903,7 @@ mod upgrade_tests {
         drop(Store::open(&home).unwrap());
         let db = home.join(DB_FILE);
         let source = Connection::open(&db).unwrap();
-        source
-            .execute_batch("DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE request_holds; DROP TABLE hold_waits; DROP TABLE announcements; PRAGMA user_version=7;")
-            .unwrap();
+        super::hold_upgrade_tests::reduce_to_v8(&source);
         drop(source);
         let mut called = false;
         Store::upgrade_offline_with_parent_sync(&home, &backup, true, |parent| {
@@ -2880,7 +2915,7 @@ mod upgrade_tests {
                 source
                     .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                     .unwrap(),
-                7
+                8
             );
             std::fs::File::open(parent)?.sync_all()
         })
@@ -2902,9 +2937,7 @@ mod upgrade_tests {
         drop(Store::open(&home).unwrap());
         let db = home.join(DB_FILE);
         let source = Connection::open(&db).unwrap();
-        source
-            .execute_batch("DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE request_holds; DROP TABLE hold_waits; DROP TABLE announcements; PRAGMA user_version=7;")
-            .unwrap();
+        super::hold_upgrade_tests::reduce_to_v8(&source);
         let version: i64 = source
             .pragma_query_value(None, "data_version", |r| r.get(0))
             .unwrap();
@@ -2915,25 +2948,97 @@ mod upgrade_tests {
             .unwrap();
         let writer = Connection::open(&db).unwrap();
         writer
-            .execute_batch(
-                "CREATE TABLE intervening(v TEXT); INSERT INTO intervening VALUES ('newer');",
-            )
+            .execute("UPDATE nodes SET display_name='newer' WHERE is_local=1", [])
             .unwrap();
         let mut source = source;
-        let result = migrate_offline(&mut source, 7, version, &node);
-        assert!(result.is_err());
+        let result = migrate_offline(&mut source, 8, version, &node);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("source changed during backup"));
         assert_eq!(
             source
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            7
+            8
         );
         assert_eq!(
             source
-                .query_row("SELECT v FROM intervening", [], |r| r.get::<_, String>(0))
+                .query_row("SELECT display_name FROM nodes WHERE is_local=1", [], |r| r
+                    .get::<_, String>(0))
                 .unwrap(),
             "newer"
         );
+    }
+
+    #[test]
+    fn missing_source_catalog_is_refused_inside_the_migration_transaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let (home, node) = home_at(temp.path(), 7);
+        let mut db = Connection::open(home.join(DB_FILE)).unwrap();
+        let data = db
+            .pragma_query_value(None, "data_version", |r| r.get(0))
+            .unwrap();
+        let error = migrate_offline(&mut db, 7, data, &node).unwrap_err();
+        assert!(
+            error.to_string().contains("no recognized catalog"),
+            "{error}"
+        );
+        assert!(db.is_autocommit());
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            7
+        );
+    }
+
+    #[test]
+    fn failure_after_a_migration_rolls_back_the_recognized_source() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        let temp = tempfile::tempdir().unwrap();
+        let (home, node) = home_at(temp.path(), 8);
+        let mut db = Connection::open(home.join(DB_FILE)).unwrap();
+        let data = db
+            .pragma_query_value(None, "data_version", |r| r.get(0))
+            .unwrap();
+        // Refuse v10's CREATE after v9 has run, without changing the exact v8 catalog.
+        let reached = Arc::new(AtomicBool::new(false));
+        let seen = reached.clone();
+        db.authorizer(Some(move |ctx: AuthContext<'_>| {
+            if matches!(
+                ctx.action,
+                AuthAction::CreateTable {
+                    table_name: "request_holds"
+                }
+            ) {
+                seen.store(true, Ordering::Relaxed);
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }))
+        .unwrap();
+        let error = migrate_offline(&mut db, 8, data, &node).unwrap_err();
+        assert!(matches!(error, Error::Db(_)), "{error}");
+        assert!(reached.load(Ordering::Relaxed));
+        db.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .unwrap();
+        assert!(db.is_autocommit());
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name='hold_waits'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        verify_schema_against(&db, schema_manifest(8).unwrap(), None).unwrap();
     }
 }
 
@@ -2941,8 +3046,103 @@ mod upgrade_tests {
 #[cfg(all(test, any(unix, windows)))]
 mod hold_upgrade_tests {
     use super::*;
-    #[cfg(unix)]
     use crate::{AcquireHolds, NewRequest, Program, RegisterAgent, SendMessage};
+
+    pub(super) fn reduce_to_v8(db: &Connection) {
+        db.execute_batch("DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE hold_waits; DROP TABLE request_holds; ALTER TABLE announcements RENAME TO announcements_v12;").unwrap();
+        db.execute_batch(MIGRATIONS[7]).unwrap();
+        db.execute_batch("INSERT INTO announcements SELECT agent_id,message_id,channel,announced_at FROM announcements_v12; DROP TABLE announcements_v12; PRAGMA user_version=8;").unwrap();
+        verify_schema_against(db, schema_manifest(8).unwrap(), None).unwrap();
+    }
+
+    #[test]
+    fn recognized_sources_publish_readable_verified_backups_and_restore_in_isolation() {
+        use sha2::{Digest, Sha256};
+        for source in [8, 9, 10] {
+            let temp = tempfile::tempdir().unwrap();
+            let home = temp.path().join("home");
+            let store = Store::open(&home).unwrap();
+            let node = store.node_id().to_owned();
+            drop(store);
+            let mut db = Connection::open(home.join(DB_FILE)).unwrap();
+            reduce_to_v8(&db);
+            let tx = db.transaction().unwrap();
+            for index in 8..source {
+                apply_migration(&tx, index).unwrap();
+            }
+            tx.pragma_update(None, "user_version", source as i64)
+                .unwrap();
+            tx.execute(
+                "UPDATE nodes SET display_name='restore-marker' WHERE is_local=1",
+                [],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            verify_schema_against(&db, schema_manifest(source as i64).unwrap(), None).unwrap();
+            drop(db);
+            let backup = temp.path().join("backup");
+            Store::upgrade_offline(&home, &backup, true).unwrap();
+            let metadata: Value =
+                serde_json::from_slice(&std::fs::read(backup.join("backup.json")).unwrap())
+                    .unwrap();
+            assert_eq!(metadata["schema_version"], source);
+            assert_eq!(metadata["node_id"], node);
+            let bytes = std::fs::read(backup.join(DB_FILE)).unwrap();
+            let digest = format!("{:x}", Sha256::digest(&bytes));
+            assert_eq!(metadata["database_sha256"], digest);
+            let saved = Connection::open(backup.join(DB_FILE)).unwrap();
+            assert_eq!(version(&saved), source as i64);
+            assert_eq!(
+                saved
+                    .pragma_query_value(None, "integrity_check", |r| r.get::<_, String>(0))
+                    .unwrap(),
+                "ok"
+            );
+            assert_eq!(
+                saved
+                    .query_row("SELECT display_name FROM nodes WHERE is_local=1", [], |r| r
+                        .get::<_, String>(0))
+                    .unwrap(),
+                "restore-marker"
+            );
+            drop(saved);
+
+            // Create a separate private home, close every handle and require no sidecars
+            // before restoring only the verified database bytes into it.
+            let restored = temp.path().join("restored");
+            drop(Store::open(&restored).unwrap());
+            for suffix in ["-wal", "-shm", "-journal"] {
+                assert!(!restored.join(format!("{DB_FILE}{suffix}")).exists());
+            }
+            std::fs::write(restored.join(DB_FILE), &bytes).unwrap();
+            assert_eq!(
+                format!(
+                    "{:x}",
+                    Sha256::digest(std::fs::read(restored.join(DB_FILE)).unwrap())
+                ),
+                digest
+            );
+            let restore_backup = temp.path().join("restore-backup");
+            Store::upgrade_offline(&restored, &restore_backup, true).unwrap();
+            let restored = Store::open(&restored).unwrap();
+            assert_eq!(restored.node_id(), node);
+            restored
+                .read(|db| {
+                    assert_eq!(version(db), 12);
+                    assert_eq!(
+                        db.pragma_query_value(None, "integrity_check", |r| r.get::<_, String>(0))?,
+                        "ok"
+                    );
+                    assert_eq!(
+                        db.query_row("SELECT display_name FROM nodes WHERE is_local=1", [], |r| r
+                            .get::<_, String>(0))?,
+                        "restore-marker"
+                    );
+                    Ok(())
+                })
+                .unwrap();
+        }
+    }
 
     /// Every table and index with its columns, types, constraints and foreign keys, in a
     /// stable order, so two databases built by different paths can be compared.
@@ -3002,7 +3202,6 @@ mod hold_upgrade_tests {
         out
     }
 
-    #[cfg(unix)]
     fn version(conn: &Connection) -> i64 {
         conn.pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap()
@@ -3090,10 +3289,7 @@ mod hold_upgrade_tests {
         );
     }
 
-    // Unix only, like every offline-upgrade test in `upgrade_tests`: the Windows upgrade
-    // path is not accepted yet. Its first hosted run upgraded successfully but then could
-    // not read the published backup.json (os error 5); see docs/DAEMON.md.
-    #[cfg(unix)]
+    // Both supported platforms must complete the public offline path and read its backup.
     #[test]
     fn a_v8_home_upgrades_to_v12_offline_and_keeps_its_data() {
         let dir = tempfile::tempdir().unwrap();

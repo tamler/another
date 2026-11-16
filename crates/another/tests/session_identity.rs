@@ -255,7 +255,9 @@ fn old_home_requires_explicit_fenced_upgrade_and_verified_wal_backup() {
     let db = home.join("another.db");
     let old = Connection::open(&db).unwrap();
     // The marker lives in a catalog table: a table the schema does not define is refused.
-    old.execute_batch("DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE request_holds; DROP TABLE hold_waits; DROP TABLE announcements; PRAGMA user_version=7; UPDATE nodes SET display_name='committed-wal';").unwrap();
+    old.execute_batch(TO_V8).unwrap();
+    old.execute("UPDATE nodes SET display_name='committed-wal'", [])
+        .unwrap();
     let denied = command(&["status"]);
     assert!(!denied.status.success());
     assert!(String::from_utf8_lossy(&denied.stderr).contains("offline upgrade"));
@@ -281,7 +283,7 @@ fn old_home_requires_explicit_fenced_upgrade_and_verified_wal_backup() {
     assert_eq!(
         old.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        7
+        8
     );
     let no_confirmation = command(&[
         "--json",
@@ -341,7 +343,7 @@ fn old_home_requires_explicit_fenced_upgrade_and_verified_wal_backup() {
     assert_eq!(
         copy.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        7
+        8
     );
     assert_eq!(
         copy.query_row("SELECT display_name FROM nodes", [], |r| r
@@ -351,7 +353,7 @@ fn old_home_requires_explicit_fenced_upgrade_and_verified_wal_backup() {
     );
     let meta: serde_json::Value =
         serde_json::from_slice(&std::fs::read(backup.join("backup.json")).unwrap()).unwrap();
-    assert_eq!(meta["schema_version"], 7);
+    assert_eq!(meta["schema_version"], 8);
     assert_eq!(meta["database_sha256"].as_str().unwrap().len(), 64);
     let migrated = Connection::open(&db).unwrap();
     assert_eq!(
@@ -544,7 +546,7 @@ fn v8_home_upgrades_to_v12_keeping_history_and_gaining_one_admission_key() {
 
 #[cfg(unix)]
 #[test]
-fn failed_migration_keeps_original_and_verified_backup() {
+fn unrecognized_source_is_refused_before_backup() {
     use rusqlite::Connection;
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
@@ -563,6 +565,7 @@ fn failed_migration_keeps_original_and_verified_backup() {
     let old = Connection::open(&db).unwrap();
     old.execute_batch("PRAGMA user_version=7;").unwrap();
     drop(old);
+    let before = std::fs::read(&db).unwrap();
     let out = run(&[
         "--json",
         "upgrade",
@@ -573,8 +576,13 @@ fn failed_migration_keeps_original_and_verified_backup() {
     assert!(!out.status.success());
     let failed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(failed["error"]["message"].is_string());
+    assert!(failed["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("no recognized catalog"));
     assert!(failed.get("status").is_none());
-    assert!(backup.join("backup.json").is_file());
+    assert!(!backup.exists());
+    assert_eq!(std::fs::read(&db).unwrap(), before);
     let current = Connection::open(&db).unwrap();
     assert_eq!(
         current
@@ -603,8 +611,9 @@ fn upgrade_commit_write_failure_is_reported_as_uncertain_json() {
     let db = home.join("another.db");
     let keeper = Connection::open(&db).unwrap();
     keeper
-        .execute_batch("PRAGMA wal_autocheckpoint=0; DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE request_holds; DROP TABLE hold_waits; DROP TABLE announcements; PRAGMA user_version=7;")
+        .execute_batch("PRAGMA wal_autocheckpoint=0;")
         .unwrap();
+    keeper.execute_batch(TO_V8).unwrap();
     // Grow the WAL through a catalog table: a table the schema does not define would be
     // refused before the commit this test is about.
     for n in 0..256 {
@@ -658,15 +667,15 @@ fn upgrade_commit_write_failure_is_reported_as_uncertain_json() {
         saved
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        7
+        8
     );
     let metadata: serde_json::Value =
         serde_json::from_slice(&std::fs::read(backup.join("backup.json")).unwrap()).unwrap();
-    assert_eq!(metadata["schema_version"], 7);
+    assert_eq!(metadata["schema_version"], 8);
     let version: i64 = keeper
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert!(version == 7 || version == 12, "unexpected schema {version}");
+    assert!(version == 8 || version == 12, "unexpected schema {version}");
     assert_eq!(
         keeper
             .query_row("SELECT display_name FROM nodes", [], |r| r
