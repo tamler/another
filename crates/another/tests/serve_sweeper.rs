@@ -91,15 +91,26 @@ async fn the_sweeper_expires_lapsed_work_and_stops_when_cancelled() {
         count(&store, "request.stale")
     );
 
+    // It keeps sweeping: the first tick of an interval is immediate, so a sweeper that ran
+    // once and stopped would pass the check above (FINDINGS-200). A hold that lapses later
+    // is swept by a later tick.
+    hold(&store, &project, "src/b.rs");
+    now.fetch_add(120_000, Ordering::SeqCst);
+    assert!(
+        eventually(|| count(&store, "hold.expired") == 2).await,
+        "the sweeper did not sweep again: {} expired",
+        count(&store, "hold.expired")
+    );
+
     // Once cancelled, a hold that lapses afterwards is left for the next server.
     ct.cancel();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    hold(&store, &project, "src/b.rs");
+    hold(&store, &project, "src/c.rs");
     now.fetch_add(120_000, Ordering::SeqCst);
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
         count(&store, "hold.expired"),
-        1,
+        2,
         "a cancelled sweeper swept again"
     );
 }
