@@ -334,6 +334,35 @@ fn grok_prompt_leaves_mail_for_a_channel_grok_shows() {
 }
 
 #[test]
+fn grok_session_start_shows_its_digest_and_leaves_mail_for_the_model() {
+    let env = Env::new();
+    env.start("grok", &env.main, &[]);
+    env.start("codex", &env.wt, &[]);
+    env.send(
+        "codex@shop-review",
+        "grok@shop",
+        "Hold free: src/b.rs",
+        false,
+    );
+    // Grok reads only a top-level `systemMessage` from a SessionStart hook (its hooks
+    // guide, "Passive Hooks"); plain text is dropped.
+    let out = env.start("grok", &env.main, &[]);
+    let reply: Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+    let shown = reply["systemMessage"].as_str().unwrap_or_default();
+    assert!(shown.contains("Hold free: src/b.rs"), "{out}");
+    // That message reaches the user, not the model, so the mail stays unannounced for
+    // the post-tool notice, which the model does see.
+    let notice = context(&env.hook(
+        "post-tool",
+        "grok",
+        &tool(&env.main, "Bash", json!({ "command": "ls" })),
+    ));
+    assert!(notice.contains("Hold free: src/b.rs"), "{notice}");
+    let stats = env.json(&["stats", "--since", "1h"]);
+    assert_eq!(stats["notices_mid_task"], 1, "{stats}");
+}
+
+#[test]
 fn manual_route_directory_holds_block_auto_edits_in_both_orders() {
     for (pattern, path) in [
         ("app/[id]", "app/[id]/page.tsx"),
