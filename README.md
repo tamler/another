@@ -192,6 +192,7 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 
 | Task | Commands |
 |---|---|
+| Exit status | `0` success, `1` error, `2` bad arguments, `3` conflict (holds that overlap, acting on a closed request, claiming or completing a request another agent has claimed). A `forbidden` error, such as releasing a request someone else owns, exits 1. An error prints `another: <what happened>` and, when the next step is not obvious, a `hint:` line; `--json` prints `{"error": {"code", "message", "hint?"}}` on stdout |
 | Node | `another init`, `another status`, `another node show`, `another node name [<name>]` (no name prints the current one), `another events` |
 | Agents | `another agent register <name> --program claude\|codex\|grok\|cursor\|grok_bot\|other [--project PATH]`, `another agent list` |
 | Mail | `another send`, `another inbox`, `another reply <message-id>`, `another ack <message-id>`, `another threads`, `another thread <id>` (there is no `another mail` command) |
