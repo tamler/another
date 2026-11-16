@@ -40,15 +40,19 @@ pub fn chain_next(chain: &str, event_id: &str, new_public_key: &str) -> String {
     crypto::sha256_hex(format!("{chain}\n{event_id}\n{new_public_key}").as_bytes())
 }
 
-/// The bytes the new key signs as `proof`.
-pub fn proof_message(node_id: &str, old: &str, new: &str, chain: &str) -> Vec<u8> {
-    format!("another-key-rotation-v2\n{node_id}\n{old}\n{new}\n{chain}").into_bytes()
+/// The bytes the new key signs as `proof`. They include the rotation event's own id, so the
+/// new key fixes the id of the link that introduces it; earlier links' ids are fixed
+/// through `chain`.
+pub fn proof_message(node_id: &str, event_id: &str, old: &str, new: &str, chain: &str) -> Vec<u8> {
+    format!("another-key-rotation-v2\n{node_id}\n{event_id}\n{old}\n{new}\n{chain}").into_bytes()
 }
 
-/// The payload for rotating `node_id` from `old` to the key `new`, at history digest
-/// `chain`. The caller signs the event itself with `old`, like any event it authors.
+/// The payload of rotation event `event_id`, moving `node_id` from `old` to the key `new`
+/// at history digest `chain`. The caller signs the event itself with `old`, like any event
+/// it authors.
 pub fn rotation_payload(
     node_id: &str,
+    event_id: &str,
     old_public_key: &str,
     new_key: &ed25519_dalek::SigningKey,
     chain: &str,
@@ -56,7 +60,7 @@ pub fn rotation_payload(
     let new_public_key = crypto::public_of(new_key);
     let proof = crypto::sign(
         new_key,
-        &proof_message(node_id, old_public_key, &new_public_key, chain),
+        &proof_message(node_id, event_id, old_public_key, &new_public_key, chain),
     );
     RotationPayload {
         node_id: node_id.into(),
@@ -130,7 +134,13 @@ pub fn verify_link(ev: &WireEvent, at: &KeyPosition, earlier: &[String]) -> Resu
         )));
     }
     crypto::decode_public(&p.new_public_key)?;
-    let msg = proof_message(&p.node_id, &p.old_public_key, &p.new_public_key, &p.chain);
+    let msg = proof_message(
+        &p.node_id,
+        &ev.event_id,
+        &p.old_public_key,
+        &p.new_public_key,
+        &p.chain,
+    );
     if !crypto::verify(&p.new_public_key, &msg, &p.proof) {
         return Err(invalid(format!(
             "rotation {} has no valid proof from its new key",
@@ -206,9 +216,14 @@ mod tests {
 
     /// A rotation event from `old` to `new`, as the node would author it.
     fn rotation(id: &str, old: &SigningKey, new: &SigningKey, chain: &str) -> WireEvent {
-        let payload =
-            serde_json::to_string(&rotation_payload(NODE, &crypto::public_of(old), new, chain))
-                .unwrap();
+        let payload = serde_json::to_string(&rotation_payload(
+            NODE,
+            id,
+            &crypto::public_of(old),
+            new,
+            chain,
+        ))
+        .unwrap();
         signed(id, old, payload)
     }
 
@@ -316,9 +331,14 @@ mod tests {
             chain: d0.clone(),
         };
         // Signed by someone else.
-        let payload =
-            serde_json::to_string(&rotation_payload(NODE, &crypto::public_of(&k1), &k2, &d0))
-                .unwrap();
+        let payload = serde_json::to_string(&rotation_payload(
+            NODE,
+            "R1",
+            &crypto::public_of(&k1),
+            &k2,
+            &d0,
+        ))
+        .unwrap();
         let wrong_signer = signed("R1", &other, payload.clone());
         assert!(verify_link(&wrong_signer, &at, &[])
             .unwrap_err()
@@ -328,7 +348,7 @@ mod tests {
         let mut p: RotationPayload = serde_json::from_str(&payload).unwrap();
         p.proof = crypto::sign(
             &other,
-            &proof_message(NODE, &p.old_public_key, &p.new_public_key, &p.chain),
+            &proof_message(NODE, "R1", &p.old_public_key, &p.new_public_key, &p.chain),
         );
         let bad_proof = signed("R1", &k1, serde_json::to_string(&p).unwrap());
         assert!(verify_link(&bad_proof, &at, &[])
@@ -336,7 +356,14 @@ mod tests {
             .to_string()
             .contains("no valid proof"));
         // The genuine link passes.
-        assert!(verify_link(&signed("R1", &k1, payload), &at, &[]).is_ok());
+        assert!(verify_link(&signed("R1", &k1, payload.clone()), &at, &[]).is_ok());
+        // Post-R7 crypto check: the same genuine payload (and K2's genuine proof) under
+        // another event id, re-signed by the retired K1, is refused: the proof covers the id.
+        let renamed = signed("R1-other", &k1, payload);
+        assert!(verify_link(&renamed, &at, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("no valid proof"));
     }
 
     #[test]
@@ -348,7 +375,7 @@ mod tests {
             key: crypto::public_of(&k1),
             chain: d0.clone(),
         };
-        let mut p = rotation_payload(NODE, &crypto::public_of(&k1), &k2, &d0);
+        let mut p = rotation_payload(NODE, "R1", &crypto::public_of(&k1), &k2, &d0);
         p.node_id = "01OTHER".into();
         let elsewhere = signed("R1", &k1, serde_json::to_string(&p).unwrap());
         assert!(verify_link(&elsewhere, &at, &[])
@@ -358,8 +385,14 @@ mod tests {
         let back = signed(
             "R1",
             &k1,
-            serde_json::to_string(&rotation_payload(NODE, &crypto::public_of(&k1), &k2, &d0))
-                .unwrap(),
+            serde_json::to_string(&rotation_payload(
+                NODE,
+                "R1",
+                &crypto::public_of(&k1),
+                &k2,
+                &d0,
+            ))
+            .unwrap(),
         );
         let used = vec![crypto::public_of(&k2)];
         assert!(verify_link(&back, &at, &used)
