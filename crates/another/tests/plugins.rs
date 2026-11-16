@@ -91,12 +91,14 @@ fn a_built_in_command_is_never_replaced() {
         "{}",
         text(&out.stdout)
     );
-    // The self-copy would print `another-board`'s clap usage only if it were run as a
-    // dispatched child; the built-in board needs no home and reports on an empty one.
+    // Run as a dispatched child, the self-copy would get `--help` alone and print the
+    // top-level usage. The built-in prints the board's own help. Clap names the binary
+    // `another.exe` on Windows, so match the subcommand part only.
     let out = another(&[bin.path()], &home.path().join("h"), &["board", "--help"]);
     assert!(out.status.success());
+    let stdout = text(&out.stdout);
     assert!(
-        text(&out.stdout).contains("Usage: another board"),
+        stdout.contains(" board [OPTIONS]") && stdout.contains("Read-only work board"),
         "{}",
         text(&out.stdout)
     );
