@@ -8,6 +8,8 @@
 
 Hooks work without it. Without the daemon, holds still expire when the next command looks at them, and mail still reaches a session at its next tool call or prompt; an idle agent just is not woken.
 
+The daemon's server has no `--auth`, so every account on this machine can reach it, not only yours. On a shared machine read [Who can reach an unauthenticated loopback server](REMOTE.md#who-can-reach-an-unauthenticated-loopback-server) before installing it.
+
 ## Run it in the background (macOS)
 
 ```bash
