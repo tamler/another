@@ -181,7 +181,7 @@ Task guides, all listed on the [guides hub](site/guides/index.html) (website sou
 | Awareness | `whats_new` (one-call catch-up: unread subjects, open requests, recent activity), `activity_feed`, `activity_summarize` (summaries and ids, never message bodies), `work_board` (read-only: holds, recent and stopped edits, pending handoffs per project) |
 | Resources | `resource_find`, `resource_register`, `resource_borrow`, `resource_release`, `resource_heartbeat`, `orphans_list`, `resource_reap` (plan and request only) |
 
-Tool errors are `{"error": {"code", "message", "hint?"}}`. The usual codes are `not_found`, `invalid`, `conflict`, `ambiguous` and `forbidden`; a storage or internal failure gives `db`, `io`, `json` or `internal`. `hint`, when present, says the next call to make.
+Tool errors are `{"error": {"code", "message", "hint?"}}`. The usual codes are `not_found`, `invalid`, `conflict`, `ambiguous` and `forbidden`; a storage or internal failure gives `db`, `io`, `json` or `internal`. `hint`, when present, says the next call to make. A call whose arguments do not match the tool's schema (a missing or wrongly typed parameter) fails before Another runs, with rmcp's plain-text message such as ``failed to deserialize parameters: missing field `agent` ``.
 
 ## CLI at a glance
 
