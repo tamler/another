@@ -330,6 +330,18 @@ impl Store {
                     if status == RequestStatus::Claimed && owned_by_me {
                         if input.due_in_seconds.is_some() {
                             let due_at = due_from(tx.now, input.due_in_seconds)?;
+                            let previous: Option<i64> = tx.query_row(
+                                "SELECT due_at FROM requests WHERE request_id = ?1",
+                                [rid],
+                                |r| r.get(0),
+                            )?;
+                            // A deadline move is a request transition like any other: the
+                            // event log is the audit trail and the activity feed's source.
+                            tx.emit(
+                                &me.address,
+                                "request.updated",
+                                json!({ "request_id": rid, "due_at": due_at, "previous_due_at": previous }),
+                            )?;
                             tx.execute(
                                 "UPDATE requests SET due_at = ?2, updated_at = ?3 WHERE request_id = ?1",
                                 params![rid, due_at, tx.now],
@@ -374,8 +386,11 @@ impl Store {
                         )));
                     }
                     tx.emit(&me.address, "request.released", json!({ "request_id": rid }))?;
+                    // A due time already past is cleared, as on takeover: otherwise the next
+                    // sweep turns the released request stale again with no one acting.
                     tx.execute(
                         "UPDATE requests SET status = 'open', owner_id = NULL, claimed_at = NULL,
+                           due_at = CASE WHEN due_at <= ?2 THEN NULL ELSE due_at END,
                            updated_at = ?2 WHERE request_id = ?1",
                         params![rid, tx.now],
                     )?;
