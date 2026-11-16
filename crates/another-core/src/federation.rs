@@ -273,6 +273,39 @@ fn require_named(entry: &NodeEntry) -> Result<()> {
     Ok(())
 }
 
+/// `listed` as a peer's node list may apply it. The name is used only when a local rename
+/// would accept it: valid, not the `local` placeholder, and not another node's. Otherwise a
+/// known node keeps its name, and an unknown one is recorded under its id, which names no
+/// one else, so its key is still learned and its signed events still verify.
+fn listed_entry(tx: &Tx<'_>, listed: &NodeEntry) -> Result<NodeEntry> {
+    let taken = tx
+        .query_row(
+            "SELECT 1 FROM nodes WHERE display_name = ?1 AND node_id != ?2",
+            params![listed.display_name, listed.node_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    let usable = validate_node_name(&listed.display_name).is_ok()
+        && listed.display_name != "local"
+        && !taken;
+    let display_name = if usable {
+        listed.display_name.clone()
+    } else {
+        tx.query_row(
+            "SELECT display_name FROM nodes WHERE node_id = ?1",
+            [&listed.node_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| listed.node_id.clone())
+    };
+    Ok(NodeEntry {
+        display_name,
+        ..listed.clone()
+    })
+}
+
 /// Record (or confirm) another node. Keys are pinned on first sight.
 fn upsert_node(tx: &Tx<'_>, node: &NodeEntry) -> Result<()> {
     if node.node_id == tx.node_id {
@@ -1678,7 +1711,12 @@ impl Store {
                 return Err(Error::Forbidden("not a paired node".into()));
             };
             for n in nodes {
-                upsert_node(tx, n)?;
+                // A spoke speaks only for itself (public keys prove nothing about the
+                // sender); for its spokes, the hub's list is the directory.
+                if role == "spoke" && n.node_id != from {
+                    continue;
+                }
+                upsert_node(tx, &listed_entry(tx, n)?)?;
             }
             let mut report = IngestReport::default();
             for ev in events {
