@@ -135,10 +135,14 @@ async fn a_project_scoped_token_registers_its_agent_only_in_its_project() {
         .unwrap();
     let client = connect(&srv.base, &token.secret).await;
 
+    // The project's stored (canonical) path. `authorize` compares the raw argument with it,
+    // so another spelling of the same directory (a trailing slash, `..`, or Windows
+    // separators) is refused today: FINDINGS-main-register-spelling.
+    let shop = srv.store.project(&srv.work).unwrap().abs_path;
     let ok = call(
         &client,
         "register_agent",
-        json!({ "name": "alice", "program": "claude", "project": srv.work }),
+        json!({ "name": "alice", "program": "claude", "project": shop }),
     )
     .await;
     assert_eq!(error_code(&ok), None, "{}", message(&ok));
