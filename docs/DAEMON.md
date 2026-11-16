@@ -44,7 +44,7 @@ The same commands manage a systemd **user** unit, `~/.config/systemd/user/one.to
 - with `ANOTHER_HOME` and your current `PATH` recorded;
 - logging to `$ANOTHER_HOME/logs/serve.log` (`StandardOutput=append:`, which needs systemd 240 or newer).
 
-`another daemon status` reads `systemctl --user show` for whether the unit is loaded and enabled and for its main PID, then checks `GET /health`. `restart` is `systemctl --user restart`. `uninstall` disables and stops the unit, deletes the file and reloads the manager. `--dry-run` and `--no-load` work as on macOS. systemd stops the daemon with SIGTERM.
+`another daemon status` reads `systemctl --user show` for whether the unit is loaded and enabled and for its main PID, then checks `GET /health`. `restart` is `systemctl --user restart`. `uninstall` disables and stops the unit, deletes the file and reloads the manager. If disabling fails, it deletes the file only when `systemctl --user show` confirms the unit is stopped and not enabled; when the manager cannot be asked, or the unit is still running, it stops with an error and keeps the file, so you can run it again. `--dry-run` and `--no-load` work as on macOS. systemd stops the daemon with SIGTERM.
 
 Your user manager, and so the daemon, runs while you have a session. To keep it running after you log out, and to start it at boot, turn on lingering for your user; Another does not do this for you:
 
@@ -62,7 +62,7 @@ On Windows the same commands manage a Task Scheduler task named `one.toanother.a
 - starts when you log on, as you, without elevation, and has no time limit;
 - inherits your environment, so `PATH` is whatever your logon session has.
 
-`status` reports the task as loaded when `schtasks /Query` finds it, and checks `GET /health`; Task Scheduler gives no process id. `restart` ends the task and runs it again. `uninstall` ends and deletes the task and removes the definition.
+`status` reports the task as loaded when the task list from `schtasks /Query` contains it, and checks `GET /health`; Task Scheduler gives no process id. `restart` ends the task and runs it again. `uninstall` ends and deletes the task and removes the definition. If the delete fails, it removes the definition only when the task list confirms the task is not there; when Task Scheduler cannot be asked, or the task is still registered, it stops with an error and keeps the definition.
 
 Two limits on Windows. Task Scheduler restarts the task when it fails, but it is not documented to restart a server that started and later exited, so keep-alive is weaker than on macOS and Linux: `another daemon status` shows `healthy: no` when it is down, and `another daemon restart` brings it back. And Another's tests register the task on a hosted CI runner, which runs as an administrator; registering it as a standard user is expected to work but has not been checked.
 

@@ -200,16 +200,15 @@ pub fn plist(env: &DaemonEnv) -> String {
     )
 }
 
-/// One systemd word in double quotes: backslash and quote escaped, `%` specifiers and, in
-/// `ExecStart=`, `$` variable expansion doubled so the value is taken literally.
-fn systemd_quote(s: &str, dollars: bool) -> String {
-    let mut out = s
+/// One systemd word in double quotes: backslash and quote escaped, and `%` specifiers
+/// doubled so the value is taken literally. `$` is left alone: `Environment=` never expands
+/// it, and in `ExecStart=` systemd resolves the executable path (the only quoted word here)
+/// before it expands variables in the arguments, so `$$` would name a different file.
+fn systemd_quote(s: &str) -> String {
+    let out = s
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('%', "%%");
-    if dollars {
-        out = out.replace('$', "$$");
-    }
     format!("\"{out}\"")
 }
 
@@ -224,13 +223,13 @@ pub fn systemd_unit(env: &DaemonEnv) -> Result<String> {
     plain("the log path", &log)?;
     let mut environment = format!(
         "Environment={}\n",
-        systemd_quote(&format!("ANOTHER_HOME={home}"), false)
+        systemd_quote(&format!("ANOTHER_HOME={home}"))
     );
     if let Some(path) = &env.path {
         plain("PATH", path)?;
         environment.push_str(&format!(
             "Environment={}\n",
-            systemd_quote(&format!("PATH={path}"), false)
+            systemd_quote(&format!("PATH={path}"))
         ));
     }
     let log = log.replace('%', "%%");
@@ -250,7 +249,7 @@ StandardError=append:{log}\n\
 \n\
 [Install]\n\
 WantedBy=default.target\n",
-        exe = systemd_quote(&exe, true),
+        exe = systemd_quote(&exe),
         bind = env.bind,
     ))
 }
@@ -652,22 +651,31 @@ pub fn uninstall(env: &DaemonEnv, dry_run: bool) -> Result<DaemonReport> {
                 remove(&path, exists)?;
             }
             Manager::Systemd => {
-                // Disabling a unit the manager never loaded fails, which is fine, and a
-                // reload after the file is gone only tidies the manager's view.
-                let _ = exec(&commands[0]);
+                // Disabling fails for a unit the manager never loaded. That is fine only
+                // when the manager then confirms the unit is stopped and not enabled.
+                let disabled = exec(&commands[0])?;
+                if !disabled.status.success() {
+                    confirm_gone(env, unit_presence(&unit), &disabled)?;
+                }
                 remove(&path, exists)?;
-                let _ = exec(&commands[1]);
+                let reloaded = exec(&commands[1])?;
+                if !reloaded.status.success() {
+                    bail!(
+                        "the unit is stopped and {} was removed, but `systemctl --user \
+                         daemon-reload` failed: {}. Run it again so the manager forgets the unit.",
+                        path.display(),
+                        stderr_of(&reloaded)
+                    );
+                }
             }
             Manager::TaskScheduler => {
-                // Ending a task that is not running, or deleting one that was never
-                // registered, fails; what matters is that no task remains.
+                // Ending a task that is not running fails, which is fine. Deleting fails for
+                // a task that was never registered; that is fine only when the task list,
+                // which Task Scheduler did return, does not contain it.
                 let _ = exec(&commands[0]);
                 let deleted = exec(&commands[1])?;
-                if !deleted.status.success() && task_registered(&env.label) {
-                    bail!(
-                        "schtasks /Delete failed: {}",
-                        String::from_utf8_lossy(&deleted.stderr).trim()
-                    );
+                if !deleted.status.success() {
+                    confirm_gone(env, task_presence(&env.label), &deleted)?;
                 }
                 remove(&path, exists)?;
             }
@@ -689,8 +697,103 @@ fn remove(path: &Path, exists: bool) -> Result<()> {
     Ok(())
 }
 
-fn task_registered(label: &str) -> bool {
-    exec(&argv(&["schtasks", "/Query", "/TN", label])).is_ok_and(|o| o.status.success())
+/// What the service manager says about the service. `Unknown` (it could not be asked, or
+/// refused) is never taken as absence.
+#[derive(Debug, PartialEq, Eq)]
+enum Presence {
+    /// Running, enabled or registered.
+    Present,
+    /// The manager answered, and the service is stopped and not enabled, or not there.
+    Absent,
+    Unknown(String),
+}
+
+fn stderr_of(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).trim().to_string()
+}
+
+/// After a stop or delete command failed: go on only when the manager confirms the service
+/// is gone. Otherwise keep the definition, which is what a later uninstall or a manual
+/// cleanup needs, and say so.
+fn confirm_gone(env: &DaemonEnv, presence: Presence, failed: &Output) -> Result<()> {
+    let file = env.file_path();
+    match presence {
+        Presence::Absent => Ok(()),
+        Presence::Present => bail!(
+            "could not stop and remove the {} service: {}. It is still running, enabled or \
+             registered, so {} was kept; fix the error and run `another daemon uninstall` again.",
+            env.label,
+            stderr_of(failed),
+            file.display()
+        ),
+        Presence::Unknown(why) => bail!(
+            "could not confirm that the {} service is stopped and removed: {} (and asking the \
+             service manager failed: {why}). {} was kept, so `another daemon uninstall` can run \
+             again once the manager answers; delete it by hand only if you know the service is gone.",
+            env.label,
+            stderr_of(failed),
+            file.display()
+        ),
+    }
+}
+
+/// A systemd user unit: running or enabled is present; stopped and not enabled (including
+/// a unit the manager does not know) is absent.
+fn unit_presence(unit: &str) -> Presence {
+    match exec(&argv(&[
+        "systemctl",
+        "--user",
+        "show",
+        unit,
+        "--property=LoadState,ActiveState,UnitFileState",
+    ])) {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let value = |key: &str| {
+                text.lines()
+                    .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            let running = matches!(
+                value("ActiveState").as_str(),
+                "active" | "activating" | "reloading" | "deactivating"
+            );
+            let enabled = matches!(
+                value("UnitFileState").as_str(),
+                "enabled" | "enabled-runtime" | "linked" | "linked-runtime"
+            );
+            if running || enabled {
+                Presence::Present
+            } else {
+                Presence::Absent
+            }
+        }
+        Ok(out) => Presence::Unknown(stderr_of(&out)),
+        Err(e) => Presence::Unknown(format!("{e:#}")),
+    }
+}
+
+/// A Task Scheduler task, from the full task list (`schtasks /Query /FO CSV /NH`). Task
+/// names are not translated, so this does not depend on the system language, and a failed
+/// listing is `Unknown` rather than "not registered".
+fn task_presence(label: &str) -> Presence {
+    match exec(&argv(&["schtasks", "/Query", "/FO", "CSV", "/NH"])) {
+        Ok(out) if out.status.success() => {
+            let want = format!("\"\\{label}\"");
+            let listed = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .any(|l| l.split(',').next().map(str::trim) == Some(want.as_str()));
+            if listed {
+                Presence::Present
+            } else {
+                Presence::Absent
+            }
+        }
+        Ok(out) => Presence::Unknown(stderr_of(&out)),
+        Err(e) => Presence::Unknown(format!("{e:#}")),
+    }
 }
 
 /// Restart the running service.
@@ -782,7 +885,7 @@ pub fn status(env: &DaemonEnv) -> Result<DaemonStatus> {
                 _ => (false, None),
             }
         }
-        Manager::TaskScheduler => (task_registered(&env.label), None),
+        Manager::TaskScheduler => (task_presence(&env.label) == Presence::Present, None),
     };
     let bind = installed_text
         .as_deref()
@@ -859,9 +962,11 @@ mod tests {
         e.another_home = "/home/someone/data 100%".into();
         e.path = Some("/usr/bin:/home/someone/$bin".into());
         let text = systemd_unit(&e).unwrap();
+        // Review P2-2: systemd resolves the executable path before it expands `$` in argv,
+        // so a `$` in the path stays single; `$$` would name a different file.
         assert!(
             text.contains(
-                "ExecStart=\"/opt/my \\\"odd\\\" $$dir/50%%/another\" serve --bind 127.0.0.1:7466\n"
+                "ExecStart=\"/opt/my \\\"odd\\\" $dir/50%%/another\" serve --bind 127.0.0.1:7466\n"
             ),
             "{text}"
         );

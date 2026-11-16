@@ -8,7 +8,7 @@
 #[path = "common/hosted_ci.rs"]
 mod hosted_ci;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 struct Env {
@@ -35,7 +35,12 @@ impl Env {
     }
 
     fn cmd(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_another"));
+        self.cmd_with(Path::new(env!("CARGO_BIN_EXE_another")), args)
+    }
+
+    /// Run a given `another` binary, for example a copy at an unusual path.
+    fn cmd_with(&self, exe: &Path, args: &[&str]) -> Command {
+        let mut c = Command::new(exe);
         let path = std::env::var_os("PATH").unwrap_or_default();
         let mut dirs = vec![self.bin.clone()];
         dirs.extend(std::env::split_paths(&path));
@@ -572,14 +577,33 @@ fn hosted_linux_systemd_user_manager_runs_the_daemon() {
         .output()
         .is_ok_and(|o| o.status.success());
     let env = Env::new();
-    let label = test_label("hosted");
+    // Review P2-2: a binary whose path contains `$` must be the one systemd runs.
+    let dollar_dir = env._dir.path().join("bin$dir");
+    std::fs::create_dir_all(&dollar_dir).unwrap();
+    let dollar_exe = dollar_dir.join("another");
+    std::fs::copy(env!("CARGO_BIN_EXE_another"), &dollar_exe).unwrap();
+    let exes = [
+        ("hosted", PathBuf::from(env!("CARGO_BIN_EXE_another"))),
+        ("hosted-dollar", dollar_exe),
+    ];
+    for (tag, exe) in &exes {
+        hosted_linux_cycle(&env, reachable, tag, exe);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn hosted_linux_cycle(env: &Env, reachable: bool, tag: &str, exe: &Path) {
+    let label = test_label(tag);
     let bind = free_bind();
     // The real manager reads the user's XDG directories, not the temporary HOME's.
     let real_home = std::env::var_os("HOME").unwrap();
     let run = |args: &[&str]| {
         let mut all = vec!["--json"];
         all.extend_from_slice(args);
-        env.cmd(&all).env("HOME", &real_home).output().unwrap()
+        env.cmd_with(exe, &all)
+            .env("HOME", &real_home)
+            .output()
+            .unwrap()
     };
     if !reachable {
         eprintln!(
@@ -614,6 +638,10 @@ fn hosted_linux_systemd_user_manager_runs_the_daemon() {
         let s = wait(true);
         assert_eq!(s["loaded"], true, "{s}");
         assert!(s["pid"].as_u64().is_some_and(|p| p > 0), "{s}");
+        // The running process is this binary, at this exact path.
+        let pid = s["pid"].as_u64().unwrap();
+        let running = std::fs::read_link(format!("/proc/{pid}/exe")).unwrap();
+        assert_eq!(running, exe, "{s}");
         let out = run(&["daemon", "restart", "--label", &label]);
         assert!(out.status.success());
         let s = wait(true);
