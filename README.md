@@ -199,7 +199,7 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 | Sessions and feed | `another heartbeat [--start\|--end [--keep]]`, `another activity [--since 1h] [--kinds mail,request] [--summary]`, `another stats [--since 48h]`, `another board [--project P] [--since 24h]` (read-only; [docs/BOARD.md](docs/BOARD.md)) |
 | Hooks | `another hook install\|uninstall --client <c>\|all [--dry-run]`, `another hook status` |
 | Daemon | `another daemon install\|uninstall\|status\|restart` (macOS launchd), `another serve [--no-wake]` |
-| Resources | `another resources`, `another resource register`, `another borrow`, `another release`, `another orphans`, `another reap <target> [--confirm]` |
+| Resources | `another resources` (or `resource list`), `another resource register`, `another borrow [--wait SECONDS]` (or `resource borrow`), `another release` (or `resource return`), `another orphans`, `another reap <target> [--confirm]` |
 | Remote peers | `another serve --auth`, `another remote up`, `another token create\|list\|revoke`, `another oauth approve\|deny\|list\|revoke`, `another audit` |
 | Federation | `another pair invite\|join\|revoke`, `another peers`, `another sync [--watch]`, `another serve --federation` |
 | Wake | `another wake [--agent X\|--all]`, `another wake set\|clear\|list\|prune` |
