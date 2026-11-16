@@ -890,3 +890,193 @@ fn only_codex_gets_labels_and_a_description() {
     }
     assert!(has_key(&env.read(".codex/hooks.json"), "statusMessage"));
 }
+
+/// `hook status` drift for one client, from the JSON output.
+fn drift(env: &Env, client: &str) -> Vec<String> {
+    let rows: Value = serde_json::from_str(&env.ok(&["--json", "hook", "status"])).unwrap();
+    rows.as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["client"] == client)
+        .unwrap()["drift"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d.as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn status_reports_drift_and_reinstall_repairs_it() {
+    let env = Env::new();
+    env.write(
+        ".claude/settings.json",
+        &json!({ "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "notify.sh" }] }] } }),
+    );
+    env.ok(&["hook", "install", "--client", "claude,codex"]);
+    for client in ["claude", "codex", "grok", "cursor"] {
+        assert!(drift(&env, client).is_empty(), "{client}");
+    }
+    assert!(!env.ok(&["hook", "status"]).contains("out of date"));
+
+    // Formatting alone is not drift.
+    let claude = env.read(".claude/settings.json");
+    std::fs::write(
+        env.home.join(".claude/settings.json"),
+        serde_json::to_string(&claude).unwrap(),
+    )
+    .unwrap();
+    assert!(drift(&env, "claude").is_empty());
+
+    // A removed event and an edited matcher are reported, each for its own client.
+    let mut claude = env.read(".claude/settings.json");
+    claude["hooks"]
+        .as_object_mut()
+        .unwrap()
+        .remove("PreToolUse");
+    env.write(".claude/settings.json", &claude);
+    let mut codex = env.read(".codex/hooks.json");
+    codex["hooks"]["PreToolUse"][0]["matcher"] = json!("Edit");
+    env.write(".codex/hooks.json", &codex);
+    let d = drift(&env, "claude");
+    assert!(
+        d.iter().any(|l| l == "no Another hook for PreToolUse"),
+        "{d:?}"
+    );
+    assert!(d
+        .last()
+        .unwrap()
+        .contains("another hook install --client claude"));
+    let d = drift(&env, "codex");
+    assert!(d.iter().any(|l| l.contains("differ from what")), "{d:?}");
+    let text = env.ok(&["hook", "status"]);
+    assert!(
+        text.contains("out of date") && text.contains("no Another hook for PreToolUse"),
+        "{text}"
+    );
+    assert!(drift(&env, "grok").is_empty(), "not installed is not drift");
+
+    // A re-install repairs both and keeps the user's own hook; a second one changes nothing.
+    env.ok(&["hook", "install", "--client", "claude,codex"]);
+    assert!(drift(&env, "claude").is_empty());
+    assert!(drift(&env, "codex").is_empty());
+    assert_eq!(
+        env.read(".claude/settings.json")["hooks"]["Stop"][0]["hooks"][0]["command"],
+        "notify.sh"
+    );
+    let out: Value =
+        serde_json::from_str(&env.ok(&["--json", "hook", "install", "--client", "claude,codex"]))
+            .unwrap();
+    assert!(
+        out["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["change"] == "unchanged"),
+        "{out}"
+    );
+
+    // The wrapper: rewritten, then missing. Both clients share it.
+    let script = env.another_home.join("hooks/another-hook.sh");
+    std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+    for client in ["claude", "codex"] {
+        let d = drift(&env, client);
+        assert!(
+            d.iter().any(|l| l.contains("different another binary")),
+            "{d:?}"
+        );
+    }
+    std::fs::remove_file(&script).unwrap();
+    assert!(drift(&env, "claude")
+        .iter()
+        .any(|l| l.contains("is missing")));
+    env.ok(&["hook", "install", "--client", "claude"]);
+    assert!(drift(&env, "claude").is_empty());
+    assert!(drift(&env, "codex").is_empty());
+
+    // A config that is no longer JSON but still names the wrapper.
+    std::fs::write(
+        env.home.join(".codex/hooks.json"),
+        "{ another-hook.sh broken",
+    )
+    .unwrap();
+    let d = drift(&env, "codex");
+    assert!(d[0].contains("is not a JSON object"), "{d:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn status_reports_a_wrapper_that_lost_its_execute_bit() {
+    let env = Env::new();
+    env.ok(&["hook", "install", "--client", "codex"]);
+    let script = env.another_home.join("hooks/another-hook.sh");
+    set_mode(&script, 0o644);
+    let d = drift(&env, "codex");
+    assert!(d.iter().any(|l| l.contains("is not executable")), "{d:?}");
+    env.ok(&["hook", "install", "--client", "codex"]);
+    assert!(drift(&env, "codex").is_empty());
+}
+
+/// Adversarial F1 (#163): a pack installed under the pre-rename name (`wyres-hook.sh`) is
+/// drift that `hook status` reports, so it must not also call the client "not installed";
+/// `installed: false` with a non-empty `drift` contradicts itself for scripts.
+#[test]
+fn adv163_a_legacy_pack_is_out_of_date_not_not_installed() {
+    let env = Env::new();
+    env.write(
+        ".claude/settings.json",
+        &json!({ "hooks": { "SessionStart": [{ "hooks": [{
+            "type": "command", "command": legacy_command("session-start", "claude") }] }] } }),
+    );
+    let rows: Value = serde_json::from_str(&env.ok(&["--json", "hook", "status"])).unwrap();
+    let claude = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["client"] == "claude")
+        .unwrap();
+    let drift = claude["drift"].as_array().unwrap();
+    assert!(!drift.is_empty(), "{claude}");
+    assert_eq!(
+        claude["installed"], true,
+        "drift listed for a client called not installed: {claude}"
+    );
+    assert!(env.ok(&["hook", "status"]).contains("out of date"));
+}
+
+/// Adversarial F2 (#163): run with a different `ANOTHER_HOME`, a healthy pack is reported
+/// with "the wrapper … is missing" for the *current* home and told to reinstall, which
+/// would repoint every client at the current home. Drift must name the home the client's
+/// hooks actually use, so the repair is not a silent home switch.
+#[test]
+fn adv163_drift_names_the_home_the_hooks_use() {
+    let env = Env::new();
+    env.ok(&["hook", "install", "--client", "claude"]);
+    let other = env.home.join("other-home");
+    let out = env
+        .cmd(&["--json", "hook", "status"])
+        .env("ANOTHER_HOME", &other)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let rows: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let claude = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["client"] == "claude")
+        .unwrap();
+    // The lines as text: JSON would double each `\` in a Windows path.
+    let text = claude["drift"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let used = env.another_home.to_string_lossy().into_owned();
+    assert!(
+        text.contains(&used),
+        "drift does not say the hooks use {used}: {text}"
+    );
+}

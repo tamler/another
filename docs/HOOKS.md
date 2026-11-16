@@ -37,6 +37,15 @@ Check what is installed, or remove it:
 another hook status
 ```
 
+`hook status` also reports drift: how an installed pack differs from what `hook install` would write now.
+- **What counts as drift:**
+  - an event with no Another hook;
+  - an Another entry whose command, timeout, matcher or label was changed;
+  - a wrapper that is missing, not executable, or calls a different `another` binary or home than the one running `status`.
+- **How it shows:** such a client reads `out of date` in text, with one line per difference and the install command that repairs it. JSON gives a `drift` list, empty when current.
+- **What does not count:** formatting, other tools' hooks and other keys in the file.
+- **Reading only:** status reads the files and writes nothing.
+
 ```bash
 another hook uninstall --client all
 ```

@@ -442,6 +442,150 @@ fn contains_ours(root: &Map<String, Value>) -> bool {
     serde_json::to_string(root).is_ok_and(|s| mentions_ours(&s))
 }
 
+/// Whether `client`'s config has Another hooks, current or from a development build (the
+/// same test `drift` uses, so a pack is never "not installed" and "out of date" at once).
+pub fn installed(env: &HookEnv, client: Client) -> bool {
+    std::fs::read_to_string(client.config_path(&env.home)).is_ok_and(|t| contains_ours_text(&t))
+}
+
+/// The wrapper scripts that Another's current-name hook commands in `config` run: the
+/// first word of each command, undoing the single quoting `command_for` writes.
+fn wrapper_paths(config: &Value) -> Vec<PathBuf> {
+    fn walk(v: &Value, out: &mut Vec<PathBuf>) {
+        match v {
+            Value::Object(m) => {
+                if let Some(Value::String(c)) = m.get("command") {
+                    if let Some(p) = first_sh_word(c).filter(|p| p.ends_with(MARKER)) {
+                        let p = PathBuf::from(p);
+                        if !out.contains(&p) {
+                            out.push(p);
+                        }
+                    }
+                }
+                m.values().for_each(|x| walk(x, out));
+            }
+            Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(config, &mut out);
+    out
+}
+
+/// The first word of a shell command: a `'...'` word as `sh_quote` writes it (with `'\''`
+/// for a quote inside), or a plain word up to the first space.
+fn first_sh_word(command: &str) -> Option<String> {
+    let command = command.trim_start();
+    let Some(mut rest) = command.strip_prefix('\'') else {
+        return command.split_whitespace().next().map(str::to_string);
+    };
+    let mut word = String::new();
+    loop {
+        let end = rest.find('\'')?;
+        word.push_str(&rest[..end]);
+        rest = &rest[end + 1..];
+        match rest.strip_prefix("\\''") {
+            Some(after) => {
+                word.push('\'');
+                rest = after;
+            }
+            None => return Some(word),
+        }
+    }
+}
+
+/// How an installed hook pack differs from what `hook install` would write now: missing
+/// events, changed entries (command, timeout, matcher, labels), and a missing, stale or
+/// non-executable wrapper. Empty when the client has no Another hooks, or none differ.
+/// Compares parsed JSON, so formatting alone is never drift. Reads only.
+pub fn drift(env: &HookEnv, client: Client) -> Vec<String> {
+    let path = client.config_path(&env.home);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    if !contains_ours_text(&text) {
+        return Vec::new();
+    }
+    let install = format!("another hook install --client {}", client.as_str());
+    let root = match read_json(&path) {
+        Ok(Some((_, root))) => root,
+        _ => {
+            return vec![format!(
+                "{} is not a JSON object; fix it, then run `{install}`",
+                path.display()
+            )]
+        }
+    };
+    // Hooks installed for another Another home run that home's wrapper. Comparing them with
+    // this home would advise a reinstall that silently moves them here (#163 F2).
+    let here = env.script_path();
+    let used = wrapper_paths(&Value::Object(root.clone()));
+    if let Some(theirs) = used.iter().find(|p| **p != here) {
+        if !used.contains(&here) {
+            let home = theirs
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or(theirs.as_path());
+            let mut out = vec![format!(
+                "these hooks run {} (Another home {}), not this one ({})",
+                theirs.display(),
+                home.display(),
+                env.another_home.display()
+            )];
+            if !theirs.is_file() {
+                out.push(format!("the wrapper {} is missing", theirs.display()));
+            }
+            out.push(format!(
+                "to keep that home, run `ANOTHER_HOME={} {install}`; `{install}` from here moves the hooks to {}",
+                home.display(),
+                env.another_home.display()
+            ));
+            return out;
+        }
+    }
+    let mut out = Vec::new();
+    let hooks = root.get("hooks").and_then(Value::as_object);
+    for spec in client.specs() {
+        let present = hooks
+            .and_then(|h| h.get(spec.key))
+            .is_some_and(|v| mentions_ours(&v.to_string()));
+        if !present {
+            out.push(format!("no Another hook for {}", spec.key));
+        }
+    }
+    let mut wanted = root.clone();
+    if out.is_empty() && install_into(client, env, &mut wanted).is_ok() && wanted != root {
+        out.push(format!(
+            "Another's entries differ from what `{install}` writes (command, timeout, matcher or label)"
+        ));
+    }
+    let script = env.script_path();
+    match std::fs::read_to_string(&script) {
+        Err(_) => out.push(format!("the wrapper {} is missing", script.display())),
+        Ok(t) if t != script_text(env) => out.push(format!(
+            "the wrapper {} calls a different another binary or home than this one",
+            script.display()
+        )),
+        Ok(_) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if std::fs::metadata(&script).is_ok_and(|m| m.permissions().mode() & 0o111 == 0) {
+                    out.push(format!(
+                        "the wrapper {} is not executable",
+                        script.display()
+                    ));
+                }
+            }
+        }
+    }
+    if !out.is_empty() {
+        out.push(format!("run `{install}` to repair"));
+    }
+    out
+}
+
 fn render(root: &Map<String, Value>) -> Result<String> {
     Ok(serde_json::to_string_pretty(root)? + "\n")
 }
@@ -1591,5 +1735,31 @@ mod tests {
                 _ => assert_eq!(guard.unwrap().matcher, Some(EDIT_TOOLS)),
             }
         }
+    }
+
+    #[test]
+    fn the_wrapper_path_is_read_back_from_a_quoted_command() {
+        for path in [
+            "/home/a/.another/hooks/another-hook.sh",
+            "/home/o'brien/my home/.another/hooks/another-hook.sh",
+        ] {
+            let command = format!("{} session-start --client claude", sh_quote(path));
+            assert_eq!(first_sh_word(&command).as_deref(), Some(path), "{command}");
+        }
+        assert_eq!(
+            first_sh_word("/usr/bin/fmt.sh --check").as_deref(),
+            Some("/usr/bin/fmt.sh")
+        );
+        assert_eq!(first_sh_word("'unterminated"), None);
+        let config = json!({ "hooks": { "Stop": [{ "hooks": [
+            { "command": "'/x/hooks/another-hook.sh' prompt --client claude" },
+            { "command": "'/x/hooks/wyres-hook.sh' prompt --client claude" },
+            { "command": "notify.sh" },
+        ] }] } });
+        assert_eq!(
+            wrapper_paths(&config),
+            vec![PathBuf::from("/x/hooks/another-hook.sh")],
+            "only current-name wrappers count"
+        );
     }
 }
