@@ -789,7 +789,10 @@ pub enum HoldCmd {
     },
 }
 
-/// Exit status used when holds conflict, so hooks can branch on it.
+/// Exit status for a conflict: holds that overlap, or any `conflict` error (acting on a
+/// closed request, claiming or completing a request another agent has claimed). Hooks and
+/// scripts branch on it. Other errors exit 1, including `forbidden` (for example releasing
+/// a request someone else owns), and bad arguments exit 2 (clap).
 pub const EXIT_CONFLICT: u8 = 3;
 
 /// Whether this process was started as `another … hook pre-commit …`.
@@ -833,14 +836,60 @@ pub fn main() -> ExitCode {
                     message: format!("{err:#}"),
                 },
             };
+            let hint = cli_hint(body.code, &body.message);
             if json {
-                println!("{}", serde_json::json!({ "error": body }));
+                let mut out = serde_json::json!({ "error": body });
+                if let Some(hint) = hint {
+                    out["error"]["hint"] = serde_json::json!(hint);
+                }
+                println!("{out}");
             } else {
                 eprintln!("another: {}", body.message);
+                if let Some(hint) = hint {
+                    eprintln!("hint: {hint}");
+                }
             }
-            ExitCode::FAILURE
+            if body.code == "conflict" {
+                ExitCode::from(EXIT_CONFLICT)
+            } else {
+                ExitCode::FAILURE
+            }
         }
     }
+}
+
+/// What to do next, for errors whose message only says what happened. The message comes
+/// from the core and is shared with MCP, so the CLI's own commands are named here. An
+/// error whose message already says what to do (a bad duration, an ambiguous name that
+/// lists the choices) gets none.
+fn cli_hint(code: &str, message: &str) -> Option<&'static str> {
+    if code == "not_found" {
+        let hint = if message.starts_with("unknown agent") {
+            "List agents with `another agent list`; register one with `another agent register NAME --program PROGRAM --project DIR`."
+        } else if message.starts_with("unknown request") {
+            "List requests with `another requests` (`--status`, `--owner` to filter)."
+        } else if message.starts_with("unknown message") || message.contains("was not delivered to")
+        {
+            "Message ids are shown by `another inbox --agent NAME` and `another thread THREAD_ID`."
+        } else if message.starts_with("unknown thread") {
+            "List threads with `another threads --agent NAME`."
+        } else if message.starts_with("no live hold") {
+            "List live holds with `another holds`; this one may have expired or been released."
+        } else if message.starts_with("no registered resource")
+            || message.starts_with("unknown resource")
+        {
+            "List resources with `another resources`."
+        } else if message.starts_with("unknown token") {
+            "List tokens with `another token list`."
+        } else {
+            return None;
+        };
+        return Some(hint);
+    }
+    if code == "db" && message.contains("database is locked") {
+        return Some("Another process is writing to the database; run the command again.");
+    }
+    None
 }
 
 fn init_tracing(serving: bool) {
