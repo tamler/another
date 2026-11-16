@@ -1016,3 +1016,60 @@ fn status_reports_a_wrapper_that_lost_its_execute_bit() {
     env.ok(&["hook", "install", "--client", "codex"]);
     assert!(drift(&env, "codex").is_empty());
 }
+
+/// Adversarial F1 (#163): a pack installed under the pre-rename name (`wyres-hook.sh`) is
+/// drift that `hook status` reports, so it must not also call the client "not installed";
+/// `installed: false` with a non-empty `drift` contradicts itself for scripts.
+#[test]
+fn adv163_a_legacy_pack_is_out_of_date_not_not_installed() {
+    let env = Env::new();
+    env.write(
+        ".claude/settings.json",
+        &json!({ "hooks": { "SessionStart": [{ "hooks": [{
+            "type": "command", "command": legacy_command("session-start", "claude") }] }] } }),
+    );
+    let rows: Value = serde_json::from_str(&env.ok(&["--json", "hook", "status"])).unwrap();
+    let claude = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["client"] == "claude")
+        .unwrap();
+    let drift = claude["drift"].as_array().unwrap();
+    assert!(!drift.is_empty(), "{claude}");
+    assert_eq!(
+        claude["installed"], true,
+        "drift listed for a client called not installed: {claude}"
+    );
+    assert!(env.ok(&["hook", "status"]).contains("out of date"));
+}
+
+/// Adversarial F2 (#163): run with a different `ANOTHER_HOME`, a healthy pack is reported
+/// with "the wrapper … is missing" for the *current* home and told to reinstall, which
+/// would repoint every client at the current home. Drift must name the home the client's
+/// hooks actually use, so the repair is not a silent home switch.
+#[test]
+fn adv163_drift_names_the_home_the_hooks_use() {
+    let env = Env::new();
+    env.ok(&["hook", "install", "--client", "claude"]);
+    let other = env.home.join("other-home");
+    let out = env
+        .cmd(&["--json", "hook", "status"])
+        .env("ANOTHER_HOME", &other)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let rows: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let claude = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["client"] == "claude")
+        .unwrap();
+    let text = claude["drift"].to_string();
+    let used = env.another_home.to_string_lossy().into_owned();
+    assert!(
+        text.contains(&used),
+        "drift does not say the hooks use {used}: {text}"
+    );
+}

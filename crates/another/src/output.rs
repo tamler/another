@@ -264,10 +264,11 @@ pub struct HookStatus {
 pub fn hook_status(rows: &[HookStatus]) -> String {
     rows.iter()
         .map(|r| {
+            // Drift means Another hooks are there: never "not installed" next to a repair.
             let state = match (r.installed, r.drift.is_empty()) {
-                (false, _) => "not installed",
+                (_, false) => "out of date",
                 (true, true) => "installed",
-                (true, false) => "out of date",
+                (false, true) => "not installed",
             };
             let mut out = format!("{:<7} {:<13} {}\n", r.client, state, r.config);
             for d in &r.drift {
