@@ -798,6 +798,51 @@ fn hold_free_ping_compares_literal_paths_after_restack() {
     );
 }
 
+/// Integration of #108 (r6 manual-glob matching) with #110 (durable waits): the recheck
+/// before a `Hold free` ping uses the same per-component matcher as the edit guard, so a
+/// manual alternation that names the file's directory keeps the wait open.
+#[test]
+fn hold_free_ping_waits_for_a_manual_alternation_naming_the_directory() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    let wt = fx.project(&fx.repos.wt);
+    let path = "src/a/b/page.tsx";
+    for (name, pattern) in [("alice", path), ("carol", "src/{a/b,c}")] {
+        fx.store
+            .acquire_holds(AcquireHolds {
+                agent: name.into(),
+                project: main.clone(),
+                paths: vec![pattern.into()],
+                ttl_seconds: Some(600),
+                exclusive: false,
+                reason: None,
+                repo_wide: false,
+            })
+            .unwrap();
+    }
+    let blocked = fx
+        .store
+        .guard_edit("bob", &wt, &[path.into()], "auto")
+        .unwrap();
+    assert_eq!(blocked.conflicts.len(), 2, "{:?}", blocked.conflicts);
+    fx.store.release_holds("alice", &[]).unwrap();
+    assert!(
+        fx.store
+            .inbox("bob", InboxQuery::default())
+            .unwrap()
+            .messages
+            .is_empty(),
+        "carol's alternation still holds the file's directory"
+    );
+    fx.store.release_holds("carol", &[]).unwrap();
+    let inbox = fx.store.inbox("bob", InboxQuery::default()).unwrap();
+    assert_eq!(inbox.messages.len(), 1);
+    assert_eq!(
+        inbox.messages[0].message.subject,
+        "Hold free: src/a/b/page.tsx"
+    );
+}
+
 #[test]
 fn hold_free_ping_waits_for_every_holder_and_covers_expiry() {
     let fx = Fx::new();

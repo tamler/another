@@ -780,3 +780,282 @@ fn sign_unsigned(conn: &Connection, node_id: &str, key: &ed25519_dalek::SigningK
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod upgrade_tests {
+    use super::*;
+    use crate::{AcquireHolds, NewRequest, Program, RegisterAgent, SendMessage};
+
+    /// Every table and index with its columns, types, constraints and foreign keys, in a
+    /// stable order, so two databases built by different paths can be compared.
+    fn catalog(conn: &Connection) -> Vec<String> {
+        let mut out = Vec::new();
+        let objects: Vec<(String, String, String)> = conn
+            .prepare(
+                "SELECT type, name, tbl_name FROM sqlite_master
+                 WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        for (kind, name, table) in objects {
+            let (columns, keys) = match kind.as_str() {
+                "table" => (
+                    format!("PRAGMA table_info(\"{name}\")"),
+                    Some(format!("PRAGMA foreign_key_list(\"{name}\")")),
+                ),
+                _ => (format!("PRAGMA index_info(\"{name}\")"), None),
+            };
+            let mut stmt = conn.prepare(&columns).unwrap();
+            let n = stmt.column_count();
+            let rows: Vec<String> = stmt
+                .query_map([], |r| {
+                    (0..n)
+                        .map(|i| {
+                            r.get::<_, rusqlite::types::Value>(i)
+                                .map(|v| format!("{v:?}"))
+                        })
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .map(|v| v.join(","))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            out.push(format!("{kind} {name} on {table}: {}", rows.join(" | ")));
+            if let Some(keys) = keys {
+                let mut stmt = conn.prepare(&keys).unwrap();
+                let fks: Vec<String> = stmt
+                    .query_map([], |r| {
+                        Ok(format!(
+                            "{}->{}.{}",
+                            r.get::<_, String>(3)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, Option<String>>(4)?.unwrap_or_default()
+                        ))
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
+                    .unwrap();
+                out.push(format!("fk {name}: {}", fks.join(" ")));
+            }
+        }
+        out
+    }
+
+    fn version(conn: &Connection) -> i64 {
+        conn.pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap()
+    }
+
+    /// The catalog of a database built by applying the first `n` migrations directly.
+    fn catalog_at(n: usize) -> Vec<String> {
+        let conn = Connection::open_in_memory().unwrap();
+        for sql in &MIGRATIONS[..n] {
+            conn.execute_batch(sql).unwrap();
+        }
+        catalog(&conn)
+    }
+
+    #[test]
+    fn schema_versions_after_v8_are_hold_waits_then_request_holds() {
+        // v1-v8 are main's released schema. v9 and v10 belong to the hold fixes (D62, D63);
+        // a later migration must append after them, never reuse either number.
+        assert_eq!(MIGRATIONS.len(), 10);
+        let v8 = catalog_at(8);
+        let v9 = catalog_at(9);
+        let v10 = catalog_at(10);
+        let added = |from: &[String], to: &[String]| -> Vec<String> {
+            to.iter().filter(|o| !from.contains(o)).cloned().collect()
+        };
+        let names = |objects: Vec<String>| -> Vec<String> {
+            objects
+                .into_iter()
+                .map(|o| o.split(':').next().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(
+            names(added(&v8, &v9)),
+            ["table hold_waits on hold_waits", "fk hold_waits"]
+        );
+        assert_eq!(
+            names(added(&v9, &v10)),
+            [
+                "index announcements_by_fingerprint on announcements",
+                "index request_holds_by_hold on request_holds",
+                "table announcements on announcements",
+                "fk announcements",
+                "table request_holds on request_holds",
+                "fk request_holds",
+            ]
+        );
+        let announcements = v10
+            .iter()
+            .find(|o| o.starts_with("table announcements "))
+            .unwrap();
+        assert!(
+            announcements.contains("Text(\"fingerprint\")"),
+            "{announcements}"
+        );
+        assert!(
+            announcements.contains("Text(\"duplicate_of\")"),
+            "{announcements}"
+        );
+    }
+
+    #[test]
+    fn a_v8_home_upgrades_to_v10_and_keeps_its_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "fn a() {}\n").unwrap();
+
+        // Populate a home through the API, using only what v8 already had.
+        let store = Store::open(&home).unwrap();
+        for (name, program) in [("alice", Program::Claude), ("bob", Program::Codex)] {
+            store
+                .register_agent(RegisterAgent {
+                    name: name.into(),
+                    program,
+                    project: None,
+                    model: None,
+                    description: None,
+                })
+                .unwrap();
+        }
+        let project = store
+            .ensure_project("test", root.to_str().unwrap())
+            .unwrap()
+            .abs_path;
+        let hold = store
+            .acquire_holds(AcquireHolds {
+                agent: "alice".into(),
+                project: project.clone(),
+                paths: vec!["src/a.rs".into()],
+                ttl_seconds: Some(600),
+                exclusive: true,
+                reason: Some("work".into()),
+                repo_wide: false,
+            })
+            .unwrap()
+            .granted
+            .remove(0);
+        let legacy = store
+            .send_message(SendMessage {
+                from: "bob".into(),
+                to: vec!["alice".into()],
+                subject: "please release src/a.rs".into(),
+                body: "a request written before linked release requests existed".into(),
+                request: Some(NewRequest::default()),
+                ..Default::default()
+            })
+            .unwrap();
+        let legacy_request = legacy.request_id.clone().unwrap();
+        assert_eq!(
+            store
+                .claim_announcement(
+                    "alice",
+                    std::slice::from_ref(&legacy.message_id),
+                    "post_tool",
+                    None
+                )
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(store);
+
+        // Take the home back to exactly main's v8 schema, keeping every v8 row.
+        let db = Connection::open(home.join(DB_FILE)).unwrap();
+        db.execute_batch(
+            "DROP TABLE hold_waits;
+             DROP TABLE request_holds;
+             ALTER TABLE announcements RENAME TO announcements_v10;",
+        )
+        .unwrap();
+        db.execute_batch(MIGRATIONS[7]).unwrap();
+        db.execute_batch(
+            "INSERT INTO announcements (agent_id, message_id, channel, announced_at)
+               SELECT agent_id, message_id, channel, announced_at FROM announcements_v10;
+             DROP TABLE announcements_v10;",
+        )
+        .unwrap();
+        db.pragma_update(None, "user_version", 8).unwrap();
+        assert_eq!(catalog(&db), catalog_at(8), "the fixture is a true v8 home");
+        drop(db);
+
+        // A normal open upgrades it, and the result matches a fresh v10 home.
+        let store = Store::open(&home).unwrap();
+        let db = Connection::open(home.join(DB_FILE)).unwrap();
+        assert_eq!(version(&db), MIGRATIONS.len() as i64);
+        assert_eq!(catalog(&db), catalog_at(MIGRATIONS.len()));
+        let (fingerprint, duplicate): (Option<String>, Option<String>) = db
+            .query_row(
+                "SELECT fingerprint, duplicate_of FROM announcements WHERE message_id = ?1",
+                [&legacy.message_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (fingerprint, duplicate),
+            (None, None),
+            "old claims gain empty columns"
+        );
+
+        // The hold survived, and the v9/v10 behaviour works on the upgraded home.
+        let blocked = store
+            .guard_edit("bob", &project, &["src/a.rs".into()], "editing (auto)")
+            .unwrap();
+        assert_eq!(blocked.conflicts.len(), 1);
+        assert_eq!(blocked.conflicts[0].held.hold_id, hold.hold_id);
+        let waits: i64 = db
+            .query_row("SELECT count(*) FROM hold_waits", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(waits, 1, "the blocked edit records a durable wait");
+        let ask = store.request_hold_release("bob", &hold.hold_id).unwrap();
+        let linked = ask.request_id.unwrap();
+        let link: String = db
+            .query_row(
+                "SELECT hold_id FROM request_holds WHERE request_id = ?1",
+                [&linked],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(link, hold.hold_id);
+        let unlinked: i64 = db
+            .query_row(
+                "SELECT count(*) FROM request_holds WHERE request_id = ?1",
+                [&legacy_request],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            unlinked, 0,
+            "a request from before the upgrade is never linked"
+        );
+
+        store
+            .release_holds("alice", std::slice::from_ref(&hold.hold_id))
+            .unwrap();
+        let status = |id: &str| -> String {
+            db.query_row(
+                "SELECT status FROM requests WHERE request_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(status(&linked), "done");
+        assert_eq!(
+            status(&legacy_request),
+            "open",
+            "prose is never inferred as a link"
+        );
+        let waits: i64 = db
+            .query_row("SELECT count(*) FROM hold_waits", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(waits, 0, "the release pings and clears the wait");
+    }
+}
