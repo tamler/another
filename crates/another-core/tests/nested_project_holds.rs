@@ -162,3 +162,72 @@ fn nested_projects_compare_case_insensitively_where_the_volume_folds_case() {
     assert_eq!(hold(&store, "beta", &p[1], "f.md"), 1);
     assert_eq!(hold(&store, "alpha", &p[0], "sub/f.md"), 0);
 }
+
+/// Nesting compares directories, and a directory names a place only on its own machine: a
+/// paired node's project at a path below (or above) a local project is not the same files,
+/// so its holds do not stop local work there. (Projects that share a git repository key
+/// are related across nodes, which the repo-key tests cover.)
+#[test]
+fn a_paired_nodes_project_at_a_nested_path_is_not_related() {
+    use another_core::{Perm, DB_FILE};
+
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(work.join("sub")).unwrap();
+    let open = |name: &str| {
+        let store = Store::open(&dir.path().join(name)).unwrap();
+        store.set_node_name(name).unwrap();
+        store
+    };
+    let hub = open("hub");
+    let spoke = open("spoke");
+    let code = hub
+        .create_invite("https://hub.example", &Perm::ALL, 3600)
+        .unwrap();
+    let (invite, req) = spoke.prepare_join(&code).unwrap();
+    let resp = hub.accept_pairing(&req).unwrap();
+    spoke.complete_join(&invite, &resp).unwrap();
+    for (store, name) in [(&hub, "alpha"), (&spoke, "beta")] {
+        store
+            .register_agent(RegisterAgent {
+                name: name.into(),
+                program: Program::Claude,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+    }
+
+    // The spoke holds sub/f.md in its project at work/sub, and the hub learns of it.
+    let remote_child = spoke
+        .ensure_project("test", work.join("sub").to_str().unwrap())
+        .unwrap()
+        .abs_path;
+    assert_eq!(hold(&spoke, "beta", &remote_child, "f.md"), 1);
+    let (events, _) = spoke.outbound_events(0, 10_000).unwrap();
+    let report = hub
+        .ingest(spoke.node_id(), &events, &[spoke.node_entry().unwrap()])
+        .unwrap();
+    assert!(report.rejected.is_empty(), "{report:?}");
+    let synced: i64 = rusqlite::Connection::open(dir.path().join("hub").join(DB_FILE))
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM holds WHERE node_id = ?1 AND released_at IS NULL",
+            [spoke.node_id()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(synced, 1, "the hub has the spoke's hold");
+
+    // The hub's own project at work, and the same relative file through it.
+    let local_parent = hub
+        .ensure_project("test", work.to_str().unwrap())
+        .unwrap()
+        .abs_path;
+    assert_eq!(
+        hold(&hub, "alpha", &local_parent, "sub/f.md"),
+        1,
+        "a path on another machine is not a nested project here"
+    );
+}
