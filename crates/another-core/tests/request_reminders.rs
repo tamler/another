@@ -321,6 +321,41 @@ fn the_same_deadline_is_never_reminded_twice_to_the_same_owner() {
     assert_eq!(fx.mail("other", "Due soon:").len(), 1);
 }
 
+/// Review R2 P2: a thread can hold several requests. Two with the same requester, owner,
+/// title and deadline in one thread are still two reminders.
+#[test]
+fn two_requests_in_one_thread_each_get_a_reminder() {
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let fx = Fx::new();
+    let a = fx.open(Some(3600));
+    let thread = fx.store.request(&a).unwrap().thread_id;
+    let b = fx
+        .store
+        .send_message(SendMessage {
+            from: "lead".into(),
+            to: vec!["worker".into()],
+            subject: "Fix the flaky test".into(),
+            body: "the other half".into(),
+            thread_id: Some(thread.clone()),
+            request: Some(NewRequest {
+                due_in_seconds: Some(3600),
+            }),
+            ..Default::default()
+        })
+        .unwrap()
+        .request_id
+        .expect("second request");
+    assert_eq!(fx.store.request(&b).unwrap().thread_id, thread);
+    fx.act("worker", &a, RequestAction::Claim, None);
+    fx.act("worker", &b, RequestAction::Claim, None);
+    fx.advance_secs(49 * 60);
+    fx.sweep();
+    assert_eq!(fx.kinds(&a, "due_soon"), 1);
+    assert_eq!(fx.kinds(&b, "due_soon"), 1);
+    fx.sweep();
+    assert_eq!(fx.mail("worker", "Due soon:").len(), 2);
+}
+
 #[test]
 fn the_window_edges_are_exact() {
     let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());

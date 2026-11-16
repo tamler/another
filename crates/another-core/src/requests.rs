@@ -276,8 +276,9 @@ struct Reminder<'a> {
 }
 
 /// Send one reminder in its own savepoint with its `request.reminded` event. A reminder
-/// that cannot be delivered is rolled back and recorded as `request.notify_failed`; it
-/// never fails the sweep or the write that ran it.
+/// that cannot be delivered is rolled back and recorded as `request.notify_failed`, and
+/// the sweep goes on. A database failure (the savepoint itself, or writing that event)
+/// still fails the caller's transaction, as any write would.
 fn send_reminder_tx(tx: &Tx<'_>, row: &ReminderRow, reminder: Reminder<'_>) -> Result<()> {
     let notice = SendMessage {
         subject: reminder.subject,
@@ -404,14 +405,23 @@ pub(crate) fn remind_due_soon_tx(tx: &Tx<'_>) -> Result<()> {
         // The body starts with this deadline, so the reminder mail itself is the record.
         let marker = format!("Due at {} (", fmt_ts(row.due_at));
         // One reminder per (request, owner, deadline) for the life of the request: moving the
-        // deadline away and back, or releasing and reclaiming, does not repeat it. The lookup
-        // reads only this request's thread (`messages_by_thread`) and the delivery's key.
+        // deadline away and back, or releasing and reclaiming, does not repeat it. A reminder
+        // replies to its own request's message, which tells apart several requests in one
+        // thread. The lookup reads only this thread (`messages_by_thread`) and the delivery's
+        // key.
         let sent: bool = tx.query_row(
             "SELECT EXISTS (SELECT 1 FROM messages m
                JOIN deliveries d ON d.message_id = m.message_id AND d.agent_id = ?3
-               WHERE m.thread_id = ?1 AND m.sender_id = ?2 AND m.subject = ?4
-                 AND substr(m.body, 1, length(?5)) = ?5)",
-            params![row.thread_id, row.creator_id, owner_id, subject, marker],
+               WHERE m.thread_id = ?1 AND m.reply_to = ?6 AND m.sender_id = ?2
+                 AND m.subject = ?4 AND substr(m.body, 1, length(?5)) = ?5)",
+            params![
+                row.thread_id,
+                row.creator_id,
+                owner_id,
+                subject,
+                marker,
+                row.message_id
+            ],
             |r| r.get(0),
         )?;
         if sent {
