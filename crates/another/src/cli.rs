@@ -11,7 +11,7 @@ use another_core::{
     RequestStatus, RequestUpdate, ResourceFilter, ResourceKind, ResourceRef, SendMessage,
     SessionInfo, SessionPhase, Since, Store,
 };
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use serde::Serialize;
 
 use crate::hooks::{self, Client, HookEnv, HookEvent};
@@ -106,19 +106,29 @@ pub enum Command {
     Agent(AgentCmd),
     /// Send a message.
     Send {
-        /// Sender: name or name@project (default: $ANOTHER_AGENT).
-        #[arg(long, short = 'f', env = "ANOTHER_AGENT")]
+        /// Sender: name or name@project (default: $ANOTHER_AGENT). `--agent`/`-a` also work,
+        /// as on every other command.
+        #[arg(
+            long,
+            short = 'f',
+            visible_alias = "agent",
+            visible_short_alias = 'a',
+            env = "ANOTHER_AGENT"
+        )]
         from: String,
         /// Recipients (repeat or comma-separate).
         #[arg(long, short = 't', value_delimiter = ',', required = true)]
         to: Vec<String>,
+        /// Copied recipients (repeat or comma-separate).
         #[arg(long, value_delimiter = ',')]
         cc: Vec<String>,
+        /// One line of text: the subject shown in inboxes and notices.
         #[arg(long, short = 's')]
         subject: String,
         /// Message body; `-` reads stdin.
         #[arg(long, short = 'b', default_value = "")]
         body: String,
+        /// low | normal | high | urgent
         #[arg(long, short = 'i', default_value = "normal")]
         importance: String,
         /// Ask recipients to acknowledge.
@@ -136,8 +146,16 @@ pub enum Command {
     },
     /// Reply to a message within its thread.
     Reply {
+        /// The message to reply to (ids are shown by `another inbox` and `another thread`).
         message_id: String,
-        #[arg(long, short = 'f', env = "ANOTHER_AGENT")]
+        /// Sender: name or name@project (default: $ANOTHER_AGENT). `--agent`/`-a` also work.
+        #[arg(
+            long,
+            short = 'f',
+            visible_alias = "agent",
+            visible_short_alias = 'a',
+            env = "ANOTHER_AGENT"
+        )]
         from: String,
         /// Reply body; `-` reads stdin.
         #[arg(long, short = 'b')]
@@ -145,8 +163,10 @@ pub enum Command {
         /// Reply to all original recipients.
         #[arg(long)]
         all: bool,
+        /// low | normal | high | urgent (default: the original's)
         #[arg(long, short = 'i')]
         importance: Option<String>,
+        /// Ask recipients to acknowledge.
         #[arg(long)]
         ack: bool,
     },
@@ -160,6 +180,7 @@ pub enum Command {
         /// Only high/urgent messages.
         #[arg(long)]
         urgent: bool,
+        /// Most messages to show.
         #[arg(long, default_value_t = 20)]
         limit: u32,
     },
@@ -167,6 +188,7 @@ pub enum Command {
     Ack {
         #[command(flatten)]
         agent: AgentArg,
+        /// Messages to mark (ids from `another inbox`).
         #[arg(required = true)]
         message_ids: Vec<String>,
         /// Mark messages read (changes state) without acknowledging. --read-only is a compatibility alias.
@@ -177,11 +199,15 @@ pub enum Command {
     Threads {
         #[command(flatten)]
         agent: AgentArg,
+        /// Most threads to show.
         #[arg(long, default_value_t = 20)]
         limit: u32,
     },
     /// Show every message in a thread.
-    Thread { thread_id: String },
+    Thread {
+        /// The thread (ids from `another threads` or `another inbox`).
+        thread_id: String,
+    },
     /// List requests.
     Requests {
         /// open | claimed | done | stale | cancelled
@@ -190,6 +216,7 @@ pub enum Command {
         /// Owner name or name@project.
         #[arg(long)]
         owner: Option<String>,
+        /// Most requests to show.
         #[arg(long, default_value_t = 50)]
         limit: u32,
     },
@@ -197,9 +224,11 @@ pub enum Command {
     Request {
         /// claim | release | complete | cancel
         action: String,
+        /// The request (ids from `another requests` or `another inbox`).
         request_id: String,
         #[command(flatten)]
         agent: AgentArg,
+        /// On complete or cancel: a note (a completion note is mailed to the requester).
         #[arg(long)]
         note: Option<String>,
         /// On claim: due in this many seconds.
@@ -214,7 +243,8 @@ pub enum Command {
         /// Project path or slug.
         #[arg(long, short = 'p')]
         project: Option<String>,
-        #[arg(long)]
+        /// Only this agent's holds (name or name@project).
+        #[arg(long, short = 'a')]
         agent: Option<String>,
     },
     /// Session heartbeat: renew holds; with --end release them and go offline.
@@ -224,6 +254,7 @@ pub enum Command {
         /// Session is starting: record a `session.started` event.
         #[arg(long, conflicts_with = "end")]
         start: bool,
+        /// Session is ending: release the agent's holds and leases and mark it offline.
         #[arg(long)]
         end: bool,
         /// With --end: keep resource leases (servers meant to outlive the session).
@@ -253,6 +284,7 @@ pub enum Command {
     Resource(ResourceCmd),
     /// Borrow a shared resource (id or kind:name).
     Borrow {
+        /// The resource: its id or kind:name (from `another resources`).
         target: String,
         #[command(flatten)]
         agent: AgentArg,
@@ -262,6 +294,7 @@ pub enum Command {
     },
     /// Release your lease on a resource (id or kind:name).
     Release {
+        /// The resource: its id or kind:name (from `another resources`).
         target: String,
         #[command(flatten)]
         agent: AgentArg,
@@ -277,6 +310,7 @@ pub enum Command {
     },
     /// Reap an orphan (resource id, kind:name, or pid:N). Without --confirm, only shows the plan.
     Reap {
+        /// What to reap: a resource id, kind:name, or pid:N (from `another orphans`).
         target: String,
         /// Seconds the target must have been orphaned (or alive, for pid targets).
         #[arg(long, default_value_t = crate::reap::DEFAULT_GRACE_SECONDS)]
@@ -299,6 +333,7 @@ pub enum Command {
     Remote(RemoteCmd),
     /// Show the audit log of remote (token-authenticated) calls.
     Audit {
+        /// Most entries to show (the newest).
         #[arg(long, default_value_t = 50)]
         limit: u32,
     },
@@ -315,6 +350,7 @@ pub enum Command {
         /// Keep syncing every --every seconds.
         #[arg(long)]
         watch: bool,
+        /// Seconds between syncs with --watch.
         #[arg(long, default_value_t = 30)]
         every: u64,
     },
@@ -344,6 +380,7 @@ pub enum Command {
         /// Start point: a duration (30m, 2h, 1d), an RFC 3339 time, or an event id cursor.
         #[arg(long)]
         since: Option<String>,
+        /// Most items to show.
         #[arg(long, default_value_t = 50)]
         limit: u32,
         /// Only these categories: mail, request, hold, resource, session, system, federation.
@@ -381,8 +418,14 @@ pub enum Command {
     Sweep,
     /// Show the most recent event-log records.
     Events {
+        /// Most records to show.
         #[arg(long, default_value_t = 20)]
         limit: u32,
+    },
+    /// Print a shell completion script, e.g. `another completions zsh > ~/.zfunc/_another`.
+    Completions {
+        /// bash | zsh | fish | powershell | elvish
+        shell: clap_complete::Shell,
     },
 }
 
@@ -420,6 +463,7 @@ pub enum WakeCmd {
         /// tmux | cmux | herdr
         #[arg(long)]
         via: String,
+        /// Where to wake it: a tmux pane (%3), a cmux surface id, or a Herdr pane id.
         #[arg(long)]
         target: String,
     },
@@ -468,6 +512,7 @@ pub enum DaemonCmd {
     Uninstall {
         #[command(flatten)]
         args: DaemonArgs,
+        /// Show what would be removed without unloading or removing anything.
         #[arg(long)]
         dry_run: bool,
     },
@@ -490,7 +535,10 @@ pub enum NodeCmd {
     Show,
     /// Rename this node (do this before pairing; names must be unique across nodes).
     /// Without a name, prints the current one.
-    Name { name: Option<String> },
+    Name {
+        /// The new name (omit it to print the current one).
+        name: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -512,9 +560,15 @@ pub enum PairCmd {
         expires: String,
     },
     /// Spoke: redeem an invite code and record the hub.
-    Join { code: String },
+    Join {
+        /// The invite code printed by the hub's `another pair invite`.
+        code: String,
+    },
     /// Stop accepting (or using) a paired node, by name or id.
-    Revoke { node: String },
+    Revoke {
+        /// The paired node's name or id (see `another peers`).
+        node: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -537,6 +591,7 @@ pub enum TokenCmd {
     List,
     /// Revoke a token by id (takes effect on the next request).
     Revoke {
+        /// The token's id (see `another token list`).
         token_id: String,
     },
 }
@@ -560,11 +615,17 @@ pub enum OauthCmd {
         label: Option<String>,
     },
     /// Reject a waiting client.
-    Deny { user_code: String },
+    Deny {
+        /// Code shown on the consent page and by `another oauth pending`.
+        user_code: String,
+    },
     /// List grants (each one is a single agent).
     List,
     /// Revoke a grant and every token issued for it.
-    Revoke { grant_id: String },
+    Revoke {
+        /// The grant's id (see `another oauth list`).
+        grant_id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -578,6 +639,7 @@ pub enum RemoteCmd {
         /// Without this, `cloudflared` is started and its quick-tunnel URL is used.
         #[arg(long)]
         public_url: Option<String>,
+        /// Seconds between sweeps of lapsed holds and overdue requests.
         #[arg(long, default_value_t = 30)]
         sweep_secs: u64,
     },
@@ -612,15 +674,19 @@ pub enum ResourceCmd {
         name: String,
         #[command(flatten)]
         agent: AgentArg,
+        /// Where to reach it, e.g. http://127.0.0.1:11434.
         #[arg(long)]
         endpoint: Option<String>,
+        /// The port it listens on.
         #[arg(long)]
         port: Option<u16>,
+        /// The process id serving it (used by `another orphans` and `reap`).
         #[arg(long)]
         pid: Option<u32>,
         /// Project path or slug.
         #[arg(long, short = 'p')]
         project: Option<String>,
+        /// What it is for, in a few words.
         #[arg(long)]
         purpose: Option<String>,
         /// Refuse borrowers.
@@ -637,6 +703,7 @@ pub enum ResourceCmd {
     Heartbeat {
         #[command(flatten)]
         agent: AgentArg,
+        /// Resource ids or kind:name to renew (default: all of your leases).
         targets: Vec<String>,
     },
 }
@@ -682,8 +749,10 @@ pub enum HookCmd {
     },
     /// Remove Another hooks from client configs, leaving other hooks untouched.
     Uninstall {
+        /// Clients to remove the hooks from (repeat or comma-separate).
         #[arg(long, value_delimiter = ',', required = true)]
         client: Vec<ClientSel>,
+        /// Show what would change without writing anything.
         #[arg(long)]
         dry_run: bool,
     },
@@ -691,7 +760,9 @@ pub enum HookCmd {
     Status,
     /// Called by the hook wrapper; reads the client's JSON on stdin. Always exits 0.
     Run {
+        /// The hook event the client fired.
         event: HookEvent,
+        /// The client that fired it.
         #[arg(long)]
         client: Client,
     },
@@ -701,6 +772,7 @@ pub enum HookCmd {
 pub enum ProjectCmd {
     /// Register a project by path (default: current directory).
     Ensure {
+        /// The project directory (default: the current directory).
         path: Option<PathBuf>,
     },
     List,
@@ -710,6 +782,7 @@ pub enum ProjectCmd {
 pub enum AgentCmd {
     /// Register or update an agent.
     Register {
+        /// The agent's name (with --project, its address is name@<project>).
         name: String,
         /// claude | grok | codex | cursor | grok_bot | other
         #[arg(long)]
@@ -717,13 +790,16 @@ pub enum AgentCmd {
         /// Project path to scope the name to (enables name@project).
         #[arg(long)]
         project: Option<PathBuf>,
+        /// The model the agent runs on, for display.
         #[arg(long)]
         model: Option<String>,
+        /// What the agent does, for display.
         #[arg(long)]
         description: Option<String>,
     },
     List,
     Show {
+        /// The agent: name or name@project.
         name: String,
     },
 }
@@ -750,6 +826,7 @@ pub enum HoldCmd {
         agent: AgentArg,
         #[command(flatten)]
         project: ProjectArg,
+        /// Files, directories or globs, relative to the project.
         #[arg(required = true)]
         paths: Vec<String>,
         /// Lease seconds (default 1800).
@@ -758,6 +835,7 @@ pub enum HoldCmd {
         /// Shared instead of exclusive.
         #[arg(long)]
         shared: bool,
+        /// Why you hold them, shown to anyone they block.
         #[arg(long)]
         reason: Option<String>,
         /// Allow a pattern that covers the whole project (`**`, `.`, `**/*.rs`).
@@ -771,8 +849,10 @@ pub enum HoldCmd {
         agent: AgentArg,
         #[command(flatten)]
         project: ProjectArg,
+        /// Files, directories or globs, relative to the project.
         #[arg(required = true)]
         paths: Vec<String>,
+        /// Check as a shared request: only exclusive holds conflict.
         #[arg(long)]
         shared: bool,
     },
@@ -780,12 +860,14 @@ pub enum HoldCmd {
     Renew {
         #[command(flatten)]
         agent: AgentArg,
+        /// Hold ids to renew (default: all of yours).
         hold_ids: Vec<String>,
     },
     /// Release your holds (all, or the given ids).
     Release {
         #[command(flatten)]
         agent: AgentArg,
+        /// Hold ids to release (default: all of yours).
         hold_ids: Vec<String>,
     },
 }
@@ -795,6 +877,54 @@ pub enum HoldCmd {
 /// scripts branch on it. Other errors exit 1, including `forbidden` (for example releasing
 /// a request someone else owns), and bad arguments exit 2 (clap).
 pub const EXIT_CONFLICT: u8 = 3;
+
+/// Whether `--json` was passed as an option: before any `--`, after which every argument
+/// is a plain value (review R1-3).
+fn json_requested() -> bool {
+    std::env::args_os()
+        .skip(1)
+        .take_while(|a| a != "--")
+        .any(|a| a == "--json")
+}
+
+/// A bad command line under `--json`, as a JSON error on stdout (exit 2, as clap), so a
+/// script reading stdout always gets an object. Kept out of `main` (and never inlined) so
+/// its temporaries do not grow the frame every command starts in: a debug build's main
+/// thread on Windows has only 1 MB of stack (review R1-1).
+#[inline(never)]
+fn usage_error_json(e: &clap::Error) -> ExitCode {
+    // clap's error paragraph (up to its blank line, before "Usage:"), on one line.
+    let text = e.to_string();
+    let message = text
+        .lines()
+        .take_while(|l| !l.trim().is_empty())
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_start_matches("error: ")
+        .to_string();
+    println!(
+        "{}",
+        serde_json::json!({ "error": {
+            "code": "usage",
+            "message": message,
+            "hint": "Run the command with --help for its arguments.",
+        }})
+    );
+    ExitCode::from(2)
+}
+
+/// `another completions <shell>`, outside `run` for the same stack reason.
+#[inline(never)]
+fn completions_command(shell: clap_complete::Shell) -> anyhow::Result<ExitCode> {
+    let mut script = Vec::new();
+    clap_complete::generate(shell, &mut Cli::command(), "another", &mut script);
+    // A closed pipe (`| head`) is not an error.
+    match std::io::Write::write_all(&mut std::io::stdout(), &script) {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e.into()),
+        _ => Ok(ExitCode::SUCCESS),
+    }
+}
 
 /// Stack for the thread the binary runs on.
 const CLI_STACK_BYTES: usize = 16 * 1024 * 1024;
@@ -821,7 +951,12 @@ pub fn with_cli_stack(f: fn() -> ExitCode) -> ExitCode {
 /// The CLI: parse the command line and run it. The binary calls it through
 /// [`with_cli_stack`].
 pub fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        // --help and --version still print as usual.
+        Err(e) if e.use_stderr() && json_requested() => return usage_error_json(&e),
+        Err(e) => e.exit(),
+    };
     let log_file = match &cli.command {
         Command::Serve { log_file, .. } => log_file.as_deref(),
         _ => None,
@@ -1211,6 +1346,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     {
         return board_command(&another_home()?, json, project.as_deref(), since, *limit);
     }
+    // Needs no database: generated from the command definitions.
+    if let Command::Completions { shell } = &cli.command {
+        return completions_command(*shell);
+    }
 
     let store = open(home)?;
     let code = match cli.command {
@@ -1219,6 +1358,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         | Command::Hook(_)
         | Command::Daemon(_)
         | Command::Board { .. }
+        | Command::Completions { .. }
         | Command::Remote(_) => {
             unreachable!("handled above")
         }
