@@ -1043,7 +1043,8 @@ fn ping_free_waiters_tx(tx: &Tx<'_>) -> Result<()> {
         // swallows a second ping for the same file within its five-minute window.
         let ended: Vec<String> = serde_json::from_str(&blockers).unwrap_or_default();
         let notice = SendMessage {
-            subject: format!("Hold free: {}", path.chars().take(280).collect::<String>()),
+            // A file name may contain a line break; subjects are one line (D75).
+            subject: format!("Hold free: {}", crate::mail::single_line(&path, 280)),
             body: format!(
                 "Another automatically checked {project_key}:{path}: no conflicting hold remains (hold {} ended). The file is not reserved; check again before editing.",
                 ended.join(", ")
@@ -1120,7 +1121,8 @@ fn complete_hold_requests_tx(tx: &Tx<'_>) -> Result<()> {
             params![rid, owner_id, note, tx.now],
         )?;
         let notice = SendMessage {
-            subject: format!("Done: {title}"),
+            // The title may come from a subject stored before D75.
+            subject: format!("Done: {}", crate::mail::single_line(&title, 290)),
             body: note,
             reply_to: Some(mid),
             ..Default::default()
@@ -1331,7 +1333,8 @@ impl Store {
                 params![hold_id, me.id], |r| r.get(0)).optional()?;
             if let Some(mid) = existing { return load_message(tx, &mid); }
             let pattern = literal_pattern(&held.pattern).unwrap_or(held.pattern);
-            let title: String = pattern.chars().take(280).collect();
+            // A held file name may contain a line break; subjects are one line (D75).
+            let title = crate::mail::single_line(&pattern, 280);
             let message = send_by_id_tx(tx, &me.id, &holder_id, &SendMessage {
                 subject: format!("Release {title}?"),
                 body: format!("Please release hold {hold_id} on {}:{pattern} when your edit is done. Another will close this request when that hold ends.", held.project),

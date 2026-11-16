@@ -46,8 +46,22 @@ pub struct WakeOptions {
     pub cancel: Option<Arc<AtomicBool>>,
 }
 
+/// Longest wake line, in characters.
+const MAX_WAKE_CHARS: usize = 1000;
+/// Longest subject quoted in a default wake line, in characters.
+const MAX_WAKE_SUBJECT_CHARS: usize = 80;
+
 /// The adapter commands for a wake.
+///
+/// Every adapter types or shows `message` in another agent's terminal, and parts of it
+/// (subjects) were chosen by whoever sent the mail. The line is made safe here, for every
+/// caller: control characters (CR, LF, ESC, …) become spaces so nothing is pressed as a
+/// key, and for cmux, which unescapes backslash sequences such as `\n`, backslashes in
+/// the text become `/` so the only escape left is the one that submits the line.
 pub fn commands(via: WakeVia, target: &str, message: &str) -> Vec<Vec<String>> {
+    let safe = another_core::single_line(message, MAX_WAKE_CHARS);
+    let message = safe.as_str();
+    let cmux_text = safe.replace('\\', "/");
     let s = |x: &str| x.to_string();
     match via {
         WakeVia::Tmux => vec![
@@ -67,7 +81,7 @@ pub fn commands(via: WakeVia, target: &str, message: &str) -> Vec<Vec<String>> {
             s("--title"),
             s("Another"),
             s("--body"),
-            s(message),
+            cmux_text.clone(),
         ]],
         // `cmux send` unescapes `\n`, which submits the line.
         WakeVia::Cmux => vec![vec![
@@ -75,7 +89,7 @@ pub fn commands(via: WakeVia, target: &str, message: &str) -> Vec<Vec<String>> {
             s("send"),
             s("--surface"),
             s(target),
-            format!("{message}\\n"),
+            format!("{cmux_text}\\n"),
         ]],
         WakeVia::Herdr => {
             let herdr = std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| s("herdr"));
@@ -100,7 +114,12 @@ fn default_message(store: &Store, agent: &str) -> Result<(Option<String>, String
     let subjects: Vec<String> = inbox
         .messages
         .iter()
-        .map(|m| format!("\"{}\"", m.message.subject))
+        .map(|m| {
+            format!(
+                "\"{}\"",
+                another_core::single_line(&m.message.subject, MAX_WAKE_SUBJECT_CHARS)
+            )
+        })
         .collect();
     let mut msg = format!(
         "Another: {} unread message(s) ({} urgent) and {} open request(s) for {}",
@@ -156,6 +175,12 @@ pub fn wake(store: &Store, agent: &str, opts: &WakeOptions) -> Result<WakePlan> 
         plan.skipped = Some(format!("no {} target for {address}", via.as_str()));
         return Ok(plan);
     };
+    // The plan's message is printed by `another wake --dry-run` and returned in JSON: keep
+    // it to the same safe line the adapters type.
+    plan.message = plan
+        .message
+        .as_deref()
+        .map(|m| another_core::single_line(m, MAX_WAKE_CHARS));
     plan.commands = commands(via, &target, plan.message.as_deref().unwrap_or_default());
     if opts.dry_run {
         plan.skipped = Some("dry run".into());
