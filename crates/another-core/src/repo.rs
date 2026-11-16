@@ -203,7 +203,7 @@ pub(crate) fn stored_key(key: &str) -> String {
 
 /// The cached link: `None` when never checked (or cached under older key rules),
 /// `Some(None)` when checked and not in a repo.
-fn cached(conn: &Connection, project_id: &str) -> Result<Option<Option<RepoLink>>> {
+pub(crate) fn cached(conn: &Connection, project_id: &str) -> Result<Option<Option<RepoLink>>> {
     let row: Option<(String, String)> = conn
         .query_row(
             "SELECT repo_key, repo_prefix FROM project_repos WHERE project_id = ?1",

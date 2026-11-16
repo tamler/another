@@ -8,6 +8,7 @@ pub mod hooks;
 pub mod mcp;
 pub mod oauth_http;
 mod output;
+pub mod precommit;
 pub mod publish;
 pub mod reap;
 pub mod remote;

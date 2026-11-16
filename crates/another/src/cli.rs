@@ -695,6 +695,13 @@ pub enum HookCmd {
         #[arg(long)]
         client: Client,
     },
+    /// Git pre-commit hook: warn when a staged file is under another agent's live hold.
+    /// Advisory: never blocks the commit, always exits 0, changes no data.
+    PreCommit {
+        /// The committer, whose own holds are left out (default: $ANOTHER_AGENT).
+        #[arg(short, long, env = "ANOTHER_AGENT")]
+        agent: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -796,6 +803,14 @@ pub enum HoldCmd {
 /// a request someone else owns), and bad arguments exit 2 (clap).
 pub const EXIT_CONFLICT: u8 = 3;
 
+/// Whether this process was started as `another … hook pre-commit …`. Raw `OsString`s:
+/// an argument that is not UTF-8 must not panic here (review IMPL-4).
+fn is_pre_commit_call() -> bool {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    args.windows(2)
+        .any(|w| w[0] == "hook" && w[1] == "pre-commit")
+}
+
 /// Stack for the thread the binary runs on.
 const CLI_STACK_BYTES: usize = 16 * 1024 * 1024;
 
@@ -821,7 +836,24 @@ pub fn with_cli_stack(f: fn() -> ExitCode) -> ExitCode {
 /// The CLI: parse the command line and run it. The binary calls it through
 /// [`with_cli_stack`].
 pub fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        // The commit guard never blocks a commit, not even on a bad argument.
+        Err(e) if e.use_stderr() && is_pre_commit_call() => {
+            let first = e.to_string();
+            let first = first
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim_start_matches("error: ");
+            eprintln!(
+                "another: hold check skipped: bad arguments ({})",
+                crate::precommit::escape_line(first)
+            );
+            return ExitCode::SUCCESS;
+        }
+        Err(e) => e.exit(),
+    };
     let log_file = match &cli.command {
         Command::Serve { log_file, .. } => log_file.as_deref(),
         _ => None,
@@ -1948,6 +1980,26 @@ fn hook_command(
             let text = hooks::run_fail_open(store, env, home.as_deref(), *event, *client);
             if !text.is_empty() {
                 println!("{text}");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        HookCmd::PreCommit { agent } => {
+            // Advisory (docs/HOOKS.md, "Commit guard"): warn at most, always exit 0.
+            let outcome = match (another_home(), std::env::current_dir()) {
+                (Ok(home), Ok(dir)) => crate::precommit::check(&home, &dir, agent.as_deref()),
+                (Err(e), _) => crate::precommit::Outcome {
+                    skipped: Some(format!("no Another home ({e:#})")),
+                    ..Default::default()
+                },
+                (_, Err(e)) => crate::precommit::Outcome {
+                    skipped: Some(format!("no working directory ({e})")),
+                    ..Default::default()
+                },
+            };
+            if json {
+                println!("{}", crate::precommit::render_json(&outcome));
+            } else {
+                eprint!("{}", crate::precommit::render_text(&outcome));
             }
             Ok(ExitCode::SUCCESS)
         }

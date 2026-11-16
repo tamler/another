@@ -318,7 +318,7 @@ pub fn new_id() -> String {
     ulid::Ulid::new().to_string()
 }
 
-const MIGRATIONS: &[&str] = &[
+pub(crate) const MIGRATIONS: &[&str] = &[
     r#"
 CREATE TABLE nodes (
     node_id      TEXT PRIMARY KEY,

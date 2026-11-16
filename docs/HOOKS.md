@@ -76,7 +76,7 @@ Codex shows a hook's `statusMessage` while the hook runs. Another sets one on ea
 
 If `~/.codex/hooks.json` has no top-level `description` (or an empty one), install adds "Another coordination hooks (toanother.one): messages and file holds between coding agents". A description you wrote yourself is left as it is, and uninstall never removes one, since it may describe your other hooks too. Installs from before the labels existed get them the next time you run `another hook install --client codex`. Codex records trust against each hook's hash and skips a changed hook until you trust it again, so after that install open `/hooks` and trust Another's hooks again; until you do, mail and holds do not reach Codex sessions through hooks in the default trust flow. The other clients' files get neither field.
 
-Edits made through a shell command (`sed -i`, `echo >`, a script) are not seen by any client's edit hook, so they are neither held nor stopped. Neither is an edit through a hard link to a held file, since a path cannot reveal one.
+Edits made through a shell command (`sed -i`, `echo >`, a script) are not seen by any client's edit hook, so they are neither held nor stopped. Neither is an edit through a hard link to a held file, since a path cannot reveal one. The opt-in [commit guard](#commit-guard-opt-in) warns about such files when they are committed.
 
 ## Mid-task notices
 
@@ -139,6 +139,35 @@ The budget is about 100 ms per tool call. Measured on a laptop over 50 runs each
 ### Grok and shared hook files
 
 Grok also executes hooks from Claude Code and Cursor config files. To keep one Grok event from running Another twice, an Another hook invoked with `GROK_HOOK_EVENT` set acts as `grok` and stands down when the Grok pack is installed. Without the Grok pack, Grok still gets Another through the Claude or Cursor entries, as `grok@<project>`.
+
+## Commit guard (opt-in)
+
+`another hook pre-commit` is a git hook, not a client hook. At `git commit` time it warns, on stderr, when a staged file is under another agent's live hold. It never blocks the commit, and it does not take holds. Another never installs it; to turn it on, put this in `.git/hooks/pre-commit` (or the path `git rev-parse --git-path hooks/pre-commit` prints) and make it executable:
+
+```sh
+#!/bin/sh
+# Another hold guard: advisory, never blocks the commit.
+if command -v another >/dev/null 2>&1; then
+  another hook pre-commit || true
+fi
+```
+
+With a hook manager (husky, lefthook, pre-commit), add the line `another hook pre-commit || true` to its pre-commit step. The command itself exits 0 on every outcome, and the snippet also turns a crash or a missing binary into success. A hook manager's own wrapper can still fail for reasons of its own, which Another cannot rule out.
+
+```text
+another: 1 staged file(s) are held by another agent (advisory; the commit goes ahead)
+  src/parser.rs  held by codex@shop-review (shop-review:src/parser.rs, "editing (taken by the edit hook)", 24m left)
+  ask: another send --from <you> --to codex@shop-review --subject "Release src/parser.rs?" --request
+```
+
+- **What it checks.** It lists the commit's files with `git diff --cached` (so `git commit -a` and `git commit <path>` are checked as committed) and matches them the way the edit guard does, including holds in other checkouts of the same repository. Names with `*`, `?`, `[` or `{` are not checked and are counted as such.
+- **Whose holds count.** The committer is `--agent`, else `ANOTHER_AGENT`; that agent's own holds are left out. Without either, every overlapping hold is listed, and the warning says it may include your own.
+- **It changes no data.** It opens the database read-only: no sweep, no event, no project registration, no repository-link cache update. SQLite itself creates the database's `-wal` and `-shm` files in the Another home when they are missing, so the check needs write access to that directory. Without it, the check prints `hold check skipped: read-only open failed (…)` and the commit goes ahead. A checkout that is not a registered project is reported as not checked.
+- **It fails open.** A missing or locked database, a schema from another build, a failed or slow `git` and a bad argument each print one `another: hold check skipped: <reason>` line, and the commit goes ahead. The whole check has a 2-second budget. A database lock wait lasts at most 300 ms and never past the budget. No database query starts once the budget is spent, one still running is interrupted, and matching stops between holds. The guard then reports the files it did not check (`time budget`) along with any conflicts already found. The budget limits how long the commit waits, not how long a stuck `git` keeps running: the guard stops reading from it and never signals it. One step is not cut short: reading a project's files to identify its repository. Each such read is small, and the budget is checked between projects.
+- **Silence** means no live overlapping hold was found among the checked files, not that the files are free. If any file was not checked, or the listing passed 4,096 files or 4 MiB, one line says how many were checked.
+- `--json` prints one object instead, with `complete`, `staged` (or `staged_at_least` when cut), `checked`, `skipped` and `conflicts`.
+
+It does not see edits that are never committed, commits made with `--no-verify` or in a clone without the snippet, or holds on other machines. When a checkout's remote changes after its repository link was cached, the link is not refreshed until that checkout's link is recomputed; the edit guard behaves the same way.
 
 ## Identity
 
