@@ -994,3 +994,37 @@ fn lease_renewal_release_and_expiry_cannot_touch_another_nodes_lease() {
     fed.forge("resource.lease_expired", json!({ "lease_id": lease }));
     assert_eq!(state(), before, "expired by another node");
 }
+
+/// adv248: #248 applies the local node-name rule to a peer's node list. A peer can also
+/// rename itself with a signed `node.renamed` event, which checks only the taken rule, so a
+/// name a local `another node name` refuses (oversized, an `@`, a space) still lands.
+/// `node.created` carries a name the same way, so it follows the same rule.
+#[test]
+fn adv248_a_peers_node_renamed_follows_the_local_name_rule() {
+    let fed = Fed::new();
+    let mut kept = Vec::new();
+    for kind in ["node.renamed", "node.created"] {
+        for name in [
+            "x".repeat(100_000),
+            "evil@hub".to_string(),
+            "two words".to_string(),
+        ] {
+            let report = fed.forge(
+                kind,
+                json!({ "node_id": fed.mallory.id(), "display_name": name }),
+            );
+            assert_eq!(report.rejected.len(), 1, "{kind} {name:.20}: {report:?}");
+            let stored: Option<String> = fed.hub_one(
+                "SELECT display_name FROM nodes WHERE node_id = ?1",
+                &fed.mallory.id(),
+            );
+            if stored.as_deref() == Some(name.as_str()) {
+                kept.push(format!("{kind} {:.20} ({} bytes)", name, name.len()));
+            }
+        }
+    }
+    assert!(
+        kept.is_empty(),
+        "the hub renamed a peer to names a local rename refuses: {kept:#?}"
+    );
+}
