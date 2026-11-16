@@ -400,8 +400,10 @@ mod windows_tests {
 
     #[test]
     fn termination_without_verified_identity_is_refused() {
-        let home = tempfile::tempdir().unwrap();
-        let store = Store::open(home.path()).unwrap();
+        // A Windows home must be created private by Another; an existing temp directory
+        // with inherited ACLs is refused, not re-permissioned (windows_home.rs).
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("home")).unwrap();
         let plan = ReapPlan {
             target: "pid:123".into(),
             resource_id: None,

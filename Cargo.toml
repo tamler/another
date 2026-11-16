@@ -41,3 +41,16 @@ libc = "0.2"
 
 [profile.release]
 strip = true
+
+# Debug and test builds optimize the signature and hash crates. The identity scan's 2 s
+# deadline (D65) verifies one Ed25519 signature per session binding; unoptimized curve
+# arithmetic made that scan about seven times slower than the release binary, so debug
+# tests on slower CI runners measured a cost no shipped build has.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3

@@ -2061,9 +2061,11 @@ mod tests {
             }
             Ok(())
         }).unwrap();
+        // Report the time spent, so a deadline failure on a slow runner shows its margin.
+        let started = std::time::Instant::now();
         store
             .session_actor("claude", Program::Claude, root, None, "new-session", true)
-            .unwrap();
+            .unwrap_or_else(|e| panic!("{e:?} after {:?}", started.elapsed()));
     }
 
     #[test]
