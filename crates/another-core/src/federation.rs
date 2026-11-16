@@ -287,29 +287,49 @@ fn node_name_taken(conn: &Connection, name: &str, node_id: &str) -> Result<bool>
         .is_some())
 }
 
-/// `listed` as a peer's node list may apply it. The name is used only when a local rename
-/// would accept it: valid, not the `local` placeholder, and not another node's. Otherwise a
-/// known node keeps its name, and an unknown one is recorded under its id, which names no
-/// one else, so its key is still learned and its signed events still verify.
-fn listed_entry(tx: &Tx<'_>, listed: &NodeEntry) -> Result<NodeEntry> {
+/// Whether `node_id` is already another node's display name. Checked before a node is first
+/// recorded, the inverse of [`node_name_taken`]: a new node whose id is someone's name would
+/// make that identifier match two nodes.
+fn node_id_is_a_name(conn: &Connection, node_id: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM nodes WHERE display_name = ?1 AND node_id != ?1",
+            [node_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// `listed` as a peer's node list may apply it, or `None` to skip it. The name is used only
+/// when a local rename would accept it: valid, not the `local` placeholder, and not another
+/// node's. Otherwise a known node keeps its name, and an unknown one is recorded under its
+/// id, so its key is still learned and its signed events still verify. An unknown node whose
+/// id is already another node's name is skipped: recording it would make that identifier
+/// match two nodes, and skipping one entry keeps the rest of the sync going.
+fn listed_entry(tx: &Tx<'_>, listed: &NodeEntry) -> Result<Option<NodeEntry>> {
+    let known = tx
+        .query_row(
+            "SELECT display_name FROM nodes WHERE node_id = ?1",
+            [&listed.node_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?;
+    if known.is_none() && node_id_is_a_name(tx, &listed.node_id)? {
+        return Ok(None);
+    }
     let usable = validate_node_name(&listed.display_name).is_ok()
         && listed.display_name != "local"
         && !node_name_taken(tx, &listed.display_name, &listed.node_id)?;
     let display_name = if usable {
         listed.display_name.clone()
     } else {
-        tx.query_row(
-            "SELECT display_name FROM nodes WHERE node_id = ?1",
-            [&listed.node_id],
-            |r| r.get(0),
-        )
-        .optional()?
-        .unwrap_or_else(|| listed.node_id.clone())
+        known.unwrap_or_else(|| listed.node_id.clone())
     };
-    Ok(NodeEntry {
+    Ok(Some(NodeEntry {
         display_name,
         ..listed.clone()
-    })
+    }))
 }
 
 /// Record (or confirm) another node. Keys are pinned on first sight.
@@ -344,6 +364,12 @@ fn upsert_node(tx: &Tx<'_>, node: &NodeEntry) -> Result<()> {
             Ok(())
         }
         None => {
+            if node_id_is_a_name(tx, &node.node_id)? {
+                return Err(Error::Conflict(format!(
+                    "node {}'s id is already another node's name; rename that node first",
+                    node.node_id
+                )));
+            }
             tx.execute(
                 "INSERT INTO nodes (node_id, display_name, role, is_local, created_at, public_key)
                  VALUES (?1, ?2, 'peer', 0, ?3, ?4)",
@@ -1703,7 +1729,9 @@ impl Store {
                 if role == "spoke" && n.node_id != from {
                     continue;
                 }
-                upsert_node(tx, &listed_entry(tx, n)?)?;
+                if let Some(entry) = listed_entry(tx, n)? {
+                    upsert_node(tx, &entry)?;
+                }
             }
             let mut report = IngestReport::default();
             for ev in events {

@@ -302,3 +302,108 @@ fn another_nodes_id_is_a_taken_name() {
     let err = hub.accept_pairing(&req).unwrap_err();
     assert_eq!(err.code(), "conflict", "pairing: {err}");
 }
+
+/// The inverse of `another_nodes_id_is_a_taken_name`: a node being recorded for the first
+/// time must not have an id that is already another node's name. The next two tests are the
+/// cross-family reviewer's probes (codex@another-ack-rename, REVIEW-62-R3), adopted as
+/// written apart from this file's helpers.
+#[test]
+fn reviewer_alias_pairing_must_not_make_node_id_address_ambiguous() {
+    for colliding in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = node(dir.path(), "hub");
+        let peer = node(dir.path(), "peer");
+        if colliding {
+            // The peer is not known yet: a real generated id and a valid local name.
+            hub.set_node_name(peer.node_id()).unwrap();
+        }
+        let code = hub
+            .create_invite("https://hub.example", &Perm::ALL, 3600)
+            .unwrap();
+        let (invite, req) = peer.prepare_join(&code).unwrap();
+        let response = match hub.accept_pairing(&req) {
+            Ok(response) => response,
+            Err(error) if colliding => {
+                assert_eq!(error.code(), "conflict", "{error}");
+                assert!(hub.peers().unwrap().is_empty());
+                continue;
+            }
+            Err(error) => panic!("ordinary pairing failed: {error}"),
+        };
+        peer.complete_join(&invite, &response).unwrap();
+        agent(&hub, "carol");
+        agent(&hub, "bob");
+        agent(&peer, "bob");
+        let (events, _) = peer.outbound_events(0, 10_000).unwrap();
+        let report = hub.ingest(peer.node_id(), &events, &[]).unwrap();
+        assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+        let result = hub.send_message(SendMessage {
+            from: "carol".into(),
+            to: vec![format!("bob@@{}", peer.node_id())],
+            subject: "address by actual generated node id".into(),
+            body: "test".into(),
+            ..Default::default()
+        });
+        assert!(
+            result.is_ok(),
+            "colliding={colliding}: generated node id cannot disambiguate: {:?}",
+            result.err()
+        );
+    }
+}
+
+#[test]
+fn reviewer_alias_hub_list_fallback_must_not_duplicate_a_known_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = node(dir.path(), "hub");
+    let alpha = node(dir.path(), "alpha");
+    let beta = node(dir.path(), "beta");
+    let gamma = node(dir.path(), "gamma");
+    alpha.set_node_name(beta.node_id()).unwrap();
+    pair(&hub, &alpha);
+
+    // Ordinary unusable-name fallback still learns a third node's genuine key and id.
+    alpha
+        .ingest(hub.node_id(), &[], &[entry(&gamma, "two words")])
+        .unwrap();
+    assert_eq!(
+        known_name(dir.path(), "alpha", &gamma).as_deref(),
+        Some(gamma.node_id())
+    );
+
+    // beta's id is alpha's own name: the entry is skipped, and the sync still succeeds.
+    let result = alpha.ingest(hub.node_id(), &[], &[entry(&beta, "two words")]);
+    assert!(result.is_ok(), "{result:?}");
+    let aliases: i64 = Connection::open(dir.path().join("alpha").join(DB_FILE))
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM nodes WHERE display_name = ?1 OR node_id = ?1",
+            [beta.node_id()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        aliases <= 1,
+        "fallback created {aliases} node matches for an existing name"
+    );
+}
+
+/// The same rule where a spoke first records its hub: a spoke already named with the hub's
+/// id cannot complete the join, and nothing is recorded.
+#[test]
+fn a_spoke_named_with_its_hubs_id_cannot_complete_the_join() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = node(dir.path(), "hub");
+    let spoke = node(dir.path(), "spoke");
+    let code = hub
+        .create_invite("https://hub.example", &Perm::ALL, 3600)
+        .unwrap();
+    let (invite, req) = spoke.prepare_join(&code).unwrap();
+    let response = hub.accept_pairing(&req).unwrap();
+    spoke.set_node_name(hub.node_id()).unwrap();
+
+    let err = spoke.complete_join(&invite, &response).unwrap_err();
+    assert_eq!(err.code(), "conflict", "{err}");
+    assert!(spoke.peers().unwrap().is_empty());
+    assert_eq!(known_name(dir.path(), "spoke", &hub), None);
+}
