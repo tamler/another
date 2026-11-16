@@ -596,6 +596,18 @@ pub fn trial_stats(s: &another_core::TrialStats) -> String {
         "  created {}, claimed {}, completed {}",
         s.requests_created, s.requests_claimed, s.requests_completed
     );
+    let _ = writeln!(out, "Right now");
+    let _ = writeln!(
+        out,
+        "  live holds {}; requests open {}, claimed {}, stale {}",
+        s.now.holds_live, s.now.requests_open, s.now.requests_claimed, s.now.requests_stale
+    );
+    if !s.events_per_day.is_empty() {
+        let _ = writeln!(out, "Events per day (UTC)");
+        for d in &s.events_per_day {
+            let _ = writeln!(out, "  {} {:>7}", d.day, d.events);
+        }
+    }
     if !s.blocked.is_empty() {
         let _ = writeln!(out, "Recent stopped edits");
         for b in s.blocked.iter().take(10) {
