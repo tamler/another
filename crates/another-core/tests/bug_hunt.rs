@@ -66,7 +66,8 @@ fn bh2_concurrent_first_open_succeeds() {
         let barrier = Arc::new(Barrier::new(OPENERS));
         let handles: Vec<_> = (0..OPENERS)
             .map(|_| {
-                let path = home.path().to_path_buf();
+                // A home that does not exist yet, so every opener races to create it.
+                let path = home.path().join("home");
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     barrier.wait();

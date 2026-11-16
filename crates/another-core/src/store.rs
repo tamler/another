@@ -2941,6 +2941,7 @@ mod upgrade_tests {
 #[cfg(all(test, any(unix, windows)))]
 mod hold_upgrade_tests {
     use super::*;
+    #[cfg(unix)]
     use crate::{AcquireHolds, NewRequest, Program, RegisterAgent, SendMessage};
 
     /// Every table and index with its columns, types, constraints and foreign keys, in a
@@ -3001,6 +3002,7 @@ mod hold_upgrade_tests {
         out
     }
 
+    #[cfg(unix)]
     fn version(conn: &Connection) -> i64 {
         conn.pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap()
@@ -3088,6 +3090,10 @@ mod hold_upgrade_tests {
         );
     }
 
+    // Unix only, like every offline-upgrade test in `upgrade_tests`: the Windows upgrade
+    // path is not accepted yet. Its first hosted run upgraded successfully but then could
+    // not read the published backup.json (os error 5); see docs/DAEMON.md.
+    #[cfg(unix)]
     #[test]
     fn a_v8_home_upgrades_to_v12_offline_and_keeps_its_data() {
         let dir = tempfile::tempdir().unwrap();

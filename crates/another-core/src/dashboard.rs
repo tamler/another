@@ -1007,7 +1007,7 @@ mod overlap_tests {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("work/shop").to_str().unwrap().to_owned();
         let (clock, _handle) = Clock::manual(T0_TEST);
-        let store = Store::open_with_clock(dir.path(), clock).unwrap();
+        let store = Store::open_with_clock(&dir.path().join("home"), clock).unwrap();
         for (name, program) in [("alice", Program::Claude), ("bob", Program::Codex)] {
             store
                 .register_agent(RegisterAgent {

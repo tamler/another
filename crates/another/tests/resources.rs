@@ -77,7 +77,8 @@ fn resource_cli_flow() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let home = dir.path();
+    let home = dir.path().join("home");
+    let home = home.as_path();
     setup(home);
     let reg = json(
         home,
@@ -151,7 +152,8 @@ fn reap_requires_lapse_grace_and_confirmation() {
     #[cfg(windows)]
     hosted_ci::require_hosted_runner();
     let dir = tempfile::tempdir().unwrap();
-    let home = dir.path();
+    let home = dir.path().join("home");
+    let home = home.as_path();
     setup(home);
     let mut child = sleeper();
     let pid = child.id().to_string();
@@ -220,7 +222,7 @@ fn reap_requires_lapse_grace_and_confirmation() {
 async fn mcp_reap_never_terminates() {
     hosted_ci::require_hosted_runner();
     let dir = tempfile::tempdir().unwrap();
-    let home = dir.path().to_path_buf();
+    let home = dir.path().join("home");
     setup(&home);
     let mut child = sleeper();
     let pid = child.id();
@@ -290,7 +292,8 @@ async fn mcp_reap_never_terminates() {
 #[test]
 fn scan_finds_unregistered_listeners() {
     let dir = tempfile::tempdir().unwrap();
-    let home = dir.path();
+    let home = dir.path().join("home");
+    let home = home.as_path();
     setup(home);
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();

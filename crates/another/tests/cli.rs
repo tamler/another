@@ -243,7 +243,8 @@ fn inbox_fetch_is_not_an_ack_and_mark_read_only_does_not_ack() {
 #[test]
 fn mark_read_only_preserves_other_recipient_unread() {
     let dir = tempfile::tempdir().unwrap();
-    let home = dir.path();
+    let home = dir.path().join("home");
+    let home = home.as_path();
     for name in ["sender", "a", "b"] {
         json(home, &["agent", "register", name, "--program", "codex"]);
     }
@@ -310,7 +311,9 @@ fn ack_help_names_state_change_and_compatibility_alias() {
 #[test]
 fn errors_are_structured_in_json_mode() {
     let dir = tempfile::tempdir().unwrap();
-    let out = another(dir.path(), &["--json", "inbox", "--agent", "nobody"]);
+    // A new home inside the temp directory: Windows never adopts an existing directory.
+    let home = dir.path().join("home");
+    let out = another(&home, &["--json", "inbox", "--agent", "nobody"]);
     assert!(!out.status.success());
     let body: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(body["error"]["code"], "not_found");
@@ -320,8 +323,9 @@ fn errors_are_structured_in_json_mode() {
 #[test]
 fn absurd_durations_are_errors_not_panics() {
     let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
     json(
-        dir.path(),
+        &home,
         &["agent", "register", "alice", "--program", "claude"],
     );
     for (expires, message) in [
@@ -329,7 +333,7 @@ fn absurd_durations_are_errors_not_panics() {
         ("9223372036854775807", "too far in the future"),
     ] {
         let out = another(
-            dir.path(),
+            &home,
             &["token", "create", "--agent", "alice", "--expires", expires],
         );
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -342,7 +346,10 @@ fn absurd_durations_are_errors_not_panics() {
 #[test]
 fn serve_refuses_non_loopback_binds() {
     let dir = tempfile::tempdir().unwrap();
-    let out = another(dir.path(), &["serve", "--bind", "0.0.0.0:7466"]);
+    let out = another(
+        &dir.path().join("home"),
+        &["serve", "--bind", "0.0.0.0:7466"],
+    );
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("loopback"));
 }

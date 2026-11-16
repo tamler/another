@@ -168,7 +168,8 @@ async fn controlled_tool_requires_stdio_metadata_and_exact_admission() {
     let response = client.call_tool(request.clone()).await.unwrap();
     assert_ne!(response.is_error, Some(true), "{response:?}");
     assert_eq!(
-        std::fs::read(edit.project.clone() + "/a.rs").unwrap(),
+        // Join, not "/": a Windows verbatim (\\?\) root does not accept '/'.
+        std::fs::read(std::path::Path::new(&edit.project).join("a.rs")).unwrap(),
         b"after"
     );
     assert_eq!(

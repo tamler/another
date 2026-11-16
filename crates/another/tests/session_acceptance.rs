@@ -81,11 +81,19 @@ impl Fixture {
     }
 
     fn edit(&self, session: &str, path: &Path) -> String {
+        // Controlled-edit paths are `/`-separated relative names on every platform.
+        let relative: Vec<_> = path
+            .strip_prefix(&self.root)
+            .unwrap()
+            .components()
+            .map(|c| c.as_os_str().to_str().unwrap().to_owned())
+            .collect();
+        let relative = relative.join("/");
         self.hook(
             "pre-controlled-edit",
             &json!({"session_id": session, "cwd": self.root,
-            "tool_use_id":format!("{session}-{}",path.display()),"tool_name":"mcp__another__controlled_edit",
-            "tool_input": {"project":self.root,"path":path.strip_prefix(&self.root).unwrap(),"expected_sha256":another_core::controlled_sha256(b"before"),"replacement":"after"}}),
+            "tool_use_id":format!("{session}-{relative}"),"tool_name":"mcp__another__controlled_edit",
+            "tool_input": {"project":self.root,"path":relative,"expected_sha256":another_core::controlled_sha256(b"before"),"replacement":"after"}}),
         )
     }
 
