@@ -517,7 +517,7 @@ fn free_bind() -> String {
     format!("127.0.0.1:{}", l.local_addr().unwrap().port())
 }
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(windows)]
 fn wait_healthy(env: &Env, label: &str, want: bool) -> serde_json::Value {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
