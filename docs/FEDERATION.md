@@ -80,11 +80,31 @@ another sync --watch --every 30
 - **Resources**: `another resources` lists other nodes' resources with their `node` and whether this machine can **reach** them (a TCP connect to the endpoint). They can be borrowed only when reachable and when `borrow_resource` was granted, and the lease is reported back to the owning node. Loopback endpoints are reachable only from the same machine.
 - **Path holds**: holds stay node- and repo-local and are never distributed locks. When an agent acquires a hold that overlaps a live hold on another node, in a project with the **same name**, the result carries a **warning** (`warnings` in JSON, `warning:` lines in the CLI), never a conflict.
 
+## Restarts, restores and offline spokes
+
+- **Hub restart.** Everything is in the hub's database, so a restarted hub carries on where it stopped. Spokes resume from their cursors.
+- **Spoke offline for days.** On its next `another sync`, the spoke pushes its backlog and pulls everyone else's in pages of 500 until caught up. Days-old holds arrive already expired, so other nodes see only the spoke's current holds as live.
+- **Replays are harmless.** Every event has a unique id, and both sides skip events they already have. Resending from zero changes nothing.
+- **Hub restored from an older backup.** The hub's sequence numbers go back, so a spoke's cursors point past the hub's log: new hub events would be skipped, and the spoke's events the hub lost would never be sent again. The spoke detects this from the hub's `reset` answer, rewinds both cursors to zero and syncs again in the same `another sync`. `another sync --json` reports `"hub_reset": true`, and a local `peer.resynced` event records it, so the next sync does not reset again. After that:
+  - every spoke's own events reach the hub again;
+  - events only the hub wrote after the backup are gone, as with any restore.
+- **Limit.** Detection relies on the hub missing the last event the spoke received from it, or on the spoke's cursor being beyond the hub's log. A restore can go unnoticed when both of these hold:
+  - it lost only events this spoke never receives (for example, mail between other nodes for a spoke without `read-feed`);
+  - the hub then writes past the spoke's old cursor before the spoke syncs.
+
+  In that case the hub's new events between the backup's end and that cursor are skipped. To rule it out after restoring a hub, run on each spoke:
+
+  ```sh
+  sqlite3 "$ANOTHER_HOME/another.db" "UPDATE peers SET push_cursor = 0, pull_cursor = 0"
+  ```
+
+  Then run `another sync`. A resend from zero is always safe.
+
 ## Wire protocol (for implementers)
 
 - `POST /fed/pair`: `{invite_id, secret, node: {node_id, display_name, public_key}}` returns `{hub, perms}`.
 - `POST /fed/push`: `{events: [WireEvent]}` returns `{accepted, duplicates, rejected}`.
-- `GET /fed/pull?after=<hub seq>&limit=N` returns `{events, cursor, more, nodes}`.
+- `GET /fed/pull?after=<hub seq>&limit=N[&after_id=<event id>]` returns `{events, cursor, more, nodes, reset}`. `after_id` is the last event the spoke received from this hub. `reset: true`, with no events, means the hub's log no longer reaches `after` or no longer holds `after_id`; see "Restarts, restores and offline spokes" below. Hubs without this field omit it, and spokes without it ignore it.
 - Push and pull requests carry these headers:
   - `x-another-node: <node id>`
   - `x-another-time: <ms>`

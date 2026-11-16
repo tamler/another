@@ -133,6 +133,11 @@ pub struct PullResponse {
     pub more: bool,
     /// Every node the hub knows (including itself), for addressing and signature checks.
     pub nodes: Vec<NodeEntry>,
+    /// The hub's log no longer contains what this spoke already received: the hub was
+    /// restored from an older copy, or replaced. No events are sent; the spoke rewinds both
+    /// cursors to zero and syncs again (ingest skips duplicates). Absent from older hubs.
+    #[serde(default)]
+    pub reset: bool,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -312,6 +317,23 @@ fn wire_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<WireEvent> {
 
 const WIRE_SELECT: &str =
     "SELECT seq, event_id, node_id, ts, actor, kind, payload, prev_id, sig FROM events";
+
+/// Every node with a key, for a pull response's addressing and signature checks.
+fn known_nodes(conn: &Connection) -> Result<Vec<NodeEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT node_id, display_name, public_key FROM nodes WHERE public_key IS NOT NULL",
+    )?;
+    let nodes = stmt
+        .query_map([], |r| {
+            Ok(NodeEntry {
+                node_id: r.get(0)?,
+                display_name: r.get(1)?,
+                public_key: r.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(nodes)
+}
 
 /// (role, perms, revoked_at)
 type PeerRow = (String, Vec<Perm>, Option<i64>);
@@ -1394,12 +1416,45 @@ impl Store {
 
     /// Hub side: what a spoke receives after `after_seq` (its own events excluded).
     pub fn pull_for(&self, peer: &str, after_seq: i64, limit: u32) -> Result<PullResponse> {
+        self.pull_for_from(peer, after_seq, None, limit)
+    }
+
+    /// [`Store::pull_for`] with the spoke's anchor `after_id`: the last event it received
+    /// from this hub. The response is `reset`, with no events, when this hub's log no longer
+    /// reaches `after_seq` or no longer holds the anchor. Both mean the hub was restored from
+    /// an older copy or replaced, so its sequence numbers no longer match the spoke's cursors.
+    pub fn pull_for_from(
+        &self,
+        peer: &str,
+        after_seq: i64,
+        after_id: Option<&str>,
+        limit: u32,
+    ) -> Result<PullResponse> {
         self.read(|conn| {
             let Some((role, perms, None)) = peer_row(conn, peer)? else {
                 return Err(Error::Forbidden("not a paired node".into()));
             };
             if role != "spoke" {
                 return Err(Error::Forbidden("only spokes pull from a hub".into()));
+            }
+            let high: i64 =
+                conn.query_row("SELECT coalesce(max(seq), 0) FROM events", [], |r| r.get(0))?;
+            let anchor_lost = match after_id.filter(|_| after_seq > 0) {
+                Some(id) => !conn.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM events WHERE event_id = ?1)",
+                    [id],
+                    |r| r.get::<_, bool>(0),
+                )?,
+                None => false,
+            };
+            if after_seq > high || anchor_lost {
+                return Ok(PullResponse {
+                    events: Vec::new(),
+                    cursor: 0,
+                    more: false,
+                    nodes: known_nodes(conn)?,
+                    reset: true,
+                });
             }
             let scan = limit.saturating_mul(4).max(limit);
             let mut stmt = conn.prepare(&format!(
@@ -1430,24 +1485,66 @@ impl Store {
                 }
             }
             let more = more || events.len() as u32 >= limit;
-            let mut stmt = conn.prepare(
-                "SELECT node_id, display_name, public_key FROM nodes WHERE public_key IS NOT NULL",
-            )?;
-            let nodes = stmt
-                .query_map([], |r| {
-                    Ok(NodeEntry {
-                        node_id: r.get(0)?,
-                        display_name: r.get(1)?,
-                        public_key: r.get(2)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(PullResponse {
                 events,
                 cursor,
                 more,
-                nodes,
+                nodes: known_nodes(conn)?,
+                reset: false,
             })
+        })
+    }
+
+    /// Spoke side: the last event this node received from its hub, the anchor for
+    /// [`Store::pull_for_from`]. Events from other nodes reach a spoke only through its hub
+    /// and are stored in the order the hub sent them. After a resync, the newest event is
+    /// the local `peer.resynced` record, whose `anchor` is the last event the hub sent then:
+    /// the newest stored foreign event may be one the restored hub no longer has.
+    pub fn last_relayed_event_id(&self) -> Result<Option<String>> {
+        self.read(|conn| {
+            let newest: Option<(String, String, String)> = conn
+                .query_row(
+                    "SELECT kind, event_id, payload FROM events
+                     WHERE node_id != ?1 OR kind = 'peer.resynced'
+                     ORDER BY seq DESC LIMIT 1",
+                    [self.node_id()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            Ok(match newest {
+                Some((kind, _, payload)) if kind == "peer.resynced" => {
+                    serde_json::from_str::<Value>(&payload)
+                        .ok()
+                        .and_then(|p| p.get("anchor")?.as_str().map(str::to_string))
+                }
+                Some((_, event_id, _)) => Some(event_id),
+                None => None,
+            })
+        })
+    }
+
+    /// Spoke side: start over with `peer` from zero in both directions, after the hub
+    /// reported `reset`. Duplicates are skipped on both sides, so this is safe to repeat.
+    pub fn reset_sync_cursors(&self, peer: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE peers SET push_cursor = 0, pull_cursor = 0 WHERE node_id = ?1",
+                [peer],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Spoke side: record a completed resync with `peer` and the last event it sent, the
+    /// anchor for later pulls. A `peer.*` event never leaves this node.
+    pub fn record_resync(&self, peer: &str, anchor: Option<&str>) -> Result<()> {
+        self.write(|tx| {
+            tx.emit(
+                "system",
+                "peer.resynced",
+                json!({ "peer": peer, "anchor": anchor }),
+            )?;
+            Ok(())
         })
     }
 

@@ -188,15 +188,17 @@ async fn pull(
     };
     let mut after = 0i64;
     let mut limit = BATCH;
+    let mut after_id: Option<String> = None;
     for pair in uri.query().unwrap_or_default().split('&') {
         match pair.split_once('=') {
             Some(("after", v)) => after = v.parse().unwrap_or(0),
             Some(("limit", v)) => limit = v.parse().unwrap_or(BATCH).clamp(1, 2000),
+            Some(("after_id", v)) if is_plain_id(v) => after_id = Some(v.to_string()),
             _ => {}
         }
     }
     let (s, n) = (store.clone(), node.clone());
-    match blocking(move || s.pull_for(&n, after, limit)).await {
+    match blocking(move || s.pull_for_from(&n, after, after_id.as_deref(), limit)).await {
         Ok(resp) => {
             let detail = format!("after {after}: {} event(s)", resp.events.len());
             record(&store, Some(node), "GET /fed/pull", "ok", detail).await;
@@ -302,9 +304,24 @@ pub struct SyncReport {
     pub applied: usize,
     pub pull_duplicates: usize,
     pub pull_rejected: Vec<Rejected>,
+    /// The hub's log no longer matched this spoke's cursors (it was restored from an older
+    /// copy, or replaced), so this sync started over from zero in both directions.
+    pub hub_reset: bool,
 }
 
-/// Spoke: push events this node authored, then pull everyone else's, until caught up.
+/// An event id that can go in a query string as is. Ids this software makes are ULIDs;
+/// anything else is not sent as an anchor, and the hub then checks the cursor alone.
+fn is_plain_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Spoke: push events this node authored, then pull everyone else's, until caught up. If the
+/// hub reports that its log went backwards (`reset`), rewind both cursors and run once more,
+/// so events the hub lost are pushed again and its new events are not skipped.
 pub fn sync(store: &Store) -> Result<SyncReport> {
     let (hub, url) = store
         .hub()?
@@ -314,38 +331,74 @@ pub fn sync(store: &Store) -> Result<SyncReport> {
         hub: url.clone(),
         ..Default::default()
     };
+    let mut last = None;
+    if !sync_pass(store, &agent, &hub, &url, &mut report, &mut last)? {
+        report.hub_reset = true;
+        store.reset_sync_cursors(&hub)?;
+        last = None;
+        // From zero no anchor is sent, so the hub cannot report reset again.
+        if !sync_pass(store, &agent, &hub, &url, &mut report, &mut last)? {
+            return Err(anyhow!(
+                "the hub at {url} reported its log reset twice in one sync; try again"
+            ));
+        }
+        store.record_resync(&hub, last.as_deref())?;
+    }
+    Ok(report)
+}
+
+/// One push and pull. Returns false, having stopped early, when the hub reports `reset`.
+/// `last` is set to the id of the last event the hub sent.
+fn sync_pass(
+    store: &Store,
+    agent: &ureq::Agent,
+    hub: &str,
+    url: &str,
+    report: &mut SyncReport,
+    last: &mut Option<String>,
+) -> Result<bool> {
     // Push.
     loop {
-        let (cursor, _) = store.push_cursor(&hub)?;
+        let (cursor, _) = store.push_cursor(hub)?;
         let (events, high) = store.outbound_events(cursor, BATCH)?;
         if high == cursor {
             break;
         }
         if !events.is_empty() {
             let body = serde_json::to_vec(&PushRequest { events })?;
-            let resp = signed(store, &agent, &url, "POST", "/fed/push", Some(body))?;
+            let resp = signed(store, agent, url, "POST", "/fed/push", Some(body))?;
             let r: IngestReport = read(resp, "push")?;
             report.pushed += r.accepted;
             report.push_duplicates += r.duplicates;
             report.push_rejected.extend(r.rejected);
         }
-        store.set_push_cursor(&hub, high)?;
+        store.set_push_cursor(hub, high)?;
     }
-    // Pull.
+    // Pull. The first page carries the anchor: the last event this spoke got from the hub.
+    let mut anchor = store.last_relayed_event_id()?.filter(|id| is_plain_id(id));
     loop {
-        let (_, cursor) = store.push_cursor(&hub)?;
-        let path = format!("/fed/pull?after={cursor}&limit={BATCH}");
-        let resp = signed(store, &agent, &url, "GET", &path, None)?;
+        let (_, cursor) = store.push_cursor(hub)?;
+        let mut path = format!("/fed/pull?after={cursor}&limit={BATCH}");
+        if let Some(id) = anchor.take().filter(|_| cursor > 0) {
+            path.push_str(&format!("&after_id={id}"));
+        }
+        let resp = signed(store, agent, url, "GET", &path, None)?;
         let page: PullResponse = read(resp, "pull")?;
+        if page.reset {
+            return Ok(false);
+        }
+        if let Some(e) = page.events.last() {
+            *last = Some(e.event_id.clone());
+        }
         report.pulled += page.events.len();
-        let r = store.ingest(&hub, &page.events, &page.nodes)?;
+        let r = store.ingest(hub, &page.events, &page.nodes)?;
         report.applied += r.accepted;
         report.pull_duplicates += r.duplicates;
         report.pull_rejected.extend(r.rejected);
-        store.set_pull_cursor(&hub, page.cursor)?;
+        store.set_pull_cursor(hub, page.cursor)?;
         if !page.more || page.cursor == cursor {
             break;
         }
     }
-    Ok(report)
+    Ok(true)
 }
