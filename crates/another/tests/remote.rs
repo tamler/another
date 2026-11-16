@@ -26,7 +26,7 @@ struct Server {
 
 async fn start() -> Server {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open(&dir.path().join("home")).unwrap();
     let work = dir.path().join("work/shop").to_string_lossy().into_owned();
     let secret = dir
         .path()
@@ -334,7 +334,7 @@ fn token_cli_and_bind_rules() {
     let run = |args: &[&str]| {
         std::process::Command::new(env!("CARGO_BIN_EXE_another"))
             .args(args)
-            .env("ANOTHER_HOME", dir.path())
+            .env("ANOTHER_HOME", dir.path().join("home"))
             .output()
             .unwrap()
     };

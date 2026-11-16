@@ -325,6 +325,11 @@ pub struct PinnedHome {
 /// this does not defend against a hostile same-user process or replace an offline fence.
 pub fn prepare_database(home: &Path, create: bool) -> io::Result<PinnedHome> {
     let directory = if create && !home.try_exists()? {
+        // Like `create_dir_all` on Unix: ordinary missing parents are created with their
+        // inherited permissions; only the home itself must be private.
+        if let Some(parent) = home.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         match create_private_directory(home) {
             Ok(directory) => directory,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => pin_directory(home)?,
@@ -579,8 +584,17 @@ pub fn inspect_private_handle(
     let mut control = 0u16;
     let mut revision = 0u32;
     // SAFETY: pointers are from a successful GetSecurityInfo and live for descriptor's lifetime.
-    if unsafe { IsValidSid(owner) } == 0 || unsafe { EqualSid(owner, user.as_ptr()) } == 0 {
-        return Err(refused_because("the owner is not the current user"));
+    // The owner may be the user or BUILTIN\Administrators. Windows Server gives objects that
+    // an administrator creates (including SQLite's own -wal/-shm files, whose security
+    // Another cannot set) the Administrators group as owner. The DACL check below already
+    // trusts Administrators with full control, so that owner grants nothing more.
+    if unsafe { IsValidSid(owner) } == 0
+        || (unsafe { EqualSid(owner, user.as_ptr()) } == 0
+            && unsafe { EqualSid(owner, admins.as_ptr()) } == 0)
+    {
+        return Err(refused_because(
+            "the owner is neither the current user nor Administrators",
+        ));
     }
     if unsafe { IsValidAcl(dacl) } == 0
         || unsafe { GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) } == 0

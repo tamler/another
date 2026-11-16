@@ -34,7 +34,7 @@ struct Server {
 
 async fn start() -> Server {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open(&dir.path().join("home")).unwrap();
     let work = dir.path().join("work/shop").to_string_lossy().into_owned();
     let secret = dir
         .path()
@@ -198,7 +198,7 @@ async fn raw_exchange(
 
 async fn start_open(allowed_hosts: Vec<String>) -> Server {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open(&dir.path().join("home")).unwrap();
     let secret = dir
         .path()
         .join("secret/vault")

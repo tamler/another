@@ -1070,7 +1070,8 @@ mod overlap_tests {
     fn active_with_no_last_seen_is_live_and_keeps_the_hold() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("work/shop").to_str().unwrap().to_owned();
-        let store = Store::open(dir.path()).unwrap();
+        // A new home, so Windows can create it private (it never adopts an existing one).
+        let store = Store::open(&dir.path().join("home")).unwrap();
         store
             .register_agent(RegisterAgent {
                 name: "alice".into(),

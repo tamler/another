@@ -515,7 +515,7 @@ async fn mark_read_only_preserves_other_recipient_unread() {
 async fn streamable_http_on_loopback() {
     let dir = tempfile::tempdir().unwrap();
     let project_path = dir.path().join("site");
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open(&dir.path().join("home")).unwrap();
     let ct = CancellationToken::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

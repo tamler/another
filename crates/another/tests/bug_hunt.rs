@@ -37,7 +37,7 @@ fn agent(store: &Store, name: &str, program: Program, project: Option<&str>) {
 
 async fn start() -> Server {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open(&dir.path().join("home")).unwrap();
     let inside = dir.path().join("sandbox/w/a");
     let outside = dir.path().join("private/data");
     std::fs::create_dir_all(&inside).unwrap();

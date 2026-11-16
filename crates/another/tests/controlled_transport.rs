@@ -109,9 +109,10 @@ fn hook_cli_then_real_stdio_confirms_exactly_once() {
 #[test]
 fn unobserved_codex_client_identity_is_unsupported() {
     let temp = tempfile::tempdir().unwrap();
-    drop(Store::open(temp.path()).unwrap());
+    let home = temp.path().join("home");
+    drop(Store::open(&home).unwrap());
     let response = stdio_call(
-        temp.path(),
+        &home,
         "codex-mcp-client",
         "0.169.0",
         json!({"name":"controlled_edit","arguments":{}}),

@@ -261,8 +261,9 @@ fn a_new_nested_registration_prevents_confirmation() {
 #[test]
 fn v12_can_record_a_claim_and_keeps_the_v11_secret() {
     let temp = tempfile::tempdir().unwrap();
-    let _store = Store::open(temp.path()).unwrap();
-    let db = rusqlite::Connection::open(temp.path().join("another.db")).unwrap();
+    let home = temp.path().join("home");
+    let _store = Store::open(&home).unwrap();
+    let db = rusqlite::Connection::open(home.join("another.db")).unwrap();
     let version: i64 = db
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
