@@ -1,7 +1,9 @@
 //! `send_message` over MCP with `reply_to` but no `subject`, when it also names recipients
-//! (or opens a request), derives the subject from the parent: "Re: " once, however many the
-//! parent had, and one safe line even when the parent's subject was stored before subjects
-//! were checked (D75). With neither a subject nor `reply_to`, it is refused.
+//! (or opens a request), derives the subject from the parent by the same rule as a plain
+//! reply (`another_core::reply_subject`): a parent already starting with "re:" in any case
+//! is kept, any other gets "Re: ", and the result is one safe line within the limit even
+//! when the parent's subject was stored before subjects were checked (D75). With neither a
+//! subject nor `reply_to`, it is refused.
 
 use another::mcp::AnotherMcp;
 use another_core::{Program, RegisterAgent, Store, DB_FILE};
@@ -65,7 +67,7 @@ fn store(dir: &std::path::Path) -> Store {
 }
 
 #[tokio::test]
-async fn a_reply_with_recipients_takes_one_re_prefix_from_its_parent() {
+async fn a_reply_with_recipients_adds_no_second_re_prefix() {
     let dir = tempfile::tempdir().unwrap();
     let c = client(store(dir.path())).await;
     let parent = call_ok(
@@ -81,7 +83,10 @@ async fn a_reply_with_recipients_takes_one_re_prefix_from_its_parent() {
                 "body": "looping in other" }),
     )
     .await;
-    assert_eq!(reply["subject"], "Re: Plan");
+    assert_eq!(
+        reply["subject"], "Re: Re: Plan",
+        "kept, as a plain reply keeps it"
+    );
     assert_eq!(reply["thread_id"], parent["thread_id"]);
     assert_eq!(reply["reply_to"], parent["message_id"]);
     assert_eq!(reply["to"], json!(["lead", "other"]));
@@ -135,4 +140,62 @@ async fn a_new_message_needs_a_subject() {
     .await;
     assert_eq!(code, "invalid", "{message}");
     assert!(message.contains("subject is required"), "{message}");
+}
+
+/// A parent subject at the limit leaves room for "Re: ": the derived subject is cut to fit,
+/// so the reply is sent rather than refused for its own subject.
+#[tokio::test]
+async fn a_reply_to_a_subject_at_the_limit_still_fits() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = client(store(dir.path())).await;
+    let long = "s".repeat(another_core::MAX_SUBJECT_CHARS);
+    let parent = call_ok(
+        &c,
+        "send_message",
+        json!({ "from": "lead", "to": ["worker"], "subject": long, "body": "b" }),
+    )
+    .await;
+    let reply = call_ok(
+        &c,
+        "send_message",
+        json!({ "from": "worker", "to": ["lead", "other"], "reply_to": parent["message_id"],
+                "body": "ok" }),
+    )
+    .await;
+    let subject = reply["subject"].as_str().unwrap();
+    assert!(subject.starts_with("Re: s"), "{subject}");
+    assert_eq!(subject.chars().count(), another_core::MAX_SUBJECT_CHARS);
+}
+
+/// Naming recipients does not change the subject a reply gets: for the same parent the
+/// derived subject matches the plain reply's (`Store::reply`), whatever the case of "Re:".
+#[tokio::test]
+async fn a_reply_subject_does_not_depend_on_naming_recipients() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = client(store(dir.path())).await;
+    for parent_subject in ["re: plan", "RE: plan", "Re: Re: plan", "plan"] {
+        let parent = call_ok(
+            &c,
+            "send_message",
+            json!({ "from": "lead", "to": ["worker"], "subject": parent_subject, "body": "b" }),
+        )
+        .await;
+        let plain = call_ok(
+            &c,
+            "send_message",
+            json!({ "from": "worker", "reply_to": parent["message_id"], "body": "ok" }),
+        )
+        .await;
+        let named = call_ok(
+            &c,
+            "send_message",
+            json!({ "from": "worker", "to": ["lead", "other"], "reply_to": parent["message_id"],
+                    "body": "ok" }),
+        )
+        .await;
+        assert_eq!(
+            named["subject"], plain["subject"],
+            "parent {parent_subject:?}"
+        );
+    }
 }

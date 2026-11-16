@@ -433,16 +433,9 @@ impl AnotherMcp {
                 _ => {
                     let subject = match (a.subject, &a.reply_to) {
                         (Some(sub), _) => sub,
+                        // The same rule as a plain reply (`Store::reply`).
                         (None, Some(parent)) => {
-                            let original = s.message(parent)?;
-                            // The original may predate D75; keep the reply one line.
-                            format!(
-                                "Re: {}",
-                                another_core::single_line(
-                                    original.subject.trim_start_matches("Re: "),
-                                    another_core::MAX_SUBJECT_CHARS - 4
-                                )
-                            )
+                            another_core::reply_subject(&s.message(parent)?.subject)
                         }
                         (None, None) => {
                             return Err(another_core::Error::Invalid("subject is required".into()))

@@ -204,6 +204,19 @@ pub fn single_line(text: &str, max_chars: usize) -> String {
     cut
 }
 
+/// The subject of a reply to a message with `original` as its subject: kept as is when it
+/// already starts with "re:" in any case, otherwise prefixed with "Re: ". The original may
+/// have been stored before D75, so it is made one safe line, with room left for the prefix.
+/// Every reply path (`Store::reply` and MCP `send_message` with `reply_to`) uses this.
+pub fn reply_subject(original: &str) -> String {
+    let original = single_line(original, MAX_SUBJECT_CHARS - 4);
+    if original.to_ascii_lowercase().starts_with("re:") {
+        original
+    } else {
+        format!("Re: {original}")
+    }
+}
+
 fn check_text(subject: &str, body: &str) -> Result<()> {
     if subject.trim().is_empty() {
         return Err(Error::Invalid("subject must not be empty".into()));
@@ -529,13 +542,7 @@ impl Store {
                 // Replying to your own message: address the original recipients.
                 to = original.to.clone();
             }
-            // The original may have been stored before D75; keep the reply one line.
-            let original_subject = single_line(&original.subject, MAX_SUBJECT_CHARS - 4);
-            let subject = if original_subject.to_ascii_lowercase().starts_with("re:") {
-                original_subject
-            } else {
-                format!("Re: {original_subject}")
-            };
+            let subject = reply_subject(&original.subject);
             send_tx(
                 tx,
                 &SendMessage {
