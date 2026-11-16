@@ -84,6 +84,19 @@ fn invalid(why: impl Into<String>) -> Error {
     Error::Invalid(why.into())
 }
 
+/// `text` if it is a public key written in its one canonical form, the way
+/// [`crypto::public_of`] writes it. Decoding is lenient (it trims whitespace), so without
+/// this one key could take several spellings and slip past the no-reuse and equality
+/// checks below (FINDINGS-192).
+pub fn canonical_key(text: &str) -> Result<&str> {
+    let key = crypto::decode_public(text)?;
+    if crypto::b64(key.as_bytes()) == text {
+        Ok(text)
+    } else {
+        Err(invalid("public key is not in canonical form"))
+    }
+}
+
 /// Check one rotation event against the receiver's position for its origin node, and
 /// return the position after it. Checks, in order: it is a rotation; its payload parses and
 /// names the event's own origin; the event is signed by the current key; it rotates from
@@ -100,6 +113,10 @@ pub fn verify_link(ev: &WireEvent, at: &KeyPosition, earlier: &[String]) -> Resu
             "rotation {} names node {} but was signed by {}",
             ev.event_id, p.node_id, ev.node_id
         )));
+    }
+    // Every key is compared as text below, so each must have exactly one spelling.
+    for k in [&at.key, &p.old_public_key, &p.new_public_key] {
+        canonical_key(k).map_err(|e| invalid(format!("rotation {}: {e}", ev.event_id)))?;
     }
     let signed = crypto::event_message(
         &ev.event_id,
@@ -133,7 +150,6 @@ pub fn verify_link(ev: &WireEvent, at: &KeyPosition, earlier: &[String]) -> Resu
             ev.event_id
         )));
     }
-    crypto::decode_public(&p.new_public_key)?;
     let msg = proof_message(
         &p.node_id,
         &ev.event_id,
@@ -172,6 +188,7 @@ pub fn verify_chain(
     links: &[WireEvent],
     trusted_current: &str,
 ) -> Result<VerifiedChain> {
+    canonical_key(trusted_current)?;
     let first_key = match links.first() {
         None => trusted_current.to_string(),
         Some(ev) => {
@@ -399,5 +416,39 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("already used"));
+    }
+
+    /// Adversarial (FINDINGS-192): `decode_public` trims whitespace, so " K0" is another
+    /// spelling of the retired K0. A link K1 -> " K0" must be refused as a reused key.
+    #[test]
+    fn adv192_a_retired_key_spelled_with_a_space_is_still_reused() {
+        let (k0, k1) = (key(), key());
+        let d0 = chain_genesis(NODE, &crypto::public_of(&k0));
+        let r1 = rotation("R1", &k0, &k1, &d0);
+        let mut at = KeyPosition {
+            key: crypto::public_of(&k0),
+            chain: d0,
+        };
+        let mut used = vec![at.key.clone()];
+        at = verify_link(&r1, &at, &used).unwrap();
+        used.push(at.key.clone());
+        // K1 rotates "back" to K0, spelled with a leading space. The proof is by K0.
+        let alias = format!(" {}", crypto::public_of(&k0));
+        let proof = crypto::sign(&k0, &proof_message(NODE, "R2", &at.key, &alias, &at.chain));
+        let payload = serde_json::to_string(&RotationPayload {
+            node_id: NODE.into(),
+            old_public_key: at.key.clone(),
+            new_public_key: alias,
+            chain: at.chain.clone(),
+            proof,
+        })
+        .unwrap();
+        let back = signed("R2", &k1, payload);
+        let got = verify_link(&back, &at, &used);
+        assert!(
+            got.is_err(),
+            "reused K0 accepted as {:?}",
+            got.map(|p| p.key)
+        );
     }
 }
