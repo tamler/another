@@ -1066,7 +1066,14 @@ fn adv163_drift_names_the_home_the_hooks_use() {
         .iter()
         .find(|r| r["client"] == "claude")
         .unwrap();
-    let text = claude["drift"].to_string();
+    // The lines as text: JSON would double each `\` in a Windows path.
+    let text = claude["drift"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join("\n");
     let used = env.another_home.to_string_lossy().into_owned();
     assert!(
         text.contains(&used),
