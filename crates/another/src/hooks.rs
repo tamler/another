@@ -1381,6 +1381,10 @@ pub fn run(
             if client == Client::Cursor {
                 // Cursor's prompt hook cannot add context; just let the prompt through.
                 json!({ "continue": true }).to_string()
+            } else if client == Client::Grok {
+                // Grok discards an allowing prompt hook's stdout. Claiming mail here would
+                // mark it announced unseen; leave it for the post-tool notice.
+                String::new()
             } else {
                 prompt_notice(store, &agent, "prompt", client)?
                     .map(|n| n.text)

@@ -296,6 +296,43 @@ fn post_tool_mentions_new_mail_once_and_is_silent_otherwise() {
     assert_eq!(stats["requests_created"], 1);
 }
 
+/// Grok discards the stdout of an allowing UserPromptSubmit hook, so its prompt hook must not
+/// claim mail: the claim would mark the message announced without the agent seeing it, and
+/// the next post-tool notice would stay silent (hold-ends review R1 P2).
+#[test]
+fn grok_prompt_leaves_mail_for_a_channel_grok_shows() {
+    let env = Env::new();
+    env.start("grok", &env.main, &[]);
+    env.start("codex", &env.wt, &[]);
+    env.send(
+        "codex@shop-review",
+        "grok@shop",
+        "Hold free: src/a.rs",
+        false,
+    );
+    let prompt = json!({ "session_id": "grok-s1", "cwd": env.main, "prompt": "go on" });
+    assert_eq!(env.hook("prompt", "grok", &prompt), "");
+    // Still unannounced: Grok's post-tool notice, which Grok does show, carries it.
+    let notice = context(&env.hook(
+        "post-tool",
+        "grok",
+        &tool(&env.main, "Bash", json!({ "command": "ls" })),
+    ));
+    assert!(notice.contains("Hold free: src/a.rs"), "{notice}");
+    let stats = env.json(&["stats", "--since", "1h"]);
+    assert_eq!(stats["notices_prompt"], 0, "{stats}");
+    assert_eq!(stats["notices_mid_task"], 1, "{stats}");
+    // The prompt hook still renews presence.
+    let agents = env.json(&["agent", "list"]);
+    let grok = agents
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["address"] == "grok@shop")
+        .unwrap();
+    assert_eq!(grok["status"], "active", "{grok}");
+}
+
 #[test]
 fn manual_route_directory_holds_block_auto_edits_in_both_orders() {
     for (pattern, path) in [
