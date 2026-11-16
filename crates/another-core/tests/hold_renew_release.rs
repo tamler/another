@@ -222,3 +222,26 @@ fn a_remote_caller_renews_and_releases_only_inside_its_token_projects() {
         Some(outside.expires_at.clone())
     );
 }
+
+/// Adversarial pass on #181 (FINDINGS-181): `renewing_by_id_restarts_only_those_holds_ttl_from_now`
+/// checks only that the new expiry is later than the old one, so a renewal that adds the TTL
+/// to the old expiry (T0+1200 s here, not T0+900 s) still passes. A hold taken at the moment
+/// of renewal with the same TTL expires exactly when the renewed one should.
+#[test]
+fn review181_renewal_expires_one_ttl_after_now_not_after_the_old_expiry() {
+    let fx = Fx::new();
+    let a = fx.hold("alice", &fx.shop, "src/a.rs", 600);
+    fx.advance_secs(300);
+    let renewed = fx
+        .store
+        .renew_holds("alice", std::slice::from_ref(&a.hold_id))
+        .unwrap();
+    let fresh = fx.hold("alice", &fx.blog, "src/fresh.rs", 600);
+    assert_eq!(renewed[0].expires_at, fresh.expires_at, "{renewed:?}");
+    // Renewing twice at one moment does not stack.
+    let again = fx
+        .store
+        .renew_holds("alice", std::slice::from_ref(&a.hold_id))
+        .unwrap();
+    assert_eq!(again[0].expires_at, fresh.expires_at, "{again:?}");
+}
