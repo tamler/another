@@ -581,6 +581,92 @@ async fn auth_dashboard_keeps_loopback_host_when_a_tunnel_host_is_allowed() {
     local.ct.cancel();
 }
 
+/// The activity endpoint checks its query before it reads: `since` and `until` take a
+/// duration or an RFC 3339 time but not an event id, `kind` only known categories, and
+/// `before` only an event this node has. Valid filters apply.
+#[tokio::test]
+async fn activity_filters_are_checked_and_applied() {
+    let srv = serve(HttpOptions {
+        dashboard: DashboardMode::Local,
+        ..Default::default()
+    })
+    .await;
+    let http = client();
+    let get = |query: &'static str| {
+        let http = http.clone();
+        let url = format!("{}/api/dash/activity?{query}", srv.base);
+        async move {
+            let res = http.get(url).send().await.unwrap();
+            let status = res.status().as_u16();
+            let body: Value = serde_json::from_str(&res.text().await.unwrap()).unwrap();
+            (status, body)
+        }
+    };
+
+    let (status, all) = get("since=all").await;
+    assert_eq!(status, 200, "{all}");
+    let items = all["items"].as_array().unwrap();
+    assert!(!items.is_empty());
+    let event_id = items[0]["event_id"].as_str().unwrap().to_string();
+
+    let cases: [(&str, &str); 3] = [
+        ("since=nonsense", "invalid since"),
+        ("until=yesterday", "until must be an RFC 3339 time"),
+        ("kind=mail,bogus", "unknown activity kind"),
+    ];
+    for (query, message) in cases {
+        let (status, body) = get(query).await;
+        assert_eq!(status, 400, "{query}: {body}");
+        assert_eq!(body["error"]["code"], "invalid", "{query}: {body}");
+        let text = body["error"]["message"].as_str().unwrap();
+        assert!(text.contains(message), "{query}: {text}");
+    }
+    let res = http
+        .get(format!("{}/api/dash/activity?since={event_id}", srv.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 400);
+    assert!(res
+        .text()
+        .await
+        .unwrap()
+        .contains("since must be a duration like 1d or an RFC 3339 time"));
+    let res = http
+        .get(format!(
+            "{}/api/dash/activity?before=01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            srv.base
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 404);
+    // An event id is not a time, so `until` refuses it too.
+    let res = http
+        .get(format!("{}/api/dash/activity?until={event_id}", srv.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 400);
+
+    let (status, mail) = get("kind=mail").await;
+    assert_eq!(status, 200, "{mail}");
+    let mail = mail["items"].as_array().unwrap();
+    assert!(!mail.is_empty());
+    assert!(mail.iter().all(|i| i["category"] == "mail"), "{mail:?}");
+    // `until` keeps only older events: an RFC 3339 time, or a duration counted back from
+    // now, both before every fixture event.
+    for query in ["until=2020-01-01T00:00:00Z", "until=1h"] {
+        let (status, old) = get(query).await;
+        assert_eq!(status, 200, "{query}: {old}");
+        assert!(
+            old["items"].as_array().unwrap().is_empty(),
+            "{query}: {old}"
+        );
+    }
+    srv.ct.cancel();
+}
+
 #[test]
 fn resolve_matrix_matches_the_loopback_rule() {
     assert_eq!(
