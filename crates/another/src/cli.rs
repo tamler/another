@@ -226,44 +226,15 @@ pub enum Command {
         keep: bool,
     },
     /// Find registered resources (model servers, dev servers, ports, GPUs, containers, jobs).
-    Resources {
-        /// model_server | dev_server | port | gpu | container | long_job
-        #[arg(long)]
-        kind: Option<String>,
-        /// Substring of name, endpoint or purpose.
-        #[arg(long, short = 'q')]
-        query: Option<String>,
-        /// Project path or slug.
-        #[arg(long, short = 'p')]
-        project: Option<String>,
-        /// Include released resources.
-        #[arg(long)]
-        all: bool,
-        /// Only resources owned by this node (default includes other nodes').
-        #[arg(long)]
-        local: bool,
-    },
-    /// Register a resource or renew resource leases.
+    /// Same as `another resource list`.
+    Resources(ResourceListArgs),
+    /// Register, list, borrow and return resources, or renew resource leases.
     #[command(subcommand)]
     Resource(ResourceCmd),
-    /// Borrow a shared resource (id or kind:name).
-    Borrow {
-        target: String,
-        #[command(flatten)]
-        agent: AgentArg,
-        /// Lease seconds (default 1800).
-        #[arg(long)]
-        ttl: Option<i64>,
-    },
-    /// Release your lease on a resource (id or kind:name).
-    Release {
-        target: String,
-        #[command(flatten)]
-        agent: AgentArg,
-        /// Owner: the resource was shut down; end all leases and mark it released.
-        #[arg(long)]
-        stopped: bool,
-    },
+    /// Borrow a shared resource (id or kind:name). Same as `another resource borrow`.
+    Borrow(BorrowArgs),
+    /// Release your lease on a resource (id or kind:name). Same as `another resource return`.
+    Release(ReturnArgs),
     /// List orphan candidates: lapsed resources and unregistered listeners.
     Orphans {
         /// Skip the listening-process scan (lapsed registered resources only).
@@ -631,6 +602,112 @@ pub enum ResourceCmd {
         agent: AgentArg,
         targets: Vec<String>,
     },
+    /// List registered resources, with who holds each and until when.
+    List(ResourceListArgs),
+    /// Borrow a shared resource (id or kind:name).
+    Borrow(BorrowArgs),
+    /// Give back your lease on a resource (id or kind:name).
+    Return(ReturnArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ResourceListArgs {
+    /// model_server | dev_server | port | gpu | container | long_job
+    #[arg(long)]
+    kind: Option<String>,
+    /// Substring of name, endpoint or purpose.
+    #[arg(long, short = 'q')]
+    query: Option<String>,
+    /// Project path or slug.
+    #[arg(long, short = 'p')]
+    project: Option<String>,
+    /// Include released resources.
+    #[arg(long)]
+    all: bool,
+    /// Only resources owned by this node (default includes other nodes').
+    #[arg(long)]
+    local: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct BorrowArgs {
+    target: String,
+    #[command(flatten)]
+    agent: AgentArg,
+    /// Lease seconds (default 1800).
+    #[arg(long)]
+    ttl: Option<i64>,
+    /// If another agent holds it exclusively, keep trying for up to this many seconds
+    /// (at most 3600) instead of failing at once.
+    #[arg(long, value_name = "SECONDS")]
+    wait: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub struct ReturnArgs {
+    target: String,
+    #[command(flatten)]
+    agent: AgentArg,
+    /// Owner: the resource was shut down; end all leases and mark it released.
+    #[arg(long)]
+    stopped: bool,
+}
+
+/// Longest `--wait` on an exclusive resource.
+const MAX_BORROW_WAIT_SECS: u64 = 3600;
+/// How often a waiting borrow tries again.
+const BORROW_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Borrow, and with `--wait`, keep trying while another agent holds it exclusively. Any
+/// other error ends the wait at once.
+fn borrow(store: &Store, args: &BorrowArgs, json: bool) -> anyhow::Result<ExitCode> {
+    let target = ResourceRef::parse(&args.target)?;
+    let wait = args.wait.unwrap_or(0);
+    if wait > MAX_BORROW_WAIT_SECS {
+        anyhow::bail!("--wait is at most {MAX_BORROW_WAIT_SECS} seconds");
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
+    let mut announced = false;
+    loop {
+        match store.borrow_resource(&args.agent.agent, &target, args.ttl) {
+            Ok(out) => return Ok(emit(json, &out, output::lease_outcome)),
+            Err(another_core::Error::Conflict(m))
+                if m.contains(" is exclusive to ") && std::time::Instant::now() < deadline =>
+            {
+                if !announced && !json {
+                    eprintln!("another: {m}; waiting up to {wait}s for it to be free");
+                    announced = true;
+                }
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                std::thread::sleep(BORROW_RETRY.min(left));
+            }
+            Err(another_core::Error::Conflict(m))
+                if wait > 0 && m.contains(" is exclusive to ") =>
+            {
+                return Err(another_core::Error::Conflict(format!(
+                    "{m}; still held after {wait}s"
+                ))
+                .into());
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+fn list_resources(store: &Store, a: ResourceListArgs, json: bool) -> anyhow::Result<ExitCode> {
+    let rs = store.find_resources(ResourceFilter {
+        kind: a.kind.map(|k| k.parse::<ResourceKind>()).transpose()?,
+        query: a.query,
+        project: a.project,
+        include_released: a.all,
+        local_only: a.local,
+    })?;
+    Ok(emit(json, &rs, |r| output::resources(r)))
+}
+
+fn return_resource(store: &Store, a: &ReturnArgs, json: bool) -> anyhow::Result<ExitCode> {
+    let out = store.release_resource(&a.agent.agent, &ResourceRef::parse(&a.target)?, a.stopped)?;
+    Ok(emit(json, &out, output::lease_outcome))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -1363,21 +1440,14 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             )?;
             emit(json, &hb, output::heartbeat)
         }
-        Command::Resources {
-            kind,
-            query,
-            project,
-            all,
-            local,
-        } => {
-            let rs = store.find_resources(ResourceFilter {
-                kind: kind.map(|k| k.parse::<ResourceKind>()).transpose()?,
-                query,
-                project,
-                include_released: all,
-                local_only: local,
-            })?;
-            emit(json, &rs, |r| output::resources(r))
+        Command::Resources(args) | Command::Resource(ResourceCmd::List(args)) => {
+            list_resources(&store, args, json)?
+        }
+        Command::Borrow(args) | Command::Resource(ResourceCmd::Borrow(args)) => {
+            borrow(&store, &args, json)?
+        }
+        Command::Release(args) | Command::Resource(ResourceCmd::Return(args)) => {
+            return_resource(&store, &args, json)?
         }
         Command::Resource(ResourceCmd::Register {
             kind,
@@ -1428,19 +1498,6 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 .collect::<Result<Vec<_>, _>>()?;
             let rs = store.heartbeat_resources(&agent.agent, &targets)?;
             emit(json, &rs, |r| output::resources(r))
-        }
-        Command::Borrow { target, agent, ttl } => {
-            let out = store.borrow_resource(&agent.agent, &ResourceRef::parse(&target)?, ttl)?;
-            emit(json, &out, output::lease_outcome)
-        }
-        Command::Release {
-            target,
-            agent,
-            stopped,
-        } => {
-            let out =
-                store.release_resource(&agent.agent, &ResourceRef::parse(&target)?, stopped)?;
-            emit(json, &out, output::lease_outcome)
         }
         Command::Orphans { no_scan } => {
             let report = crate::reap::orphans(&store, !no_scan)?;

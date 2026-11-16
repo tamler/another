@@ -307,29 +307,53 @@ pub fn resources(rs: &[Resource]) -> String {
     if rs.is_empty() {
         return "no resources registered".to_string();
     }
-    rs.iter()
-        .map(|r| {
-            let who = match (&r.owner, r.refcount) {
-                (Some(o), n) if n > 1 => format!("{o} +{} borrower(s)", n - 1),
-                (Some(o), _) => o.clone(),
-                (None, _) => "-".to_string(),
-            };
-            format!(
-                "{:<8} {:<12} {:<26} {:<9} {:<28} {}{}  [{}]\n",
-                r.status,
-                r.kind.as_str(),
-                r.name,
-                r.mode.as_str(),
-                who,
-                r.endpoint.as_deref().unwrap_or(""),
-                r.purpose
-                    .as_deref()
-                    .map(|p| format!("  ({p})"))
-                    .unwrap_or_default(),
-                r.resource_id
-            )
-        })
-        .collect()
+    rs.iter().map(resource).collect()
+}
+
+/// One resource: a summary line (where to reach it, what it is for), then one indented line
+/// per live lease saying who holds it, as what, and until when.
+fn resource(r: &Resource) -> String {
+    let place = match (&r.endpoint, r.port, r.pid) {
+        (Some(e), _, _) => e.clone(),
+        (None, Some(p), _) => format!("port {p}"),
+        (None, None, Some(pid)) => format!("pid {pid}"),
+        (None, None, None) => "-".to_string(),
+    };
+    let node = match (&r.node, r.reachable) {
+        (Some(n), Some(false)) => format!("  on {n}, not reachable from here"),
+        (Some(n), _) => format!("  on {n}"),
+        (None, _) => String::new(),
+    };
+    let mut out = format!(
+        "{:<8} {:<12} {:<26} {:<9} {place}{node}{}  [{}]\n",
+        r.status,
+        r.kind.as_str(),
+        r.name,
+        r.mode.as_str(),
+        r.purpose
+            .as_deref()
+            .map(|p| format!("  ({p})"))
+            .unwrap_or_default(),
+        r.resource_id
+    );
+    let mut leases: Vec<_> = r.leases.iter().collect();
+    leases.sort_by_key(|l| (l.role != "owner", l.expires_at.clone()));
+    for l in leases {
+        let _ = writeln!(out, "{:9}{} {} until {}", "", l.role, l.agent, l.expires_at);
+    }
+    if r.leases.is_empty() && r.status == "lapsed" {
+        let since = r
+            .lapsed_since
+            .as_deref()
+            .map(|s| format!(" since {s}"))
+            .unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "{:9}no live lease{since}; borrowing it adopts it, and `another orphans` lists it",
+            ""
+        );
+    }
+    out
 }
 
 pub fn lease_outcome(o: &LeaseOutcome) -> String {
