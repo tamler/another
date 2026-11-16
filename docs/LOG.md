@@ -8,6 +8,8 @@ another log export > events.jsonl
 
 The output is JSON Lines: one object per line, in log order (by `seq`, the order events were stored), and nothing else on stdout. That is nearly always oldest first, but not always: after the clock steps back, a later event carries an earlier `ts`, and a peer's events are stored when they arrive, after newer local ones. Log order is what lets the cursor below continue without gaps. Each event line has `seq`, `event_id`, `node_id`, `ts` (RFC 3339, UTC), `actor`, `kind`, `payload` (the event's data), `prev_id` and `sig`. A payload that is not valid JSON is kept as text, with `"payload_raw": true`.
 
+The export carries the data of each event, not its exact stored bytes. `payload` is re-encoded from the stored JSON, so its whitespace and escapes can differ from what was signed. `sig` therefore cannot in general be verified against the exported `payload`, and peer bodies are redacted by default (below). Use the export to read and keep the log's content, not as a signed backup that could be checked or restored event by event.
+
 When it finishes, the export prints a line on stderr naming the last event:
 
 ```text
