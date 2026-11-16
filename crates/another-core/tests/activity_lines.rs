@@ -170,3 +170,37 @@ fn whats_new_defaults_and_caps_its_limit_and_names_urgent_mail() {
         idle.next
     );
 }
+
+/// adv230: a small `whats_new` limit is kept (not raised to the default) and bounds the
+/// feed as well as the messages; request lines name who acted.
+#[test]
+fn adv230_a_small_limit_bounds_messages_and_feed_and_lines_name_the_actor() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(dir.path());
+    for n in 0..6 {
+        s.send_message(SendMessage {
+            from: "lead".into(),
+            to: vec!["worker".into()],
+            subject: format!("note {n}"),
+            body: "b".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    let small = s.whats_new("worker", None, 3).unwrap();
+    assert_eq!(small.messages.len(), 3, "a limit of 3 is kept");
+    assert!(
+        small.activity.len() <= 3,
+        "the activity list ignores the limit: {}",
+        small.activity.len()
+    );
+
+    let id = request(&s, "Port the parser");
+    act(&s, "worker", &id, RequestAction::Claim);
+    act(&s, "worker", &id, RequestAction::Release);
+    assert!(
+        has(&lines(&s), "worker released request: Port the parser"),
+        "{:#?}",
+        lines(&s)
+    );
+}
