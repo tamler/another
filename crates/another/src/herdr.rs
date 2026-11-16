@@ -138,10 +138,13 @@ fn open_cache(path: &Path) -> rusqlite::Result<Connection> {
     conn.busy_timeout(LOCK_WAIT)?;
     // WAL with `synchronous = NORMAL`: commits stay atomic and ordered but skip the per-commit
     // fsync, so a burst of hooks is not held up by slow disks. Power loss can drop the last
-    // rows; the next reservation is then still `max(now, last + 1)`. Switching a new file to
-    // WAL can answer busy without waiting; the cache then keeps the default journal, which
-    // is slower but equally correct.
-    let _ = conn.pragma_update(None, "journal_mode", "WAL");
+    // rows; the next reservation is then still `max(now, last + 1)`. The mode is stored in
+    // the file, so it is switched once; switching can answer busy without waiting, which
+    // [`reserve_retrying`] retries.
+    let mode: String = conn.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+    }
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     // `at_ms` 0 marks a report whose `herdr` could not be started: send it again.
     conn.execute_batch(
@@ -213,6 +216,40 @@ fn reserve(
     Ok(Some(seq))
 }
 
+fn is_busy(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(f, _)
+            if matches!(
+                f.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
+}
+
+/// [`open_cache`] and [`reserve`], retried until [`LOCK_WAIT`] has passed. SQLite answers
+/// busy without calling the busy handler in a few cases (switching to WAL, opening while
+/// another connection sets up or tears down the WAL index), so the busy timeout alone does
+/// not bound the wait for a burst of hooks.
+fn reserve_retrying(
+    path: &Path,
+    pane: &str,
+    state: Option<&str>,
+    note: Option<&str>,
+) -> rusqlite::Result<Option<u64>> {
+    let deadline = std::time::Instant::now() + LOCK_WAIT;
+    loop {
+        let attempt = open_cache(path)
+            .and_then(|mut conn| reserve(&mut conn, pane, state, note, now_micros()));
+        match attempt {
+            Err(e) if is_busy(&e) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            other => return other,
+        }
+    }
+}
+
 /// Report `status` for `pane` (`None`, or an `unknown` state, clears the tokens). Returns
 /// the arguments sent, or `None` when nothing needed sending or the cache could not be
 /// used within [`LOCK_WAIT`]. Never fails: a missing or failing `herdr` is ignored.
@@ -221,22 +258,25 @@ pub fn report(
     pane: &Pane,
     status: Option<&AgentStatus>,
 ) -> Option<Vec<String>> {
-    let (state, note) = tokens(status);
-    let path = cache_path(another_home);
-    let mut conn = match open_cache(&path) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::debug!(error = %e, "herdr status cache unavailable");
-            return None;
-        }
-    };
-    let seq = match reserve(&mut conn, &pane.id, state, note.as_deref(), now_micros()) {
-        Ok(Some(seq)) => seq,
-        Ok(None) => return None,
+    match try_report(another_home, pane, status) {
+        Ok(sent) => sent,
         Err(e) => {
             tracing::debug!(error = %e, "herdr status report skipped");
-            return None;
+            None
         }
+    }
+}
+
+/// [`report`], with the reason a report was skipped.
+fn try_report(
+    another_home: &Path,
+    pane: &Pane,
+    status: Option<&AgentStatus>,
+) -> rusqlite::Result<Option<Vec<String>>> {
+    let (state, note) = tokens(status);
+    let path = cache_path(another_home);
+    let Some(seq) = reserve_retrying(&path, &pane.id, state, note.as_deref())? else {
+        return Ok(None);
     };
     let argv = args(&pane.id, state, note.as_deref(), seq);
     // In the background: the hook does not wait for Herdr, and Herdr's answer is unused.
@@ -249,12 +289,14 @@ pub fn report(
     if let Err(e) = spawned {
         tracing::debug!(error = %e, "herdr status report not started");
         // Not delivered: let the next hook send it again, unless a later report followed.
-        let _ = conn.execute(
-            "UPDATE panes SET at_ms = 0 WHERE pane = ?1 AND seq = ?2",
-            params![pane.id, seq as i64],
-        );
+        let _ = open_cache(&path).and_then(|conn| {
+            conn.execute(
+                "UPDATE panes SET at_ms = 0 WHERE pane = ?1 AND seq = ?2",
+                params![pane.id, seq as i64],
+            )
+        });
     }
-    Some(argv)
+    Ok(Some(argv))
 }
 
 #[cfg(test)]
@@ -468,10 +510,11 @@ mod tests {
     /// Every sequence sent is above `ahead` and distinct. A caller that could not get the
     /// cache lock in time skips its report (documented), so liveness is only required for
     /// most callers, not all, on a slow machine.
-    fn assert_sent_seqs(sent: &[Option<u64>], ahead: u64) {
-        let mut seqs: Vec<u64> = sent.iter().flatten().copied().collect();
+    fn assert_sent_seqs(sent: &[Result<Option<u64>, String>], ahead: u64) {
+        let mut seqs: Vec<u64> = sent.iter().flatten().flatten().copied().collect();
+        let errors: Vec<&String> = sent.iter().filter_map(|r| r.as_ref().err()).collect();
         eprintln!(
-            "{} of {} callers sent; seqs {seqs:?}",
+            "{} of {} callers sent; errors {errors:?}; seqs {seqs:?}",
             seqs.len(),
             sent.len()
         );
@@ -510,11 +553,14 @@ mod tests {
                     };
                     let blocked = status(AgentState::Blocked, Some(&format!("block {i}")));
                     barrier.wait();
-                    report(&home, &pane, Some(&blocked)).map(|argv| seq_of(&argv))
+                    try_report(&home, &pane, Some(&blocked))
+                        .map(|sent| sent.map(|argv| seq_of(&argv)))
+                        .map_err(|e| e.to_string())
                 })
             })
             .collect();
-        let sent: Vec<Option<u64>> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        let sent: Vec<Result<Option<u64>, String>> =
+            threads.into_iter().map(|t| t.join().unwrap()).collect();
         assert_sent_seqs(&sent, ahead);
     }
 
@@ -539,9 +585,10 @@ mod tests {
             id: "w1:p1".into(),
         };
         let blocked = status(AgentState::Blocked, Some(&format!("process {i}")));
-        match report(&home, &pane, Some(&blocked)) {
-            Some(argv) => println!("SEQ={}", seq_of(&argv)),
-            None => println!("SEQ=none"),
+        match try_report(&home, &pane, Some(&blocked)) {
+            Ok(Some(argv)) => println!("SEQ={}", seq_of(&argv)),
+            Ok(None) => println!("SEQ=none"),
+            Err(e) => println!("SEQ=error {}", e.to_string().replace('\n', " ")),
         }
     }
 
@@ -574,7 +621,7 @@ mod tests {
             })
             .collect();
         std::fs::write(dir.path().join("go"), b"").unwrap();
-        let sent: Vec<Option<u64>> = workers
+        let sent: Vec<Result<Option<u64>, String>> = workers
             .into_iter()
             .map(|w| {
                 let out = w.wait_with_output().unwrap();
@@ -583,8 +630,13 @@ mod tests {
                     .lines()
                     .find_map(|l| l.split_once("SEQ=").map(|(_, n)| n.to_string()))
                     .expect("worker printed its sequence");
-                let word = line.split_whitespace().next().unwrap_or("");
-                (word != "none").then(|| word.parse().unwrap())
+                match line.split_once(' ') {
+                    Some(("error", why)) => Err(why.trim().to_string()),
+                    _ => {
+                        let word = line.split_whitespace().next().unwrap_or("");
+                        Ok((word != "none").then(|| word.parse().unwrap()))
+                    }
+                }
             })
             .collect();
         assert_sent_seqs(&sent, ahead);
