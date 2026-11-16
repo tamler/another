@@ -116,3 +116,86 @@ fn a_submodule_without_origin_does_not_take_the_superprojects_key() {
     assert_eq!(inner.key, format!("git:{}", modules.to_string_lossy()));
     assert_ne!(inner.key, outer.key);
 }
+
+/// adv237: a relative-path worktree opened through a symlink whose parent is not the
+/// worktree's real parent. Git resolves `gitdir: ../main/...` from the `.git` file's real
+/// location, so the worktree still belongs to `main`; a lexical join from the symlinked path
+/// lands next to the symlink instead.
+#[cfg(unix)]
+#[test]
+fn adv237_a_symlinked_relative_worktree_still_shares_the_checkouts_key() {
+    let dir = tempfile::tempdir().unwrap();
+    relative_worktree(dir.path(), Some("git@example.com:me/shop.git"));
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("wt-a"), elsewhere.join("wt")).unwrap();
+
+    let main = repo_link_for(&dir.path().join("main")).unwrap();
+    let via_link =
+        repo_link_for(&elsewhere.join("wt")).expect("the symlinked worktree is still a repository");
+    assert_eq!(
+        via_link.key, main.key,
+        "opened through a symlink, the worktree got a key of its own"
+    );
+}
+
+/// A worktree whose link was cached under the old key rules (KEY_VERSION v2, from before the
+/// symlink fix) is relinked, not trusted: its holds count against the main checkout's.
+#[cfg(unix)]
+#[test]
+fn a_link_cached_under_the_old_key_rules_is_recomputed() {
+    use another_core::*;
+    let dir = tempfile::tempdir().unwrap();
+    relative_worktree(dir.path(), Some("git@example.com:me/shop.git"));
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("wt-a"), elsewhere.join("wt")).unwrap();
+    let home = dir.path().join("home");
+    let store = Store::open(&home).unwrap();
+    let main = store
+        .ensure_project("t", &dir.path().join("main").to_string_lossy())
+        .unwrap();
+    let wt = store
+        .ensure_project("t", &elsewhere.join("wt").to_string_lossy())
+        .unwrap();
+    for (name, project) in [("alice", &main), ("bob", &wt)] {
+        store
+            .register_agent(RegisterAgent {
+                name: name.into(),
+                program: Program::Other,
+                project: Some(project.abs_path.clone()),
+                model: None,
+                description: None,
+            })
+            .unwrap();
+    }
+    // What the pre-fix build cached for the symlinked worktree: a key of its own.
+    rusqlite::Connection::open(home.join(DB_FILE))
+        .unwrap()
+        .execute(
+            "UPDATE project_repos SET repo_key = 'v2:git:/nowhere/.git', repo_prefix = ''
+             WHERE project_id = ?1",
+            [&wt.project_id],
+        )
+        .unwrap();
+    let hold = |agent: &str, project: &Project| {
+        store
+            .acquire_holds(AcquireHolds {
+                agent: format!("{agent}@{}", project.slug),
+                project: project.abs_path.clone(),
+                paths: vec!["src/a.rs".into()],
+                ttl_seconds: Some(600),
+                exclusive: true,
+                reason: None,
+                repo_wide: false,
+            })
+            .unwrap()
+    };
+    assert_eq!(hold("alice", &main).granted.len(), 1);
+    let bob = hold("bob", &wt);
+    assert!(
+        bob.granted.is_empty(),
+        "the stale v2 key was trusted: {bob:?}"
+    );
+    assert_eq!(bob.conflicts.len(), 1, "{bob:?}");
+}
