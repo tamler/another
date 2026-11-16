@@ -85,7 +85,7 @@ opened request 01M77HNNEDVZ92ZVSKQEYXYRB5</span>
 
 requests:
 open      -                Fix the flaky test  (from lead@shop due 2026-11-12T09:48:24.813Z)  [01M77HNNEDVZ92ZVSKQEYXYRB5]</span></code></pre>
-      <p>The worker claims the request, then its session crashes before it runs <code>complete</code>. Nothing arrives in the lead's inbox, because nothing was sent. The request list and the activity feed show a claim with no completion. A sender checks <code>another requests</code>, not its own inbox, to see whether work it opened is still owned.</p>
+      <p>The worker claims the request, then its session crashes before it runs <code>complete</code>. Nothing arrives in the lead's inbox, because nothing was sent. The request list and the activity feed show a claim with no completion. A sender checks <code>another requests</code>, not its own inbox, to see whether work it opened is still owned. <code>another board</code> lists every pending request with its owner and recipients, and which agents still have unread mail or an acknowledgement outstanding, without marking anything read.</p>
       <pre class="code-block shell" tabindex="0" aria-label="The sender sees the work is unfinished"><code><span class="command">$ another request claim --agent worker 01M77HNNEDVZ92ZVSKQEYXYRB5</span>
 <span class="output">claimed   worker@shop      Fix the flaky test  (from lead@shop due 2026-11-12T09:48:24.813Z)  [01M77HNNEDVZ92ZVSKQEYXYRB5]</span>
 <span class="command">$ another inbox --agent lead</span>

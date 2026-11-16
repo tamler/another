@@ -102,6 +102,7 @@ function render(snap) {
   renderAgents(snap, now);
   $("holds-body").innerHTML = holdsHtml(snap, now);
   renderRequests(snap, now);
+  $("edits-body").innerHTML = editsHtml(snap, now);
   $("mail-body").innerHTML = mailHtml(snap, now);
   $("resources-body").innerHTML = resourcesHtml(snap, now);
   $("peers-body").innerHTML = peersHtml(snap, now);
@@ -341,6 +342,34 @@ function resourcesHtml(snap, now) {
       "</article>"
     );
   }).join("") + "</div>";
+}
+
+function editsHtml(snap, now) {
+  const blocked = snap.blocked || [];
+  const edits = snap.edits || [];
+  if (!blocked.length && !edits.length) {
+    return '<p class="empty">No edits through the edit hook in the last day. <span class="path">another hook install</span> adds it to a client.</p>';
+  }
+  const rows = [];
+  for (const b of blocked) {
+    rows.push(
+      '<article class="row conflict"><div class="top"><span class="path">' + esc(b.path) +
+      '</span><span class="sub">' + esc(b.agent) + "</span></div>" +
+      '<div class="tags"><span class="tag bad">stopped</span><span class="tag">' + esc(b.project) +
+      '</span><span class="tag">' + esc(rel(b.at, now)) + "</span></div>" +
+      '<div class="sub">Held by ' + esc(b.holder) + " (" + esc(b.holder_project) + ":" + esc(b.pattern) + ")</div>" +
+      "</article>"
+    );
+  }
+  for (const e of edits) {
+    rows.push(
+      '<article class="row"><div class="top"><span class="path">' + esc(e.path) +
+      '</span><span class="sub">' + esc(e.agent) + "</span></div>" +
+      '<div class="tags"><span class="tag">' + esc(e.project) + '</span><span class="tag">' +
+      esc(rel(e.at, now)) + "</span></div></article>"
+    );
+  }
+  return '<div class="stack">' + rows.join("") + "</div>";
 }
 
 function peersHtml(snap) {
