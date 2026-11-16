@@ -1,7 +1,7 @@
 //! Message limits and threading that had no test: the subject and body size limits at their
 //! boundaries, the three ways `send_message` refuses a thread (unknown reply target, unknown
 //! thread, a thread that is not the reply target's), and a reply to one's own message going
-//! to the original recipients. A refused send stores nothing.
+//! to the original `to` recipients. A refused send stores nothing.
 
 use another_core::*;
 use rusqlite::Connection;
@@ -123,8 +123,9 @@ fn a_send_into_a_thread_must_name_one_that_exists_and_agrees() {
     assert_eq!(replied.reply_to.as_deref(), Some(first.message_id.as_str()));
 }
 
-/// Replying to a message one sent oneself goes to its original recipients, not back to the
-/// sender; anyone else's plain reply goes to the sender only.
+/// Replying to a message one sent oneself goes to its original `to` recipients, not back to
+/// the sender; anyone else's plain reply goes to the sender only. (Whether a plain self-reply
+/// should also keep the original cc is not decided here; FINDINGS-219-w9Z.)
 #[test]
 fn a_reply_to_ones_own_message_goes_to_its_recipients() {
     let f = fx();
@@ -154,4 +155,40 @@ fn a_reply_to_ones_own_message_goes_to_its_recipients() {
         .unwrap();
     assert_eq!(theirs.to, vec![sent.from.clone()]);
     assert_eq!(theirs.subject, "Re: plan", "the prefix is not repeated");
+}
+
+/// A reply to a subject at the limit still fits: the `Re: ` prefix is made room for by
+/// shortening the original, so the reply is not refused for its own subject.
+#[test]
+fn a_reply_to_a_subject_at_the_limit_fits_under_it() {
+    let f = fx();
+    let sent = f.send(&"s".repeat(MAX_SUBJECT_CHARS), "b").unwrap();
+    let reply = f
+        .store
+        .reply(Reply {
+            from: "bob".into(),
+            message_id: sent.message_id.clone(),
+            body: "ok".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(reply.subject.starts_with("Re: s"), "{}", reply.subject);
+    assert_eq!(reply.subject.chars().count(), MAX_SUBJECT_CHARS);
+}
+
+/// The `Re:` check ignores case, so a lowercase prefix is not doubled.
+#[test]
+fn a_lowercase_re_prefix_is_not_repeated() {
+    let f = fx();
+    let sent = f.send("re: plan", "b").unwrap();
+    let reply = f
+        .store
+        .reply(Reply {
+            from: "bob".into(),
+            message_id: sent.message_id.clone(),
+            body: "ok".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(reply.subject, "re: plan");
 }
