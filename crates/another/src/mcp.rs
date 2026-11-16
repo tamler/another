@@ -482,6 +482,21 @@ fn resource_ref(raw: &str) -> another_core::Result<ResourceRef> {
     ResourceRef::parse(raw)
 }
 
+/// A project named by a **local** caller, spelled the way the CLI and hooks store it: an
+/// absolute path is resolved through symlinks and to its on-disk form (macOS `/var` is
+/// `/private/var`; Windows short names and `\\?\`), so one directory stays one project
+/// whichever entry point names it. A slug, or a path that cannot be resolved, is kept.
+///
+/// A remote caller's (`scope` set) project is kept exactly as given: `remote::authorize`
+/// checked that string against the token's project globs, and following a symlink could
+/// lead outside them.
+fn local_project(store: &Store, raw: String, remote: bool) -> String {
+    if remote || !std::path::Path::new(&raw).is_absolute() {
+        return raw;
+    }
+    crate::cli::project_dir(store, std::path::Path::new(&raw)).unwrap_or(raw)
+}
+
 #[tool_router(router = tool_router)]
 impl AnotherMcp {
     #[tool(description = "Register a project by its absolute path (idempotent). Returns its slug.")]
@@ -489,7 +504,9 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<EnsureProjectArgs>,
     ) -> ToolResult<Project> {
-        self.run(move |s| s.ensure_project("mcp", &a.path)).await
+        let remote = crate::remote::current_scope().is_some();
+        self.run(move |s| s.ensure_project("mcp", &local_project(s, a.path, remote)))
+            .await
     }
 
     #[tool(
@@ -499,11 +516,12 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<RegisterAgentArgs>,
     ) -> ToolResult<Agent> {
+        let remote = crate::remote::current_scope().is_some();
         self.run(move |s| {
             s.register_agent(RegisterAgent {
                 name: a.name,
                 program: a.program,
-                project: a.project,
+                project: a.project.map(|p| local_project(s, p, remote)),
                 model: a.model,
                 description: a.description,
             })
@@ -651,20 +669,32 @@ impl AnotherMcp {
     ) -> ToolResult<HoldPathsOut> {
         let scope = crate::remote::current_scope();
         self.run(move |s| {
+            let remote = scope.is_some();
+            let project = a.project.clone().map(|p| local_project(s, p, remote));
             let need_project = || {
-                a.project.clone().ok_or_else(|| {
+                project.clone().ok_or_else(|| {
                     another_core::Error::Invalid("project is required for this action".into())
                 })
+            };
+            // A local caller's paths are resolved like the CLI's (symlinked spellings of
+            // the project, links inside it); a remote caller's are left as authorized.
+            let paths = |project: &str| {
+                if remote {
+                    a.paths.clone()
+                } else {
+                    crate::cli::resolve_hold_paths(s, project, a.paths.clone())
+                }
             };
             let mut out = HoldPathsOut::default();
             match a.action {
                 // A remote caller's refusals name no directory outside its own request.
                 HoldAction::Acquire => {
+                    let project = need_project()?;
                     let report = s.acquire_holds_scoped(
                         AcquireHolds {
                             agent: a.agent.clone(),
-                            project: need_project()?,
-                            paths: a.paths.clone(),
+                            paths: paths(&project),
+                            project,
                             ttl_seconds: a.ttl_seconds,
                             exclusive: a.exclusive.unwrap_or(true),
                             reason: a.reason.clone(),
@@ -679,10 +709,11 @@ impl AnotherMcp {
                     out.not_compared = report.not_compared;
                 }
                 HoldAction::Check => {
+                    let project = need_project()?;
                     out.conflicts = s.check_holds_scoped(
                         &a.agent,
-                        &need_project()?,
-                        &a.paths,
+                        &project,
+                        &paths(&project),
                         a.exclusive.unwrap_or(true),
                         scope.as_ref(),
                     )?;
@@ -723,7 +754,7 @@ impl AnotherMcp {
                 }
                 HoldAction::List => {
                     out.holds = s.holds(HoldFilter {
-                        project: a.project.clone(),
+                        project: project.clone(),
                         agent: None,
                     })?
                 }
@@ -767,6 +798,7 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<ResourceRegisterArgs>,
     ) -> ToolResult<LeaseOutcome> {
+        let remote = crate::remote::current_scope().is_some();
         self.run(move |s| {
             s.register_resource(RegisterResource {
                 agent: a.agent,
@@ -775,7 +807,7 @@ impl AnotherMcp {
                 endpoint: a.endpoint,
                 port: a.port,
                 pid: a.pid,
-                project: a.project,
+                project: a.project.map(|p| local_project(s, p, remote)),
                 purpose: a.purpose,
                 mode: if a.exclusive {
                     LeaseMode::Exclusive
@@ -797,12 +829,13 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<ResourceFindArgs>,
     ) -> ToolResult<ResourcesOut> {
+        let remote = crate::remote::current_scope().is_some();
         self.run(move |s| {
             Ok(ResourcesOut {
                 resources: s.find_resources(ResourceFilter {
                     kind: a.kind,
                     query: a.query,
-                    project: a.project,
+                    project: a.project.map(|p| local_project(s, p, remote)),
                     include_released: a.include_released,
                     local_only: a.local_only,
                 })?,
@@ -979,7 +1012,7 @@ impl AnotherMcp {
                 },
             };
             s.board(another_core::BoardQuery {
-                project: a.project,
+                project: a.project.map(|p| local_project(s, p, remote)),
                 confined: remote,
                 since_ms,
                 limit: a.limit.unwrap_or(0),
@@ -1197,5 +1230,34 @@ impl ServerHandler for AnotherMcp {
         }
         remote::audit(&self.store, record).await;
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A remote caller's project is used exactly as authorized; a local caller's absolute
+    /// path is resolved through symlinks the way the CLI resolves it.
+    #[cfg(unix)]
+    #[test]
+    fn only_local_callers_get_project_paths_resolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let store = Store::open_in_memory(another_core::Clock::System).unwrap();
+        let given = link.to_string_lossy().into_owned();
+
+        assert_eq!(local_project(&store, given.clone(), true), given);
+        let local = local_project(&store, given.clone(), false);
+        assert_ne!(local, given);
+        assert_eq!(
+            std::path::Path::new(&local),
+            real.canonicalize().unwrap().as_path()
+        );
+        // Slugs pass through either way.
+        assert_eq!(local_project(&store, "shop".into(), false), "shop");
     }
 }
