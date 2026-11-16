@@ -38,3 +38,24 @@ fn a_live_ipv6_endpoint_with_a_query_is_reachable() {
     let e = format!("http://[::1]:{p}?q=1");
     assert!(reachable(Some(&e), None), "{e} is live");
 }
+
+/// The authority is cut at `/`, `?` or `#` before a `user@` prefix is dropped, so an `@`
+/// in the path, query or fragment is not read as userinfo: the probe goes to the live
+/// host, not to a host named after it.
+#[test]
+fn an_at_sign_after_the_authority_is_not_userinfo() {
+    let v4 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let p = v4.local_addr().unwrap().port();
+    let dead = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    for e in [
+        format!("http://127.0.0.1:{p}/?mail=a@127.0.0.1:{dead}"),
+        format!("http://127.0.0.1:{p}?mail=a@127.0.0.1:{dead}"),
+        format!("http://127.0.0.1:{p}/x@127.0.0.1:{dead}"),
+        format!("http://127.0.0.1:{p}#a@127.0.0.1:{dead}"),
+    ] {
+        assert!(reachable(Some(&e), None), "{e} is live");
+    }
+}
