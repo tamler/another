@@ -674,34 +674,56 @@ fn conflicts_for(
         .map_or((String::new(), String::new()), |l| {
             (crate::repo::stored_key(&l.key), l.prefix)
         });
-    // This project's holds, holds in any local project of the same repository, and holds in
-    // any other local project; the last are kept below only when one project's directory
-    // contains the other's (a lanes or notes folder outside git and a subfolder of it
-    // registered as its own project).
+    let fold = folds_case(Path::new(&project.abs_path));
+    // The projects whose holds can cover this project's files: this one, any project of the
+    // same repository, and any local project whose directory contains this one's or lies
+    // inside it (a lanes or notes folder outside git and a subfolder of it registered as its
+    // own project). Found from the projects table first, so the holds query below stays on
+    // the `holds_live` index instead of scanning every hold ever recorded.
+    let mut pstmt = tx.prepare(
+        "SELECT p.project_id, p.node_id, p.abs_path, coalesce(pr.repo_key, '')
+         FROM projects p LEFT JOIN project_repos pr ON pr.project_id = p.project_id
+         WHERE p.project_id = ?1 OR p.node_id = ?2 OR (?3 != '' AND pr.repo_key = ?3)",
+    )?;
+    let related: Vec<String> = pstmt
+        .query_map(params![project.project_id, tx.node_id, repo_key], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|(id, node, dir, key)| {
+            *id == project.project_id
+                || (!repo_key.is_empty() && *key == repo_key)
+                || (*node == tx.node_id
+                    && (dir_below(dir, &project.abs_path, fold).is_some()
+                        || dir_below(&project.abs_path, dir, fold).is_some()))
+        })
+        .map(|(id, ..)| id)
+        .collect();
+    let ids = vec!["?"; related.len()].join(", ");
     let mut stmt = tx.prepare(&format!(
-        "{HOLD_SELECT_REPO} WHERE h.released_at IS NULL AND h.expires_at > ?3
-           AND h.agent_id != ?2
-           AND (h.project_id = ?1
-                OR (?4 != '' AND h.project_id IN
-                    (SELECT project_id FROM project_repos WHERE repo_key = ?4))
-                OR p.node_id = ?5)
+        "{HOLD_SELECT_REPO} WHERE h.released_at IS NULL AND h.expires_at > ?
+           AND h.agent_id != ? AND h.project_id IN ({ids})
          ORDER BY h.created_at"
     ))?;
+    let mut args: Vec<&dyn rusqlite::ToSql> = vec![&tx.now, &agent_id];
+    args.extend(related.iter().map(|id| id as &dyn rusqlite::ToSql));
     let others = stmt
-        .query_map(
-            params![project.project_id, agent_id, tx.now, repo_key, tx.node_id],
-            |r| {
-                Ok((
-                    hold_from_row(r)?,
-                    r.get::<_, String>(10)?,
-                    r.get::<_, String>(11)?,
-                    r.get::<_, String>(12)?,
-                    r.get::<_, String>(13)?,
-                ))
-            },
-        )?
+        .query_map(args.as_slice(), |r| {
+            Ok((
+                hold_from_row(r)?,
+                r.get::<_, String>(10)?,
+                r.get::<_, String>(11)?,
+                r.get::<_, String>(12)?,
+                r.get::<_, String>(13)?,
+            ))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let fold = folds_case(Path::new(&project.abs_path));
     let overlaps = |a: &str, b: &str| overlap_on_volume(a, b, fold);
     // How a held hold's project relates to this one: both patterns as paths from a common
     // directory, or `None` when the two projects cover different files.
