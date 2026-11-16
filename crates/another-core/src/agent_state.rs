@@ -173,10 +173,13 @@ pub(crate) fn status_of(
     stop: Option<&Stop>,
 ) -> AgentStatus {
     let (presence, _) = presence(status, last_seen_at, now);
-    let (state, stop) = match (presence, stop) {
-        ("offline", _) => (AgentState::Unknown, None),
-        (_, Some(stop)) => (AgentState::Blocked, Some(stop)),
-        ("live", None) => (AgentState::Working, None),
+    // `unknown` means the session ended (stored status), not that an open session has been
+    // quiet for hours: dashboard presence calls that `offline` too (R1 P3).
+    let ended = status != "active";
+    let (state, stop) = match (ended, presence, stop) {
+        (true, _, _) => (AgentState::Unknown, None),
+        (false, _, Some(stop)) => (AgentState::Blocked, Some(stop)),
+        (false, "live", None) => (AgentState::Working, None),
         _ => (AgentState::Idle, None),
     };
     AgentStatus {

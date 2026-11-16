@@ -637,6 +637,11 @@ fn agent_state_follows_herdr_idle_working_and_blocked() {
     let carol = state(&fx, "carol@blog");
     assert_eq!(carol.state, AgentState::Unknown);
     assert_eq!(carol.message, None);
+
+    // An open session quiet for seven hours (past the dashboard's idle presence) is still
+    // idle: only an ended session is unknown (R1 P3).
+    fx.advance_secs(7 * 3600);
+    assert_eq!(state(&fx, "alice@shop").state, AgentState::Idle);
 }
 
 /// A stop is the agent's current state only until it edits something else, the hold ends,
