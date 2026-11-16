@@ -89,6 +89,17 @@ pub struct Event {
     pub prev_id: Option<String>,
 }
 
+/// What [`Store::inspect`] found.
+#[derive(Debug, Clone, Serialize)]
+pub struct DbInspection {
+    /// The database's schema version (`user_version`).
+    pub version: i64,
+    /// The schema version this build migrates to.
+    pub expected: i64,
+    /// `ok`, or SQLite's first `quick_check` complaint.
+    pub quick_check: String,
+}
+
 impl Store {
     /// Open (creating if needed) the node database inside `home`.
     pub fn open(home: &Path) -> Result<Store> {
@@ -109,23 +120,73 @@ impl Store {
         Self::init(conn, clock, Some(path))
     }
 
+    /// Look at the database in `home` for `another doctor`: its schema version against this
+    /// build's, and SQLite's `quick_check`. The file is opened read-only, so nothing is
+    /// created, migrated or written. SQLite may still add the empty `-shm` / `-wal` files any
+    /// reader of a WAL database makes. `NotFound` when there is no database file.
+    pub fn inspect(home: &Path, busy: std::time::Duration) -> Result<DbInspection> {
+        use rusqlite::OpenFlags;
+        let path = home.join(DB_FILE);
+        if !path.is_file() {
+            return Err(Error::NotFound(format!(
+                "no database at {}",
+                path.display()
+            )));
+        }
+        let conn = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(busy)?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let quick_check: String = conn.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
+        Ok(DbInspection {
+            version,
+            expected: MIGRATIONS.len() as i64,
+            quick_check,
+        })
+    }
+
     /// Open an existing database for a hook that runs on every tool call: nothing is created,
     /// nothing is migrated, opening writes nothing, and `busy` bounds every wait for a lock
     /// so a busy database fails fast instead of stalling the agent. Fails when the database
     /// is missing or its schema is not current; a normal [`Store::open`] fixes both.
     pub fn open_quick(home: &Path, busy: std::time::Duration) -> Result<Store> {
+        Self::open_existing(home, busy, false)
+    }
+
+    /// [`Store::open_quick`] on a read-only connection, for `another doctor`: every read
+    /// works, any write fails, and closing it cannot checkpoint the WAL into the main
+    /// file (a read-write connection that closes may do that, which changes the file's
+    /// bytes though not its contents).
+    pub fn open_read_only(home: &Path, busy: std::time::Duration) -> Result<Store> {
+        Self::open_existing(home, busy, true)
+    }
+
+    fn open_existing(home: &Path, busy: std::time::Duration, read_only: bool) -> Result<Store> {
         use rusqlite::OpenFlags;
         let path = home.join(DB_FILE);
+        let mode = if read_only {
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+        } else {
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+        };
         let conn = Connection::open_with_flags(
             &path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_URI
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            mode | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         conn.busy_timeout(busy)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        if !read_only {
+            conn.pragma_update(None, "synchronous", "NORMAL")?;
+        }
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version > MIGRATIONS.len() as i64 {
+            // A normal open refuses this too; only a newer build can use the database.
+            return Err(newer_schema(version));
+        }
         if version != MIGRATIONS.len() as i64 {
             return Err(Error::Invalid(format!(
                 "database schema is v{version}, this build expects v{}; a normal open migrates it",
@@ -661,6 +722,15 @@ fn use_wal(conn: &Connection) -> Result<()> {
     }
 }
 
+/// A database a newer build has migrated: this build must not touch it. The normal and the
+/// quick open say the same thing, so the CLI and the hook log give the same fix.
+fn newer_schema(version: i64) -> Error {
+    Error::Invalid(format!(
+        "database schema v{version} is newer than this another build supports (v{}); upgrade another",
+        MIGRATIONS.len()
+    ))
+}
+
 fn migrate(conn: &mut Connection) -> Result<()> {
     // Read the version inside each write transaction: another process may have applied a
     // step while this one waited for the lock (several sessions opening a new home at once).
@@ -669,10 +739,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         let current: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         let current = usize::try_from(current).unwrap_or(0);
         if current > MIGRATIONS.len() {
-            return Err(Error::Invalid(format!(
-                "database schema v{current} is newer than this another build supports (v{}); upgrade another",
-                MIGRATIONS.len()
-            )));
+            return Err(newer_schema(current as i64));
         }
         let Some(sql) = MIGRATIONS.get(current) else {
             return Ok(());

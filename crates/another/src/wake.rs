@@ -178,6 +178,9 @@ pub fn wake(store: &Store, agent: &str, opts: &WakeOptions) -> Result<WakePlan> 
         plan.skipped = Some(format!("no {} target for {address}", via.as_str()));
         return Ok(plan);
     };
+    // A `--target` override, a target stored before this check, or Herdr's default of the
+    // agent's name (which may start with `-`) never reaches an adapter as an option.
+    another_core::refuse_option_like_target(&target)?;
     // The plan's message is printed by `another wake --dry-run` and returned in JSON: keep
     // it to the same safe line the adapters type.
     plan.message = plan
@@ -392,6 +395,11 @@ pub fn probe_herdr(target: &str) -> Probe {
 
 /// [`probe_herdr`], bounded by [`PROBE_TIMEOUT`] and stopped early when `cancel` is set.
 pub fn probe_herdr_until(target: &str, cancel: Option<&AtomicBool>) -> Probe {
+    // Herdr reads the target positionally; one stored before targets were checked must not
+    // reach it as an option.
+    if let Err(e) = another_core::refuse_option_like_target(target) {
+        return Probe::Unknown(e.to_string());
+    }
     let mut cmd = Command::new(herdr_bin());
     cmd.args(["agent", "get", target]);
     let (status, stdout) = match run_bounded(&mut cmd, PROBE_TIMEOUT, cancel) {
@@ -481,15 +489,20 @@ pub fn prune(store: &Store, dry_run: bool) -> Result<Vec<PruneRow>> {
             .and_then(|a| a.last_seen_at.as_deref())
             .and_then(another_core::parse_ts)
             .is_some_and(|seen| store.now() - seen > STALE_AFTER_MS);
-        let stale = match probe(t.via, &t.target) {
-            Probe::Gone => Some(format!("{} reports the pane is gone", t.via.as_str())),
-            _ if agent.is_none() => Some("agent is no longer registered".into()),
-            _ if offline => Some("agent ended its session".into()),
-            _ if unseen => Some("agent not seen for over a day".into()),
-            Probe::Live { .. } => None,
-            Probe::Unknown(why) => {
-                row.reason = format!("kept ({why})");
-                None
+        // A capture stored before targets were checked, which every wake now refuses.
+        let stale = if another_core::refuse_option_like_target(&t.target).is_err() {
+            Some("target starts with '-', which a wake refuses".into())
+        } else {
+            match probe(t.via, &t.target) {
+                Probe::Gone => Some(format!("{} reports the pane is gone", t.via.as_str())),
+                _ if agent.is_none() => Some("agent is no longer registered".into()),
+                _ if offline => Some("agent ended its session".into()),
+                _ if unseen => Some("agent not seen for over a day".into()),
+                Probe::Live { .. } => None,
+                Probe::Unknown(why) => {
+                    row.reason = format!("kept ({why})");
+                    None
+                }
             }
         };
         if let Some(reason) = stale {
