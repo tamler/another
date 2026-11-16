@@ -424,6 +424,9 @@ pub fn tokens(ts: &[Token]) -> String {
 }
 
 pub fn audit(es: &[AuditEntry]) -> String {
+    if es.is_empty() {
+        return "no audit entries (remote requests and OAuth events are recorded here)".to_string();
+    }
     es.iter()
         .map(|e| {
             format!(
