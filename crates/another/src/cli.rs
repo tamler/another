@@ -41,6 +41,52 @@ pub struct AgentArg {
     pub agent: String,
 }
 
+// Keep Clap's generated argument builder off the top-level command builder's stack
+// frame so parser construction fits the default Windows main-thread stack.
+#[derive(Debug, Args)]
+pub struct ServeArgs {
+    /// Serve MCP on stdin/stdout instead of HTTP (for MCP client configs).
+    #[arg(long)]
+    stdio: bool,
+    /// HTTP bind address. Loopback unless --auth and --allow-remote-bind are both given.
+    #[arg(long, default_value = crate::serve::DEFAULT_BIND)]
+    bind: String,
+    /// Require bearer tokens (`another token create`) on /mcp and /activity; audit every call.
+    #[arg(long)]
+    auth: bool,
+    /// Allow a non-loopback --bind (requires --auth). Prefer a tunnel instead.
+    #[arg(long, requires = "auth")]
+    allow_remote_bind: bool,
+    /// Extra Host header to accept, e.g. a tunnel hostname (repeatable; requires --auth).
+    #[arg(long = "allowed-host", requires = "auth")]
+    allowed_hosts: Vec<String>,
+    /// Public origin for OAuth, e.g. https://another.example.com (no path; requires --auth).
+    /// Hosted apps such as ChatGPT and Claude connect to `<origin>/mcp`.
+    #[arg(long, requires = "auth")]
+    public_url: Option<String>,
+    /// Act as a federation hub: serve /fed/* for paired spokes (node-signed requests).
+    #[arg(long)]
+    federation: bool,
+    /// Serve the local dashboard at /ui.
+    /// On by default for a loopback server without --auth.
+    /// With --auth it is read-only and omits message bodies. Refused on a non-loopback bind.
+    #[arg(long, conflicts_with = "no_dashboard")]
+    dashboard: bool,
+    /// Do not serve the dashboard.
+    #[arg(long)]
+    no_dashboard: bool,
+    /// Seconds between sweeps that expire holds and stale requests.
+    #[arg(long, default_value_t = 30)]
+    sweep_secs: u64,
+    /// Do not wake idle Herdr agents when new mail arrives.
+    /// (Push delivery runs only on a loopback server without --auth.)
+    #[arg(long)]
+    no_wake: bool,
+    /// Seconds between checks for new mail to push to idle Herdr agents.
+    #[arg(long, default_value_t = 2)]
+    wake_secs: u64,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Show the SQLite version and source ID linked into this executable without opening a home.
@@ -59,48 +105,7 @@ pub enum Command {
     /// Show the local node, database location and registered agents.
     Status,
     /// Run the daemon: MCP over loopback streamable HTTP (default) or stdio.
-    Serve {
-        /// Serve MCP on stdin/stdout instead of HTTP (for MCP client configs).
-        #[arg(long)]
-        stdio: bool,
-        /// HTTP bind address. Loopback unless --auth and --allow-remote-bind are both given.
-        #[arg(long, default_value = crate::serve::DEFAULT_BIND)]
-        bind: String,
-        /// Require bearer tokens (`another token create`) on /mcp and /activity; audit every call.
-        #[arg(long)]
-        auth: bool,
-        /// Allow a non-loopback --bind (requires --auth). Prefer a tunnel instead.
-        #[arg(long, requires = "auth")]
-        allow_remote_bind: bool,
-        /// Extra Host header to accept, e.g. a tunnel hostname (repeatable; requires --auth).
-        #[arg(long = "allowed-host", requires = "auth")]
-        allowed_hosts: Vec<String>,
-        /// Public origin for OAuth, e.g. https://another.example.com (no path; requires --auth).
-        /// Hosted apps such as ChatGPT and Claude connect to `<origin>/mcp`.
-        #[arg(long, requires = "auth")]
-        public_url: Option<String>,
-        /// Act as a federation hub: serve /fed/* for paired spokes (node-signed requests).
-        #[arg(long)]
-        federation: bool,
-        /// Serve the local dashboard at /ui.
-        /// On by default for a loopback server without --auth.
-        /// With --auth it is read-only and omits message bodies. Refused on a non-loopback bind.
-        #[arg(long, conflicts_with = "no_dashboard")]
-        dashboard: bool,
-        /// Do not serve the dashboard.
-        #[arg(long)]
-        no_dashboard: bool,
-        /// Seconds between sweeps that expire holds and stale requests.
-        #[arg(long, default_value_t = 30)]
-        sweep_secs: u64,
-        /// Do not wake idle Herdr agents when new mail arrives.
-        /// (Push delivery runs only on a loopback server without --auth.)
-        #[arg(long)]
-        no_wake: bool,
-        /// Seconds between checks for new mail to push to idle Herdr agents.
-        #[arg(long, default_value_t = 2)]
-        wake_secs: u64,
-    },
+    Serve(ServeArgs),
     /// Keep `another serve` running in the background (macOS launchd LaunchAgent).
     #[command(subcommand)]
     Daemon(DaemonCmd),
@@ -817,7 +822,7 @@ pub fn main() -> ExitCode {
     let cli = Cli::parse();
     init_tracing(matches!(
         cli.command,
-        Command::Serve { .. } | Command::Dashboard { .. }
+        Command::Serve(_) | Command::Dashboard { .. }
     ));
     let json = cli.json;
     match run(cli) {
@@ -1037,7 +1042,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             )
         }));
     }
-    if let Command::Serve {
+    if let Command::Serve(ServeArgs {
         stdio,
         bind,
         auth,
@@ -1050,7 +1055,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         sweep_secs,
         no_wake,
         wake_secs,
-    } = &cli.command
+    }) = &cli.command
     {
         let store = open(home)?;
         let every = Duration::from_secs((*sweep_secs).max(1));
@@ -1193,7 +1198,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     }
     let store = open(home)?;
     let code = match cli.command {
-        Command::Serve { .. }
+        Command::Serve(_)
         | Command::Dashboard { .. }
         | Command::Hook(_)
         | Command::Daemon(_)
