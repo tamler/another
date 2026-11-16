@@ -1,0 +1,65 @@
+name: install e2e
+
+# Install `another` the documented way (`cargo install --locked`), use it on a fresh home,
+# upgrade a home written by an older build, and uninstall it, on Linux, macOS and Windows.
+# The checks live in scripts/e2e-install.sh.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The schema-v8 build (#103, 2026-11-11): the oldest home the upgrade path is checked from.
+  OLD_REV: 42f44c4
+
+jobs:
+  e2e:
+    name: install / upgrade / uninstall (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install this checkout
+        run: cargo install --locked --path crates/another --root "$RUNNER_TEMP/new"
+
+      - name: Install the old build
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/old-src" "$OLD_REV"
+          cargo install --locked --path "$RUNNER_TEMP/old-src/crates/another" --root "$RUNNER_TEMP/old"
+
+      - name: Fresh install
+        run: scripts/e2e-install.sh fresh "$RUNNER_TEMP/new/bin/another"
+
+      - name: Upgrade from the old build's schema
+        run: scripts/e2e-install.sh upgrade "$RUNNER_TEMP/old/bin/another" "$RUNNER_TEMP/new/bin/another"
+
+      - name: Uninstall
+        run: |
+          cargo uninstall --root "$RUNNER_TEMP/new" another
+          for f in "$RUNNER_TEMP/new/bin/another" "$RUNNER_TEMP/new/bin/another.exe"; do
+            if [ -e "$f" ]; then
+              echo "still installed: $f" >&2
+              exit 1
+            fi
+          done
