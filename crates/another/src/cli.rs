@@ -299,7 +299,8 @@ pub enum Command {
     Remote(RemoteCmd),
     /// Show the audit log of remote (token-authenticated) calls.
     Audit {
-        #[arg(long, default_value_t = 50)]
+        /// How many of the newest entries to show (at least 1).
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..))]
         limit: u32,
     },
     /// Show or rename this node.
