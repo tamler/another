@@ -1,0 +1,52 @@
+[package]
+name = "another-fuzz-targets"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace: cargo-fuzz needs nightly and libFuzzer, which the main workspace's
+# stable and Rust 1.88 checks must never build. The harness logic lives in
+# crates/another-fuzz, which the main workspace tests on stable.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+another-fuzz = { path = "../crates/another-fuzz" }
+
+[[bin]]
+name = "ingest_events"
+path = "fuzz_targets/ingest_events.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ingest_raw"
+path = "fuzz_targets/ingest_raw.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "peer_request"
+path = "fuzz_targets/peer_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tool_args"
+path = "fuzz_targets/tool_args.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cli_args"
+path = "fuzz_targets/cli_args.rs"
+test = false
+doc = false
+bench = false

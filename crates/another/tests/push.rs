@@ -47,6 +47,11 @@ case "$1 $2" in
     printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$3"
     exit 1 ;;
   "agent prompt")
+    # Test control: `fail-prompt` makes the prompt fail as a closed pane would.
+    if [ -f "$dir/fail-prompt" ]; then
+      printf '{"error":{"code":"pane_closed","message":"pane %s closed"}}\n' "$3"
+      exit 1
+    fi
     printf '{"result":{"type":"ok"}}\n'
     exit 0 ;;
 esac
@@ -1256,6 +1261,41 @@ fn daemon_does_not_wake_for_mail_a_hook_announced_during_the_probe() {
     let stats = env.json(&["stats", "--since", "1h"]);
     assert_eq!(stats["wakes_sent"], 0);
     assert_eq!(stats["notices_mid_task"], 1);
+}
+
+/// A daemon wake whose prompt fails gives the mail back to the hooks: the next tool hook
+/// still announces it, nothing claims it was delivered, and the failure is counted.
+#[test]
+fn a_failed_daemon_wake_leaves_the_mail_to_the_hooks() {
+    let env = Env::new();
+    env.start("claude", &env.main, &[("HERDR_PANE_ID", "w7:p2")]);
+    env.start("codex", &env.wt, &[]);
+    env.set_pane("w7:p2", Some("idle claude"));
+    std::fs::write(env.herdr_dir.join("fail-prompt"), "").unwrap();
+    let daemon = Daemon::start(&env);
+    env.send("codex@shop-review", "claude@shop", "Still there?", false);
+    assert!(
+        wait_for(Duration::from_secs(20), || env
+            .herdr_calls()
+            .iter()
+            .any(|c| c.starts_with("agent prompt w7:p2 "))),
+        "the daemon never tried: {:?}\n{}",
+        env.herdr_calls(),
+        daemon.text()
+    );
+    daemon.wait_log("action=failed", Duration::from_secs(10));
+
+    let notice = env.hook("post-tool", "claude", &tool(&env.main, "Bash", json!({})));
+    assert!(
+        context(&notice).contains("Still there?"),
+        "the hook announces what the failed wake did not deliver: {notice:?}"
+    );
+    assert!(daemon.stop().success());
+
+    let stats = env.json(&["stats", "--since", "1h"]);
+    assert_eq!(stats["wakes_sent"], 0, "{stats}");
+    assert_eq!(stats["wakes_failed"], 1, "{stats}");
+    assert_eq!(stats["notices_mid_task"], 1, "{stats}");
 }
 
 /// F3: a burst larger than one notice's preview is announced and counted in full.
