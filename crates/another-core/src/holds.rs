@@ -1295,13 +1295,18 @@ fn waits_to_recheck_tx(tx: &Tx<'_>) -> Result<Vec<WaitRow>> {
 fn ping_free_waiters_tx(tx: &Tx<'_>) -> Result<()> {
     for (agent_id, project_key, project_id, path, holder_id, blockers) in waits_to_recheck_tx(tx)? {
         let project = find_project(tx, tx.node_id, &project_key)?;
-        let conflicts = conflicts_for(
-            tx,
-            &project,
-            &agent_id,
-            &[(path.clone(), globset::escape(&path))],
-            true,
-        )?;
+        let targets = [(path.clone(), globset::escape(&path))];
+        let mut conflicts = conflicts_for(tx, &project, &agent_id, &targets, true)?;
+        // Wait rows have no policy tag. Cover both advisory matching and controlled
+        // admission's conservative case aliases before declaring any wait free.
+        for conflict in conflicts_for_policy(tx, &project, &agent_id, &targets, true, true)? {
+            if !conflicts
+                .iter()
+                .any(|held| held.held.hold_id == conflict.held.hold_id)
+            {
+                conflicts.push(conflict);
+            }
+        }
         if !conflicts.is_empty() {
             let mut current: Vec<&str> =
                 conflicts.iter().map(|c| c.held.hold_id.as_str()).collect();
