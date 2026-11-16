@@ -102,6 +102,18 @@ pub fn canonical_key(text: &str) -> Result<&str> {
     Ok(text)
 }
 
+/// `text` if it is a 64-byte signature written exactly as [`crypto::sign`] writes it. The
+/// proof is part of a rotation's identity, which is compared as text, and decoding is
+/// lenient (it trims), so a padded copy of a genuine proof would otherwise verify and still
+/// be a different identity (REVIEW-R8).
+pub fn canonical_signature(text: &str) -> Result<&str> {
+    let bytes = crypto::unb64(text)?;
+    if bytes.len() != 64 || crypto::b64(&bytes) != text {
+        return Err(invalid("signature is not in canonical form"));
+    }
+    Ok(text)
+}
+
 /// Check one rotation event against the receiver's position for its origin node, and
 /// return the position after it. Checks, in order: it is a rotation; its payload parses and
 /// names the event's own origin; the event is signed by the current key; it rotates from
@@ -123,6 +135,9 @@ pub fn verify_link(ev: &WireEvent, at: &KeyPosition, earlier: &[String]) -> Resu
     for k in [&at.key, &p.old_public_key, &p.new_public_key] {
         canonical_key(k).map_err(|e| invalid(format!("rotation {}: {e}", ev.event_id)))?;
     }
+    // So is the proof, as part of the rotation's identity.
+    canonical_signature(&p.proof)
+        .map_err(|e| invalid(format!("rotation {}: proof: {e}", ev.event_id)))?;
     let signed = crypto::event_message(
         &ev.event_id,
         &ev.node_id,
@@ -491,5 +506,29 @@ mod tests {
             link.is_err(),
             "a rotation to a small-order key was accepted"
         );
+    }
+
+    /// REVIEW-R8 (codex@lanes): base64 decoding trims, so the genuine proof with spaces
+    /// around it still verifies, yet as text it would give the same rotation a second
+    /// identity (pairing could pin the padded one and refuse the genuine stream link). Only
+    /// the one canonical spelling of the proof is accepted.
+    #[test]
+    fn review_r8_a_proof_with_padding_is_refused() {
+        let (k, links) = two_rotations();
+        let p: RotationPayload = serde_json::from_str(&links[1].payload).unwrap();
+        for padded in [
+            format!(" {}", p.proof),
+            format!("{} ", p.proof),
+            format!("\n{}", p.proof),
+        ] {
+            let mut q = p.clone();
+            q.proof = padded.clone();
+            let mut chain = links.clone();
+            chain[1] = signed("R2", &k[1], serde_json::to_string(&q).unwrap());
+            let got = verify_chain(NODE, &chain, &crypto::public_of(&k[2]));
+            assert!(got.is_err(), "padded proof {padded:?} accepted");
+        }
+        // The genuine chain still verifies.
+        assert!(verify_chain(NODE, &links, &crypto::public_of(&k[2])).is_ok());
     }
 }
