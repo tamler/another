@@ -16,7 +16,7 @@ Several machines, such as a laptop, a remote runner and a GPU box, each run thei
 | Directory: node, project and agent registrations | every paired node |
 | Mail (`message.sent`) | only nodes that host a recipient; mail between agents on one node never leaves it |
 | Read and acknowledgement receipts | only the node that sent the message |
-| Activity: sessions, requests, holds, resources | nodes with `read_feed`, plus the owner of a resource being borrowed |
+| Activity: sessions, requests, holds, resources | nodes with `read_feed`, plus the owner of a resource being borrowed, and the node whose lease on a resource expired |
 | Tokens, audit records, pairing records | never |
 
 ## Permissions
@@ -71,12 +71,12 @@ another sync
 another sync --watch --every 30
 ```
 
-`another peers` lists paired nodes with key fingerprints, permissions and last sync. `another pair revoke <node>` cuts a node off: the hub refuses its next request, and ends that node's leases on the hub's own resources (reason `peer_revoked`), so a revoked node is never promoted to owner. Its agents, holds and leases on other nodes' resources stay until they expire. A revoked node can pair again only with a fresh, unused invite.
+`another peers` lists paired nodes with key fingerprints, permissions and last sync. `another pair revoke <node>` cuts a node off: the hub refuses its next request, and ends that node's leases on the hub's own resources (reason `peer_revoked`), so a revoked node is never promoted to owner. Its agents stay listed, and its holds and its leases on other nodes' resources stay until they expire. A revoked node can pair again only with a fresh, unused invite.
 
 ## Cross-node behaviour
 
 - **Mail**: `another send --from bob --to carol@@runner …`. Replies, threads and acknowledgements work across nodes. Requests stay node-local: open them only with agents on the same node.
-- **Merged activity feed**: `another activity` shows other nodes' events prefixed with their node name, e.g. `[hub] alice@shop holds shop:src/**`. Message bodies never appear in the feed.
+- **Merged activity feed**: `another activity` shows other nodes' events prefixed with their node name, e.g. `[hub] alice@shop holds shop:src/** (exclusive)`. Message bodies never appear in the feed.
 - **Resources**: `another resources` lists other nodes' resources with their `node` and whether this machine can **reach** them (a TCP connect to the endpoint). They can be borrowed only when reachable and when `borrow_resource` was granted, and the lease is reported back to the owning node. Loopback endpoints are reachable only from the same machine.
 - **Path holds**: holds stay node- and repo-local and are never distributed locks. When an agent acquires a hold that overlaps a live hold on another node, in a project with the **same name**, the result carries a **warning** (`warnings` in JSON, `warning:` lines in the CLI), never a conflict.
 

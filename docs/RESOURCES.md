@@ -71,4 +71,4 @@ another reap model_server:ollama@11434 --confirm
 
 ## MCP tools
 
-`resource_register`, `resource_find`, `resource_borrow`, `resource_release`, `resource_heartbeat`, `orphans_list`, `resource_reap` (plan and request only). See the snippet in [AGENTS.md](../AGENTS.md) for wording to give your agents.
+`resource_register`, `resource_find`, `resource_borrow`, `resource_release`, `resource_heartbeat`, `orphans_list`, `resource_reap` (plan and request only). Tell your agents to call `resource_find` before starting a server, and `resource_borrow` when one is already running.
