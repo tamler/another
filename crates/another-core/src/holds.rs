@@ -1751,8 +1751,13 @@ impl Store {
         scope: Option<&TokenScope>,
     ) -> Result<HeartbeatReport> {
         self.write(|tx| {
-            sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, agent)?;
+            // A leaving waiter's waits end first: the sweep below may expire the last
+            // blocker, and must not ping the agent that is going away (#149 review P2).
+            if phase == SessionPhase::End {
+                end_waits_tx(tx, &me, scope)?;
+            }
+            sweep_tx(tx)?;
             let owned = owned_holds(tx, &me.id, &[], scope)?;
             let session_payload = || {
                 json!({
@@ -1766,7 +1771,6 @@ impl Store {
                 crate::resources::session_leases_tx(tx, &me, release_leases, scope)?;
             let (renewed, released, status) = if phase == SessionPhase::End {
                 let ids: Vec<String> = owned.into_iter().map(|(id, _)| id).collect();
-                end_waits_tx(tx, &me, scope)?;
                 release_tx(tx, &me.address, &ids, "session_end")?;
                 tx.emit(&me.address, "session.ended", session_payload())?;
                 tx.execute(

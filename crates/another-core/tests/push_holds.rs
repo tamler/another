@@ -2388,3 +2388,51 @@ fn a_waiters_session_end_drops_its_waits() {
     assert!(guard.first_notice && guard.wait_recorded);
     assert_eq!(waits("bob"), 1);
 }
+
+/// REVIEW-IMPL P2 on #149: session end sweeps expired holds. A blocker that expired just
+/// before the waiter ends must not ping the waiter that is leaving; others still get it.
+#[test]
+fn a_waiters_session_end_is_not_pinged_by_its_own_sweep() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    fx.store
+        .acquire_holds(AcquireHolds {
+            agent: "alice".into(),
+            project: main.clone(),
+            paths: vec!["src/a.rs".into()],
+            ttl_seconds: Some(600),
+            exclusive: false,
+            reason: None,
+            repo_wide: false,
+        })
+        .unwrap();
+    for waiter in ["bob", "carol"] {
+        let guard = fx
+            .store
+            .guard_edit(waiter, &main, &["src/a.rs".into()], "auto")
+            .unwrap();
+        assert!(guard.wait_recorded);
+    }
+    // Alice's hold lapses; no sweep runs until bob's session end.
+    fx.advance_secs(601);
+    fx.store.heartbeat("bob", true).unwrap();
+    let pinged = |agent: &str| {
+        fx.store
+            .inbox(agent, InboxQuery::default())
+            .unwrap()
+            .messages
+            .iter()
+            .filter(|m| m.message.subject == "Hold free: src/a.rs")
+            .count()
+    };
+    assert_eq!((pinged("bob"), pinged("carol")), (0, 1));
+    let reasons: Vec<_> = fx
+        .store
+        .events(10_000)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "hold.wait.finished" && e.actor.starts_with("bob"))
+        .map(|e| e.payload["reason"].clone())
+        .collect();
+    assert_eq!(reasons, vec![serde_json::json!("session_end")]);
+}
