@@ -54,8 +54,9 @@ pub use holds::{
 };
 pub use identity::{Agent, Program, Project, RegisterAgent};
 pub use mail::{
-    AckOutcome, Importance, Inbox, InboxItem, InboxQuery, Message, NewRequest, Reply, SendMessage,
-    Thread, ThreadSummary, UnreadAfter, UnreadItem,
+    is_unsafe_text_char, single_line, AckOutcome, Importance, Inbox, InboxItem, InboxQuery,
+    Message, NewRequest, Reply, SendMessage, Thread, ThreadSummary, UnreadAfter, UnreadItem,
+    MAX_SUBJECT_CHARS,
 };
 pub use oauth::{
     canonical_resource, error_redirect, redirect_host, redirect_is_loopback, redirect_matches,
