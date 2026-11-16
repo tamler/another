@@ -499,6 +499,11 @@ pub fn wake_targets(ts: &[WakeTarget]) -> String {
 pub fn wake_plans(ps: &[crate::wake::WakePlan]) -> String {
     ps.iter()
         .map(|p| match (&p.skipped, p.sent) {
+            _ if p.error.is_some() => format!(
+                "failed {}: {}\n",
+                p.agent,
+                p.error.as_deref().unwrap_or_default()
+            ),
             (_, true) => format!(
                 "woke {} via {} ({})\n",
                 p.agent,
@@ -538,7 +543,7 @@ pub fn prune_rows(rows: &[crate::wake::PruneRow], dry_run: bool) -> String {
 pub fn daemon_report(r: &crate::daemon::DaemonReport) -> String {
     let mut out = String::new();
     let prefix = if r.dry_run { "would " } else { "" };
-    let _ = writeln!(out, "{prefix}{} {}", r.change, r.plist);
+    let _ = writeln!(out, "{prefix}{} {}", r.change, r.file);
     for c in &r.commands {
         let _ = writeln!(out, "{prefix}run: {}", c.join(" "));
     }
@@ -787,9 +792,14 @@ pub fn board(b: &another_core::Board) -> String {
 pub fn daemon_status(s: &crate::daemon::DaemonStatus) -> String {
     let yes = |b: bool| if b { "yes" } else { "no" };
     format!(
-        "label     {}\nplist     {} (installed: {})\nloaded    {}\npid       {}\nbind      {}\nhealthy   {}\nlog       {}",
+        "manager   {}\nlabel     {}\nfile      {} (installed: {})\nloaded    {}\npid       {}\nbind      {}\nhealthy   {}\nlog       {}",
+        match s.manager {
+            crate::daemon::Manager::Launchd => "launchd",
+            crate::daemon::Manager::Systemd => "systemd (user)",
+            crate::daemon::Manager::TaskScheduler => "Task Scheduler",
+        },
         s.label,
-        s.plist,
+        s.file,
         yes(s.installed),
         yes(s.loaded),
         s.pid.map_or("-".to_string(), |p| p.to_string()),

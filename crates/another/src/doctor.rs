@@ -522,7 +522,8 @@ fn daemon_check(
         return check("daemon", Level::Info, "not installed")
             .fix("another daemon install, if you want another serve running in the background");
     }
-    let served = std::fs::read_to_string(&s.plist)
+    // macOS only (`daemon_status`): `file` is the launchd plist.
+    let served = std::fs::read_to_string(&s.file)
         .ok()
         .as_deref()
         .and_then(plist_home);
