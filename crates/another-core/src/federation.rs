@@ -273,11 +273,13 @@ fn require_named(entry: &NodeEntry) -> Result<()> {
     Ok(())
 }
 
-/// Record (or confirm) another node. Keys are pinned on first sight.
+/// Record (or confirm) another node. Keys are pinned on first sight. The name follows the
+/// local node-name rule: it is part of every address of that node's agents.
 fn upsert_node(tx: &Tx<'_>, node: &NodeEntry) -> Result<()> {
     if node.node_id == tx.node_id {
         return Ok(());
     }
+    validate_node_name(&node.display_name)?;
     crypto::decode_public(&node.public_key)?;
     let known: Option<(String, Option<String>)> = tx
         .query_row(
@@ -1681,6 +1683,12 @@ impl Store {
                 return Err(Error::Forbidden("not a paired node".into()));
             };
             for n in nodes {
+                // An entry whose name breaks the node-name rule is skipped, not fatal: a known
+                // node keeps the name it has, and one bad entry in a hub's relayed list does
+                // not stop the rest of the sync.
+                if validate_node_name(&n.display_name).is_err() {
+                    continue;
+                }
                 upsert_node(tx, n)?;
             }
             let mut report = IngestReport::default();
