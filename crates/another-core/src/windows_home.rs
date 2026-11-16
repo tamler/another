@@ -37,13 +37,14 @@ const NO_PROPAGATE: u8 = 0x04;
 const SID_MAX_BYTES: usize = 68;
 const ACE_LIMIT: usize = 512;
 
+use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsHandle;
 use std::path::{Component, Path, PathBuf, Prefix};
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateDirectoryW, GetDriveTypeW, MoveFileExW, FILE_FLAG_BACKUP_SEMANTICS,
+    CreateDirectoryW, GetDriveTypeW, GetLongPathNameW, MoveFileExW, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE, MOVEFILE_WRITE_THROUGH,
 };
 
@@ -54,6 +55,35 @@ fn wide(path: &Path) -> io::Result<Vec<u16>> {
     }
     text.push(0);
     Ok(text)
+}
+
+/// Replace 8.3 short-name components with the long names of the same directory entries.
+///
+/// A short name is a second name for one entry, not an ambiguous alias, so it is expanded
+/// rather than refused (Windows sets `TEMP` to a short spelling on some systems). This does
+/// not follow reparse points or fold case; the component walk in [`pin_directory`] still
+/// requires every expanded component to be spelled exactly as its entry and to be a plain
+/// directory.
+fn long_spelling(path: &Path) -> io::Result<PathBuf> {
+    let input = wide(path)?;
+    let mut buffer = vec![0u16; 512];
+    loop {
+        // SAFETY: input is NUL-terminated; buffer has buffer.len() writable u16 slots.
+        let needed =
+            unsafe { GetLongPathNameW(input.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32) }
+                as usize;
+        if needed == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if needed < buffer.len() {
+            buffer.truncate(needed);
+            return Ok(PathBuf::from(OsString::from_wide(&buffer)));
+        }
+        if needed > 32_768 {
+            return Err(refused_because("the path is too long"));
+        }
+        buffer.resize(needed, 0);
+    }
 }
 
 /// Every opened ancestor omits FILE_SHARE_DELETE and rejects reparse points.
@@ -108,7 +138,15 @@ fn exact_name(parent: &Path, name: &std::ffi::OsStr) -> io::Result<()> {
     Ok(())
 }
 
+/// Pin a home or backup directory: short-name components are expanded first (see
+/// [`long_spelling`]), then every component is pinned as in [`pin_exact`].
 pub fn pin_directory(path: &Path) -> io::Result<PinnedDirectory> {
+    pin_exact(&long_spelling(path)?)
+}
+
+/// Pin a directory whose every component must already be spelled exactly as its entry.
+/// Controlled edits use this for project roots, which must match the registered spelling.
+pub fn pin_exact(path: &Path) -> io::Result<PinnedDirectory> {
     let mut components = path.components();
     let drive = match components.next() {
         Some(Component::Prefix(prefix)) => match prefix.kind() {

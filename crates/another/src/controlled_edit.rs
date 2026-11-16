@@ -208,8 +208,8 @@ fn resolve(edit: &ControlledEdit, retained_root: Option<&File>) -> io::Result<Ch
 
 #[cfg(windows)]
 fn resolve(edit: &ControlledEdit, retained_root: Option<&File>) -> io::Result<CheckedFile> {
-    use another_core::windows_home::pin_directory;
-    let mut parent = pin_directory(Path::new(&edit.project))?;
+    use another_core::windows_home::pin_exact;
+    let mut parent = pin_exact(Path::new(&edit.project))?;
     let root = parent.file.try_clone()?;
     if let Some(previous) = retained_root {
         if handle_identity(previous)? != handle_identity(&root)? {
@@ -325,7 +325,7 @@ fn open_root_for_comparison(path: &Path) -> io::Result<(File, Vec<File>)> {
 #[cfg(windows)]
 fn open_root_for_comparison(path: &Path) -> io::Result<(File, Vec<File>)> {
     Ok((
-        another_core::windows_home::pin_directory(path)?
+        another_core::windows_home::pin_exact(path)?
             .file
             .try_clone()?,
         Vec::new(),
