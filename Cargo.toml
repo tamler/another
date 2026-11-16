@@ -33,6 +33,7 @@ rmcp = { version = "3.8", features = ["server", "macros", "schemars", "transport
 schemars = "1"
 axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
