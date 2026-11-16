@@ -107,6 +107,9 @@ fn herdrs_default_target_from_a_dash_name_is_refused() {
 /// REVIEW-R1 of #206: the Herdr probe (`herdr agent get <target>`, positional) runs on stored
 /// targets in `wake prune` and the push waker without going through `wake()`. A target
 /// stored before the check must not reach it; an automatic one is pruned, a manual one kept.
+/// The fake Herdr is a `/bin/sh` script, so this test is Unix only; the refusals above run
+/// everywhere.
+#[cfg(unix)]
 #[test]
 fn stored_dash_targets_never_reach_the_herdr_probe() {
     use std::os::unix::fs::PermissionsExt;
