@@ -2,9 +2,13 @@
 //! events (mail, holds taken and released by the edit guard, requests claimed and done),
 //! then the median time of each call that runs on a hot path.
 //!
-//! The ceilings are regression guards, not targets: each is many times the median measured
-//! when this test was written (see the table it prints with `--nocapture`), so a debug
-//! build on a slow CI runner passes, and an accidental full scan or an N+1 query does not.
+//! The ceilings are coarse regression guards, not targets: each is many times the median
+//! measured when this test was written (see the table it prints with `--nocapture`), so a
+//! debug build on a slow hosted runner passes. They catch order-of-magnitude regressions
+//! (an O(n²) loop, a query per row, a sleep or a retry loop on a hot path). They do NOT
+//! catch a single missing index at this size: review R1 dropped all twelve non-unique
+//! indexes and every ceiling still passed, because scanning a few thousand rows costs
+//! microseconds next to a write's commit. Index use is not asserted here.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -50,10 +54,20 @@ impl Home {
     }
 
     fn events(&self) -> i64 {
+        self.count("SELECT count(*) FROM events")
+    }
+
+    fn count(&self, sql: &str) -> i64 {
         rusqlite::Connection::open(self.home.join(DB_FILE))
             .unwrap()
-            .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+            .query_row(sql, [], |r| r.get(0))
             .unwrap()
+    }
+
+    fn kind(&self, kind: &str) -> i64 {
+        self.count(&format!(
+            "SELECT count(*) FROM events WHERE kind = '{kind}'"
+        ))
     }
 }
 
@@ -101,7 +115,8 @@ fn seed() -> Home {
         for i in 0..20 {
             let from = rng.next(AGENTS);
             let to = (from + 1 + rng.next(AGENTS - 1)) % AGENTS;
-            h.store
+            let msg = h
+                .store
                 .send_message(SendMessage {
                     from: h.agents[from].clone(),
                     to: vec![h.agents[to].clone()],
@@ -118,28 +133,24 @@ fn seed() -> Home {
                     ..SendMessage::default()
                 })
                 .unwrap();
-            if i % 10 == 0 {
-                if let Some(req) = h
-                    .store
-                    .requests(RequestFilter {
-                        owner: Some(h.agents[to].clone()),
-                        limit: 1,
-                        ..RequestFilter::default()
-                    })
-                    .unwrap()
-                    .first()
-                {
-                    // The newest request of that owner may already be done; its update
-                    // is then refused, which is fine for seeding.
-                    for action in [RequestAction::Claim, RequestAction::Complete] {
-                        let _ = h.store.update_request(RequestUpdate {
+            // Of the requests (every fifth message): a third stay pending, a third are
+            // claimed by their recipient, a third are claimed and completed.
+            if let Some(request_id) = msg.request_id {
+                let actions: &[RequestAction] = match (i / 5) % 3 {
+                    0 => &[],
+                    1 => &[RequestAction::Claim],
+                    _ => &[RequestAction::Claim, RequestAction::Complete],
+                };
+                for action in actions {
+                    h.store
+                        .update_request(RequestUpdate {
                             agent: h.agents[to].clone(),
-                            request_id: req.request_id.clone(),
-                            action,
+                            request_id: request_id.clone(),
+                            action: *action,
                             note: None,
                             due_in_seconds: None,
-                        });
-                    }
+                        })
+                        .unwrap();
                 }
             }
         }
@@ -187,6 +198,25 @@ fn hot_paths_stay_fast_at_ten_thousand_events() {
     let h = seed();
     let seeded = started.elapsed();
     let events = h.events();
+    // The load is what the header says it is (review R1: requests were never claimed).
+    let created = h.kind("request.created");
+    let claimed = h.kind("request.claimed");
+    let completed = h.kind("request.completed");
+    assert!(created > 100, "requests created: {created}");
+    assert!(claimed * 3 > created, "claimed {claimed} of {created}");
+    assert!(
+        completed * 5 > created,
+        "completed {completed} of {created}"
+    );
+    let live = h.count("SELECT count(*) FROM holds WHERE released_at IS NULL");
+    let released = h.count("SELECT count(*) FROM holds WHERE released_at IS NOT NULL");
+    assert!(
+        live > 100 && released > 100,
+        "holds live {live}, released {released}"
+    );
+    println!(
+        "requests created {created}, claimed {claimed}, completed {completed}; holds live {live}, released {released}"
+    );
     let me = &h.agents[3];
     let my_project = h.agent_project(3).to_string();
 
