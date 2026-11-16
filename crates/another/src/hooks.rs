@@ -886,11 +886,16 @@ pub fn session_digest(store: &Store, agent: &str) -> Result<String> {
         ));
     }
     let summary = store.activity_summary(Some(Since::Time(store.now() - 3_600_000)))?;
+    // Activity summaries quote stored text (titles, subjects, reasons, names), so the
+    // highlights get the same one-safe-line treatment as the lines above.
     out.push_str("\nLast hour: ");
-    out.push_str(summary.text.lines().next().unwrap_or_default());
+    out.push_str(&another_core::single_line(
+        summary.text.lines().next().unwrap_or_default(),
+        usize::MAX,
+    ));
     for h in summary.highlights.iter().rev().take(3).rev() {
         out.push_str("\n- ");
-        out.push_str(h);
+        out.push_str(&another_core::single_line(h, usize::MAX));
     }
     out.push_str(&format!(
         "\nThe Another MCP tools fetch_inbox, acknowledge and claim_request (or `another inbox --agent {}`) show details.",
