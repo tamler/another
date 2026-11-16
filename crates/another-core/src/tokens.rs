@@ -32,11 +32,22 @@ pub struct Token {
 }
 
 /// A freshly created token. `secret` is the only copy of the bearer value.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct NewToken {
     #[serde(flatten)]
     pub token: Token,
     pub secret: String,
+}
+
+/// `Serialize` keeps `secret`, because the CLI and MCP show it once at creation. `Debug`
+/// never prints it, so a log line or a panic message cannot leak it.
+impl std::fmt::Debug for NewToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewToken")
+            .field("token", &self.token)
+            .field("secret", &crate::oauth::REDACTED)
+            .finish()
+    }
 }
 
 /// What a verified bearer token may do.

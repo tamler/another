@@ -155,7 +155,7 @@ impl std::fmt::Debug for IssuedTokens {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CodeExchange {
     pub code: String,
     pub client_id: String,
@@ -165,13 +165,42 @@ pub struct CodeExchange {
     pub remote: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+/// Like [`IssuedTokens`], the code and the PKCE verifier are never printed.
+impl std::fmt::Debug for CodeExchange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodeExchange")
+            .field("code", &REDACTED)
+            .field("client_id", &self.client_id)
+            .field("redirect_uri", &self.redirect_uri)
+            .field("code_verifier", &REDACTED)
+            .field("resource", &self.resource)
+            .field("remote", &self.remote)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct RefreshExchange {
     pub refresh_token: String,
     pub client_id: String,
     pub resource: String,
     pub remote: Option<String>,
 }
+
+/// Like [`IssuedTokens`], the refresh token is never printed.
+impl std::fmt::Debug for RefreshExchange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RefreshExchange")
+            .field("refresh_token", &REDACTED)
+            .field("client_id", &self.client_id)
+            .field("resource", &self.resource)
+            .field("remote", &self.remote)
+            .finish()
+    }
+}
+
+/// What `Debug` prints in place of a credential.
+pub(crate) const REDACTED: &str = "<redacted>";
 
 /// An OAuth protocol error. `code` is the RFC 6749 error name.
 #[derive(Debug)]
