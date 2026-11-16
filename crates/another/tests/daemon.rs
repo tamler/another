@@ -543,12 +543,48 @@ fn hosted_windows_task_scheduler_runs_the_daemon() {
     let label = test_label("hosted");
     let bind = free_bind();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // TEMPORARY DIAGNOSTIC: record Task Scheduler's view and the processes at each step.
+        let diag = |step: &str| -> String {
+            let q = |args: &[&str]| {
+                let o = Command::new(args[0])
+                    .args(&args[1..])
+                    .stdin(Stdio::null())
+                    .output()
+                    .unwrap();
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                )
+            };
+            format!(
+                "=== {step}\n{}\n{}\n",
+                q(&["schtasks", "/Query", "/TN", &label, "/V", "/FO", "LIST"]),
+                q(&[
+                    "tasklist",
+                    "/V",
+                    "/FO",
+                    "CSV",
+                    "/FI",
+                    "IMAGENAME eq another.exe"
+                ])
+            )
+        };
+        let mut log = String::new();
         env.json(&["daemon", "install", "--label", &label, "--bind", &bind]);
+        log.push_str(&diag("right after install"));
         let status = wait_healthy(&env, &label, true);
+        log.push_str(&diag("healthy after install"));
         assert_eq!(status["loaded"], true, "{status}");
         assert_eq!(status["healthy"], true, "{status}");
         env.json(&["daemon", "restart", "--label", &label]);
+        log.push_str(&diag("right after restart"));
         let status = wait_healthy(&env, &label, true);
+        log.push_str(&diag("healthy after restart"));
+        let serve_log = std::fs::read_to_string(env.another_home().join("logs").join("serve.log"))
+            .unwrap_or_default();
+        panic!("DIAGNOSTIC\n{log}\n=== serve.log\n{serve_log}\n=== status {status}");
+        #[allow(unreachable_code)]
         assert_eq!(status["healthy"], true, "after restart: {status}");
         assert!(env.another_home().join("logs").join("serve.log").is_file());
         // Uninstall decides "still running" from this column (review round 2): a running
