@@ -826,3 +826,37 @@ fn a_peers_message_body_is_capped_like_a_local_one() {
         Some(256 * 1024)
     );
 }
+
+/// The body limit does not depend on the body being a JSON string: a peer's `message.sent`
+/// whose `body` is an array or object of more than the limit is refused too. Otherwise the
+/// projection stores an empty body but the hub keeps the whole signed payload in its event
+/// log and relays it to every spoke.
+#[test]
+fn a_peers_non_string_message_body_cannot_slip_past_the_cap() {
+    let fed = Fed::new();
+    let alice = fed.hub.agent("alice");
+    let sender = fed.mallory.agent("m");
+    push(&fed.hub, &fed.mallory);
+    let report = fed.forge(
+        "message.sent",
+        json!({ "message_id": "mallory-array-mail", "sender_id": sender,
+                "subject": "hello", "body": ["x".repeat(300 * 1024)], "importance": "normal",
+                "recipients": [{ "agent_id": alice, "node_id": fed.hub.id(), "role": "to" }],
+                "recipient_nodes": [fed.hub.id()] }),
+    );
+    let kept: i64 = fed
+        .hub
+        .sql()
+        .query_row(
+            "SELECT coalesce(max(length(payload)), 0) FROM events
+             WHERE kind = 'message.sent' AND node_id = ?1",
+            [fed.mallory.id()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        kept <= 256 * 1024,
+        "the hub kept a {kept}-byte message.sent payload (rejected: {:?})",
+        report.rejected
+    );
+}
