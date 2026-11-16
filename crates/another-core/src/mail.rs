@@ -288,10 +288,22 @@ pub(crate) fn send_notice_tx(
     to_id: &str,
     input: &SendMessage,
 ) -> Result<Message> {
+    send_by_id_tx(tx, from_id, to_id, input, false)
+}
+
+/// A message from one local agent to another, both known by id, sent on the sender's
+/// explicit behalf: like [`send_notice_tx`], but the sender's activity is recorded.
+pub(crate) fn send_by_id_tx(
+    tx: &Tx<'_>,
+    from_id: &str,
+    to_id: &str,
+    input: &SendMessage,
+    touch_sender: bool,
+) -> Result<Message> {
     check_text(&input.subject, &input.body)?;
     let sender = agent_by_id(tx, from_id)?;
     let to = [agent_by_id(tx, to_id)?];
-    deliver_tx(tx, input, &sender, &to, &[], false)
+    deliver_tx(tx, input, &sender, &to, &[], touch_sender)
 }
 
 fn agent_by_id(tx: &Tx<'_>, agent_id: &str) -> Result<AgentRef> {

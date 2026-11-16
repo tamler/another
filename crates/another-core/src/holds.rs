@@ -17,7 +17,9 @@ use serde_json::{json, Value};
 
 use crate::error::{Error, Result};
 use crate::identity::{address, find_project, resolve_agent, Project};
-use crate::mail::{load_message, send_notice_tx, send_tx, touch, Message, NewRequest, SendMessage};
+use crate::mail::{
+    load_message, send_by_id_tx, send_notice_tx, touch, Message, NewRequest, SendMessage,
+};
 use crate::requests::stale_overdue_tx;
 use crate::store::{new_id, Store, Tx};
 use crate::time::fmt_ts;
@@ -939,13 +941,29 @@ fn attempt<T>(tx: &Tx<'_>, name: &str, f: impl FnOnce() -> Result<T>) -> Result<
 /// holder are addressed by the ids the wait row stores. A ping that cannot be delivered is
 /// recorded as `hold.notify_failed` and its wait is dropped anyway, so a release or a sweep
 /// never fails, and never fails again later, because of one notice.
-fn ping_free_waiters_tx(tx: &Tx<'_>) -> Result<()> {
+/// A wait row: waiter id, project slug, project id, path, holder id, blocker ids (JSON).
+type WaitRow = (String, String, String, String, String, String);
+
+/// The waits that can have become free: those with at least one stored blocker that is no
+/// longer live (released, past its expiry whether swept or not, or unknown, on this node or
+/// another). A live hold never changes its pattern, project or owner in place, so a wait
+/// whose every blocker is still live still conflicts and needs no recheck; this keeps
+/// writes that end no hold from rechecking every wait (#137 adversarial F1). A row whose
+/// blockers are not a non-empty JSON array is always rechecked.
+fn waits_to_recheck_tx(tx: &Tx<'_>) -> Result<Vec<WaitRow>> {
     let mut stmt = tx.prepare(
         "SELECT w.agent_id, p.slug, w.project_id, w.path, w.holder_id, w.blockers
-         FROM hold_waits w JOIN projects p ON p.project_id = w.project_id",
+         FROM hold_waits w JOIN projects p ON p.project_id = w.project_id
+         WHERE CASE WHEN json_valid(w.blockers) AND json_type(w.blockers) = 'array'
+                    THEN json_array_length(w.blockers) = 0
+                      OR EXISTS (SELECT 1 FROM json_each(w.blockers) b
+                                 WHERE NOT EXISTS (SELECT 1 FROM holds h
+                                   WHERE h.hold_id = b.value AND h.released_at IS NULL
+                                     AND h.expires_at > ?1))
+                    ELSE 1 END",
     )?;
     let waits = stmt
-        .query_map([], |r| {
+        .query_map([tx.now], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -956,7 +974,11 @@ fn ping_free_waiters_tx(tx: &Tx<'_>) -> Result<()> {
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (agent_id, project_key, project_id, path, holder_id, blockers) in waits {
+    Ok(waits)
+}
+
+fn ping_free_waiters_tx(tx: &Tx<'_>) -> Result<()> {
+    for (agent_id, project_key, project_id, path, holder_id, blockers) in waits_to_recheck_tx(tx)? {
         let project = find_project(tx, tx.node_id, &project_key)?;
         if !conflicts_for(
             tx,
@@ -1211,7 +1233,11 @@ impl Store {
                 AND h.node_id = ?2 AND h.released_at IS NULL AND h.expires_at > ?3"),
                 params![hold_id, tx.node_id, tx.now], hold_from_row).optional()?
                 .ok_or_else(|| Error::NotFound(format!("unknown live local hold {hold_id:?}")))?;
-            if held.agent == me.address {
+            // The hold names its owner by id; never resolve the owner's display address
+            // again, which a later same-named agent can have made ambiguous.
+            let holder_id: String = tx.query_row(
+                "SELECT agent_id FROM holds WHERE hold_id = ?1", [hold_id], |r| r.get(0))?;
+            if holder_id == me.id {
                 return Err(Error::Invalid("release your own hold with hold release".into()));
             }
             let existing: Option<String> = tx.query_row(
@@ -1221,11 +1247,11 @@ impl Store {
             if let Some(mid) = existing { return load_message(tx, &mid); }
             let pattern = literal_pattern(&held.pattern).unwrap_or(held.pattern);
             let title: String = pattern.chars().take(280).collect();
-            let message = send_tx(tx, &SendMessage {
-                from: me.address, to: vec![held.agent], subject: format!("Release {title}?"),
+            let message = send_by_id_tx(tx, &me.id, &holder_id, &SendMessage {
+                subject: format!("Release {title}?"),
                 body: format!("Please release hold {hold_id} on {}:{pattern} when your edit is done. Another will close this request when that hold ends.", held.project),
                 request: Some(NewRequest::default()), ..Default::default()
-            })?;
+            }, true)?;
             let rid = message.request_id.as_ref().expect("request was created");
             tx.emit(&message.from, "request.hold_linked", json!({ "request_id": rid, "hold_id": hold_id }))?;
             tx.execute("INSERT INTO request_holds (request_id, hold_id) VALUES (?1, ?2)", params![rid, hold_id])?;
@@ -1694,6 +1720,77 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Program;
+
+    /// #137 adversarial F1: only waits with a blocker that is no longer live are rechecked,
+    /// so a write that ends no hold costs nothing per wait; expiry counts before any sweep.
+    #[test]
+    fn only_waits_with_an_ended_blocker_are_rechecked() {
+        let dir = tempfile::tempdir().unwrap();
+        let (clock, now) = crate::store::Clock::manual(1_800_000_000_000);
+        let store = Store::open_in_memory(clock).unwrap();
+        for (name, program) in [("alice", Program::Claude), ("bob", Program::Codex)] {
+            store
+                .register_agent(crate::RegisterAgent {
+                    name: name.into(),
+                    program,
+                    project: None,
+                    model: None,
+                    description: None,
+                })
+                .unwrap();
+        }
+        let project = store
+            .ensure_project("test", dir.path().to_str().unwrap())
+            .unwrap()
+            .abs_path;
+        store
+            .acquire_holds(AcquireHolds {
+                agent: "alice".into(),
+                project: project.clone(),
+                paths: vec!["src/**".into()],
+                ttl_seconds: Some(600),
+                exclusive: true,
+                reason: None,
+                repo_wide: false,
+            })
+            .unwrap();
+        for path in ["src/a.rs", "src/b.rs"] {
+            let blocked = store
+                .guard_edit("bob", &project, &[path.into()], "auto")
+                .unwrap();
+            assert_eq!(blocked.conflicts.len(), 1);
+        }
+        let candidates = || store.write(waits_to_recheck_tx).unwrap().len();
+        assert_eq!(candidates(), 0, "every blocker is live");
+
+        store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO hold_waits (agent_id, project_id, path, blockers, holder_id,
+                       retry_at, backoff_seconds)
+                     SELECT agent_id, project_id, 'src/c.rs', 'not json', holder_id, retry_at,
+                       backoff_seconds FROM hold_waits LIMIT 1",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(candidates(), 1, "a malformed row is always rechecked");
+        store
+            .write(|tx| {
+                tx.execute("DELETE FROM hold_waits WHERE path = 'src/c.rs'", [])?;
+                Ok(())
+            })
+            .unwrap();
+
+        now.fetch_add(601_000, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            candidates(),
+            2,
+            "an expired blocker counts before it is swept"
+        );
+    }
 
     #[test]
     fn overlap_rules() {
