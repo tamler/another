@@ -166,6 +166,7 @@ Task guides, all listed on the [guides hub](site/guides/index.html) (website sou
 | [docs/WAKE.md](docs/WAKE.md) | `another wake` adapters (tmux, cmux, Herdr) and the Herdr plugin |
 | [docs/DASHBOARD.md](docs/DASHBOARD.md) | Local web dashboard (`another dashboard`, `GET /ui`) |
 | [docs/BOARD.md](docs/BOARD.md) | `another board`: who holds what, recent and stopped edits, pending handoffs, per project; writes nothing |
+| [docs/PLUGINS.md](docs/PLUGINS.md) | External commands: `another <name>` runs `another-<name>` from `PATH`; the rules and the trust model |
 | [docs/SPEC.md](docs/SPEC.md) | Research and product spec |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | Locked defaults and every design decision made while building |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute (clean-room rules, checks, MSRV) |
@@ -206,6 +207,7 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 | Federation | `another pair invite\|join\|revoke`, `another peers`, `another sync [--watch]`, `another serve --federation` |
 | Wake | `another wake [--agent X\|--all]`, `another wake set\|clear\|list\|prune` |
 | Dashboard | `another dashboard` (loopback UI), or `GET /ui` on a loopback `another serve` |
+| External commands | `another <name> [args]` runs `another-<name>` from `PATH` when `<name>` is not built in, like git ([docs/PLUGINS.md](docs/PLUGINS.md)) |
 
 ## Concepts
 

@@ -1882,7 +1882,22 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 })?;
                 vec![crate::wake::wake(&store, &agent, &opts)?]
             };
-            emit(json, &plans, |p| output::wake_plans(p))
+            let code = emit(json, &plans, |p| output::wake_plans(p));
+            // `--all` reports a failed wake per agent and carries on; the exit status
+            // still says that something failed.
+            let failed: Vec<_> = plans.iter().filter(|p| p.error.is_some()).collect();
+            if failed.is_empty() {
+                code
+            } else {
+                for p in failed {
+                    eprintln!(
+                        "another: wake failed for {}: {}",
+                        p.agent,
+                        p.error.as_deref().unwrap_or_default()
+                    );
+                }
+                ExitCode::FAILURE
+            }
         }
         Command::Audit { limit } => {
             let entries = store.audit_log(limit)?;
