@@ -865,3 +865,85 @@ fn hold_renewal_release_and_expiry_cannot_touch_another_nodes_hold() {
     fed.forge("hold.expired", json!({ "hold_id": hold_id }));
     assert_eq!(state(), before, "expired by another node");
 }
+
+/// adv210: a `hold.updated` from mallory that names alpha's hold, with mallory's own agent
+/// and project, is refused and leaves the hold as it was.
+#[test]
+fn adv210_hold_update_cannot_take_another_nodes_hold() {
+    let fed = Fed::new();
+    let shop = fed.project_dir("alpha-shop");
+    fed.alpha
+        .store
+        .register_agent(RegisterAgent {
+            name: "alice".into(),
+            program: Program::Claude,
+            project: Some(shop.clone()),
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    let hold_id = fed
+        .alpha
+        .store
+        .acquire_holds(AcquireHolds {
+            agent: "alice@alpha-shop".into(),
+            project: shop,
+            paths: vec!["src/a.rs".into()],
+            ttl_seconds: Some(1800),
+            exclusive: true,
+            reason: None,
+            repo_wide: false,
+        })
+        .unwrap()
+        .granted[0]
+        .hold_id
+        .clone();
+    assert!(push(&fed.hub, &fed.alpha).rejected.is_empty());
+    let mshop = fed.project_dir("mallory-shop");
+    let spy = fed
+        .mallory
+        .store
+        .register_agent(RegisterAgent {
+            name: "spy".into(),
+            program: Program::Claude,
+            project: Some(mshop.clone()),
+            model: None,
+            description: None,
+        })
+        .unwrap()
+        .agent_id;
+    let mproject = fed
+        .mallory
+        .store
+        .ensure_project("test", &mshop)
+        .unwrap()
+        .project_id;
+    push(&fed.hub, &fed.mallory);
+    let row = || {
+        fed.hub
+            .sql()
+            .query_row(
+                "SELECT node_id, agent_id, exclusive, reason, expires_at FROM holds WHERE hold_id = ?1",
+                [&hold_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, bool>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+    let before = row();
+    let report = fed.forge(
+        "hold.updated",
+        json!({ "hold_id": hold_id, "project_id": mproject, "agent_id": spy,
+                "pattern": "src/a.rs", "exclusive": false, "reason": "taken",
+                "ttl_seconds": 60 }),
+    );
+    assert_rejected(&report, "hold.updated naming alpha's hold");
+    assert_eq!(row(), before);
+}
