@@ -33,7 +33,7 @@ impl Env {
     fn new() -> Env {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
-        for sub in ["bin", "dead"] {
+        for sub in ["bin", "dead", "empty"] {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
         let tmux = root.join("bin/tmux");
@@ -51,12 +51,14 @@ impl Env {
         env
     }
 
-    /// The binary with the fake tmux first on PATH (or no tmux at all).
+    /// The binary with the fake tmux first on PATH, or with only an empty directory on PATH
+    /// so no tmux can be found, wherever the machine installs a real one (`/usr/bin` on
+    /// Linux CI, which installs tmux for `wake_e2e`).
     fn cmd(&self, args: &[&str], with_tmux: bool) -> Command {
         let path = if with_tmux {
             format!("{}:/usr/bin:/bin", self.root.join("bin").display())
         } else {
-            "/usr/bin:/bin".to_string()
+            self.root.join("empty").display().to_string()
         };
         let mut c = Command::new(env!("CARGO_BIN_EXE_another"));
         c.args(args)
