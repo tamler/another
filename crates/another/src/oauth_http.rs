@@ -1169,7 +1169,7 @@ async fn register_client(
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct TokenForm {
     grant_type: Option<String>,
     code: Option<String>,
@@ -1180,6 +1180,28 @@ struct TokenForm {
     resource: Option<String>,
     client_secret: Option<String>,
     client_assertion: Option<String>,
+}
+
+/// A credential field in `Debug`: whether it was sent, never its value.
+fn redacted(v: &Option<String>) -> Option<&'static str> {
+    v.as_ref().map(|_| "<redacted>")
+}
+
+/// The code, verifier, refresh token, client secret and assertion are never printed.
+impl std::fmt::Debug for TokenForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenForm")
+            .field("grant_type", &self.grant_type)
+            .field("code", &redacted(&self.code))
+            .field("redirect_uri", &self.redirect_uri)
+            .field("client_id", &self.client_id)
+            .field("code_verifier", &redacted(&self.code_verifier))
+            .field("refresh_token", &redacted(&self.refresh_token))
+            .field("resource", &self.resource)
+            .field("client_secret", &redacted(&self.client_secret))
+            .field("client_assertion", &redacted(&self.client_assertion))
+            .finish()
+    }
 }
 
 async fn token(
@@ -1266,9 +1288,17 @@ async fn token(
     }
 }
 
-#[derive(Debug)]
 struct RevokeForm {
     token: Option<String>,
+}
+
+/// The token being revoked is never printed.
+impl std::fmt::Debug for RevokeForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RevokeForm")
+            .field("token", &redacted(&self.token))
+            .finish()
+    }
 }
 
 async fn revoke(
@@ -1494,6 +1524,38 @@ mod tests {
         assert!(map.len() <= RATE_LIMIT_CAP);
         assert!(map.contains_key("live"));
         assert_eq!(map["live"].tokens, 0);
+    }
+
+    /// FINDINGS-222: the token and revoke forms never print a credential through `Debug`,
+    /// but still say which fields were sent.
+    #[test]
+    fn token_and_revoke_forms_hide_credentials_in_debug() {
+        let secret = "s3cr3t-form-value";
+        let form = TokenForm {
+            grant_type: Some("authorization_code".into()),
+            code: Some(secret.into()),
+            code_verifier: Some(secret.into()),
+            refresh_token: Some(secret.into()),
+            client_secret: Some(secret.into()),
+            client_assertion: Some(secret.into()),
+            ..Default::default()
+        };
+        let debug = format!("{form:?}");
+        assert!(
+            !debug.contains(secret),
+            "TokenForm prints a credential: {debug}"
+        );
+        assert!(debug.contains("authorization_code"), "{debug}");
+        assert!(debug.contains("code: Some(\"<redacted>\")"), "{debug}");
+        assert!(debug.contains("resource: None"), "{debug}");
+        let revoke = RevokeForm {
+            token: Some(secret.into()),
+        };
+        let debug = format!("{revoke:?}");
+        assert!(
+            !debug.contains(secret),
+            "RevokeForm prints the token: {debug}"
+        );
     }
 
     #[test]

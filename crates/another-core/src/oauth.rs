@@ -81,7 +81,7 @@ pub struct AuthorizeInput {
     pub remote: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct PendingAuthorization {
     pub request_id: String,
     pub user_code: String,
@@ -92,6 +92,21 @@ pub struct PendingAuthorization {
     /// Presented once in the browser URL. Only its hash is stored.
     #[serde(skip)]
     pub redirect_token: String,
+}
+
+/// Like [`IssuedTokens`], the one-time redirect token is never printed.
+impl std::fmt::Debug for PendingAuthorization {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingAuthorization")
+            .field("request_id", &self.request_id)
+            .field("user_code", &self.user_code)
+            .field("client_name", &self.client_name)
+            .field("redirect_host", &self.redirect_host)
+            .field("loopback_redirect", &self.loopback_redirect)
+            .field("expires_at", &self.expires_at)
+            .field("redirect_token", &REDACTED)
+            .finish()
+    }
 }
 
 /// A waiting request, without the PKCE challenge or authorization code.
