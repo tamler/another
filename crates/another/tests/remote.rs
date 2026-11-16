@@ -328,6 +328,32 @@ async fn expired_and_unscoped_tokens() {
     srv.ct.cancel();
 }
 
+/// A remote peer reads the work board for one project inside its globs, never node-wide.
+#[tokio::test]
+async fn work_board_is_one_project_inside_the_globs() {
+    let srv = start().await;
+    let token = srv
+        .store
+        .create_token("grok-bot", std::slice::from_ref(&srv.work_glob), None, None)
+        .unwrap();
+    let client = connect(&srv.base, &token.secret).await;
+    let all = call(&client, "work_board", json!({})).await;
+    assert_eq!(error_code(&all).as_deref(), Some("forbidden"));
+    let secret = call(&client, "work_board", json!({ "project": srv.secret })).await;
+    assert_eq!(error_code(&secret).as_deref(), Some("forbidden"));
+    let shop = call(&client, "work_board", json!({ "project": srv.work })).await;
+    assert_eq!(error_code(&shop), None);
+    let board = shop.structured_content.unwrap();
+    let slugs: Vec<&str> = board["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["project"].as_str().unwrap())
+        .collect();
+    assert_eq!(slugs, ["shop"]);
+    srv.ct.cancel();
+}
+
 #[test]
 fn token_cli_and_bind_rules() {
     let dir = tempfile::tempdir().unwrap();

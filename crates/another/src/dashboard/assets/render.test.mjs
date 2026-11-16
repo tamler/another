@@ -73,6 +73,20 @@ function snap(title, status) {
     resources: [],
     peers: [],
     projects: [],
+    edits: [
+      { project: "shop", agent: "alice@shop", path: "src/" + status + ".rs", at: new Date().toISOString() },
+    ],
+    blocked: [
+      {
+        project: "shop-wt",
+        agent: "bob@shop-wt",
+        path: "src/main.rs",
+        holder: "alice@shop",
+        holder_project: "shop",
+        pattern: "src/main.rs",
+        at: new Date().toISOString(),
+      },
+    ],
   };
 }
 
@@ -94,6 +108,18 @@ assert(requests.includes("Nightly fixture drift"), "second render did not update
 assert(
   !requests.includes("Cut over the billing rewrite"),
   "second render left the previous request in place"
+);
+const edits = first.window.document.getElementById("edits-body").textContent;
+assert(edits.includes("src/stale.rs") && !edits.includes("src/open.rs"), "edits did not re-render");
+assert(edits.includes("Held by alice@shop (shop:src/main.rs)"), "stopped edit is missing");
+const old = page("");
+const legacy = snap("No edit fields", "open");
+delete legacy.edits;
+delete legacy.blocked;
+old.window.__anotherDash.render(legacy);
+assert(
+  old.window.document.getElementById("edits-body").textContent.includes("No edits through the edit hook"),
+  "a snapshot without edits should render the empty state"
 );
 assert(
   first.window.document.getElementById("boot"),

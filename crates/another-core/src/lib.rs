@@ -6,6 +6,7 @@
 //! breaking migration.
 
 mod activity;
+mod board;
 pub mod crypto;
 mod dashboard;
 mod error;
@@ -27,10 +28,14 @@ pub use activity::{
     ActivityFeed, ActivityItem, ActivityKind, ActivityQuery, ActivitySummary, AgentPresence,
     DigestMessage, DigestRequest, RequestCounts, Since, WhatsNew,
 };
+pub use board::{
+    Board, BoardAgent, BoardBlocked, BoardEdit, BoardHold, BoardProject, BoardQuery, BoardRequest,
+    DEFAULT_BOARD_LIMIT, DEFAULT_BOARD_WINDOW_MS, EDIT_HOOK_HOLD_REASON, MAX_BOARD_LIMIT,
+};
 pub use dashboard::{
-    DashAccess, DashActivityItem, DashActivityPage, DashActivityQuery, DashAgent, DashClash,
-    DashCounts, DashHold, DashMessage, DashProject, DashRequest, DashThread, DashboardSnapshot,
-    DashboardView,
+    DashAccess, DashActivityItem, DashActivityPage, DashActivityQuery, DashAgent, DashBlocked,
+    DashClash, DashCounts, DashEdit, DashHold, DashMessage, DashProject, DashRequest, DashThread,
+    DashboardSnapshot, DashboardView,
 };
 pub use error::{Error, ErrorBody, Result};
 pub use federation::{
