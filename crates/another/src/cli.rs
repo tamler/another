@@ -661,11 +661,12 @@ const BORROW_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
 /// Borrow, and with `--wait`, keep trying while another agent holds this node's resource
 /// exclusively. Any other error ends the wait at once.
 ///
-/// The deadline is enforced by the core inside each attempt's transaction
-/// ([`Store::borrow_resource_before`]), so an attempt that waits on a busy database past
-/// the deadline changes nothing and cannot succeed late. Whether a refusal is worth waiting
-/// for is read from the resource itself, never from the error text, which can contain a
-/// resource name.
+/// The wait is measured on one monotonic clock (`Instant`), and the core asks it inside
+/// each attempt's transaction, after the lock ([`Store::borrow_resource_while`]). So an
+/// attempt that waits on a busy database past the deadline changes nothing, and a
+/// wall-clock step cannot reopen an ended wait. Whether a refusal is worth waiting for, and
+/// what to say when the wait ends, is read from the resource's current state, never from
+/// the error text (which can contain a resource name) or an earlier refusal.
 fn borrow(store: &Store, args: &BorrowArgs, json: bool) -> anyhow::Result<ExitCode> {
     let target = ResourceRef::parse(&args.target)?;
     let wait = args.wait.unwrap_or(0);
@@ -674,40 +675,54 @@ fn borrow(store: &Store, args: &BorrowArgs, json: bool) -> anyhow::Result<ExitCo
     }
     let started = std::time::Instant::now();
     let until = std::time::Duration::from_secs(wait);
-    let deadline_ms = (wait > 0).then(|| store.now() + (wait as i64) * 1000);
-    let mut refused: Option<String> = None;
+    let still_waiting = || started.elapsed() < until;
+    let check: Option<&dyn Fn() -> bool> = (wait > 0).then_some(&still_waiting);
+    let mut waiting = false;
     loop {
-        match store.borrow_resource_before(&args.agent.agent, &target, args.ttl, deadline_ms) {
+        match store.borrow_resource_while(&args.agent.agent, &target, args.ttl, check) {
             Ok(out) => return Ok(emit(json, &out, output::lease_outcome)),
             Err(another_core::Error::Conflict(m)) if wait > 0 => {
-                let held = refused.is_some() || held_exclusively_here(store, &target);
-                let left = until.saturating_sub(started.elapsed());
-                if !held || left.is_zero() || m.ends_with("the wait ended") {
-                    let why = refused.unwrap_or(m);
-                    return Err(match held {
-                        true => another_core::Error::Conflict(format!(
-                            "{why}; still held after {wait}s"
-                        )),
-                        false => another_core::Error::Conflict(why),
-                    }
-                    .into());
+                let held_now = held_exclusively_here(store, &target);
+                if !still_waiting() {
+                    // Say what is true now, not what the first refusal said.
+                    let what = target.describe();
+                    let why = if held_now {
+                        format!("{what} is still held exclusively by another agent after {wait}s")
+                    } else {
+                        format!("{what} was not borrowed: the {wait}s wait ended")
+                    };
+                    return Err(another_core::Error::Conflict(why).into());
                 }
-                if refused.is_none() && !json {
+                if !held_now && !waiting {
+                    // Not a refusal that clears by itself: fail as without --wait.
+                    return Err(another_core::Error::Conflict(m).into());
+                }
+                if !waiting && !json {
                     eprintln!("another: {m}; waiting up to {wait}s for it to be free");
                 }
-                refused.get_or_insert(m);
-                std::thread::sleep(BORROW_RETRY.min(left));
+                waiting = true;
+                if held_now {
+                    let left = until.saturating_sub(started.elapsed());
+                    std::thread::sleep(BORROW_RETRY.min(left));
+                }
             }
             Err(e) => return Err(e.into()),
         }
     }
 }
 
-/// A resource on this node, exclusive, with a live lease: the one refusal that clears by
-/// itself when its holder returns it. A resource on another node is never waited for.
+/// A resource on this node, exclusive, with a lease that has not expired: the one refusal
+/// that clears by itself when its holder returns it. A resource on another node is never
+/// waited for. Expiry is compared here because this node lists its own leases until the
+/// sweep releases them, so an expired one would otherwise still read as held.
 fn held_exclusively_here(store: &Store, target: &ResourceRef) -> bool {
+    let now = store.now();
     store.resource(target).is_ok_and(|r| {
-        r.node.is_none() && r.mode == another_core::LeaseMode::Exclusive && r.refcount > 0
+        r.node.is_none()
+            && r.mode == another_core::LeaseMode::Exclusive
+            && r.leases
+                .iter()
+                .any(|l| another_core::parse_ts(&l.expires_at).is_some_and(|t| t > now))
     })
 }
 

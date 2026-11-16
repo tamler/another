@@ -148,7 +148,10 @@ fn borrow_wait_gives_up_after_its_time_on_an_exclusive_resource() {
     assert!(!out.status.success());
     let err = text(&out.stderr);
     assert!(err.contains("waiting up to 2s"), "{err}");
-    assert!(err.contains("still held after 2s"), "{err}");
+    assert!(
+        err.contains("still held exclusively by another agent after 2s"),
+        "{err}"
+    );
     assert!(took >= Duration::from_secs(2), "{took:?}");
     assert!(took < Duration::from_secs(10), "{took:?}");
 
@@ -209,7 +212,13 @@ fn borrow_wait_does_not_acquire_after_its_deadline() {
         "acquired after the wait: {}",
         text(&out.stdout)
     );
-    assert!(rest.contains("still held after 1s"), "{rest}");
+    // The lock holder expired every lease: the resource is free now, so the message must
+    // not say it is held (review R2 P3), only that the wait ended.
+    assert!(
+        rest.contains("was not borrowed: the 1s wait ended"),
+        "{rest}"
+    );
+    assert!(!rest.contains("still held"), "{rest}");
 }
 
 #[test]

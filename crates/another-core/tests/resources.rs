@@ -338,3 +338,35 @@ fn validates_input() {
     let missing = store.borrow_resource("alice", &ResourceRef::Id("nope".into()), None);
     assert_eq!(missing.unwrap_err().code(), "not_found");
 }
+
+/// Review R2 of #161 (P2): the wait is the caller's, on the caller's clock. Once its
+/// `still_waiting` says no, nothing is granted, even if the store's wall clock was stepped
+/// back and the resource has become free. With no check, a borrow behaves as before.
+#[test]
+fn an_ended_wait_grants_nothing_whatever_the_wall_clock_says() {
+    let (store, clock) = setup();
+    ollama(&store, "alice", LeaseMode::Exclusive, 600).unwrap();
+    let refused = store.borrow_resource_while("bob", &name_ref(), None, Some(&|| true));
+    assert_eq!(refused.unwrap_err().code(), "conflict");
+
+    // The wall clock steps back ten seconds, and the holder returns the resource.
+    clock.fetch_sub(10_000, Ordering::SeqCst);
+    store.release_resource("alice", &name_ref(), false).unwrap();
+
+    let ended = store.borrow_resource_while("bob", &name_ref(), None, Some(&|| false));
+    let err = ended.unwrap_err();
+    assert_eq!(err.code(), "conflict");
+    assert!(err.to_string().contains("the wait ended"), "{err}");
+    let r = store.resource(&name_ref()).unwrap();
+    assert!(
+        r.leases.is_empty(),
+        "granted after the wait: {:?}",
+        r.leases
+    );
+
+    // The same borrow without a wait check adopts it, as `borrow_resource` always did.
+    let adopted = store
+        .borrow_resource_while("bob", &name_ref(), None, None)
+        .unwrap();
+    assert_eq!(adopted.outcome, "adopted");
+}

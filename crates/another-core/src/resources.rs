@@ -826,23 +826,24 @@ impl Store {
         target: &ResourceRef,
         ttl_seconds: Option<i64>,
     ) -> Result<LeaseOutcome> {
-        self.borrow_resource_before(agent, target, ttl_seconds, None)
+        self.borrow_resource_while(agent, target, ttl_seconds, None)
     }
 
-    /// [`Store::borrow_resource`] that changes nothing once `deadline_ms` has passed. The
-    /// deadline is checked inside the write transaction, after its lock is taken, so a
-    /// borrow that waited on a busy database past its deadline gives up instead of
-    /// succeeding late (`another borrow --wait`).
-    pub fn borrow_resource_before(
+    /// [`Store::borrow_resource`] that changes nothing unless `still_waiting()` holds.
+    /// `still_waiting` is asked inside the write transaction, after its lock is taken, so a
+    /// borrow that waited on a busy database past the caller's deadline gives up instead of
+    /// succeeding late (`another borrow --wait`). The caller decides the clock: the CLI
+    /// passes a monotonic one, so a wall-clock step cannot reopen an ended wait.
+    pub fn borrow_resource_while(
         &self,
         agent: &str,
         target: &ResourceRef,
         ttl_seconds: Option<i64>,
-        deadline_ms: Option<i64>,
+        still_waiting: Option<&dyn Fn() -> bool>,
     ) -> Result<LeaseOutcome> {
         let ttl = clamp_ttl(ttl_seconds)?;
         self.write(|tx| {
-            if deadline_ms.is_some_and(|d| tx.now > d) {
+            if still_waiting.is_some_and(|f| !f()) {
                 return Err(Error::Conflict(format!(
                     "{} was not borrowed: the wait ended",
                     target.describe()
