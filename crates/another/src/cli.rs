@@ -43,8 +43,19 @@ pub struct AgentArg {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Show the SQLite version and source ID linked into this executable without opening a home.
+    SqliteInfo,
     /// Create the data directory and database if needed; show the local node.
     Init,
+    /// Upgrade a fenced existing home after creating a verified backup.
+    Upgrade {
+        /// New directory outside the Another home for the protected backup.
+        #[arg(long)]
+        backup_dir: PathBuf,
+        /// Confirm that all writers are stopped and prevented from restarting.
+        #[arg(long)]
+        confirm_writer_fence: bool,
+    },
     /// Show the local node, database location and registered agents.
     Status,
     /// Run the daemon: MCP over loopback streamable HTTP (default) or stdio.
@@ -99,6 +110,9 @@ pub enum Command {
     /// Register agents, list them, or show one.
     #[command(subcommand)]
     Agent(AgentCmd),
+    /// Run a child with a registered session actor.
+    #[command(subcommand)]
+    Session(SessionCmd),
     /// Send a message.
     Send {
         /// Sender: name or name@project (default: $ANOTHER_AGENT).
@@ -364,6 +378,17 @@ pub enum Command {
     Events {
         #[arg(long, default_value_t = 20)]
         limit: u32,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SessionCmd {
+    /// Run a program with its exact session identity and session provenance.
+    Exec {
+        #[command(flatten)]
+        agent: AgentArg,
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<std::ffi::OsString>,
     },
 }
 
@@ -657,6 +682,9 @@ pub enum HookCmd {
         /// Show what would change without writing anything.
         #[arg(long)]
         dry_run: bool,
+        /// Opt into native edit denial and the restricted Claude checked-handle route.
+        #[arg(long)]
+        strict_controlled: bool,
     },
     /// Remove Another hooks from client configs, leaving other hooks untouched.
     Uninstall {
@@ -774,13 +802,7 @@ pub fn main() -> ExitCode {
     match run(cli) {
         Ok(code) => code,
         Err(err) => {
-            let body = match err.downcast_ref::<another_core::Error>() {
-                Some(e) => e.body(),
-                None => another_core::ErrorBody {
-                    code: "error",
-                    message: format!("{err:#}"),
-                },
-            };
+            let body = error_body(&err);
             if json {
                 println!("{}", serde_json::json!({ "error": body }));
             } else {
@@ -791,16 +813,34 @@ pub fn main() -> ExitCode {
     }
 }
 
+fn error_body(err: &anyhow::Error) -> another_core::ErrorBody {
+    match err.downcast_ref::<another_core::Error>() {
+        Some(e) => e.body(),
+        None => another_core::ErrorBody {
+            code: "error",
+            message: format!("{err:#}"),
+        },
+    }
+}
+
 fn init_tracing(serving: bool) {
     let default = if serving { "info" } else { "warn" };
     let filter = tracing_subscriber::EnvFilter::try_from_env("ANOTHER_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default));
     // Colour only on a terminal: the daemon's log is a file under launchd.
     use std::io::IsTerminal;
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
+    use tracing_subscriber::prelude::*;
+    // rmcp debug events contain complete arguments and metadata. This layer filter
+    // cannot be overridden by a more specific ANOTHER_LOG directive.
+    let output = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
+        .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
+            !meta.target().starts_with("rmcp")
+        }));
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(output)
         .try_init();
 }
 
@@ -907,6 +947,21 @@ fn emit<T: Serialize>(json: bool, value: &T, human: impl FnOnce(&T) -> String) -
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     let json = cli.json;
     let home = cli.home.as_deref();
+    if matches!(&cli.command, Command::SqliteInfo) {
+        let connection = rusqlite::Connection::open_in_memory()?;
+        let (version, source_id): (String, String) =
+            connection.query_row("SELECT sqlite_version(), sqlite_source_id()", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
+        let info = serde_json::json!({ "version": version, "source_id": source_id });
+        return Ok(emit(json, &info, |value| {
+            format!(
+                "SQLite {}\nSource ID {}",
+                value["version"].as_str().unwrap_or_default(),
+                value["source_id"].as_str().unwrap_or_default()
+            )
+        }));
+    }
     if let Command::Serve {
         stdio,
         bind,
@@ -1014,13 +1069,53 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     if let Command::Daemon(cmd) = &cli.command {
         return daemon_command(cmd, json, another_home()?);
     }
+    if let Command::Upgrade {
+        backup_dir,
+        confirm_writer_fence,
+    } = &cli.command
+    {
+        if !confirm_writer_fence {
+            anyhow::bail!("fence all writers and pass --confirm-writer-fence before upgrading");
+        }
+        Store::upgrade_offline(&another_home()?, backup_dir, *confirm_writer_fence)?;
+        let result = serde_json::json!({
+            "status": "completed",
+            "backup": "verified",
+            "instruction": "Retain the writer fence until matching clients are installed."
+        });
+        return Ok(emit(json, &result, |_| {
+            "Backup verified and offline migration completed; retain the writer fence until matching clients are installed.".into()
+        }));
+    }
 
+    if let Command::Session(SessionCmd::Exec { agent, command }) = &cli.command {
+        // Resolving a session actor never creates or migrates a home, and is bounded.
+        let home = another_home()?;
+        let budget = std::time::Duration::from_secs(5);
+        let store = Store::open_existing(&home, budget, std::time::Instant::now() + budget)?;
+        let address = store.session_actor_address(&agent.agent)?;
+        drop(store);
+        let status = std::process::Command::new(&command[0])
+            .args(&command[1..])
+            .env("ANOTHER_AGENT", &address)
+            .env("ANOTHER_AGENT_MODE", "session")
+            .env("ANOTHER_HOME", &home)
+            .status()?;
+        return Ok(ExitCode::from(
+            status
+                .code()
+                .and_then(|n| u8::try_from(n).ok())
+                .unwrap_or(1),
+        ));
+    }
     let store = open(home)?;
     let code = match cli.command {
         Command::Serve { .. }
         | Command::Dashboard { .. }
         | Command::Hook(_)
         | Command::Daemon(_)
+        | Command::Upgrade { .. }
+        | Command::SqliteInfo
         | Command::Remote(_) => {
             unreachable!("handled above")
         }
@@ -1033,9 +1128,12 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     .unwrap_or_default(),
                 projects: store.projects()?,
                 agents: store.agents()?,
+                unknown_controlled_edits: store.unknown_controlled_edits()?,
+                unknown_controlled_edit_count: store.unknown_controlled_edit_count()?,
             };
             emit(json, &status, output::status)
         }
+        Command::Session(_) => unreachable!("handled above"),
         Command::Project(ProjectCmd::Ensure { path }) => {
             let path = match path {
                 Some(p) => abs(&p)?,
@@ -1716,28 +1814,36 @@ fn hook_command(
 ) -> anyhow::Result<ExitCode> {
     match cmd {
         HookCmd::Run { event, client } => {
-            // Fail open: whatever happens, print what we have and exit 0.
-            let home = another_home().ok();
-            // Tool hooks run on every tool call: open without migrating, with a short lock
-            // wait, so a busy or missing database costs milliseconds, not seconds.
-            let store = match &home {
-                Some(h) if event.is_tool_event() => {
-                    Store::open_quick(h, event.busy_timeout()).map_err(anyhow::Error::from)
+            {
+                // Whatever happens, print what we have and exit 0. The run passes its
+                // safety gates before any route, never creates a home, and is bounded.
+                let home = another_home().ok();
+                let text = hooks::run_guarded(home.as_deref(), *event, *client);
+                if !text.is_empty() {
+                    println!("{text}");
                 }
-                Some(h) => Store::open(h).map_err(anyhow::Error::from),
-                None => Err(anyhow::anyhow!("no Another home directory")),
-            };
-            let env = another_home().and_then(HookEnv::detect);
-            let text = hooks::run_fail_open(store, env, home.as_deref(), *event, *client);
-            if !text.is_empty() {
-                println!("{text}");
+                Ok(ExitCode::SUCCESS)
             }
-            Ok(ExitCode::SUCCESS)
         }
-        HookCmd::Install { client, dry_run } | HookCmd::Uninstall { client, dry_run } => {
+        HookCmd::Install {
+            client, dry_run, ..
+        }
+        | HookCmd::Uninstall { client, dry_run } => {
             let install = matches!(cmd, HookCmd::Install { .. });
+            let strict_controlled = matches!(
+                cmd,
+                HookCmd::Install {
+                    strict_controlled: true,
+                    ..
+                }
+            );
             let env = HookEnv::detect(another_home()?)?;
-            let report = hooks::install(&env, &clients(client), install, *dry_run)?;
+            if install && !*dry_run {
+                // Hooks never create a home; installing them is the explicit step that does.
+                Store::open(&env.another_home)?;
+            }
+            let report =
+                hooks::install(&env, &clients(client), install, *dry_run, strict_controlled)?;
             Ok(emit(json, &report, output::hook_report))
         }
         HookCmd::Status => {
@@ -1749,7 +1855,7 @@ fn hook_command(
                     output::HookStatus {
                         client: c.as_str().to_string(),
                         installed: std::fs::read_to_string(&path)
-                            .is_ok_and(|t| t.contains(hooks::MARKER)),
+                            .is_ok_and(|t| hooks::contains_ours_text(&t)),
                         config: path.display().to_string(),
                         trust_note: (*c == Client::Codex).then_some(hooks::CODEX_TRUST_NOTE),
                     }

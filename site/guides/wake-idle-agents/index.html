@@ -47,7 +47,7 @@
       <p>This assumes the agent runs in tmux. Inside that pane, tmux sets <code>TMUX_PANE</code>; from elsewhere, <code>tmux list-panes -a</code> shows pane IDs. The agent <code>codex@shop</code> and the pane <code>%3</code> are examples, so use your own.</p>
       <pre class="code-block shell" tabindex="0" aria-label="Store a wake target"><code>another wake set --agent codex@shop --via tmux --target %3
 another wake list</code></pre>
-      <p>Session hooks running inside tmux or cmux record this automatically, and never replace a target you set by hand. If you've <a href="/docs/getting-started/">installed hooks</a> and started the session in tmux, check <code>another wake list</code> first; it may already be there.</p>
+      <p>Unfenced session hooks do not capture a pane automatically. Set the target for the full session address shown in the start digest, and use <code>another wake list</code> to inspect it.</p>
     </section>
     <section class="guide-section" aria-labelledby="send">
       <h2 id="send">Preview, then send</h2>

@@ -15,6 +15,8 @@ pub struct Status {
     pub db_path: String,
     pub projects: Vec<Project>,
     pub agents: Vec<Agent>,
+    pub unknown_controlled_edits: Vec<String>,
+    pub unknown_controlled_edit_count: u64,
 }
 
 pub fn status(s: &Status) -> String {
@@ -30,6 +32,16 @@ pub fn status(s: &Status) -> String {
     if !s.agents.is_empty() {
         out.push('\n');
         out.push_str(&agents(&s.agents));
+    }
+    for id in &s.unknown_controlled_edits {
+        out.push_str(&format!("\nunknown controlled edit {id}: inspect the file and admission; do not retry automatically\n"));
+    }
+    if s.unknown_controlled_edit_count > s.unknown_controlled_edits.len() as u64 {
+        out.push_str(&format!(
+            "\n{} unknown controlled edits total; showing the first {}\n",
+            s.unknown_controlled_edit_count,
+            s.unknown_controlled_edits.len()
+        ));
     }
     out
 }

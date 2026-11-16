@@ -11,12 +11,12 @@
 use std::path::Path;
 
 use globset::{Glob, GlobBuilder, GlobMatcher};
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use serde_json::json;
 
 use crate::error::{Error, Result};
-use crate::identity::{address, find_project, resolve_agent, Project};
+use crate::identity::{address, find_project, resolve_agent, AgentRef, Project};
 use crate::mail::touch;
 use crate::requests::stale_overdue_tx;
 use crate::store::{new_id, Store, Tx};
@@ -95,7 +95,7 @@ pub enum SessionPhase {
 pub struct SessionInfo {
     /// Client program, e.g. `claude` or `codex`.
     pub client: Option<String>,
-    /// The client's own session identifier, if it has one.
+    /// A caller-supplied session identifier; never persisted in lifecycle events.
     pub session_id: Option<String>,
     /// At session end, keep resource leases (e.g. a server meant to outlive the session).
     pub keep_resources: bool,
@@ -406,6 +406,17 @@ fn conflicts_for(
     patterns: &[(String, String)],
     exclusive: bool,
 ) -> Result<Vec<HoldConflict>> {
+    conflicts_for_policy(tx, project, agent_id, patterns, exclusive, false)
+}
+
+fn conflicts_for_policy(
+    tx: &Tx<'_>,
+    project: &Project,
+    agent_id: &str,
+    patterns: &[(String, String)],
+    exclusive: bool,
+    controlled_literal: bool,
+) -> Result<Vec<HoldConflict>> {
     link_unlinked(tx)?;
     let (repo_key, my_prefix) = crate::repo::link_of(tx, project)?
         .map_or((String::new(), String::new()), |l| {
@@ -414,14 +425,14 @@ fn conflicts_for(
     // This project's holds, plus holds in any local project of the same repository.
     let mut stmt = tx.prepare(&format!(
         "{HOLD_SELECT_REPO} WHERE h.released_at IS NULL AND h.expires_at > ?3
-           AND h.agent_id != ?2
+           AND (h.agent_id != ?2 OR h.node_id != ?5)
            AND (h.project_id = ?1 OR (?4 != '' AND h.project_id IN
                 (SELECT project_id FROM project_repos WHERE repo_key = ?4)))
          ORDER BY h.created_at"
     ))?;
     let others = stmt
         .query_map(
-            params![project.project_id, agent_id, tx.now, repo_key],
+            params![project.project_id, agent_id, tx.now, repo_key, tx.node_id],
             |r| {
                 Ok((
                     hold_from_row(r)?,
@@ -432,7 +443,15 @@ fn conflicts_for(
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let fold = folds_case(Path::new(&project.abs_path));
-    let overlaps = |a: &str, b: &str| overlap_on_volume(a, b, fold);
+    let overlaps = |a: &str, b: &str| {
+        if controlled_literal {
+            // Controlled paths are ASCII literals. Widen conservatively even when
+            // volume case rules are unknown, including positive character classes.
+            patterns_overlap(a, b) || patterns_overlap(&a.to_lowercase(), &b.to_lowercase())
+        } else {
+            overlap_on_volume(a, b, fold)
+        }
+    };
     let mut conflicts = Vec::new();
     for (requested, pattern) in patterns {
         for (held, held_project, held_prefix) in &others {
@@ -459,6 +478,210 @@ fn conflicts_for(
     Ok(conflicts)
 }
 
+/// One project's share of an edit: its files as hold patterns, and the holds of other
+/// agents that stop it. Computing a plan writes no holds and no events.
+pub(crate) struct GuardPlan {
+    pub(crate) project: Project,
+    /// `(path as given, normalized pattern)`.
+    pub(crate) patterns: Vec<(String, String)>,
+    pub conflicts: Vec<HoldConflict>,
+}
+
+pub(crate) fn guard_plan_controlled_tx(
+    tx: &Tx<'_>,
+    me: &AgentRef,
+    project: Project,
+    paths: &[String],
+) -> Result<GuardPlan> {
+    let mut plan = guard_plan_tx(tx, me, project, paths)?;
+    plan.conflicts = conflicts_for_policy(tx, &plan.project, &me.id, &plan.patterns, true, true)?;
+    Ok(plan)
+}
+
+/// Insert new per-edit holds without adopting or renewing any earlier hold.
+pub(crate) fn guard_take_pending_tx(
+    tx: &Tx<'_>,
+    me: &AgentRef,
+    plan: GuardPlan,
+    admission_id: &str,
+    reason: &str,
+) -> Result<Vec<(String, String, String)>> {
+    let mut created = Vec::new();
+    for (_, pattern) in plan.patterns {
+        let id = new_id();
+        let expires_at = tx.now + DEFAULT_HOLD_TTL_SECONDS * 1000;
+        tx.emit(
+            &me.address,
+            "hold.acquired",
+            json!({
+                "hold_id": id, "agent_id": me.id, "project_id": plan.project.project_id,
+                "pattern": pattern, "exclusive": true, "reason": reason,
+                "ttl_seconds": DEFAULT_HOLD_TTL_SECONDS, "expires_at": expires_at, "auto": true
+            }),
+        )?;
+        tx.execute(
+            "INSERT INTO holds (hold_id,node_id,project_id,agent_id,pattern,exclusive,reason,ttl_seconds,created_at,renewed_at,expires_at)
+             VALUES (?1,?2,?3,?4,?5,1,?6,?7,?8,?8,?9)",
+            params![id, tx.node_id, plan.project.project_id, me.id, pattern, reason,
+                DEFAULT_HOLD_TTL_SECONDS, tx.now, expires_at],
+        )?;
+        tx.execute(
+            "INSERT INTO admission_holds(admission_id,hold_id) VALUES (?1,?2)",
+            params![admission_id, id],
+        )?;
+        created.push((id, plan.project.project_id.clone(), pattern));
+    }
+    Ok(created)
+}
+
+pub(crate) fn guard_plan_tx(
+    tx: &Tx<'_>,
+    me: &AgentRef,
+    project: Project,
+    paths: &[String],
+) -> Result<GuardPlan> {
+    let mut patterns: Vec<(String, String)> = Vec::new();
+    for raw in paths {
+        let p = normalize_pattern(&project, raw)?;
+        if p == "**" {
+            return Err(Error::Invalid(format!(
+                "{raw:?} is the project directory, not a file"
+            )));
+        }
+        if !patterns.iter().any(|(_, q)| *q == p) {
+            patterns.push((raw.clone(), p));
+        }
+    }
+    let mut conflicts = conflicts_for(tx, &project, &me.id, &patterns, true)?;
+    // Report project-relative paths, like hold patterns, not what the tool sent
+    // (often an absolute path).
+    for c in &mut conflicts {
+        if let Some((_, p)) = patterns.iter().find(|(raw, _)| *raw == c.path) {
+            c.path = p.clone();
+        }
+    }
+    Ok(GuardPlan {
+        project,
+        patterns,
+        conflicts,
+    })
+}
+
+/// Record a stopped edit (evidence for `another stats`: who was stopped, by whose hold,
+/// where) and report its conflicts. Takes no holds.
+pub(crate) fn guard_blocked_tx(tx: &Tx<'_>, me: &AgentRef, plan: GuardPlan) -> Result<EditGuard> {
+    let GuardPlan {
+        project,
+        patterns,
+        conflicts,
+    } = plan;
+    let repo = crate::repo::link_of(tx, &project)?.map(|l| l.key);
+    tx.emit(
+        &me.address,
+        crate::stats::BLOCKED_EVENT,
+        json!({
+            "agent_id": me.id,
+            "agent": me.address,
+            "project_id": project.project_id,
+            "project": project.slug,
+            "repo": repo,
+            "paths": patterns.iter().map(|(_, p)| p).collect::<Vec<_>>(),
+            "conflicts": conflicts.iter().map(|c| json!({
+                "path": c.path,
+                "holder": c.held.agent,
+                "hold_id": c.held.hold_id,
+                "pattern": c.held.pattern,
+                "project": c.held.project,
+            })).collect::<Vec<_>>(),
+        }),
+    )?;
+    Ok(EditGuard {
+        agent: me.address.clone(),
+        project: project.slug,
+        held: Vec::new(),
+        covered: Vec::new(),
+        conflicts,
+    })
+}
+
+/// Hold every path of a conflict-free plan: paths under a live exclusive hold of the
+/// agent's own are left alone (renewed past half their TTL), the rest get a narrow one.
+pub(crate) fn guard_take_tx(
+    tx: &Tx<'_>,
+    me: &AgentRef,
+    plan: GuardPlan,
+    reason: &str,
+) -> Result<EditGuard> {
+    let GuardPlan {
+        project, patterns, ..
+    } = plan;
+    let mut stmt = tx.prepare(
+        "SELECT hold_id, pattern, ttl_seconds, expires_at FROM holds
+         WHERE agent_id = ?1 AND project_id = ?2 AND exclusive = 1
+           AND node_id = ?4
+           AND released_at IS NULL AND expires_at > ?3
+           AND NOT EXISTS (SELECT 1 FROM admission_holds ah JOIN admissions a
+               ON a.admission_id = ah.admission_id
+               WHERE ah.hold_id = holds.hold_id AND a.state IN ('pending','claimed','unknown'))
+         ORDER BY created_at",
+    )?;
+    let own = stmt
+        .query_map(
+            params![me.id, project.project_id, tx.now, tx.node_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut renew: Vec<(String, i64)> = Vec::new();
+    let mut covered = Vec::new();
+    let mut needed = Vec::new();
+    for (raw, pattern) in &patterns {
+        match own
+            .iter()
+            .find(|(_, held, _, _)| hold_covers(held, pattern))
+        {
+            Some((id, _, ttl, expires_at)) if expires_at - tx.now < ttl * 500 => {
+                if !renew.iter().any(|(r, _)| r == id) {
+                    renew.push((id.clone(), *ttl));
+                }
+            }
+            Some(_) => covered.push(raw.clone()),
+            None => needed.push(pattern.clone()),
+        }
+    }
+    renew_tx(tx, &me.address, &renew)?;
+    let mut ids: Vec<String> = renew.into_iter().map(|(id, _)| id).collect();
+    for pattern in &needed {
+        ids.push(upsert_hold_tx(
+            tx,
+            &me.id,
+            &me.address,
+            &project.project_id,
+            pattern,
+            true,
+            Some(reason),
+            DEFAULT_HOLD_TTL_SECONDS,
+            true,
+        )?);
+    }
+    if !ids.is_empty() {
+        touch(tx, &me.id)?;
+    }
+    Ok(EditGuard {
+        agent: me.address.clone(),
+        project: project.slug,
+        held: holds_by_id(tx, &ids)?,
+        covered,
+        conflicts: Vec::new(),
+    })
+}
+
 /// Create a hold, or update and renew the agent's existing hold on the same pattern.
 /// Returns the hold id.
 #[allow(clippy::too_many_arguments)]
@@ -476,11 +699,14 @@ fn upsert_hold_tx(
     let existing: Option<String> = tx
         .query_row(
             "SELECT hold_id FROM holds WHERE agent_id = ?1 AND project_id = ?2
-               AND pattern = ?3 AND released_at IS NULL",
-            params![agent_id, project_id, pattern],
+               AND pattern = ?3 AND node_id = ?4 AND released_at IS NULL
+               AND NOT EXISTS (SELECT 1 FROM admission_holds ah JOIN admissions a
+                   ON a.admission_id = ah.admission_id
+                   WHERE ah.hold_id = holds.hold_id AND a.state IN ('pending','claimed','unknown'))",
+            params![agent_id, project_id, pattern, tx.node_id],
             |r| r.get(0),
         )
-        .ok();
+        .optional()?;
     let expires_at = tx.now + ttl * 1000;
     let mut payload = json!({
         "agent_id": agent_id,
@@ -574,9 +800,22 @@ pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
             json!({ "hold_id": hold_id, "pattern": pattern, "agent_id": agent_id }),
         )?;
         tx.execute(
-            "UPDATE holds SET released_at = expires_at, release_reason = 'expired' WHERE hold_id = ?1",
-            [hold_id],
+            "UPDATE holds SET released_at = expires_at, release_reason = 'expired'
+             WHERE hold_id = ?1 AND node_id = ?2 AND released_at IS NULL AND expires_at <= ?3",
+            params![hold_id, tx.node_id, tx.now],
         )?;
+        let settled = tx.execute(
+            "UPDATE admissions SET state=CASE WHEN state='claimed' THEN 'unknown' ELSE 'expired' END, settled_at=?3
+             WHERE node_id=?2 AND state IN ('pending','claimed')
+               AND admission_id IN (SELECT admission_id FROM admission_holds WHERE hold_id=?1)
+               AND NOT EXISTS (SELECT 1 FROM admission_holds ah LEFT JOIN holds h ON h.hold_id=ah.hold_id
+                   WHERE ah.admission_id=admissions.admission_id
+                     AND (h.hold_id IS NULL OR (h.released_at IS NULL AND h.expires_at>?3)))",
+            params![hold_id, tx.node_id, tx.now],
+        )?;
+        if settled != 0 {
+            tx.emit("system", "admission.settled", json!({"hold_id": hold_id}))?;
+        }
     }
     let stale_requests = stale_overdue_tx(tx)?;
     let expired_leases = crate::resources::expire_leases_tx(tx)?;
@@ -596,6 +835,13 @@ pub(crate) fn release_tx(
     if hold_ids.is_empty() {
         return Ok(());
     }
+    for id in hold_ids {
+        if is_pending_hold(tx, id)? {
+            return Err(Error::Invalid(
+                "pending admission hold cannot be released".into(),
+            ));
+        }
+    }
     tx.emit(
         actor,
         "hold.released",
@@ -614,6 +860,13 @@ fn renew_tx(tx: &Tx<'_>, actor: &str, holds: &[(String, i64)]) -> Result<()> {
     if holds.is_empty() {
         return Ok(());
     }
+    for (id, _) in holds {
+        if is_pending_hold(tx, id)? {
+            return Err(Error::Invalid(
+                "pending admission hold cannot be renewed".into(),
+            ));
+        }
+    }
     let ids: Vec<&String> = holds.iter().map(|(id, _)| id).collect();
     tx.emit(actor, "hold.renewed", json!({ "hold_ids": ids }))?;
     for (id, ttl) in holds {
@@ -623,6 +876,16 @@ fn renew_tx(tx: &Tx<'_>, actor: &str, holds: &[(String, i64)]) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+fn is_pending_hold(tx: &Tx<'_>, id: &str) -> Result<bool> {
+    Ok(tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM admission_holds ah JOIN admissions a
+         ON a.admission_id = ah.admission_id
+         WHERE ah.hold_id = ?1 AND a.state IN ('pending','claimed','unknown'))",
+        [id],
+        |r| r.get(0),
+    )?)
 }
 
 /// Live holds owned by `agent_id` in projects `scope` may see (all of them locally),
@@ -635,10 +898,14 @@ fn owned_holds(
 ) -> Result<Vec<(String, i64)>> {
     let mut stmt = tx.prepare(
         "SELECT hold_id, ttl_seconds, project_id FROM holds
-         WHERE agent_id = ?1 AND released_at IS NULL ORDER BY created_at",
+         WHERE agent_id = ?1 AND node_id = ?2 AND released_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM admission_holds ah JOIN admissions a
+               ON a.admission_id = ah.admission_id
+               WHERE ah.hold_id = holds.hold_id AND a.state IN ('pending','claimed','unknown'))
+         ORDER BY created_at",
     )?;
     let rows = stmt
-        .query_map([agent_id], |r| {
+        .query_map(params![agent_id, tx.node_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, i64>(1)?,
@@ -787,114 +1054,12 @@ impl Store {
         self.write(|tx| {
             let me = resolve_agent(tx, tx.node_id, agent)?;
             let project = find_project(tx, tx.node_id, project)?;
-            let mut patterns: Vec<(String, String)> = Vec::new();
-            for raw in paths {
-                let p = normalize_pattern(&project, raw)?;
-                if p == "**" {
-                    return Err(Error::Invalid(format!(
-                        "{raw:?} is the project directory, not a file"
-                    )));
-                }
-                if !patterns.iter().any(|(_, q)| *q == p) {
-                    patterns.push((raw.clone(), p));
-                }
+            let plan = guard_plan_tx(tx, &me, project, paths)?;
+            if plan.conflicts.is_empty() {
+                guard_take_tx(tx, &me, plan, reason)
+            } else {
+                guard_blocked_tx(tx, &me, plan)
             }
-            let mut conflicts = conflicts_for(tx, &project, &me.id, &patterns, true)?;
-            if !conflicts.is_empty() {
-                // Report project-relative paths, like hold patterns, not what the tool sent
-                // (often an absolute path).
-                for c in &mut conflicts {
-                    if let Some((_, p)) = patterns.iter().find(|(raw, _)| *raw == c.path) {
-                        c.path = p.clone();
-                    }
-                }
-                // Evidence for `another stats`: who was stopped, by whose hold, where.
-                let repo = crate::repo::link_of(tx, &project)?.map(|l| l.key);
-                tx.emit(
-                    &me.address,
-                    crate::stats::BLOCKED_EVENT,
-                    json!({
-                        "agent_id": me.id,
-                        "agent": me.address,
-                        "project_id": project.project_id,
-                        "project": project.slug,
-                        "repo": repo,
-                        "paths": patterns.iter().map(|(_, p)| p).collect::<Vec<_>>(),
-                        "conflicts": conflicts.iter().map(|c| json!({
-                            "path": c.path,
-                            "holder": c.held.agent,
-                            "hold_id": c.held.hold_id,
-                            "pattern": c.held.pattern,
-                            "project": c.held.project,
-                        })).collect::<Vec<_>>(),
-                    }),
-                )?;
-                return Ok(EditGuard {
-                    agent: me.address,
-                    project: project.slug,
-                    held: Vec::new(),
-                    covered: Vec::new(),
-                    conflicts,
-                });
-            }
-            let mut stmt = tx.prepare(
-                "SELECT hold_id, pattern, ttl_seconds, expires_at FROM holds
-                 WHERE agent_id = ?1 AND project_id = ?2 AND exclusive = 1
-                   AND released_at IS NULL AND expires_at > ?3
-                 ORDER BY created_at",
-            )?;
-            let own = stmt
-                .query_map(params![me.id, project.project_id, tx.now], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, i64>(2)?,
-                        r.get::<_, i64>(3)?,
-                    ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let mut renew: Vec<(String, i64)> = Vec::new();
-            let mut covered = Vec::new();
-            let mut needed = Vec::new();
-            for (raw, pattern) in &patterns {
-                match own
-                    .iter()
-                    .find(|(_, held, _, _)| hold_covers(held, pattern))
-                {
-                    Some((id, _, ttl, expires_at)) if expires_at - tx.now < ttl * 500 => {
-                        if !renew.iter().any(|(r, _)| r == id) {
-                            renew.push((id.clone(), *ttl));
-                        }
-                    }
-                    Some(_) => covered.push(raw.clone()),
-                    None => needed.push(pattern.clone()),
-                }
-            }
-            renew_tx(tx, &me.address, &renew)?;
-            let mut ids: Vec<String> = renew.into_iter().map(|(id, _)| id).collect();
-            for pattern in &needed {
-                ids.push(upsert_hold_tx(
-                    tx,
-                    &me.id,
-                    &me.address,
-                    &project.project_id,
-                    pattern,
-                    true,
-                    Some(reason),
-                    DEFAULT_HOLD_TTL_SECONDS,
-                    true,
-                )?);
-            }
-            if !ids.is_empty() {
-                touch(tx, &me.id)?;
-            }
-            Ok(EditGuard {
-                agent: me.address,
-                project: project.slug,
-                held: holds_by_id(tx, &ids)?,
-                covered,
-                conflicts: Vec::new(),
-            })
         })
     }
 
@@ -909,10 +1074,16 @@ impl Store {
             let mut stmt = tx.prepare(
                 "SELECT hold_id, ttl_seconds FROM holds
                  WHERE agent_id = ?1 AND released_at IS NULL AND expires_at > ?2
+                   AND node_id = ?3
+                   AND NOT EXISTS (SELECT 1 FROM admission_holds ah JOIN admissions a
+                       ON a.admission_id = ah.admission_id
+                       WHERE ah.hold_id = holds.hold_id AND a.state IN ('pending','claimed','unknown'))
                    AND expires_at - ?2 < ttl_seconds * 500",
             )?;
             let due = stmt
-                .query_map(params![me.id, tx.now], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .query_map(params![me.id, tx.now, tx.node_id], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?
                 .collect::<rusqlite::Result<Vec<(String, i64)>>>()?;
             renew_tx(tx, &me.address, &due)?;
             Ok(due.len())
@@ -1034,11 +1205,14 @@ impl Store {
             sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, agent)?;
             let owned = owned_holds(tx, &me.id, &[], scope)?;
+            // Manual lifecycle calls lack the verified hook tuple; do not invent a fingerprint.
+            let fingerprint: Option<String> = None;
             let session_payload = || {
                 json!({
                     "agent_id": me.id,
                     "client": info.client,
-                    "session_id": info.session_id,
+                    "session_id": null,
+                    "session_fingerprint": fingerprint,
                 })
             };
             let release_leases = phase == SessionPhase::End && !info.keep_resources;

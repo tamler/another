@@ -43,6 +43,7 @@
     </div>
     <section class="guide-section" aria-labelledby="shipped-title">
       <h2 id="shipped-title">On main</h2>
+      <p>For the session-identity upgrade, older homes need a fenced offline upgrade and verified backup. The Rust wake helpers <code>current_target</code>, <code>capture_target</code> and <code>release_target</code> are removed because their signatures cannot fence delayed callers; use explicit <code>another wake set</code> and <code>another wake clear</code> for the exact actor. See <a href="https://github.com/tamler/another/blob/main/docs/DAEMON.md#upgrading">upgrade and recovery</a>.</p>
       <dl class="clients">
         <div class="client"><dt>1. Local core</dt><dd>SQLite event log, agents, mail, requests, path holds, MCP over stdio and loopback HTTP, CLI. <a href="https://github.com/tamler/another/pull/1">PR 1</a>.</dd></div>
         <div class="client"><dt>2. Hooks and the feed</dt><dd>Activity summary, session events, hook packs, <code>another hook install</code>. <a href="https://github.com/tamler/another/pull/2">PR 2</a>.</dd></div>

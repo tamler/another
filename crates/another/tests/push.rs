@@ -1,6 +1,5 @@
-//! Mid-task push and enforced holds, through the real binary: the post-tool and pre-edit
-//! hooks, failing open when the database is missing or locked, Herdr target capture,
-//! `wake prune`, and the daemon's waker against a fake `herdr`.
+//! Real CLI mail, native denial and wake checks. Legacy advisory path projections
+//! remain separately exercised; they are not authorization for a native editor.
 #![cfg(unix)]
 
 #[path = "common/hosted_ci.rs"]
@@ -142,6 +141,10 @@ impl Env {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
+        let mut stdin = stdin.clone();
+        if stdin.get("session_id").and_then(Value::as_str) == Some("s1") {
+            stdin["session_id"] = json!(format!("{client}-s1"));
+        }
         child
             .stdin
             .take()
@@ -158,10 +161,94 @@ impl Env {
         self.hook_timed(event, client, stdin, &[]).0
     }
 
+    /// Deny the real native call first; separately inspect the legacy advisory API.
+    /// Its result is never presented to a client and never writes a file.
+    fn advisory(&self, client: &str, input: &Value) -> String {
+        let native = self.hook("pre-native-edit", client, input);
+        assert!(
+            native.contains("\"permissionDecision\":\"deny\""),
+            "native path edits must remain denied"
+        );
+        let parsed = another::hooks::HookInput::parse(&input.to_string());
+        let cwd = parsed.cwd.as_ref().unwrap();
+        let root = another::hooks::project_root(cwd);
+        let physical_root = another::hooks::resolve_existing(&root);
+        let mut files = Vec::new();
+        for raw in parsed.edit_paths() {
+            let raw = PathBuf::from(raw);
+            let full = if raw.is_absolute() {
+                raw
+            } else {
+                cwd.join(raw)
+            };
+            let mut targets = vec![another::hooks::resolve_existing(&full)];
+            if let (Some(parent), Some(name)) = (full.parent(), full.file_name()) {
+                let entry = another::hooks::resolve_existing(parent).join(name);
+                if !targets.contains(&entry) {
+                    targets.push(entry);
+                }
+            }
+            for target in targets {
+                if let Ok(relative) = target.strip_prefix(&physical_root) {
+                    let relative = relative.to_str().unwrap().to_owned();
+                    if !files.contains(&relative) {
+                        files.push(relative);
+                    }
+                }
+            }
+        }
+        if files.is_empty() {
+            return String::new();
+        }
+        let store = another_core::Store::open(&self.another_home).unwrap();
+        let program = serde_json::from_value(json!(client)).unwrap();
+        let result = store.admit_edit(
+            client,
+            program,
+            root.to_str().unwrap(),
+            None,
+            &format!("{client}-s1"),
+            another::hooks::AUTO_HOLD_REASON,
+            |_| another_core::EditScope {
+                groups: vec![(root.to_str().unwrap().into(), files)],
+                unguarded: vec![],
+            },
+        );
+        let result=match result {
+            Ok(result)=>result,
+            Err(another_core::Error::Invalid(message))=>return json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":message}}).to_string(),
+            Err(error)=>panic!("unexpected advisory failure: {error}"),
+        };
+        if result.conflicts.is_empty() {
+            String::new()
+        } else {
+            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny",
+                "permissionDecisionReason":another::hooks::deny_message(&result.agent,&result.conflicts)}}).to_string()
+        }
+    }
+
     fn start(&self, client: &str, dir: &Path, extra_env: &[(&str, &str)]) -> String {
+        // Hooks never create a home: it exists before any session starts.
+        self.ok(&["init"]);
         let stdin = json!({ "session_id": format!("{client}-s1"), "cwd": dir });
-        self.hook_timed("session-start", client, &stdin, extra_env)
-            .0
+        let out = self
+            .hook_timed("session-start", client, &stdin, extra_env)
+            .0;
+        let digest = if client == "cursor" {
+            serde_json::from_str::<Value>(&out).unwrap()["additional_context"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        } else {
+            out
+        };
+        digest
+            .strip_prefix("Another: ")
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string()
     }
 
     fn send(&self, from: &str, to: &str, subject: &str, request: bool) {
@@ -184,6 +271,13 @@ impl Env {
 
     fn holds(&self) -> Vec<Value> {
         self.json(&["holds"]).as_array().unwrap().clone()
+    }
+
+    fn seed_auto_target(&self, agent: &str, via: another_core::WakeVia, target: &str) {
+        another_core::Store::open(&self.another_home)
+            .unwrap()
+            .set_wake_target(agent, via, target, true)
+            .unwrap();
     }
 
     fn set_pane(&self, pane: &str, state: Option<&str>) {
@@ -237,8 +331,8 @@ fn denial(out: &str) -> String {
 #[test]
 fn post_tool_mentions_new_mail_once_and_is_silent_otherwise() {
     let env = Env::new();
-    env.start("claude", &env.main, &[]);
-    env.start("codex", &env.wt, &[]);
+    let claude = env.start("claude", &env.main, &[]);
+    let codex = env.start("codex", &env.wt, &[]);
     let after_bash = tool(&env.main, "Bash", json!({ "command": "ls" }));
 
     assert_eq!(
@@ -247,18 +341,13 @@ fn post_tool_mentions_new_mail_once_and_is_silent_otherwise() {
         "nothing new"
     );
 
-    env.send(
-        "codex@shop-review",
-        "claude@shop",
-        "Release src/a.rs?",
-        true,
-    );
+    env.send(&codex, &claude, "Release src/a.rs?", true);
     let notice = context(&env.hook("post-tool", "claude", &after_bash));
     assert!(
-        notice.contains("1 new message(s) for claude@shop (0 urgent)"),
+        notice.contains(&format!("1 new message(s) for {claude} (0 urgent)")),
         "{notice}"
     );
-    assert!(notice.contains("\"Release src/a.rs?\" from codex@shop-review"));
+    assert!(notice.contains(&format!("\"Release src/a.rs?\" from {codex}")));
     assert!(notice.contains("opens request"), "{notice}");
     assert!(!notice.contains("secret body"), "bodies never appear");
 
@@ -267,8 +356,8 @@ fn post_tool_mentions_new_mail_once_and_is_silent_otherwise() {
     assert_eq!(env.hook("prompt", "claude", &after_bash), "");
 
     // Cursor gets its own context format.
-    env.start("cursor", &env.main, &[]);
-    env.send("codex@shop-review", "cursor@shop", "Docs", false);
+    let cursor = env.start("cursor", &env.main, &[]);
+    env.send(&codex, &cursor, "Docs", false);
     let out = env.hook("post-tool", "cursor", &after_bash);
     let v: Value = serde_json::from_str(out.trim()).unwrap();
     assert!(v["additional_context"].as_str().unwrap().contains("Docs"));
@@ -282,12 +371,12 @@ fn post_tool_mentions_new_mail_once_and_is_silent_otherwise() {
     assert!(!projects.to_string().contains("elsewhere"));
 
     // Both notices were recorded with their message ids; reading one counts as acting on it.
-    let unread = env.json(&["inbox", "--agent", "claude@shop", "--unread"]);
+    let unread = env.json(&["inbox", "--agent", &claude, "--unread"]);
     let id = unread["messages"][0]["message_id"]
         .as_str()
         .unwrap()
         .to_string();
-    env.ok(&["ack", "--agent", "claude@shop", &id]);
+    env.ok(&["ack", "--agent", &claude, &id]);
     let stats = env.json(&["stats", "--since", "1h"]);
     assert_eq!(stats["notices_mid_task"], 2, "{stats}");
     assert_eq!(stats["notices_prompt"], 0);
@@ -297,15 +386,14 @@ fn post_tool_mentions_new_mail_once_and_is_silent_otherwise() {
 }
 
 #[test]
-fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
+fn advisory_projection_holds_files_and_reports_sibling_worktree_conflicts() {
     let env = Env::new();
-    env.start("claude", &env.main, &[]);
-    env.start("codex", &env.wt, &[]);
+    let claude = env.start("claude", &env.main, &[]);
+    let codex = env.start("codex", &env.wt, &[]);
     let a = env.main.join("src/a.rs");
 
     // Claude edits: allowed silently, and the file is now held.
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "claude",
         &tool(
             &env.main,
@@ -316,7 +404,7 @@ fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
     assert_eq!(out, "", "an allowed edit prints nothing");
     let holds = env.holds();
     assert_eq!(holds.len(), 1);
-    assert_eq!(holds[0]["agent"], "claude@shop");
+    assert_eq!(holds[0]["agent"], claude);
     assert_eq!(holds[0]["pattern"], "src/a.rs");
     assert_eq!(holds[0]["exclusive"], true);
     assert!(holds[0]["reason"].as_str().unwrap().contains("edit hook"));
@@ -324,13 +412,12 @@ fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
     // Codex, in a sibling worktree of the same repository, patches the same file: stopped,
     // with the holder named and a way to ask.
     let patch = "*** Begin Patch\n*** Update File: src/a.rs\n@@\n-x\n+y\n*** End Patch\n";
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(&env.wt, "apply_patch", json!({ "command": patch })),
     );
     let reason = denial(&out);
-    assert!(reason.contains("held by claude@shop"), "{reason}");
+    assert!(reason.contains(&format!("held by {claude}")), "{reason}");
     assert!(
         reason.starts_with("Another stopped this edit: src/a.rs is held by"),
         "paths are project-relative: {reason}"
@@ -341,15 +428,16 @@ fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
     );
     assert!(reason.contains("shop:src/a.rs"), "{reason}");
     assert!(
-        reason.contains("another send --from codex@shop-review --to claude@shop --request"),
+        reason.contains(&format!(
+            "another send --from {codex} --to {claude} --request"
+        )),
         "{reason}"
     );
     assert!(!reason.contains('\u{2014}'), "no em dashes in copy");
 
     // A different file is fine, and gets its own hold in the worktree's project.
     let patch = "*** Begin Patch\n*** Add File: src/b.rs\n+fn b() {}\n*** End Patch\n";
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(&env.wt, "apply_patch", json!({ "command": patch })),
     );
@@ -357,11 +445,10 @@ fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
     assert!(env
         .holds()
         .iter()
-        .any(|h| h["agent"] == "codex@shop-review" && h["pattern"] == "src/b.rs"));
+        .any(|h| h["agent"] == codex && h["pattern"] == "src/b.rs"));
 
     // Relative paths resolve against cwd; Claude is now the one stopped.
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "claude",
         &tool(
             &env.main,
@@ -369,11 +456,10 @@ fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
             json!({ "file_path": "src/b.rs", "content": "" }),
         ),
     );
-    assert!(denial(&out).contains("held by codex@shop-review"));
+    assert!(denial(&out).contains(&format!("held by {codex}")));
 
     // Notebooks, files outside any project, and tools without a path.
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "claude",
         &tool(
             &env.main,
@@ -383,14 +469,13 @@ fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
     );
     assert_eq!(out, "");
     let scratch = env.root.join("scratch/x.txt");
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "claude",
         &tool(&env.main, "Write", json!({ "file_path": scratch })),
     );
     assert_eq!(out, "");
     assert_eq!(
-        env.hook("pre-edit", "claude", &tool(&env.main, "Edit", json!({}))),
+        env.advisory("claude", &tool(&env.main, "Edit", json!({}))),
         ""
     );
     let patterns: Vec<String> = env
@@ -404,33 +489,30 @@ fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
         "{patterns:?}"
     );
 
-    // Editing a file one already holds writes nothing new.
-    let events_before = env
-        .json(&["events", "--limit", "1000"])
-        .as_array()
-        .unwrap()
-        .len();
-    env.hook(
-        "pre-edit",
+    // Editing a file one already holds takes no new hold: it renews the session's holds
+    // so the edit starts with a full TTL, and records that once.
+    let events_before = env.json(&["events", "--limit", "1000"]);
+    let holds_before = env.holds().len();
+    env.advisory(
         "claude",
         &tool(&env.main, "Edit", json!({ "file_path": a })),
     );
-    let events_after = env
-        .json(&["events", "--limit", "1000"])
-        .as_array()
-        .unwrap()
-        .len();
-    assert_eq!(events_before, events_after);
+    let events_after = env.json(&["events", "--limit", "1000"]);
+    let added = &events_after.as_array().unwrap()[events_before.as_array().unwrap().len()..];
+    assert_eq!(added.len(), 1, "{added:?}");
+    assert_eq!(added[0]["kind"], "hold.renewed");
+    assert_eq!(env.holds().len(), holds_before);
 
-    // Session end releases Claude's holds; Codex may edit src/a.rs now.
+    // An unfenced hook End does not release holds; explicit exact-actor End does.
     env.hook(
         "session-end",
         "claude",
         &json!({ "session_id": "claude-s1", "cwd": env.main }),
     );
+    assert!(env.holds().iter().any(|h| h["agent"] == claude));
+    env.ok(&["heartbeat", "--agent", &claude, "--end"]);
     let patch = "*** Begin Patch\n*** Update File: src/a.rs\n@@\n-x\n+y\n*** End Patch\n";
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(&env.wt, "apply_patch", json!({ "command": patch })),
     );
@@ -445,38 +527,101 @@ fn pre_edit_holds_files_and_stops_edits_in_sibling_worktrees() {
         "a.rs, b.rs, x.ipynb, then a.rs again"
     );
     let first = &stats["blocked"][1];
-    assert_eq!(first["agent"], "codex@shop-review");
-    assert_eq!(first["holder"], "claude@shop");
+    assert_eq!(first["agent"], codex);
+    assert_eq!(first["holder"], claude);
     assert_eq!(first["path"], "src/a.rs");
     assert_eq!(first["project"], "shop-review");
     assert_eq!(first["holder_project"], "shop");
     let human = env.ok(&["stats", "--since", "1h"]);
     assert!(human.contains("edits stopped by a hold"), "{human}");
     assert!(
-        human.contains("codex@shop-review on shop-review:src/a.rs, held by claude@shop"),
+        human.contains(&format!(
+            "{codex} on shop-review:src/a.rs, held by {claude}"
+        )),
         "{human}"
     );
 }
 
 #[test]
-fn tool_hooks_fail_open_fast_when_the_database_is_missing_or_locked() {
+fn controlled_admissions_conflict_across_worktrees_and_keep_distinct_holds() {
+    let env = Env::new();
+    let claude = env.start("claude", &env.main, &[]);
+    let reviewer = env.start("claude", &env.wt, &[]);
+    for root in [&env.main, &env.wt] {
+        for file in ["src/a.rs", "src/b.rs"] {
+            std::fs::write(root.join(file), b"x").unwrap();
+        }
+    }
+    let admit = |client: &str, root: &Path, path: &str, id: &str| {
+        let mut input = tool(
+            root,
+            "mcp__another__controlled_edit",
+            json!({"project":root,"path":path,
+            "expected_sha256":another_core::controlled_sha256(b"x"),"replacement":"y"}),
+        );
+        input["tool_use_id"] = json!(id);
+        env.hook("pre-controlled-edit", client, &input)
+    };
+    assert_eq!(admit("claude", &env.main, "src/a.rs", "claude-a"), "");
+    let first = env.holds();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0]["agent"], claude);
+    assert!(denial(&admit("claude", &env.wt, "src/a.rs", "reviewer-a")).contains(&claude));
+    assert_eq!(
+        env.holds(),
+        first,
+        "conflict must not leave partial coverage"
+    );
+    assert_eq!(admit("claude", &env.wt, "src/b.rs", "reviewer-b"), "");
+    assert!(denial(&admit("claude", &env.main, "src/b.rs", "claude-b")).contains(&reviewer));
+    assert_eq!(admit("claude", &env.main, "src/a.rs", "claude-a2"), "");
+    let held = env.holds();
+    assert_eq!(held.len(), 3, "each operation needs its own pending hold");
+    assert!(
+        held.contains(&first[0]),
+        "older pending coverage must remain unchanged"
+    );
+    env.hook(
+        "session-end",
+        "claude",
+        &json!({"session_id":"claude-s1","cwd":env.main}),
+    );
+    assert_eq!(env.holds(), held);
+    env.ok(&["heartbeat", "--agent", &claude, "--end"]);
+    assert_eq!(
+        env.holds(),
+        held,
+        "explicit end must not release pending admissions"
+    );
+    let stats = env.json(&["stats", "--since", "1h"]);
+    assert_eq!(stats["edits_blocked"], 2);
+    assert_eq!(stats["holds_auto_acquired"], 3);
+}
+
+#[test]
+fn tool_hooks_are_fast_when_the_database_is_missing_or_locked() {
+    let denied = |out: &str| {
+        serde_json::from_str::<Value>(out).unwrap()["hookSpecificOutput"]["permissionDecision"]
+            == "deny"
+    };
     let env = Env::new();
     let edit = tool(
         &env.main,
         "Edit",
         json!({ "file_path": env.main.join("src/a.rs") }),
     );
-    // No database yet: silent, quick, and nothing is created.
+    // No database yet: the notice hook is silent, the edit guard stops the edit it cannot
+    // protect, both are quick, and nothing is created.
     let (out, took) = env.hook_timed("post-tool", "claude", &edit, &[]);
     assert_eq!(out, "");
     assert!(took < Duration::from_secs(2), "{took:?}");
-    let (out, _) = env.hook_timed("pre-edit", "claude", &edit, &[]);
-    assert_eq!(out, "");
-    assert!(!env.another_home.join("another.db").exists());
+    let (out, _) = env.hook_timed("pre-native-edit", "claude", &edit, &[]);
+    assert!(denied(&out), "{out}");
+    assert!(!env.another_home.exists());
 
-    env.start("claude", &env.main, &[]);
-    env.start("codex", &env.wt, &[]);
-    env.send("codex@shop-review", "claude@shop", "While locked", false);
+    let claude = env.start("claude", &env.main, &[]);
+    let codex = env.start("codex", &env.wt, &[]);
+    env.send(&codex, &claude, "While locked", false);
 
     // A writer holding the lock: announcing needs the claim write, so the notice waits for
     // the next tool call instead of risking a duplicate. Quiet and quick, never lost.
@@ -486,9 +631,9 @@ fn tool_hooks_fail_open_fast_when_the_database_is_missing_or_locked() {
     let (out, took) = env.hook_timed("post-tool", "claude", &after, &[]);
     assert_eq!(out, "");
     assert!(took < Duration::from_secs(2), "{took:?}");
-    // The edit guard cannot write: it lets the edit through and logs why.
-    let (out, took) = env.hook_timed("pre-edit", "claude", &edit, &[]);
-    assert_eq!(out, "");
+    // The edit guard cannot write, so it cannot hold the file: the edit is stopped.
+    let (out, took) = env.hook_timed("pre-native-edit", "claude", &edit, &[]);
+    assert!(denied(&out), "{out}");
     assert!(took < Duration::from_secs(3), "{took:?}");
     db.execute_batch("ROLLBACK").unwrap();
     drop(db);
@@ -507,15 +652,17 @@ fn tool_hooks_fail_open_fast_when_the_database_is_missing_or_locked() {
     let (out, took) = env.hook_timed("post-tool", "claude", &after, &[]);
     assert_eq!(out, "");
     assert!(took < Duration::from_secs(2), "{took:?}");
-    let (out, took) = env.hook_timed("pre-edit", "claude", &edit, &[]);
-    assert_eq!(out, "");
+    let (out, took) = env.hook_timed("pre-native-edit", "claude", &edit, &[]);
+    assert!(denied(&out), "{out}");
     assert!(took < Duration::from_secs(3), "{took:?}");
     db.execute_batch("ROLLBACK").unwrap();
     drop(db);
 
+    // Only the hook that failed open leaves a trace; a stopped edit says why itself.
     let log = std::fs::read_to_string(env.another_home.join("logs/hooks.log")).unwrap();
-    assert!(log.contains("pre-edit --client claude"), "{log}");
+    assert!(log.contains("post-tool --client claude"), "{log}");
     assert!(log.contains("failing open"), "{log}");
+    assert!(!log.contains("pre-native-edit"), "{log}");
 }
 
 impl Env {
@@ -532,18 +679,15 @@ impl Env {
 }
 
 #[test]
-fn herdr_panes_are_captured_at_start_and_released_at_end() {
+fn hook_start_and_end_do_not_change_wake_targets() {
     let env = Env::new();
     let in_herdr = [("HERDR_PANE_ID", "w7:p2"), ("TERM_PROGRAM", "herdr")];
-    env.start("claude", &env.main, &in_herdr);
-    let targets = env.json(&["wake", "list"]);
-    assert_eq!(targets[0]["agent"], "claude@shop");
-    assert_eq!(targets[0]["via"], "herdr");
-    assert_eq!(targets[0]["target"], "w7:p2");
-    assert_eq!(targets[0]["auto"], true);
+    let claude = env.start("claude", &env.main, &in_herdr);
+    assert!(env.json(&["wake", "list"]).as_array().unwrap().is_empty());
+    env.seed_auto_target(&claude, another_core::WakeVia::Herdr, "w7:p2");
 
     // tmux running inside a Herdr pane: tmux is the innermost terminal.
-    env.start(
+    let codex = env.start(
         "codex",
         &env.wt,
         &[
@@ -552,28 +696,36 @@ fn herdr_panes_are_captured_at_start_and_released_at_end() {
             ("TERM_PROGRAM", "tmux"),
         ],
     );
+    assert_eq!(env.json(&["wake", "list"]).as_array().unwrap().len(), 1);
+    env.seed_auto_target(&codex, another_core::WakeVia::Tmux, "%4");
     let targets = env.json(&["wake", "list"]);
     assert!(targets
         .as_array()
         .unwrap()
         .iter()
-        .any(|t| t["agent"] == "codex@shop-review" && t["via"] == "tmux" && t["target"] == "%4"));
+        .any(|t| t["agent"] == codex && t["via"] == "tmux" && t["target"] == "%4"));
 
-    // A session ending in another pane leaves the capture alone; ending in this one clears it.
+    // Neither a different pane's End nor a matching pane's End clears the target.
     let end = json!({ "session_id": "claude-s1", "cwd": env.main });
     env.hook_timed("session-end", "claude", &end, &[("HERDR_PANE_ID", "w9:p9")]);
     assert_eq!(env.json(&["wake", "list"]).as_array().unwrap().len(), 2);
     env.hook_timed("session-end", "claude", &end, &in_herdr);
     let targets = env.json(&["wake", "list"]);
-    assert!(!targets.to_string().contains("claude@shop"), "{targets}");
+    assert!(targets
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["agent"] == claude));
 }
 
 #[test]
 fn wake_prune_drops_dead_automatic_targets_only() {
     hosted_ci::require_hosted_runner();
     let env = Env::new();
-    env.start("claude", &env.main, &[("HERDR_PANE_ID", "w1:p1")]);
-    env.start("codex", &env.wt, &[("HERDR_PANE_ID", "w1:p2")]);
+    let claude = env.start("claude", &env.main, &[("HERDR_PANE_ID", "w1:p1")]);
+    let codex = env.start("codex", &env.wt, &[("HERDR_PANE_ID", "w1:p2")]);
+    env.seed_auto_target(&claude, another_core::WakeVia::Herdr, "w1:p1");
+    env.seed_auto_target(&codex, another_core::WakeVia::Herdr, "w1:p2");
     env.ok(&["agent", "register", "bob", "--program", "other"]);
     env.ok(&[
         "wake",
@@ -596,12 +748,9 @@ fn wake_prune_drops_dead_automatic_targets_only() {
             .unwrap()
             .clone()
     };
-    assert_eq!(row("claude@shop")["pruned"], true);
-    assert!(row("claude@shop")["reason"]
-        .as_str()
-        .unwrap()
-        .contains("gone"));
-    assert_eq!(row("codex@shop-review")["pruned"], false);
+    assert_eq!(row(&claude)["pruned"], true);
+    assert!(row(&claude)["reason"].as_str().unwrap().contains("gone"));
+    assert_eq!(row(&codex)["pruned"], false);
     assert_eq!(row("bob")["pruned"], false, "targets set by hand stay");
     assert_eq!(env.json(&["wake", "list"]).as_array().unwrap().len(), 3);
 
@@ -613,7 +762,7 @@ fn wake_prune_drops_dead_automatic_targets_only() {
         .iter()
         .map(|t| t["agent"].as_str().unwrap().to_string())
         .collect();
-    assert_eq!(left, ["bob", "codex@shop-review"]);
+    assert_eq!(left, ["bob".to_string(), codex]);
     // Probes only ever ask; nothing is focused or typed.
     assert!(env
         .herdr_calls()
@@ -686,6 +835,24 @@ impl Daemon {
     }
 }
 
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        if !matches!(self.child.try_wait(), Ok(None)) {
+            return;
+        }
+        let pid = self.child.id().to_string();
+        let _ = Command::new("kill").args(["-TERM", &pid]).status();
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(5) {
+            if !matches!(self.child.try_wait(), Ok(None)) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        eprintln!("test-owned daemon {pid} did not exit after SIGTERM");
+    }
+}
+
 fn wait_for(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
     let started = Instant::now();
     while started.elapsed() < limit {
@@ -700,13 +867,14 @@ fn wait_for(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
 #[test]
 fn daemon_wakes_idle_herdr_agents_and_leaves_working_ones_to_hooks() {
     let env = Env::new();
-    env.start("claude", &env.main, &[("HERDR_PANE_ID", "w7:p2")]);
-    env.start("codex", &env.wt, &[]);
+    let claude = env.start("claude", &env.main, &[("HERDR_PANE_ID", "w7:p2")]);
+    let codex = env.start("codex", &env.wt, &[]);
+    env.seed_auto_target(&claude, another_core::WakeVia::Herdr, "w7:p2");
     env.set_pane("w7:p2", Some("working claude"));
     let daemon = Daemon::start(&env);
 
     // Working: the daemon looks, but leaves delivery to the post-tool hook.
-    env.send("codex@shop-review", "claude@shop", "Rebase please", false);
+    env.send(&codex, &claude, "Rebase please", false);
     assert!(wait_for(Duration::from_secs(15), || env
         .herdr_calls()
         .iter()
@@ -744,7 +912,7 @@ fn daemon_wakes_idle_herdr_agents_and_leaves_working_ones_to_hooks() {
     assert_eq!(env.hook("post-tool", "claude", &after), "");
 
     // More mail right away does not cause a second prompt (debounced).
-    env.send("codex@shop-review", "claude@shop", "One more", false);
+    env.send(&codex, &claude, "One more", false);
     std::thread::sleep(Duration::from_secs(4));
     let prompts = env
         .herdr_calls()
@@ -767,7 +935,7 @@ fn daemon_wakes_idle_herdr_agents_and_leaves_working_ones_to_hooks() {
     assert_eq!(stats["wakes_sent"], 1, "{stats}");
     assert_eq!(stats["wakes_failed"], 0);
     assert_eq!(stats["messages_pushed"], 1);
-    assert_eq!(stats["wakes"][0]["agent"], "claude@shop");
+    assert_eq!(stats["wakes"][0]["agent"], claude);
     assert_eq!(stats["wakes"][0]["target"], "w7:p2");
     assert_eq!(stats["wakes"][0]["outcome"], "sent");
 }
@@ -777,13 +945,12 @@ fn daemon_wakes_idle_herdr_agents_and_leaves_working_ones_to_hooks() {
 
 /// F1: an edit through a symlink is checked against the file it really reaches.
 #[test]
-fn symlinked_paths_do_not_bypass_a_hold() {
+fn advisory_symlinked_paths_do_not_bypass_a_hold() {
     let env = Env::new();
-    env.start("claude", &env.main, &[]);
-    env.start("codex", &env.wt, &[]);
+    let claude = env.start("claude", &env.main, &[]);
+    let codex = env.start("codex", &env.wt, &[]);
     std::fs::write(env.wt.join("src/a.rs"), "x").unwrap();
-    let held = env.hook(
-        "pre-edit",
+    let held = env.advisory(
         "claude",
         &tool(
             &env.main,
@@ -795,8 +962,7 @@ fn symlinked_paths_do_not_bypass_a_hold() {
 
     // An alias inside the worktree pointing at its src/.
     std::os::unix::fs::symlink(env.wt.join("src"), env.wt.join("alias")).unwrap();
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(
             &env.wt,
@@ -806,14 +972,15 @@ fn symlinked_paths_do_not_bypass_a_hold() {
     );
     let reason = denial(&out);
     assert!(
-        reason.starts_with("Another stopped this edit: src/a.rs is held by claude@shop"),
+        reason.starts_with(&format!(
+            "Another stopped this edit: src/a.rs is held by {claude}"
+        )),
         "{reason}"
     );
     // An alias outside any checkout pointing into it.
     let outside = env.root.join("outside-link");
     std::os::unix::fs::symlink(env.wt.join("src"), &outside).unwrap();
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(
             &env.wt,
@@ -821,11 +988,10 @@ fn symlinked_paths_do_not_bypass_a_hold() {
             json!({ "file_path": outside.join("a.rs") }),
         ),
     );
-    assert!(denial(&out).contains("held by claude@shop"));
+    assert!(denial(&out).contains(&format!("held by {claude}")));
     // A file that is itself a symlink to the held file.
     std::os::unix::fs::symlink(env.wt.join("src/a.rs"), env.wt.join("src/link.rs")).unwrap();
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(
             &env.wt,
@@ -833,12 +999,9 @@ fn symlinked_paths_do_not_bypass_a_hold() {
             json!({ "file_path": env.wt.join("src/link.rs") }),
         ),
     );
-    assert!(denial(&out).contains("held by claude@shop"));
+    assert!(denial(&out).contains(&format!("held by {claude}")));
     // No alias hold was taken by the stopped agent.
-    assert!(!env
-        .holds()
-        .iter()
-        .any(|h| h["agent"] == "codex@shop-review"));
+    assert!(!env.holds().iter().any(|h| h["agent"] == codex));
 
     // Manual holds resolve aliases too: a hold taken through `alias/` covers src/.
     let wt = env.wt.to_string_lossy().into_owned();
@@ -847,7 +1010,7 @@ fn symlinked_paths_do_not_bypass_a_hold() {
             "hold",
             "acquire",
             "--agent",
-            "codex@shop-review",
+            &codex,
             "--project",
             &wt,
             "alias/a.rs",
@@ -866,16 +1029,11 @@ fn symlinked_paths_do_not_bypass_a_hold() {
 #[test]
 fn concurrent_hooks_announce_a_message_once() {
     let env = Env::new();
-    env.start("claude", &env.main, &[]);
-    env.start("codex", &env.wt, &[]);
+    let claude = env.start("claude", &env.main, &[]);
+    let codex = env.start("codex", &env.wt, &[]);
     let after = tool(&env.main, "Bash", json!({}));
     for round in 0..5 {
-        env.send(
-            "codex@shop-review",
-            "claude@shop",
-            &format!("round {round}"),
-            false,
-        );
+        env.send(&codex, &claude, &format!("round {round}"), false);
         let outs: Vec<String> = std::thread::scope(|s| {
             let handles: Vec<_> = (0..8)
                 .map(|_| s.spawn(|| env.hook("post-tool", "claude", &after)))
@@ -894,12 +1052,13 @@ fn concurrent_hooks_announce_a_message_once() {
 #[test]
 fn daemon_does_not_wake_for_mail_a_hook_announced_during_the_probe() {
     let env = Env::new();
-    env.start("claude", &env.main, &[("HERDR_PANE_ID", "w7:p2")]);
-    env.start("codex", &env.wt, &[]);
+    let claude = env.start("claude", &env.main, &[("HERDR_PANE_ID", "w7:p2")]);
+    let codex = env.start("codex", &env.wt, &[]);
+    env.seed_auto_target(&claude, another_core::WakeVia::Herdr, "w7:p2");
     env.set_pane("w7:p2", Some("idle claude"));
     std::fs::write(env.herdr_dir.join("slow"), "").unwrap();
     let daemon = Daemon::start(&env);
-    env.send("codex@shop-review", "claude@shop", "Race me", false);
+    env.send(&codex, &claude, "Race me", false);
     // The daemon has picked the message and is waiting on Herdr.
     assert!(wait_for(Duration::from_secs(15), || env
         .herdr_calls()
@@ -926,18 +1085,13 @@ fn daemon_does_not_wake_for_mail_a_hook_announced_during_the_probe() {
 #[test]
 fn a_large_burst_is_counted_in_full() {
     let env = Env::new();
-    env.start("claude", &env.main, &[]);
-    env.start("codex", &env.wt, &[]);
+    let claude = env.start("claude", &env.main, &[]);
+    let codex = env.start("codex", &env.wt, &[]);
     let after = tool(&env.main, "Bash", json!({}));
-    env.send("codex@shop-review", "claude@shop", "warmup", false);
+    env.send(&codex, &claude, "warmup", false);
     assert!(!env.hook("post-tool", "claude", &after).is_empty());
     for i in 0..120 {
-        env.send(
-            "codex@shop-review",
-            "claude@shop",
-            &format!("burst {i}"),
-            false,
-        );
+        env.send(&codex, &claude, &format!("burst {i}"), false);
     }
     let notice = context(&env.hook("post-tool", "claude", &after));
     assert!(notice.contains("120 new message(s)"), "{notice}");
@@ -950,11 +1104,12 @@ fn a_large_burst_is_counted_in_full() {
 #[test]
 fn a_hung_adapter_does_not_block_sigterm() {
     let env = Env::new();
-    env.start("claude", &env.main, &[("HERDR_PANE_ID", "w7:p2")]);
-    env.start("codex", &env.wt, &[]);
+    let claude = env.start("claude", &env.main, &[("HERDR_PANE_ID", "w7:p2")]);
+    let codex = env.start("codex", &env.wt, &[]);
+    env.seed_auto_target(&claude, another_core::WakeVia::Herdr, "w7:p2");
     std::fs::write(env.herdr_dir.join("hang"), "").unwrap();
     let daemon = Daemon::start(&env);
-    env.send("codex@shop-review", "claude@shop", "Anyone there?", false);
+    env.send(&codex, &claude, "Anyone there?", false);
     assert!(wait_for(Duration::from_secs(15), || env
         .herdr_calls()
         .iter()
@@ -1004,15 +1159,14 @@ fn adapter_commands_are_bounded() {
 
 /// N1: `..` after a symlink is applied where the link points, not lexically.
 #[test]
-fn dot_dot_after_a_symlink_does_not_escape_the_guard() {
+fn advisory_dot_dot_after_a_symlink_does_not_escape_the_guard() {
     let env = Env::new();
-    env.start("claude", &env.main, &[]);
+    let claude = env.start("claude", &env.main, &[]);
     env.start("codex", &env.wt, &[]);
     std::fs::create_dir_all(env.wt.join("src/deep")).unwrap();
     std::fs::write(env.wt.join("src/a.rs"), "x").unwrap();
     std::os::unix::fs::symlink(env.wt.join("src/deep"), env.wt.join("deeplink")).unwrap();
-    let held = env.hook(
-        "pre-edit",
+    let held = env.advisory(
         "claude",
         &tool(
             &env.main,
@@ -1026,33 +1180,30 @@ fn dot_dot_after_a_symlink_does_not_escape_the_guard() {
         "deeplink/../a.rs".to_string(),
         format!("{}/deeplink/../a.rs", env.wt.display()),
     ] {
-        let out = env.hook(
-            "pre-edit",
+        let out = env.advisory(
             "codex",
             &tool(&env.wt, "Edit", json!({ "file_path": path })),
         );
         assert!(
-            denial(&out).contains("src/a.rs is held by claude@shop"),
+            denial(&out).contains(&format!("src/a.rs is held by {claude}")),
             "{path}"
         );
     }
     // A plain `..` with no symlink still resolves the ordinary way.
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(&env.wt, "Edit", json!({ "file_path": "src/deep/../a.rs" })),
     );
-    assert!(denial(&out).contains("held by claude@shop"));
+    assert!(denial(&out).contains(&format!("held by {claude}")));
 }
 
 /// N2: a dangling symlink to a held, not yet existing file is checked at its target.
 #[test]
-fn a_dangling_symlink_to_a_held_new_file_is_stopped() {
+fn advisory_dangling_symlink_to_a_held_new_file_is_stopped() {
     let env = Env::new();
-    env.start("claude", &env.main, &[]);
-    env.start("codex", &env.wt, &[]);
-    let out = env.hook(
-        "pre-edit",
+    let claude = env.start("claude", &env.main, &[]);
+    let codex = env.start("codex", &env.wt, &[]);
+    let out = env.advisory(
         "claude",
         &tool(
             &env.main,
@@ -1063,8 +1214,7 @@ fn a_dangling_symlink_to_a_held_new_file_is_stopped() {
     assert_eq!(out, "");
     assert!(!env.wt.join("src/new.rs").exists());
     std::os::unix::fs::symlink(env.wt.join("src/new.rs"), env.wt.join("dangle.rs")).unwrap();
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(
             &env.wt,
@@ -1073,17 +1223,13 @@ fn a_dangling_symlink_to_a_held_new_file_is_stopped() {
         ),
     );
     assert!(
-        denial(&out).contains("src/new.rs is held by claude@shop"),
+        denial(&out).contains(&format!("src/new.rs is held by {claude}")),
         "{out}"
     );
-    assert!(!env
-        .holds()
-        .iter()
-        .any(|h| h["agent"] == "codex@shop-review"));
+    assert!(!env.holds().iter().any(|h| h["agent"] == codex));
     // A chain of links, and a loop, do not hang or crash the hook.
     std::os::unix::fs::symlink(env.wt.join("dangle.rs"), env.wt.join("chain.rs")).unwrap();
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(
             &env.wt,
@@ -1091,11 +1237,11 @@ fn a_dangling_symlink_to_a_held_new_file_is_stopped() {
             json!({ "file_path": env.wt.join("chain.rs") }),
         ),
     );
-    assert!(denial(&out).contains("held by claude@shop"));
+    assert!(denial(&out).contains(&format!("held by {claude}")));
     std::os::unix::fs::symlink(env.wt.join("loop2"), env.wt.join("loop1")).unwrap();
     std::os::unix::fs::symlink(env.wt.join("loop1"), env.wt.join("loop2")).unwrap();
     let (out, took) = env.hook_timed(
-        "pre-edit",
+        "pre-native-edit",
         "codex",
         &tool(
             &env.wt,
@@ -1104,15 +1250,15 @@ fn a_dangling_symlink_to_a_held_new_file_is_stopped() {
         ),
         &[],
     );
-    assert_eq!(out, "");
+    assert!(out.contains("\"permissionDecision\":\"deny\""));
     assert!(took < Duration::from_secs(2));
 }
 
 /// N5: a glob hold taken through a symlinked directory protects the real files.
 #[test]
-fn glob_holds_through_a_symlinked_directory_are_resolved() {
+fn advisory_glob_holds_through_a_symlinked_directory_are_resolved() {
     let env = Env::new();
-    env.start("claude", &env.main, &[]);
+    let claude = env.start("claude", &env.main, &[]);
     env.start("codex", &env.wt, &[]);
     std::os::unix::fs::symlink(env.main.join("src"), env.main.join("alias")).unwrap();
     let main = env.main.to_string_lossy().into_owned();
@@ -1120,7 +1266,7 @@ fn glob_holds_through_a_symlinked_directory_are_resolved() {
         "hold",
         "acquire",
         "--agent",
-        "claude@shop",
+        &claude,
         "--project",
         &main,
         "alias/**",
@@ -1132,7 +1278,7 @@ fn glob_holds_through_a_symlinked_directory_are_resolved() {
         "hold",
         "acquire",
         "--agent",
-        "claude@shop",
+        &claude,
         "--project",
         &main,
         &abs,
@@ -1146,8 +1292,7 @@ fn glob_holds_through_a_symlinked_directory_are_resolved() {
         .collect();
     assert_eq!(patterns, ["src/*.toml", "*.md"]);
     // The sibling worktree's edit of a file under src/ is now stopped.
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(
             &env.wt,
@@ -1155,7 +1300,7 @@ fn glob_holds_through_a_symlinked_directory_are_resolved() {
             json!({ "file_path": env.wt.join("src/b.rs") }),
         ),
     );
-    assert!(denial(&out).contains("held by claude@shop"));
+    assert!(denial(&out).contains(&format!("held by {claude}")));
 }
 
 /// N4: an adapter that leaves a process behind on its stdout does not stall the caller.
@@ -1194,12 +1339,11 @@ fn a_descendant_holding_stdout_does_not_outlast_the_deadline() {
 }
 
 #[test]
-fn a_dangling_link_after_a_missing_directory_and_dot_dot_is_followed() {
+fn advisory_dangling_link_after_a_missing_directory_and_dot_dot_is_followed() {
     let env = Env::new();
-    env.start("claude", &env.main, &[]);
+    let claude = env.start("claude", &env.main, &[]);
     env.start("codex", &env.wt, &[]);
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "claude",
         &tool(
             &env.main,
@@ -1211,8 +1355,7 @@ fn a_dangling_link_after_a_missing_directory_and_dot_dot_is_followed() {
     std::os::unix::fs::symlink(env.wt.join("src/new.rs"), env.wt.join("dangle.rs")).unwrap();
     // `nope` does not exist; a client that creates parent directories before writing
     // ends up writing through `dangle.rs`.
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(
             &env.wt,
@@ -1221,7 +1364,7 @@ fn a_dangling_link_after_a_missing_directory_and_dot_dot_is_followed() {
         ),
     );
     assert!(
-        denial(&out).contains("src/new.rs is held by claude@shop"),
+        denial(&out).contains(&format!("src/new.rs is held by {claude}")),
         "{out}"
     );
 }
@@ -1236,12 +1379,11 @@ fn volume_folds_case(dir: &Path) -> bool {
 }
 
 #[test]
-fn a_new_file_in_another_letter_case_matches_only_where_the_volume_folds_case() {
+fn advisory_new_file_case_matches_only_where_the_volume_folds_case() {
     let env = Env::new();
-    env.start("claude", &env.main, &[]);
+    let claude = env.start("claude", &env.main, &[]);
     env.start("codex", &env.wt, &[]);
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "claude",
         &tool(
             &env.main,
@@ -1250,8 +1392,7 @@ fn a_new_file_in_another_letter_case_matches_only_where_the_volume_folds_case() 
         ),
     );
     assert_eq!(out, "");
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(
             &env.wt,
@@ -1261,7 +1402,7 @@ fn a_new_file_in_another_letter_case_matches_only_where_the_volume_folds_case() 
     );
     if volume_folds_case(&env.wt) {
         assert!(
-            denial(&out).contains("src/NEW.RS is held by claude@shop"),
+            denial(&out).contains(&format!("src/NEW.RS is held by {claude}")),
             "{out}"
         );
     } else {
@@ -1270,7 +1411,7 @@ fn a_new_file_in_another_letter_case_matches_only_where_the_volume_folds_case() 
 }
 
 #[test]
-fn a_symlink_loop_does_not_register_a_second_project() {
+fn advisory_symlink_loop_does_not_register_a_second_project() {
     let env = Env::new();
     env.start("codex", &env.wt, &[]);
     std::os::unix::fs::symlink(env.wt.join("loop2"), env.wt.join("loop1")).unwrap();
@@ -1280,8 +1421,7 @@ fn a_symlink_loop_does_not_register_a_second_project() {
     let alias = env.root.join("alias");
     std::os::unix::fs::symlink(env.wt.parent().unwrap(), &alias).unwrap();
     let raw = alias.join(env.wt.file_name().unwrap()).join("loop1/x.rs");
-    let out = env.hook(
-        "pre-edit",
+    let out = env.advisory(
         "codex",
         &tool(&env.wt, "Write", json!({ "file_path": raw })),
     );
@@ -1295,10 +1435,10 @@ fn a_symlink_loop_does_not_register_a_second_project() {
 }
 
 #[test]
-fn case_folding_keeps_glob_character_classes_exact() {
+fn advisory_case_folding_keeps_glob_character_classes_exact() {
     let env = Env::new();
-    env.start("claude", &env.main, &[]);
-    env.start("codex", &env.wt, &[]);
+    let claude = env.start("claude", &env.main, &[]);
+    let codex = env.start("codex", &env.wt, &[]);
     write(&env.wt.join("src/Upper.rs"), "");
     write(&env.wt.join("src/a.rs"), "");
     let main = env.main.to_string_lossy().into_owned();
@@ -1315,32 +1455,31 @@ fn case_folding_keeps_glob_character_classes_exact() {
             "hold",
             "acquire",
             "--agent",
-            "claude@shop",
+            &claude,
             "--project",
             &main,
             glob,
         ]);
-        let out = env.hook(
-            "pre-edit",
+        let out = env.advisory(
             "codex",
             &tool(&env.wt, "Write", json!({ "file_path": env.wt.join(file) })),
         );
         if denied {
             assert!(
-                out.contains("held by claude@shop"),
+                out.contains(&format!("held by {claude}")),
                 "{glob} vs {file}: {out}"
             );
-            assert!(denial(&out).contains("held by claude@shop"));
+            assert!(denial(&out).contains(&format!("held by {claude}")));
         } else {
             assert_eq!(out, "", "{glob} vs {file}");
         }
-        env.json(&["hold", "release", "--agent", "claude@shop"]);
-        env.json(&["hold", "release", "--agent", "codex@shop-review"]);
+        env.json(&["hold", "release", "--agent", &claude]);
+        env.json(&["hold", "release", "--agent", &codex]);
     }
 }
 
 #[test]
-fn a_symlink_loop_then_dot_dot_does_not_register_a_second_project() {
+fn advisory_symlink_loop_then_dot_dot_does_not_register_a_second_project() {
     let env = Env::new();
     env.start("codex", &env.wt, &[]);
     std::os::unix::fs::symlink(env.wt.join("loop2"), env.wt.join("loop1")).unwrap();
@@ -1350,8 +1489,7 @@ fn a_symlink_loop_then_dot_dot_does_not_register_a_second_project() {
     let raw = alias
         .join(env.wt.file_name().unwrap())
         .join("loop1/../src/a.rs");
-    env.hook(
-        "pre-edit",
+    env.advisory(
         "codex",
         &tool(&env.wt, "Write", json!({ "file_path": raw })),
     );

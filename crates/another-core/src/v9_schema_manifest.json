@@ -1,0 +1,4192 @@
+[
+  {
+    "type": "index",
+    "name": "admissions_open",
+    "table": "admissions",
+    "sql": "CREATE INDEX admissions_open ON admissions(state, created_at)",
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        5,
+        "state",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        6,
+        "created_at",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        2,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "agents_identity",
+    "table": "agents",
+    "sql": "CREATE UNIQUE INDEX agents_identity ON agents(node_id, name, ifnull(project_id, ''))",
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        1,
+        "node_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        3,
+        "name",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        2,
+        -2,
+        null,
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        3,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "deliveries_by_agent",
+    "table": "deliveries",
+    "sql": "CREATE INDEX deliveries_by_agent ON deliveries(agent_id, read_at)",
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        1,
+        "agent_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        4,
+        "read_at",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        2,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "events_by_kind",
+    "table": "events",
+    "sql": "CREATE INDEX events_by_kind ON events(kind, seq)",
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        5,
+        "kind",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        0,
+        "seq",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        2,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "events_by_node",
+    "table": "events",
+    "sql": "CREATE INDEX events_by_node ON events(node_id, seq)",
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        2,
+        "node_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        0,
+        "seq",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        2,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "holds_live",
+    "table": "holds",
+    "sql": "CREATE INDEX holds_live ON holds(project_id, released_at, expires_at)",
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        2,
+        "project_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        11,
+        "released_at",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        2,
+        10,
+        "expires_at",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        3,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "messages_by_thread",
+    "table": "messages",
+    "sql": "CREATE INDEX messages_by_thread ON messages(thread_id, created_at)",
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        2,
+        "thread_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        9,
+        "created_at",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        2,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "oauth_tokens_by_grant",
+    "table": "oauth_tokens",
+    "sql": "CREATE INDEX oauth_tokens_by_grant ON oauth_tokens(grant_id)",
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        2,
+        "grant_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "project_repos_by_key",
+    "table": "project_repos",
+    "sql": "CREATE INDEX project_repos_by_key ON project_repos(repo_key)",
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        1,
+        "repo_key",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "requests_by_status",
+    "table": "requests",
+    "sql": "CREATE INDEX requests_by_status ON requests(status, due_at)",
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        7,
+        "status",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        8,
+        "due_at",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        2,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "resource_leases_by_agent",
+    "table": "resource_leases",
+    "sql": "CREATE INDEX resource_leases_by_agent ON resource_leases(agent_id, released_at)",
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        3,
+        "agent_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        9,
+        "released_at",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        2,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "resource_leases_by_resource",
+    "table": "resource_leases",
+    "sql": "CREATE INDEX resource_leases_by_resource ON resource_leases(resource_id, released_at)",
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        1,
+        "resource_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        9,
+        "released_at",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        2,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "resources_live_identity",
+    "table": "resources",
+    "sql": "CREATE UNIQUE INDEX resources_live_identity ON resources(node_id, kind, name)\n    WHERE released_at IS NULL",
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        1,
+        "node_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        2,
+        "kind",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        2,
+        3,
+        "name",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        3,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_admission_holds_1",
+    "table": "admission_holds",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        1,
+        "hold_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_admission_holds_2",
+    "table": "admission_holds",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "admission_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        1,
+        "hold_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        2,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_admissions_1",
+    "table": "admissions",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "admission_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_admissions_2",
+    "table": "admissions",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        1,
+        "node_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        2,
+        "agent_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        2,
+        3,
+        "correlation",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        3,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_agents_1",
+    "table": "agents",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "agent_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_announcements_1",
+    "table": "announcements",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "agent_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        1,
+        "message_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        2,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_deliveries_1",
+    "table": "deliveries",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "message_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        1,
+        "agent_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        2,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_events_1",
+    "table": "events",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        1,
+        "event_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_holds_1",
+    "table": "holds",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "hold_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_invites_1",
+    "table": "invites",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "invite_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_messages_1",
+    "table": "messages",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "message_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_nodes_1",
+    "table": "nodes",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "node_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_oauth_clients_1",
+    "table": "oauth_clients",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "client_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_oauth_grants_1",
+    "table": "oauth_grants",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "grant_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_oauth_requests_1",
+    "table": "oauth_requests",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "request_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_oauth_requests_2",
+    "table": "oauth_requests",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        10,
+        "user_code",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_oauth_tokens_1",
+    "table": "oauth_tokens",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "token_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_peers_1",
+    "table": "peers",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "node_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_project_repos_1",
+    "table": "project_repos",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "project_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_projects_1",
+    "table": "projects",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "project_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_projects_2",
+    "table": "projects",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        1,
+        "node_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        2,
+        "abs_path",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        2,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_projects_3",
+    "table": "projects",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        1,
+        "node_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        3,
+        "slug",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        2,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_requests_1",
+    "table": "requests",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "request_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_resource_leases_1",
+    "table": "resource_leases",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "lease_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_resources_1",
+    "table": "resources",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "resource_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_tokens_1",
+    "table": "tokens",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "token_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_wake_targets_1",
+    "table": "wake_targets",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "agent_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "table",
+    "name": "admission_holds",
+    "table": "admission_holds",
+    "sql": "CREATE TABLE admission_holds (\n    admission_id TEXT NOT NULL REFERENCES admissions(admission_id),\n    hold_id      TEXT NOT NULL UNIQUE REFERENCES holds(hold_id),\n    PRIMARY KEY (admission_id, hold_id)\n)",
+    "columns": [
+      [
+        0,
+        "admission_id",
+        "TEXT",
+        1,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "hold_id",
+        "TEXT",
+        1,
+        null,
+        2,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "holds",
+        "hold_id",
+        "hold_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        1,
+        0,
+        "admissions",
+        "admission_id",
+        "admission_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [
+      [
+        0,
+        "sqlite_autoindex_admission_holds_2",
+        1,
+        "pk",
+        0
+      ],
+      [
+        1,
+        "sqlite_autoindex_admission_holds_1",
+        1,
+        "u",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "admission_secret",
+    "table": "admission_secret",
+    "sql": "CREATE TABLE admission_secret (\n    singleton INTEGER NOT NULL PRIMARY KEY CHECK (singleton = 1),\n    secret    BLOB NOT NULL CHECK (typeof(secret) = 'blob' AND length(secret) = 32)\n)",
+    "columns": [
+      [
+        0,
+        "singleton",
+        "INTEGER",
+        1,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "secret",
+        "BLOB",
+        1,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [],
+    "indexes": [],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "admissions",
+    "table": "admissions",
+    "sql": "CREATE TABLE admissions (\n    admission_id TEXT NOT NULL PRIMARY KEY,\n    node_id      TEXT NOT NULL REFERENCES nodes(node_id),\n    agent_id     TEXT NOT NULL REFERENCES agents(agent_id),\n    correlation  BLOB NOT NULL CHECK (typeof(correlation) = 'blob' AND length(correlation) = 32),\n    targets      BLOB NOT NULL CHECK (typeof(targets) = 'blob' AND length(targets) = 32),\n    state        TEXT NOT NULL CHECK (state IN ('pending', 'confirmed', 'expired')),\n    created_at   INTEGER NOT NULL,\n    settled_at   INTEGER,\n    UNIQUE (node_id, agent_id, correlation)\n)",
+    "columns": [
+      [
+        0,
+        "admission_id",
+        "TEXT",
+        1,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "node_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        2,
+        "agent_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        3,
+        "correlation",
+        "BLOB",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        4,
+        "targets",
+        "BLOB",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        5,
+        "state",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        6,
+        "created_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        7,
+        "settled_at",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "agents",
+        "agent_id",
+        "agent_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        1,
+        0,
+        "nodes",
+        "node_id",
+        "node_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [
+      [
+        0,
+        "admissions_open",
+        0,
+        "c",
+        0
+      ],
+      [
+        1,
+        "sqlite_autoindex_admissions_2",
+        1,
+        "u",
+        0
+      ],
+      [
+        2,
+        "sqlite_autoindex_admissions_1",
+        1,
+        "pk",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "agents",
+    "table": "agents",
+    "sql": "CREATE TABLE agents (\n    agent_id     TEXT PRIMARY KEY,\n    node_id      TEXT NOT NULL REFERENCES nodes(node_id),\n    project_id   TEXT REFERENCES projects(project_id),\n    name         TEXT NOT NULL,\n    program      TEXT NOT NULL,\n    model        TEXT,\n    description  TEXT,\n    status       TEXT NOT NULL,\n    created_at   INTEGER NOT NULL,\n    updated_at   INTEGER NOT NULL,\n    last_seen_at INTEGER,\n    event_id     TEXT NOT NULL\n, address TEXT)",
+    "columns": [
+      [
+        0,
+        "agent_id",
+        "TEXT",
+        0,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "node_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        2,
+        "project_id",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        3,
+        "name",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        4,
+        "program",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        5,
+        "model",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        6,
+        "description",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        7,
+        "status",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        8,
+        "created_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        9,
+        "updated_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        10,
+        "last_seen_at",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        11,
+        "event_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        12,
+        "address",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "projects",
+        "project_id",
+        "project_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        1,
+        0,
+        "nodes",
+        "node_id",
+        "node_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [
+      [
+        0,
+        "agents_identity",
+        1,
+        "c",
+        0
+      ],
+      [
+        1,
+        "sqlite_autoindex_agents_1",
+        1,
+        "pk",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "announcements",
+    "table": "announcements",
+    "sql": "CREATE TABLE announcements (\n    agent_id     TEXT NOT NULL REFERENCES agents(agent_id),\n    message_id   TEXT NOT NULL REFERENCES messages(message_id),\n    channel      TEXT NOT NULL,\n    announced_at INTEGER NOT NULL,\n    PRIMARY KEY (agent_id, message_id)\n)",
+    "columns": [
+      [
+        0,
+        "agent_id",
+        "TEXT",
+        1,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "message_id",
+        "TEXT",
+        1,
+        null,
+        2,
+        0
+      ],
+      [
+        2,
+        "channel",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        3,
+        "announced_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "messages",
+        "message_id",
+        "message_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        1,
+        0,
+        "agents",
+        "agent_id",
+        "agent_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [
+      [
+        0,
+        "sqlite_autoindex_announcements_1",
+        1,
+        "pk",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "audit_log",
+    "table": "audit_log",
+    "sql": "CREATE TABLE audit_log (\n    audit_id  INTEGER PRIMARY KEY AUTOINCREMENT,\n    node_id   TEXT NOT NULL REFERENCES nodes(node_id),\n    ts        INTEGER NOT NULL,\n    token_id  TEXT,\n    agent     TEXT,\n    operation TEXT NOT NULL,\n    outcome   TEXT NOT NULL,\n    detail    TEXT,\n    remote    TEXT\n)",
+    "columns": [
+      [
+        0,
+        "audit_id",
+        "INTEGER",
+        0,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "node_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        2,
+        "ts",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        3,
+        "token_id",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        4,
+        "agent",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        5,
+        "operation",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        6,
+        "outcome",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        7,
+        "detail",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        8,
+        "remote",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "nodes",
+        "node_id",
+        "node_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "deliveries",
+    "table": "deliveries",
+    "sql": "CREATE TABLE deliveries (\n    message_id TEXT NOT NULL REFERENCES messages(message_id),\n    agent_id   TEXT NOT NULL REFERENCES agents(agent_id),\n    node_id    TEXT NOT NULL REFERENCES nodes(node_id),\n    role       TEXT NOT NULL,\n    read_at    INTEGER,\n    acked_at   INTEGER,\n    PRIMARY KEY (message_id, agent_id)\n)",
+    "columns": [
+      [
+        0,
+        "message_id",
+        "TEXT",
+        1,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "agent_id",
+        "TEXT",
+        1,
+        null,
+        2,
+        0
+      ],
+      [
+        2,
+        "node_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        3,
+        "role",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        4,
+        "read_at",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        5,
+        "acked_at",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "nodes",
+        "node_id",
+        "node_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        1,
+        0,
+        "agents",
+        "agent_id",
+        "agent_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        2,
+        0,
+        "messages",
+        "message_id",
+        "message_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [
+      [
+        0,
+        "deliveries_by_agent",
+        0,
+        "c",
+        0
+      ],
+      [
+        1,
+        "sqlite_autoindex_deliveries_1",
+        1,
+        "pk",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "events",
+    "table": "events",
+    "sql": "CREATE TABLE events (\n    seq      INTEGER PRIMARY KEY AUTOINCREMENT,\n    event_id TEXT NOT NULL UNIQUE,\n    node_id  TEXT NOT NULL REFERENCES nodes(node_id),\n    ts       INTEGER NOT NULL,\n    actor    TEXT NOT NULL,\n    kind     TEXT NOT NULL,\n    payload  TEXT NOT NULL,\n    prev_id  TEXT\n, sig TEXT)",
+    "columns": [
+      [
+        0,
+        "seq",
+        "INTEGER",
+        0,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "event_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        2,
+        "node_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        3,
+        "ts",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        4,
+        "actor",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        5,
+        "kind",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        6,
+        "payload",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        7,
+        "prev_id",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        8,
+        "sig",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "nodes",
+        "node_id",
+        "node_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [
+      [
+        0,
+        "events_by_kind",
+        0,
+        "c",
+        0
+      ],
+      [
+        1,
+        "events_by_node",
+        0,
+        "c",
+        0
+      ],
+      [
+        2,
+        "sqlite_autoindex_events_1",
+        1,
+        "u",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "holds",
+    "table": "holds",
+    "sql": "CREATE TABLE holds (\n    hold_id        TEXT PRIMARY KEY,\n    node_id        TEXT NOT NULL REFERENCES nodes(node_id),\n    project_id     TEXT NOT NULL REFERENCES projects(project_id),\n    agent_id       TEXT NOT NULL REFERENCES agents(agent_id),\n    pattern        TEXT NOT NULL,\n    exclusive      INTEGER NOT NULL,\n    reason         TEXT,\n    ttl_seconds    INTEGER NOT NULL,\n    created_at     INTEGER NOT NULL,\n    renewed_at     INTEGER NOT NULL,\n    expires_at     INTEGER NOT NULL,\n    released_at    INTEGER,\n    release_reason TEXT\n)",
+    "columns": [
+      [
+        0,
+        "hold_id",
+        "TEXT",
+        0,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "node_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        2,
+        "project_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        3,
+        "agent_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        4,
+        "pattern",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        5,
+        "exclusive",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        6,
+        "reason",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        7,
+        "ttl_seconds",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        8,
+        "created_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        9,
+        "renewed_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        10,
+        "expires_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        11,
+        "released_at",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        12,
+        "release_reason",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "agents",
+        "agent_id",
+        "agent_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        1,
+        0,
+        "projects",
+        "project_id",
+        "project_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        2,
+        0,
+        "nodes",
+        "node_id",
+        "node_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [
+      [
+        0,
+        "holds_live",
+        0,
+        "c",
+        0
+      ],
+      [
+        1,
+        "sqlite_autoindex_holds_1",
+        1,
+        "pk",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "invites",
+    "table": "invites",
+    "sql": "CREATE TABLE invites (\n    invite_id   TEXT PRIMARY KEY,\n    secret_hash TEXT NOT NULL,\n    perms       TEXT NOT NULL,\n    created_at  INTEGER NOT NULL,\n    expires_at  INTEGER NOT NULL,\n    used_at     INTEGER,\n    used_by     TEXT\n)",
+    "columns": [
+      [
+        0,
+        "invite_id",
+        "TEXT",
+        0,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "secret_hash",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        2,
+        "perms",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        3,
+        "created_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        4,
+        "expires_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        5,
+        "used_at",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        6,
+        "used_by",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [],
+    "indexes": [
+      [
+        0,
+        "sqlite_autoindex_invites_1",
+        1,
+        "pk",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "messages",
+    "table": "messages",
+    "sql": "CREATE TABLE messages (\n    message_id   TEXT PRIMARY KEY,\n    node_id      TEXT NOT NULL REFERENCES nodes(node_id),\n    thread_id    TEXT NOT NULL,\n    reply_to     TEXT REFERENCES messages(message_id),\n    sender_id    TEXT NOT NULL REFERENCES agents(agent_id),\n    subject      TEXT NOT NULL,\n    body         TEXT NOT NULL,\n    importance   TEXT NOT NULL,\n    ack_required INTEGER NOT NULL DEFAULT 0,\n    created_at   INTEGER NOT NULL,\n    event_id     TEXT NOT NULL\n)",
+    "columns": [
+      [
+        0,
+        "message_id",
+        "TEXT",
+        0,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "node_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        2,
+        "thread_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        3,
+        "reply_to",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        4,
+        "sender_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        5,
+        "subject",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        6,
+        "body",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        7,
+        "importance",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        8,
+        "ack_required",
+        "INTEGER",
+        1,
+        "0",
+        0,
+        0
+      ],
+      [
+        9,
+        "created_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        10,
+        "event_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "agents",
+        "sender_id",
+        "agent_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        1,
+        0,
+        "messages",
+        "reply_to",
+        "message_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        2,
+        0,
+        "nodes",
+        "node_id",
+        "node_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [
+      [
+        0,
+        "messages_by_thread",
+        0,
+        "c",
+        0
+      ],
+      [
+        1,
+        "sqlite_autoindex_messages_1",
+        1,
+        "pk",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "nodes",
+    "table": "nodes",
+    "sql": "CREATE TABLE nodes (\n    node_id      TEXT PRIMARY KEY,\n    display_name TEXT NOT NULL,\n    role         TEXT NOT NULL DEFAULT 'home',\n    is_local     INTEGER NOT NULL DEFAULT 0,\n    created_at   INTEGER NOT NULL\n, public_key TEXT, secret_key TEXT)",
+    "columns": [
+      [
+        0,
+        "node_id",
+        "TEXT",
+        0,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "display_name",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        2,
+        "role",
+        "TEXT",
+        1,
+        "'home'",
+        0,
+        0
+      ],
+      [
+        3,
+        "is_local",
+        "INTEGER",
+        1,
+        "0",
+        0,
+        0
+      ],
+      [
+        4,
+        "created_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        5,
+        "public_key",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        6,
+        "secret_key",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [],
+    "indexes": [
+      [
+        0,
+        "sqlite_autoindex_nodes_1",
+        1,
+        "pk",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "oauth_clients",
+    "table": "oauth_clients",
+    "sql": "CREATE TABLE oauth_clients (\n    client_id      TEXT PRIMARY KEY,\n    node_id        TEXT NOT NULL REFERENCES nodes(node_id),\n    client_name    TEXT NOT NULL,\n    redirect_uris  TEXT NOT NULL,\n    application_type TEXT NOT NULL,\n    created_at     INTEGER NOT NULL\n)",
+    "columns": [
+      [
+        0,
+        "client_id",
+        "TEXT",
+        0,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "node_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        2,
+        "client_name",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        3,
+        "redirect_uris",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        4,
+        "application_type",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        5,
+        "created_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "nodes",
+        "node_id",
+        "node_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [
+      [
+        0,
+        "sqlite_autoindex_oauth_clients_1",
+        1,
+        "pk",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "oauth_grants",
+    "table": "oauth_grants",
+    "sql": "CREATE TABLE oauth_grants (\n    grant_id      TEXT PRIMARY KEY,\n    node_id       TEXT NOT NULL REFERENCES nodes(node_id),\n    client_id     TEXT NOT NULL,\n    client_name   TEXT NOT NULL,\n    agent_id      TEXT NOT NULL REFERENCES agents(agent_id),\n    project_globs TEXT NOT NULL,\n    label         TEXT,\n    resource      TEXT NOT NULL,\n    scope         TEXT NOT NULL,\n    created_at    INTEGER NOT NULL,\n    revoked_at    INTEGER,\n    last_used_at  INTEGER\n)",
+    "columns": [
+      [
+        0,
+        "grant_id",
+        "TEXT",
+        0,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "node_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        2,
+        "client_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        3,
+        "client_name",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        4,
+        "agent_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        5,
+        "project_globs",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        6,
+        "label",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        7,
+        "resource",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        8,
+        "scope",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        9,
+        "created_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        10,
+        "revoked_at",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        11,
+        "last_used_at",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "agents",
+        "agent_id",
+        "agent_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        1,
+        0,
+        "nodes",
+        "node_id",
+        "node_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [
+      [
+        0,
+        "sqlite_autoindex_oauth_grants_1",
+        1,
+        "pk",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "oauth_requests",
+    "table": "oauth_requests",
+    "sql": "CREATE TABLE oauth_requests (\n    request_id            TEXT PRIMARY KEY,\n    node_id               TEXT NOT NULL REFERENCES nodes(node_id),\n    client_id             TEXT NOT NULL,\n    client_name           TEXT NOT NULL,\n    redirect_uri          TEXT NOT NULL,\n    state                 TEXT,\n    scope                 TEXT NOT NULL,\n    resource              TEXT NOT NULL,\n    code_challenge        TEXT NOT NULL,\n    code_challenge_method TEXT NOT NULL,\n    user_code             TEXT NOT NULL UNIQUE,\n    status                TEXT NOT NULL,\n    grant_id              TEXT,\n    redirect_token_hash   TEXT NOT NULL,\n    code_hash             TEXT,\n    created_at            INTEGER NOT NULL,\n    expires_at            INTEGER NOT NULL,\n    code_expires_at       INTEGER\n)",
+    "columns": [
+      [
+        0,
+        "request_id",
+        "TEXT",
+        0,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "node_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        2,
+        "client_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        3,
+        "client_name",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        4,
+        "redirect_uri",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        5,
+        "state",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        6,
+        "scope",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        7,
+        "resource",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        8,
+        "code_challenge",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        9,
+        "code_challenge_method",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        10,
+        "user_code",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        11,
+        "status",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        12,
+        "grant_id",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        13,
+        "redirect_token_hash",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        14,
+        "code_hash",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        15,
+        "created_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        16,
+        "expires_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        17,
+        "code_expires_at",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "nodes",
+        "node_id",
+        "node_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [
+      [
+        0,
+        "sqlite_autoindex_oauth_requests_2",
+        1,
+        "u",
+        0
+      ],
+      [
+        1,
+        "sqlite_autoindex_oauth_requests_1",
+        1,
+        "pk",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "oauth_tokens",
+    "table": "oauth_tokens",
+    "sql": "CREATE TABLE oauth_tokens (\n    token_id     TEXT PRIMARY KEY,\n    node_id      TEXT NOT NULL REFERENCES nodes(node_id),\n    grant_id     TEXT NOT NULL REFERENCES oauth_grants(grant_id),\n    kind         TEXT NOT NULL,\n    secret_hash  TEXT NOT NULL,\n    resource     TEXT NOT NULL,\n    scope        TEXT NOT NULL,\n    expires_at   INTEGER NOT NULL,\n    revoked_at   INTEGER,\n    replaced_by  TEXT,\n    created_at   INTEGER NOT NULL,\n    last_used_at INTEGER\n)",
+    "columns": [
+      [
+        0,
+        "token_id",
+        "TEXT",
+        0,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "node_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        2,
+        "grant_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        3,
+        "kind",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        4,
+        "secret_hash",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        5,
+        "resource",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        6,
+        "scope",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        7,
+        "expires_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        8,
+        "revoked_at",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        9,
+        "replaced_by",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        10,
+        "created_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        11,
+        "last_used_at",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "oauth_grants",
+        "grant_id",
+        "grant_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        1,
+        0,
+        "nodes",
+        "node_id",
+        "node_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [
+      [
+        0,
+        "oauth_tokens_by_grant",
+        0,
+        "c",
+        0
+      ],
+      [
+        1,
+        "sqlite_autoindex_oauth_tokens_1",
+        1,
+        "pk",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "peers",
+    "table": "peers",
+    "sql": "CREATE TABLE peers (\n    node_id      TEXT PRIMARY KEY REFERENCES nodes(node_id),\n    role         TEXT NOT NULL,\n    url          TEXT,\n    perms        TEXT NOT NULL,\n    paired_at    INTEGER NOT NULL,\n    push_cursor  INTEGER NOT NULL DEFAULT 0,\n    pull_cursor  INTEGER NOT NULL DEFAULT 0,\n    last_sync_at INTEGER,\n    revoked_at   INTEGER\n)",
+    "columns": [
+      [
+        0,
+        "node_id",
+        "TEXT",
+        0,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "role",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        2,
+        "url",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        3,
+        "perms",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        4,
+        "paired_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        5,
+        "push_cursor",
+        "INTEGER",
+        1,
+        "0",
+        0,
+        0
+      ],
+      [
+        6,
+        "pull_cursor",
+        "INTEGER",
+        1,
+        "0",
+        0,
+        0
+      ],
+      [
+        7,
+        "last_sync_at",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        8,
+        "revoked_at",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "nodes",
+        "node_id",
+        "node_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [
+      [
+        0,
+        "sqlite_autoindex_peers_1",
+        1,
+        "pk",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "project_repos",
+    "table": "project_repos",
+    "sql": "CREATE TABLE project_repos (\n    project_id  TEXT PRIMARY KEY REFERENCES projects(project_id),\n    repo_key    TEXT NOT NULL,\n    repo_prefix TEXT NOT NULL,\n    checked_at  INTEGER NOT NULL\n)",
+    "columns": [
+      [
+        0,
+        "project_id",
+        "TEXT",
+        0,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "repo_key",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        2,
+        "repo_prefix",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        3,
+        "checked_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "projects",
+        "project_id",
+        "project_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [
+      [
+        0,
+        "project_repos_by_key",
+        0,
+        "c",
+        0
+      ],
+      [
+        1,
+        "sqlite_autoindex_project_repos_1",
+        1,
+        "pk",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "projects",
+    "table": "projects",
+    "sql": "CREATE TABLE projects (\n    project_id TEXT PRIMARY KEY,\n    node_id    TEXT NOT NULL REFERENCES nodes(node_id),\n    abs_path   TEXT NOT NULL,\n    slug       TEXT NOT NULL,\n    created_at INTEGER NOT NULL,\n    event_id   TEXT NOT NULL,\n    UNIQUE (node_id, abs_path),\n    UNIQUE (node_id, slug)\n)",
+    "columns": [
+      [
+        0,
+        "project_id",
+        "TEXT",
+        0,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "node_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        2,
+        "abs_path",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        3,
+        "slug",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        4,
+        "created_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        5,
+        "event_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "nodes",
+        "node_id",
+        "node_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [
+      [
+        0,
+        "sqlite_autoindex_projects_3",
+        1,
+        "u",
+        0
+      ],
+      [
+        1,
+        "sqlite_autoindex_projects_2",
+        1,
+        "u",
+        0
+      ],
+      [
+        2,
+        "sqlite_autoindex_projects_1",
+        1,
+        "pk",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "requests",
+    "table": "requests",
+    "sql": "CREATE TABLE requests (\n    request_id TEXT PRIMARY KEY,\n    node_id    TEXT NOT NULL REFERENCES nodes(node_id),\n    message_id TEXT NOT NULL REFERENCES messages(message_id),\n    thread_id  TEXT NOT NULL,\n    title      TEXT NOT NULL,\n    created_by TEXT NOT NULL REFERENCES agents(agent_id),\n    owner_id   TEXT REFERENCES agents(agent_id),\n    status     TEXT NOT NULL,\n    due_at     INTEGER,\n    note       TEXT,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    claimed_at INTEGER,\n    closed_at  INTEGER\n)",
+    "columns": [
+      [
+        0,
+        "request_id",
+        "TEXT",
+        0,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "node_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        2,
+        "message_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        3,
+        "thread_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        4,
+        "title",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        5,
+        "created_by",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        6,
+        "owner_id",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        7,
+        "status",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        8,
+        "due_at",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        9,
+        "note",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        10,
+        "created_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        11,
+        "updated_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        12,
+        "claimed_at",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        13,
+        "closed_at",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "agents",
+        "owner_id",
+        "agent_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        1,
+        0,
+        "agents",
+        "created_by",
+        "agent_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        2,
+        0,
+        "messages",
+        "message_id",
+        "message_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        3,
+        0,
+        "nodes",
+        "node_id",
+        "node_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [
+      [
+        0,
+        "requests_by_status",
+        0,
+        "c",
+        0
+      ],
+      [
+        1,
+        "sqlite_autoindex_requests_1",
+        1,
+        "pk",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "resource_leases",
+    "table": "resource_leases",
+    "sql": "CREATE TABLE resource_leases (\n    lease_id       TEXT PRIMARY KEY,\n    resource_id    TEXT NOT NULL REFERENCES resources(resource_id),\n    node_id        TEXT NOT NULL REFERENCES nodes(node_id),\n    agent_id       TEXT NOT NULL REFERENCES agents(agent_id),\n    role           TEXT NOT NULL,\n    ttl_seconds    INTEGER NOT NULL,\n    created_at     INTEGER NOT NULL,\n    renewed_at     INTEGER NOT NULL,\n    expires_at     INTEGER NOT NULL,\n    released_at    INTEGER,\n    release_reason TEXT\n)",
+    "columns": [
+      [
+        0,
+        "lease_id",
+        "TEXT",
+        0,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "resource_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        2,
+        "node_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        3,
+        "agent_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        4,
+        "role",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        5,
+        "ttl_seconds",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        6,
+        "created_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        7,
+        "renewed_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        8,
+        "expires_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        9,
+        "released_at",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        10,
+        "release_reason",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "agents",
+        "agent_id",
+        "agent_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        1,
+        0,
+        "nodes",
+        "node_id",
+        "node_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        2,
+        0,
+        "resources",
+        "resource_id",
+        "resource_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [
+      [
+        0,
+        "resource_leases_by_agent",
+        0,
+        "c",
+        0
+      ],
+      [
+        1,
+        "resource_leases_by_resource",
+        0,
+        "c",
+        0
+      ],
+      [
+        2,
+        "sqlite_autoindex_resource_leases_1",
+        1,
+        "pk",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "resources",
+    "table": "resources",
+    "sql": "CREATE TABLE resources (\n    resource_id    TEXT PRIMARY KEY,\n    node_id        TEXT NOT NULL REFERENCES nodes(node_id),\n    kind           TEXT NOT NULL,\n    name           TEXT NOT NULL,\n    endpoint       TEXT,\n    port           INTEGER,\n    pid            INTEGER,\n    project_id     TEXT REFERENCES projects(project_id),\n    purpose        TEXT,\n    mode           TEXT NOT NULL,\n    metadata       TEXT NOT NULL DEFAULT '{}',\n    created_at     INTEGER NOT NULL,\n    lapsed_at      INTEGER,\n    released_at    INTEGER,\n    release_reason TEXT,\n    event_id       TEXT NOT NULL\n)",
+    "columns": [
+      [
+        0,
+        "resource_id",
+        "TEXT",
+        0,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "node_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        2,
+        "kind",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        3,
+        "name",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        4,
+        "endpoint",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        5,
+        "port",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        6,
+        "pid",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        7,
+        "project_id",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        8,
+        "purpose",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        9,
+        "mode",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        10,
+        "metadata",
+        "TEXT",
+        1,
+        "'{}'",
+        0,
+        0
+      ],
+      [
+        11,
+        "created_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        12,
+        "lapsed_at",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        13,
+        "released_at",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        14,
+        "release_reason",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        15,
+        "event_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "projects",
+        "project_id",
+        "project_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        1,
+        0,
+        "nodes",
+        "node_id",
+        "node_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [
+      [
+        0,
+        "resources_live_identity",
+        1,
+        "c",
+        1
+      ],
+      [
+        1,
+        "sqlite_autoindex_resources_1",
+        1,
+        "pk",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "sqlite_sequence",
+    "table": "sqlite_sequence",
+    "sql": "CREATE TABLE sqlite_sequence(name,seq)",
+    "columns": [
+      [
+        0,
+        "name",
+        "",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        1,
+        "seq",
+        "",
+        0,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [],
+    "indexes": [],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "tokens",
+    "table": "tokens",
+    "sql": "CREATE TABLE tokens (\n    token_id      TEXT PRIMARY KEY,\n    node_id       TEXT NOT NULL REFERENCES nodes(node_id),\n    agent_id      TEXT NOT NULL REFERENCES agents(agent_id),\n    label         TEXT,\n    project_globs TEXT NOT NULL,\n    secret_hash   TEXT NOT NULL,\n    created_at    INTEGER NOT NULL,\n    expires_at    INTEGER,\n    revoked_at    INTEGER,\n    last_used_at  INTEGER\n)",
+    "columns": [
+      [
+        0,
+        "token_id",
+        "TEXT",
+        0,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "node_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        2,
+        "agent_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        3,
+        "label",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        4,
+        "project_globs",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        5,
+        "secret_hash",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        6,
+        "created_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        7,
+        "expires_at",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        8,
+        "revoked_at",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        9,
+        "last_used_at",
+        "INTEGER",
+        0,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "agents",
+        "agent_id",
+        "agent_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        1,
+        0,
+        "nodes",
+        "node_id",
+        "node_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [
+      [
+        0,
+        "sqlite_autoindex_tokens_1",
+        1,
+        "pk",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "wake_targets",
+    "table": "wake_targets",
+    "sql": "CREATE TABLE wake_targets (\n    agent_id   TEXT PRIMARY KEY REFERENCES agents(agent_id),\n    via        TEXT NOT NULL,\n    target     TEXT NOT NULL,\n    auto       INTEGER NOT NULL DEFAULT 0,\n    updated_at INTEGER NOT NULL\n)",
+    "columns": [
+      [
+        0,
+        "agent_id",
+        "TEXT",
+        0,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "via",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        2,
+        "target",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        3,
+        "auto",
+        "INTEGER",
+        1,
+        "0",
+        0,
+        0
+      ],
+      [
+        4,
+        "updated_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "agents",
+        "agent_id",
+        "agent_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [
+      [
+        0,
+        "sqlite_autoindex_wake_targets_1",
+        1,
+        "pk",
+        0
+      ]
+    ],
+    "index_columns": null
+  }
+]

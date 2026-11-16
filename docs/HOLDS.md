@@ -10,7 +10,7 @@ another hold acquire --agent claude@shop src/api
 another holds --project .
 ```
 
-Conflicts are all-or-nothing: if any requested path overlaps another agent's live hold, nothing is granted and the command exits with status 3. Session hooks renew an agent's holds and release them at session end.
+Conflicts are all-or-nothing: if any requested path overlaps another agent's live hold, nothing is granted and the command exits with status 3. Unfenced session hooks do not renew all holds or release them at session end; the edit guard can renew an own hold for a path it checks. Holds otherwise expire at their TTL or can be released explicitly by their exact actor.
 
 ## The edit guard
 

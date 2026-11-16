@@ -466,6 +466,11 @@ impl Store {
     pub fn inbox(&self, who: &str, query: InboxQuery) -> Result<Inbox> {
         // Expire stale requests/holds first so the digest is current even without a daemon.
         self.sweep()?;
+        self.inbox_without_sweep(who, query)
+    }
+
+    /// Read an inbox without changing hold or request lifecycle state.
+    pub fn inbox_without_sweep(&self, who: &str, query: InboxQuery) -> Result<Inbox> {
         self.read(|conn| {
             let me = resolve_agent(conn, self.node_id(), who)?;
             let (unread, urgent_unread, awaiting_ack): (u32, u32, u32) = conn.query_row(

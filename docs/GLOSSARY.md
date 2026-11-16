@@ -62,7 +62,7 @@ Reading or acknowledging a message never claims its request. A worked example wi
 | Conflict | Exclusive overlaps exit with status 3 and grant nothing | `--exclusive` resources refuse borrowers; shared ones count leases |
 | Enforced by | The edit guard, for edits through the Claude Code, Codex CLI or Grok CLI edit tools, when the hook is installed (and, for Codex, trusted) and can reach the database. A conflict it cannot check lets the edit through. Nothing locks the file on disk; a Cursor edit or a shell write is not checked | Nothing. A lease is a record; another process can still bind the port |
 | Across machines | A clash with another node's hold is a warning (D26) | Foreign leases count until their TTL; stop or reap only on the owning node (D25) |
-| Session end | Released by the session-end hook, always (D11) | Released too, unless `another heartbeat --end --keep` |
+| Session end | Unfenced hook leaves it until TTL or explicit release; exact-actor `heartbeat --end` releases it | Unfenced hook leaves it until TTL or explicit release; exact-actor `heartbeat --end` releases it unless `--keep` |
 
 Holds are advisory outside the edit guard. If you need a boundary a shell command cannot cross, use a separate checkout.
 
@@ -72,8 +72,8 @@ A path hold and a resource lease always carry a TTL and lapse on their own. A re
 
 | | Default TTL | Range | Renewed by | On expiry |
 |---|---|---|---|---|
-| Path hold | 30 minutes | 1 minute to 4 hours | Session start, each prompt, and the post-tool hook once a minute for holds past half their TTL; `another hold renew` | Stops conflicting at once. The next sweep records it as expired. Nobody is told; the holder finds out at its next check |
+| Path hold | 30 minutes | 1 minute to 4 hours | A matching pre-edit check can renew its own aging hold; `another hold renew` or exact-actor `heartbeat` | Stops conflicting at once. The next sweep records it as expired. Nobody is told; the holder finds out at its next check |
 | Request due time | None | Positive seconds within the supported timestamp range; zero, negative and overflowing values are refused | A claim with `--due`; a takeover without one clears a past-due deadline | Status becomes `stale` at the next sweep or listing. The owner keeps the request until someone claims it away. Without a due time nothing expires by itself; only the dashboard's confirmed Expire marks it stale |
-| Resource lease | 30 minutes | 1 minute to 24 hours (D13) | `another heartbeat`, the session hooks, `another resource heartbeat` | The lease ends. With no live lease the resource is `lapsed`: still listed, an orphan candidate, adopted by the next register or borrow. Only a human can reap it |
+| Resource lease | 30 minutes | 1 minute to 24 hours (D13) | `another heartbeat`, `another resource heartbeat` | The lease ends. With no live lease the resource is `lapsed`: still listed, an orphan candidate, adopted by the next register or borrow. Only a human can reap it |
 
 Automatic expiry is silent in all three cases. There is no notification to the holder, the owner or the people waiting; the state is visible to whoever looks next, through `another holds`, `another requests`, `another orphans`, the hook digest, or the dashboard.
