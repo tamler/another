@@ -628,6 +628,8 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
         "resource.registered" => {
             agent("owner_id")?;
             project()?;
+            // The local resource-name rule. A missing name counts as empty and is refused.
+            crate::resources::validate_name(p.get("name").and_then(Value::as_str).unwrap_or(""))?;
             resource()
         }
         "resource.adopted" => {

@@ -208,7 +208,7 @@ pub fn derive_port(text: &str) -> Option<u16> {
         .filter(|p| *p > 0)
 }
 
-fn validate_name(name: &str) -> Result<()> {
+pub(crate) fn validate_name(name: &str) -> Result<()> {
     if name.trim().is_empty() || name.len() > 200 || name.chars().any(char::is_control) {
         return Err(Error::Invalid(
             "resource name must be 1-200 printable characters".into(),
