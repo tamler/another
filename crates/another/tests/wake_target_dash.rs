@@ -103,3 +103,70 @@ fn herdrs_default_target_from_a_dash_name_is_refused() {
     let ok = plan(&s, "bob", WakeVia::Herdr, None).unwrap();
     assert_eq!(ok[0][3], "bob");
 }
+
+/// REVIEW-R1 of #206: the Herdr probe (`herdr agent get <target>`, positional) runs on stored
+/// targets in `wake prune` and the push waker without going through `wake()`. A target
+/// stored before the check must not reach it; an automatic one is pruned, a manual one kept.
+#[test]
+fn stored_dash_targets_never_reach_the_herdr_probe() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("herdr.log");
+    let fake = dir.path().join("herdr");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 1\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::env::set_var("HERDR_BIN_PATH", &fake);
+
+    let home = dir.path().join("home");
+    let s = Store::open(&home).unwrap();
+    let mut ids = Vec::new();
+    for name in ["bob", "carol"] {
+        ids.push(
+            s.register_agent(RegisterAgent {
+                name: name.into(),
+                program: Program::Claude,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap()
+            .agent_id,
+        );
+    }
+    let db = rusqlite::Connection::open(home.join(DB_FILE)).unwrap();
+    for (id, target, auto) in [(&ids[0], "-x", 1), (&ids[1], "--help", 0)] {
+        db.execute(
+            "INSERT INTO wake_targets (agent_id, via, target, auto, updated_at)
+             VALUES (?1, 'herdr', ?2, ?3, 0)",
+            rusqlite::params![id, target, auto],
+        )
+        .unwrap();
+    }
+
+    assert!(matches!(
+        another::wake::probe_herdr("--help"),
+        another::wake::Probe::Unknown(_)
+    ));
+    let rows = another::wake::prune(&s, false).unwrap();
+    let bob = rows.iter().find(|r| r.agent == "bob").unwrap();
+    assert!(bob.pruned, "{bob:?}");
+    assert!(bob.reason.contains('-'), "{bob:?}");
+    let carol = rows.iter().find(|r| r.agent == "carol").unwrap();
+    assert!(!carol.pruned, "{carol:?}");
+    assert_eq!(s.wake_target("carol").unwrap().unwrap().target, "--help");
+    assert!(s.wake_target("bob").unwrap().is_none());
+
+    let seen = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        seen.is_empty(),
+        "herdr was run with a dash target: {seen:?}"
+    );
+}
