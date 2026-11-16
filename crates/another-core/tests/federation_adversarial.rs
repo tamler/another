@@ -465,3 +465,137 @@ fn control_a_revoked_spoke_cannot_push() {
     let refused = fed.hub.store.ingest(&fed.mallory.id(), &events, &[]);
     assert!(matches!(refused, Err(Error::Forbidden(_))), "{refused:?}");
 }
+
+/// Review R2-1 (P2). Each receiver bounds a foreign lease by its own clock, so a borrow
+/// signed ten years ahead lives 30 minutes on the hub. The signed event is relayed
+/// unchanged, though: a spoke that pulls it a week later would bound it by *its* clock and
+/// give the lease a fresh 30 minutes, and the hub's earlier `resource.transferred` would
+/// make that revived lease an owner there. The resource's node must publish the expiry it
+/// decided, so a late observer ends the lease too. Rejecting the skewed borrow outright
+/// would also satisfy this test.
+#[test]
+fn a_late_observer_does_not_revive_an_expired_skewed_owner() {
+    let fed = Fed::new();
+    let resource = fed.hub_resource();
+    let spy = fed.spy();
+    let report = fed.forge_at(
+        T0 + 10 * 365 * DAY_MS,
+        "resource.borrowed",
+        json!({
+            "resource_id": resource, "lease_id": "skewed-owner", "agent_id": spy,
+            "ttl_seconds": 1800, "resource_node": fed.hub.id(),
+        }),
+    );
+    let accepted = report.accepted == 1;
+    if accepted {
+        // The hub's owner leaves while the bounded lease is live: it is promoted.
+        fed.hub
+            .store
+            .release_resource("alice", &ResourceRef::Id(resource.clone()), false)
+            .unwrap();
+        assert_eq!(
+            fed.owner_node(&resource).as_deref(),
+            Some(fed.mallory.id().as_str())
+        );
+    }
+
+    fed.hub.advance_ms(7 * DAY_MS);
+    fed.alpha.advance_ms(7 * DAY_MS);
+    fed.hub.store.sweep().unwrap();
+    let now = T0 + 7 * DAY_MS;
+    let live = |node: &Node| -> i64 {
+        node.sql()
+            .query_row(
+                "SELECT count(*) FROM resource_leases WHERE lease_id = 'skewed-owner'
+                   AND released_at IS NULL AND expires_at > ?1",
+                [now],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(live(&fed.hub), 0, "the hub still sees the lease");
+
+    // Alpha has not synced since before the borrow; it pulls the whole history now.
+    let page = fed.hub.store.pull_for(&fed.alpha.id(), 0, 10_000).unwrap();
+    let applied = fed
+        .alpha
+        .store
+        .ingest(&fed.hub.id(), &page.events, &page.nodes)
+        .unwrap();
+    assert!(applied.rejected.is_empty(), "{applied:?}");
+    assert_eq!(
+        live(&fed.alpha),
+        0,
+        "a late observer revived a lease the resource's node already expired"
+    );
+    let hub_view = fed
+        .hub
+        .store
+        .resource(&ResourceRef::Id(resource.clone()))
+        .unwrap();
+    let alpha_view = fed
+        .alpha
+        .store
+        .resource(&ResourceRef::Id(resource))
+        .unwrap();
+    assert_eq!(
+        (hub_view.refcount, alpha_view.refcount),
+        (0, 0),
+        "hub and late observer disagree on the resource's live leases"
+    );
+}
+
+/// The owner's expiry also reaches a spoke that only follows its own leases: the lease's
+/// node is named in the event, so a spoke without `read_feed` still learns its borrow ended.
+#[test]
+fn the_lease_holders_node_learns_the_owner_expired_its_lease() {
+    let fed = Fed::new();
+    let resource = fed.hub_resource();
+    let spy = fed.spy();
+    let report = fed.forge(
+        "resource.borrowed",
+        json!({
+            "resource_id": resource, "lease_id": "honest-borrow", "agent_id": spy,
+            "ttl_seconds": 600, "resource_node": fed.hub.id(),
+        }),
+    );
+    assert_eq!(report.accepted, 1, "{report:?}");
+    fed.hub.advance_ms(DAY_MS);
+    fed.hub.store.sweep().unwrap();
+    let expiry: Vec<Value> = fed
+        .hub
+        .sql()
+        .prepare(
+            "SELECT payload FROM events WHERE node_id = ?1 AND kind = 'resource.lease_expired'",
+        )
+        .unwrap()
+        .query_map([fed.hub.id()], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(|p| serde_json::from_str(&p.unwrap()).unwrap())
+        .filter(|p: &Value| p["lease_id"] == "honest-borrow")
+        .collect();
+    assert_eq!(
+        expiry.len(),
+        1,
+        "the hub did not publish the foreign lease's expiry"
+    );
+    assert_eq!(expiry[0]["resource_nodes"], json!([fed.mallory.id()]));
+
+    // Mallory, paired without read_feed, still receives it and ends its own lease row.
+    fed.hub
+        .sql()
+        .execute(
+            "UPDATE peers SET perms = '[\"send_mail\",\"borrow_resource\"]' WHERE node_id = ?1",
+            [fed.mallory.id()],
+        )
+        .unwrap();
+    let page = fed
+        .hub
+        .store
+        .pull_for(&fed.mallory.id(), 0, 10_000)
+        .unwrap();
+    assert!(page
+        .events
+        .iter()
+        .any(|e| e.kind == "resource.lease_expired" && e.payload.contains("honest-borrow")));
+}

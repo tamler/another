@@ -489,11 +489,21 @@ fn outcome(tx: &Tx<'_>, resource_id: &str, agent_id: &str, what: &str) -> Result
     })
 }
 
-/// Expire lapsed leases. Returns how many expired.
+/// Expire lapsed leases: this node's own, and other nodes' leases on this node's resources.
+/// Returns how many expired.
+///
+/// A foreign lease on a local resource was bounded by this node's clock when it arrived, but
+/// the borrow event is relayed unchanged, and a node that receives it later bounds it by its
+/// own, later clock. Publishing the expiry decided here, as the resource's owner, ends the
+/// lease on every node that replays the history, whenever it does. The lease's node is
+/// named in `resource_nodes` so it receives the event even without `read_feed`.
 pub(crate) fn expire_leases_tx(tx: &Tx<'_>) -> Result<usize> {
     let mut stmt = tx.prepare(
-        "SELECT lease_id, resource_id, agent_id, expires_at FROM resource_leases
-         WHERE node_id = ?1 AND released_at IS NULL AND expires_at <= ?2",
+        "SELECT l.lease_id, l.resource_id, l.agent_id, l.expires_at, l.node_id
+         FROM resource_leases l
+         WHERE l.released_at IS NULL AND l.expires_at <= ?2
+           AND (l.node_id = ?1 OR EXISTS (SELECT 1 FROM resources r
+                WHERE r.resource_id = l.resource_id AND r.node_id = ?1))",
     )?;
     let expired = stmt
         .query_map(params![tx.node_id, tx.now], |r| {
@@ -502,15 +512,17 @@ pub(crate) fn expire_leases_tx(tx: &Tx<'_>) -> Result<usize> {
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, i64>(3)?,
+                r.get::<_, String>(4)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (lease_id, resource_id, agent_id, expires_at) in &expired {
-        tx.emit(
-            "system",
-            "resource.lease_expired",
-            json!({ "lease_id": lease_id, "resource_id": resource_id, "agent_id": agent_id }),
-        )?;
+    for (lease_id, resource_id, agent_id, expires_at, lease_node) in &expired {
+        let mut payload =
+            json!({ "lease_id": lease_id, "resource_id": resource_id, "agent_id": agent_id });
+        if *lease_node != tx.node_id {
+            payload["resource_nodes"] = json!([lease_node]);
+        }
+        tx.emit("system", "resource.lease_expired", payload)?;
         tx.execute(
             "UPDATE resource_leases SET released_at = expires_at, release_reason = 'expired'
              WHERE lease_id = ?1",
