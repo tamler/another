@@ -148,7 +148,9 @@ pub(crate) fn current_stops(
             }
         }
         let stop = live.first().map(|(_, path, holder)| {
-            let mut message = format!("{path} is held by {holder}");
+            // A file name can hold control or bidi characters; the message is shown on the
+            // board, the dashboard and Herdr's pane, so it is one safe line (D75).
+            let mut message = crate::mail::single_line(&format!("{path} is held by {holder}"), 300);
             if live.len() > 1 {
                 message.push_str(&format!(" (+{} more)", live.len() - 1));
             }

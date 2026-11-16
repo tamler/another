@@ -75,6 +75,9 @@ impl Pane {
     }
 }
 
+/// Longest blocked note sent to Herdr, after cleaning.
+const NOTE_CHARS: usize = 200;
+
 /// What to send: the state token and the blocked note, or `None` to clear both.
 fn tokens(status: Option<&AgentStatus>) -> (Option<&'static str>, Option<String>) {
     match status {
@@ -83,7 +86,9 @@ fn tokens(status: Option<&AgentStatus>) -> (Option<&'static str>, Option<String>
             s.message
                 .as_deref()
                 .filter(|_| s.state == AgentState::Blocked)
-                .map(|m| format!("blocked: {m}")),
+                // Herdr draws the token in a terminal; the path inside it was chosen by
+                // whoever named the file (D75: one safe line).
+                .map(|m| format!("blocked: {}", another_core::single_line(m, NOTE_CHARS))),
         ),
         _ => (None, None),
     }
@@ -745,5 +750,20 @@ mod tests {
             })
             .collect();
         assert_sent_seqs(&sent, ahead);
+    }
+
+    /// Adversarial F1 (#144): the blocked note is built from a held path and a holder, and a
+    /// file name can hold ESC, CR, LF or a bidi override. Herdr draws the token in its
+    /// terminal UI, so the note must be one line with no control or bidi-override
+    /// characters (the D75 rule for anything shown in a terminal).
+    #[test]
+    fn adv144_the_blocked_note_is_one_safe_line() {
+        let hostile = "src/a\u{1b}[2J\r\nX\u{202e}gpj.rs is held by alice";
+        let (_, note) = tokens(Some(&status(AgentState::Blocked, Some(hostile))));
+        let note = note.expect("a blocked status has a note");
+        assert!(
+            !note.chars().any(another_core::is_unsafe_text_char),
+            "{note:?}"
+        );
     }
 }
