@@ -231,3 +231,47 @@ fn the_dashboard_will_not_expire_a_closed_or_unknown_request() {
         .unwrap_err();
     assert_eq!(err.code(), "not_found", "{err}");
 }
+
+/// adv220: only another node's live holds warn. Once alpha releases its hold, or the hub's
+/// copy of it has expired, the hub's overlapping hold shows no remote warning.
+#[test]
+fn adv220_released_or_expired_foreign_holds_do_not_warn() {
+    let (hub, alpha) = fed();
+    let carols = alpha.holder("carol");
+    push(&hub, &alpha);
+    let bobs = hub.holder("bob");
+    let warnings = || {
+        hub.store
+            .dashboard_snapshot(DashboardView::LOCAL)
+            .unwrap()
+            .holds
+            .into_iter()
+            .find(|h| h.hold.hold_id == bobs.hold_id)
+            .unwrap()
+            .remote_warnings
+            .len()
+    };
+    assert_eq!(warnings(), 1, "the live foreign hold warns");
+
+    // Released by its owner and synced.
+    alpha
+        .store
+        .release_holds("carol@shop", std::slice::from_ref(&carols.hold_id))
+        .unwrap();
+    push(&hub, &alpha);
+    assert!(hub.released(&carols.hold_id), "the release reached the hub");
+    assert_eq!(warnings(), 0, "a released foreign hold still warns");
+
+    // A new live hold warns; once the hub's copy has expired, it does not.
+    let dans = alpha.holder("dan");
+    push(&hub, &alpha);
+    assert_eq!(warnings(), 1, "the second live foreign hold warns");
+    Connection::open(&hub.db)
+        .unwrap()
+        .execute(
+            "UPDATE holds SET expires_at = expires_at - 3600000 * 2 WHERE hold_id = ?1",
+            [&dans.hold_id],
+        )
+        .unwrap();
+    assert_eq!(warnings(), 0, "an expired foreign hold still warns");
+}
