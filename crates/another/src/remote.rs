@@ -49,7 +49,14 @@ fn remote_addr(headers: &HeaderMap, req: &Request) -> Option<String> {
     let socket = req
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|c| c.0.to_string());
+        .map(|c| c.0);
+    origin(headers, socket)
+}
+
+/// The audit origin of a request from its headers and socket address, by the rule on
+/// [`remote_addr`]. The OAuth endpoints use it too, so both audit paths record the same thing.
+pub(crate) fn origin(headers: &HeaderMap, socket: Option<std::net::SocketAddr>) -> Option<String> {
+    let socket = socket.map(|s| s.to_string());
     for h in ["cf-connecting-ip", "x-forwarded-for", "x-real-ip"] {
         let Some(v) = headers.get(h).and_then(|v| v.to_str().ok()) else {
             continue;

@@ -17,7 +17,7 @@ use another_core::{
     canonical_resource, error_redirect, redirect_matches, validate_cimd, AuthorizeInput,
     ClientProfile, ClientRegistration, CodeExchange, OAuthFail, RefreshExchange, Store,
 };
-use axum::extract::{Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -553,14 +553,13 @@ struct AuthorizeQuery {
     scope: Option<String>,
 }
 
-fn client_ip(headers: &HeaderMap) -> Option<String> {
-    for name in ["cf-connecting-ip", "x-forwarded-for", "x-real-ip"] {
-        if let Some(v) = headers.get(name).and_then(|v| v.to_str().ok()) {
-            let ip = v.split(',').next().unwrap_or(v).trim();
-            return Some(format!("{name}: {ip}"));
-        }
-    }
-    None
+/// The connection's socket address, present when the server runs with connect info.
+type Peer = Option<Extension<ConnectInfo<SocketAddr>>>;
+
+/// Where an OAuth request came from, for its audit row: the same rule as MCP calls
+/// ([`crate::remote::origin`]), so a proxy claim is kept next to the socket, never instead.
+fn client_ip(headers: &HeaderMap, peer: Peer) -> Option<String> {
+    crate::remote::origin(headers, peer.map(|Extension(ConnectInfo(addr))| addr))
 }
 
 fn audit_oauth(
@@ -618,12 +617,13 @@ async fn authorize(
     State(store): State<Store>,
     Extension(ctx): Extension<AuthContext>,
     headers: HeaderMap,
+    peer: Peer,
     Query(q): Query<AuthorizeQuery>,
 ) -> Response {
     let Some(cfg) = cfg(&ctx).cloned() else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let remote = client_ip(&headers);
+    let remote = client_ip(&headers, peer);
     let client_id = q.client_id.clone().unwrap_or_default();
     let redirect_uri = q.redirect_uri.clone().unwrap_or_default();
     let redirect_for_error = redirect_uri.clone();
@@ -1111,12 +1111,13 @@ async fn register_client(
     State(store): State<Store>,
     Extension(ctx): Extension<AuthContext>,
     headers: HeaderMap,
+    peer: Peer,
     Json(body): Json<RegisterBody>,
 ) -> Response {
     if cfg(&ctx).is_none() {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let remote = client_ip(&headers);
+    let remote = client_ip(&headers, peer);
     if let Some(method) = body.token_endpoint_auth_method.as_deref() {
         if method != "none" {
             return oauth_json(&OAuthFail::InvalidRequest(
@@ -1186,6 +1187,7 @@ async fn token(
     State(store): State<Store>,
     Extension(ctx): Extension<AuthContext>,
     headers: HeaderMap,
+    peer: Peer,
     body: axum::body::Bytes,
 ) -> Response {
     let Some(cfg) = cfg(&ctx).cloned() else {
@@ -1209,7 +1211,7 @@ async fn token(
             "this server only accepts public clients; do not send a client secret".into(),
         ));
     }
-    let remote = client_ip(&headers);
+    let remote = client_ip(&headers, peer);
     let client_id = form.client_id.clone().unwrap_or_default();
     let Some(resource) = form.resource.clone() else {
         return oauth_json(&OAuthFail::InvalidRequest("resource is required".into()));
@@ -1275,6 +1277,7 @@ async fn revoke(
     State(store): State<Store>,
     Extension(ctx): Extension<AuthContext>,
     headers: HeaderMap,
+    peer: Peer,
     body: axum::body::Bytes,
 ) -> Response {
     if cfg(&ctx).is_none() {
@@ -1297,7 +1300,7 @@ async fn revoke(
     // RFC 7009: an invalid token still returns 200.
     if let Some(token) = form.token.filter(|t| !t.is_empty()) {
         let store2 = store.clone();
-        let remote = client_ip(&headers);
+        let remote = client_ip(&headers, peer);
         let _ =
             tokio::task::spawn_blocking(move || store2.revoke_oauth_token(&token, remote)).await;
     }
