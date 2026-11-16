@@ -1111,9 +1111,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             another_home: another_home()?,
             bind: bind.clone(),
         });
-        emit(json, &report, crate::doctor::render);
+        let printed = emit(json, &report, crate::doctor::render);
         return Ok(if report.ok {
-            ExitCode::SUCCESS
+            printed
         } else {
             ExitCode::FAILURE
         });
