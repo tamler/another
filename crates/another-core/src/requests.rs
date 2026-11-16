@@ -424,7 +424,11 @@ impl Store {
                             &SendMessage {
                                 from: me.address.clone(),
                                 to: vec![creator.address],
-                                subject: format!("Done: {title}"),
+                                // The title may come from a subject stored before D75.
+                                subject: format!(
+                                    "Done: {}",
+                                    crate::mail::single_line(&title, 290)
+                                ),
                                 body,
                                 importance: Importance::Normal,
                                 reply_to: Some(message_id),
