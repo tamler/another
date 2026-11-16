@@ -226,3 +226,36 @@ async fn an_mcp_hold_through_another_spelling_conflicts_with_a_cli_hold() {
     let conflicts = out["conflicts"].as_array().cloned().unwrap_or_default();
     assert_eq!(conflicts.len(), 1, "{out}");
 }
+
+/// `agent register --project PATH` and `board --project PATH` with the other spelling given
+/// explicitly. On Windows `.` itself comes back as the short-name spelling (seen in CI);
+/// on macOS the working directory comes back resolved, so an explicit path is the probe.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_explicit_cli_project_path_is_resolved_too() {
+    let s = spellings();
+    let given = s.given.to_string_lossy().into_owned();
+    let client = mcp(&s.home).await;
+    call(&client, "ensure_project", json!({ "path": given })).await;
+    let elsewhere = s.home.parent().unwrap().to_path_buf();
+    cli(
+        &s.home,
+        &elsewhere,
+        &[
+            "agent",
+            "register",
+            "w",
+            "--program",
+            "codex",
+            "--project",
+            &given,
+        ],
+    );
+    let paths = project_paths(&s.home);
+    assert_eq!(paths.len(), 1, "{paths:?}");
+    let board = cli(&s.home, &elsewhere, &["board", "--project", &given]);
+    assert_eq!(
+        board["projects"].as_array().map(Vec::len),
+        Some(1),
+        "{board}"
+    );
+}
