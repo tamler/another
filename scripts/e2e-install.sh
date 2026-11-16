@@ -51,6 +51,19 @@ unset ANOTHER_AGENT ANOTHER_LOG
 git -C "$work/shop" init -q
 shop=$(native "$work/shop")
 
+# The client config files `hook install --client all` writes, relative to HOME.
+CLIENT_CONFIGS=".claude/settings.json .codex/hooks.json .cursor/hooks.json .grok/hooks/another.json"
+
+# The content of every client config (and the hook script), to compare installs.
+configs_digest() {
+  local f
+  for f in $CLIENT_CONFIGS; do
+    printf '== %s\n' "$f"
+    cat "$work/home/$f" 2>/dev/null || printf 'missing\n'
+  done
+  ls "$work/data/hooks" 2>/dev/null
+}
+
 # Agents, a message and a hold, written by $1.
 seed() {
   local bin=$1
@@ -90,7 +103,7 @@ fresh() {
   local out
   out=$("$new" --json hook install --client all)
   expect "first hook install" '"change": "create"' "$out"
-  for f in .claude/settings.json .codex/hooks.json .cursor/hooks.json; do
+  for f in $CLIENT_CONFIGS; do
     [ -s "$work/home/$f" ] || fail "hook install did not write ~/$f"
     grep -qF "another-hook" "$work/home/$f" || fail "~/$f does not run the Another hook"
   done
@@ -98,9 +111,13 @@ fresh() {
   expect "hook status" "claude" "$out"
 
   step "hook packs: reinstall changes nothing"
+  local before after
+  before=$(configs_digest)
   out=$("$new" --json hook install --client all)
   reject "second hook install" '"change": "create"' "$out"
   reject "second hook install" '"change": "update"' "$out"
+  after=$(configs_digest)
+  [ "$before" = "$after" ] || fail "a second hook install changed the client configs"
 
   step "hook packs: uninstall"
   "$new" hook uninstall --client all >/dev/null
