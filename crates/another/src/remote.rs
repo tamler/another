@@ -135,11 +135,11 @@ pub async fn require_token(
     }
 }
 
-/// Arguments for the audit log: message bodies and long strings are not recorded.
+/// Arguments for the audit log: message bodies, note text and long strings are not recorded.
 pub fn redact(args: Option<&Map<String, Value>>) -> String {
     fn walk(key: &str, v: &Value) -> Value {
         match v {
-            Value::String(s) if key == "body" || key == "note" => {
+            Value::String(s) if key == "body" || key == "note" || key == "text" => {
                 Value::String(format!("<{} bytes>", s.len()))
             }
             Value::String(s) if s.chars().count() > 200 => {
@@ -209,6 +209,10 @@ pub fn authorize(
     };
     match tool {
         "resource_reap" => Err("reaping is never available to remote peers".into()),
+        // Project notes are node-local and local-only (D70).
+        "project_notes" => {
+            Err("project notes are available only to local callers on this machine".into())
+        }
         "activity_feed" | "activity_summarize" | "resource_find" => Ok(()),
         // The board names agents, paths and request titles across projects: a remote peer
         // sees one project inside its globs.
@@ -354,5 +358,14 @@ mod tests {
         assert!(out.contains("<11 bytes>"));
         assert!(out.len() < 400);
         assert!(out.contains("\"to\":[\"b\"]"));
+    }
+
+    /// A refused remote `project_notes` call is audited without the note's text (D70).
+    #[test]
+    fn redacts_note_text() {
+        let args = json!({ "action": "set", "project": "shop", "text": "short secret" });
+        let out = redact(args.as_object());
+        assert!(!out.contains("short secret"), "{out}");
+        assert!(out.contains("<12 bytes>"), "{out}");
     }
 }

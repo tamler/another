@@ -490,6 +490,42 @@ pub fn sync_report(r: &crate::fed::SyncReport) -> String {
     out
 }
 
+/// Notes of a project, newest first: who wrote each and when, then its text.
+pub fn notes(list: &another_core::NoteList) -> String {
+    if list.notes.is_empty() {
+        return format!(
+            "no notes for {} (add one with `another note set`)",
+            list.project
+        );
+    }
+    let mut out = String::new();
+    for n in &list.notes {
+        let key = n
+            .key
+            .as_deref()
+            .map(|k| format!("[{k}] "))
+            .unwrap_or_default();
+        let expires = n
+            .expires_at
+            .as_deref()
+            .map(|e| format!(", expires {e}"))
+            .unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "{key}{} ({} in {}, {}{expires})\n  {}",
+            n.note_id,
+            n.author,
+            n.project,
+            n.updated_at,
+            n.text.replace('\n', "\n  ")
+        );
+    }
+    if list.total > list.notes.len() {
+        let _ = writeln!(out, "and {} more", list.total - list.notes.len());
+    }
+    out
+}
+
 pub fn wake_targets(ts: &[WakeTarget]) -> String {
     if ts.is_empty() {
         return "no wake targets (hooks record Herdr, tmux and cmux panes automatically)"

@@ -72,6 +72,7 @@ async fn exposes_the_tool_surface() {
             "heartbeat",
             "hold_paths",
             "orphans_list",
+            "project_notes",
             "register_agent",
             "resource_borrow",
             "resource_find",

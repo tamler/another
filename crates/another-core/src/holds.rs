@@ -1483,6 +1483,8 @@ pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
     ping_free_waiters_tx(tx)?;
     let stale_requests = stale_overdue_tx(tx)?;
     let expired_leases = crate::resources::expire_leases_tx(tx)?;
+    // Expired project notes have their text erased (D70).
+    crate::notes::expire_notes_tx(tx)?;
     Ok(SweepReport {
         expired_holds: expired.len(),
         stale_requests,

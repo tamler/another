@@ -267,7 +267,8 @@ fn v12_can_record_a_claim_and_keeps_the_v11_secret() {
     let version: i64 = db
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 12);
+    // A fresh home is at the current schema (v13, D70), which keeps v12's claim columns.
+    assert_eq!(version, 13);
     let columns: i64 = db.query_row(
         "SELECT count(*) FROM pragma_table_info('admissions') WHERE name IN ('call_key','operation','claimed_at','object_identity','client','session_digest','preimage','replacement')",
         [], |r| r.get(0),

@@ -182,10 +182,23 @@ fn frozen_historical_schema_and_legitimate_partial_index_are_accepted() {
         added_tables,
         ["admission_holds", "admission_secret", "admissions"]
     );
-    let (hold_fixes, mut kept): (Vec<Value>, Vec<Value>) = rest.into_iter().partition(|row| {
+    let (hold_fixes, rest): (Vec<Value>, Vec<Value>) = rest.into_iter().partition(|row| {
         matches!(row[2].as_str().unwrap(), "hold_waits" | "request_holds")
             || row[1] == "announcements_by_fingerprint"
     });
+    // v13 added only the notes table and its indexes (D70).
+    let (notes, mut kept): (Vec<Value>, Vec<Value>) =
+        rest.into_iter().partition(|row| row[2] == "notes");
+    let note_names: Vec<&str> = notes.iter().map(|row| row[1].as_str().unwrap()).collect();
+    assert_eq!(
+        note_names,
+        [
+            "notes_live",
+            "notes_live_key",
+            "sqlite_autoindex_notes_1",
+            "notes"
+        ]
+    );
     let hold_names: Vec<&str> = hold_fixes
         .iter()
         .map(|row| row[1].as_str().unwrap())
@@ -229,7 +242,7 @@ fn frozen_historical_schema_and_legitimate_partial_index_are_accepted() {
     assert_eq!(
         Value::Array(kept),
         historical,
-        "fresh schema diverges from frozen historical v8 catalogs outside the v9-v12 additions"
+        "fresh schema diverges from frozen historical v8 catalogs outside the v9-v13 additions"
     );
     let partial: i64 = db.query_row("SELECT partial FROM pragma_index_list('resources') WHERE name='resources_live_identity'", [], |r| r.get(0)).unwrap();
     assert_eq!(

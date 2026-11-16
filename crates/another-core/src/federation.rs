@@ -184,7 +184,8 @@ fn classify(kind: &str, payload: &Value, origin: &str) -> Share {
     let not_origin =
         |nodes: Vec<String>| -> Vec<String> { nodes.into_iter().filter(|n| n != origin).collect() };
     match kind.split('.').next().unwrap_or_default() {
-        "token" | "peer" | "oauth" => return Share::Never,
+        // Project notes are node-local (D70).
+        "token" | "peer" | "oauth" | "note" => return Share::Never,
         _ => {}
     }
     match kind {

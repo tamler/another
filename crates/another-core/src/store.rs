@@ -1576,6 +1576,26 @@ ALTER TABLE admissions_v12 RENAME TO admissions;
 ALTER TABLE admission_holds_v12 RENAME TO admission_holds;
 CREATE INDEX admissions_open ON admissions(state, created_at);
 "#,
+    // v13 (D70): project notes. Node-local; the text lives only here (events carry its
+    // size and hash), and forgetting a note blanks `text` and sets `deleted_at`.
+    r#"
+CREATE TABLE notes (
+    note_id    TEXT PRIMARY KEY,
+    node_id    TEXT NOT NULL REFERENCES nodes(node_id),
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    key        TEXT,
+    text       TEXT NOT NULL,
+    author_id  TEXT NOT NULL REFERENCES agents(agent_id),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    expires_at INTEGER,
+    deleted_at INTEGER,
+    event_id   TEXT NOT NULL
+);
+CREATE UNIQUE INDEX notes_live_key ON notes(project_id, key)
+    WHERE key IS NOT NULL AND deleted_at IS NULL;
+CREATE INDEX notes_live ON notes(project_id, deleted_at, updated_at);
+"#,
 ];
 
 /// Index in [`MIGRATIONS`] of the migration that creates `admission_secret`.
@@ -1655,10 +1675,10 @@ fn require_current_or_empty(conn: &Connection) -> Result<()> {
 ///
 /// v8 was extracted from an isolated home created by the 0403dce executable and is kept so
 /// a v8 home is verified before it is upgraded. v9 and v10 are the hold fixes' schemas
-/// (D62, D63), v11 and v12 the admission schemas (D66, D67). Each was generated from the
-/// bundled migrations by `regenerate_schema_manifest` (a test) and is held to them by
-/// `frozen_catalogs_match_their_migrations` and the drift test. v10 was also compared with
-/// a home created by the #137 executable at ae72fb7.
+/// (D62, D63), v11 and v12 the admission schemas (D66, D67), v13 project notes (D70). Each
+/// was generated from the bundled migrations by `regenerate_schema_manifest` (a test) and
+/// is held to them by `frozen_catalogs_match_their_migrations` and the drift test. v10 was
+/// also compared with a home created by the #137 executable at ae72fb7.
 fn schema_manifest(version: i64) -> Option<&'static str> {
     match version {
         8 => Some(include_str!("v8_schema_manifest.json")),
@@ -1666,6 +1686,7 @@ fn schema_manifest(version: i64) -> Option<&'static str> {
         10 => Some(include_str!("v10_schema_manifest.json")),
         11 => Some(include_str!("v11_schema_manifest.json")),
         12 => Some(include_str!("v12_schema_manifest.json")),
+        13 => Some(include_str!("v13_schema_manifest.json")),
         _ => None,
     }
 }
@@ -2166,11 +2187,12 @@ mod upgrade_tests {
         (home, node)
     }
 
-    /// Main's v8 and the hold fixes' v9 and v10 are each accepted as an upgrade source,
-    /// checked against their own catalog, and recorded with their true version.
+    /// Main's v8, the hold fixes' v9 and v10, and the admission schemas v11 and v12 are each
+    /// accepted as an upgrade source, checked against their own catalog, and recorded with
+    /// their true version.
     #[test]
-    fn v8_v9_and_v10_homes_take_the_offline_upgrade() {
-        for source in [8usize, 9, 10] {
+    fn v8_through_v12_homes_take_the_offline_upgrade() {
+        for source in [8usize, 9, 10, 11, 12] {
             let temp = tempfile::tempdir().unwrap();
             let (home, node) = home_at(temp.path(), source);
             let db = Connection::open(home.join(DB_FILE)).unwrap();
@@ -2277,7 +2299,7 @@ mod upgrade_tests {
             .read(|db| {
                 assert_eq!(
                     db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))?,
-                    12
+                    MIGRATIONS.len() as i64
                 );
                 assert!(
                     db.query_row("SELECT secret FROM admission_secret", [], |r| r
@@ -3049,7 +3071,7 @@ mod hold_upgrade_tests {
     use crate::{AcquireHolds, NewRequest, Program, RegisterAgent, SendMessage};
 
     pub(super) fn reduce_to_v8(db: &Connection) {
-        db.execute_batch("DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE hold_waits; DROP TABLE request_holds; ALTER TABLE announcements RENAME TO announcements_v12;").unwrap();
+        db.execute_batch("DROP TABLE notes; DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE hold_waits; DROP TABLE request_holds; ALTER TABLE announcements RENAME TO announcements_v12;").unwrap();
         db.execute_batch(MIGRATIONS[7]).unwrap();
         db.execute_batch("INSERT INTO announcements SELECT agent_id,message_id,channel,announced_at FROM announcements_v12; DROP TABLE announcements_v12; PRAGMA user_version=8;").unwrap();
         verify_schema_against(db, schema_manifest(8).unwrap(), None).unwrap();
@@ -3058,7 +3080,7 @@ mod hold_upgrade_tests {
     #[test]
     fn recognized_sources_publish_readable_verified_backups_and_restore_in_isolation() {
         use sha2::{Digest, Sha256};
-        for source in [8, 9, 10] {
+        for source in [8, 9, 10, 11, 12] {
             let temp = tempfile::tempdir().unwrap();
             let home = temp.path().join("home");
             let store = Store::open(&home).unwrap();
@@ -3128,7 +3150,7 @@ mod hold_upgrade_tests {
             assert_eq!(restored.node_id(), node);
             restored
                 .read(|db| {
-                    assert_eq!(version(db), 12);
+                    assert_eq!(version(db), MIGRATIONS.len() as i64);
                     assert_eq!(
                         db.pragma_query_value(None, "integrity_check", |r| r.get::<_, String>(0))?,
                         "ok"
@@ -3219,14 +3241,15 @@ mod hold_upgrade_tests {
     #[test]
     fn schema_versions_after_v8_are_hold_waits_then_request_holds() {
         // v1-v8 are main's released schema. v9 and v10 belong to the hold fixes (D62, D63),
-        // v11 and v12 to admissions (D66, D67); a later migration must append after them,
-        // never reuse any of these numbers.
-        assert_eq!(MIGRATIONS.len(), 12);
+        // v11 and v12 to admissions (D66, D67), v13 to project notes (D70); a later
+        // migration must append after them, never reuse any of these numbers.
+        assert_eq!(MIGRATIONS.len(), 13);
         let v8 = catalog_at(8);
         let v9 = catalog_at(9);
         let v10 = catalog_at(10);
         let v11 = catalog_at(11);
         let v12 = catalog_at(12);
+        let v13 = catalog_at(13);
         let added = |from: &[String], to: &[String]| -> Vec<String> {
             to.iter().filter(|o| !from.contains(o)).cloned().collect()
         };
@@ -3286,6 +3309,19 @@ mod hold_upgrade_tests {
         assert!(
             removed(&v10, &v12).is_empty(),
             "the admission migrations leave every hold-fix object as it was"
+        );
+        assert_eq!(
+            names(added(&v12, &v13)),
+            [
+                "index notes_live on notes",
+                "index notes_live_key on notes",
+                "table notes on notes",
+                "fk notes",
+            ]
+        );
+        assert!(
+            removed(&v12, &v13).is_empty(),
+            "the notes migration leaves every earlier object as it was"
         );
     }
 
@@ -3356,7 +3392,8 @@ mod hold_upgrade_tests {
         // Take the home back to exactly main's v8 schema, keeping every v8 row.
         let db = Connection::open(home.join(DB_FILE)).unwrap();
         db.execute_batch(
-            "DROP TABLE admission_holds;
+            "DROP TABLE notes;
+             DROP TABLE admission_holds;
              DROP TABLE admissions;
              DROP TABLE admission_secret;
              DROP TABLE hold_waits;

@@ -332,6 +332,9 @@ pub enum Command {
         #[arg(long, default_value_t = 30)]
         every: u64,
     },
+    /// Project notes: short facts every agent in a project and its sibling checkouts sees.
+    #[command(subcommand)]
+    Note(NoteCmd),
     /// Nudge agents with unread mail through tmux, cmux or Herdr (optional adapters).
     #[command(args_conflicts_with_subcommands = true)]
     Wake {
@@ -434,6 +437,40 @@ pub struct WakeRun {
     /// Print the adapter commands without running them.
     #[arg(long)]
     dry_run: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NoteCmd {
+    /// Leave a note for a project. With --key, replace the project's note under that key.
+    /// Notes stay on this machine. Never put secrets or credentials in a note.
+    Set {
+        #[command(flatten)]
+        agent: AgentArg,
+        #[command(flatten)]
+        project: ProjectArg,
+        #[arg(long)]
+        key: Option<String>,
+        /// Forget the note after this long (e.g. 30m, 12h, 7d).
+        #[arg(long)]
+        ttl: Option<String>,
+        /// The note, at most 4096 bytes.
+        text: String,
+    },
+    /// List the live notes of a project and its sibling checkouts, newest first.
+    List {
+        #[command(flatten)]
+        project: ProjectArg,
+    },
+    /// Forget a note by id, or by --key in a project. Its text is erased.
+    Forget {
+        #[command(flatten)]
+        agent: AgentArg,
+        #[command(flatten)]
+        project: ProjectArg,
+        #[arg(long, conflicts_with = "note_id", required_unless_present = "note_id")]
+        key: Option<String>,
+        note_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -947,6 +984,17 @@ fn board_command(
         confined: false,
     })?;
     Ok(emit(json, &board, output::board))
+}
+
+/// Resolve `--project` for a read: a path or slug; default cwd. Unlike [`project_key`] it
+/// registers nothing, so an unknown project is an error rather than a new row.
+fn project_lookup(store: &Store, project: Option<String>) -> anyhow::Result<String> {
+    let looks_like_path = |p: &str| p.contains('/') || p.contains('\\') || p == "." || p == "..";
+    match project {
+        Some(p) if !looks_like_path(&p) => Ok(p),
+        Some(p) => project_dir(store, Path::new(&p)),
+        None => project_dir(store, &std::env::current_dir()?),
+    }
 }
 
 /// Resolve `--project`: a path (ensured on the fly) or an existing slug; default cwd.
@@ -1783,6 +1831,58 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 } else {
                     "no wake target was set".into()
                 }
+            })
+        }
+        Command::Note(NoteCmd::Set {
+            agent,
+            project,
+            key,
+            ttl,
+            text,
+        }) => {
+            let project = project_key(&store, &agent.agent, project.project)?;
+            let ttl_seconds = ttl.as_deref().map(parse_secs).transpose()?;
+            let note = store.set_note(another_core::NewNote {
+                agent: agent.agent,
+                project,
+                key,
+                text,
+                ttl_seconds,
+            })?;
+            emit(json, &note, |n| {
+                format!(
+                    "noted {} in {} ({} bytes)",
+                    n.note_id,
+                    n.project,
+                    n.text.len()
+                )
+            })
+        }
+        Command::Note(NoteCmd::List { project }) => {
+            let project = project_lookup(&store, project.project)?;
+            let list = store.notes(&project, another_core::MAX_NOTE_LIST)?;
+            emit(json, &list, output::notes)
+        }
+        Command::Note(NoteCmd::Forget {
+            agent,
+            project,
+            key,
+            note_id,
+        }) => {
+            let target = match (note_id, key) {
+                (Some(id), _) => another_core::NoteTarget::Id(id),
+                (None, Some(key)) => another_core::NoteTarget::Key {
+                    project: project_lookup(&store, project.project)?,
+                    key,
+                },
+                (None, None) => anyhow::bail!("give a note id or --key"),
+            };
+            let gone = store.forget_note(&agent.agent, target)?;
+            emit(json, &gone, |g| {
+                format!(
+                    "forgot {} in {} ({} bytes erased)",
+                    g.note_id, g.project, g.bytes
+                )
             })
         }
         Command::Wake {

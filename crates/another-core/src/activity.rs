@@ -525,6 +525,27 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             format!("unpaired node {}", s("node_id")),
             json!({ "node_id": s("node_id") }),
         ),
+        // Note events never carry text; the feed also leaves out the text's hash (D70).
+        "note.set" | "note.forgotten" | "note.expired" => {
+            let what = match p.get("key").and_then(Value::as_str) {
+                Some(key) => format!("note \"{key}\""),
+                None => "a note".to_string(),
+            };
+            let size = p
+                .get("bytes")
+                .and_then(Value::as_u64)
+                .map(|b| format!(" ({b} bytes)"))
+                .unwrap_or_default();
+            let summary = match row.kind.as_str() {
+                "note.set" => format!("{actor} wrote {what}{size}"),
+                "note.forgotten" => format!("{actor} forgot {what}{size}"),
+                _ => "a note expired".to_string(),
+            };
+            (
+                summary,
+                json!({ "note_id": s("note_id"), "project_id": s("project_id") }),
+            )
+        }
         other => (format!("{actor}: {other}"), p.clone()),
     };
     // Merged feed: events from other nodes carry their node's name.

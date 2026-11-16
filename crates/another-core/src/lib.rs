@@ -14,6 +14,7 @@ mod federation;
 mod holds;
 mod identity;
 mod mail;
+mod notes;
 mod oauth;
 mod repo;
 mod requests;
@@ -57,6 +58,10 @@ pub use identity::{
 pub use mail::{
     AckOutcome, Importance, Inbox, InboxItem, InboxQuery, Message, NewRequest, Reply, SendMessage,
     Thread, ThreadSummary, UnreadAfter, UnreadItem,
+};
+pub use notes::{
+    ForgottenNote, NewNote, Note, NoteList, NoteTarget, MAX_LIVE_NOTES, MAX_NOTE_BYTES,
+    MAX_NOTE_LIST,
 };
 pub use oauth::{
     canonical_resource, error_redirect, redirect_host, redirect_is_loopback, redirect_matches,
