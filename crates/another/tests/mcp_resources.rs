@@ -182,3 +182,57 @@ async fn only_the_owner_may_release_with_stopped() {
     assert_eq!(stopped["outcome"], "stopped", "{stopped}");
     assert_eq!(stopped["resource"]["status"], "released", "{stopped}");
 }
+
+/// adv227: `resource_register` passes its TTL, endpoint, port and metadata to the store.
+#[tokio::test]
+async fn adv227_register_keeps_ttl_endpoint_port_and_metadata() {
+    let f = fx().await;
+    let out = ok(
+        &f.client,
+        "resource_register",
+        json!({ "agent": "owner", "kind": "model_server", "name": "ollama@11434",
+                "endpoint": "http://127.0.0.1:11434", "port": 11434,
+                "metadata": { "model": "llama3" }, "ttl_seconds": 600 }),
+    )
+    .await;
+    let res = &out["resource"];
+    assert_eq!(res["endpoint"], "http://127.0.0.1:11434", "{out}");
+    assert_eq!(res["port"], 11434, "{out}");
+    assert_eq!(res["metadata"]["model"], "llama3", "{out}");
+    let lease = out["lease"]["lease_id"].as_str().unwrap();
+    assert_eq!(f.lease_ttl(lease), 600);
+}
+
+/// adv227: `resource_heartbeat` renews only the resources it names, and all of the
+/// caller's leases when it names none.
+#[tokio::test]
+async fn adv227_heartbeat_renews_only_the_named_resources() {
+    let f = fx().await;
+    let a = f.register("a@1", false).await;
+    let b = f.register("b@2", false).await;
+    let expiry = |id: &str| -> i64 {
+        rusqlite::Connection::open(&f.db)
+            .unwrap()
+            .query_row(
+                "SELECT expires_at FROM resource_leases WHERE resource_id = ?1 AND role = 'owner'",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let (a0, b0) = (expiry(&a), expiry(&b));
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    ok(
+        &f.client,
+        "resource_heartbeat",
+        json!({ "agent": "owner", "resources": [a] }),
+    )
+    .await;
+    assert!(expiry(&a) >= a0 + 1_000, "the named lease was not renewed");
+    assert_eq!(expiry(&b), b0, "an unnamed lease was renewed");
+
+    let a1 = expiry(&a);
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    ok(&f.client, "resource_heartbeat", json!({ "agent": "owner" })).await;
+    assert!(expiry(&a) >= a1 + 1_000 && expiry(&b) >= b0 + 1_000);
+}
