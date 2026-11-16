@@ -195,26 +195,260 @@ pub(crate) fn create_request_tx(
 /// Mark open/claimed requests past their due time as stale. Returns how many changed.
 pub(crate) fn stale_overdue_tx(tx: &Tx<'_>) -> Result<usize> {
     let mut stmt = tx.prepare(
-        "SELECT request_id, status FROM requests
+        "SELECT request_id, status, message_id, thread_id, title, created_by, owner_id, due_at
+         FROM requests
          WHERE node_id = ?1 AND status IN ('open', 'claimed') AND due_at IS NOT NULL AND due_at <= ?2",
     )?;
     let overdue = stmt
         .query_map(params![tx.node_id, tx.now], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            Ok((
+                r.get::<_, String>(1)?,
+                ReminderRow {
+                    request_id: r.get(0)?,
+                    message_id: r.get(2)?,
+                    thread_id: r.get(3)?,
+                    title: r.get(4)?,
+                    creator_id: r.get(5)?,
+                    owner_id: r.get(6)?,
+                    due_at: r.get(7)?,
+                },
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (id, from) in &overdue {
+    let remind = reminders_enabled();
+    for (from, row) in &overdue {
         tx.emit(
             "system",
             "request.stale",
-            json!({ "request_id": id, "from": from, "reason": "past due" }),
+            json!({ "request_id": row.request_id, "from": from, "reason": "past due" }),
         )?;
         tx.execute(
             "UPDATE requests SET status = 'stale', updated_at = ?2 WHERE request_id = ?1",
-            params![id, tx.now],
+            params![row.request_id, tx.now],
         )?;
+        if remind {
+            send_overdue_notice_tx(tx, row)?;
+        }
     }
     Ok(overdue.len())
+}
+
+/// The last line of every reminder: it is not written by the agent it comes from.
+const AUTOMATIC: &str = "(Automatic notice from Another.)";
+
+/// Shortest and longest time before a deadline that the owner is reminded.
+const REMINDER_LEAD_MIN_MS: i64 = 5 * 60 * 1000;
+const REMINDER_LEAD_MAX_MS: i64 = 60 * 60 * 1000;
+
+/// Deadline reminders are on unless `ANOTHER_REQUEST_REMINDERS=off` in the process that
+/// runs the sweep.
+fn reminders_enabled() -> bool {
+    !std::env::var("ANOTHER_REQUEST_REMINDERS").is_ok_and(|v| v.trim().eq_ignore_ascii_case("off"))
+}
+
+/// How long before `due_at` the owner of a request claimed at `claimed_at` is reminded: a
+/// fifth of the claimed span, between five minutes and an hour. `None` when the claim left
+/// less than the minimum, so there is no useful moment to remind.
+fn reminder_lead_ms(claimed_at: i64, due_at: i64) -> Option<i64> {
+    let span = due_at.saturating_sub(claimed_at);
+    (span >= REMINDER_LEAD_MIN_MS)
+        .then(|| (span / 5).clamp(REMINDER_LEAD_MIN_MS, REMINDER_LEAD_MAX_MS))
+}
+
+struct ReminderRow {
+    request_id: String,
+    message_id: String,
+    thread_id: String,
+    title: String,
+    creator_id: String,
+    owner_id: Option<String>,
+    due_at: i64,
+}
+
+/// One reminder mail: its kind, sender, recipient, text and extra event fields.
+struct Reminder<'a> {
+    kind: &'a str,
+    from_id: &'a str,
+    to_id: &'a str,
+    subject: String,
+    body: String,
+    extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Send one reminder in its own savepoint with its `request.reminded` event. A reminder
+/// that cannot be delivered is rolled back and recorded as `request.notify_failed`, and
+/// the sweep goes on. A database failure (the savepoint itself, or writing that event)
+/// still fails the caller's transaction, as any write would.
+fn send_reminder_tx(tx: &Tx<'_>, row: &ReminderRow, reminder: Reminder<'_>) -> Result<()> {
+    let notice = SendMessage {
+        subject: reminder.subject,
+        body: reminder.body,
+        reply_to: Some(row.message_id.clone()),
+        thread_id: Some(row.thread_id.clone()),
+        ..Default::default()
+    };
+    let sent = crate::holds::attempt(tx, "request_reminder", || {
+        let message = crate::mail::send_notice_tx(tx, reminder.from_id, reminder.to_id, &notice)?;
+        let mut payload = serde_json::Map::new();
+        payload.insert("request_id".into(), json!(row.request_id));
+        payload.insert("kind".into(), json!(reminder.kind));
+        payload.insert("to".into(), json!(reminder.to_id));
+        payload.insert("due_at".into(), json!(row.due_at));
+        payload.insert("message_id".into(), json!(message.message_id));
+        payload.extend(reminder.extra.clone());
+        tx.emit("system", "request.reminded", payload.into())?;
+        Ok(())
+    });
+    if let Err(e) = sent {
+        tx.emit(
+            "system",
+            "request.notify_failed",
+            json!({ "request_id": row.request_id, "kind": reminder.kind, "error": e.to_string() }),
+        )?;
+    }
+    Ok(())
+}
+
+/// Tell the requester that its request went stale past its deadline. Nobody is told about
+/// work an agent requested and then claimed itself.
+fn send_overdue_notice_tx(tx: &Tx<'_>, row: &ReminderRow) -> Result<()> {
+    if row.owner_id.as_deref() == Some(row.creator_id.as_str()) {
+        return Ok(());
+    }
+    let rid = &row.request_id;
+    let due = fmt_ts(row.due_at);
+    let (from_id, body) = match &row.owner_id {
+        Some(owner_id) => {
+            let owner = crate::identity::get_agent(tx, owner_id)?;
+            (
+                owner_id.as_str(),
+                format!(
+                    "Passed its due time {due}. Owner: {}. Anyone may take it over with \
+                     another request claim {rid}, or cancel it with another request cancel {rid}. \
+                     {AUTOMATIC}",
+                    owner.address
+                ),
+            )
+        }
+        None => (
+            row.creator_id.as_str(),
+            format!(
+                "Passed its due time {due} with nobody claiming it. Anyone may take it with \
+                 another request claim {rid}, or cancel it with another request cancel {rid}. \
+                 {AUTOMATIC}"
+            ),
+        ),
+    };
+    send_reminder_tx(
+        tx,
+        row,
+        Reminder {
+            kind: "overdue",
+            from_id,
+            to_id: &row.creator_id,
+            // The title may come from a subject stored before D75.
+            subject: format!("Overdue: {}", crate::mail::single_line(&row.title, 290)),
+            body,
+            extra: serde_json::Map::new(),
+        },
+    )
+}
+
+/// Remind each owner whose claimed deadline is within its lead, once per owner and deadline.
+/// Runs only in the full sweep (`sweep_tx`), not on every write.
+/// A window missed entirely (nothing swept before the deadline) gets no late reminder: the
+/// overdue notice covers it.
+pub(crate) fn remind_due_soon_tx(tx: &Tx<'_>) -> Result<()> {
+    if !reminders_enabled() {
+        return Ok(());
+    }
+    let mut stmt = tx.prepare(
+        "SELECT request_id, message_id, thread_id, title, created_by, owner_id, due_at, claimed_at
+         FROM requests
+         WHERE status = 'claimed' AND node_id = ?1 AND due_at > ?2 AND due_at <= ?3
+           AND claimed_at IS NOT NULL AND owner_id IS NOT NULL AND owner_id != created_by",
+    )?;
+    let due = stmt
+        .query_map(
+            params![
+                tx.node_id,
+                tx.now,
+                tx.now.saturating_add(REMINDER_LEAD_MAX_MS)
+            ],
+            |r| {
+                Ok((
+                    ReminderRow {
+                        request_id: r.get(0)?,
+                        message_id: r.get(1)?,
+                        thread_id: r.get(2)?,
+                        title: r.get(3)?,
+                        creator_id: r.get(4)?,
+                        owner_id: r.get(5)?,
+                        due_at: r.get(6)?,
+                    },
+                    r.get::<_, i64>(7)?,
+                ))
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (row, claimed_at) in due {
+        let Some(lead) = reminder_lead_ms(claimed_at, row.due_at) else {
+            continue;
+        };
+        if row.due_at - lead > tx.now {
+            continue;
+        }
+        let Some(owner_id) = row.owner_id.as_deref() else {
+            continue;
+        };
+        let subject = format!("Due soon: {}", crate::mail::single_line(&row.title, 290));
+        // The body starts with this deadline, so the reminder mail itself is the record.
+        let marker = format!("Due at {} (", fmt_ts(row.due_at));
+        // One reminder per (request, owner, deadline) for the life of the request: moving the
+        // deadline away and back, or releasing and reclaiming, does not repeat it. A reminder
+        // replies to its own request's message, which tells apart several requests in one
+        // thread. The lookup reads only this thread (`messages_by_thread`) and the delivery's
+        // key.
+        let sent: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM messages m
+               JOIN deliveries d ON d.message_id = m.message_id AND d.agent_id = ?3
+               WHERE m.thread_id = ?1 AND m.reply_to = ?6 AND m.sender_id = ?2
+                 AND m.subject = ?4 AND substr(m.body, 1, length(?5)) = ?5)",
+            params![
+                row.thread_id,
+                row.creator_id,
+                owner_id,
+                subject,
+                marker,
+                row.message_id
+            ],
+            |r| r.get(0),
+        )?;
+        if sent {
+            continue;
+        }
+        let rid = &row.request_id;
+        let minutes = (row.due_at - tx.now + 59_999) / 60_000;
+        let mut extra = serde_json::Map::new();
+        extra.insert("claimed_at".into(), json!(claimed_at));
+        send_reminder_tx(
+            tx,
+            &row,
+            Reminder {
+                kind: "due_soon",
+                from_id: &row.creator_id,
+                to_id: owner_id,
+                subject,
+                body: format!(
+                    "{marker}in {minutes} min). Complete it with another request complete \
+                     {rid}, or release it with another request release {rid} if you cannot \
+                     finish. {AUTOMATIC}"
+                ),
+                extra,
+            },
+        )?;
+    }
+    Ok(())
 }
 
 /// Requests an agent should see in its inbox: open/stale ones addressed to it, and ones it owns.
