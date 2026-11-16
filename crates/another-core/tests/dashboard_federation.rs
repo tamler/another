@@ -275,3 +275,42 @@ fn adv220_released_or_expired_foreign_holds_do_not_warn() {
         .unwrap();
     assert_eq!(warnings(), 0, "an expired foreign hold still warns");
 }
+
+/// Remote warnings use glob overlap, not equal text: a spoke's `src/**` in `shop` warns
+/// against the hub's `src/a.rs`.
+#[test]
+fn a_foreign_glob_that_covers_a_local_path_is_a_remote_warning() {
+    let (hub, alpha) = fed();
+    let carols = alpha.holder("carol");
+    alpha
+        .store
+        .release_holds("carol@shop", std::slice::from_ref(&carols.hold_id))
+        .unwrap();
+    let shop = alpha.store.project("shop").unwrap().abs_path;
+    let glob = alpha
+        .store
+        .acquire_holds(AcquireHolds {
+            agent: "carol@shop".into(),
+            project: shop,
+            paths: vec!["src/**".into()],
+            ttl_seconds: Some(600),
+            exclusive: true,
+            reason: None,
+            repo_wide: false,
+        })
+        .unwrap()
+        .granted
+        .remove(0);
+    push(&hub, &alpha);
+    let bobs = hub.holder("bob");
+
+    let snap = hub.store.dashboard_snapshot(DashboardView::LOCAL).unwrap();
+    let bob = snap
+        .holds
+        .iter()
+        .find(|h| h.hold.hold_id == bobs.hold_id)
+        .unwrap();
+    assert_eq!(bob.remote_warnings.len(), 1, "{:?}", bob.remote_warnings);
+    assert_eq!(bob.remote_warnings[0].hold_id, glob.hold_id);
+    assert_eq!(bob.remote_warnings[0].pattern, "src/**");
+}
