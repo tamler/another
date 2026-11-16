@@ -617,6 +617,74 @@ fn linked_release_requests_finish_on_session_end_or_expiry() {
     }
 }
 
+/// #137 review P2: the hold id already identifies its owner. A release ask must reach that
+/// agent by id even after a second agent with the same name makes the stored display
+/// address ambiguous, and it must still be reused and closed when the hold ends.
+#[test]
+fn release_ask_reaches_the_holder_by_id_after_its_name_becomes_ambiguous() {
+    let fx = Fx::new();
+    let held = fx
+        .acquire("alice", &fx.repos.main, &["src/a.rs"])
+        .unwrap()
+        .granted
+        .remove(0);
+    let holder_id = fx.store.agent("alice").unwrap().agent_id;
+    let main = fx.project(&fx.repos.main);
+    let twin = fx
+        .store
+        .register_agent(RegisterAgent {
+            name: "alice".into(),
+            program: Program::Codex,
+            project: Some(main),
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    assert!(
+        fx.store.agent("alice").is_err(),
+        "the original holder's name is now ambiguous"
+    );
+
+    let ask = fx
+        .store
+        .request_hold_release("bob", &held.hold_id)
+        .expect("the hold id identifies its owner");
+    let request_id = ask.request_id.clone().unwrap();
+    let again = fx.store.request_hold_release("bob", &held.hold_id).unwrap();
+    assert_eq!(
+        again.message_id, ask.message_id,
+        "the outstanding ask is reused"
+    );
+    // A different agent that merely shares the name is not the holder.
+    let from_twin = fx
+        .store
+        .request_hold_release(&twin.address, &held.hold_id)
+        .expect("a same-named agent is not the holder");
+    assert_ne!(from_twin.message_id, ask.message_id);
+    // Both asks are delivered to the original holder only, never to the twin.
+    let db = rusqlite::Connection::open(fx.store.db_path().unwrap()).unwrap();
+    for message in [&ask, &from_twin] {
+        let recipients: Vec<String> = db
+            .prepare("SELECT agent_id FROM deliveries WHERE message_id = ?1")
+            .unwrap()
+            .query_map([&message.message_id], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(recipients, std::slice::from_ref(&holder_id));
+    }
+    assert_ne!(holder_id, twin.agent_id);
+
+    fx.advance_secs(601);
+    fx.store.sweep().unwrap();
+    assert_eq!(
+        fx.store.request(&request_id).unwrap().status,
+        RequestStatus::Done
+    );
+    let done = fx.store.inbox("bob", InboxQuery::default()).unwrap();
+    assert_eq!(done.messages.len(), 1, "bob gets the Done notice");
+}
+
 #[test]
 fn push_dedupe_preserves_sender_audience_importance_and_thread_changes() {
     let fx = Fx::new();
