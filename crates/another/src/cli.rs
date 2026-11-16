@@ -783,8 +783,9 @@ pub enum HoldCmd {
 }
 
 /// Exit status for a conflict: holds that overlap, or any `conflict` error (acting on a
-/// closed request, releasing someone else's work). Hooks and scripts branch on it.
-/// Other errors exit 1, and bad arguments exit 2 (clap).
+/// closed request, claiming or completing a request another agent has claimed). Hooks and
+/// scripts branch on it. Other errors exit 1, including `forbidden` (for example releasing
+/// a request someone else owns), and bad arguments exit 2 (clap).
 pub const EXIT_CONFLICT: u8 = 3;
 
 pub fn main() -> ExitCode {

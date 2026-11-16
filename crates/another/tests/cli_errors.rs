@@ -198,6 +198,33 @@ fn every_conflict_exits_3() {
     assert_eq!(code, Some(3));
     assert_eq!(body["code"], "conflict");
 
+    // Completing a request another agent has claimed is a conflict too (README's example).
+    let sent = fx.ok(&[
+        "--json",
+        "send",
+        "--from",
+        "lead",
+        "--to",
+        "worker",
+        "--subject",
+        "Second",
+        "--body",
+        "b",
+        "--request",
+    ]);
+    let second = serde_json::from_str::<Value>(&sent).unwrap()["request_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    fx.ok(&["request", "claim", "--agent", "worker", &second]);
+    let (code, body) = fx.fail_json(&["request", "complete", "--agent", "lead", &second]);
+    assert_eq!(code, Some(3), "{body}");
+    assert_eq!(body["code"], "conflict");
+    // Releasing it is `forbidden`, not a conflict, and keeps status 1 (review R1 of #156).
+    let (code, body) = fx.fail_json(&["request", "release", "--agent", "lead", &second]);
+    assert_eq!(code, Some(1), "{body}");
+    assert_eq!(body["code"], "forbidden");
+
     // The hold conflict keeps its exit status 3.
     fx.ok(&["hold", "acquire", "--agent", "lead", "src/a.rs"]);
     let out = fx.run(&["hold", "check", "--agent", "worker", "src/a.rs"]);
