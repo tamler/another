@@ -284,6 +284,7 @@ Bearer tokens and OAuth grants follow the same rules.
 | `work_board` | A `project` matching the globs (required). Returns a confined board: that one project, no sibling checkouts, and agents, projects and hold patterns from other projects hidden ([BOARD.md](BOARD.md#remote-connections)) |
 | `orphans_list` | Lapsed registrations only; the process scan is never run for remote peers |
 | `resource_reap` | **Never** (remote reaping is disabled) |
+| `project_notes` | **Never** (project notes are local only; see [NOTES.md](NOTES.md)) |
 
 `whats_new` is the call a chat app should make first. It returns unread subjects, open requests and a short activity list for that one agent, and a `next` field. Message bodies are not included. If nothing is waiting, `next` says so and the app should stop.
 
