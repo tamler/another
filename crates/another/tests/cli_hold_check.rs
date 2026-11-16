@@ -97,8 +97,11 @@ fn an_exclusive_hold_conflicts_for_others_only() {
 
     let (code, out) = fx.run(&["hold", "check", "-a", "worker", "src/a.rs"]);
     assert_eq!(code, 3, "{out}");
+    // The checked path is echoed in the platform's form (src\a.rs on Windows); the hold's
+    // own pattern is always stored with '/'.
+    assert!(out.starts_with("conflict: src"), "{out}");
     assert!(
-        out.contains("conflict: src/a.rs is held by lead@shop"),
+        out.contains("is held by lead@shop (shop:src/a.rs, exclusive"),
         "{out}"
     );
     // A glob that covers the held file conflicts too, and JSON names the hold.
