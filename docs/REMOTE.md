@@ -103,7 +103,9 @@ Tunnels usually forward the public hostname in the `Host` header. Another reject
 - authorization-server metadata (RFC 8414) and the same document at `/.well-known/openid-configuration`, including `code_challenge_methods_supported: ["S256"]`
 - authorization code + PKCE (`S256` only) and the RFC 8707 `resource` parameter, which must be the MCP URL
 - RFC 9207 `iss` on every redirect, including errors
-- Client ID Metadata Documents, and dynamic client registration for clients that still use it
+- Client ID Metadata Documents, and dynamic client registration for clients that still use it. A metadata document is fetched only from a public address.
+  - **What is refused:** private, loopback, link-local and special-purpose ranges, including the same addresses written in an IPv6 form that carries an IPv4 address (mapped, translated, IPv4-compatible, NAT64 `64:ff9b::/96`, 6to4, Teredo).
+  - **A limit:** on an IPv6-only host whose DNS64 uses a network-specific NAT64 prefix, Another cannot tell a translated private address from a public one, so do not serve `--auth` from such a host.
 - public clients only (`token_endpoint_auth_method=none`). A client secret is rejected
 - access tokens last **one hour**. A refresh token is issued only when the grant includes `offline_access`. Refresh tokens last 30 days, rotate on every use, and reuse of an old refresh token revokes the grant
 

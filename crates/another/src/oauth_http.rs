@@ -907,6 +907,14 @@ fn cgnat(v: std::net::Ipv4Addr) -> bool {
     a == 100 && (64..128).contains(&b)
 }
 
+/// IPv4 special-purpose ranges the `std` predicates leave out (FINDINGS-198):
+/// 192.0.0.0/24 (IETF protocol assignments, RFC 6890), 198.18.0.0/15 (benchmarking,
+/// RFC 2544) and 240.0.0.0/4 (reserved, RFC 1112; 255.255.255.255 is `is_broadcast`).
+fn special_ipv4(v: std::net::Ipv4Addr) -> bool {
+    let [a, b, c, _] = v.octets();
+    (a == 192 && b == 0 && c == 0) || (a == 198 && (b & 0xfe) == 18) || a >= 240
+}
+
 fn ip_allowed(ip: IpAddr, allow_loopback: bool) -> bool {
     match ip {
         IpAddr::V4(v) => {
@@ -921,7 +929,8 @@ fn ip_allowed(ip: IpAddr, allow_loopback: bool) -> bool {
                 || v.is_unspecified()
                 || v.is_multicast()
                 || cgnat(v)
-                || v.octets()[0] == 0)
+                || v.octets()[0] == 0
+                || special_ipv4(v))
         }
         IpAddr::V6(v) => {
             if let Some(v4) = v.to_ipv4_mapped() {
@@ -945,7 +954,9 @@ fn ip_allowed(ip: IpAddr, allow_loopback: bool) -> bool {
                 // address is not in the last 32 bits, so refuse it all.
                 || (s[0] == 0x64 && s[1] == 0xff9b && s[2] == 1)
                 // Site-local, fec0::/10 (deprecated, RFC 3879).
-                || (s[0] & 0xffc0) == 0xfec0)
+                || (s[0] & 0xffc0) == 0xfec0
+                // Teredo, 2001::/32 (RFC 4380): carries an IPv4 client, obfuscated.
+                || (s[0] == 0x2001 && s[1] == 0))
         }
     }
 }
@@ -960,6 +971,8 @@ fn embedded_ipv4(v: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
     match s {
         [0x64, 0xff9b, 0, 0, 0, 0, _, _] => Some(last()),
         [0, 0, 0, 0, 0, 0, _, _] => Some(last()),
+        // SIIT IPv4-translated, ::ffff:0:0/96 (RFC 2765, RFC 6145; FINDINGS-198).
+        [0, 0, 0, 0, 0xffff, 0, _, _] => Some(last()),
         [0x2002, hi, lo, ..] => Some(std::net::Ipv4Addr::from(((hi as u32) << 16) | lo as u32)),
         _ => None,
     }
@@ -1541,6 +1554,13 @@ mod tests {
             ("2002:c0a8:105::1", "6to4 -> 192.168.1.5"),
             ("fec0::1", "site-local (deprecated)"),
             ("feff::1", "site-local, top of fec0::/10"),
+            // FINDINGS-198: SIIT IPv4-translated ::ffff:0:a.b.c.d (RFC 2765/6145).
+            ("::ffff:0:a9fe:a9fe", "IPv4-translated -> 169.254.169.254"),
+            ("::ffff:0:7f00:1", "IPv4-translated -> 127.0.0.1"),
+            ("::ffff:0:a00:1", "IPv4-translated -> 10.0.0.1"),
+            // FINDINGS-198 note: Teredo 2001::/32 carries an obfuscated IPv4 client.
+            ("2001:0:4136:e378:8000:63bf:3fff:fdd2", "Teredo"),
+            ("2001::1", "Teredo prefix"),
         ] {
             assert!(!allowed(ip, false), "{ip} ({what}) must be refused");
         }
@@ -1555,7 +1575,25 @@ mod tests {
             "2002:808:808::1",
             "2606:4700:4700::1111",
             "fe00::1",
+            "::ffff:0:808:808",
+            "2001:4860:4860::8888",
         ] {
+            assert!(allowed(ip, false), "{ip} is public");
+        }
+        // FINDINGS-198 note: IPv4 special ranges outside the `std` predicates, alone and
+        // embedded.
+        for ip in [
+            "192.0.0.170",
+            "198.18.0.1",
+            "198.19.255.255",
+            "240.0.0.1",
+            "255.255.255.254",
+            "64:ff9b::c612:1",
+        ] {
+            assert!(!allowed(ip, false), "{ip} must be refused");
+        }
+        // Their public neighbours stay allowed.
+        for ip in ["198.17.255.255", "198.20.0.1", "192.0.1.1"] {
             assert!(allowed(ip, false), "{ip} is public");
         }
     }
