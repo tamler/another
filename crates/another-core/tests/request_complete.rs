@@ -1,7 +1,8 @@
 //! Who may complete a request, and who hears about it. Claimed work belongs to its owner;
-//! stale work may be taken over by anyone (completing it is a takeover); open work may be
-//! completed by anyone. The creator is told "Done: <title>" unless it completed the request
-//! itself.
+//! stale work may be taken over by any local agent (completing it is a takeover); open work
+//! may be completed by any local agent. A token caller is further limited to requests it
+//! created, received or owns (see `request_scope.rs`). The creator is told "Done: <title>"
+//! unless it completed the request itself.
 
 use std::sync::atomic::Ordering;
 
@@ -145,4 +146,46 @@ fn a_creator_completing_its_own_request_is_not_told_about_it() {
     let done = f.act("lead", &id, RequestAction::Complete, None).unwrap();
     assert_eq!(done.status, RequestStatus::Done);
     assert_eq!(f.dones(), 0);
+}
+
+/// adv216: completing open work without a note tells the creator "Request <id> is done.",
+/// a blank note counts as none, and the request records when it was taken (its
+/// `claimed_at`), which a direct completion sets to the completion time.
+#[test]
+fn adv216_a_direct_completion_without_a_note_gets_the_default_body_and_a_claim_time() {
+    let f = fx();
+    for note in [None, Some("   ".to_string())] {
+        let id = f.request();
+        let done = f
+            .store
+            .update_request(RequestUpdate {
+                agent: "other".into(),
+                request_id: id.clone(),
+                action: RequestAction::Complete,
+                note,
+                due_in_seconds: None,
+            })
+            .unwrap();
+        assert!(done.closed_at.is_some());
+        assert_eq!(done.claimed_at, done.closed_at, "{done:?}");
+        let inbox = f
+            .store
+            .inbox(
+                "lead",
+                InboxQuery {
+                    unread_only: false,
+                    urgent_only: false,
+                    limit: 100,
+                },
+            )
+            .unwrap();
+        let body = &inbox
+            .messages
+            .iter()
+            .find(|m| m.message.subject == "Done: Ship it" && m.message.body.contains(&id))
+            .unwrap_or_else(|| panic!("no Done mail naming {id}"))
+            .message
+            .body;
+        assert_eq!(body, &format!("Request {id} is done."));
+    }
 }
