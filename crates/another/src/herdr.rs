@@ -136,6 +136,13 @@ fn open_cache(path: &Path) -> rusqlite::Result<Connection> {
     }
     let conn = Connection::open(path)?;
     conn.busy_timeout(LOCK_WAIT)?;
+    // Every hook opens and closes its own connection. By default the last connection to
+    // close checkpoints the WAL (with fsyncs), which made a burst of hooks wait on each
+    // other's closes; SQLite's automatic checkpoint (every 1000 pages) still runs.
+    let _ = conn.set_db_config(
+        rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+        true,
+    );
     // WAL with `synchronous = NORMAL`: commits stay atomic and ordered but skip the per-commit
     // fsync, so a burst of hooks is not held up by slow disks. Power loss can drop the last
     // rows; the next reservation is then still `max(now, last + 1)`. The mode is stored in
@@ -166,10 +173,42 @@ fn now_micros() -> u64 {
         .unwrap_or(0)
 }
 
+/// The pane's last report: state, note, sequence number, and when it was sent (0 when its
+/// `herdr` could not be started).
+type LastReport = (Option<String>, Option<String>, i64, i64);
+
+fn last_report(conn: &Connection, pane: &str) -> rusqlite::Result<Option<LastReport>> {
+    conn.query_row(
+        "SELECT state, note, seq, at_ms FROM panes WHERE pane = ?1",
+        [pane],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )
+    .optional()
+}
+
+/// Whether `state`/`note` must be sent, given the pane's last report.
+fn needs_send(
+    last: Option<&LastReport>,
+    state: Option<&str>,
+    note: Option<&str>,
+    now_ms: u64,
+) -> bool {
+    match last {
+        Some((last_state, last_note, _, at_ms)) => {
+            let unchanged = last_state.as_deref() == state && last_note.as_deref() == note;
+            let delivered = *at_ms != 0;
+            let fresh = state.is_none() || now_ms.saturating_sub(*at_ms as u64) < REFRESH_MS;
+            !(unchanged && delivered && fresh)
+        }
+        None => true,
+    }
+}
+
 /// In one write transaction: decide whether `state`/`note` must be sent for `pane`, and if
 /// so record it and reserve its sequence number, `max(now_us, last + 1)`. Parallel callers
 /// are serialized by SQLite's write lock, so each reservation is above every earlier one,
-/// whatever the clock says.
+/// whatever the clock says. The write lock is only taken when a plain read shows that
+/// something may need sending; the decision is made again inside the transaction.
 fn reserve(
     conn: &mut Connection,
     pane: &str,
@@ -177,27 +216,18 @@ fn reserve(
     note: Option<&str>,
     now_us: u64,
 ) -> rusqlite::Result<Option<u64>> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let last: Option<(Option<String>, Option<String>, i64, i64)> = tx
-        .query_row(
-            "SELECT state, note, seq, at_ms FROM panes WHERE pane = ?1",
-            [pane],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .optional()?;
     let now_ms = now_us / 1000;
-    let last_seq = match &last {
-        Some((last_state, last_note, seq, at_ms)) => {
-            let unchanged = last_state.as_deref() == state && last_note.as_deref() == note;
-            let delivered = *at_ms != 0;
-            let fresh = state.is_none() || now_ms.saturating_sub(*at_ms as u64) < REFRESH_MS;
-            if unchanged && delivered && fresh {
-                return Ok(None);
-            }
-            u64::try_from(*seq).unwrap_or(0)
-        }
-        None => 0,
-    };
+    if !needs_send(last_report(conn, pane)?.as_ref(), state, note, now_ms) {
+        return Ok(None);
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let last = last_report(&tx, pane)?;
+    if !needs_send(last.as_ref(), state, note, now_ms) {
+        return Ok(None);
+    }
+    let last_seq = last
+        .map(|(_, _, seq, _)| u64::try_from(seq).unwrap_or(0))
+        .unwrap_or(0);
     // Sequence numbers are stored as SQLite integers; past `i64::MAX` nothing can follow.
     let Some(seq) = last_seq
         .checked_add(1)
