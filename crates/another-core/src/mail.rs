@@ -11,7 +11,7 @@ use crate::store::{new_id, Store, Tx};
 use crate::time::{fmt_opt, fmt_ts};
 
 const MAX_BODY_BYTES: usize = 256 * 1024;
-const MAX_SUBJECT_CHARS: usize = 300;
+pub const MAX_SUBJECT_CHARS: usize = 300;
 
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
@@ -180,9 +180,39 @@ pub struct AckOutcome {
     pub unchanged: Vec<String>,
 }
 
+/// Characters that must never reach a terminal from text another agent chose: C0 and C1
+/// controls and DEL (CR, LF, ESC, tab, …), plus Unicode bidirectional overrides and
+/// isolates, which can make text display in a different order than it is typed.
+pub fn is_unsafe_text_char(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// `text` as one line that is safe to type into or print on a terminal: every unsafe
+/// character (see [`is_unsafe_text_char`]) becomes a space, and the result is cut to
+/// `max_chars` characters (with `…` when cut). Used for subjects that arrive from other
+/// nodes and for everything a wake types (wake.rs).
+pub fn single_line(text: &str, max_chars: usize) -> String {
+    let clean: String = text
+        .chars()
+        .map(|c| if is_unsafe_text_char(c) { ' ' } else { c })
+        .collect();
+    if clean.chars().count() <= max_chars {
+        return clean;
+    }
+    let mut cut: String = clean.chars().take(max_chars.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
+}
+
 fn check_text(subject: &str, body: &str) -> Result<()> {
     if subject.trim().is_empty() {
         return Err(Error::Invalid("subject must not be empty".into()));
+    }
+    // A subject is typed into the recipient's terminal by a wake and printed by the CLI.
+    if subject.chars().any(is_unsafe_text_char) {
+        return Err(Error::Invalid(
+            "subject must be one line of text: no line breaks, tabs, escape or other control characters".into(),
+        ));
     }
     if subject.chars().count() > MAX_SUBJECT_CHARS {
         return Err(Error::Invalid(format!(
@@ -265,6 +295,10 @@ fn resolve_all(tx: &Tx<'_>, names: &[String]) -> Result<Vec<AgentRef>> {
 }
 
 pub(crate) fn send_tx(tx: &Tx<'_>, input: &SendMessage) -> Result<Message> {
+    send_inner_tx(tx, input, true)
+}
+
+fn send_inner_tx(tx: &Tx<'_>, input: &SendMessage, touch_sender: bool) -> Result<Message> {
     check_text(&input.subject, &input.body)?;
     if input.to.is_empty() {
         return Err(Error::Invalid("at least one recipient is required".into()));
@@ -272,7 +306,61 @@ pub(crate) fn send_tx(tx: &Tx<'_>, input: &SendMessage) -> Result<Message> {
     let sender = resolve_agent(tx, tx.node_id, &input.from)?;
     let to = resolve_all(tx, &input.to)?;
     let cc = resolve_all(tx, &input.cc)?;
+    deliver_tx(tx, input, &sender, &to, &cc, touch_sender)
+}
 
+/// An automatic notice from one local agent to another, both known by id. Nothing is
+/// resolved by display address, which can have become ambiguous since the ids were stored.
+/// `input.from`, `to` and `cc` are ignored; the sender is not touched.
+pub(crate) fn send_notice_tx(
+    tx: &Tx<'_>,
+    from_id: &str,
+    to_id: &str,
+    input: &SendMessage,
+) -> Result<Message> {
+    send_by_id_tx(tx, from_id, to_id, input, false)
+}
+
+/// A message from one local agent to another, both known by id, sent on the sender's
+/// explicit behalf: like [`send_notice_tx`], but the sender's activity is recorded.
+pub(crate) fn send_by_id_tx(
+    tx: &Tx<'_>,
+    from_id: &str,
+    to_id: &str,
+    input: &SendMessage,
+    touch_sender: bool,
+) -> Result<Message> {
+    check_text(&input.subject, &input.body)?;
+    let sender = agent_by_id(tx, from_id)?;
+    let to = [agent_by_id(tx, to_id)?];
+    deliver_tx(tx, input, &sender, &to, &[], touch_sender)
+}
+
+fn agent_by_id(tx: &Tx<'_>, agent_id: &str) -> Result<AgentRef> {
+    tx.query_row(
+        "SELECT agent_id, address, node_id FROM agents WHERE agent_id = ?1",
+        [agent_id],
+        |r| {
+            Ok(AgentRef {
+                id: r.get(0)?,
+                address: r.get(1)?,
+                node_id: r.get(2)?,
+            })
+        },
+    )
+    .optional()?
+    .ok_or_else(|| Error::NotFound(format!("unknown agent id {agent_id:?}")))
+}
+
+/// Store and deliver a message whose sender and recipients are already resolved.
+fn deliver_tx(
+    tx: &Tx<'_>,
+    input: &SendMessage,
+    sender: &AgentRef,
+    to: &[AgentRef],
+    cc: &[AgentRef],
+    touch_sender: bool,
+) -> Result<Message> {
     let message_id = new_id();
     let thread_id = match (&input.reply_to, &input.thread_id) {
         (Some(parent), given) => {
@@ -397,14 +485,16 @@ pub(crate) fn send_tx(tx: &Tx<'_>, input: &SendMessage) -> Result<Message> {
         create_request_tx(
             tx,
             request_id,
-            &sender,
+            sender,
             &message_id,
             &thread_id,
             &input.subject,
             req.due_in_seconds,
         )?;
     }
-    touch(tx, &sender.id)?;
+    if touch_sender {
+        touch(tx, &sender.id)?;
+    }
     load_message(tx, &message_id)
 }
 
@@ -439,10 +529,12 @@ impl Store {
                 // Replying to your own message: address the original recipients.
                 to = original.to.clone();
             }
-            let subject = if original.subject.to_ascii_lowercase().starts_with("re:") {
-                original.subject.clone()
+            // The original may have been stored before D75; keep the reply one line.
+            let original_subject = single_line(&original.subject, MAX_SUBJECT_CHARS - 4);
+            let subject = if original_subject.to_ascii_lowercase().starts_with("re:") {
+                original_subject
             } else {
-                format!("Re: {}", original.subject)
+                format!("Re: {original_subject}")
             };
             send_tx(
                 tx,

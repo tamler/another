@@ -76,13 +76,13 @@ A running `another` keeps the code it started with, so after installing a new bi
    another daemon restart
    ```
 
-   If it is at a different path (say `cargo install` put it in `~/.cargo/bin` but the plist names `~/.local/bin/another`), run the new binary's install instead, which rewrites the plist and reloads it. Pass the same `--bind` if you chose one:
+   If it is at a different path (say `cargo install` put it in `~/.cargo/bin` but the plist names `~/.local/bin/another`), run the new binary's install instead, which rewrites the plist and reloads it. Run it with the same `ANOTHER_HOME` (or `--home`), `--label` and `--bind` as the original install. Install records `ANOTHER_HOME` and `PATH` from the shell you run it in, so from a plain shell it would point the daemon at a different database, or, with another label, add a second daemon beside the old one:
 
    ```bash
    another daemon install
    ```
 
-   The recorded path is the first `ProgramArguments` entry in `~/Library/LaunchAgents/one.toanother.another.plist`.
+   The plist (`~/Library/LaunchAgents/<label>.plist`, `one.toanother.another.plist` by default) shows what the old install recorded: the binary is the first `ProgramArguments` entry, the bind follows `--bind`, and `ANOTHER_HOME` and `PATH` are under `EnvironmentVariables`.
 
 2. **The systemd and Task Scheduler daemons (Linux, Windows).** The same rule applies: `another daemon restart` relaunches the binary recorded at install time (the unit's `ExecStart`, or the task's `<Command>`), and the new binary's `another daemon install` rewrites the definition when the path changed. A daemon you run under some other service manager needs that manager's restart, and a check that it names the new binary.
 

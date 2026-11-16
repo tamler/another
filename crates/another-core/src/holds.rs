@@ -11,13 +11,15 @@
 use std::path::Path;
 
 use globset::{Glob, GlobBuilder, GlobMatcher};
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::error::{Error, Result};
 use crate::identity::{address, find_project, resolve_agent, Project};
-use crate::mail::touch;
+use crate::mail::{
+    load_message, send_by_id_tx, send_notice_tx, touch, Message, NewRequest, SendMessage,
+};
 use crate::requests::stale_overdue_tx;
 use crate::store::{new_id, Store, Tx};
 use crate::time::fmt_ts;
@@ -129,6 +131,15 @@ pub struct EditGuard {
     pub covered: Vec<String>,
     /// Other agents' overlapping holds. When this is not empty nothing was taken.
     pub conflicts: Vec<HoldConflict>,
+    /// First notice for a new set of blockers; repeated attempts get a short denial.
+    pub first_notice: bool,
+    /// A durable wait is on record for these conflicts, so one inbox ping follows when the
+    /// file is free. False when recording the wait failed: no ping will come, and the
+    /// agent has to check again itself after `retry_after_seconds`. Always false when
+    /// there are no conflicts.
+    pub wait_recorded: bool,
+    /// Advisory backoff, in seconds. A wait also sends one inbox ping when the file is free.
+    pub retry_after_seconds: i64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -193,6 +204,18 @@ fn clamp_ttl(ttl: Option<i64>) -> Result<i64> {
 
 /// Normalize a requested path or glob to a project-relative pattern.
 pub(crate) fn normalize_pattern(project: &Project, raw: &str) -> Result<String> {
+    let path = normalize_path(project, raw)?;
+    let pattern = if path.is_empty() {
+        "**".to_string()
+    } else {
+        path
+    };
+    compile(&pattern)?;
+    Ok(pattern)
+}
+
+/// Normalize a path without interpreting filename characters as glob syntax.
+fn normalize_path(project: &Project, raw: &str) -> Result<String> {
     let raw = raw.trim();
     #[cfg(windows)]
     let (raw, root_path) = (raw.replace('\\', "/"), project.abs_path.replace('\\', "/"));
@@ -226,14 +249,7 @@ pub(crate) fn normalize_pattern(project: &Project, raw: &str) -> Result<String> 
             p => parts.push(p),
         }
     }
-    // An empty pattern means the whole project.
-    let pattern = if parts.is_empty() {
-        "**".to_string()
-    } else {
-        parts.join("/")
-    };
-    compile(&pattern)?;
-    Ok(pattern)
+    Ok(parts.join("/"))
 }
 
 fn compile(pattern: &str) -> Result<GlobMatcher> {
@@ -244,8 +260,25 @@ fn compile(pattern: &str) -> Result<GlobMatcher> {
     Ok(glob.compile_matcher())
 }
 
-fn is_glob(pattern: &str) -> bool {
-    pattern.contains(['*', '?', '[', '{'])
+/// Decode an entirely literal pattern, including globset's single-character escapes.
+/// Real character classes, wildcards and alternations still return None.
+fn literal_pattern(pattern: &str) -> Option<String> {
+    let mut chars = pattern.chars();
+    let mut out = String::new();
+    while let Some(c) = chars.next() {
+        if c == '[' {
+            let escaped = chars.next()?;
+            if !matches!(escaped, '*' | '?' | '[' | ']' | '{' | '}') || chars.next()? != ']' {
+                return None;
+            }
+            out.push(escaped);
+        } else if matches!(c, '*' | '?' | '{') {
+            return None;
+        } else {
+            out.push(c);
+        }
+    }
+    Some(out)
 }
 
 /// A pattern that reaches across the whole project: `**` (also what the project root
@@ -256,10 +289,13 @@ pub fn is_repo_wide(pattern: &str) -> bool {
 
 /// An own hold `held` already covers the literal path `path`.
 fn hold_covers(held: &str, path: &str) -> bool {
-    if is_glob(held) {
-        held == "**" || matches(held, path)
-    } else {
-        covers(held, path)
+    let path = literal_pattern(path).unwrap_or_else(|| path.to_string());
+    if held == path {
+        return true;
+    }
+    match literal_pattern(held) {
+        Some(held) => covers(&held, &path),
+        None => held == "**" || glob_touches_literal(held, &path, false),
     }
 }
 
@@ -283,11 +319,16 @@ pub fn patterns_overlap(a: &str, b: &str) -> bool {
     if a == b || a == "**" || b == "**" {
         return true;
     }
-    match (is_glob(a), is_glob(b)) {
-        (false, false) => covers(a, b) || covers(b, a),
-        (true, false) => glob_touches_literal(a, b),
-        (false, true) => glob_touches_literal(b, a),
-        (true, true) => {
+    // Older auto holds stored filenames without escapes. Keep their exact spelling
+    // protected while also interpreting any deliberate manual glob conservatively.
+    if literal_pattern(a).as_deref() == Some(b) || literal_pattern(b).as_deref() == Some(a) {
+        return true;
+    }
+    match (literal_pattern(a), literal_pattern(b)) {
+        (Some(a), Some(b)) => covers(&a, &b) || covers(&b, &a),
+        (None, Some(b)) => glob_touches_literal(a, &b, true),
+        (Some(a), None) => glob_touches_literal(b, &a, true),
+        (None, None) => {
             let (pa, pb) = (literal_prefix(a), literal_prefix(b));
             pa.starts_with(pb) || pb.starts_with(pa)
         }
@@ -302,8 +343,8 @@ pub fn patterns_overlap(a: &str, b: &str) -> bool {
 fn overlap_on_volume(a: &str, b: &str, fold: bool) -> bool {
     patterns_overlap(a, b)
         || (fold
-            && !a.contains('[')
-            && !b.contains('[')
+            && (literal_pattern(a).is_some() || !a.contains('['))
+            && (literal_pattern(b).is_some() || !b.contains('['))
             && patterns_overlap(&a.to_lowercase(), &b.to_lowercase()))
 }
 
@@ -354,20 +395,201 @@ fn matches(glob: &str, path: &str) -> bool {
     compile(glob).map(|m| m.is_match(path)).unwrap_or(true)
 }
 
-fn glob_touches_literal(glob: &str, literal: &str) -> bool {
-    if matches(glob, literal) {
+/// One glob component against one literal path component. Three readings count: the same
+/// text, a glob match, and a glob match in which `[`, `]`, `{` and `}` are plain characters
+/// while `*` and `?` stay wildcards. The last reading is how `[id]*` names the route
+/// directories that start with `[id]`, and it keeps a bracketed directory name literal even
+/// after a wildcard component, where no leading-prefix rule can reach it. A globset escape
+/// such as `[*]` already spells one plain character and is kept as it is.
+fn component_touches(glob: &str, path: &str) -> bool {
+    // A piece of a split pattern may not compile on its own; then it matches nothing here
+    // and only the whole-glob reading in `glob_touches_literal` can count.
+    if glob == path || compile(glob).is_ok_and(|m| m.is_match(path)) {
         return true;
     }
-    // The literal may be a directory with matches of the glob below it: compare the
-    // glob's leading components at the literal's depth.
-    let comps: Vec<&str> = glob.split('/').collect();
-    let lit: Vec<&str> = literal.split('/').collect();
-    if let Some(pos) = comps.iter().position(|c| c.contains("**")) {
-        if pos < lit.len() {
-            return pos == 0 || matches(&comps[..pos].join("/"), &lit[..pos].join("/"));
+    let mut spelled = String::with_capacity(glob.len() + 8);
+    let mut rest = glob;
+    while let Some(c) = rest.chars().next() {
+        let escape = rest
+            .get(..3)
+            .filter(|e| literal_pattern(e).is_some_and(|l| l.len() == 1));
+        if let Some(e) = escape {
+            spelled.push_str(e);
+            rest = &rest[3..];
+            continue;
+        }
+        if matches!(c, '[' | ']' | '{' | '}') {
+            spelled.push('[');
+            spelled.push(c);
+            spelled.push(']');
+        } else {
+            spelled.push(c);
+        }
+        rest = &rest[c.len_utf8()..];
+    }
+    spelled != glob && compile(&spelled).is_ok_and(|m| m.is_match(path))
+}
+
+/// Where the character class opened by the `[` at byte `open` closes: the byte of its `]`,
+/// read as globset reads it (`[!` and `[^` negate; a `]` first in the class is a member,
+/// so `[]]` is the class of `]`). None for an unclosed class, which is then a plain `[`.
+fn class_end(pattern: &str, open: usize) -> Option<usize> {
+    let bytes = pattern.as_bytes();
+    let mut i = open + 1;
+    if matches!(bytes.get(i), Some(b'!' | b'^')) {
+        i += 1;
+    }
+    if bytes.get(i) == Some(&b']') {
+        i += 1;
+    }
+    pattern.get(i..)?.find(']').map(|j| i + j)
+}
+
+/// The characters of `pattern` outside character classes, with their byte offsets. A class
+/// and everything in it is skipped, so `[*]`, `[/]` and `[{]` are never read as a
+/// wildcard, a separator or an alternation.
+fn outside_classes(pattern: &str) -> Vec<(usize, char)> {
+    let mut out = Vec::new();
+    let mut skip_to = 0;
+    for (i, c) in pattern.char_indices() {
+        if i < skip_to {
+            continue;
+        }
+        if c == '[' {
+            if let Some(end) = class_end(pattern, i) {
+                skip_to = end + 1;
+                continue;
+            }
+        }
+        out.push((i, c));
+    }
+    out
+}
+
+/// A glob component that names a directory or a file rather than a set of them: no `*` and
+/// no `?` outside a character class. `[id]`, `{shop,blog}` and the escaped literal names
+/// `[*]` and `[?]` qualify, `*` and `[id]*` do not.
+fn names_entries(component: &str) -> bool {
+    !outside_classes(component)
+        .iter()
+        .any(|&(_, c)| matches!(c, '*' | '?'))
+}
+
+/// A pattern's components: split on `/` outside brackets and braces, so an alternation
+/// such as `{a/b,c}` stays one piece until `components_touch` reaches it.
+fn pattern_components(pattern: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut start, mut depth) = (0, 0usize);
+    for (i, c) in outside_classes(pattern) {
+        match c {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            '/' if depth == 0 => {
+                out.push(&pattern[start..i]);
+                start = i + 1;
+            }
+            _ => {}
         }
     }
-    comps.len() > lit.len() && matches(&comps[..lit.len()].join("/"), literal)
+    out.push(&pattern[start..]);
+    out
+}
+
+/// The first alternation of `pattern` outside character classes: the text before it, its
+/// alternatives, and the text after it. The braces read as plain characters count as one
+/// more alternative, spelled `[{]...[}]`, so that `{group}` still names a directory called
+/// `{group}`; a name cannot contain a `/`, so that reading is skipped when the alternation
+/// does. None without an alternation, and for an unclosed `{`, which globset refuses.
+fn first_alternation(pattern: &str) -> Option<(&str, Vec<String>, &str)> {
+    let outside = outside_classes(pattern);
+    let open = outside.iter().position(|&(_, c)| c == '{')?;
+    let open_at = outside[open].0;
+    let close_at = outside[open..].iter().find(|&&(_, c)| c == '}')?.0;
+    let inside = &pattern[open_at + 1..close_at];
+    let mut alternatives = Vec::new();
+    let mut start = open_at + 1;
+    for &(i, c) in &outside[open + 1..] {
+        if i >= close_at {
+            break;
+        }
+        if c == ',' {
+            alternatives.push(pattern[start..i].to_string());
+            start = i + 1;
+        }
+    }
+    alternatives.push(pattern[start..close_at].to_string());
+    if !inside.contains('/') {
+        alternatives.push(format!("[{{]{inside}[}}]"));
+    }
+    Some((&pattern[..open_at], alternatives, &pattern[close_at + 1..]))
+}
+
+/// Steps one component walk may take. A comparison that runs past it counts as an
+/// overlap: a spurious conflict costs a retry, a missed one lets two agents edit one file.
+/// A realistic pattern takes a few dozen steps; only a pattern that branches at every
+/// component, such as `{**,x}` many times over, gets near this.
+const WALK_BUDGET: usize = 20_000;
+
+/// Glob components against the components of a literal path. An alternation in the first
+/// component is spelled out one alternative at a time, each respliced into components, so
+/// `{a/b,c}` continues as `a`, `b` or as `c` and no chain of alternations is ever expanded
+/// in full. `**` spans zero or more components. A glob whose last component names an
+/// entry (`names_entries`) and that ends above the rest of the path is a directory hold,
+/// and covers everything below it; `src/*` names the entries directly in `src` and nothing
+/// deeper. A path that ends first is an ancestor directory of what the glob names when the
+/// caller allows the path to be a directory (`path_may_be_dir`); an edited file is never
+/// that. Every call spends one step of `budget`; at zero the answer is an overlap.
+fn components_touch(
+    glob: &[&str],
+    path: &[&str],
+    path_may_be_dir: bool,
+    budget: &mut usize,
+) -> bool {
+    if *budget == 0 {
+        return true;
+    }
+    *budget -= 1;
+    if let Some((g, rest)) = glob.split_first() {
+        if let Some((head, alternatives, tail)) = first_alternation(g) {
+            return alternatives.iter().any(|alt| {
+                let spliced = format!("{head}{alt}{tail}");
+                let mut pieces = pattern_components(&spliced);
+                pieces.extend_from_slice(rest);
+                components_touch(&pieces, path, path_may_be_dir, budget)
+            });
+        }
+    }
+    match (glob.split_first(), path.split_first()) {
+        (None, None) => true,
+        (None, Some(_)) => false,
+        (Some(_), None) => path_may_be_dir,
+        (Some((&"**", rest)), Some((_, deeper))) => {
+            rest.is_empty()
+                || components_touch(rest, path, path_may_be_dir, budget)
+                || components_touch(glob, deeper, path_may_be_dir, budget)
+        }
+        (Some((g, rest)), Some((p, deeper))) => {
+            component_touches(g, p)
+                && if rest.is_empty() {
+                    deeper.is_empty() || names_entries(g)
+                } else {
+                    components_touch(rest, deeper, path_may_be_dir, budget)
+                }
+        }
+    }
+}
+
+/// A glob against a literal path: component by component with alternations spelled out
+/// as they are reached, and the whole as globset reads it.
+fn glob_touches_literal(glob: &str, literal: &str, path_may_be_dir: bool) -> bool {
+    let lit: Vec<&str> = literal.split('/').collect();
+    let mut budget = WALK_BUDGET;
+    components_touch(
+        &pattern_components(glob),
+        &lit,
+        path_may_be_dir,
+        &mut budget,
+    ) || matches(glob, literal)
 }
 
 /// Link local projects that hold live holds but have no current repository link: never
@@ -553,6 +775,371 @@ fn remote_clashes(
     Ok(out)
 }
 
+/// The blocked paths and, per path, the sorted ids of the holds blocking it. This is the
+/// identity of a wait: the same path with a different set of hold ids is a new conflict.
+fn blocker_sets(conflicts: &[HoldConflict]) -> Vec<(&str, Vec<&str>)> {
+    let mut paths: Vec<&str> = conflicts.iter().map(|c| c.path.as_str()).collect();
+    paths.sort_unstable();
+    paths.dedup();
+    paths
+        .into_iter()
+        .map(|path| {
+            let mut blockers: Vec<&str> = conflicts
+                .iter()
+                .filter(|c| c.path == path)
+                .map(|c| c.held.hold_id.as_str())
+                .collect();
+            blockers.sort_unstable();
+            blockers.dedup();
+            (path, blockers)
+        })
+        .collect()
+}
+
+/// Register durable file waits and advance backoff only after its current window ends.
+/// Returns whether any blocker set is new, and the longest remaining backoff.
+fn wait_for_conflicts_tx(
+    tx: &Tx<'_>,
+    agent: &crate::identity::AgentRef,
+    project: &Project,
+    conflicts: &[HoldConflict],
+) -> Result<(bool, i64)> {
+    let mut first_notice = false;
+    let mut retry_after = 0;
+    for (path, blockers) in blocker_sets(conflicts) {
+        let signature = serde_json::to_string(&blockers)?;
+        let old: Option<(String, i64, i64)> = tx
+            .query_row(
+                "SELECT blockers, retry_at, backoff_seconds FROM hold_waits
+             WHERE agent_id = ?1 AND project_id = ?2 AND path = ?3",
+                params![agent.id, project.project_id, path],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let is_new = old.is_none()
+            || recorded_wait_is_new(tx, &agent.id, &project.project_id, path, &blockers)?;
+        let (retry_at, backoff) = match old {
+            Some((stored, until, backoff)) if !is_new && stored == signature && until > tx.now => {
+                (until, backoff)
+            }
+            old => {
+                let (until, backoff) = match old {
+                    Some((_, until, previous)) if !is_new && until > tx.now => (until, previous),
+                    Some((_, _, previous)) if !is_new => {
+                        let backoff = (previous * 2).min(300);
+                        (tx.now + backoff * 1000, backoff)
+                    }
+                    _ => (tx.now + 30_000, 30),
+                };
+                // The hold row carries the holder's id. Its display address may have become
+                // ambiguous since the hold was taken and is never resolved again here.
+                let first = conflicts
+                    .iter()
+                    .find(|c| c.path == path)
+                    .expect("path came from conflicts");
+                let holder_id: String = tx.query_row(
+                    "SELECT agent_id FROM holds WHERE hold_id = ?1",
+                    [&first.held.hold_id],
+                    |r| r.get(0),
+                )?;
+                tx.emit(
+                    &agent.address,
+                    "hold.waiting",
+                    json!({
+                        "agent_id": agent.id, "project_id": project.project_id,
+                        "path": path, "blockers": blockers, "retry_at": until,
+                    }),
+                )?;
+                tx.execute(
+                    "INSERT INTO hold_waits (agent_id, project_id, path, blockers, holder_id, retry_at, backoff_seconds)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(agent_id, project_id, path) DO UPDATE SET
+                       blockers = excluded.blockers, holder_id = excluded.holder_id,
+                       retry_at = excluded.retry_at, backoff_seconds = excluded.backoff_seconds",
+                    params![agent.id, project.project_id, path, signature, holder_id, until, backoff],
+                )?;
+                (until, backoff)
+            }
+        };
+        first_notice |= is_new;
+        retry_after = retry_after.max(((retry_at - tx.now + 999) / 1000).min(backoff));
+    }
+    Ok((first_notice, retry_after))
+}
+
+/// A refreshed row is bookkeeping; only the last successful wait event records which
+/// blockers were announced and whose backoff applies. Terminal events end that record.
+fn recorded_wait_is_new(
+    tx: &Tx<'_>,
+    agent_id: &str,
+    project_id: &str,
+    path: &str,
+    blockers: &[&str],
+) -> Result<bool> {
+    let recorded: Option<(String, String)> = tx
+        .query_row(
+            "SELECT kind, payload FROM events
+             WHERE kind IN ('hold.waiting', 'hold.available', 'hold.notify_failed', 'hold.wait.finished')
+               AND json_extract(payload, '$.agent_id') = ?1
+               AND json_extract(payload, '$.project_id') = ?2
+               AND json_extract(payload, '$.path') = ?3
+             ORDER BY seq DESC LIMIT 1",
+            params![agent_id, project_id, path],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let announced = |payload: &str| {
+        serde_json::from_str::<Value>(payload)
+            .ok()
+            .and_then(|v| serde_json::from_value::<Vec<String>>(v["blockers"].clone()).ok())
+    };
+    Ok(!recorded.as_ref().is_some_and(|(kind, payload)| {
+        kind == "hold.waiting" && announced(payload).is_some_and(|stored| stored == blockers)
+    }))
+}
+
+/// A failed update may have announced another set without replacing the successful
+/// one. Either announcement suppresses a duplicate denial until the wait ends.
+fn failed_wait_is_new(
+    tx: &Tx<'_>,
+    agent_id: &str,
+    project_id: &str,
+    path: &str,
+    blockers: &[&str],
+) -> Result<bool> {
+    if !recorded_wait_is_new(tx, agent_id, project_id, path, blockers)? {
+        return Ok(false);
+    }
+    let latest: Option<(String, String)> = tx
+        .query_row(
+            "SELECT kind, payload FROM events
+             WHERE kind IN ('hold.waiting', 'hold.wait_failed', 'hold.available',
+                            'hold.notify_failed', 'hold.wait.finished')
+               AND json_extract(payload, '$.agent_id') = ?1
+               AND json_extract(payload, '$.project_id') = ?2
+               AND json_extract(payload, '$.path') = ?3
+             ORDER BY seq DESC LIMIT 1",
+            params![agent_id, project_id, path],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(match latest {
+        Some((kind, payload)) if kind == "hold.waiting" || kind == "hold.wait_failed" => {
+            serde_json::from_str::<Value>(&payload)
+                .ok()
+                .and_then(|v| serde_json::from_value::<Vec<String>>(v["blockers"].clone()).ok())
+                .is_none_or(|stored| stored != blockers)
+        }
+        _ => true,
+    })
+}
+
+/// Run `f` inside a savepoint. On error only its own work is rolled back and the error is
+/// returned; the surrounding transaction stays usable. The event chain is unaffected, since
+/// each emit reads its predecessor from the table.
+fn attempt<T>(tx: &Tx<'_>, name: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    tx.execute_batch(&format!("SAVEPOINT {name}"))?;
+    match f() {
+        Ok(v) => {
+            tx.execute_batch(&format!("RELEASE SAVEPOINT {name}"))?;
+            Ok(v)
+        }
+        Err(e) => {
+            tx.execute_batch(&format!(
+                "ROLLBACK TO SAVEPOINT {name}; RELEASE SAVEPOINT {name}"
+            ))?;
+            Err(e)
+        }
+    }
+}
+
+/// Deliver each free-file ping and remove its wait in the same transaction. Recheck all
+/// current blockers, including replacement holds and holds in sibling worktrees. Waiter and
+/// holder are addressed by the ids the wait row stores. A ping that cannot be delivered is
+/// recorded as `hold.notify_failed` and its wait is dropped anyway, so a release or a sweep
+/// never fails, and never fails again later, because of one notice.
+/// A wait row: waiter id, project slug, project id, path, holder id, blocker ids (JSON).
+type WaitRow = (String, String, String, String, String, String);
+
+/// The waits that can have become free: those with at least one stored blocker that is no
+/// longer live (released, past its expiry whether swept or not, or unknown, on this node or
+/// another). A live hold never changes its pattern, project or owner in place, so a wait
+/// whose every blocker is still live still conflicts and needs no recheck; this keeps
+/// writes that end no hold from rechecking every wait (#137 adversarial F1). A row whose
+/// blockers are not a non-empty JSON array is always rechecked.
+fn waits_to_recheck_tx(tx: &Tx<'_>) -> Result<Vec<WaitRow>> {
+    let mut stmt = tx.prepare(
+        "SELECT w.agent_id, p.slug, w.project_id, w.path, w.holder_id, w.blockers
+         FROM hold_waits w JOIN projects p ON p.project_id = w.project_id
+         WHERE CASE WHEN json_valid(w.blockers) AND json_type(w.blockers) = 'array'
+                    THEN json_array_length(w.blockers) = 0
+                      OR EXISTS (SELECT 1 FROM json_each(w.blockers) b
+                                 WHERE NOT EXISTS (SELECT 1 FROM holds h
+                                   WHERE h.hold_id = b.value AND h.released_at IS NULL
+                                     AND h.expires_at > ?1))
+                    ELSE 1 END",
+    )?;
+    let waits = stmt
+        .query_map([tx.now], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(waits)
+}
+
+fn ping_free_waiters_tx(tx: &Tx<'_>) -> Result<()> {
+    for (agent_id, project_key, project_id, path, holder_id, blockers) in waits_to_recheck_tx(tx)? {
+        let project = find_project(tx, tx.node_id, &project_key)?;
+        let conflicts = conflicts_for(
+            tx,
+            &project,
+            &agent_id,
+            &[(path.clone(), globset::escape(&path))],
+            true,
+        )?;
+        if !conflicts.is_empty() {
+            let mut current: Vec<&str> =
+                conflicts.iter().map(|c| c.held.hold_id.as_str()).collect();
+            current.sort_unstable();
+            current.dedup();
+            // Retire processed ended IDs and capture replacement holds. Keep the original
+            // notice sender, retry deadline and backoff; this is not a waiter retry.
+            let refreshed = attempt(tx, "wait_refresh", || {
+                tx.emit(
+                    "system",
+                    "hold.wait.rechecked",
+                    json!({
+                        "agent_id": agent_id, "project_id": project_id,
+                        "path": path, "blockers": current,
+                    }),
+                )?;
+                tx.execute(
+                    "UPDATE hold_waits SET blockers = ?4
+                     WHERE agent_id = ?1 AND project_id = ?2 AND path = ?3",
+                    params![agent_id, project_id, path, serde_json::to_string(&current)?],
+                )?;
+                Ok(())
+            });
+            if let Err(error) = refreshed {
+                tx.emit(
+                    "system",
+                    "hold.recheck_failed",
+                    json!({
+                        "agent_id": agent_id, "project_id": project_id,
+                        "path": path, "blockers": current, "error": error.to_string(),
+                    }),
+                )?;
+            }
+            continue;
+        }
+        // Naming the ended holds makes every ping distinct, so the push dedupe never
+        // swallows a second ping for the same file within its five-minute window.
+        let ended: Vec<String> = serde_json::from_str(&blockers).unwrap_or_default();
+        let notice = SendMessage {
+            // A file name may contain a line break; subjects are one line (D75).
+            subject: format!("Hold free: {}", crate::mail::single_line(&path, 280)),
+            body: format!(
+                "Another automatically checked {project_key}:{path}: no conflicting hold remains (hold {} ended). The file is not reserved; check again before editing.",
+                ended.join(", ")
+            ),
+            ..Default::default()
+        };
+        let sent = attempt(tx, "ping", || {
+            tx.emit(
+                "system",
+                "hold.available",
+                json!({
+                    "agent_id": agent_id, "project_id": project_id, "path": path,
+                    "blockers": ended,
+                }),
+            )?;
+            send_notice_tx(tx, &holder_id, &agent_id, &notice)
+        });
+        if let Err(e) = sent {
+            tx.emit(
+                "system",
+                "hold.notify_failed",
+                json!({
+                    "agent_id": agent_id, "project_id": project_id, "path": path,
+                    "error": e.to_string(),
+                }),
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM hold_waits WHERE agent_id = ?1 AND project_id = ?2 AND path = ?3",
+            params![agent_id, project_id, path],
+        )?;
+    }
+    Ok(())
+}
+
+/// Fulfil only requests explicitly linked to a hold, without guessing from mail text. The
+/// request closes first; its notice goes from the holder to the requester by id, and a
+/// notice that cannot be delivered is recorded as `request.notify_failed` without failing
+/// the release or the sweep.
+fn complete_hold_requests_tx(tx: &Tx<'_>) -> Result<()> {
+    let mut stmt = tx.prepare(
+        "SELECT r.request_id, r.message_id, r.title, r.created_by, h.hold_id, h.agent_id
+         FROM request_holds rh JOIN requests r ON r.request_id = rh.request_id
+         JOIN holds h ON h.hold_id = rh.hold_id
+         WHERE h.node_id = ?1 AND r.status IN ('open', 'claimed', 'stale')
+           AND (h.released_at IS NOT NULL OR h.expires_at <= ?2)",
+    )?;
+    let pending = stmt
+        .query_map(params![tx.node_id, tx.now], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (rid, mid, title, creator_id, hold_id, owner_id) in pending {
+        let note = format!(
+            "Another automatically closed this release request: hold {hold_id} is no longer live."
+        );
+        tx.emit(
+            "system",
+            "request.completed",
+            json!({
+                "request_id": rid, "hold_id": hold_id, "reason": "hold ended", "note": note,
+            }),
+        )?;
+        tx.execute(
+            "UPDATE requests SET status = 'done', owner_id = coalesce(owner_id, ?2),
+            note = ?3, closed_at = ?4, updated_at = ?4 WHERE request_id = ?1",
+            params![rid, owner_id, note, tx.now],
+        )?;
+        let notice = SendMessage {
+            // The title may come from a subject stored before D75.
+            subject: format!("Done: {}", crate::mail::single_line(&title, 290)),
+            body: note,
+            reply_to: Some(mid),
+            ..Default::default()
+        };
+        if let Err(e) = attempt(tx, "request_notice", || {
+            send_notice_tx(tx, &owner_id, &creator_id, &notice)
+        }) {
+            tx.emit(
+                "system",
+                "request.notify_failed",
+                json!({ "request_id": rid, "hold_id": hold_id, "error": e.to_string() }),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
     let mut stmt = tx.prepare(
         "SELECT hold_id, pattern, agent_id FROM holds
@@ -578,6 +1165,8 @@ pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
             [hold_id],
         )?;
     }
+    complete_hold_requests_tx(tx)?;
+    ping_free_waiters_tx(tx)?;
     let stale_requests = stale_overdue_tx(tx)?;
     let expired_leases = crate::resources::expire_leases_tx(tx)?;
     Ok(SweepReport {
@@ -607,6 +1196,8 @@ pub(crate) fn release_tx(
             params![id, tx.now, reason],
         )?;
     }
+    complete_hold_requests_tx(tx)?;
+    ping_free_waiters_tx(tx)?;
     Ok(())
 }
 
@@ -683,6 +1274,42 @@ fn holds_by_id(conn: &Connection, ids: &[String]) -> Result<Vec<Hold>> {
 }
 
 impl Store {
+    /// Ask a live local hold's owner to release it. Reuse an outstanding ask from this
+    /// agent for this hold. The linked request closes automatically when the hold ends.
+    pub fn request_hold_release(&self, agent: &str, hold_id: &str) -> Result<Message> {
+        self.write(|tx| {
+            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let held = tx.query_row(&format!("{HOLD_SELECT} WHERE h.hold_id = ?1
+                AND h.node_id = ?2 AND h.released_at IS NULL AND h.expires_at > ?3"),
+                params![hold_id, tx.node_id, tx.now], hold_from_row).optional()?
+                .ok_or_else(|| Error::NotFound(format!("unknown live local hold {hold_id:?}")))?;
+            // The hold names its owner by id; never resolve the owner's display address
+            // again, which a later same-named agent can have made ambiguous.
+            let holder_id: String = tx.query_row(
+                "SELECT agent_id FROM holds WHERE hold_id = ?1", [hold_id], |r| r.get(0))?;
+            if holder_id == me.id {
+                return Err(Error::Invalid("release your own hold with hold release".into()));
+            }
+            let existing: Option<String> = tx.query_row(
+                "SELECT r.message_id FROM request_holds rh JOIN requests r ON r.request_id = rh.request_id
+                 WHERE rh.hold_id = ?1 AND r.created_by = ?2 AND r.status IN ('open', 'claimed', 'stale')",
+                params![hold_id, me.id], |r| r.get(0)).optional()?;
+            if let Some(mid) = existing { return load_message(tx, &mid); }
+            let pattern = literal_pattern(&held.pattern).unwrap_or(held.pattern);
+            // A held file name may contain a line break; subjects are one line (D75).
+            let title = crate::mail::single_line(&pattern, 280);
+            let message = send_by_id_tx(tx, &me.id, &holder_id, &SendMessage {
+                subject: format!("Release {title}?"),
+                body: format!("Please release hold {hold_id} on {}:{pattern} when your edit is done. Another will close this request when that hold ends.", held.project),
+                request: Some(NewRequest::default()), ..Default::default()
+            }, true)?;
+            let rid = message.request_id.as_ref().expect("request was created");
+            tx.emit(&message.from, "request.hold_linked", json!({ "request_id": rid, "hold_id": hold_id }))?;
+            tx.execute("INSERT INTO request_holds (request_id, hold_id) VALUES (?1, ?2)", params![rid, hold_id])?;
+            Ok(message)
+        })
+    }
+
     /// Expire lapsed holds and mark overdue requests stale.
     pub fn sweep(&self) -> Result<SweepReport> {
         self.write(sweep_tx)
@@ -789,12 +1416,13 @@ impl Store {
             let project = find_project(tx, tx.node_id, project)?;
             let mut patterns: Vec<(String, String)> = Vec::new();
             for raw in paths {
-                let p = normalize_pattern(&project, raw)?;
-                if p == "**" {
+                let literal = normalize_path(&project, raw)?;
+                if literal.is_empty() || raw.ends_with('/') || Path::new(&project.abs_path).join(&literal).is_dir() {
                     return Err(Error::Invalid(format!(
-                        "{raw:?} is the project directory, not a file"
+                        "{raw:?} is a directory, not an edited file; request directory holds explicitly with hold acquire or hold_paths"
                     )));
                 }
+                let p = globset::escape(&literal);
                 if !patterns.iter().any(|(_, q)| *q == p) {
                     patterns.push((raw.clone(), p));
                 }
@@ -805,12 +1433,49 @@ impl Store {
                 // (often an absolute path).
                 for c in &mut conflicts {
                     if let Some((_, p)) = patterns.iter().find(|(raw, _)| *raw == c.path) {
-                        c.path = p.clone();
+                        c.path = literal_pattern(p).expect("edit targets are escaped literals");
                     }
                 }
-                // Evidence for `another stats`: who was stopped, by whose hold, where.
+                // Recording the wait is bookkeeping. A real conflict is denied even when
+                // that fails; the failure is an event, never an open guard.
+                let (first_notice, wait_recorded, retry_after_seconds) =
+                    match attempt(tx, "wait", || {
+                        wait_for_conflicts_tx(tx, &me, &project, &conflicts)
+                    }) {
+                        Ok((first_notice, retry_after)) => (first_notice, true, retry_after),
+                        Err(e) => {
+                            // The savepoint rolled the wait back, so no ping can follow.
+                            // The guard says so (wait_recorded = false) and the hook tells
+                            // the agent to check again itself. One hold.wait_failed per
+                            // path records which hold ids were announced, so a retry with
+                            // the same blockers is a short denial (D62 dedupe) while a new
+                            // path or a replacement hold still gets its first notice.
+                            // Each path is checked before its own failure event is written.
+                            let mut first_notice = false;
+                            for (path, blockers) in blocker_sets(&conflicts) {
+                                first_notice |= failed_wait_is_new(
+                                    tx,
+                                    &me.id,
+                                    &project.project_id,
+                                    path,
+                                    &blockers,
+                                )?;
+                                tx.emit(
+                                    &me.address,
+                                    "hold.wait_failed",
+                                    json!({
+                                        "agent_id": me.id, "project_id": project.project_id,
+                                        "path": path, "blockers": blockers,
+                                        "error": e.to_string(),
+                                    }),
+                                )?;
+                            }
+                            (first_notice, false, 30)
+                        }
+                    };
+                // Count each distinct collision, rather than every retry of the same edit.
                 let repo = crate::repo::link_of(tx, &project)?.map(|l| l.key);
-                tx.emit(
+                if first_notice { tx.emit(
                     &me.address,
                     crate::stats::BLOCKED_EVENT,
                     json!({
@@ -828,13 +1493,16 @@ impl Store {
                             "project": c.held.project,
                         })).collect::<Vec<_>>(),
                     }),
-                )?;
+                )?; }
                 return Ok(EditGuard {
                     agent: me.address,
                     project: project.slug,
                     held: Vec::new(),
                     covered: Vec::new(),
                     conflicts,
+                    first_notice,
+                    wait_recorded,
+                    retry_after_seconds,
                 });
             }
             let mut stmt = tx.prepare(
@@ -888,12 +1556,27 @@ impl Store {
             if !ids.is_empty() {
                 touch(tx, &me.id)?;
             }
+            for (_, path) in &patterns {
+                let path = literal_pattern(path).expect("edit targets are escaped literals");
+                let waiting = tx.query_row(
+                    "SELECT 1 FROM hold_waits WHERE agent_id = ?1 AND project_id = ?2 AND path = ?3",
+                    params![me.id, project.project_id, path], |_| Ok(()),
+                ).optional()?.is_some();
+                if waiting {
+                    tx.emit(&me.address, "hold.wait.finished", json!({ "agent_id": me.id, "project_id": project.project_id, "path": path }))?;
+                    tx.execute("DELETE FROM hold_waits WHERE agent_id = ?1 AND project_id = ?2 AND path = ?3",
+                        params![me.id, project.project_id, path])?;
+                }
+            }
             Ok(EditGuard {
                 agent: me.address,
                 project: project.slug,
                 held: holds_by_id(tx, &ids)?,
                 covered,
                 conflicts: Vec::new(),
+                first_notice: false,
+                wait_recorded: false,
+                retry_after_seconds: 0,
             })
         })
     }
@@ -1088,6 +1771,77 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Program;
+
+    /// #137 adversarial F1: only waits with a blocker that is no longer live are rechecked,
+    /// so a write that ends no hold costs nothing per wait; expiry counts before any sweep.
+    #[test]
+    fn only_waits_with_an_ended_blocker_are_rechecked() {
+        let dir = tempfile::tempdir().unwrap();
+        let (clock, now) = crate::store::Clock::manual(1_800_000_000_000);
+        let store = Store::open_in_memory(clock).unwrap();
+        for (name, program) in [("alice", Program::Claude), ("bob", Program::Codex)] {
+            store
+                .register_agent(crate::RegisterAgent {
+                    name: name.into(),
+                    program,
+                    project: None,
+                    model: None,
+                    description: None,
+                })
+                .unwrap();
+        }
+        let project = store
+            .ensure_project("test", dir.path().to_str().unwrap())
+            .unwrap()
+            .abs_path;
+        store
+            .acquire_holds(AcquireHolds {
+                agent: "alice".into(),
+                project: project.clone(),
+                paths: vec!["src/**".into()],
+                ttl_seconds: Some(600),
+                exclusive: true,
+                reason: None,
+                repo_wide: false,
+            })
+            .unwrap();
+        for path in ["src/a.rs", "src/b.rs"] {
+            let blocked = store
+                .guard_edit("bob", &project, &[path.into()], "auto")
+                .unwrap();
+            assert_eq!(blocked.conflicts.len(), 1);
+        }
+        let candidates = || store.write(waits_to_recheck_tx).unwrap().len();
+        assert_eq!(candidates(), 0, "every blocker is live");
+
+        store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO hold_waits (agent_id, project_id, path, blockers, holder_id,
+                       retry_at, backoff_seconds)
+                     SELECT agent_id, project_id, 'src/c.rs', 'not json', holder_id, retry_at,
+                       backoff_seconds FROM hold_waits LIMIT 1",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(candidates(), 1, "a malformed row is always rechecked");
+        store
+            .write(|tx| {
+                tx.execute("DELETE FROM hold_waits WHERE path = 'src/c.rs'", [])?;
+                Ok(())
+            })
+            .unwrap();
+
+        now.fetch_add(601_000, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            candidates(),
+            2,
+            "an expired blocker counts before it is swept"
+        );
+    }
 
     #[test]
     fn overlap_rules() {
@@ -1103,6 +1857,286 @@ mod tests {
         assert!(patterns_overlap("src/**", "src/*.toml"));
         assert!(!patterns_overlap("docs/**", "src/**"));
         assert!(patterns_overlap("**", "anything"));
+    }
+
+    /// PR #108 r4: a wildcard component before a bracketed or braced directory must not
+    /// turn that directory back into a character class or an alternation, in either order.
+    #[test]
+    fn wildcards_before_bracketed_components_keep_literal_intent() {
+        for (glob, path) in [
+            (
+                "packages/*/app/[id]/page.tsx",
+                "packages/web/app/[id]/page.tsx",
+            ),
+            ("app/*/[id]/*.tsx", "app/shop/[id]/page.tsx"),
+            ("app/{shop,blog}/[id]/page.tsx", "app/shop/[id]/page.tsx"),
+            ("app/[id]/**/[slug]/*.tsx", "app/[id]/x/[slug]/page.tsx"),
+            ("app/[id]/*/[slug]/page.tsx", "app/[id]/x/[slug]/page.tsx"),
+            ("app/?/[id]/page.tsx", "app/a/[id]/page.tsx"),
+            ("app/[id]*/page.tsx", "app/[id]x/page.tsx"),
+            // A glob whose last component names a directory covers the files below it.
+            ("packages/*/app/[id]", "packages/web/app/[id]/page.tsx"),
+            ("packages/*/app/[id]/**", "packages/web/app/[id]/page.tsx"),
+            ("app/{shop,blog}", "app/shop/[id]/page.tsx"),
+            // `*` and `src/*` name the entries at their own depth.
+            ("*", "top.rs"),
+            ("src/*", "src/a.rs"),
+            // An alternation may contain a `/`; the whole-glob reading catches it.
+            ("src/{a/b,c}.ts", "src/a/b.ts"),
+            ("src/{a/b,c}.ts", "src/c.ts"),
+            // r6: an alternation with a `/` is spelled out before the components are
+            // compared, so it still names a directory or keeps a later route literal.
+            ("src/{a/b,c}", "src/a/b/page.tsx"),
+            ("src/{a/b,c}", "src/c/page.tsx"),
+            ("src/{a/b,c}/[id]/page.tsx", "src/a/b/[id]/page.tsx"),
+            ("src/{a/b,c}/[id]/page.tsx", "src/c/[id]/page.tsx"),
+            ("src/{a/b,c}/**/[slug]/*.tsx", "src/a/b/x/[slug]/page.tsx"),
+            ("{a/b,c}/[id]", "a/b/[id]/page.tsx"),
+            // Braces read as plain characters still name a directory called `{group}`.
+            (
+                "app/{group}/part[ver]/**/file-?.{rs,ts}",
+                "app/{group}/part[ver]/deep/file-1.rs",
+            ),
+            ("app/{group}", "app/{group}/[id]/page.tsx"),
+            // r7: a chain of alternations past any spelling-out cap still branches one
+            // component at a time, in either reading.
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}",
+                "src/a/b/d/f/h/j/l/page.tsx",
+            ),
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+                "src/a/b/d/f/h/j/l/[id]/page.tsx",
+            ),
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/{n,o}/{p,q}/{r,s}/{t,u}/{v,w}/{x,y}",
+                "src/c/e/g/i/k/m/o/q/s/u/w/y/page.tsx",
+            ),
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{group}",
+                "src/a/b/d/f/h/j/{group}/page.tsx",
+            ),
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/**/[slug]/*.tsx",
+                "src/c/d/f/h/j/x/y/[slug]/page.tsx",
+            ),
+            // r6: `[*]` and `[?]` are the literal names `*` and `?`, so they name a
+            // directory the way `[id]` does.
+            ("packages/*/app/[*]", "packages/web/app/*/page.tsx"),
+            ("packages/*/app/[?]", "packages/web/app/?/page.tsx"),
+            ("app/[*]/[id]", "app/*/[id]/page.tsx"),
+            // A literal ancestor directory still meets a deeper glob.
+            ("packages/*/app/[id]/page.tsx", "packages/web/app"),
+            ("packages/*/app/[id]/page.tsx", "packages/web/app/[id]"),
+            ("src/{a/b,c}.ts", "src/a"),
+            // Below a `**`, a deeper literal may be a directory with matches inside it,
+            // as it always was for `src/**/*.rs` against `src/a/b.css`.
+            ("app/[id]/**/[slug]/*.tsx", "app/[id]/x/[slug]/page.css"),
+            ("src/**/*.rs", "src/a/b.css"),
+        ] {
+            let literal = globset::escape(path);
+            assert!(patterns_overlap(glob, &literal), "{glob} vs {path}");
+            assert!(patterns_overlap(&literal, glob), "{path} vs {glob}");
+        }
+        // Real glob readings still count: a class, an alternation, a wildcard tail.
+        assert!(patterns_overlap(
+            "app/[ab]/page.tsx",
+            &globset::escape("app/a/page.tsx")
+        ));
+        assert!(patterns_overlap(
+            "src/{a,b}.ts",
+            &globset::escape("src/a.ts")
+        ));
+        assert!(patterns_overlap(
+            "app/[id]/*.tsx",
+            &globset::escape("app/[id]/page.tsx")
+        ));
+        // Must stay free.
+        for (glob, path) in [
+            (
+                "packages/*/app/[id]/page.tsx",
+                "packages/web/app/[idx]/page.tsx",
+            ),
+            (
+                "packages/*/app/[id]/page.tsx",
+                "packages/web/lib/[id]/page.tsx",
+            ),
+            ("app/{shop,blog}/[id]/page.tsx", "app/docs/[id]/page.tsx"),
+            ("app/?/[id]/page.tsx", "app/ab/[id]/page.tsx"),
+            ("app/[id]*/page.tsx", "app/[idx]/page.tsx"),
+            ("app/[id]/**/[slug]/*.tsx", "app/other/[slug]/page.tsx"),
+            ("app/[id]/*/[slug]/page.tsx", "app/[id]/x/[slug]/page.css"),
+            ("app/*/[id]/*.tsx", "app/shop/[id]/deep/page.tsx"),
+            ("app/[id]", "app/[idx]/page.tsx"),
+            ("app/[id]", "other/[id]/page.tsx"),
+            ("src/*.rs", "src/deep/a.rs"),
+            ("src/a?.rs", "src/abc.rs"),
+            // r5: a wildcard last component is not a directory hold, so `*`, `*/*` and
+            // `src/*` do not act like `**`.
+            ("*", "src/a.rs"),
+            ("*/*", "a/b/c.rs"),
+            ("src/*", "src/deep/a.rs"),
+            ("app/[id]*", "app/[id]x/page.tsx"),
+            ("app/?", "app/a/page.tsx"),
+            // The alternatives name exactly what they spell.
+            ("src/{a/b,c}.ts", "src/x.ts"),
+            ("src/{a/b,c}.ts", "src/a/x.ts"),
+            ("src/{a/b,c}", "src/a/x.ts"),
+            ("src/{a/b,c}", "src/ab/page.tsx"),
+            ("src/{a/b,c}/[id]/page.tsx", "src/a/b/[idx]/page.tsx"),
+            ("src/{a/b,c}/[id]/page.tsx", "src/a/[id]/page.tsx"),
+            ("src/{a/b,c}/[id]/page.tsx", "src/c/[id]/page.css"),
+            // An escaped wildcard is one literal character, not a wildcard.
+            ("packages/*/app/[*]", "packages/web/app/x/page.tsx"),
+            ("packages/*/app/[*]", "packages/web/app/*x/page.tsx"),
+            ("packages/*/app/[*]", "packages/web/app/[idx]/page.tsx"),
+            ("packages/*/app/[?]", "packages/web/app/x/page.tsx"),
+            ("packages/*/app/[?]", "packages/web/app/[i]/page.tsx"),
+            // r7: a long chain still names only what it spells.
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}",
+                "src/a/b/d/f/h/j/x/page.tsx",
+            ),
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}",
+                "src/a/d/f/h/j/l/page.tsx",
+            ),
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+                "src/a/b/d/f/h/j/l/[idx]/page.tsx",
+            ),
+            (
+                "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+                "src/a/b/d/f/h/j/l/[id]/page.css",
+            ),
+        ] {
+            let literal = globset::escape(path);
+            assert!(!patterns_overlap(glob, &literal), "{glob} vs {path}");
+            assert!(!patterns_overlap(&literal, glob), "{path} vs {glob}");
+        }
+        assert_eq!(
+            pattern_components("src/{a/b,c}/[x/y]/*.ts"),
+            vec!["src", "{a/b,c}", "[x/y]", "*.ts"]
+        );
+        assert_eq!(
+            pattern_components("src/[/]x/[!/]y/[]/]z/*.ts"),
+            vec!["src", "[/]x", "[!/]y", "[]/]z", "*.ts"]
+        );
+        assert_eq!(
+            first_alternation("{a/b,c}"),
+            Some(("", vec!["a/b".to_string(), "c".to_string()], ""))
+        );
+        assert_eq!(
+            first_alternation("{d,}.ts"),
+            Some((
+                "",
+                vec!["d".to_string(), String::new(), "[{]d,[}]".to_string()],
+                ".ts"
+            ))
+        );
+        assert_eq!(first_alternation("[{]a,b[}]"), None);
+        assert_eq!(first_alternation("src/{a,b"), None);
+        for c in [
+            "[id]",
+            "{shop,blog}",
+            "[*]",
+            "[?]",
+            "[!*?]",
+            "[]*]",
+            "a[",
+            "x",
+        ] {
+            assert!(names_entries(c), "{c}");
+        }
+        for c in ["*", "?", "[id]*", "*.rs", "[*]*", "a[b]?"] {
+            assert!(!names_entries(c), "{c}");
+        }
+        // The escaped spelling keeps working and does not read as a class.
+        assert!(patterns_overlap(
+            "packages/*/app/[[]id[]]/page.tsx",
+            &globset::escape("packages/web/app/[id]/page.tsx")
+        ));
+        assert!(!patterns_overlap(
+            "packages/*/app/[[]id[]]/page.tsx",
+            &globset::escape("packages/web/app/i/page.tsx")
+        ));
+    }
+
+    /// Own-hold coverage reads the glob the same way, but the edited path is a file: a glob
+    /// that would only match a directory above it does not cover it.
+    #[test]
+    fn own_hold_coverage_through_wildcards() {
+        assert!(hold_covers(
+            "packages/*/app/[id]",
+            "packages/web/app/[id]/page.tsx"
+        ));
+        assert!(!hold_covers("app/[id]*", "app/[id]x/page.tsx"));
+        assert!(hold_covers("app/[id]*/**", "app/[id]x/page.tsx"));
+        assert!(hold_covers("src/*", "src/a.rs"));
+        assert!(!hold_covers("src/*", "src/deep/a.rs"));
+        assert!(hold_covers(
+            "app/{shop,blog}/[id]/page.tsx",
+            "app/shop/[id]/page.tsx"
+        ));
+        assert!(!hold_covers("src/**/*.rs", "src/a"));
+        assert!(!hold_covers(
+            "packages/*/app/[id]/page.tsx",
+            "packages/web/app"
+        ));
+        // r6: an alternation with a `/`, and the escaped literal names `*` and `?`.
+        assert!(hold_covers("src/{a/b,c}", "src/a/b/page.tsx"));
+        assert!(hold_covers(
+            "src/{a/b,c}/[id]/page.tsx",
+            "src/a/b/[id]/page.tsx"
+        ));
+        assert!(!hold_covers("src/{a/b,c}", "src/a/x.ts"));
+        assert!(hold_covers(
+            "packages/*/app/[*]",
+            "packages/web/app/*/page.tsx"
+        ));
+        assert!(hold_covers(
+            "packages/*/app/[*]",
+            &globset::escape("packages/web/app/*/page.tsx")
+        ));
+        assert!(hold_covers(
+            "packages/*/app/[?]",
+            "packages/web/app/?/page.tsx"
+        ));
+        assert!(!hold_covers(
+            "packages/*/app/[*]",
+            "packages/web/app/x/page.tsx"
+        ));
+        // r7: a chain of alternations past any spelling-out cap.
+        assert!(hold_covers(
+            "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}",
+            "src/a/b/d/f/h/j/l/page.tsx"
+        ));
+        assert!(hold_covers(
+            "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+            "src/a/b/d/f/h/j/l/[id]/page.tsx"
+        ));
+        assert!(!hold_covers(
+            "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}",
+            "src/a/b/d/f/h/j/x/page.tsx"
+        ));
+    }
+
+    /// r7: the component walk has a step budget instead of a spelling-out cap. A
+    /// comparison that would run past it counts as an overlap, never as free, and a
+    /// pattern built to make the walk branch at every step still answers quickly.
+    #[test]
+    fn exhausted_walk_budget_counts_as_overlap() {
+        let mut none = 0;
+        assert!(components_touch(&["a"], &["b"], false, &mut none));
+        let mut plenty = WALK_BUDGET;
+        assert!(!components_touch(&["a"], &["b"], false, &mut plenty));
+        assert_eq!(plenty, WALK_BUDGET - 1);
+        let branching = "{**,x}/".repeat(40) + "end";
+        let deep = "a/".repeat(60) + "tail";
+        let started = std::time::Instant::now();
+        assert!(patterns_overlap(&branching, &globset::escape(&deep)));
+        assert!(patterns_overlap(&globset::escape(&deep), &branching));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]

@@ -375,26 +375,36 @@ fn resolve_remote(
     project: Option<&str>,
     node: &str,
 ) -> Result<AgentRef> {
-    let row: Option<(String, String, String)> = conn
-        .query_row(
-            "SELECT a.agent_id, a.address, a.node_id FROM agents a
-             JOIN nodes n ON n.node_id = a.node_id
-             LEFT JOIN projects p ON p.project_id = a.project_id
-             WHERE a.name = ?1 AND (n.display_name = ?2 OR n.node_id = ?2)
-               AND ((?3 = '' AND a.project_id IS NULL) OR p.slug = ?3)
-             LIMIT 1",
-            params![name, node, project.unwrap_or("")],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    match row {
-        Some((id, address, node_id)) => Ok(AgentRef {
-            id,
-            address,
-            node_id,
-        }),
-        None => Err(Error::NotFound(format!(
+    // Two rows mean two known nodes answer to the same name: refuse to pick one, so mail
+    // never goes to whichever row the database returns first.
+    let mut stmt = conn.prepare(
+        "SELECT a.agent_id, a.address, a.node_id FROM agents a
+         JOIN nodes n ON n.node_id = a.node_id
+         LEFT JOIN projects p ON p.project_id = a.project_id
+         WHERE a.name = ?1 AND (n.display_name = ?2 OR n.node_id = ?2)
+           AND ((?3 = '' AND a.project_id IS NULL) OR p.slug = ?3)
+         LIMIT 2",
+    )?;
+    let mut rows = stmt
+        .query_map(params![name, node, project.unwrap_or("")], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?
+        .collect::<rusqlite::Result<Vec<(String, String, String)>>>()?;
+    match rows.len() {
+        0 => Err(Error::NotFound(format!(
             "unknown agent {who:?}; register it with register_agent first (or sync with its node)"
+        ))),
+        1 => {
+            let (id, address, node_id) = rows.remove(0);
+            Ok(AgentRef {
+                id,
+                address,
+                node_id,
+            })
+        }
+        _ => Err(Error::Ambiguous(format!(
+            "{who:?} matches agents on more than one node named {node:?}; address it by node id \
+             (name@project@<node id>)"
         ))),
     }
 }
