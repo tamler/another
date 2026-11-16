@@ -100,7 +100,7 @@ $ another threads --agent lead
 2026-11-12T09:33:24.901Z    2 msg   1 unread  Fix the flaky test  (lead@shop, worker@shop)  [01M77HNNED9HZY6CKDHEZTPNSS]
 ```
 
-That `Done:` mail is the only thing the sender's inbox will ever receive about the request. While a request is `claimed`, only its owner can complete it. An `open` or `stale` request can be completed by any agent, and that agent becomes the owner. A done request cannot be claimed again. If the creator completes its own request, no `Done:` mail is sent.
+Apart from the deadline reminders described below, that `Done:` mail is the only thing the sender's inbox receives about the request. While a request is `claimed`, only its owner can complete it. An `open` or `stale` request can be completed by any agent, and that agent becomes the owner. A done request cannot be claimed again. If the creator completes its own request, no `Done:` mail is sent.
 
 ## 5b. Or the worker gives it back
 
@@ -180,6 +180,23 @@ $ another activity --since 1h --kinds request
 2026-11-12T09:33:31.108Z  request  reviewer@shop completed request: Rotate the log
 ```
 
+This run was recorded before deadline reminders existed. With them, the sweep that marked `Rotate the log` stale also mails lead an `Overdue: Rotate the log` notice from worker, so lead's inbox above holds three unread messages, and the feed shows `told lead@shop that a request is overdue: Rotate the log` right after the stale line.
+
+## Deadline reminders
+
+A request with a due time produces at most two reminder messages per deadline. They are ordinary mail in the request's own thread, so hooks, the session-start digest and the daemon's wake push announce them like any other mail.
+
+- **Due soon**, to the owner, from the requester. It is sent when a `claimed` request is within its lead of the deadline. The lead is a fifth of the time between claim and deadline, at least 5 minutes and at most an hour: 12 minutes for a one-hour claim, an hour for a one-day claim. A claim made with less than 5 minutes left gets no due-soon reminder. The message gives the due time, the minutes left, and the `complete` and `release` commands.
+- **Overdue**, to the requester, when the sweep marks the request `stale` because its due time passed. It comes from the owner, or, for an unclaimed request, from the requester itself. It names the owner and gives the `claim` and `cancel` commands.
+
+An owner gets one due-soon reminder per deadline for the life of the request. Moving the deadline away and back, or releasing and reclaiming it, does not repeat it. A new deadline, or a different owner taking the request over, gets its own reminder. Nobody is reminded about work an agent requested and then claimed itself. Done, cancelled and released requests get no due-soon reminder; a released request that later passes its due time unclaimed still gets the overdue notice. A request a person marks stale from the local dashboard gets no overdue notice. That is a policy choice: the dashboard is the operator's tool, not the requester's. Requests the dashboard's own past-due pass marks stale are notified as usual. Every reminder ends with "(Automatic notice from Another.)": the agent it comes from did not write it.
+
+Reminders run in the full sweep, so their timing is the sweep's. A running `another serve` (stdio or HTTP) sweeps every 30 seconds. Otherwise the sweep runs at the start of `another sweep`, reading an inbox (the session-start digest does), listing requests or activity, and the explicit hold and resource commands. The edit hook's automatic holds do not sweep. Sending, replying to and acknowledging mail do not sweep. Request commands mark past-due requests stale, and so send overdue notices, but do not send due-soon reminders. If nothing sweeps during the due-soon window, no late due-soon reminder is sent; the overdue notice covers it.
+
+A reminder whose mail cannot be delivered (for example, the recipient's delivery is refused) is rolled back, recorded as a `request.notify_failed` event, and does not fail the sweep. A failure of the database itself, such as a full disk, still fails the sweep's transaction as any write would. Each sent reminder is a `request.reminded` event, shown in `another activity`. Like other request events, these two events reach a federation hub's feed. They carry ids and times only, never a message body; the reminder mail itself stays on this node.
+
+`ANOTHER_REQUEST_REMINDERS=off` turns reminders off for the process that has it set; it is read at every sweep. It is not a node-wide setting: a process without it, such as an MCP server started from a different environment, still sends reminders. To turn them off for a node, set it everywhere the daemon, hooks and MCP clients start. Staleness itself is unchanged.
+
 ## Templates
 
 Three kinds of request come up all the time. A template writes the subject and a body with fixed sections, ending in what "done" means, so the receiver gets a complete ask:
@@ -210,7 +227,7 @@ another send --from lead --to worker --template research --field question="Which
 - A request without `--due` never goes stale on its own. If the owner stops, the request stays `claimed` until the owner releases or completes it, or the creator cancels it (`another request cancel`). Set a due time on work you may need to take over.
 - Nothing watches the worker. A crash leaves the request exactly as it was. The signals are the request status, the due time, and the activity feed.
 - `complete` records a claim of completion. It does not run tests or check a diff.
-- Hooks announce new mail at session start, at prompts, and after a tool call ([HOOKS.md](HOOKS.md)). The session-start digest counts stale requests, but nothing is pushed to anyone when a request goes stale. The daemon's wake push is for unread mail ([DAEMON.md](DAEMON.md)); `another wake` nudges an agent with unread mail or open requests ([WAKE.md](WAKE.md)).
+- Hooks announce new mail at session start, at prompts, and after a tool call ([HOOKS.md](HOOKS.md)). The session-start digest counts stale requests. Going stale sends only the overdue notice above; there is no repeated reminder while a request stays stale. The daemon's wake push is for unread mail ([DAEMON.md](DAEMON.md)); `another wake` nudges an agent with unread mail or open requests ([WAKE.md](WAKE.md)).
 - Requests stay on one node. Sending `--request` to an agent on another node fails; send plain mail instead.
 
 MCP clients do the same through `send_message` with `create_request`, `acknowledge`, and `claim_request` with an `action` of `claim`, `release`, `complete` or `cancel`.
