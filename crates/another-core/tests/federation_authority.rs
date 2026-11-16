@@ -89,12 +89,23 @@ fn push(hub: &Node, spoke: &Node) -> IngestReport {
 
 impl Fed {
     fn new() -> Fed {
+        Fed::with_mallory_perms(&Perm::ALL)
+    }
+
+    /// Mallory paired with only `perms`; alpha always gets every permission.
+    fn with_mallory_perms(perms: &[Perm]) -> Fed {
         let dir = tempfile::tempdir().unwrap();
         let hub = Node::new(dir.path(), "hub");
         let alpha = Node::new(dir.path(), "alpha");
         let mallory = Node::new(dir.path(), "mallory");
         pair(&hub, &alpha);
-        pair(&hub, &mallory);
+        let code = hub
+            .store
+            .create_invite("https://hub.example", perms, 3600)
+            .unwrap();
+        let (invite, req) = mallory.store.prepare_join(&code).unwrap();
+        let resp = hub.store.accept_pairing(&req).unwrap();
+        mallory.store.complete_join(&invite, &resp).unwrap();
         Fed {
             _dir: dir,
             hub,
@@ -592,4 +603,192 @@ fn a_nodes_own_events_still_sync() {
         )
         .unwrap();
     assert!(acked.is_some(), "bob's ack reached alpha");
+}
+
+/// Review P1: whether a borrow needs `borrow_resource` must follow the resource the hub
+/// actually knows, never the routing hint the event's author chose. Every hint variant is
+/// refused for a spoke without the permission; the correctly labelled one is the control.
+#[test]
+fn a_spoke_without_borrow_permission_cannot_borrow_whatever_the_routing_hint() {
+    let fed = Fed::with_mallory_perms(&[Perm::ReadFeed]);
+    fed.hub.agent("alice");
+    fed.hub.agent("bob");
+    let spy = fed.mallory.agent("spy");
+    assert!(push(&fed.hub, &fed.mallory).rejected.is_empty());
+    let (rid, _, _) = fed.hub_resource();
+    let variants = [
+        ("labelled", json!({ "resource_node": fed.hub.id() })),
+        ("missing", json!({})),
+        (
+            "self-labelled",
+            json!({ "resource_node": fed.mallory.id() }),
+        ),
+        ("wrong node", json!({ "resource_node": fed.alpha.id() })),
+        ("empty list", json!({ "resource_nodes": [] })),
+    ];
+    for (i, (what, hint)) in variants.into_iter().enumerate() {
+        let mut payload = json!({
+            "resource_id": rid, "lease_id": format!("lease-{i}"), "agent_id": spy,
+            "ttl_seconds": 600,
+        });
+        for (k, v) in hint.as_object().unwrap() {
+            payload[k] = v.clone();
+        }
+        let report = fed.forge("resource.borrowed", payload);
+        assert_rejected(&report, &format!("borrow with a {what} hint"));
+        assert_eq!(
+            fed.hub_one::<String>(
+                "SELECT lease_id FROM resource_leases WHERE lease_id = ?1",
+                &format!("lease-{i}")
+            ),
+            None,
+            "{what} hint created a lease"
+        );
+    }
+    // A resource the hub does not know cannot be proved to be mallory's own.
+    let report = fed.forge(
+        "resource.borrowed",
+        json!({ "resource_id": "unknown-res", "lease_id": "lease-unknown", "agent_id": spy }),
+    );
+    assert_rejected(&report, "borrow of an unknown resource");
+}
+
+/// The permission check leaves borrowing one's own resource alone.
+#[test]
+fn a_spoke_without_borrow_permission_still_syncs_its_own_borrows() {
+    let fed = Fed::with_mallory_perms(&[Perm::ReadFeed]);
+    fed.mallory.agent("owner");
+    fed.mallory.agent("user");
+    let rid = fed
+        .mallory
+        .store
+        .register_resource(RegisterResource {
+            agent: "owner".into(),
+            kind: ResourceKind::Port,
+            name: "tcp:127.0.0.1:1".into(),
+            endpoint: None,
+            port: Some(1),
+            pid: None,
+            project: None,
+            purpose: None,
+            mode: LeaseMode::Shared,
+            ttl_seconds: None,
+            metadata: None,
+        })
+        .unwrap()
+        .resource
+        .resource_id;
+    fed.mallory
+        .store
+        .borrow_resource("user", &ResourceRef::Id(rid.clone()), None)
+        .unwrap();
+    let report = push(&fed.hub, &fed.mallory);
+    assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+    let leases: i64 = fed
+        .hub
+        .sql()
+        .query_row(
+            "SELECT count(*) FROM resource_leases WHERE resource_id = ?1",
+            [&rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(leases, 2);
+}
+
+/// F3 follow-up: when a receiver already knows two nodes by one name (state from before
+/// renames were checked), an address by that name is refused instead of picking one.
+#[test]
+fn an_address_matching_two_nodes_is_ambiguous() {
+    let fed = Fed::new();
+    fed.alpha.agent("bob");
+    fed.mallory.agent("bob");
+    assert!(push(&fed.hub, &fed.alpha).rejected.is_empty());
+    assert!(push(&fed.hub, &fed.mallory).rejected.is_empty());
+    fed.hub
+        .sql()
+        .execute(
+            "UPDATE nodes SET display_name = 'alpha' WHERE node_id = ?1",
+            [fed.mallory.id()],
+        )
+        .unwrap();
+    fed.hub.agent("carol");
+    let sent = fed.hub.store.send_message(SendMessage {
+        from: "carol".into(),
+        to: vec!["bob@@alpha".into()],
+        subject: "which bob?".into(),
+        body: "b".into(),
+        ..Default::default()
+    });
+    assert!(matches!(sent, Err(Error::Ambiguous(_))), "{sent:?}");
+    // The node id still names one of them exactly.
+    let exact = fed.hub.store.send_message(SendMessage {
+        from: "carol".into(),
+        to: vec![format!("bob@@{}", fed.alpha.id())],
+        subject: "alpha's bob".into(),
+        body: "b".into(),
+        ..Default::default()
+    });
+    assert!(exact.is_ok(), "{exact:?}");
+}
+
+/// F1 follow-up: the hub's release of a revoked spoke's lease reaches the other spokes,
+/// and none of them sees the revoked node become the owner.
+#[test]
+fn a_revoked_spokes_lease_release_reaches_other_spokes() {
+    let fed = Fed::new();
+    fed.hub.agent("alice");
+    fed.hub.agent("bob");
+    let spy = fed.mallory.agent("spy");
+    assert!(push(&fed.hub, &fed.mallory).rejected.is_empty());
+    let (rid, owner, _) = fed.hub_resource();
+    let report = fed.forge(
+        "resource.borrowed",
+        json!({ "resource_id": rid, "lease_id": "spy-lease", "agent_id": spy,
+                "ttl_seconds": 1800, "resource_node": fed.hub.id() }),
+    );
+    assert_eq!(report.accepted, 1, "{report:?}");
+    let pull = |node: &Node| {
+        let page = fed.hub.store.pull_for(&node.id(), 0, 10_000).unwrap();
+        let report = node
+            .store
+            .ingest(&fed.hub.id(), &page.events, &page.nodes)
+            .unwrap();
+        assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+    };
+    pull(&fed.alpha);
+    let live = |node: &Node, lease: &str| -> bool {
+        node.sql()
+            .query_row(
+                "SELECT released_at IS NULL FROM resource_leases WHERE lease_id = ?1",
+                [lease],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert!(live(&fed.alpha, "spy-lease"), "alpha saw the borrow");
+
+    fed.hub.store.revoke_peer("mallory").unwrap();
+    assert!(
+        !live(&fed.hub, "spy-lease"),
+        "revoking ended the lease on the hub"
+    );
+    fed.hub
+        .store
+        .release_resource("alice", &ResourceRef::Id(rid.clone()), false)
+        .unwrap();
+    pull(&fed.alpha);
+    assert!(!live(&fed.alpha, "spy-lease"), "the release reached alpha");
+    assert!(!live(&fed.alpha, &owner), "alice's release reached alpha");
+    let mallory_owner: i64 = fed
+        .alpha
+        .sql()
+        .query_row(
+            "SELECT count(*) FROM resource_leases WHERE resource_id = ?1 AND node_id = ?2
+             AND role = 'owner'",
+            [&rid, &fed.mallory.id()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(mallory_owner, 0);
 }

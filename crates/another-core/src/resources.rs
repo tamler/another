@@ -521,6 +521,40 @@ pub(crate) fn expire_leases_tx(tx: &Tx<'_>) -> Result<usize> {
     Ok(expired.len())
 }
 
+/// End every live lease `node` holds on this node's own resources, and settle each
+/// resource. Used when a peer is revoked: it can no longer end its leases here, and
+/// `settle` would otherwise promote one of them to owner. This node owns the resources, so
+/// other nodes accept its `resource.released` for those leases. Returns how many ended.
+pub(crate) fn release_node_leases_tx(tx: &Tx<'_>, node: &str, reason: &str) -> Result<usize> {
+    let mut stmt = tx.prepare(
+        "SELECT l.lease_id, l.resource_id FROM resource_leases l
+         JOIN resources r ON r.resource_id = l.resource_id
+         WHERE l.node_id = ?1 AND r.node_id = ?2 AND l.released_at IS NULL",
+    )?;
+    let leases = stmt
+        .query_map(params![node, tx.node_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if leases.is_empty() {
+        return Ok(0);
+    }
+    let ids: Vec<&String> = leases.iter().map(|(id, _)| id).collect();
+    tx.emit(
+        "system",
+        "resource.released",
+        json!({ "lease_ids": ids, "reason": reason, "lease_node": node }),
+    )?;
+    for (lease_id, resource_id) in &leases {
+        tx.execute(
+            "UPDATE resource_leases SET released_at = ?2, release_reason = ?3 WHERE lease_id = ?1",
+            params![lease_id, tx.now, reason],
+        )?;
+        settle(tx, resource_id, "system", tx.now)?;
+    }
+    Ok(leases.len())
+}
+
 /// Renew (or release, at session end) every live lease an agent holds.
 pub(crate) fn session_leases_tx(
     tx: &Tx<'_>,
