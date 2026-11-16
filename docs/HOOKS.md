@@ -62,7 +62,7 @@ Cursor blocks a tool call when a `preToolUse` reply is not valid JSON. Because o
 
 - **A held file:** the wrapper prints one line, `{"permission":"deny","user_message":...,"agent_message":...}`, and exits 0.
   - `another` builds that line with a JSON serializer.
-  - The wrapper forwards it only after `another` exited 0 and `another hook check-reply` accepted it as one complete deny object with nothing else in it.
+  - The wrapper keeps the output as raw bytes in a temporary file, capped just above 8 KB. It forwards those exact bytes only after `another` exited 0 and `another hook check-reply` accepted the same file as one complete deny object with nothing else in it, so a NUL, extra lines or an oversized reply are rejected rather than trimmed. The temporary files are removed on exit.
   - A message too long for the 8 KB cap is replaced by a short fixed deny, never cut.
 - **Everything else** prints nothing and exits 1, which Cursor's hook documentation treats as "hook failed, action proceeds". That covers a free file (the hold is taken, as for other clients), a missing binary or database, a crash, partial output or anything the check rejects.
   - Another never replies `allow`, so it cannot skip Cursor's own approval prompts.

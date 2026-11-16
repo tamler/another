@@ -1263,6 +1263,9 @@ fn cursor_wrapper_fails_open_on_every_bad_reply() {
              \x20 deny-exit3) printf '%s\\n' '{deny}'; exit 3 ;;\n\
              \x20 partial) printf '%s' '{{\"permission\":\"deny\",\"user_mess' ;;\n\
              \x20 deny-garbage) printf '%s\\n%s\\n' '{deny}' 'garbage' ;;\n\
+             \x20 deny-nul) printf '%s\\n\\000' '{deny}' ;;\n\
+             \x20 deny-newlines) printf '%s' '{deny}'; i=0; while [ $i -lt 9000 ]; do printf '\\n'; i=$((i+1)); done ;;\n\
+             \x20 deny-spaces) printf '%s' '{deny}'; head -c 1000000 /dev/zero | tr '\\000' ' ' ;;\n\
              \x20 allow) printf '%s\\n' '{{\"permission\":\"allow\"}}' ;;\n\
              \x20 crash) kill -SEGV $$ ;;\n\
              \x20 empty) ;;\n\
@@ -1288,6 +1291,11 @@ fn cursor_wrapper_fails_open_on_every_bad_reply() {
         "deny-exit3",
         "partial",
         "deny-garbage",
+        // REVIEW-IMPL IMPL-1: bytes a shell variable would drop must still reject.
+        "deny-nul",
+        "deny-newlines",
+        // Valid trailing whitespace, but far past the size cap.
+        "deny-spaces",
         "allow",
         "crash",
         "empty",
