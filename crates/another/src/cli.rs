@@ -105,15 +105,32 @@ pub enum Command {
         #[arg(long, short = 'f', env = "ANOTHER_AGENT")]
         from: String,
         /// Recipients (repeat or comma-separate).
-        #[arg(long, short = 't', value_delimiter = ',', required = true)]
+        #[arg(
+            long,
+            short = 't',
+            value_delimiter = ',',
+            required_unless_present = "template"
+        )]
         to: Vec<String>,
         #[arg(long, value_delimiter = ',')]
         cc: Vec<String>,
-        #[arg(long, short = 's')]
-        subject: String,
+        #[arg(
+            long,
+            short = 's',
+            required_unless_present = "template",
+            conflicts_with = "template"
+        )]
+        subject: Option<String>,
         /// Message body; `-` reads stdin.
-        #[arg(long, short = 'b', default_value = "")]
+        #[arg(long, short = 'b', default_value = "", conflicts_with = "template")]
         body: String,
+        /// Open a request from a template (review | fix | research) that writes the subject
+        /// and body; `--template list` shows them and their fields. Implies --request.
+        #[arg(long)]
+        template: Option<String>,
+        /// A template field as key=value (repeatable), e.g. --field target="PR #170".
+        #[arg(long = "field", value_name = "KEY=VALUE", requires = "template")]
+        fields: Vec<String>,
         #[arg(long, short = 'i', default_value = "normal")]
         importance: String,
         /// Ask recipients to acknowledge.
@@ -1223,18 +1240,35 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             request,
             due,
             thread,
+            template,
+            fields,
         } => {
+            if template.as_deref() == Some("list") {
+                print!("{}", crate::templates::listing());
+                return Ok(ExitCode::SUCCESS);
+            }
+            // A template writes the subject and body, and always opens a request.
+            let (subject, body) = match &template {
+                Some(name) => {
+                    let fields = crate::templates::parse_fields(&fields)?;
+                    crate::templates::render(name, &fields)?
+                }
+                None => (subject.unwrap_or_default(), body_arg(body)?),
+            };
+            if to.is_empty() {
+                anyhow::bail!("no recipients: pass --to");
+            }
             let m = store.send_message(SendMessage {
                 from,
                 to,
                 cc,
                 subject,
-                body: body_arg(body)?,
+                body,
                 importance: importance.parse::<Importance>()?,
                 ack_required: ack,
                 reply_to: None,
                 thread_id: thread,
-                request: (request || due.is_some()).then_some(NewRequest {
+                request: (request || due.is_some() || template.is_some()).then_some(NewRequest {
                     due_in_seconds: due,
                 }),
             })?;

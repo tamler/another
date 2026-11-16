@@ -180,6 +180,29 @@ $ another activity --since 1h --kinds request
 2026-11-12T09:33:31.108Z  request  reviewer@shop completed request: Rotate the log
 ```
 
+## Templates
+
+Three kinds of request come up all the time. A template writes the subject and a body with fixed sections, ending in what "done" means, so the receiver gets a complete ask:
+
+```bash
+another send --from lead --to worker --template review --field target="PR #170" --field focus="error paths"
+another send --from lead --to worker --template fix --field issue="inbox --json drops urgent mail" --field repro="..." --due 3600
+another send --from lead --to worker --template research --field question="Which MCP clients honour subscribe?"
+```
+
+| Template | Required | Optional | Ends with |
+|---|---|---|---|
+| `review` | `target` | `focus`, `verdict_file` (default `REVIEW.md`) | **Done when:** a PASS or FAIL verdict with evidence in the verdict file; review only work you did not write |
+| `fix` | `issue` | `repro`, `where` | **Done when:** a test that failed before passes after, with tests, fmt and clippy green |
+| `research` | `question` | `scope` | **Deliver:** findings with sources, uncertainty marked, no code changes |
+
+- `--template` opens a request, as `--request` does. `--due`, `--ack`, `--cc` and `--thread` work as usual.
+- The template writes the subject and the body, so `--subject` and `--body` cannot be combined with it.
+- Fields are one line each, except `repro` and `scope`.
+- A missing required field, or an unknown one, is refused and named.
+- `--template list` shows the templates and their fields.
+- Only the message and the request are stored; the subject prefix (`Review:`, `Fix:`, `Research:`) is how you find them later.
+
 ## What this does not do
 
 - A request without `--due` never goes stale on its own. If the owner stops, the request stays `claimed` until the owner releases or completes it, or the creator cancels it (`another request cancel`). Set a due time on work you may need to take over.
