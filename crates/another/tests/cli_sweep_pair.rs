@@ -82,11 +82,10 @@ fn sweep_reports_and_ends_lapsed_holds_and_overdue_requests() {
 
     let (ok, out) = run(&home, &shop, &["sweep"]);
     assert!(ok, "{out}");
-    assert_eq!(
-        out.trim(),
-        "expired 1 hold(s), 1 request(s) went stale",
-        "{out}"
-    );
+    // The counts, not the whole line: #189 adds resource leases to this sentence
+    // ("expired 1 hold(s) and 0 resource lease(s), 1 request(s) went stale").
+    assert!(out.contains("expired 1 hold(s)"), "{out}");
+    assert!(out.contains("1 request(s) went stale"), "{out}");
     // Swept once: a second sweep finds nothing, in JSON too.
     let (ok, out) = run(&home, &shop, &["--json", "sweep"]);
     assert!(ok, "{out}");
