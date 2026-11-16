@@ -89,8 +89,13 @@ pub enum Command {
         /// Seconds between checks for new mail to push to idle Herdr agents.
         #[arg(long, default_value_t = 2)]
         wake_secs: u64,
+        /// Append log records to this file instead of stderr (the Windows daemon uses this;
+        /// Task Scheduler keeps no output). The startup lines still go to stderr.
+        #[arg(long, value_name = "PATH")]
+        log_file: Option<PathBuf>,
     },
-    /// Keep `another serve` running in the background (macOS launchd LaunchAgent).
+    /// Keep `another serve` running in the background (launchd on macOS, a systemd user
+    /// unit on Linux, a Task Scheduler logon task on Windows).
     #[command(subcommand)]
     Daemon(DaemonCmd),
     /// Register projects or list them.
@@ -436,28 +441,30 @@ pub enum WakeCmd {
 
 #[derive(Debug, Args)]
 pub struct DaemonArgs {
-    /// launchd label (change it only to run a second, separate daemon).
+    /// Service label: launchd label, systemd unit name (without `.service`) or task name.
+    /// Change it only to run a second, separate daemon.
     #[arg(long, default_value = crate::daemon::DEFAULT_LABEL)]
     label: String,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum DaemonCmd {
-    /// Write the LaunchAgent and load it: `another serve` on loopback, restarted if it exits.
+    /// Write the service definition and load it: `another serve` on loopback, started at
+    /// login and restarted if it exits.
     Install {
         #[command(flatten)]
         args: DaemonArgs,
         /// Loopback address to serve on.
         #[arg(long, default_value = crate::serve::DEFAULT_BIND)]
         bind: String,
-        /// Write the plist but do not load it.
+        /// Write the definition but do not load it.
         #[arg(long)]
         no_load: bool,
         /// Show what would change without writing or loading anything.
         #[arg(long)]
         dry_run: bool,
     },
-    /// Unload the LaunchAgent and remove its plist.
+    /// Unload the service and remove its definition.
     Uninstall {
         #[command(flatten)]
         args: DaemonArgs,
@@ -469,7 +476,8 @@ pub enum DaemonCmd {
         #[command(flatten)]
         args: DaemonArgs,
     },
-    /// Restart the daemon (`launchctl kickstart -k`).
+    /// Restart the daemon (`launchctl kickstart -k`, `systemctl --user restart`, or
+    /// `schtasks /End` then `/Run`).
     Restart {
         #[command(flatten)]
         args: DaemonArgs,
@@ -790,10 +798,17 @@ pub const EXIT_CONFLICT: u8 = 3;
 
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
-    init_tracing(matches!(
-        cli.command,
-        Command::Serve { .. } | Command::Dashboard { .. }
-    ));
+    let log_file = match &cli.command {
+        Command::Serve { log_file, .. } => log_file.as_deref(),
+        _ => None,
+    };
+    init_tracing(
+        matches!(
+            cli.command,
+            Command::Serve { .. } | Command::Dashboard { .. }
+        ),
+        log_file,
+    );
     let json = cli.json;
     match run(cli) {
         Ok(code) => code,
@@ -861,11 +876,36 @@ fn cli_hint(code: &str, message: &str) -> Option<&'static str> {
     None
 }
 
-fn init_tracing(serving: bool) {
+fn init_tracing(serving: bool, log_file: Option<&Path>) {
     let default = if serving { "info" } else { "warn" };
     let filter = tracing_subscriber::EnvFilter::try_from_env("ANOTHER_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default));
-    // Colour only on a terminal: the daemon's log is a file under launchd.
+    if let Some(path) = log_file {
+        let opened = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+            });
+        match opened {
+            Ok(file) => {
+                let _ = tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_writer(std::sync::Mutex::new(file))
+                    .with_ansi(false)
+                    .try_init();
+                return;
+            }
+            Err(e) => eprintln!(
+                "another: cannot open log file {}: {e}; logging to stderr",
+                path.display()
+            ),
+        }
+    }
+    // Colour only on a terminal: the daemon's log is a file under launchd and systemd.
     use std::io::IsTerminal;
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -1044,6 +1084,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         sweep_secs,
         no_wake,
         wake_secs,
+        log_file: _,
     } = &cli.command
     {
         let store = open(home)?;
