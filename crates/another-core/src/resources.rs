@@ -17,6 +17,9 @@ use crate::time::{fmt_opt, fmt_ts};
 pub const DEFAULT_LEASE_TTL_SECONDS: i64 = 30 * 60;
 pub const MIN_LEASE_TTL_SECONDS: i64 = 60;
 pub const MAX_LEASE_TTL_SECONDS: i64 = 24 * 60 * 60;
+/// Largest resource metadata accepted, measured as serialized JSON. Metadata is stored,
+/// written into the `resource.registered` event and synced to peers, so it stays small.
+pub const MAX_RESOURCE_METADATA_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -105,6 +108,7 @@ pub struct RegisterResource {
     pub mode: LeaseMode,
     pub ttl_seconds: Option<i64>,
     /// Free-form details: model, backend (`metal|mlx|cpu|cuda`), estimated_bytes, cmdline, ...
+    /// At most 64 KiB as JSON.
     pub metadata: Option<Value>,
 }
 
@@ -650,6 +654,12 @@ impl Store {
             .unwrap_or(Value::Object(Default::default()));
         if !metadata.is_object() {
             return Err(Error::Invalid("metadata must be a JSON object".into()));
+        }
+        let metadata_bytes = metadata.to_string().len();
+        if metadata_bytes > MAX_RESOURCE_METADATA_BYTES {
+            return Err(Error::Invalid(format!(
+                "metadata is {metadata_bytes} bytes as JSON; the limit is {MAX_RESOURCE_METADATA_BYTES}"
+            )));
         }
         self.write(|tx| {
             crate::holds::sweep_tx(tx)?;
