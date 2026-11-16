@@ -178,6 +178,9 @@ pub fn wake(store: &Store, agent: &str, opts: &WakeOptions) -> Result<WakePlan> 
         plan.skipped = Some(format!("no {} target for {address}", via.as_str()));
         return Ok(plan);
     };
+    // A `--target` override, a target stored before this check, or Herdr's default of the
+    // agent's name (which may start with `-`) never reaches an adapter as an option.
+    another_core::refuse_option_like_target(&target)?;
     // The plan's message is printed by `another wake --dry-run` and returned in JSON: keep
     // it to the same safe line the adapters type.
     plan.message = plan

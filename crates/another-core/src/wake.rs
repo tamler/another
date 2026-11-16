@@ -53,10 +53,25 @@ pub struct WakeTarget {
 }
 
 fn validate_target(target: &str) -> Result<()> {
-    if target.trim().is_empty() || target.len() > 200 || target.chars().any(char::is_control) {
+    if target.trim().is_empty()
+        || target.chars().count() > 200
+        || target.chars().any(char::is_control)
+    {
         return Err(Error::Invalid(
             "wake target must be 1-200 printable characters".into(),
         ));
+    }
+    refuse_option_like_target(target)
+}
+
+/// Adapters pass the target as a command-line argument, and Herdr takes it positionally, so
+/// a target that starts with `-` would be read as an option. No tmux pane, cmux surface or
+/// Herdr pane starts with one.
+pub fn refuse_option_like_target(target: &str) -> Result<()> {
+    if target.starts_with('-') {
+        return Err(Error::Invalid(format!(
+            "wake target {target:?} starts with '-', which an adapter would read as an option"
+        )));
     }
     Ok(())
 }
