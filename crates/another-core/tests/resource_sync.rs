@@ -129,13 +129,14 @@ fn a_borrowers_renewal_reaches_the_node_that_owns_the_resource() {
 
     let lease = alpha
         .store
-        .borrow_resource("carol", &ResourceRef::Id(rid.clone()), Some(600))
+        .borrow_resource("carol", &ResourceRef::Id(rid.clone()), Some(900))
         .unwrap()
         .lease
         .unwrap()
         .lease_id;
     assert!(push(&hub, &alpha).rejected.is_empty());
-    assert_eq!(hub.lease_expiry(&lease), T0 + 600_000);
+    // The lease's own TTL (900 s), not the resource owner's (600 s).
+    assert_eq!(hub.lease_expiry(&lease), T0 + 900_000);
 
     for node in [&hub, &alpha] {
         node.clock.fetch_add(60_000, Ordering::SeqCst);
@@ -154,12 +155,13 @@ fn a_borrowers_renewal_reaches_the_node_that_owns_the_resource() {
     assert_eq!(renewed["lease_ids"], serde_json::json!([lease]));
 
     assert!(push(&hub, &alpha).rejected.is_empty());
-    assert_eq!(hub.lease_expiry(&lease), T0 + 60_000 + 600_000);
+    assert_eq!(hub.lease_expiry(&lease), T0 + 60_000 + 900_000);
     drop(listener);
 }
 
 /// The owner is a spoke that does not read the feed. The hub relays the renewal to it only
-/// because the renewal names it, so the owner's copy of the borrower's lease is extended.
+/// because the renewal names it, so the owner's copy of the borrower's lease is extended. A
+/// renewal that does not name it (of a lease on alpha's own resource) does not reach it.
 #[test]
 fn a_renewal_reaches_an_owner_spoke_that_does_not_read_the_feed() {
     let dir = tempfile::tempdir().unwrap();
@@ -201,6 +203,40 @@ fn a_renewal_reaches_an_owner_spoke_that_does_not_read_the_feed() {
     assert!(push(&hub, &alpha).rejected.is_empty());
     assert!(pull(&hub, &beta).rejected.is_empty());
     assert_eq!(beta.lease_expiry(&lease), T0 + 60_000 + 600_000);
+
+    let own = register(&alpha, "carol", 9);
+    alpha
+        .store
+        .heartbeat_resources("carol", &[ResourceRef::Id(own)])
+        .unwrap();
+    let unnamed: String = alpha
+        .sql()
+        .query_row(
+            "SELECT event_id FROM events WHERE kind = 'resource.renewed' ORDER BY seq DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(push(&hub, &alpha).rejected.is_empty());
+    let on_hub: i64 = hub
+        .sql()
+        .query_row(
+            "SELECT count(*) FROM events WHERE event_id = ?1",
+            [&unnamed],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(on_hub, 1, "the hub has the renewal to relay");
+    assert!(pull(&hub, &beta).rejected.is_empty());
+    let on_beta: i64 = beta
+        .sql()
+        .query_row(
+            "SELECT count(*) FROM events WHERE event_id = ?1",
+            [&unnamed],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(on_beta, 0, "a renewal that does not name beta reached it");
     drop(listener);
 }
 
