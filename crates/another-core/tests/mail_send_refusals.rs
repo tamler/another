@@ -124,3 +124,47 @@ fn a_request_cannot_be_opened_with_an_agent_on_another_node() {
         .unwrap();
     assert_eq!(sent.request_id, None);
 }
+
+/// A foreign agent on cc counts as much as one on to: a request with a local `to` and a
+/// paired node's agent on cc is refused, and stores nothing.
+#[test]
+fn a_request_cannot_cc_an_agent_on_another_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = store(dir.path(), "hub");
+    let spoke = store(dir.path(), "spoke");
+    let code = hub
+        .create_invite("https://hub.example", &Perm::ALL, 3600)
+        .unwrap();
+    let (invite, req) = spoke.prepare_join(&code).unwrap();
+    let resp = hub.accept_pairing(&req).unwrap();
+    spoke.complete_join(&invite, &resp).unwrap();
+    let (events, _) = hub.outbound_events(0, 10_000).unwrap();
+    spoke
+        .ingest(hub.node_id(), &events, &[hub.node_entry().unwrap()])
+        .unwrap();
+
+    let mut ask = mail("please review", &["bob"]);
+    ask.cc = vec!["bob@@hub".into()];
+    ask.request = Some(NewRequest {
+        due_in_seconds: None,
+    });
+    let err = spoke.send_message(ask).unwrap_err();
+    assert_eq!(err.code(), "invalid", "{err}");
+    assert!(err.to_string().contains("requests are node-local"), "{err}");
+    assert_eq!(bobs_mail(&spoke), 0, "a refused request was delivered");
+}
+
+/// Every bidi embedding, override and isolate control is refused on its own, including the
+/// ends of both ranges (U+202A, U+202E, U+2066, U+2069).
+#[test]
+fn each_bidi_control_is_refused_in_a_subject() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(dir.path(), "node");
+    for c in ('\u{202A}'..='\u{202E}').chain('\u{2066}'..='\u{2069}') {
+        let err = s
+            .send_message(mail(&format!("a{c}b"), &["bob"]))
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid", "U+{:04X}: {err}", c as u32);
+    }
+    assert_eq!(bobs_mail(&s), 0, "a refused send stored a message");
+}
