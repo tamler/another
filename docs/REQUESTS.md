@@ -199,7 +199,7 @@ another send --from lead --to worker --template research --field question="Which
 - `--template` opens a request, as `--request` does. `--due`, `--ack`, `--cc` and `--thread` work as usual.
 - The template writes the subject and the body, so `--subject` and `--body` cannot be combined with it.
 - Fields are one line of text each, with no line breaks, tabs or other control characters. The exceptions are `repro` and `scope`, which may also hold line breaks and tabs. Escape and bidirectional-override characters are refused in every field.
-- No field can open a section of its own. `repro` and `scope` go into the body as an indented block, and a one-line field that reads as a heading gets its `#` escaped.
+- Every field value goes into the body as an indented block (four spaces). In Markdown, indented text cannot be a heading, a code fence or an HTML block, so no field can open a section or hide the ones after it.
 - The subject is the prefix and the main field, cut to the 300-character subject limit. The full value is in the body.
 - A missing required field, an unknown or repeated one, or one that breaks these rules is refused, naming the field. This is a usage error: exit status 2, and code `usage` under `--json`.
 - `another send --template list` shows the templates and their fields. It needs no sender or recipient, and `--json` prints them as JSON.

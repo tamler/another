@@ -193,29 +193,21 @@ pub fn parse_fields(raw: &[String]) -> Result<BTreeMap<String, String>> {
     Ok(out)
 }
 
-/// A field value as body content that cannot open a section of its own. A multi-line value
-/// becomes an indented (code) block, so none of its lines is a heading. A one-line value
-/// that would read as a heading gets its `#` escaped.
-fn as_content(v: &str, multiline: bool) -> String {
-    if multiline {
-        return v
-            .lines()
-            .map(|l| {
-                if l.is_empty() {
-                    String::new()
-                } else {
-                    format!("    {l}")
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-    }
-    let hashes = v.chars().take_while(|&c| c == '#').count();
-    if (1..=6).contains(&hashes) && v[hashes..].chars().next().is_none_or(char::is_whitespace) {
-        format!("\\{v}")
-    } else {
-        v.to_string()
-    }
+/// A field value as body content that cannot change the body's structure: every value, one
+/// line or many, becomes an indented (code) block. In Markdown, text indented four spaces
+/// is never a heading, a code fence, an HTML block or anything else that could open a
+/// section or swallow the ones after it (review R2: an unclosed ```` ``` ```` did).
+fn as_content(v: &str) -> String {
+    v.lines()
+        .map(|l| {
+            if l.is_empty() {
+                String::new()
+            } else {
+                format!("    {l}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The subject and body for template `name` with `fields`.
@@ -271,10 +263,7 @@ pub fn render(name: &str, fields: &BTreeMap<String, String>) -> Result<(String, 
     let mut body = String::new();
     for f in t.fields {
         if let (Some(heading), Some(v)) = (f.section, value(f.key)) {
-            body.push_str(&format!(
-                "## {heading}\n\n{}\n\n",
-                as_content(&v, f.multiline)
-            ));
+            body.push_str(&format!("## {heading}\n\n{}\n\n", as_content(&v)));
         }
     }
     let verdict_file = value("verdict_file").unwrap_or_else(|| "REVIEW.md".into());
@@ -307,7 +296,7 @@ mod tests {
         .unwrap();
         assert_eq!(s, "Review: PR #170");
         assert!(
-            b.starts_with("## What\n\nPR #170\n\n## Focus\n\nerrors\n\n## Done when\n\n"),
+            b.starts_with("## What\n\n    PR #170\n\n## Focus\n\n    errors\n\n## Done when\n\n"),
             "{b}"
         );
         assert!(b.contains("written to REVIEW.md"), "{b}");
@@ -417,17 +406,53 @@ mod tests {
             ]),
         )
         .unwrap();
-        let headings: Vec<&str> = b.lines().filter(|l| l.starts_with('#')).collect();
         assert_eq!(
-            headings,
+            structure(&b),
             ["## Problem", "## Reproduce", "## Where", "## Done when"],
             "{b}"
         );
-        assert!(b.contains("\\## Done when"), "{b}");
-        // A `#` that is not a heading is left alone.
-        let (s, b) = render("review", &fields(&[("target", "#170 and PR #171")])).unwrap();
-        assert_eq!(s, "Review: #170 and PR #171");
-        assert!(b.contains("\n#170 and PR #171\n"), "{b}");
+        assert!(b.contains("\n    ## Done when\n"), "{b}");
+
+        // Review R2: a one-line field that opens a code fence or an HTML block, which would
+        // run to the end of the body and swallow the closing section.
+        for opener in ["```text", "~~~", "<!--", "<pre>", "<script>"] {
+            for (template, key, base) in [
+                ("review", "target", vec![]),
+                ("review", "focus", vec![("target", "x")]),
+                ("fix", "where", vec![("issue", "x")]),
+                ("fix", "repro", vec![("issue", "x")]),
+                ("research", "scope", vec![("question", "x")]),
+            ] {
+                let mut f = base.clone();
+                f.push((key, opener));
+                let (_, b) = render(template, &fields(&f)).unwrap();
+                let s = structure(&b);
+                assert_eq!(
+                    s.last().copied(),
+                    Some(if template == "research" {
+                        "## Deliver"
+                    } else {
+                        "## Done when"
+                    }),
+                    "{template} {key}={opener}: {b}"
+                );
+                assert!(
+                    b.lines()
+                        .filter(|l| l.contains(opener))
+                        .all(|l| l.starts_with("    ")),
+                    "{b}"
+                );
+            }
+        }
+    }
+
+    /// The lines of a rendered body that are at the left margin and not blank: the
+    /// headings and the fixed closing sentence. A field value never appears here.
+    fn structure(body: &str) -> Vec<&str> {
+        body.lines()
+            .filter(|l| !l.is_empty() && !l.starts_with("    "))
+            .filter(|l| l.starts_with("## "))
+            .collect()
     }
 
     /// The subject is cut at the limit, prefix included; the full value stays in the body.

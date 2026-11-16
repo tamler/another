@@ -56,7 +56,7 @@ fn a_template_opens_a_request_with_its_subject_and_sections() {
     let msg: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(msg["subject"], "Review: PR #170");
     let body = msg["body"].as_str().unwrap();
-    assert!(body.contains("## Focus\n\nerror paths"), "{body}");
+    assert!(body.contains("## Focus\n\n    error paths"), "{body}");
     assert!(body.contains("## Done when"), "{body}");
 
     let reqs = another(dir.path(), &["--json", "requests"]);
