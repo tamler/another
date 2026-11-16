@@ -69,7 +69,9 @@ The `Host` and `Origin` checks (D38) stop web pages, but not other people's proc
 
 On a machine only you log in to, this changes nothing. On a shared machine (a multi-user Linux box, a lab Mac, a CI runner with several users), pick one of these:
 - **Use stdio:** `another serve --stdio`, started by each client. There is no port, and nothing else can connect.
-- **Use `--auth` on loopback too:** create a bearer token per agent (below) and give it to each local client. The daemon's unit or LaunchAgent then needs `--auth` as well.
+- **Use `--auth` on loopback too:** create a bearer token per agent (below), give it to each local client, and run `another serve --auth` yourself.
+  - **Not through the daemon.** `another daemon install` has no `--auth` and writes a fixed `serve --bind` command, so a hand-edited unit, LaunchAgent or task loses `--auth` at the next install.
+  - **No push or wake.** Push runs only on a loopback server without `--auth` (DAEMON.md), so this server wakes nobody. Agents still see new mail through their hooks, and `another wake` reaches them on demand.
 - **Run no HTTP server**, and rely on hooks, which open the database directly as you.
 
 ## Bearer tokens
