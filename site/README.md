@@ -29,6 +29,27 @@ the provided `404.html`.
 - Output directory: `site/dist`
 - No environment variables or runtime bindings required.
 
+### Release checklist
+
+Use this for each separately authorized deploy. It records evidence; it is not
+itself an audit of what production serves.
+
+- [ ] Record the approved source SHA and run `sh site/build.sh` at that commit.
+  Inspect the exit status and output.
+- [ ] Save the built `dist/sitemap.xml` with that SHA. Its canonical routes are
+  the expected route set; derive and record the route count from it rather than
+  from a remembered number.
+- [ ] After the deploy, record the deployment identifier. Fetch every route in
+  the saved sitemap and require 200, the expected content and matching canonical
+  and social metadata. The fetched canonical set must equal the saved sitemap.
+- [ ] Confirm that the served sitemap, `llms.txt` and the home and docs
+  discovery links describe the same set. A partial or stale live sitemap does
+  not replace the saved one, and a partial deployment does not pass.
+- [ ] Fetch each `_redirects` source and a deep missing URL, and check the
+  redirect target and the real 404 with `noindex`.
+- [ ] Record which checks ran. A green local build proves the package, not that
+  production serves it; an earlier audit is historical, not new evidence.
+
 The build copies an explicit public file list. It excludes this README, check
 scripts and source notes. `_headers` sets a restrictive CSP
 and disables access to camera, microphone and location.

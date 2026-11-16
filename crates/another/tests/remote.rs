@@ -1,9 +1,13 @@
 //! Authenticated remote access: bearer tokens, scoping, audit log, GET /activity.
 
 use std::net::SocketAddr;
+use std::path::Path;
 
 use another::serve::{http_router, HttpOptions};
-use another_core::{Program, RegisterAgent, SendMessage, Store};
+use another_core::{
+    NewRequest, Program, RegisterAgent, RequestAction, RequestFilter, RequestUpdate, SendMessage,
+    Store,
+};
 use rmcp::model::{CallToolRequestParams, CallToolResult, ClientConfig};
 use rmcp::service::RunningService;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -325,6 +329,190 @@ async fn expired_and_unscoped_tokens() {
     assert!(srv.store.verify_token("not-a-token").is_err());
     let tampered = format!("{}x", token.secret);
     assert!(srv.store.verify_token(&tampered).is_err());
+    srv.ct.cancel();
+}
+
+/// A remote peer reads the work board for one project inside its globs, never node-wide.
+#[tokio::test]
+async fn work_board_is_one_project_inside_the_globs() {
+    let srv = start().await;
+    let token = srv
+        .store
+        .create_token("grok-bot", std::slice::from_ref(&srv.work_glob), None, None)
+        .unwrap();
+    let client = connect(&srv.base, &token.secret).await;
+    let all = call(&client, "work_board", json!({})).await;
+    assert_eq!(error_code(&all).as_deref(), Some("forbidden"));
+    let secret = call(&client, "work_board", json!({ "project": srv.secret })).await;
+    assert_eq!(error_code(&secret).as_deref(), Some("forbidden"));
+    let shop = call(&client, "work_board", json!({ "project": srv.work })).await;
+    assert_eq!(error_code(&shop), None);
+    let board = shop.structured_content.unwrap();
+    let slugs: Vec<&str> = board["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["project"].as_str().unwrap())
+        .collect();
+    assert_eq!(slugs, ["shop"]);
+    assert_eq!(board["confined"], true);
+    srv.ct.cancel();
+}
+
+/// Review round 1, P1: the holder of a stopped edit in a sibling checkout outside the
+/// token's globs is not named, though the stopped edit itself is in view.
+#[tokio::test]
+async fn work_board_hides_a_sibling_holder_outside_the_globs() {
+    let srv = start().await;
+    let sibling = srv._dir.path().join("secret/shop-wt");
+    for p in [Path::new(&srv.work), sibling.as_path()] {
+        std::fs::create_dir_all(p.join(".git")).unwrap();
+        std::fs::write(
+            p.join(".git/config"),
+            "[remote \"origin\"]\nurl = https://example.com/team/shop.git\n",
+        )
+        .unwrap();
+    }
+    // `start` registered shop before it was a git checkout; ensure it again so its
+    // repository link is recorded and the sibling's hold conflicts with it.
+    srv.store.ensure_project("t", &srv.work).unwrap();
+    srv.store
+        .register_agent(RegisterAgent {
+            name: "private-holder".into(),
+            program: Program::Claude,
+            project: Some(sibling.to_string_lossy().into_owned()),
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    let file = |dir: &Path| dir.join("src/internal.rs").to_string_lossy().into_owned();
+    let held = srv
+        .store
+        .guard_edit(
+            "private-holder@shop-wt",
+            sibling.to_str().unwrap(),
+            &[file(&sibling)],
+            another_core::EDIT_HOOK_HOLD_REASON,
+        )
+        .unwrap();
+    assert!(held.conflicts.is_empty());
+    let stopped = srv
+        .store
+        .guard_edit(
+            "alice@shop",
+            &srv.work,
+            &[file(Path::new(&srv.work))],
+            another_core::EDIT_HOOK_HOLD_REASON,
+        )
+        .unwrap();
+    assert_eq!(
+        stopped.conflicts.len(),
+        1,
+        "the sibling hold must stop alice"
+    );
+
+    let token = srv
+        .store
+        .create_token("grok-bot", std::slice::from_ref(&srv.work_glob), None, None)
+        .unwrap();
+    let client = connect(&srv.base, &token.secret).await;
+    let res = call(&client, "work_board", json!({ "project": srv.work })).await;
+    assert_eq!(error_code(&res), None);
+    let board = res.structured_content.unwrap();
+    let blocked = &board["projects"][0]["blocked"][0];
+    assert_eq!(blocked["agent"], "alice@shop");
+    assert_eq!(blocked["path"], "src/internal.rs");
+    assert!(blocked["holder"].is_null() && blocked["holder_project"].is_null());
+    assert!(blocked["pattern"].is_null());
+    let text = board.to_string();
+    assert!(!text.contains("private-holder"), "{text}");
+    assert!(!text.contains("shop-wt"), "{text}");
+    client.cancel().await.unwrap();
+    srv.ct.cancel();
+}
+
+/// Review round 1, P1: request participants registered outside the token's globs are not
+/// named, in either direction, and neither is an outside owner.
+#[tokio::test]
+async fn work_board_hides_request_participants_outside_the_globs() {
+    let srv = start().await;
+    srv.store
+        .register_agent(RegisterAgent {
+            name: "vault-owner".into(),
+            program: Program::Claude,
+            project: Some(srv.secret.clone()),
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    let request = |from: &str, to: &[&str], subject: &str| {
+        srv.store
+            .send_message(SendMessage {
+                from: from.into(),
+                to: to.iter().map(|s| s.to_string()).collect(),
+                subject: subject.into(),
+                body: "fixture".into(),
+                request: Some(NewRequest::default()),
+                ..Default::default()
+            })
+            .unwrap()
+    };
+    request("alice@shop", &["vault-owner@vault"], "Outbound");
+    request("vault-owner@vault", &["alice@shop"], "Inbound");
+    request("alice@shop", &["alice@shop"], "Owned outside");
+    let owned = srv
+        .store
+        .requests(RequestFilter::default())
+        .unwrap()
+        .into_iter()
+        .find(|r| r.title == "Owned outside")
+        .unwrap();
+    srv.store
+        .update_request(RequestUpdate {
+            agent: "vault-owner@vault".into(),
+            request_id: owned.request_id,
+            action: RequestAction::Claim,
+            note: None,
+            due_in_seconds: None,
+        })
+        .unwrap();
+
+    let token = srv
+        .store
+        .create_token("grok-bot", std::slice::from_ref(&srv.work_glob), None, None)
+        .unwrap();
+    let client = connect(&srv.base, &token.secret).await;
+    let res = call(&client, "work_board", json!({ "project": "shop" })).await;
+    assert_eq!(error_code(&res), None);
+    let board = res.structured_content.unwrap();
+    let text = board.to_string();
+    assert!(
+        !text.contains("vault-owner"),
+        "outside participant leaked: {text}"
+    );
+    assert!(!text.contains("vault"), "outside project leaked: {text}");
+    let by_title = |t: &str| {
+        board["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["title"] == t)
+            .unwrap()
+            .clone()
+    };
+    let out = by_title("Outbound");
+    assert_eq!(out["from"], "alice@shop");
+    assert_eq!(
+        (out["to"].clone(), out["to_hidden"].clone()),
+        (json!([]), json!(1))
+    );
+    let inbound = by_title("Inbound");
+    assert!(inbound["from"].is_null());
+    assert_eq!(inbound["to"], json!(["alice@shop"]));
+    let owned = by_title("Owned outside");
+    assert!(owned["owner"].is_null());
+    assert_eq!(owned["owner_hidden"], true);
+    client.cancel().await.unwrap();
     srv.ct.cancel();
 }
 
