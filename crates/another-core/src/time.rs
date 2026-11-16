@@ -19,9 +19,10 @@ pub fn now_ms() -> i64 {
 }
 
 pub fn fmt_ts(ms: i64) -> String {
-    DateTime::from_timestamp_millis(ms)
-        .map(|t| t.to_rfc3339_opts(SecondsFormat::Millis, true))
-        .unwrap_or_else(|| ms.to_string())
+    DateTime::from_timestamp_millis(ms).map_or_else(
+        || ms.to_string(),
+        |t| t.to_rfc3339_opts(SecondsFormat::Millis, true),
+    )
 }
 
 /// Milliseconds since the epoch for an RFC 3339 time such as [`fmt_ts`] produces.

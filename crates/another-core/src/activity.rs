@@ -334,6 +334,20 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             };
             (text, json!({ "request_id": rid }))
         }
+        "request.reminded" => {
+            let rid = s("request_id");
+            let title = request_title(conn, &rid)?;
+            let to = agent_address(conn, &s("to"))?;
+            let text = if s("kind") == "due_soon" {
+                format!("reminded {to} that a request is due soon: {title}")
+            } else {
+                format!("told {to} that a request is overdue: {title}")
+            };
+            (
+                text,
+                json!({ "request_id": rid, "message_id": s("message_id") }),
+            )
+        }
         "hold.acquired" | "hold.updated" => {
             let mode = if p.get("exclusive").and_then(Value::as_bool) == Some(true) {
                 "exclusive"
