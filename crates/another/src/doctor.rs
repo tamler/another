@@ -242,6 +242,19 @@ fn database(home: &Path) -> (Check, Option<Store>) {
         );
     }
     let (v, want) = (inspected.version, inspected.expected);
+    // No build writes a negative version, and none migrates one: this is not an another
+    // database, or it was edited by hand.
+    if v < 0 {
+        return (
+            check(
+                "database",
+                Level::Fail,
+                format!("database schema version {v} is not valid"),
+            )
+            .fix("check that --home or ANOTHER_HOME points at an another home"),
+            None,
+        );
+    }
     if v > want {
         return (
             check(
