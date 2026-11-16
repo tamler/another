@@ -17,7 +17,7 @@ Several machines, such as a laptop, a remote runner and a GPU box, each run thei
 | Mail (`message.sent`) | only nodes that host a recipient; mail between agents on one node never leaves it |
 | Read and acknowledgement receipts | only the node that sent the message |
 | Activity: sessions, requests, holds, resources | nodes with `read_feed`, plus the owner of a resource being borrowed |
-| Tokens, audit records, pairing records | never |
+| Tokens, audit records, pairing records, push records (wakes and notices, which name local terminals) | never |
 
 ## Permissions
 
