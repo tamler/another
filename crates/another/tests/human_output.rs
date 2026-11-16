@@ -160,7 +160,27 @@ fn token_list_and_audit_never_show_the_secret() {
     let list = fx.ok(&["token", "list"]);
     assert!(list.contains("revoked"), "{list}");
 
+    // Token create and revoke are not audited; only remote calls are. Record one the way
+    // the remote server does, so the audit renderer has a row to format (FINDINGS-196-b).
+    another_core::Store::open(&fx.home)
+        .unwrap()
+        .record_audit(another_core::AuditRecord {
+            token_id: Some(token_id.clone()),
+            agent: Some("alice@shop".into()),
+            operation: "tool.fetch_inbox".into(),
+            outcome: "ok".into(),
+            detail: Some("3 message(s)".into()),
+            remote: Some("203.0.113.7".into()),
+        })
+        .unwrap();
     let audit = fx.ok(&["audit"]);
+    let row = audit
+        .lines()
+        .find(|l| l.contains("tool.fetch_inbox"))
+        .unwrap_or_else(|| panic!("no audit row rendered: {audit}"));
+    for part in ["ok", "alice@shop", "3 message(s)", "[203.0.113.7]"] {
+        assert!(row.contains(part), "{part} missing: {row}");
+    }
     assert!(!audit.contains(&tail), "audit printed the secret: {audit}");
 }
 
