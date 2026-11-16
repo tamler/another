@@ -81,11 +81,16 @@ pub fn spawn_sweeper(store: Store, every: Duration, ct: CancellationToken) {
                 _ = tick.tick() => {
                     let store = store.clone();
                     match tokio::task::spawn_blocking(move || store.sweep()).await {
-                        Ok(Ok(r)) if r.expired_holds + r.stale_requests > 0 => tracing::info!(
-                            expired_holds = r.expired_holds,
-                            stale_requests = r.stale_requests,
-                            "sweep"
-                        ),
+                        Ok(Ok(r))
+                            if r.expired_holds + r.expired_leases + r.stale_requests > 0 =>
+                        {
+                            tracing::info!(
+                                expired_holds = r.expired_holds,
+                                expired_leases = r.expired_leases,
+                                stale_requests = r.stale_requests,
+                                "sweep"
+                            );
+                        }
                         Ok(Ok(_)) => {}
                         Ok(Err(e)) => tracing::warn!(error = %e, "sweep failed"),
                         Err(e) => tracing::warn!(error = %e, "sweep task failed"),
