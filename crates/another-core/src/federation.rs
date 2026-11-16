@@ -645,7 +645,12 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                 [origin],
                 |r| r.get(0),
             )?;
-            let address = format!("{name}@{}@{node_name}", slug.unwrap_or_default());
+            // The stored slug stays as sent, since it is matched against local slugs; in an
+            // address, which is printed and typed, it is one safe line (FINDINGS-178 P2-1).
+            let address = format!(
+                "{name}@{}@{node_name}",
+                crate::mail::single_line(&slug.unwrap_or_default(), usize::MAX)
+            );
             tx.execute(
                 "INSERT INTO agents (agent_id, node_id, project_id, name, program, model, description,
                    status, created_at, updated_at, last_seen_at, event_id, address)

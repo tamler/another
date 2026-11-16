@@ -207,37 +207,9 @@ fn gap_a_peer_hold_with_terminal_escapes_never_reaches_the_feed() {
     );
 }
 
-/// R4. A paired node's agent description and model reach `another agent list` unchanged.
-#[test]
-fn gap_a_peer_agent_with_terminal_escapes_is_not_listed_raw() {
-    let hub = node("hub");
-    let spoke = node("spoke");
-    pair(&hub, &spoke);
-    register(&spoke, "bob", None).unwrap();
-    let events = resigned(&spoke, |kind, p| {
-        if kind == "agent.registered" {
-            p["description"] = Value::String(EVIL.into());
-            p["model"] = Value::String(EVIL.into());
-        }
-    });
-    hub.store
-        .ingest(
-            spoke.store.node_id(),
-            &events,
-            &[spoke.store.node_entry().unwrap()],
-        )
-        .unwrap();
-    let listed = hub.store.agents().unwrap();
-    let bad: Vec<_> = listed
-        .iter()
-        .filter(|a| {
-            a.description.as_deref().is_some_and(unsafe_in)
-                || a.model.as_deref().is_some_and(unsafe_in)
-        })
-        .map(|a| (&a.address, &a.description, &a.model))
-        .collect();
-    assert!(bad.is_empty(), "agents listed with escapes: {bad:?}");
-}
+// R4 (a peer agent's description and model) was checked through `Store::agents()`, which
+// lists local agents only, so it could not fail (FINDINGS-178 P2-test). review178.rs reads
+// the imported rows instead.
 
 /// Control: #146 holds. A subject with escapes is refused locally.
 #[test]
