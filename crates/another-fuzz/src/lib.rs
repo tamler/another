@@ -614,16 +614,21 @@ pub fn tool_args(data: &[u8]) {
         args.insert(k, v);
     }
     let rig = rig().lock().unwrap_or_else(|e| e.into_inner());
-    // The remote gate and the audit line: any outcome but a panic is fine, and an audited
-    // note `text` never appears verbatim (D70).
+    // The remote gate and the audit line: any outcome but a panic is fine, the audit line is
+    // JSON, and a top-level message `body` or request `note` is replaced by its size. (Note
+    // `text` redaction, D70, arrives with #143 and is not on main.) The redacted value is
+    // compared, not searched for: a short body can occur verbatim in the JSON syntax itself.
     let mut gated = args.clone();
     let _ = another::remote::authorize(&rig.store, &rig.scope, &tool, &mut gated);
     let audit = another::remote::redact(Some(&args));
-    if let Some(Value::String(text)) = args.get("text") {
-        if text.chars().count() >= 8 {
-            assert!(
-                !audit.contains(text.as_str()),
-                "audit kept note text: {audit}"
+    let logged: Value =
+        serde_json::from_str(&audit).unwrap_or_else(|e| panic!("audit is not JSON ({e}): {audit}"));
+    for key in ["body", "note"] {
+        if let Some(Value::String(secret)) = args.get(key) {
+            assert_eq!(
+                logged[key],
+                Value::String(format!("<{} bytes>", secret.len())),
+                "audit kept {key}: {audit}"
             );
         }
     }

@@ -86,6 +86,14 @@ fn tool_args_smoke() {
     run("tool_args", 0x5eed_0004, 300, 256, another_fuzz::tool_args);
 }
 
+/// The nightly run's crash input (run 43891582711): a `text` argument that main's audit line
+/// keeps, because note redaction (D70) is not on main. The oracle checks only what main
+/// redacts; this input must pass.
+#[test]
+fn tool_args_nightly_crash_e60e2bc6_is_not_a_failure_on_main() {
+    another_fuzz::tool_args(&[114, 43, 101, 7, 41, 27, 115, 117]);
+}
+
 #[test]
 fn cli_args_smoke() {
     run("cli_args", 0x5eed_0005, 2000, 64, another_fuzz::cli_args);
