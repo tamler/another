@@ -260,7 +260,13 @@ mod tests {
     fn steps_for_quiet_read(hours: i64, per_hour: i64) -> u64 {
         let (clock, now) = Clock::manual(1_800_000_000_000);
         let store = Store::open_in_memory(clock).unwrap();
-        let project = store.ensure_project("t", "/w/shop").unwrap().abs_path;
+        // A real directory, so the path is absolute on Windows too.
+        let dir = tempfile::tempdir().unwrap();
+        let shop = dir.path().join("shop");
+        let project = store
+            .ensure_project("t", &shop.to_string_lossy())
+            .unwrap()
+            .abs_path;
         for name in ["alice", "bob"] {
             store
                 .register_agent(RegisterAgent {
