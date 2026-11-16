@@ -863,16 +863,20 @@ pub fn session_digest(store: &Store, agent: &str) -> Result<String> {
             another_core::Importance::High => "[high] ",
             _ => "",
         };
+        // A subject stored before D75 can hold line breaks or escapes: show it as one safe
+        // line, as `Store::reply` does, so it cannot add lines to what the session reads.
         out.push_str(&format!(
             "\n- {tag}from {}: \"{}\" (message {})",
-            m.from, m.subject, m.message_id
+            m.from,
+            another_core::single_line(&m.subject, another_core::MAX_SUBJECT_CHARS),
+            m.message_id
         ));
     }
     for r in inbox.requests.iter().take(5) {
         out.push_str(&format!(
             "\n- request {} \"{}\" from {} ({}{})",
             r.request_id,
-            r.title,
+            another_core::single_line(&r.title, another_core::MAX_SUBJECT_CHARS),
             r.created_by,
             r.status.as_str(),
             r.owner
