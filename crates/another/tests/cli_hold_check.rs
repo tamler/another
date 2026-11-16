@@ -69,6 +69,7 @@ impl Fx {
 #[test]
 fn a_free_path_checks_clean_and_checking_grants_nothing() {
     let fx = Fx::new();
+    let events = fx.ok(&["--json", "events", "--limit", "1000"]);
     assert_eq!(
         fx.ok(&["hold", "check", "-a", "worker", "src/a.rs"]).trim(),
         "no conflicts"
@@ -79,6 +80,11 @@ fn a_free_path_checks_clean_and_checking_grants_nothing() {
         "[]"
     );
     assert_eq!(fx.holds(), 0, "hold check took a hold");
+    assert_eq!(
+        fx.ok(&["--json", "events", "--limit", "1000"]),
+        events,
+        "hold check wrote an event"
+    );
     // Nothing was taken, so the lead can still hold the path exclusively.
     fx.ok(&["hold", "acquire", "-a", "lead", "src/a.rs"]);
     assert_eq!(fx.holds(), 1);
