@@ -9,7 +9,7 @@ CI runs each script against the current build (`crates/another/tests/examples.rs
 
 | Script | Shows |
 |---|---|
-| [two-agent-handoff.sh](two-agent-handoff.sh) | Two agents on one machine. alice takes a hold on the file she is changing and asks bob for a review as a claimable request. bob claims it, replies in the thread and completes it. alice then reads the reply and releases her hold. |
+| [two-agent-handoff.sh](two-agent-handoff.sh) | Two agents on one machine. alice takes a hold on the file she is changing and asks bob for a review as a claimable request. bob claims it, acknowledges it, replies in the thread and completes it. alice then reads the reply and the "Done:" notice, acknowledges both and releases her hold. The script ends by checking that both inboxes are empty. |
 | [federation-hub-two-spokes.sh](federation-hub-two-spokes.sh) | A hub and two spokes (laptop, runner), as three data directories on one machine. The hub issues one invite per spoke with different permissions. Each spoke joins and syncs. alice on the laptop mails bob on the runner with `bob@@runner`, and bob replies. |
 
 Run one with the `another` binary on your `PATH`:

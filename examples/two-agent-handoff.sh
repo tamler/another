@@ -3,7 +3,7 @@
 #
 #   alice holds the file she is changing and asks bob for a review (a claimable request);
 #   bob sees it in his inbox, claims it, replies in the thread and completes it;
-#   alice reads the reply, acknowledges it and releases her hold.
+#   alice reads the reply and the "Done:" notice, acknowledges both and releases her hold.
 #
 # Everything runs in a throwaway data directory; your own ~/.another is never touched.
 # Run it from anywhere: sh examples/two-agent-handoff.sh
@@ -24,7 +24,12 @@ step() {
 
 # The value of one string field in `another --json ...` output.
 field() {
-    sed -n "s/.*\"$1\": *\"\\([^\"]*\\)\".*/\\1/p" | head -n 1
+    field_all "$1" | head -n 1
+}
+
+# Every value of one string field, one per line.
+field_all() {
+    sed -n "s/.*\"$1\": *\"\\([^\"]*\\)\".*/\\1/p"
 }
 
 mkdir -p "$scratch/shop/src"
@@ -49,13 +54,23 @@ request=$(printf '%s\n' "$sent" | field request_id)
 # bob's session start (or his next tool call) shows the same thing his inbox does.
 step inbox --agent bob@shop
 step request claim --agent bob@shop "$request"
-step reply --from bob@shop --body "Looks right. One nit: say which order id was missing." "$message"
+# bob marks alice's message read and acknowledged: it leaves his inbox.
+step ack --agent bob@shop "$message"
+printf '\n$ another --json reply --from bob@shop ... %s\n' "$message"
+replied=$("$another" --json reply --from bob@shop \
+    --body "Looks right. One nit: say which order id was missing." "$message")
+reply=$(printf '%s\n' "$replied" | field message_id)
+[ -n "$reply" ] || { echo "reply did not return an id: $replied" >&2; exit 1; }
+# Completing the request also sends alice a "Done:" notice in the same thread.
 step request complete --agent bob@shop --note "reviewed, one nit" "$request"
 
-# alice reads the reply, acknowledges the thread and lets go of the file.
+# alice reads the thread: bob's reply and the "Done:" notice.
 step inbox --agent alice@shop
 step thread "$message"
-step ack --agent bob@shop "$message"
+# She acknowledges both, by id, as herself.
+notices=$("$another" --json inbox --agent alice@shop | field_all message_id | tr '\n' ' ')
+# shellcheck disable=SC2086 # one id per word, by construction
+step ack --agent alice@shop $notices
 # With no hold ids, release lets go of all of alice's holds.
 step hold release --agent alice@shop
 step requests
@@ -71,4 +86,19 @@ holds=$("$another" --json holds)
     echo "a hold is still live: $holds" >&2
     exit 1
 }
-printf '\nhandoff complete: request %s is done and no hold is left\n' "$request"
+# bob's reply reached alice, and both inboxes are empty: everything was read and acknowledged.
+case " $notices " in
+*" $reply "*) ;;
+*)
+    echo "bob's reply $reply was not in alice's inbox: $notices" >&2
+    exit 1
+    ;;
+esac
+for who in alice@shop bob@shop; do
+    inbox=$("$another" --json inbox --agent "$who")
+    printf '%s\n' "$inbox" | grep -q '"unread": *0,' || {
+        echo "$who still has unread mail: $inbox" >&2
+        exit 1
+    }
+done
+printf '\nhandoff complete: request %s is done, every message is acknowledged and no hold is left\n' "$request"
