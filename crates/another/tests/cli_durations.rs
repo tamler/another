@@ -83,6 +83,9 @@ fn a_duration_must_be_a_number_with_a_known_unit() {
         ("", "invalid duration"),
         ("-5m", "invalid duration"),
         ("1.5h", "use s, m, h, d or w"),
+        // Parses, but a token that is born expired is refused, in any unit.
+        ("0", "expiry must be positive"),
+        ("0w", "expiry must be positive"),
     ] {
         // `--expires=…` so a leading `-` reaches the parser instead of clap.
         let arg = format!("--expires={expires}");
