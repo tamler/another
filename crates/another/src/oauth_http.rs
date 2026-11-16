@@ -697,7 +697,11 @@ async fn authorize(
                 "another: {} wants to connect (redirect host {}).\n  \
                  Approve it on this machine (this page cannot approve it):\n  \
                  another oauth approve {} --agent NAME --project '/path/*'",
-                pending.client_name, pending.redirect_host, pending.user_code
+                // Registration refuses control characters (D82); a name stored before that
+                // is cleaned here.
+                another_core::single_line(&pending.client_name, 120),
+                pending.redirect_host,
+                pending.user_code
             );
             let loc = format!(
                 "/oauth/wait/{}?rt={}",

@@ -1719,7 +1719,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                         break emitted;
                     }
                 }
-                Err(e) if watch => eprintln!("another: sync failed: {e:#}"),
+                // The message can quote the hub's error body (fed.rs).
+                Err(e) if watch => {
+                    eprintln!("another: sync failed: {}", terminal_safe(&format!("{e:#}")))
+                }
                 Err(e) => return Err(e),
             }
             std::thread::sleep(Duration::from_secs(every.max(5)));
