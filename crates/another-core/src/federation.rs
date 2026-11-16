@@ -633,6 +633,10 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
             else {
                 return Ok(());
             };
+            // The local rename rule. `set_node_name` always applies it; a `node.created`
+            // whose name came unchecked from ANOTHER_NODE_NAME is refused once, and pairing
+            // needs a valid rename first anyway.
+            validate_node_name(name)?;
             if node_name_taken(conn, name, origin)? {
                 return Err(Error::Forbidden(format!(
                     "{kind} names {name:?}, which another node already has"
