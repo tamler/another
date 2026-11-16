@@ -89,8 +89,13 @@ pub enum Command {
         /// Seconds between checks for new mail to push to idle Herdr agents.
         #[arg(long, default_value_t = 2)]
         wake_secs: u64,
+        /// Append log records to this file instead of stderr (the Windows daemon uses this;
+        /// Task Scheduler keeps no output). The startup lines still go to stderr.
+        #[arg(long, value_name = "PATH")]
+        log_file: Option<PathBuf>,
     },
-    /// Keep `another serve` running in the background (macOS launchd LaunchAgent).
+    /// Keep `another serve` running in the background (launchd on macOS, a systemd user
+    /// unit on Linux, a Task Scheduler logon task on Windows).
     #[command(subcommand)]
     Daemon(DaemonCmd),
     /// Register projects or list them.
@@ -436,28 +441,30 @@ pub enum WakeCmd {
 
 #[derive(Debug, Args)]
 pub struct DaemonArgs {
-    /// launchd label (change it only to run a second, separate daemon).
+    /// Service label: launchd label, systemd unit name (without `.service`) or task name.
+    /// Change it only to run a second, separate daemon.
     #[arg(long, default_value = crate::daemon::DEFAULT_LABEL)]
     label: String,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum DaemonCmd {
-    /// Write the LaunchAgent and load it: `another serve` on loopback, restarted if it exits.
+    /// Write the service definition and load it: `another serve` on loopback, started at
+    /// login and restarted if it exits.
     Install {
         #[command(flatten)]
         args: DaemonArgs,
         /// Loopback address to serve on.
         #[arg(long, default_value = crate::serve::DEFAULT_BIND)]
         bind: String,
-        /// Write the plist but do not load it.
+        /// Write the definition but do not load it.
         #[arg(long)]
         no_load: bool,
         /// Show what would change without writing or loading anything.
         #[arg(long)]
         dry_run: bool,
     },
-    /// Unload the LaunchAgent and remove its plist.
+    /// Unload the service and remove its definition.
     Uninstall {
         #[command(flatten)]
         args: DaemonArgs,
@@ -469,7 +476,8 @@ pub enum DaemonCmd {
         #[command(flatten)]
         args: DaemonArgs,
     },
-    /// Restart the daemon (`launchctl kickstart -k`).
+    /// Restart the daemon (`launchctl kickstart -k`, `systemctl --user restart`, or
+    /// `schtasks /End` then `/Run`).
     Restart {
         #[command(flatten)]
         args: DaemonArgs,
@@ -782,15 +790,25 @@ pub enum HoldCmd {
     },
 }
 
-/// Exit status used when holds conflict, so hooks can branch on it.
+/// Exit status for a conflict: holds that overlap, or any `conflict` error (acting on a
+/// closed request, claiming or completing a request another agent has claimed). Hooks and
+/// scripts branch on it. Other errors exit 1, including `forbidden` (for example releasing
+/// a request someone else owns), and bad arguments exit 2 (clap).
 pub const EXIT_CONFLICT: u8 = 3;
 
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
-    init_tracing(matches!(
-        cli.command,
-        Command::Serve { .. } | Command::Dashboard { .. }
-    ));
+    let log_file = match &cli.command {
+        Command::Serve { log_file, .. } => log_file.as_deref(),
+        _ => None,
+    };
+    init_tracing(
+        matches!(
+            cli.command,
+            Command::Serve { .. } | Command::Dashboard { .. }
+        ),
+        log_file,
+    );
     let json = cli.json;
     match run(cli) {
         Ok(code) => code,
@@ -802,21 +820,92 @@ pub fn main() -> ExitCode {
                     message: format!("{err:#}"),
                 },
             };
+            let hint = cli_hint(body.code, &body.message);
             if json {
-                println!("{}", serde_json::json!({ "error": body }));
+                let mut out = serde_json::json!({ "error": body });
+                if let Some(hint) = hint {
+                    out["error"]["hint"] = serde_json::json!(hint);
+                }
+                println!("{out}");
             } else {
                 eprintln!("another: {}", body.message);
+                if let Some(hint) = hint {
+                    eprintln!("hint: {hint}");
+                }
             }
-            ExitCode::FAILURE
+            if body.code == "conflict" {
+                ExitCode::from(EXIT_CONFLICT)
+            } else {
+                ExitCode::FAILURE
+            }
         }
     }
 }
 
-fn init_tracing(serving: bool) {
+/// What to do next, for errors whose message only says what happened. The message comes
+/// from the core and is shared with MCP, so the CLI's own commands are named here. An
+/// error whose message already says what to do (a bad duration, an ambiguous name that
+/// lists the choices) gets none.
+fn cli_hint(code: &str, message: &str) -> Option<&'static str> {
+    if code == "not_found" {
+        let hint = if message.starts_with("unknown agent") {
+            "List agents with `another agent list`; register one with `another agent register NAME --program PROGRAM --project DIR`."
+        } else if message.starts_with("unknown request") {
+            "List requests with `another requests` (`--status`, `--owner` to filter)."
+        } else if message.starts_with("unknown message") || message.contains("was not delivered to")
+        {
+            "Message ids are shown by `another inbox --agent NAME` and `another thread THREAD_ID`."
+        } else if message.starts_with("unknown thread") {
+            "List threads with `another threads --agent NAME`."
+        } else if message.starts_with("no live hold") {
+            "List live holds with `another holds`; this one may have expired or been released."
+        } else if message.starts_with("no registered resource")
+            || message.starts_with("unknown resource")
+        {
+            "List resources with `another resources`."
+        } else if message.starts_with("unknown token") {
+            "List tokens with `another token list`."
+        } else {
+            return None;
+        };
+        return Some(hint);
+    }
+    if code == "db" && message.contains("database is locked") {
+        return Some("Another process is writing to the database; run the command again.");
+    }
+    None
+}
+
+fn init_tracing(serving: bool, log_file: Option<&Path>) {
     let default = if serving { "info" } else { "warn" };
     let filter = tracing_subscriber::EnvFilter::try_from_env("ANOTHER_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default));
-    // Colour only on a terminal: the daemon's log is a file under launchd.
+    if let Some(path) = log_file {
+        let opened = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+            });
+        match opened {
+            Ok(file) => {
+                let _ = tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_writer(std::sync::Mutex::new(file))
+                    .with_ansi(false)
+                    .try_init();
+                return;
+            }
+            Err(e) => eprintln!(
+                "another: cannot open log file {}: {e}; logging to stderr",
+                path.display()
+            ),
+        }
+    }
+    // Colour only on a terminal: the daemon's log is a file under launchd and systemd.
     use std::io::IsTerminal;
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -995,6 +1084,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         sweep_secs,
         no_wake,
         wake_secs,
+        log_file: _,
     } = &cli.command
     {
         let store = open(home)?;
@@ -1713,7 +1803,22 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 })?;
                 vec![crate::wake::wake(&store, &agent, &opts)?]
             };
-            emit(json, &plans, |p| output::wake_plans(p))
+            let code = emit(json, &plans, |p| output::wake_plans(p));
+            // `--all` reports a failed wake per agent and carries on; the exit status
+            // still says that something failed.
+            let failed: Vec<_> = plans.iter().filter(|p| p.error.is_some()).collect();
+            if failed.is_empty() {
+                code
+            } else {
+                for p in failed {
+                    eprintln!(
+                        "another: wake failed for {}: {}",
+                        p.agent,
+                        p.error.as_deref().unwrap_or_default()
+                    );
+                }
+                ExitCode::FAILURE
+            }
         }
         Command::Audit { limit } => {
             let entries = store.audit_log(limit)?;

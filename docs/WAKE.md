@@ -56,7 +56,7 @@ another wake --agent codex@shop --dry-run
 another wake --agent codex@shop --force --message "New mail in Another: run fetch_inbox (or another inbox --agent codex@shop), reply with another reply <message-id>, then another ack <message-id>."
 ```
 
-- `--all` wakes every agent that has a stored target and something waiting, which makes it suitable for a cron job or a Herdr action.
+- `--all` wakes every agent that has a stored target and something waiting, which makes it suitable for a cron job or a Herdr action. If one agent's adapter fails (its pane is gone, say), that agent is listed as `failed` with the adapter's error, the other agents are still woken, and the command exits non-zero.
 - `--dry-run` prints the commands without running them.
 
 ## Herdr plugin
