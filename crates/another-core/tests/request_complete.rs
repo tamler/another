@@ -189,3 +189,20 @@ fn adv216_a_direct_completion_without_a_note_gets_the_default_body_and_a_claim_t
         assert_eq!(body, &format!("Request {id} is done."));
     }
 }
+
+/// adv216-b: completing claimed work keeps the time it was claimed, so the record still shows
+/// how long the work was held.
+#[test]
+fn adv216_b_completing_claimed_work_keeps_its_claim_time() {
+    let f = fx();
+    let id = f.request();
+    let claimed_at = f
+        .act("worker", &id, RequestAction::Claim, None)
+        .unwrap()
+        .claimed_at;
+    assert!(claimed_at.is_some());
+    f.now.fetch_add(60_000, Ordering::SeqCst);
+    let done = f.act("worker", &id, RequestAction::Complete, None).unwrap();
+    assert_eq!(done.claimed_at, claimed_at, "{done:?}");
+    assert_ne!(done.claimed_at, done.closed_at, "{done:?}");
+}
