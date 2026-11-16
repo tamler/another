@@ -560,6 +560,10 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
         Some(node) => format!("[{node}] {summary}"),
         None => summary,
     };
+    // Summaries quote event payloads, and a peer's signed payload keeps its original text
+    // (subjects, titles, reasons, names). Every reader (whats_new, MCP activity, the digest,
+    // the dashboard) gets one line without control characters.
+    let summary = crate::mail::single_line(&summary, usize::MAX);
     Ok(ActivityItem {
         category: ActivityKind::of_event(&row.kind),
         event_id: row.event_id,
