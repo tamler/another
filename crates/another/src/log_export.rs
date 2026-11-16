@@ -24,8 +24,26 @@ pub struct ExportArgs {
     pub kinds: Vec<String>,
     /// Peers' events stored here as well as this node's own.
     pub all_nodes: bool,
+    /// Keep message bodies in peers' events (redacted by default, as on the dashboard, D41).
+    pub include_foreign_bodies: bool,
     pub audit: bool,
     pub limit: Option<u64>,
+}
+
+/// A peer's message body, replaced by its size unless asked for (D41: bodies of messages
+/// from other nodes stay redacted outside their own node's tools).
+fn redact_foreign(line: &mut Value, local_node: &str) {
+    if line["node_id"].as_str() == Some(local_node) {
+        return;
+    }
+    let Some(payload) = line.get_mut("payload").and_then(Value::as_object_mut) else {
+        return;
+    };
+    if let Some(body) = payload.get("body").and_then(Value::as_str) {
+        let bytes = body.len();
+        payload.insert("body".into(), Value::Null);
+        payload.insert("body_redacted_bytes".into(), Value::from(bytes));
+    }
 }
 
 /// Where an export starts: after a key, and/or from a time.
@@ -108,10 +126,13 @@ pub fn export(
         if page.is_empty() {
             break;
         }
-        for line in &page {
+        for mut line in page.iter().cloned() {
             let key = if args.audit { "audit_id" } else { "seq" };
             after = line[key].as_i64().unwrap_or(after);
-            let text = serde_json::to_string(line)?;
+            if !args.audit && !args.include_foreign_bodies {
+                redact_foreign(&mut line, store.node_id());
+            }
+            let text = serde_json::to_string(&line)?;
             if let Err(e) = writeln!(out, "{text}") {
                 if e.kind() == ErrorKind::BrokenPipe {
                     return Ok((written, last));
@@ -151,6 +172,27 @@ pub fn run(home: &Path, args: &ExportArgs) -> Result<()> {
         Some(key) if args.audit => eprintln!("another: exported {n} {what}, last audit id {key}"),
         Some(key) => eprintln!("another: exported {n} {what}, last event_id {key}"),
         None => eprintln!("another: exported 0 {what}"),
+    }
+    // A misspelt kind looks like an empty log; say which kinds this log has never held.
+    if n == 0 && !args.audit {
+        let unknown: Vec<&str> = args
+            .kinds
+            .iter()
+            .filter(|k| {
+                let any = ExportFilter {
+                    kinds: vec![(*k).clone()],
+                    ..ExportFilter::default()
+                };
+                store.export_events(0, &any, 1).is_ok_and(|p| p.is_empty())
+            })
+            .map(String::as_str)
+            .collect();
+        if !unknown.is_empty() {
+            eprintln!(
+                "another: this log has no event of kind {}; `another events` shows recent kinds",
+                unknown.join(", ")
+            );
+        }
     }
     Ok(())
 }

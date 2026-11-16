@@ -386,9 +386,10 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum LogCmd {
-    /// Write the event log (or, with --audit, the audit log) as JSON Lines on stdout,
-    /// oldest first. Everything in the log is included, message bodies too. The last line
-    /// on stderr names the cursor for the next `--since`.
+    /// Write the event log (or, with --audit, the audit log) as JSON Lines on stdout, in
+    /// log order. Bodies of this node's messages are included; peers' are replaced by their
+    /// size unless --include-foreign-bodies. The last line on stderr names the cursor for
+    /// the next `--since`.
     Export {
         /// A duration (30m, 2h, 1d), an RFC 3339 time, or an event id to continue after
         /// (with --audit: an audit id).
@@ -403,6 +404,9 @@ pub enum LogCmd {
         /// `local` (this node's own events, the default) or `all` (peers' events too).
         #[arg(long, default_value = "local", value_parser = ["local", "all"])]
         node: String,
+        /// With `--node all`: keep the bodies of messages written on other nodes.
+        #[arg(long)]
+        include_foreign_bodies: bool,
         /// Export the audit log of remote calls instead of the event log.
         #[arg(long)]
         audit: bool,
@@ -1183,6 +1187,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         until,
         kind,
         node,
+        include_foreign_bodies,
         audit,
         limit,
     }) = &cli.command
@@ -1192,6 +1197,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             until: until.clone(),
             kinds: kind.clone(),
             all_nodes: node == "all",
+            include_foreign_bodies: *include_foreign_bodies,
             audit: *audit,
             limit: *limit,
         };

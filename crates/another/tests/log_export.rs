@@ -283,3 +283,76 @@ fn it_never_creates_or_migrates_a_home() {
         .unwrap();
     assert_eq!(after, v - 1, "the export migrated the database");
 }
+
+/// FINDINGS-164 F2: a peer's message body is redacted (D41) unless asked for; this node's
+/// own bodies are kept.
+#[test]
+fn peers_message_bodies_are_redacted_unless_asked_for() {
+    let env = Env::new();
+    env.send(1);
+    let db = rusqlite::Connection::open(env.home.join(DB_FILE)).unwrap();
+    db.execute(
+        "INSERT INTO nodes (node_id, display_name, created_at) VALUES ('PEER', 'peer', 1)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO events (event_id, node_id, ts, actor, kind, payload)
+         VALUES ('01XXXXXXXXXXXXXXXXXXXXXXXX', 'PEER', 3, 'p', 'message.sent',
+                 '{\"subject\":\"from afar\",\"body\":\"secret words\"}')",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let (lines, _) = env.export(&["--kind", "message.sent", "--node", "all"]);
+    let peer = lines.iter().find(|l| l["node_id"] == "PEER").unwrap();
+    assert_eq!(peer["payload"]["body"], Value::Null, "{peer}");
+    assert_eq!(peer["payload"]["body_redacted_bytes"], 12, "{peer}");
+    assert_eq!(peer["payload"]["subject"], "from afar");
+    let own = lines.iter().find(|l| l["node_id"] != "PEER").unwrap();
+    assert_eq!(own["payload"]["body"], "body", "{own}");
+
+    let (lines, _) = env.export(&[
+        "--kind",
+        "message.sent",
+        "--node",
+        "all",
+        "--include-foreign-bodies",
+    ]);
+    let peer = lines.iter().find(|l| l["node_id"] == "PEER").unwrap();
+    assert_eq!(peer["payload"]["body"], "secret words");
+}
+
+/// FINDINGS-164 note: a kind the log has never held is named, not silently empty.
+#[test]
+fn an_unknown_kind_is_named_on_stderr() {
+    let env = Env::new();
+    let (lines, err) = env.export(&["--kind", "messsage.sent"]);
+    assert!(lines.is_empty());
+    assert!(err.contains("no event of kind messsage.sent"), "{err}");
+}
+
+/// FINDINGS-164 F1: the order is log order (`seq`), even when a later event has an earlier
+/// time, so the cursor stays gap-free.
+#[test]
+fn the_order_is_log_order_even_when_time_goes_backwards() {
+    let env = Env::new();
+    env.send(1);
+    let db = rusqlite::Connection::open(env.home.join(DB_FILE)).unwrap();
+    let node: String = db
+        .query_row("SELECT node_id FROM nodes WHERE is_local = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    db.execute(
+        "INSERT INTO events (event_id, node_id, ts, actor, kind, payload)
+         VALUES ('01WWWWWWWWWWWWWWWWWWWWWWWW', ?1, 1, 'test', 'test.backwards', '{}')",
+        [&node],
+    )
+    .unwrap();
+    drop(db);
+    let (lines, _) = env.export(&[]);
+    let s = seqs(&lines);
+    assert!(s.windows(2).all(|w| w[0] < w[1]));
+    assert_eq!(lines.last().unwrap()["kind"], "test.backwards");
+}
