@@ -259,14 +259,14 @@ fn a_new_nested_registration_prevents_confirmation() {
 }
 
 #[test]
-fn v10_can_record_a_claim_and_keeps_the_v9_secret() {
+fn v12_can_record_a_claim_and_keeps_the_v11_secret() {
     let temp = tempfile::tempdir().unwrap();
     let _store = Store::open(temp.path()).unwrap();
     let db = rusqlite::Connection::open(temp.path().join("another.db")).unwrap();
     let version: i64 = db
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 10);
+    assert_eq!(version, 12);
     let columns: i64 = db.query_row(
         "SELECT count(*) FROM pragma_table_info('admissions') WHERE name IN ('call_key','operation','claimed_at','object_identity','client','session_digest','preimage','replacement')",
         [], |r| r.get(0),

@@ -907,17 +907,6 @@ impl HookInput {
                 out.push(p.to_string());
             }
         };
-        for key in [
-            "file_path",
-            "filePath",
-            "notebook_path",
-            "path",
-            "target_notebook",
-        ] {
-            if let Some(p) = input.get(key).and_then(Value::as_str) {
-                add(p);
-            }
-        }
         let patch = input
             .get("command")
             .or_else(|| input.get("patch"))
@@ -935,6 +924,18 @@ impl HookInput {
                     if let Some(p) = line.strip_prefix(header) {
                         add(p);
                     }
+                }
+            }
+        } else {
+            for key in [
+                "file_path",
+                "filePath",
+                "notebook_path",
+                "path",
+                "target_notebook",
+            ] {
+                if let Some(p) = input.get(key).and_then(Value::as_str) {
+                    add(p);
                 }
             }
         }
@@ -1370,18 +1371,29 @@ fn git_root_above(path: &Path) -> Option<PathBuf> {
 /// Reason given on auto-acquired holds.
 pub const AUTO_HOLD_REASON: &str = "editing (taken by the edit hook)";
 
-/// The text shown when an edit is stopped.
-pub fn deny_message(agent: &str, conflicts: &[HoldConflict]) -> String {
+/// Said instead of the ping promise when the wait could not be recorded.
+const NO_PING_NOTICE: &str =
+    "Another could not record your wait for this file, so no inbox ping will come.";
+
+/// The text shown when an edit is stopped the first time. `wait_recorded` says whether a
+/// durable wait exists for it: only then may the text promise an inbox ping. When the
+/// wait could not be recorded, the agent is told to check again itself after
+/// `retry_after` seconds instead.
+pub fn deny_message(
+    agent: &str,
+    conflicts: &[HoldConflict],
+    wait_recorded: bool,
+    retry_after: i64,
+) -> String {
+    let Some(first) = conflicts.first() else {
+        return String::new();
+    };
     let mut out = String::from("Another stopped this edit: ");
-    let mut holders: Vec<&str> = Vec::new();
     let lines: Vec<String> = conflicts
         .iter()
         .take(3)
         .map(|c| {
             let h = &c.held;
-            if !holders.contains(&h.agent.as_str()) {
-                holders.push(&h.agent);
-            }
             let kind = if h.exclusive { "exclusive" } else { "shared" };
             let reason = h
                 .reason
@@ -1394,14 +1406,21 @@ pub fn deny_message(agent: &str, conflicts: &[HoldConflict]) -> String {
             )
         })
         .collect();
-    out.push_str(&lines.join("; "));
+    out.push_str(&truncate(lines.join("; "), 450));
     if conflicts.len() > 3 {
         out.push_str(&format!("; and {} more", conflicts.len() - 3));
     }
-    let first = conflicts.first().map(|c| c.path.as_str()).unwrap_or("it");
+    out.push_str(". Worktrees of the same repository still conflict at merge");
+    if wait_recorded {
+        out.push_str(". You'll be pinged in your Another inbox when the file is free. Do not retry this edit while waiting");
+    } else {
+        out.push_str(&format!(
+            ". {NO_PING_NOTICE} Retry this edit after {retry_after} seconds"
+        ));
+    }
     out.push_str(&format!(
-        ". Leave it alone until the hold is released. Ask the holder with `another send --from {agent} --to {} --request --subject \"Release {first}?\"`, or work on other files and try again later.",
-        holders.join(",")
+        ". Leave it alone until the hold is released. Ask the holder with `another hold request-release --agent {agent} {}`, or work on other files.",
+        first.held.hold_id
     ));
     truncate(out, 1000)
 }
@@ -1450,23 +1469,55 @@ fn pre_advisory_edit(
     }
     let agent = hook_agent(store, client, &project_root(dir), input, false)?;
     let mut conflicts = Vec::new();
+    let mut first_notice = false;
+    // A ping is promised only when every blocked project has its wait on record.
+    let mut wait_recorded = true;
+    let mut retry_after = 0;
     for (project, paths) in scope.groups {
         let project = match store.project(&project) {
             Ok(project) => project,
             Err(another_core::Error::NotFound(_)) => store.ensure_project(&agent, &project)?,
             Err(error) => return Err(error.into()),
         };
-        conflicts.extend(
-            store
-                .guard_edit(&agent, &project.abs_path, &paths, AUTO_HOLD_REASON)?
-                .conflicts,
-        );
+        let guard = store.guard_edit(&agent, &project.abs_path, &paths, AUTO_HOLD_REASON)?;
+        if !guard.conflicts.is_empty() {
+            first_notice |= guard.first_notice;
+            wait_recorded &= guard.wait_recorded;
+            retry_after = retry_after.max(guard.retry_after_seconds);
+            conflicts.extend(guard.conflicts);
+        }
     }
-    Ok(if conflicts.is_empty() {
-        String::new()
+    if conflicts.is_empty() {
+        return Ok(String::new());
+    }
+    Ok(deny(&blocked_reason(
+        &agent,
+        &conflicts,
+        first_notice,
+        wait_recorded,
+        retry_after,
+    )))
+}
+
+/// The denial text for a blocked edit: the full notice on the first block of a wait (or a
+/// changed set of blockers), a short backoff reminder on repeats (D62).
+pub fn blocked_reason(
+    agent: &str,
+    conflicts: &[HoldConflict],
+    first_notice: bool,
+    wait_recorded: bool,
+    retry_after: i64,
+) -> String {
+    if first_notice {
+        return deny_message(agent, conflicts, wait_recorded, retry_after);
+    }
+    let path = truncate(conflicts[0].path.clone(), 200);
+    let holder = &conflicts[0].held.agent;
+    if wait_recorded {
+        format!("Another: this edit is still blocked. {path} is held by {holder}. Back off for {retry_after} seconds. Wait for the hold-free inbox ping or work on other files.")
     } else {
-        deny(&deny_message(&agent, &conflicts))
-    })
+        format!("Another: this edit is still blocked. {path} is held by {holder}. {NO_PING_NOTICE} Retry after {retry_after} seconds, or work on other files.")
+    }
 }
 
 fn pre_controlled_edit(
@@ -1549,6 +1600,11 @@ fn group_edit(
     for raw in paths {
         // Not normalized lexically: `..` must apply after symlinks (review N1).
         for target in edit_targets(&dir.join(raw)) {
+            // Some tool envelopes name a working directory rather than an edited file.
+            // Never widen an automatic hold to that directory.
+            if target.is_dir() || raw.ends_with('/') {
+                continue;
+            }
             let git = git_root_above(&target);
             let registered = projects
                 .iter()
@@ -2029,20 +2085,65 @@ mod tests {
             created_at: "2026-11-10T10:00:00.000Z".into(),
             expires_at: "2026-11-10T10:30:00.000Z".into(),
         };
-        let msg = deny_message(
-            "claude@shop-wt",
-            &[HoldConflict {
-                path: "src/a.rs".into(),
-                held,
-            }],
-        );
+        let conflict = HoldConflict {
+            path: "src/a.rs".into(),
+            held: held.clone(),
+        };
+        let msg = deny_message("claude@shop-wt", std::slice::from_ref(&conflict), true, 30);
         assert!(msg.starts_with("Another stopped this edit: src/a.rs is held by codex@shop"));
         assert!(msg.contains("exclusive hold on shop:src/**, \"refactor api\""));
         assert!(msg.contains("until 2026-11-10T10:30:00.000Z"));
-        assert!(msg.contains(
-            "another send --from claude@shop-wt --to codex@shop --request --subject \"Release src/a.rs?\""
-        ));
+        assert!(msg.contains("You'll be pinged in your Another inbox"));
+        assert!(msg.contains("another hold request-release --agent claude@shop-wt h1"));
         assert!(!msg.contains('\u{2014}') && !msg.contains('\u{2013}'));
+        // No wait on record: no ping is promised, and the fallback is spelled out.
+        let msg = deny_message("claude@shop-wt", &[conflict], false, 30);
+        assert!(msg.starts_with("Another stopped this edit: src/a.rs is held by codex@shop"));
+        assert!(!msg.contains("pinged"), "{msg}");
+        assert!(msg.contains("no inbox ping will come. Retry this edit after 30 seconds"));
+        assert!(msg.contains("another hold request-release --agent claude@shop-wt h1"));
+        assert!(!msg.contains('\u{2014}') && !msg.contains('\u{2013}'));
+        let msg = deny_message(
+            "claude@shop",
+            &[HoldConflict {
+                path: "long/".repeat(300),
+                held,
+            }],
+            true,
+            30,
+        );
+        assert!(msg.contains("Worktrees of the same repository still conflict at merge"));
+    }
+
+    /// Repeats of a block get the short reminder; only a recorded wait promises a ping.
+    /// (The binary-level wait-failure test from #137 injected a trigger, which this build's
+    /// schema profile refuses before any route runs; the core tests in `push_holds.rs`
+    /// cover the failed-recording path itself.)
+    #[test]
+    fn blocked_reason_repeats_are_short_and_only_promise_a_recorded_ping() {
+        let conflict = HoldConflict {
+            path: "src/a.rs".into(),
+            held: another_core::Hold {
+                hold_id: "h1".into(),
+                project: "shop".into(),
+                agent: "claude@shop".into(),
+                pattern: "src/a.rs".into(),
+                exclusive: true,
+                reason: None,
+                ttl_seconds: 1800,
+                created_at: "2026-11-10T10:00:00.000Z".into(),
+                expires_at: "2026-11-10T10:30:00.000Z".into(),
+            },
+        };
+        let conflicts = std::slice::from_ref(&conflict);
+        let first = blocked_reason("codex@shop-review", conflicts, true, false, 30);
+        assert!(first.starts_with("Another stopped this edit: src/a.rs is held by claude@shop"));
+        assert!(first.contains("no inbox ping will come. Retry this edit after 30 seconds"));
+        let repeat = blocked_reason("codex@shop-review", conflicts, false, false, 30);
+        assert_eq!(repeat, format!("Another: this edit is still blocked. src/a.rs is held by claude@shop. {NO_PING_NOTICE} Retry after 30 seconds, or work on other files."));
+        let waiting = blocked_reason("codex@shop-review", conflicts, false, true, 60);
+        assert!(waiting.contains("Back off for 60 seconds. Wait for the hold-free inbox ping"));
+        assert!(!waiting.contains("no inbox ping"));
     }
 
     #[test]

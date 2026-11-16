@@ -3,6 +3,25 @@ use std::process::{Command, Stdio};
 
 use serde_json::json;
 
+/// Take a current home back to exactly main's v8 schema, keeping every v8 row: drop the
+/// admission (v11/v12) and hold-fix (v9/v10) objects and rebuild `announcements` with its
+/// v8 text, which the frozen v8 catalog compares.
+#[cfg(unix)]
+const TO_V8: &str =
+    "DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret;
+DROP TABLE request_holds; DROP TABLE hold_waits;
+ALTER TABLE announcements RENAME TO announcements_v12;
+CREATE TABLE announcements (
+    agent_id     TEXT NOT NULL REFERENCES agents(agent_id),
+    message_id   TEXT NOT NULL REFERENCES messages(message_id),
+    channel      TEXT NOT NULL,
+    announced_at INTEGER NOT NULL,
+    PRIMARY KEY (agent_id, message_id)
+);
+INSERT INTO announcements SELECT agent_id, message_id, channel, announced_at FROM announcements_v12;
+DROP TABLE announcements_v12;
+PRAGMA user_version=8;";
+
 #[test]
 fn missing_identity_denies_and_lifecycle_does_not_persist_raw_id() {
     let dir = tempfile::tempdir().unwrap();
@@ -236,7 +255,7 @@ fn old_home_requires_explicit_fenced_upgrade_and_verified_wal_backup() {
     let db = home.join("another.db");
     let old = Connection::open(&db).unwrap();
     // The marker lives in a catalog table: a table the schema does not define is refused.
-    old.execute_batch("DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE announcements; PRAGMA user_version=7; UPDATE nodes SET display_name='committed-wal';").unwrap();
+    old.execute_batch("DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE request_holds; DROP TABLE hold_waits; DROP TABLE announcements; PRAGMA user_version=7; UPDATE nodes SET display_name='committed-wal';").unwrap();
     let denied = command(&["status"]);
     assert!(!denied.status.success());
     assert!(String::from_utf8_lossy(&denied.stderr).contains("offline upgrade"));
@@ -339,17 +358,17 @@ fn old_home_requires_explicit_fenced_upgrade_and_verified_wal_backup() {
         migrated
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        10
+        12
     );
     assert!(command(&["status"]).status.success());
 }
 
-/// The upgrade every existing home takes: a real v8 schema, with sessions and holds in
-/// it, becomes v9 only through the fenced offline upgrade, keeps every historical event
-/// byte, and gains exactly one admission key.
+/// The upgrade every existing main home takes: a real v8 schema, with sessions and holds
+/// in it, becomes v12 only through the fenced offline upgrade, keeps every historical
+/// event byte, and gains exactly one admission key.
 #[cfg(unix)]
 #[test]
-fn v8_home_upgrades_to_v10_keeping_history_and_gaining_one_admission_key() {
+fn v8_home_upgrades_to_v12_keeping_history_and_gaining_one_admission_key() {
     use rusqlite::Connection;
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
@@ -397,12 +416,9 @@ fn v8_home_upgrades_to_v10_keeping_history_and_gaining_one_admission_key() {
         .unwrap()
         .to_owned();
 
-    // Take the home back to exactly the v8 schema: v9 added these objects and nothing else.
+    // Take the home back to exactly the v8 schema.
     let db = Connection::open(home.join("another.db")).unwrap();
-    db.execute_batch(
-        "DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; PRAGMA user_version=8;",
-    )
-    .unwrap();
+    db.execute_batch(TO_V8).unwrap();
     let events = |db: &Connection| -> Vec<String> {
         let mut stmt = db
             .prepare("SELECT event_id||':'||hex(payload)||':'||coalesce(sig,'') FROM events ORDER BY seq")
@@ -459,7 +475,7 @@ fn v8_home_upgrades_to_v10_keeping_history_and_gaining_one_admission_key() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        10
+        12
     );
     assert_eq!(events(&db), history, "the upgrade rewrote history");
     let (keys, length): (i64, i64) = db
@@ -500,10 +516,8 @@ fn v8_home_upgrades_to_v10_keeping_history_and_gaining_one_admission_key() {
     };
     assert!(other_command(&["init"]).status.success());
     let db = Connection::open(other.join("another.db")).unwrap();
-    db.execute_batch(
-        "DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; PRAGMA user_version=8; CREATE TABLE stray(v TEXT);",
-    )
-    .unwrap();
+    db.execute_batch(TO_V8).unwrap();
+    db.execute_batch("CREATE TABLE stray(v TEXT);").unwrap();
     drop(db);
     let refused = other_command(&[
         "upgrade",
@@ -589,7 +603,7 @@ fn upgrade_commit_write_failure_is_reported_as_uncertain_json() {
     let db = home.join("another.db");
     let keeper = Connection::open(&db).unwrap();
     keeper
-        .execute_batch("PRAGMA wal_autocheckpoint=0; DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE announcements; PRAGMA user_version=7;")
+        .execute_batch("PRAGMA wal_autocheckpoint=0; DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE request_holds; DROP TABLE hold_waits; DROP TABLE announcements; PRAGMA user_version=7;")
         .unwrap();
     // Grow the WAL through a catalog table: a table the schema does not define would be
     // refused before the commit this test is about.
@@ -652,7 +666,7 @@ fn upgrade_commit_write_failure_is_reported_as_uncertain_json() {
     let version: i64 = keeper
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert!(version == 7 || version == 9, "unexpected schema {version}");
+    assert!(version == 7 || version == 12, "unexpected schema {version}");
     assert_eq!(
         keeper
             .query_row("SELECT display_name FROM nodes", [], |r| r

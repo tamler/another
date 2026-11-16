@@ -153,8 +153,10 @@ fn frozen_historical_schema_and_legitimate_partial_index_are_accepted() {
     let mut stmt = db
         .prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name")
         .unwrap();
-    // v9 only added the admission tables and their indexes. Everything else in a fresh
-    // home must still be the frozen v8 catalog, object for object.
+    // After v8, the hold fixes (v9/v10) added `hold_waits`, `request_holds` and two
+    // indexes and appended two columns to `announcements`; admissions (v11/v12) added only
+    // the admission tables and their indexes. Everything else in a fresh home must still
+    // be the frozen v8 catalog, object for object.
     let rows = stmt
         .query_map([], |r| {
             Ok(json!([
@@ -167,7 +169,7 @@ fn frozen_historical_schema_and_legitimate_partial_index_are_accepted() {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    let (added, kept): (Vec<Value>, Vec<Value>) = rows
+    let (added, rest): (Vec<Value>, Vec<Value>) = rows
         .into_iter()
         .partition(|row| row[2].as_str().unwrap().starts_with("admission"));
     let mut added_tables: Vec<&str> = added
@@ -180,11 +182,54 @@ fn frozen_historical_schema_and_legitimate_partial_index_are_accepted() {
         added_tables,
         ["admission_holds", "admission_secret", "admissions"]
     );
+    let (hold_fixes, mut kept): (Vec<Value>, Vec<Value>) = rest.into_iter().partition(|row| {
+        matches!(row[2].as_str().unwrap(), "hold_waits" | "request_holds")
+            || row[1] == "announcements_by_fingerprint"
+    });
+    let hold_names: Vec<&str> = hold_fixes
+        .iter()
+        .map(|row| row[1].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        hold_names,
+        [
+            "announcements_by_fingerprint",
+            "request_holds_by_hold",
+            "sqlite_autoindex_hold_waits_1",
+            "sqlite_autoindex_request_holds_1",
+            "hold_waits",
+            "request_holds",
+        ]
+    );
     let historical: Value = serde_json::from_str(HISTORICAL_V8_SCHEMA).unwrap();
+    // v10's two `ADD COLUMN`s append to the stored v8 `announcements` text.
+    let announcements = kept
+        .iter_mut()
+        .find(|row| row[0] == "table" && row[1] == "announcements")
+        .unwrap();
+    let v8_text = historical
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row[0] == "table" && row[1] == "announcements")
+        .unwrap()[3]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        announcements[3].as_str().unwrap(),
+        // SQLite inserts added columns after the last column definition, before the
+        // table constraint.
+        v8_text.replace(
+            "announced_at INTEGER NOT NULL,",
+            "announced_at INTEGER NOT NULL, fingerprint TEXT, duplicate_of TEXT REFERENCES messages(message_id),"
+        )
+    );
+    announcements[3] = Value::String(v8_text);
     assert_eq!(
         Value::Array(kept),
         historical,
-        "fresh schema diverges from frozen historical v8 catalogs outside the v9 additions"
+        "fresh schema diverges from frozen historical v8 catalogs outside the v9-v12 additions"
     );
     let partial: i64 = db.query_row("SELECT partial FROM pragma_index_list('resources') WHERE name='resources_live_identity'", [], |r| r.get(0)).unwrap();
     assert_eq!(

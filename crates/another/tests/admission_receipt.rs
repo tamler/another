@@ -158,7 +158,7 @@ fn distinct_edits_of_one_file_get_distinct_pending_holds() {
          JOIN admission_holds ah ON ah.admission_id = a.admission_id
          JOIN holds h ON h.hold_id = ah.hold_id ORDER BY h.hold_id",
         )
-        .expect("v9 admission schema must exist");
+        .expect("v11 admission schema must exist");
     let rows: Vec<(String, String, String)> = query
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
         .unwrap()
@@ -210,7 +210,7 @@ fn admission_does_not_renew_or_replace_an_existing_manual_hold() {
     assert_eq!(retained, original, "manual hold must be unchanged");
     let pending: i64 = db.query_row(
         "SELECT count(*) FROM admission_holds ah JOIN holds h ON h.hold_id=ah.hold_id WHERE h.pattern='src/a.rs' AND h.hold_id != ?1",
-        [&original.0], |r| r.get(0)).expect("v9 admission schema must exist");
+        [&original.0], |r| r.get(0)).expect("v11 admission schema must exist");
     assert_eq!(pending, 1, "edit must have its own pending hold");
 }
 

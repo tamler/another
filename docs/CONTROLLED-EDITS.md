@@ -26,7 +26,7 @@ After writing, a second checked resolution must observe the same object, the ret
 
 These are observations during resolution. They do not prove namespace membership at the separate claim-commit instant, attachment between observations, stable pathname membership afterwards or prevention of later aliases. A detected mismatch becomes `unknown`.
 
-Schema v10 preserves v9, its admission key, signed events, holds and admissions. Existing homes require the fenced offline backup and upgrade; do not mix versions. The operator's writer fence remains required and does not cover an unrelated restore or older binary automatically.
+Schema v12 preserves v11, its admission key, signed events, holds and admissions, and the hold fixes' v9 and v10 waits and release links. Existing homes require the fenced offline backup and upgrade; do not mix versions. The operator's writer fence remains required and does not cover an unrelated restore or older binary automatically.
 
 `pending` becomes `claimed` once before I/O. Partial writes, failed syncs and failed post-write checks become terminal `unknown`. A crash leaves an unconfirmed claim; when its holds lapse, sweep changes it to `unknown`, never to confirmed or retryable pending. Unclaimed admissions expire without writing. Unknown outcomes stay permanently and appear in `another status` (first 1000 IDs plus total count). Call-key records remain to prevent replay after hold expiry. Never retry automatically, infer rollback, or promote unknown by rereading a pathname after restart.
 

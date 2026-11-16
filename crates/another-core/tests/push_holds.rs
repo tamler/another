@@ -294,6 +294,665 @@ fn whole_project_holds_need_repo_wide() {
 }
 
 #[test]
+fn manual_globs_under_literal_route_components_conflict_in_both_orders() {
+    assert!(!patterns_overlap(
+        "app/[id]/*.tsx",
+        &globset::escape("app/[id]/page.rs")
+    ));
+    for (pattern, path) in [
+        ("app/[id]/*.tsx", "app/[id]/page.tsx"),
+        ("app/[id]/**/*.tsx", "app/[id]/deep/page.tsx"),
+        ("app/[id]/file?.{ts,tsx}", "app/[id]/file1.tsx"),
+        (
+            "app/{group}/part[ver]/**/file-?.{rs,ts}",
+            "app/{group}/part[ver]/deep/file-1.rs",
+        ),
+        ("app/{a,b}/*.tsx", "app/a/page.tsx"),
+        // r4: a wildcard before the bracketed or braced directory.
+        (
+            "packages/*/app/[id]/page.tsx",
+            "packages/web/app/[id]/page.tsx",
+        ),
+        ("app/{shop,blog}/[id]/page.tsx", "app/shop/[id]/page.tsx"),
+        ("app/[id]/**/[slug]/*.tsx", "app/[id]/x/[slug]/page.tsx"),
+        ("app/*/[id]/*.tsx", "app/shop/[id]/page.tsx"),
+        ("app/?/[id]/page.tsx", "app/a/[id]/page.tsx"),
+        ("app/[id]*/page.tsx", "app/[id]x/page.tsx"),
+        ("packages/*/app/[id]", "packages/web/app/[id]/page.tsx"),
+        // r6: an alternation with a `/` still names a directory or a literal route, and
+        // the escaped literal names `*` and `?` are directories like `[id]`.
+        ("src/{a/b,c}", "src/a/b/page.tsx"),
+        ("src/{a/b,c}", "src/c/page.tsx"),
+        ("src/{a/b,c}/[id]/page.tsx", "src/a/b/[id]/page.tsx"),
+        ("packages/*/app/[*]", "packages/web/app/*/page.tsx"),
+        ("packages/*/app/[?]", "packages/web/app/?/page.tsx"),
+        // r7: a chain of alternations past any spelling-out cap.
+        (
+            "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}",
+            "src/a/b/d/f/h/j/l/page.tsx",
+        ),
+        (
+            "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+            "src/a/b/d/f/h/j/l/[id]/page.tsx",
+        ),
+    ] {
+        let fx = Fx::new();
+        let wt = fx.project(&fx.repos.wt);
+        assert_eq!(
+            fx.acquire("alice", &fx.repos.main, &[pattern])
+                .unwrap()
+                .granted
+                .len(),
+            1
+        );
+        assert_eq!(
+            fx.store
+                .guard_edit("bob", &wt, &[path.into()], "auto")
+                .unwrap()
+                .conflicts
+                .len(),
+            1,
+            "manual first: {pattern}"
+        );
+        fx.store.release_holds("alice", &[]).unwrap();
+        assert!(fx
+            .store
+            .guard_edit("bob", &wt, &[path.into()], "auto")
+            .unwrap()
+            .conflicts
+            .is_empty());
+        assert_eq!(
+            fx.acquire("alice", &fx.repos.main, &[pattern])
+                .unwrap()
+                .conflicts
+                .len(),
+            1,
+            "auto first: {pattern}"
+        );
+    }
+    // Must stay free: a different route directory, a different package subtree, and a
+    // file the tail does not name.
+    let fx = Fx::new();
+    let wt = fx.project(&fx.repos.wt);
+    for pattern in [
+        "packages/*/app/[id]/page.tsx",
+        "app/{shop,blog}/[id]/page.tsx",
+        "app/[id]/**/[slug]/*.tsx",
+        "src/{a/b,c}/[id]/page.tsx",
+        "packages/*/app/[*]",
+        "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+    ] {
+        assert_eq!(
+            fx.acquire("alice", &fx.repos.main, &[pattern])
+                .unwrap()
+                .granted
+                .len(),
+            1
+        );
+    }
+    for path in [
+        "packages/web/app/[idx]/page.tsx",
+        "packages/web/lib/[id]/page.tsx",
+        "app/docs/[id]/page.tsx",
+        "app/other/[slug]/page.tsx",
+        "packages/web/app/[id]/page.css",
+        "src/a/[id]/page.tsx",
+        "src/a/b/[idx]/page.tsx",
+        "packages/web/app/x/page.tsx",
+        "src/a/b/d/f/h/j/x/[id]/page.tsx",
+        "src/a/b/d/f/h/j/l/[idx]/page.tsx",
+    ] {
+        assert!(
+            fx.store
+                .guard_edit("bob", &wt, &[path.into()], "auto")
+                .unwrap()
+                .conflicts
+                .is_empty(),
+            "{path} must stay free"
+        );
+    }
+}
+
+/// r6: an agent's own glob hold covers the files it names through an alternation with a
+/// `/` or through the escaped literal names `*` and `?`, so the edit guard takes no second
+/// hold for them.
+#[test]
+fn own_glob_holds_cover_brace_and_escaped_wildcard_files() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    let granted = fx
+        .acquire(
+            "alice",
+            &fx.repos.main,
+            &[
+                "src/{a/b,c}",
+                "src/{a/b,c}/[id]/page.tsx",
+                "packages/*/app/[*]",
+                "lib/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+            ],
+        )
+        .unwrap();
+    assert_eq!(granted.granted.len(), 4);
+    for path in [
+        "src/a/b/page.tsx",
+        "src/c/page.tsx",
+        "src/a/b/[id]/page.tsx",
+        "packages/web/app/*/page.tsx",
+        "lib/a/b/d/f/h/j/l/[id]/page.tsx",
+    ] {
+        let guard = fx
+            .store
+            .guard_edit("alice", &main, &[path.into()], "auto")
+            .unwrap();
+        assert_eq!(guard.covered, [path], "{path}");
+        assert!(guard.held.is_empty(), "{path}");
+    }
+    // A file outside the alternation gets a hold of its own.
+    let guard = fx
+        .store
+        .guard_edit("alice", &main, &["src/a/x.ts".into()], "auto")
+        .unwrap();
+    assert!(guard.covered.is_empty());
+    assert_eq!(guard.held.len(), 1);
+}
+
+/// r5: `*` and `src/*` name the entries at their own depth. They are granted without
+/// `--repo-wide` and must not hold everything below the way `**` does.
+#[test]
+fn wildcard_only_globs_hold_one_level() {
+    let fx = Fx::new();
+    let wt = fx.project(&fx.repos.wt);
+    for pattern in ["*", "src/*"] {
+        let granted = fx.acquire("alice", &fx.repos.main, &[pattern]).unwrap();
+        assert_eq!(granted.granted.len(), 1, "{pattern}");
+    }
+    for (path, blocked) in [
+        ("top.rs", true),
+        ("src/a.rs", true),
+        ("src/deep/a.rs", false),
+        ("a/b/c.rs", false),
+    ] {
+        let conflicts = fx
+            .store
+            .guard_edit("bob", &wt, &[path.into()], "auto")
+            .unwrap()
+            .conflicts;
+        assert_eq!(!conflicts.is_empty(), blocked, "{path}");
+    }
+}
+
+#[test]
+fn manual_bracket_directory_holds_conflict_with_literal_files_in_both_orders() {
+    for pattern in ["app/[id]", "app/[id]/**"] {
+        let fx = Fx::new();
+        let main = fx.project(&fx.repos.main);
+        let wt = fx.project(&fx.repos.wt);
+        // The directory need not exist for an explicit intent hold to protect it.
+        let manual = fx.acquire("alice", &fx.repos.main, &[pattern]).unwrap();
+        assert_eq!(manual.granted.len(), 1);
+        let edit = fx
+            .store
+            .guard_edit("bob", &wt, &["app/[id]/page.tsx".into()], "auto")
+            .unwrap();
+        assert_eq!(edit.conflicts.len(), 1, "manual first: {pattern}");
+        fx.store.release_holds("alice", &[]).unwrap();
+        assert!(fx
+            .store
+            .guard_edit("bob", &wt, &["app/[id]/page.tsx".into()], "auto")
+            .unwrap()
+            .conflicts
+            .is_empty());
+        let manual = fx.acquire("alice", &fx.repos.main, &[pattern]).unwrap();
+        assert!(manual.granted.is_empty(), "auto first: {pattern}");
+        assert_eq!(manual.conflicts.len(), 1);
+        // A real wildcard still protects ordinary files as well.
+        fx.acquire("carol", &fx.repos.main, &["src/**"]).unwrap();
+        assert_eq!(
+            fx.store
+                .guard_edit("alice", &main, &["src/a.rs".into()], "auto")
+                .unwrap()
+                .conflicts
+                .len(),
+            1
+        );
+    }
+}
+
+#[test]
+fn a_cancelled_release_request_does_not_suppress_a_fresh_ask() {
+    let fx = Fx::new();
+    let held = fx
+        .acquire("alice", &fx.repos.main, &["src/a.rs"])
+        .unwrap()
+        .granted
+        .remove(0);
+    let first = fx.store.request_hold_release("bob", &held.hold_id).unwrap();
+    assert_eq!(
+        fx.store
+            .claim_announcement("alice", &[first.message_id], "post_tool", None)
+            .unwrap()
+            .len(),
+        1
+    );
+    fx.store
+        .update_request(RequestUpdate {
+            agent: "bob".into(),
+            request_id: first.request_id.unwrap(),
+            action: RequestAction::Cancel,
+            note: None,
+            due_in_seconds: None,
+        })
+        .unwrap();
+    let fresh = fx.store.request_hold_release("bob", &held.hold_id).unwrap();
+    assert_eq!(
+        fx.store
+            .claim_announcement("alice", &[fresh.message_id], "post_tool", None)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn linked_release_requests_finish_on_session_end_or_expiry() {
+    for session_end in [true, false] {
+        let fx = Fx::new();
+        let held = fx
+            .acquire("alice", &fx.repos.main, &["src/a.rs"])
+            .unwrap()
+            .granted
+            .remove(0);
+        assert!(fx
+            .store
+            .request_hold_release("alice", &held.hold_id)
+            .is_err());
+        let bob = fx.store.request_hold_release("bob", &held.hold_id).unwrap();
+        let carol = fx
+            .store
+            .request_hold_release("carol", &held.hold_id)
+            .unwrap();
+        if session_end {
+            fx.store.heartbeat("alice", true).unwrap();
+            assert_eq!(fx.store.agent("alice").unwrap().status, "offline");
+        } else {
+            fx.advance_secs(601);
+            fx.store.sweep().unwrap();
+        }
+        fx.store.sweep().unwrap();
+        for message in [bob, carol] {
+            assert_eq!(
+                fx.store
+                    .request(message.request_id.as_ref().unwrap())
+                    .unwrap()
+                    .status,
+                RequestStatus::Done
+            );
+            assert_eq!(
+                fx.store
+                    .inbox(&message.from, InboxQuery::default())
+                    .unwrap()
+                    .messages
+                    .len(),
+                1
+            );
+        }
+        assert!(fx.store.request_hold_release("bob", &held.hold_id).is_err());
+        let new_hold = fx
+            .acquire("alice", &fx.repos.main, &["src/a.rs"])
+            .unwrap()
+            .granted
+            .remove(0);
+        assert_ne!(held.hold_id, new_hold.hold_id);
+        let fresh = fx
+            .store
+            .request_hold_release("bob", &new_hold.hold_id)
+            .unwrap();
+        assert_eq!(
+            fx.store
+                .request(fresh.request_id.as_ref().unwrap())
+                .unwrap()
+                .status,
+            RequestStatus::Open
+        );
+    }
+}
+
+#[test]
+fn push_dedupe_preserves_sender_audience_importance_and_thread_changes() {
+    let fx = Fx::new();
+    let base = SendMessage {
+        from: "alice".into(),
+        to: vec!["bob".into()],
+        subject: "Same subject".into(),
+        body: "same body".into(),
+        ..Default::default()
+    };
+    let first = fx.store.send_message(base.clone()).unwrap();
+    let variants = [
+        SendMessage {
+            from: "carol".into(),
+            ..base.clone()
+        },
+        SendMessage {
+            to: vec!["bob".into(), "carol".into()],
+            ..base.clone()
+        },
+        SendMessage {
+            importance: Importance::Urgent,
+            ..base.clone()
+        },
+        SendMessage {
+            thread_id: Some(first.thread_id.clone()),
+            ..base.clone()
+        },
+    ];
+    let mut ids = vec![first.message_id];
+    for input in variants {
+        ids.push(fx.store.send_message(input).unwrap().message_id);
+    }
+    assert_eq!(
+        fx.store
+            .claim_announcement("bob", &ids, "post_tool", None)
+            .unwrap()
+            .len(),
+        5
+    );
+}
+
+#[test]
+fn identical_pushes_are_coalesced_without_losing_mail_or_wake_retries() {
+    let fx = Fx::new();
+    let send = |body: &str| {
+        fx.store
+            .send_message(SendMessage {
+                from: "alice".into(),
+                to: vec!["bob".into()],
+                subject: "Holds came back".into(),
+                body: body.into(),
+                ..Default::default()
+            })
+            .unwrap()
+    };
+    let a = send("same");
+    let b = send("same");
+    let ids = vec![a.message_id.clone(), b.message_id.clone()];
+    let claimed = fx
+        .store
+        .claim_announcement("bob", &ids, "wake", None)
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert!(fx
+        .store
+        .unannounced("bob", "", 100)
+        .unwrap()
+        .items
+        .is_empty());
+    assert_eq!(
+        fx.store
+            .inbox("bob", InboxQuery::default())
+            .unwrap()
+            .messages
+            .len(),
+        2
+    );
+    // A failed wake gives back both the representative and its suppressed duplicates.
+    fx.store.release_announcement("bob", &claimed).unwrap();
+    assert_eq!(
+        fx.store
+            .claim_announcement("bob", &ids, "post_tool", Some("codex"))
+            .unwrap()
+            .len(),
+        1
+    );
+    let different = send("changed body");
+    assert_eq!(
+        fx.store
+            .claim_announcement("bob", &[different.message_id], "post_tool", None)
+            .unwrap()
+            .len(),
+        1
+    );
+    fx.advance_secs(301);
+    let later = send("same");
+    assert_eq!(
+        fx.store
+            .claim_announcement("bob", &[later.message_id], "post_tool", None)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn blocked_retries_are_deduplicated_and_ping_once_after_release() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    let wt = fx.project(&fx.repos.wt);
+    fx.acquire("alice", &fx.repos.main, &["src/a.rs"]).unwrap();
+    for attempt in 0..20 {
+        let blocked = fx
+            .store
+            .guard_edit("bob", &wt, &["src/a.rs".into()], "auto")
+            .unwrap();
+        assert_eq!(blocked.conflicts.len(), 1);
+        assert_eq!(blocked.first_notice, attempt == 0);
+        assert_eq!(blocked.retry_after_seconds, 30);
+    }
+    for (advance, expected) in [(30, 60), (60, 120), (120, 240), (240, 300)] {
+        fx.advance_secs(advance);
+        let blocked = fx
+            .store
+            .guard_edit("bob", &wt, &["src/a.rs".into()], "auto")
+            .unwrap();
+        assert!(!blocked.first_notice);
+        assert_eq!(blocked.retry_after_seconds, expected);
+    }
+    assert_eq!(
+        fx.kinds().iter().filter(|k| *k == "hold.blocked").count(),
+        1
+    );
+    // The subscription survives opening another store connection.
+    let store = Store::open_with_clock(&fx.repos.home, Clock::Manual(fx.clock.clone())).unwrap();
+    store.release_holds("alice", &[]).unwrap();
+    store.sweep().unwrap();
+    store.sweep().unwrap();
+    let inbox = store.inbox("bob", InboxQuery::default()).unwrap();
+    assert_eq!(inbox.messages.len(), 1);
+    assert_eq!(inbox.messages[0].message.subject, "Hold free: src/a.rs");
+    assert!(inbox.messages[0].message.body.contains("not reserved"));
+    assert!(store
+        .guard_edit("bob", &main, &["src/a.rs".into()], "auto")
+        .unwrap()
+        .conflicts
+        .is_empty());
+}
+
+#[test]
+fn hold_free_ping_compares_literal_paths_after_restack() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    let wt = fx.project(&fx.repos.wt);
+    let path = "app/[id]/page.tsx";
+    fx.store
+        .guard_edit("alice", &main, &[path.into()], "auto")
+        .unwrap();
+    fx.store
+        .guard_edit("carol", &main, &["app/i/page.tsx".into()], "auto")
+        .unwrap();
+    assert!(!fx
+        .store
+        .guard_edit("bob", &wt, &[path.into()], "auto")
+        .unwrap()
+        .conflicts
+        .is_empty());
+    fx.store.release_holds("alice", &[]).unwrap();
+    let inbox = fx.store.inbox("bob", InboxQuery::default()).unwrap();
+    assert_eq!(
+        inbox.messages.len(),
+        1,
+        "the ordinary route must not delay a literal-route ping"
+    );
+    assert_eq!(
+        inbox.messages[0].message.subject,
+        "Hold free: app/[id]/page.tsx"
+    );
+}
+
+/// Integration of #108 (r6 manual-glob matching) with #110 (durable waits): the recheck
+/// before a `Hold free` ping uses the same per-component matcher as the edit guard, so a
+/// manual alternation that names the file's directory keeps the wait open.
+#[test]
+fn hold_free_ping_waits_for_a_manual_alternation_naming_the_directory() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    let wt = fx.project(&fx.repos.wt);
+    let path = "src/a/b/page.tsx";
+    for (name, pattern) in [("alice", path), ("carol", "src/{a/b,c}")] {
+        fx.store
+            .acquire_holds(AcquireHolds {
+                agent: name.into(),
+                project: main.clone(),
+                paths: vec![pattern.into()],
+                ttl_seconds: Some(600),
+                exclusive: false,
+                reason: None,
+                repo_wide: false,
+            })
+            .unwrap();
+    }
+    let blocked = fx
+        .store
+        .guard_edit("bob", &wt, &[path.into()], "auto")
+        .unwrap();
+    assert_eq!(blocked.conflicts.len(), 2, "{:?}", blocked.conflicts);
+    fx.store.release_holds("alice", &[]).unwrap();
+    assert!(
+        fx.store
+            .inbox("bob", InboxQuery::default())
+            .unwrap()
+            .messages
+            .is_empty(),
+        "carol's alternation still holds the file's directory"
+    );
+    fx.store.release_holds("carol", &[]).unwrap();
+    let inbox = fx.store.inbox("bob", InboxQuery::default()).unwrap();
+    assert_eq!(inbox.messages.len(), 1);
+    assert_eq!(
+        inbox.messages[0].message.subject,
+        "Hold free: src/a/b/page.tsx"
+    );
+}
+
+#[test]
+fn hold_free_ping_waits_for_every_holder_and_covers_expiry() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    for name in ["alice", "carol"] {
+        fx.store
+            .acquire_holds(AcquireHolds {
+                agent: name.into(),
+                project: main.clone(),
+                paths: vec!["src/a.rs".into()],
+                ttl_seconds: Some(60),
+                exclusive: false,
+                reason: None,
+                repo_wide: false,
+            })
+            .unwrap();
+    }
+    fx.store
+        .guard_edit("bob", &main, &["src/a.rs".into()], "auto")
+        .unwrap();
+    fx.store.heartbeat("alice", true).unwrap();
+    assert!(fx
+        .store
+        .inbox("bob", InboxQuery::default())
+        .unwrap()
+        .messages
+        .is_empty());
+    fx.advance_secs(61);
+    fx.store.sweep().unwrap();
+    assert_eq!(fx.store.agent("alice").unwrap().status, "offline");
+    assert_eq!(
+        fx.store
+            .inbox("bob", InboxQuery::default())
+            .unwrap()
+            .messages
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn edit_guard_refuses_directories_and_keeps_glob_characters_literal() {
+    let fx = Fx::new();
+    let project = fx.project(&fx.repos.main);
+    std::fs::create_dir_all(fx.repos.main.join("src")).unwrap();
+    for path in ["src", "src/"] {
+        assert!(
+            fx.store
+                .guard_edit("alice", &project, &[path.into()], "auto")
+                .is_err(),
+            "{path}"
+        );
+    }
+    assert!(fx.store.holds(HoldFilter::default()).unwrap().is_empty());
+    for path in [
+        "src/*.rs",
+        "src/a?.rs",
+        "src/{new}.rs",
+        "app/[id]/new.tsx",
+        "src/[.rs",
+        "src/**",
+        "**",
+    ] {
+        // A new file has a literal name too. It must never become a wildcard hold.
+        let guard = fx
+            .store
+            .guard_edit("alice", &project, &[path.into()], "auto")
+            .unwrap();
+        assert_eq!(guard.held[0].pattern, globset::escape(path));
+        // Windows forbids `*` and `?` in file names, so such a file can only be new there.
+        if cfg!(windows) && path.contains(['*', '?']) {
+            continue;
+        }
+        write(&fx.repos.main.join(path), "file");
+        let again = fx
+            .store
+            .guard_edit("alice", &project, &[path.into()], "auto")
+            .unwrap();
+        assert_eq!(again.covered, [path]);
+    }
+    assert!(fx
+        .store
+        .guard_edit("bob", &project, &["src/ordinary.rs".into()], "auto")
+        .unwrap()
+        .conflicts
+        .is_empty());
+    fx.store.release_holds("alice", &[]).unwrap();
+    fx.store.release_holds("bob", &[]).unwrap();
+    // Older auto holds used the unescaped name. Their exact path remains protected.
+    fx.acquire("alice", &fx.repos.main, &["app/[id]/new.tsx"])
+        .unwrap();
+    assert_eq!(
+        fx.store
+            .guard_edit("bob", &project, &["app/[id]/new.tsx".into()], "auto")
+            .unwrap()
+            .conflicts
+            .len(),
+        1
+    );
+    fx.store.release_holds("alice", &[]).unwrap();
+    assert_eq!(
+        fx.acquire("alice", &fx.repos.main, &["src"])
+            .unwrap()
+            .granted
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn edit_guard_takes_narrow_holds_and_names_the_holder() {
     let fx = Fx::new();
     let r = &fx.repos;
@@ -506,21 +1165,29 @@ fn unannounced_mail_is_claimed_once() {
     };
     let first = send("first", Importance::Normal, false);
     fx.advance_secs(1);
-    send("second", Importance::Urgent, true);
+    let second = send("second", Importance::Urgent, true);
     fx.advance_secs(1);
     let third = send("third", Importance::Normal, false);
 
     let all = fx.store.unannounced("alice", "", 10).unwrap();
     assert_eq!(all.agent, "alice");
     assert_eq!((all.count, all.urgent), (3, 1));
+    // Newest delivery first (#132). IDs use real time and random bits, so two created in
+    // the same millisecond need not sort in delivery order; the query does not use them.
     let subjects: Vec<_> = all.items.iter().map(|i| i.subject.as_str()).collect();
     assert_eq!(subjects, ["third", "second", "first"]);
-    assert!(all.items[1].request_id.is_some());
-    assert_eq!(all.items[1].from, "bob");
+    let request = all
+        .items
+        .iter()
+        .find(|i| i.message_id == second.message_id)
+        .unwrap();
+    assert!(request.request_id.is_some());
+    assert_eq!(request.from, "bob");
 
     let newer = fx.store.unannounced("alice", &first.message_id, 1).unwrap();
     assert_eq!(newer.count, 2);
     assert_eq!(newer.items.len(), 1, "limit caps items, not the count");
+    assert_eq!(newer.items[0].message_id, third.message_id);
 
     // Review F2: a claim is exclusive. The first caller wins; a second (another hook, or
     // the daemon) gets nothing for the same message.
@@ -656,7 +1323,7 @@ fn stats_count_the_coordination_evidence() {
     edit("alice", &main, "src/a.rs");
     edit("alice", &main, "src/b.rs");
     fx.acquire("carol", &r.main, &["docs/**"]).unwrap();
-    // Bob is stopped three times on two files: three stops, two distinct collisions.
+    // Bob is stopped three times on two files: two notices and two distinct collisions.
     for path in ["src/a.rs", "src/a.rs", "src/b.rs"] {
         assert!(!edit("bob", &wt, path).conflicts.is_empty());
     }
@@ -744,7 +1411,7 @@ fn stats_count_the_coordination_evidence() {
     }
 
     let s = fx.store.trial_stats(Some(Since::Time(start))).unwrap();
-    assert_eq!(s.edits_blocked, 3);
+    assert_eq!(s.edits_blocked, 2);
     assert_eq!(s.collisions, 2);
     assert_eq!(s.holds_auto_acquired, 2);
     assert_eq!(s.notices_mid_task, 1);
@@ -882,4 +1549,458 @@ fn repo_keys_cached_under_older_rules_are_recomputed() {
         .guard_edit("carol", &wt, &["src/c.rs".into()], "editing (auto)")
         .unwrap();
     assert_eq!(g.conflicts.len(), 1);
+}
+
+fn register_as(fx: &Fx, name: &str, project: Option<&Path>) -> String {
+    fx.store
+        .register_agent(RegisterAgent {
+            name: name.into(),
+            program: Program::Claude,
+            project: project.map(Repos::path),
+            model: None,
+            description: None,
+        })
+        .unwrap()
+        .agent_id
+}
+
+/// #110 review P1, result A: the holder's bare name becomes ambiguous after it took the
+/// hold. The guard must still deny and record the wait; it must never fail open.
+#[test]
+fn ambiguous_holder_name_still_denies_the_edit() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    fx.project(&fx.repos.wt);
+    register_as(&fx, "solo", None);
+    fx.acquire("solo", &fx.repos.wt, &["src/d.rs"]).unwrap();
+    register_as(&fx, "solo", Some(&fx.repos.wt));
+    for attempt in 0..2 {
+        let guard = fx
+            .store
+            .guard_edit("bob", &main, &["src/d.rs".into()], "auto")
+            .expect("a real conflict must not fail the guard");
+        assert_eq!(guard.conflicts.len(), 1, "attempt {attempt}");
+        assert_eq!(guard.first_notice, attempt == 0);
+        assert_eq!(guard.retry_after_seconds, 30);
+    }
+    assert_eq!(
+        fx.kinds().iter().filter(|k| *k == "hold.waiting").count(),
+        1
+    );
+}
+
+/// #110 review P1, result B: the waiter's bare name becomes ambiguous after it was blocked.
+/// The holder's release, or the sweep after expiry, must still succeed; the ping reaches
+/// the waiter by id; the wait is gone; other agents' hold commands keep working.
+#[test]
+fn ambiguous_waiter_does_not_break_release_sweep_or_other_agents() {
+    for expiry in [false, true] {
+        let fx = Fx::new();
+        let main = fx.project(&fx.repos.main);
+        let wt = fx.project(&fx.repos.wt);
+        let w = register_as(&fx, "w", None);
+        fx.store
+            .acquire_holds(AcquireHolds {
+                agent: "bob".into(),
+                project: wt.clone(),
+                paths: vec!["src/e.rs".into()],
+                ttl_seconds: Some(60),
+                exclusive: true,
+                reason: None,
+                repo_wide: false,
+            })
+            .unwrap();
+        assert!(!fx
+            .store
+            .guard_edit("w", &main, &["src/e.rs".into()], "auto")
+            .unwrap()
+            .conflicts
+            .is_empty());
+        register_as(&fx, "w", Some(&fx.repos.main));
+        if expiry {
+            fx.advance_secs(61);
+            fx.store
+                .sweep()
+                .expect("sweep must not depend on resolving the waiter");
+        } else {
+            fx.store
+                .release_holds("bob", &[])
+                .expect("release must not depend on resolving the waiter");
+        }
+        let pings: Vec<_> = fx
+            .store
+            .events(10_000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "message.sent" && e.payload["subject"] == "Hold free: src/e.rs")
+            .collect();
+        assert_eq!(pings.len(), 1, "expiry={expiry}");
+        assert_eq!(pings[0].payload["recipients"][0]["agent_id"], w);
+        assert_eq!(
+            fx.kinds().iter().filter(|k| *k == "hold.available").count(),
+            1
+        );
+        // The wait is gone, so later sweeps and other agents are unaffected.
+        fx.store.sweep().unwrap();
+        fx.acquire("carol", &fx.repos.main, &["docs/x.md"]).unwrap();
+        assert!(fx
+            .store
+            .check_holds("carol", &main, &["docs/y.md".into()], true)
+            .is_ok());
+        fx.store.holds(HoldFilter::default()).unwrap();
+        fx.store.heartbeat("carol", true).unwrap();
+    }
+}
+
+/// #111 review P1: the requester's bare name becomes ambiguous before the hold ends. The
+/// holder's release must still succeed and the linked request must still close, with its
+/// notice sent to the requester by id.
+#[test]
+fn ambiguous_requester_does_not_break_release() {
+    let fx = Fx::new();
+    fx.project(&fx.repos.main);
+    let w = register_as(&fx, "w", None);
+    let held = fx
+        .acquire("bob", &fx.repos.wt, &["src/g.rs"])
+        .unwrap()
+        .granted
+        .remove(0);
+    let ask = fx.store.request_hold_release("w", &held.hold_id).unwrap();
+    register_as(&fx, "w", Some(&fx.repos.main));
+    fx.store
+        .release_holds("bob", &[])
+        .expect("release must not depend on resolving the requester");
+    assert_eq!(
+        fx.store
+            .request(ask.request_id.as_ref().unwrap())
+            .unwrap()
+            .status,
+        RequestStatus::Done
+    );
+    let done: Vec<_> = fx
+        .store
+        .events(10_000)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "message.sent" && e.payload["subject"] == "Done: Release src/g.rs?")
+        .collect();
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].payload["recipients"][0]["agent_id"], w);
+    fx.store.sweep().unwrap();
+}
+
+/// #111 review P2: a second `Hold free` ping for the same file within five minutes must
+/// still be announced; the waiter was just told to wait for it.
+#[test]
+fn second_hold_free_ping_for_the_same_file_is_announced() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    let wt = fx.project(&fx.repos.wt);
+    for round in 0..2 {
+        fx.acquire("alice", &fx.repos.main, &["src/b.rs"]).unwrap();
+        let blocked = fx
+            .store
+            .guard_edit("bob", &wt, &["src/b.rs".into()], "auto")
+            .unwrap();
+        assert!(blocked.first_notice, "round {round}");
+        fx.store.release_holds("alice", &[]).unwrap();
+        let unread = InboxQuery {
+            unread_only: true,
+            ..Default::default()
+        };
+        let inbox = fx.store.inbox("bob", unread).unwrap();
+        assert_eq!(inbox.messages.len(), 1, "round {round}");
+        assert_eq!(inbox.messages[0].message.subject, "Hold free: src/b.rs");
+        let id = inbox.messages[0].message.message_id.clone();
+        let claimed = fx
+            .store
+            .claim_announcement("bob", std::slice::from_ref(&id), "post_tool", None)
+            .unwrap();
+        assert_eq!(
+            claimed,
+            vec![id.clone()],
+            "round {round}: the ping must be announced"
+        );
+        fx.store
+            .acknowledge("bob", std::slice::from_ref(&id), false)
+            .unwrap();
+        fx.advance_secs(10);
+    }
+    assert!(!fx.kinds().iter().any(|k| k == "push.suppressed"));
+    assert!(fx
+        .store
+        .guard_edit("bob", &main, &["src/b.rs".into()], "auto")
+        .unwrap()
+        .conflicts
+        .is_empty());
+}
+
+/// Make every wait record fail, or let waits through again.
+fn inject_wait_failure(fx: &Fx, on: bool) {
+    let db = rusqlite::Connection::open(fx.repos.home.join(DB_FILE)).unwrap();
+    db.execute_batch(if on {
+        "CREATE TRIGGER hold_waits_inject_failure BEFORE INSERT ON hold_waits
+         BEGIN SELECT RAISE(ABORT, 'injected wait-record failure'); END;"
+    } else {
+        "DROP TRIGGER hold_waits_inject_failure;"
+    })
+    .unwrap();
+}
+
+fn count(fx: &Fx, kind: &str) -> usize {
+    fx.kinds().iter().filter(|k| *k == kind).count()
+}
+
+/// Wait-record failure must still deny the edit and must say that no wait exists, so the
+/// hook never promises a ping that cannot arrive. Retries must not re-send the first hook
+/// notice or a second hold.blocked event (D62).
+#[test]
+fn wait_record_failure_does_not_renotice_on_retry() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    let wt = fx.project(&fx.repos.wt);
+    fx.acquire("alice", &fx.repos.main, &["src/a.rs"]).unwrap();
+    inject_wait_failure(&fx, true);
+
+    let first = fx
+        .store
+        .guard_edit("bob", &wt, &["src/a.rs".into()], "auto")
+        .expect("a wait-record failure must still deny, not fail the guard");
+    assert_eq!(first.conflicts.len(), 1);
+    assert!(
+        first.first_notice,
+        "the first failed wait still gets the first notice"
+    );
+    assert!(
+        !first.wait_recorded,
+        "a rolled-back wait must not be reported as recorded"
+    );
+    assert_eq!(first.retry_after_seconds, 30);
+
+    let second = fx
+        .store
+        .guard_edit("bob", &wt, &["src/a.rs".into()], "auto")
+        .expect("retries must still deny");
+    assert_eq!(second.conflicts.len(), 1);
+    assert!(
+        !second.first_notice,
+        "a retry after wait-record failure must not re-send the first hook notice"
+    );
+    assert!(!second.wait_recorded);
+    assert_eq!(second.retry_after_seconds, 30);
+
+    assert_eq!(
+        count(&fx, "hold.blocked"),
+        1,
+        "unchanged blockers must not get a second hold.blocked"
+    );
+    assert!(count(&fx, "hold.wait_failed") >= 2);
+    // Nothing was recorded, so a release pings nobody and the next edit goes through.
+    fx.store.release_holds("alice", &[]).unwrap();
+    fx.store.sweep().unwrap();
+    assert!(fx
+        .store
+        .inbox("bob", InboxQuery::default())
+        .unwrap()
+        .messages
+        .is_empty());
+    assert!(fx
+        .store
+        .guard_edit("bob", &main, &["src/a.rs".into()], "auto")
+        .unwrap()
+        .conflicts
+        .is_empty());
+}
+
+/// Dedupe after a wait-record failure is keyed by the exact path and set of blocking
+/// hold ids, not by "this agent was blocked in this project before": a new file, a
+/// replacement hold and a conflict after an ended wait each get a first notice, while an
+/// unchanged blocker stays a short denial however many unrelated events pile up (D62).
+#[test]
+fn wait_record_failure_notices_new_paths_and_replacement_holds() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    let wt = fx.project(&fx.repos.wt);
+    let edit = |path: &str| {
+        fx.store
+            .guard_edit("bob", &wt, &[path.into()], "auto")
+            .unwrap()
+    };
+
+    // A wait that was recorded and ended by its free-file ping, before failures begin.
+    fx.acquire("alice", &fx.repos.main, &["src/c.rs"]).unwrap();
+    let recorded = edit("src/c.rs");
+    assert!(recorded.first_notice && recorded.wait_recorded);
+    fx.store.release_holds("alice", &[]).unwrap();
+    assert_eq!(
+        fx.store
+            .inbox("bob", InboxQuery::default())
+            .unwrap()
+            .messages
+            .len(),
+        1
+    );
+    // A wait that was recorded and ended because the edit went through after expiry.
+    fx.acquire("alice", &fx.repos.main, &["src/d.rs"]).unwrap();
+    assert!(edit("src/d.rs").wait_recorded);
+    fx.advance_secs(601);
+    assert!(edit("src/d.rs").conflicts.is_empty());
+    assert_eq!(count(&fx, "hold.wait.finished"), 1);
+    fx.store.release_holds("bob", &[]).unwrap();
+
+    fx.acquire(
+        "alice",
+        &fx.repos.main,
+        &["src/a.rs", "src/b.rs", "src/c.rs", "src/d.rs"],
+    )
+    .unwrap();
+    inject_wait_failure(&fx, true);
+
+    // First failure on a file: first notice. Retries: short denial.
+    let a = edit("src/a.rs");
+    assert!(a.first_notice && !a.wait_recorded);
+    for _ in 0..3 {
+        let again = edit("src/a.rs");
+        assert!(!again.first_notice && !again.wait_recorded);
+        assert_eq!(again.retry_after_seconds, 30);
+    }
+    // Two from the recorded waits on src/c.rs and src/d.rs, one from src/a.rs.
+    assert_eq!(count(&fx, "hold.blocked"), 3);
+
+    // Another file held by the same agent is a new conflict.
+    assert!(edit("src/b.rs").first_notice, "new path");
+    assert!(!edit("src/b.rs").first_notice);
+    assert!(
+        !edit("src/a.rs").first_notice,
+        "interleaved paths stay deduped"
+    );
+    assert_eq!(count(&fx, "hold.blocked"), 4);
+
+    // Files whose earlier waits ended get a first notice for the new hold.
+    assert!(edit("src/c.rs").first_notice, "after a free-file ping");
+    assert!(!edit("src/c.rs").first_notice);
+    assert!(edit("src/d.rs").first_notice, "after a finished wait");
+    assert!(!edit("src/d.rs").first_notice);
+    assert_eq!(count(&fx, "hold.blocked"), 6);
+
+    // A replacement hold on the same file is a new blocker set.
+    fx.store.release_holds("alice", &[]).unwrap();
+    fx.acquire("carol", &fx.repos.main, &["src/a.rs"]).unwrap();
+    let replaced = edit("src/a.rs");
+    assert!(replaced.first_notice, "replacement hold");
+    assert_eq!(replaced.conflicts[0].held.agent, "carol");
+    assert!(!edit("src/a.rs").first_notice);
+    assert_eq!(count(&fx, "hold.blocked"), 7);
+
+    // Hundreds of unrelated events, including other agents' blocks and wait failures in
+    // this project, never push the matching record out of view or stand in for it.
+    for i in 0..150 {
+        fx.acquire("alice", &fx.repos.main, &[&format!("src/z{i}.rs")])
+            .unwrap();
+    }
+    for _ in 0..3 {
+        fx.store
+            .guard_edit("alice", &wt, &["src/a.rs".into()], "auto")
+            .unwrap();
+    }
+    assert_eq!(count(&fx, "hold.blocked"), 8, "alice's own first notice");
+    assert!(
+        !edit("src/a.rs").first_notice,
+        "unchanged blockers after noise"
+    );
+    assert_eq!(count(&fx, "hold.blocked"), 8);
+    assert!(
+        fx.store
+            .events(10_000)
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == "hold.wait_failed")
+            .all(|e| e.payload["path"].is_string() && e.payload["blockers"].is_array()),
+        "every failure names its path and blockers"
+    );
+
+    // Once waits can be recorded again the next block registers one and the ping comes.
+    inject_wait_failure(&fx, false);
+    let again = edit("src/a.rs");
+    assert!(again.wait_recorded);
+    fx.store.release_holds("carol", &[]).unwrap();
+    let inbox = fx.store.inbox("bob", InboxQuery::default()).unwrap();
+    assert_eq!(inbox.messages.len(), 2);
+    assert_eq!(inbox.messages[0].message.subject, "Hold free: src/a.rs");
+    assert!(fx
+        .store
+        .guard_edit("bob", &main, &["src/a.rs".into()], "auto")
+        .unwrap()
+        .conflicts
+        .is_empty());
+}
+
+/// A wait recorded for one hold, then a second overlapping hold whose wait update fails:
+/// the changed blockers get one first notice, every retry with the same blockers is a
+/// short denial, and the wait row's stale signature never stands in for the current
+/// blocker set (D62).
+#[test]
+fn wait_update_failure_does_not_renotice_unchanged_blockers() {
+    let fx = Fx::new();
+    let wt = fx.project(&fx.repos.wt);
+    let edit = |path: &str| {
+        fx.store
+            .guard_edit("bob", &wt, &[path.into()], "auto")
+            .unwrap()
+    };
+    fx.acquire("alice", &fx.repos.main, &["src/**"]).unwrap();
+    let recorded = edit("src/a.rs");
+    assert!(recorded.first_notice && recorded.wait_recorded);
+    assert_eq!(recorded.conflicts.len(), 1);
+    let narrow = fx
+        .acquire("alice", &fx.repos.main, &["src/a.rs"])
+        .unwrap()
+        .granted[0]
+        .hold_id
+        .clone();
+    let db = rusqlite::Connection::open(fx.repos.home.join(DB_FILE)).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER hold_waits_inject_update_failure BEFORE UPDATE ON hold_waits
+         BEGIN SELECT RAISE(ABORT, 'injected wait-update failure'); END;",
+    )
+    .unwrap();
+
+    let changed = edit("src/a.rs");
+    assert_eq!(changed.conflicts.len(), 2);
+    assert!(
+        changed.first_notice,
+        "a second blocking hold is a changed set"
+    );
+    assert!(!changed.wait_recorded);
+    assert_eq!(changed.retry_after_seconds, 30);
+    for _ in 0..3 {
+        let again = edit("src/a.rs");
+        assert_eq!(again.conflicts.len(), 2);
+        assert!(
+            !again.first_notice,
+            "unchanged blockers after a failed update must be a short denial"
+        );
+        assert!(!again.wait_recorded);
+    }
+    assert_eq!(count(&fx, "hold.blocked"), 2);
+
+    // Back to the recorded set: that wait already announced it.
+    fx.store.release_holds("alice", &[narrow]).unwrap();
+    let back = edit("src/a.rs");
+    assert_eq!(back.conflicts.len(), 1);
+    assert!(!back.first_notice, "the recorded wait covers this hold");
+    assert_eq!(count(&fx, "hold.blocked"), 2);
+
+    // Once updates work again the changed set is recorded and the ping comes once.
+    db.execute_batch("DROP TRIGGER hold_waits_inject_update_failure;")
+        .unwrap();
+    drop(db);
+    fx.acquire("alice", &fx.repos.main, &["src/a.rs"]).unwrap();
+    let again = edit("src/a.rs");
+    assert!(again.first_notice && again.wait_recorded);
+    assert_eq!(count(&fx, "hold.blocked"), 3);
+    fx.store.release_holds("alice", &[]).unwrap();
+    let inbox = fx.store.inbox("bob", InboxQuery::default()).unwrap();
+    assert_eq!(inbox.messages.len(), 1);
+    assert_eq!(inbox.messages[0].message.subject, "Hold free: src/a.rs");
 }

@@ -185,6 +185,16 @@ impl Store {
                 "home is not an older initialized schema".into(),
             ));
         }
+        // Refuse a home whose schema is foreign at its stated version (for example one
+        // made by a build that numbered admissions v9/v10) before any backup is written.
+        // `migrate_offline` checks again inside its transaction.
+        if let Some(manifest) = schema_manifest(version) {
+            verify_schema_against(&source, manifest, None).map_err(|_| {
+                Error::Invalid(format!(
+                    "home schema does not match v{version} as this build knows it; nothing was written. Preserve the home and inspect it before upgrading"
+                ))
+            })?;
+        }
         let node: String =
             source.query_row("SELECT node_id FROM nodes WHERE is_local = 1", [], |r| {
                 r.get(0)
@@ -1450,7 +1460,31 @@ CREATE TABLE announcements (
     PRIMARY KEY (agent_id, message_id)
 );
 "#,
-    // v9: per-edit admissions. Each guarded edit gets its own pending holds, confirmed by
+    // v9 (hold fixes, D62): durable, node-local subscriptions created by blocked file edits.
+    r#"
+CREATE TABLE hold_waits (
+    agent_id       TEXT NOT NULL REFERENCES agents(agent_id),
+    project_id     TEXT NOT NULL REFERENCES projects(project_id),
+    path           TEXT NOT NULL,
+    blockers       TEXT NOT NULL,
+    holder_id      TEXT NOT NULL REFERENCES agents(agent_id),
+    retry_at       INTEGER NOT NULL,
+    backoff_seconds INTEGER NOT NULL,
+    PRIMARY KEY (agent_id, project_id, path)
+);
+"#,
+    // v10 (hold fixes, D63): release requests linked to hold ids, and push fingerprints.
+    r#"
+CREATE TABLE request_holds (
+    request_id TEXT PRIMARY KEY REFERENCES requests(request_id),
+    hold_id    TEXT NOT NULL REFERENCES holds(hold_id)
+);
+CREATE INDEX request_holds_by_hold ON request_holds(hold_id);
+ALTER TABLE announcements ADD COLUMN fingerprint TEXT;
+ALTER TABLE announcements ADD COLUMN duplicate_of TEXT REFERENCES messages(message_id);
+CREATE INDEX announcements_by_fingerprint ON announcements(agent_id, fingerprint, announced_at);
+"#,
+    // v11: per-edit admissions. Each guarded edit gets its own pending holds, confirmed by
     // the tool's receipt. Node-local. A pending hold's deadline is `holds.expires_at`
     // alone; there is no second copy to disagree with it. `correlation` is a keyed digest
     // of the client's tool-use ID (the raw ID is never stored) and `targets` a digest of
@@ -1479,9 +1513,9 @@ CREATE TABLE admission_holds (
 );
 CREATE INDEX admissions_open ON admissions(state, created_at);
 "#,
-    // v10 preserves v9 rows and their key while adding controlled-tool claim evidence.
+    // v12 preserves v11 rows and their key while adding controlled-tool claim evidence.
     r#"
-CREATE TABLE admissions_v10 (
+CREATE TABLE admissions_v12 (
     admission_id TEXT NOT NULL PRIMARY KEY,
     node_id TEXT NOT NULL REFERENCES nodes(node_id),
     agent_id TEXT NOT NULL REFERENCES agents(agent_id),
@@ -1501,24 +1535,24 @@ CREATE TABLE admissions_v10 (
     UNIQUE (node_id, agent_id, correlation),
     UNIQUE (node_id, call_key)
 );
-INSERT INTO admissions_v10(admission_id,node_id,agent_id,correlation,targets,state,created_at,settled_at)
+INSERT INTO admissions_v12(admission_id,node_id,agent_id,correlation,targets,state,created_at,settled_at)
 SELECT admission_id,node_id,agent_id,correlation,targets,state,created_at,settled_at FROM admissions;
-CREATE TABLE admission_holds_v10 (
-    admission_id TEXT NOT NULL REFERENCES admissions_v10(admission_id),
+CREATE TABLE admission_holds_v12 (
+    admission_id TEXT NOT NULL REFERENCES admissions_v12(admission_id),
     hold_id TEXT NOT NULL UNIQUE REFERENCES holds(hold_id),
     PRIMARY KEY (admission_id, hold_id)
 );
-INSERT INTO admission_holds_v10 SELECT admission_id,hold_id FROM admission_holds;
+INSERT INTO admission_holds_v12 SELECT admission_id,hold_id FROM admission_holds;
 DROP TABLE admission_holds;
 DROP TABLE admissions;
-ALTER TABLE admissions_v10 RENAME TO admissions;
-ALTER TABLE admission_holds_v10 RENAME TO admission_holds;
+ALTER TABLE admissions_v12 RENAME TO admissions;
+ALTER TABLE admission_holds_v12 RENAME TO admission_holds;
 CREATE INDEX admissions_open ON admissions(state, created_at);
 "#,
 ];
 
 /// Index in [`MIGRATIONS`] of the migration that creates `admission_secret`.
-const ADMISSION_MIGRATION: usize = 8;
+const ADMISSION_MIGRATION: usize = 10;
 
 /// Apply one migration inside `tx`, with the data it must create atomically.
 fn apply_migration(tx: &rusqlite::Transaction<'_>, index: usize) -> Result<()> {
@@ -1593,13 +1627,18 @@ fn require_current_or_empty(conn: &Connection) -> Result<()> {
 /// The checked-in catalog for schema `version`, for the versions that have one.
 ///
 /// v8 was extracted from an isolated home created by the 0403dce executable and is kept so
-/// a v8 home is verified before it is upgraded. v9 is generated from the bundled migrations
-/// by `regenerate_schema_manifest` (a test) and held to them by the drift test.
+/// a v8 home is verified before it is upgraded. v9 and v10 are the hold fixes' schemas
+/// (D62, D63), v11 and v12 the admission schemas (D66, D67). Each was generated from the
+/// bundled migrations by `regenerate_schema_manifest` (a test) and is held to them by
+/// `frozen_catalogs_match_their_migrations` and the drift test. v10 was also compared with
+/// a home created by the #137 executable at ae72fb7.
 fn schema_manifest(version: i64) -> Option<&'static str> {
     match version {
         8 => Some(include_str!("v8_schema_manifest.json")),
         9 => Some(include_str!("v9_schema_manifest.json")),
         10 => Some(include_str!("v10_schema_manifest.json")),
+        11 => Some(include_str!("v11_schema_manifest.json")),
+        12 => Some(include_str!("v12_schema_manifest.json")),
         _ => None,
     }
 }
@@ -2010,18 +2049,24 @@ mod upgrade_tests {
     /// Rewrites the current schema's manifest from the bundled migrations. Run it on
     /// purpose after adding a migration:
     /// `ANOTHER_REGENERATE_MANIFEST=1 cargo test -p another-core --lib regenerate_schema_manifest`.
+    /// `ANOTHER_REGENERATE_MANIFEST=<n>` (n > 8) writes the manifest of schema v<n> instead,
+    /// from the first n migrations; use it only when that version is new to this tree.
     #[test]
     fn regenerate_schema_manifest() {
-        if std::env::var_os("ANOTHER_REGENERATE_MANIFEST").is_none() {
+        let Some(request) = std::env::var_os("ANOTHER_REGENERATE_MANIFEST") else {
             return;
-        }
+        };
+        let version = match request.to_str().unwrap().parse::<usize>() {
+            Ok(n) if n > 8 && n <= MIGRATIONS.len() => n,
+            _ => MIGRATIONS.len(),
+        };
         let db = Connection::open_in_memory().unwrap();
-        for migration in MIGRATIONS {
+        for migration in &MIGRATIONS[..version] {
             db.execute_batch(migration).unwrap();
         }
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src")
-            .join(format!("v{}_schema_manifest.json", MIGRATIONS.len()));
+            .join(format!("v{version}_schema_manifest.json"));
         std::fs::write(path, dump_schema_manifest(&db)).unwrap();
     }
 
@@ -2039,22 +2084,129 @@ mod upgrade_tests {
         let dumped: serde_json::Value = serde_json::from_str(&dump_schema_manifest(&db)).unwrap();
         let frozen: serde_json::Value = serde_json::from_str(v8).unwrap();
         assert_eq!(dumped, frozen);
-        // A v9 database is not a v8 one, and the reverse.
-        db.execute_batch(MIGRATIONS[8]).unwrap();
-        assert!(verify_schema_against(&db, v8, None).is_err());
-        verify_schema_against(&db, schema_manifest(9).unwrap(), None).unwrap();
-        let frozen_v9: serde_json::Value =
-            serde_json::from_str(schema_manifest(9).unwrap()).unwrap();
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&dump_schema_manifest(&db)).unwrap(),
-            frozen_v9
-        );
-        db.execute_batch(MIGRATIONS[9]).unwrap();
+    }
+
+    /// Every checked-in catalog after v8 describes exactly the first n migrations, and each
+    /// version's database matches its own catalog and no neighbour's. Editing an already
+    /// numbered migration fails here, not only in the current-schema drift test.
+    #[test]
+    fn frozen_catalogs_match_their_migrations() {
+        let db = Connection::open_in_memory().unwrap();
+        for migration in &MIGRATIONS[..8] {
+            db.execute_batch(migration).unwrap();
+        }
+        for version in 9..=MIGRATIONS.len() as i64 {
+            let previous = schema_manifest(version - 1).unwrap();
+            db.execute_batch(MIGRATIONS[version as usize - 1]).unwrap();
+            let manifest = schema_manifest(version)
+                .unwrap_or_else(|| panic!("v{version} has no checked-in catalog"));
+            assert!(
+                verify_schema_against(&db, previous, None).is_err(),
+                "v{version} must not pass as v{}",
+                version - 1
+            );
+            verify_schema_against(&db, manifest, None).unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&dump_schema_manifest(&db)).unwrap(),
+                serde_json::from_str::<serde_json::Value>(manifest).unwrap(),
+                "v{version} catalog"
+            );
+        }
         verify_schema(&db, None).unwrap();
     }
 
+    /// A home at schema `version`, built from the first `version` bundled migrations, with
+    /// its local node. Returns the home and the node id.
+    fn home_at(temp: &Path, version: usize) -> (PathBuf, String) {
+        let home = temp.join("home");
+        std::fs::create_dir(&home).unwrap();
+        let mut db = Connection::open(home.join(DB_FILE)).unwrap();
+        db.pragma_update(None, "foreign_keys", "ON").unwrap();
+        let tx = db.transaction().unwrap();
+        for index in 0..version {
+            apply_migration(&tx, index).unwrap();
+        }
+        tx.pragma_update(None, "user_version", version as i64)
+            .unwrap();
+        tx.commit().unwrap();
+        let (node, _) = ensure_local_node(&mut db, 1_000_000).unwrap();
+        (home, node)
+    }
+
+    /// Main's v8 and the hold fixes' v9 and v10 are each accepted as an upgrade source,
+    /// checked against their own catalog, and recorded with their true version.
     #[test]
-    fn v9_offline_upgrade_preserves_secret_events_and_admission_rows() {
+    fn v8_v9_and_v10_homes_take_the_offline_upgrade() {
+        for source in [8usize, 9, 10] {
+            let temp = tempfile::tempdir().unwrap();
+            let (home, node) = home_at(temp.path(), source);
+            let db = Connection::open(home.join(DB_FILE)).unwrap();
+            db.execute("INSERT INTO agents(agent_id,node_id,name,program,status,created_at,updated_at,event_id) VALUES('old-agent',?1,'old','claude','active',1,1,'fixture')",[&node]).unwrap();
+            db.execute("INSERT INTO projects(project_id,node_id,slug,abs_path,created_at,event_id) VALUES('old-project',?1,'old','/old',1,'fixture')",[&node]).unwrap();
+            if source >= 9 {
+                db.execute("INSERT INTO hold_waits(agent_id,project_id,path,blockers,holder_id,retry_at,backoff_seconds) VALUES('old-agent','old-project','src/a.rs','[]','old-agent',1,30)",[]).unwrap();
+            }
+            drop(db);
+            let refused = Store::open(&home).err().expect("older home is refused");
+            assert!(
+                refused.to_string().contains("requires offline upgrade"),
+                "v{source}: {refused}"
+            );
+            let backup = temp.path().join("backup");
+            Store::upgrade_offline(&home, &backup, true).unwrap();
+            let record: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(backup.join("backup.json")).unwrap())
+                    .unwrap();
+            assert_eq!(record["schema_version"], source as i64, "v{source}");
+            let upgraded = Store::open(&home).unwrap();
+            upgraded
+                .read(|db| {
+                    assert_eq!(
+                        db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))?,
+                        MIGRATIONS.len() as i64
+                    );
+                    let waits: i64 =
+                        db.query_row("SELECT count(*) FROM hold_waits", [], |r| r.get(0))?;
+                    assert_eq!(waits, i64::from(source >= 9), "v{source} waits survive");
+                    Ok(())
+                })
+                .unwrap();
+        }
+    }
+
+    /// A home made by a build that numbered admissions v9 and v10 (the old #131/#136
+    /// drafts) is foreign at v10: open and upgrade both refuse it, no backup is written,
+    /// and its database bytes are unchanged.
+    #[test]
+    fn an_old_numbering_v10_home_is_refused_without_writing() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let mut db = Connection::open(home.join(DB_FILE)).unwrap();
+        let tx = db.transaction().unwrap();
+        for index in (0..8).chain([ADMISSION_MIGRATION, ADMISSION_MIGRATION + 1]) {
+            apply_migration(&tx, index).unwrap();
+        }
+        tx.pragma_update(None, "user_version", 10).unwrap();
+        tx.commit().unwrap();
+        ensure_local_node(&mut db, 1_000_000).unwrap();
+        db.pragma_update(None, "journal_mode", "DELETE").unwrap();
+        drop(db);
+        let before = std::fs::read(home.join(DB_FILE)).unwrap();
+        assert!(Store::open(&home).is_err());
+        let backup = temp.path().join("backup");
+        let refused =
+            Store::upgrade_offline(&home, &backup, true).expect_err("foreign v10 is refused");
+        assert!(
+            refused.to_string().contains("does not match v10"),
+            "{refused}"
+        );
+        assert!(!backup.exists(), "no backup of a foreign home");
+        assert_eq!(std::fs::read(home.join(DB_FILE)).unwrap(), before);
+    }
+
+    #[test]
+    fn v11_offline_upgrade_preserves_secret_events_and_admission_rows() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
         #[cfg(unix)]
@@ -2064,10 +2216,10 @@ mod upgrade_tests {
         let mut db = Connection::open(home.join(DB_FILE)).unwrap();
         db.pragma_update(None, "foreign_keys", "ON").unwrap();
         let tx = db.transaction().unwrap();
-        for index in 0..9 {
+        for index in 0..11 {
             apply_migration(&tx, index).unwrap();
         }
-        tx.pragma_update(None, "user_version", 9).unwrap();
+        tx.pragma_update(None, "user_version", 11).unwrap();
         tx.commit().unwrap();
         let (node, _) = ensure_local_node(&mut db, 1_000_000).unwrap();
         db.execute("INSERT INTO agents(agent_id,node_id,name,program,status,created_at,updated_at,event_id) VALUES('old-agent',?1,'old','claude','active',1,1,'fixture')",[&node]).unwrap();
@@ -2092,7 +2244,7 @@ mod upgrade_tests {
             .read(|db| {
                 assert_eq!(
                     db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))?,
-                    10
+                    12
                 );
                 assert!(
                     db.query_row("SELECT secret FROM admission_secret", [], |r| r
@@ -2128,7 +2280,7 @@ mod upgrade_tests {
             saved
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            9
+            11
         );
         assert!(
             saved
@@ -2669,7 +2821,7 @@ mod upgrade_tests {
         drop(Store::open(&home).unwrap());
         let db = home.join(DB_FILE);
         let source = Connection::open(&db).unwrap();
-        source.execute_batch("DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE announcements; PRAGMA user_version=7; CREATE TABLE preserved(v TEXT); INSERT INTO preserved VALUES ('unchanged');").unwrap();
+        source.execute_batch("DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE request_holds; DROP TABLE hold_waits; DROP TABLE announcements; PRAGMA user_version=7; CREATE TABLE preserved(v TEXT); INSERT INTO preserved VALUES ('unchanged');").unwrap();
         drop(source);
         let mut called = false;
         let result = Store::upgrade_offline_with_parent_sync(&home, &backup, true, |parent| {
@@ -2715,7 +2867,7 @@ mod upgrade_tests {
         let db = home.join(DB_FILE);
         let source = Connection::open(&db).unwrap();
         source
-            .execute_batch("DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE announcements; PRAGMA user_version=7;")
+            .execute_batch("DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE request_holds; DROP TABLE hold_waits; DROP TABLE announcements; PRAGMA user_version=7;")
             .unwrap();
         drop(source);
         let mut called = false;
@@ -2751,7 +2903,7 @@ mod upgrade_tests {
         let db = home.join(DB_FILE);
         let source = Connection::open(&db).unwrap();
         source
-            .execute_batch("DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE announcements; PRAGMA user_version=7;")
+            .execute_batch("DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE request_holds; DROP TABLE hold_waits; DROP TABLE announcements; PRAGMA user_version=7;")
             .unwrap();
         let version: i64 = source
             .pragma_query_value(None, "data_version", |r| r.get(0))
@@ -2782,5 +2934,329 @@ mod upgrade_tests {
                 .unwrap(),
             "newer"
         );
+    }
+}
+
+/// The hold fixes' schema tests (#137), carried onto the admission migrations.
+#[cfg(all(test, any(unix, windows)))]
+mod hold_upgrade_tests {
+    use super::*;
+    use crate::{AcquireHolds, NewRequest, Program, RegisterAgent, SendMessage};
+
+    /// Every table and index with its columns, types, constraints and foreign keys, in a
+    /// stable order, so two databases built by different paths can be compared.
+    fn catalog(conn: &Connection) -> Vec<String> {
+        let mut out = Vec::new();
+        let objects: Vec<(String, String, String)> = conn
+            .prepare(
+                "SELECT type, name, tbl_name FROM sqlite_master
+                 WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        for (kind, name, table) in objects {
+            let (columns, keys) = match kind.as_str() {
+                "table" => (
+                    format!("PRAGMA table_info(\"{name}\")"),
+                    Some(format!("PRAGMA foreign_key_list(\"{name}\")")),
+                ),
+                _ => (format!("PRAGMA index_info(\"{name}\")"), None),
+            };
+            let mut stmt = conn.prepare(&columns).unwrap();
+            let n = stmt.column_count();
+            let rows: Vec<String> = stmt
+                .query_map([], |r| {
+                    (0..n)
+                        .map(|i| {
+                            r.get::<_, rusqlite::types::Value>(i)
+                                .map(|v| format!("{v:?}"))
+                        })
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .map(|v| v.join(","))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            out.push(format!("{kind} {name} on {table}: {}", rows.join(" | ")));
+            if let Some(keys) = keys {
+                let mut stmt = conn.prepare(&keys).unwrap();
+                let fks: Vec<String> = stmt
+                    .query_map([], |r| {
+                        Ok(format!(
+                            "{}->{}.{}",
+                            r.get::<_, String>(3)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, Option<String>>(4)?.unwrap_or_default()
+                        ))
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
+                    .unwrap();
+                out.push(format!("fk {name}: {}", fks.join(" ")));
+            }
+        }
+        out
+    }
+
+    fn version(conn: &Connection) -> i64 {
+        conn.pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap()
+    }
+
+    /// The catalog of a database built by applying the first `n` migrations directly.
+    fn catalog_at(n: usize) -> Vec<String> {
+        let conn = Connection::open_in_memory().unwrap();
+        for sql in &MIGRATIONS[..n] {
+            conn.execute_batch(sql).unwrap();
+        }
+        catalog(&conn)
+    }
+
+    #[test]
+    fn schema_versions_after_v8_are_hold_waits_then_request_holds() {
+        // v1-v8 are main's released schema. v9 and v10 belong to the hold fixes (D62, D63),
+        // v11 and v12 to admissions (D66, D67); a later migration must append after them,
+        // never reuse any of these numbers.
+        assert_eq!(MIGRATIONS.len(), 12);
+        let v8 = catalog_at(8);
+        let v9 = catalog_at(9);
+        let v10 = catalog_at(10);
+        let v11 = catalog_at(11);
+        let v12 = catalog_at(12);
+        let added = |from: &[String], to: &[String]| -> Vec<String> {
+            to.iter().filter(|o| !from.contains(o)).cloned().collect()
+        };
+        let names = |objects: Vec<String>| -> Vec<String> {
+            objects
+                .into_iter()
+                .map(|o| o.split(':').next().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(
+            names(added(&v8, &v9)),
+            ["table hold_waits on hold_waits", "fk hold_waits"]
+        );
+        assert_eq!(
+            names(added(&v9, &v10)),
+            [
+                "index announcements_by_fingerprint on announcements",
+                "index request_holds_by_hold on request_holds",
+                "table announcements on announcements",
+                "fk announcements",
+                "table request_holds on request_holds",
+                "fk request_holds",
+            ]
+        );
+        let announcements = v10
+            .iter()
+            .find(|o| o.starts_with("table announcements "))
+            .unwrap();
+        assert!(
+            announcements.contains("Text(\"fingerprint\")"),
+            "{announcements}"
+        );
+        assert!(
+            announcements.contains("Text(\"duplicate_of\")"),
+            "{announcements}"
+        );
+        assert_eq!(
+            names(added(&v10, &v11)),
+            [
+                "index admissions_open on admissions",
+                "table admission_holds on admission_holds",
+                "fk admission_holds",
+                "table admission_secret on admission_secret",
+                "fk admission_secret",
+                "table admissions on admissions",
+                "fk admissions",
+            ]
+        );
+        assert_eq!(
+            names(added(&v11, &v12)),
+            ["table admissions on admissions"],
+            "v12 rebuilds admissions with claim columns; admission_holds keeps its shape"
+        );
+        let removed = |from: &[String], to: &[String]| -> Vec<String> {
+            from.iter().filter(|o| !to.contains(o)).cloned().collect()
+        };
+        assert!(
+            removed(&v10, &v12).is_empty(),
+            "the admission migrations leave every hold-fix object as it was"
+        );
+    }
+
+    #[test]
+    fn a_v8_home_upgrades_to_v12_offline_and_keeps_its_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "fn a() {}\n").unwrap();
+
+        // Populate a home through the API, using only what v8 already had.
+        let store = Store::open(&home).unwrap();
+        for (name, program) in [("alice", Program::Claude), ("bob", Program::Codex)] {
+            store
+                .register_agent(RegisterAgent {
+                    name: name.into(),
+                    program,
+                    project: None,
+                    model: None,
+                    description: None,
+                })
+                .unwrap();
+        }
+        let project = store
+            .ensure_project("test", root.to_str().unwrap())
+            .unwrap()
+            .abs_path;
+        let hold = store
+            .acquire_holds(AcquireHolds {
+                agent: "alice".into(),
+                project: project.clone(),
+                paths: vec!["src/a.rs".into()],
+                ttl_seconds: Some(600),
+                exclusive: true,
+                reason: Some("work".into()),
+                repo_wide: false,
+            })
+            .unwrap()
+            .granted
+            .remove(0);
+        let legacy = store
+            .send_message(SendMessage {
+                from: "bob".into(),
+                to: vec!["alice".into()],
+                subject: "please release src/a.rs".into(),
+                body: "a request written before linked release requests existed".into(),
+                request: Some(NewRequest::default()),
+                ..Default::default()
+            })
+            .unwrap();
+        let legacy_request = legacy.request_id.clone().unwrap();
+        assert_eq!(
+            store
+                .claim_announcement(
+                    "alice",
+                    std::slice::from_ref(&legacy.message_id),
+                    "post_tool",
+                    None
+                )
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(store);
+
+        // Take the home back to exactly main's v8 schema, keeping every v8 row.
+        let db = Connection::open(home.join(DB_FILE)).unwrap();
+        db.execute_batch(
+            "DROP TABLE admission_holds;
+             DROP TABLE admissions;
+             DROP TABLE admission_secret;
+             DROP TABLE hold_waits;
+             DROP TABLE request_holds;
+             ALTER TABLE announcements RENAME TO announcements_v10;",
+        )
+        .unwrap();
+        db.execute_batch(MIGRATIONS[7]).unwrap();
+        db.execute_batch(
+            "INSERT INTO announcements (agent_id, message_id, channel, announced_at)
+               SELECT agent_id, message_id, channel, announced_at FROM announcements_v10;
+             DROP TABLE announcements_v10;",
+        )
+        .unwrap();
+        db.pragma_update(None, "user_version", 8).unwrap();
+        assert_eq!(catalog(&db), catalog_at(8), "the fixture is a true v8 home");
+        verify_schema_against(&db, schema_manifest(8).unwrap(), None).unwrap();
+        drop(db);
+
+        // A normal open refuses it; the fenced offline upgrade takes it to the current
+        // schema and records the true source version.
+        let refused = Store::open(&home)
+            .err()
+            .expect("v8 needs the offline upgrade");
+        assert!(
+            refused.to_string().contains("requires offline upgrade"),
+            "{refused}"
+        );
+        let backup = dir.path().join("backup");
+        Store::upgrade_offline(&home, &backup, true).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(backup.join("backup.json")).unwrap()).unwrap();
+        assert_eq!(record["schema_version"], 8);
+        let store = Store::open(&home).unwrap();
+        let db = Connection::open(home.join(DB_FILE)).unwrap();
+        assert_eq!(version(&db), MIGRATIONS.len() as i64);
+        assert_eq!(catalog(&db), catalog_at(MIGRATIONS.len()));
+        let (fingerprint, duplicate): (Option<String>, Option<String>) = db
+            .query_row(
+                "SELECT fingerprint, duplicate_of FROM announcements WHERE message_id = ?1",
+                [&legacy.message_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (fingerprint, duplicate),
+            (None, None),
+            "old claims gain empty columns"
+        );
+
+        // The hold survived, and the v9/v10 behaviour works on the upgraded home.
+        let blocked = store
+            .guard_edit("bob", &project, &["src/a.rs".into()], "editing (auto)")
+            .unwrap();
+        assert_eq!(blocked.conflicts.len(), 1);
+        assert_eq!(blocked.conflicts[0].held.hold_id, hold.hold_id);
+        let waits: i64 = db
+            .query_row("SELECT count(*) FROM hold_waits", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(waits, 1, "the blocked edit records a durable wait");
+        let ask = store.request_hold_release("bob", &hold.hold_id).unwrap();
+        let linked = ask.request_id.unwrap();
+        let link: String = db
+            .query_row(
+                "SELECT hold_id FROM request_holds WHERE request_id = ?1",
+                [&linked],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(link, hold.hold_id);
+        let unlinked: i64 = db
+            .query_row(
+                "SELECT count(*) FROM request_holds WHERE request_id = ?1",
+                [&legacy_request],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            unlinked, 0,
+            "a request from before the upgrade is never linked"
+        );
+
+        store
+            .release_holds("alice", std::slice::from_ref(&hold.hold_id))
+            .unwrap();
+        let status = |id: &str| -> String {
+            db.query_row(
+                "SELECT status FROM requests WHERE request_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(status(&linked), "done");
+        assert_eq!(
+            status(&legacy_request),
+            "open",
+            "prose is never inferred as a link"
+        );
+        let waits: i64 = db
+            .query_row("SELECT count(*) FROM hold_waits", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(waits, 0, "the release pings and clears the wait");
     }
 }

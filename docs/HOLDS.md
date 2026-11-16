@@ -3,7 +3,7 @@
 A hold says "I am changing these files". It is a lease on a path or glob inside a project, with a TTL (default 30 minutes, 1 minute to 4 hours). Holds do not lock files on disk. An exclusive hold conflicts with any overlapping hold of another agent; a shared hold conflicts only with exclusive ones.
 
 ```bash
-another hold acquire --agent claude@shop src/api
+another hold acquire --agent claude@shop src/api/routes.rs
 ```
 
 ```bash
@@ -15,6 +15,14 @@ Conflicts are all-or-nothing: if any requested path overlaps another agent's liv
 ## The edit guard
 
 With the hook pack installed, agents do not have to remember to take holds. Before each file edit, the `pre-edit` hook takes a narrow exclusive hold on that file for the editing agent, or stops the edit and names the holder when another agent holds it. [HOOKS.md](HOOKS.md) has the details, the clients it covers, and what happens when the database is unavailable.
+
+Automatic holds name files only. File targets are literal, even when a new or existing filename contains `[`, `{`, `*` or `?`; stored patterns escape these characters. Directory hints in tool input are skipped, and patch headers supply the exact files a patch changes. To hold a directory or use glob syntax, explicitly request it in `another hold acquire` or MCP `hold_paths`. Be careful: a directory hold blocks every file below it, including unrelated work. Prefer individual files whenever possible.
+
+Manual holds also keep literal intent for bracketed or braced names anywhere in the pattern. A pattern is compared with a literal path one component at a time. A component matches when it is the same text, when it matches as a glob, or when it matches with `[`, `]`, `{` and `}` read as plain characters while `*` and `?` stay wildcards; `**` spans any number of components. An alternation is spelled out as the comparison reaches it, one alternative at a time however many the pattern chains, so `src/{a/b,c}` names the directories `src/a/b` and `src/c`, and `src/{a/b,c}/[id]/page.tsx` keeps `[id]` literal below either; the braces read as plain characters still count, so `app/{group}` also names a directory called `{group}`. A comparison that would take too many steps counts as an overlap rather than as free. An escape such as `[*]` or `[?]` is one plain character, so `packages/*/app/[*]` names the directory `*` under each app and covers `packages/web/app/*/page.tsx`. A pattern whose last component is a plain, bracketed or braced name (no `*` or `?` outside a character class) and that ends above a file names a directory, and that hold covers the file; `src/*` names the entries directly in `src` and nothing deeper, so use `src/**` for everything below. Thus `app/[id]`, `app/[id]/**`, `app/[id]/*.tsx`, `packages/*/app/[id]/page.tsx`, `app/{shop,blog}/[id]/page.tsx`, `src/{a/b,c}` and `app/[id]/**/[slug]/*.tsx` protect the matching literal files whichever hold comes first. The original glob interpretation still counts too, so `app/[ab]/page.tsx` also meets `app/a/page.tsx`.
+
+A stopped edit automatically waits for the file. Do not keep retrying: repeat attempts get a short backoff, and Another sends one inbox ping after every conflicting hold clears. The file is not reserved by that ping. See [Waiting for a held file](HOOKS.md#waiting-for-a-held-file) for timing and delivery.
+
+To ask an owner to release a hold, use `another hold request-release --agent AGENT HOLD_ID` with an ID from `another holds` or a deny notice. The command reuses your outstanding request for that exact hold; it closes automatically when the hold is released or expires, including a release by an explicit `another heartbeat --end` (a hook session end leaves holds in place). A new hold is a new request. Unlinked free-text requests stay manual. This command is local CLI only; it does not add a remote release capability.
 
 ## Holds across worktrees
 
@@ -45,6 +53,8 @@ A path given to `another hold acquire` or `hold check`, and every file the edit 
 - a path through a symlink loop cannot be opened, so it is checked as written, with only its existing directories resolved.
 
 A path whose real location is outside the project is passed on as given. Hard links cannot be seen from a path: an edit through a second hard link to a held file is not stopped.
+
+A project given to the CLI as a path (`--project /tmp/shop`, `another project ensure`, or the current directory by default) is resolved the same way, so a symlinked spelling names the project already registered at the real directory instead of adding a second one. A project registered earlier under a symlinked spelling keeps its row, and that spelling still finds it. Paths given to the MCP `ensure_project` tool are still only normalized as text (`.` and `..` removed), because a remote token's project scope is judged on the path as written.
 
 ## Letter case
 

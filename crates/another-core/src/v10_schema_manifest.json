@@ -1,41 +1,6 @@
 [
   {
     "type": "index",
-    "name": "admissions_open",
-    "table": "admissions",
-    "sql": "CREATE INDEX admissions_open ON admissions(state, created_at)",
-    "columns": null,
-    "foreign_keys": null,
-    "indexes": null,
-    "index_columns": [
-      [
-        0,
-        5,
-        "state",
-        0,
-        "BINARY",
-        1
-      ],
-      [
-        1,
-        6,
-        "created_at",
-        0,
-        "BINARY",
-        1
-      ],
-      [
-        2,
-        -1,
-        null,
-        0,
-        "BINARY",
-        0
-      ]
-    ]
-  },
-  {
-    "type": "index",
     "name": "agents_identity",
     "table": "agents",
     "sql": "CREATE UNIQUE INDEX agents_identity ON agents(node_id, name, ifnull(project_id, ''))",
@@ -63,6 +28,49 @@
         2,
         -2,
         null,
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        3,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "announcements_by_fingerprint",
+    "table": "announcements",
+    "sql": "CREATE INDEX announcements_by_fingerprint ON announcements(agent_id, fingerprint, announced_at)",
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "agent_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        4,
+        "fingerprint",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        2,
+        3,
+        "announced_at",
         0,
         "BINARY",
         1
@@ -316,6 +324,33 @@
   },
   {
     "type": "index",
+    "name": "request_holds_by_hold",
+    "table": "request_holds",
+    "sql": "CREATE INDEX request_holds_by_hold ON request_holds(hold_id)",
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        1,
+        "hold_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
     "name": "requests_by_status",
     "table": "requests",
     "sql": "CREATE INDEX requests_by_status ON requests(status, due_at)",
@@ -464,173 +499,6 @@
   },
   {
     "type": "index",
-    "name": "sqlite_autoindex_admission_holds_1",
-    "table": "admission_holds",
-    "sql": null,
-    "columns": null,
-    "foreign_keys": null,
-    "indexes": null,
-    "index_columns": [
-      [
-        0,
-        1,
-        "hold_id",
-        0,
-        "BINARY",
-        1
-      ],
-      [
-        1,
-        -1,
-        null,
-        0,
-        "BINARY",
-        0
-      ]
-    ]
-  },
-  {
-    "type": "index",
-    "name": "sqlite_autoindex_admission_holds_2",
-    "table": "admission_holds",
-    "sql": null,
-    "columns": null,
-    "foreign_keys": null,
-    "indexes": null,
-    "index_columns": [
-      [
-        0,
-        0,
-        "admission_id",
-        0,
-        "BINARY",
-        1
-      ],
-      [
-        1,
-        1,
-        "hold_id",
-        0,
-        "BINARY",
-        1
-      ],
-      [
-        2,
-        -1,
-        null,
-        0,
-        "BINARY",
-        0
-      ]
-    ]
-  },
-  {
-    "type": "index",
-    "name": "sqlite_autoindex_admissions_1",
-    "table": "admissions",
-    "sql": null,
-    "columns": null,
-    "foreign_keys": null,
-    "indexes": null,
-    "index_columns": [
-      [
-        0,
-        0,
-        "admission_id",
-        0,
-        "BINARY",
-        1
-      ],
-      [
-        1,
-        -1,
-        null,
-        0,
-        "BINARY",
-        0
-      ]
-    ]
-  },
-  {
-    "type": "index",
-    "name": "sqlite_autoindex_admissions_2",
-    "table": "admissions",
-    "sql": null,
-    "columns": null,
-    "foreign_keys": null,
-    "indexes": null,
-    "index_columns": [
-      [
-        0,
-        1,
-        "node_id",
-        0,
-        "BINARY",
-        1
-      ],
-      [
-        1,
-        2,
-        "agent_id",
-        0,
-        "BINARY",
-        1
-      ],
-      [
-        2,
-        3,
-        "correlation",
-        0,
-        "BINARY",
-        1
-      ],
-      [
-        3,
-        -1,
-        null,
-        0,
-        "BINARY",
-        0
-      ]
-    ]
-  },
-  {
-    "type": "index",
-    "name": "sqlite_autoindex_admissions_3",
-    "table": "admissions",
-    "sql": null,
-    "columns": null,
-    "foreign_keys": null,
-    "indexes": null,
-    "index_columns": [
-      [
-        0,
-        1,
-        "node_id",
-        0,
-        "BINARY",
-        1
-      ],
-      [
-        1,
-        8,
-        "call_key",
-        0,
-        "BINARY",
-        1
-      ],
-      [
-        2,
-        -1,
-        null,
-        0,
-        "BINARY",
-        0
-      ]
-    ]
-  },
-  {
-    "type": "index",
     "name": "sqlite_autoindex_agents_1",
     "table": "agents",
     "sql": null,
@@ -745,6 +613,49 @@
       ],
       [
         1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_hold_waits_1",
+    "table": "hold_waits",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "agent_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        1,
+        "project_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        2,
+        2,
+        "path",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        3,
         -1,
         null,
         0,
@@ -1149,6 +1060,33 @@
   },
   {
     "type": "index",
+    "name": "sqlite_autoindex_request_holds_1",
+    "table": "request_holds",
+    "sql": null,
+    "columns": null,
+    "foreign_keys": null,
+    "indexes": null,
+    "index_columns": [
+      [
+        0,
+        0,
+        "request_id",
+        0,
+        "BINARY",
+        1
+      ],
+      [
+        1,
+        -1,
+        null,
+        0,
+        "BINARY",
+        0
+      ]
+    ]
+  },
+  {
+    "type": "index",
     "name": "sqlite_autoindex_requests_1",
     "table": "requests",
     "sql": null,
@@ -1281,305 +1219,6 @@
         0
       ]
     ]
-  },
-  {
-    "type": "table",
-    "name": "admission_holds",
-    "table": "admission_holds",
-    "sql": "CREATE TABLE \"admission_holds\" (\n    admission_id TEXT NOT NULL REFERENCES \"admissions\"(admission_id),\n    hold_id TEXT NOT NULL UNIQUE REFERENCES holds(hold_id),\n    PRIMARY KEY (admission_id, hold_id)\n)",
-    "columns": [
-      [
-        0,
-        "admission_id",
-        "TEXT",
-        1,
-        null,
-        1,
-        0
-      ],
-      [
-        1,
-        "hold_id",
-        "TEXT",
-        1,
-        null,
-        2,
-        0
-      ]
-    ],
-    "foreign_keys": [
-      [
-        0,
-        0,
-        "holds",
-        "hold_id",
-        "hold_id",
-        "NO ACTION",
-        "NO ACTION",
-        "NONE"
-      ],
-      [
-        1,
-        0,
-        "admissions",
-        "admission_id",
-        "admission_id",
-        "NO ACTION",
-        "NO ACTION",
-        "NONE"
-      ]
-    ],
-    "indexes": [
-      [
-        0,
-        "sqlite_autoindex_admission_holds_2",
-        1,
-        "pk",
-        0
-      ],
-      [
-        1,
-        "sqlite_autoindex_admission_holds_1",
-        1,
-        "u",
-        0
-      ]
-    ],
-    "index_columns": null
-  },
-  {
-    "type": "table",
-    "name": "admission_secret",
-    "table": "admission_secret",
-    "sql": "CREATE TABLE admission_secret (\n    singleton INTEGER NOT NULL PRIMARY KEY CHECK (singleton = 1),\n    secret    BLOB NOT NULL CHECK (typeof(secret) = 'blob' AND length(secret) = 32)\n)",
-    "columns": [
-      [
-        0,
-        "singleton",
-        "INTEGER",
-        1,
-        null,
-        1,
-        0
-      ],
-      [
-        1,
-        "secret",
-        "BLOB",
-        1,
-        null,
-        0,
-        0
-      ]
-    ],
-    "foreign_keys": [],
-    "indexes": [],
-    "index_columns": null
-  },
-  {
-    "type": "table",
-    "name": "admissions",
-    "table": "admissions",
-    "sql": "CREATE TABLE \"admissions\" (\n    admission_id TEXT NOT NULL PRIMARY KEY,\n    node_id TEXT NOT NULL REFERENCES nodes(node_id),\n    agent_id TEXT NOT NULL REFERENCES agents(agent_id),\n    correlation BLOB NOT NULL CHECK (typeof(correlation)='blob' AND length(correlation)=32),\n    targets BLOB NOT NULL CHECK (typeof(targets)='blob' AND length(targets)=32),\n    state TEXT NOT NULL CHECK (state IN ('pending','claimed','confirmed','expired','unknown')),\n    created_at INTEGER NOT NULL,\n    settled_at INTEGER,\n    call_key BLOB CHECK (call_key IS NULL OR (typeof(call_key)='blob' AND length(call_key)=32)),\n    operation BLOB CHECK (operation IS NULL OR (typeof(operation)='blob' AND length(operation)=32)),\n    client TEXT,\n    session_digest TEXT,\n    claimed_at INTEGER,\n    object_identity TEXT,\n    preimage TEXT,\n    replacement TEXT,\n    UNIQUE (node_id, agent_id, correlation),\n    UNIQUE (node_id, call_key)\n)",
-    "columns": [
-      [
-        0,
-        "admission_id",
-        "TEXT",
-        1,
-        null,
-        1,
-        0
-      ],
-      [
-        1,
-        "node_id",
-        "TEXT",
-        1,
-        null,
-        0,
-        0
-      ],
-      [
-        2,
-        "agent_id",
-        "TEXT",
-        1,
-        null,
-        0,
-        0
-      ],
-      [
-        3,
-        "correlation",
-        "BLOB",
-        1,
-        null,
-        0,
-        0
-      ],
-      [
-        4,
-        "targets",
-        "BLOB",
-        1,
-        null,
-        0,
-        0
-      ],
-      [
-        5,
-        "state",
-        "TEXT",
-        1,
-        null,
-        0,
-        0
-      ],
-      [
-        6,
-        "created_at",
-        "INTEGER",
-        1,
-        null,
-        0,
-        0
-      ],
-      [
-        7,
-        "settled_at",
-        "INTEGER",
-        0,
-        null,
-        0,
-        0
-      ],
-      [
-        8,
-        "call_key",
-        "BLOB",
-        0,
-        null,
-        0,
-        0
-      ],
-      [
-        9,
-        "operation",
-        "BLOB",
-        0,
-        null,
-        0,
-        0
-      ],
-      [
-        10,
-        "client",
-        "TEXT",
-        0,
-        null,
-        0,
-        0
-      ],
-      [
-        11,
-        "session_digest",
-        "TEXT",
-        0,
-        null,
-        0,
-        0
-      ],
-      [
-        12,
-        "claimed_at",
-        "INTEGER",
-        0,
-        null,
-        0,
-        0
-      ],
-      [
-        13,
-        "object_identity",
-        "TEXT",
-        0,
-        null,
-        0,
-        0
-      ],
-      [
-        14,
-        "preimage",
-        "TEXT",
-        0,
-        null,
-        0,
-        0
-      ],
-      [
-        15,
-        "replacement",
-        "TEXT",
-        0,
-        null,
-        0,
-        0
-      ]
-    ],
-    "foreign_keys": [
-      [
-        0,
-        0,
-        "agents",
-        "agent_id",
-        "agent_id",
-        "NO ACTION",
-        "NO ACTION",
-        "NONE"
-      ],
-      [
-        1,
-        0,
-        "nodes",
-        "node_id",
-        "node_id",
-        "NO ACTION",
-        "NO ACTION",
-        "NONE"
-      ]
-    ],
-    "indexes": [
-      [
-        0,
-        "admissions_open",
-        0,
-        "c",
-        0
-      ],
-      [
-        1,
-        "sqlite_autoindex_admissions_3",
-        1,
-        "u",
-        0
-      ],
-      [
-        2,
-        "sqlite_autoindex_admissions_2",
-        1,
-        "u",
-        0
-      ],
-      [
-        3,
-        "sqlite_autoindex_admissions_1",
-        1,
-        "pk",
-        0
-      ]
-    ],
-    "index_columns": null
   },
   {
     "type": "table",
@@ -1749,7 +1388,7 @@
     "type": "table",
     "name": "announcements",
     "table": "announcements",
-    "sql": "CREATE TABLE announcements (\n    agent_id     TEXT NOT NULL REFERENCES agents(agent_id),\n    message_id   TEXT NOT NULL REFERENCES messages(message_id),\n    channel      TEXT NOT NULL,\n    announced_at INTEGER NOT NULL,\n    PRIMARY KEY (agent_id, message_id)\n)",
+    "sql": "CREATE TABLE announcements (\n    agent_id     TEXT NOT NULL REFERENCES agents(agent_id),\n    message_id   TEXT NOT NULL REFERENCES messages(message_id),\n    channel      TEXT NOT NULL,\n    announced_at INTEGER NOT NULL, fingerprint TEXT, duplicate_of TEXT REFERENCES messages(message_id),\n    PRIMARY KEY (agent_id, message_id)\n)",
     "columns": [
       [
         0,
@@ -1786,11 +1425,39 @@
         null,
         0,
         0
+      ],
+      [
+        4,
+        "fingerprint",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
+      ],
+      [
+        5,
+        "duplicate_of",
+        "TEXT",
+        0,
+        null,
+        0,
+        0
       ]
     ],
     "foreign_keys": [
       [
         0,
+        0,
+        "messages",
+        "duplicate_of",
+        "message_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        1,
         0,
         "messages",
         "message_id",
@@ -1800,7 +1467,7 @@
         "NONE"
       ],
       [
-        1,
+        2,
         0,
         "agents",
         "agent_id",
@@ -1813,6 +1480,13 @@
     "indexes": [
       [
         0,
+        "announcements_by_fingerprint",
+        0,
+        "c",
+        0
+      ],
+      [
+        1,
         "sqlite_autoindex_announcements_1",
         1,
         "pk",
@@ -2155,6 +1829,119 @@
         "sqlite_autoindex_events_1",
         1,
         "u",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "hold_waits",
+    "table": "hold_waits",
+    "sql": "CREATE TABLE hold_waits (\n    agent_id       TEXT NOT NULL REFERENCES agents(agent_id),\n    project_id     TEXT NOT NULL REFERENCES projects(project_id),\n    path           TEXT NOT NULL,\n    blockers       TEXT NOT NULL,\n    holder_id      TEXT NOT NULL REFERENCES agents(agent_id),\n    retry_at       INTEGER NOT NULL,\n    backoff_seconds INTEGER NOT NULL,\n    PRIMARY KEY (agent_id, project_id, path)\n)",
+    "columns": [
+      [
+        0,
+        "agent_id",
+        "TEXT",
+        1,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "project_id",
+        "TEXT",
+        1,
+        null,
+        2,
+        0
+      ],
+      [
+        2,
+        "path",
+        "TEXT",
+        1,
+        null,
+        3,
+        0
+      ],
+      [
+        3,
+        "blockers",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        4,
+        "holder_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        5,
+        "retry_at",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ],
+      [
+        6,
+        "backoff_seconds",
+        "INTEGER",
+        1,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "agents",
+        "holder_id",
+        "agent_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        1,
+        0,
+        "projects",
+        "project_id",
+        "project_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        2,
+        0,
+        "agents",
+        "agent_id",
+        "agent_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [
+      [
+        0,
+        "sqlite_autoindex_hold_waits_1",
+        1,
+        "pk",
         0
       ]
     ],
@@ -3515,6 +3302,71 @@
       [
         2,
         "sqlite_autoindex_projects_1",
+        1,
+        "pk",
+        0
+      ]
+    ],
+    "index_columns": null
+  },
+  {
+    "type": "table",
+    "name": "request_holds",
+    "table": "request_holds",
+    "sql": "CREATE TABLE request_holds (\n    request_id TEXT PRIMARY KEY REFERENCES requests(request_id),\n    hold_id    TEXT NOT NULL REFERENCES holds(hold_id)\n)",
+    "columns": [
+      [
+        0,
+        "request_id",
+        "TEXT",
+        0,
+        null,
+        1,
+        0
+      ],
+      [
+        1,
+        "hold_id",
+        "TEXT",
+        1,
+        null,
+        0,
+        0
+      ]
+    ],
+    "foreign_keys": [
+      [
+        0,
+        0,
+        "holds",
+        "hold_id",
+        "hold_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ],
+      [
+        1,
+        0,
+        "requests",
+        "request_id",
+        "request_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE"
+      ]
+    ],
+    "indexes": [
+      [
+        0,
+        "request_holds_by_hold",
+        0,
+        "c",
+        0
+      ],
+      [
+        1,
+        "sqlite_autoindex_request_holds_1",
         1,
         "pk",
         0
