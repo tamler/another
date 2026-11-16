@@ -88,7 +88,7 @@ impl Client {
     }
 
     /// The hook entries Another installs for this client. Cursor's edit guard is included
-    /// only with `cursor_guard` (`hook install --cursor-edit-guard`, D75).
+    /// only with `cursor_guard` (`hook install --cursor-edit-guard`, D76).
     fn specs(self, cursor_guard: bool) -> Vec<HookSpec> {
         let spec = |key, event, timeout, matcher| HookSpec {
             key,
@@ -299,18 +299,12 @@ fn script_text(env: &HookEnv) -> String {
     format!(
         "#!/bin/sh\n\
          # Another hook wrapper, written by `another hook install`; removed by `another hook uninstall`.\n\
-         # It always exits 0: a missing another never blocks the agent. The pre-edit hook
-\
-         # may still print a deny when it cannot check holds after waiting for a lock.
-\
-         # The one exception is Cursor's edit guard (D75): Cursor blocks a tool call whose
-\
-         # reply it cannot parse, so a reply is printed only after another exited 0 and
-\
-         # checked it. Anything else prints nothing and exits 1, which Cursor treats as a
-\
-         # failed hook and lets the edit proceed.
-\
+         # It always exits 0: a missing another never blocks the agent. The pre-edit hook\n\
+         # may still print a deny when it cannot check holds after waiting for a lock.\n\
+         # The one exception is Cursor's edit guard (D76): Cursor blocks a tool call whose\n\
+         # reply it cannot parse, so a reply is printed only after another exited 0 and\n\
+         # checked it. Anything else prints nothing and exits 1, which Cursor treats as a\n\
+         # failed hook and lets the edit proceed.\n\
          ANOTHER_BIN={exe}\n\
          if [ ! -x \"$ANOTHER_BIN\" ]; then\n\
          \x20 ANOTHER_BIN=$(command -v another 2>/dev/null) || ANOTHER_BIN=\n\
@@ -682,7 +676,7 @@ fn plan_script(env: &HookEnv, install: bool, still_used: bool) -> FileChange {
 }
 
 /// Install (or with `install = false`, uninstall) hooks for `clients`. `cursor_guard` adds
-/// Cursor's edit guard on install; an install without it removes that entry (D75).
+/// Cursor's edit guard on install; an install without it removes that entry (D76).
 pub fn install(
     env: &HookEnv,
     clients: &[Client],
@@ -1662,7 +1656,7 @@ pub fn cursor_deny(reason: &str) -> String {
     }
 }
 
-/// The only reply the Cursor edit guard forwards (D75).
+/// The only reply the Cursor edit guard forwards (D76).
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CursorDeny {

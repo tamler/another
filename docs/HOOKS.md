@@ -60,7 +60,7 @@ Uninstall removes only entries that reference `another-hook.sh`, and deletes the
 another hook install --client cursor --cursor-edit-guard
 ```
 
-Cursor blocks a tool call when a `preToolUse` reply is not valid JSON. Because of that, the guard is opt-in, and its wrapper route works differently from every other hook (D75):
+Cursor blocks a tool call when a `preToolUse` reply is not valid JSON. Because of that, the guard is opt-in, and its wrapper route works differently from every other hook (D76):
 
 - **A held file:** the wrapper prints one line, `{"permission":"deny","user_message":...,"agent_message":...}`, and exits 0.
   - `another` builds that line with a JSON serializer.
