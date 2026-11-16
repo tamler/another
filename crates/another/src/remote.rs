@@ -38,15 +38,39 @@ pub struct RemotePeer {
     pub remote: Option<String>,
 }
 
+/// Longest proxy claim kept in an audit row; an address needs far less.
+const MAX_CLAIM_CHARS: usize = 64;
+
+/// Where a remote call came from, for the audit log. A proxy header is the client's (or a
+/// proxy's) claim, so it is labelled with its header and recorded next to the socket address,
+/// never instead of it: `x-forwarded-for: 203.0.113.9 via 127.0.0.1:54321`. Only the first
+/// hop is kept, cut to [`MAX_CLAIM_CHARS`]; an empty claim counts as no header.
 fn remote_addr(headers: &HeaderMap, req: &Request) -> Option<String> {
-    for h in ["cf-connecting-ip", "x-forwarded-for", "x-real-ip"] {
-        if let Some(v) = headers.get(h).and_then(|v| v.to_str().ok()) {
-            return Some(format!("{h}: {}", v.split(',').next().unwrap_or(v).trim()));
-        }
-    }
-    req.extensions()
+    let socket = req
+        .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|c| c.0.to_string())
+        .map(|c| c.0.to_string());
+    for h in ["cf-connecting-ip", "x-forwarded-for", "x-real-ip"] {
+        let Some(v) = headers.get(h).and_then(|v| v.to_str().ok()) else {
+            continue;
+        };
+        let hop: String = v
+            .split(',')
+            .next()
+            .unwrap_or(v)
+            .trim()
+            .chars()
+            .take(MAX_CLAIM_CHARS)
+            .collect();
+        if hop.is_empty() {
+            continue;
+        }
+        return Some(match &socket {
+            Some(s) => format!("{h}: {hop} via {s}"),
+            None => format!("{h}: {hop}"),
+        });
+    }
+    socket
 }
 
 fn bearer(headers: &HeaderMap) -> Option<String> {
