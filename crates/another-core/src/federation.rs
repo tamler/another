@@ -419,29 +419,158 @@ fn verify_wire(conn: &Connection, ev: &WireEvent) -> Result<()> {
 }
 
 /// Permission checks the hub applies to events a spoke pushes.
-fn spoke_may_publish(perms: &[Perm], from: &str, ev: &WireEvent, payload: &Value) -> Result<()> {
+fn spoke_may_publish(
+    conn: &Connection,
+    perms: &[Perm],
+    from: &str,
+    ev: &WireEvent,
+    payload: &Value,
+) -> Result<()> {
     if ev.node_id != from {
         return Err(Error::Forbidden(
             "spokes may only push events they authored".into(),
         ));
     }
     match classify(&ev.kind, payload, &ev.node_id) {
-        Share::Never => Err(Error::Forbidden(format!(
-            "{} events are not shared",
-            ev.kind
-        ))),
-        Share::Mail(_) if ev.kind == "message.sent" && !perms.contains(&Perm::SendMail) => Err(
-            Error::Forbidden("this node may not send mail to other nodes".into()),
-        ),
-        Share::Feed(others)
-            if ev.kind == "resource.borrowed"
-                && !others.is_empty()
-                && !perms.contains(&Perm::BorrowResource) =>
-        {
-            Err(Error::Forbidden(
-                "this node may not borrow resources of other nodes".into(),
+        Share::Never => {
+            return Err(Error::Forbidden(format!(
+                "{} events are not shared",
+                ev.kind
+            )))
+        }
+        Share::Mail(_) if ev.kind == "message.sent" && !perms.contains(&Perm::SendMail) => {
+            return Err(Error::Forbidden(
+                "this node may not send mail to other nodes".into(),
             ))
         }
+        _ => {}
+    }
+    // Whether a borrow reaches another node's resource is decided by the resource this node
+    // knows, never by the routing hint (`resource_node`) the event's author chose. A
+    // resource this node does not know cannot be shown to be the spoke's own.
+    if ev.kind == "resource.borrowed" && !perms.contains(&Perm::BorrowResource) {
+        let rid = payload.get("resource_id").and_then(Value::as_str);
+        let owner = match rid {
+            Some(id) => owner_of(conn, "resources", "resource_id", id)?,
+            None => None,
+        };
+        if owner.as_deref() != Some(ev.node_id.as_str()) {
+            return Err(Error::Forbidden(
+                "this node may not borrow resources of other nodes".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The node that owns the row `id` in `table`, if this node knows it.
+fn owner_of(conn: &Connection, table: &str, column: &str, id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT node_id FROM {table} WHERE {column} = ?1"),
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// A signature proves only who sent an event. Before a foreign event is stored, check that
+/// every agent, project, message, hold and resource it would create or change belongs to
+/// its origin node. An object this node does not know yet cannot be rewritten, so it
+/// passes; the projection then records it under the origin. Mail may name recipients and
+/// a borrow may name a resource on any node: those are the cross-node operations
+/// federation exists for, and the permission checks in `spoke_may_publish` cover them.
+fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> Result<()> {
+    let owned = |what: &str, table: &str, column: &str, key: &str| -> Result<()> {
+        let Some(id) = p.get(key).and_then(Value::as_str) else {
+            return Ok(());
+        };
+        match owner_of(conn, table, column, id)? {
+            Some(node) if node != origin => Err(Error::Forbidden(format!(
+                "{kind} names {what} {id}, which belongs to another node"
+            ))),
+            _ => Ok(()),
+        }
+    };
+    let agent = |key: &str| owned("agent", "agents", "agent_id", key);
+    let project = || owned("project", "projects", "project_id", "project_id");
+    let resource = || owned("resource", "resources", "resource_id", "resource_id");
+    match kind {
+        // Pairing refuses a name another node has; a later rename must not take one either,
+        // or two nodes' agents would share `name@@node` addresses.
+        "node.created" | "node.renamed" => {
+            // `local` is the placeholder every node starts with (its first `node.created`
+            // carries it) and that pairing refuses, so it names no one.
+            let Some(name) = p
+                .get("display_name")
+                .and_then(Value::as_str)
+                .filter(|n| *n != "local")
+            else {
+                return Ok(());
+            };
+            let taken = conn
+                .query_row(
+                    "SELECT 1 FROM nodes WHERE display_name = ?1 AND node_id != ?2",
+                    params![name, origin],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if taken {
+                return Err(Error::Forbidden(format!(
+                    "{kind} names {name:?}, which another node already has"
+                )));
+            }
+            Ok(())
+        }
+        "agent.registered" => {
+            agent("agent_id")?;
+            project()
+        }
+        "session.started" | "session.ended" | "delivery.read" | "delivery.acked" => {
+            agent("agent_id")
+        }
+        "message.sent" => {
+            agent("sender_id")?;
+            owned("message", "messages", "message_id", "message_id")
+        }
+        "hold.acquired" | "hold.updated" => {
+            agent("agent_id")?;
+            project()?;
+            owned("hold", "holds", "hold_id", "hold_id")
+        }
+        "resource.registered" => {
+            agent("owner_id")?;
+            project()?;
+            resource()
+        }
+        "resource.adopted" => {
+            agent("agent_id")?;
+            resource()
+        }
+        "resource.borrowed" => agent("agent_id"),
+        "resource.transferred" => {
+            resource()?;
+            // The lease's resource decides, whatever resource_id the payload claims.
+            let lease_resource: Option<String> = match p.get("lease_id").and_then(Value::as_str) {
+                Some(lease) => conn
+                    .query_row(
+                        "SELECT r.node_id FROM resource_leases l
+                         JOIN resources r ON r.resource_id = l.resource_id WHERE l.lease_id = ?1",
+                        [lease],
+                        |r| r.get(0),
+                    )
+                    .optional()?,
+                None => None,
+            };
+            match lease_resource {
+                Some(node) if node != origin => Err(Error::Forbidden(format!(
+                    "{kind} names a lease on a resource that belongs to another node"
+                ))),
+                _ => Ok(()),
+            }
+        }
+        "resource.stopped" | "resource.reaped" => resource(),
         _ => Ok(()),
     }
 }
@@ -463,9 +592,14 @@ fn project_exists(conn: &Connection, id: &str) -> Result<bool> {
 }
 
 /// Fold a foreign event into local read models. Idempotent; unknown kinds are only stored.
+///
+/// The origin chose the event's time and every TTL in it. Times are therefore taken no
+/// later than this node's clock, and TTLs are clamped to the limits a local caller gets, so
+/// a skewed clock or a huge TTL cannot keep a foreign hold or lease alive here (or put
+/// mail, presence or receipts in the future).
 fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
     let s = |k: &str| p.get(k).and_then(Value::as_str).map(str::to_string);
-    let ts = ev.ts;
+    let ts = ev.ts.min(tx.now);
     let origin = ev.node_id.as_str();
     match ev.kind.as_str() {
         "node.created" | "node.renamed" => {
@@ -615,11 +749,20 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
             if !project_exists(tx, &project)? || !agent_exists(tx, &agent)? {
                 return Ok(());
             }
-            let ttl = p.get("ttl_seconds").and_then(Value::as_i64).unwrap_or(1800);
+            let ttl = p
+                .get("ttl_seconds")
+                .and_then(Value::as_i64)
+                .unwrap_or(crate::holds::DEFAULT_HOLD_TTL_SECONDS)
+                .clamp(
+                    crate::holds::MIN_HOLD_TTL_SECONDS,
+                    crate::holds::MAX_HOLD_TTL_SECONDS,
+                );
+            // No later than the bounded TTL from the (bounded) event time allows.
+            let latest = ts + ttl * 1000;
             let expires = p
                 .get("expires_at")
                 .and_then(Value::as_i64)
-                .unwrap_or(ts + ttl * 1000);
+                .map_or(latest, |e| e.min(latest));
             let exclusive = p.get("exclusive").and_then(Value::as_bool).unwrap_or(true);
             tx.execute(
                 "INSERT INTO holds (hold_id, node_id, project_id, agent_id, pattern, exclusive, reason,
@@ -740,15 +883,19 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                        ttl_seconds = coalesce(?4, ttl_seconds),
                        expires_at = ?2 + coalesce(?4, ttl_seconds) * 1000
                      WHERE lease_id = ?1 AND node_id = ?3 AND released_at IS NULL",
-                    params![id, ts, origin, p.get("ttl_seconds").and_then(Value::as_i64)],
+                    params![id, ts, origin, lease_ttl(p)],
                 )?;
             }
         }
+        // A lease ends by its holder's word, or by the word of the node that owns the
+        // resource (a hub ending a revoked spoke's leases on its own resources).
         "resource.released" => {
             for id in strings(p, "lease_ids") {
                 tx.execute(
                     "UPDATE resource_leases SET released_at = ?2, release_reason = ?3
-                     WHERE lease_id = ?1 AND node_id = ?4 AND released_at IS NULL",
+                     WHERE lease_id = ?1 AND released_at IS NULL
+                       AND (node_id = ?4 OR EXISTS (SELECT 1 FROM resources r
+                            WHERE r.resource_id = resource_leases.resource_id AND r.node_id = ?4))",
                     params![
                         id,
                         ts,
@@ -761,7 +908,9 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
         "resource.lease_expired" => {
             tx.execute(
                 "UPDATE resource_leases SET released_at = ?2, release_reason = 'expired'
-                 WHERE lease_id = ?1 AND node_id = ?3 AND released_at IS NULL",
+                 WHERE lease_id = ?1 AND released_at IS NULL
+                   AND (node_id = ?3 OR EXISTS (SELECT 1 FROM resources r
+                        WHERE r.resource_id = resource_leases.resource_id AND r.node_id = ?3))",
                 params![s("lease_id"), ts, origin],
             )?;
         }
@@ -781,14 +930,25 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                 )?;
                 tx.execute(
                     "UPDATE resource_leases SET released_at = ?2, release_reason = 'stopped'
-                     WHERE resource_id = ?1 AND released_at IS NULL",
-                    params![rid, ts],
+                     WHERE resource_id = ?1 AND released_at IS NULL
+                       AND EXISTS (SELECT 1 FROM resources WHERE resource_id = ?1 AND node_id = ?3)",
+                    params![rid, ts, origin],
                 )?;
             }
         }
         _ => {}
     }
     Ok(())
+}
+
+/// A foreign lease TTL from the payload, clamped to the limits a local borrower gets.
+fn lease_ttl(p: &Value) -> Option<i64> {
+    p.get("ttl_seconds").and_then(Value::as_i64).map(|t| {
+        t.clamp(
+            crate::resources::MIN_LEASE_TTL_SECONDS,
+            crate::resources::MAX_LEASE_TTL_SECONDS,
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -819,7 +979,7 @@ fn foreign_lease(
     if !exists {
         return Ok(());
     }
-    let ttl = p.get("ttl_seconds").and_then(Value::as_i64).unwrap_or(1800);
+    let ttl = lease_ttl(p).unwrap_or(crate::resources::DEFAULT_LEASE_TTL_SECONDS);
     tx.execute(
         "INSERT OR IGNORE INTO resource_leases (lease_id, resource_id, node_id, agent_id, role,
            ttl_seconds, created_at, renewed_at, expires_at)
@@ -1162,6 +1322,9 @@ impl Store {
                 "peer.revoked",
                 json!({ "node_id": id }),
             )?;
+            // The revoked node can no longer end its own leases here, so this node ends
+            // the ones on its own resources rather than let one be promoted to owner.
+            crate::resources::release_node_leases_tx(tx, &id, "peer_revoked")?;
             Ok(tx.query_row(
                 &format!("{PEER_SELECT} WHERE p.node_id = ?1"),
                 [&id],
@@ -1314,12 +1477,16 @@ impl Store {
                     }
                 };
                 if role == "spoke" {
-                    if let Err(e) = spoke_may_publish(&perms, from, ev, &payload) {
+                    if let Err(e) = spoke_may_publish(tx, &perms, from, ev, &payload) {
                         report.rejected.push(reject(e.to_string()));
                         continue;
                     }
                 }
                 if let Err(e) = verify_wire(tx, ev) {
+                    report.rejected.push(reject(e.to_string()));
+                    continue;
+                }
+                if let Err(e) = foreign_authority(tx, &ev.node_id, &ev.kind, &payload) {
                     report.rejected.push(reject(e.to_string()));
                     continue;
                 }
@@ -1393,9 +1560,66 @@ mod tests {
         }).unwrap();
     }
 
+    /// The projection itself, not only the ingest check, keeps a foreign stop away from this
+    /// node's leases.
+    #[test]
+    fn foreign_stop_cannot_end_local_leases() {
+        let (clock, _) = crate::Clock::manual(1_000_000);
+        let store = Store::open_in_memory(clock).unwrap();
+        store
+            .register_agent(crate::RegisterAgent {
+                name: "owner".into(),
+                program: crate::Program::Claude,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+        let rid = store
+            .register_resource(crate::RegisterResource {
+                agent: "owner".into(),
+                kind: crate::ResourceKind::Port,
+                name: "tcp:127.0.0.1:1".into(),
+                endpoint: None,
+                port: Some(1),
+                pid: None,
+                project: None,
+                purpose: None,
+                mode: crate::LeaseMode::Shared,
+                ttl_seconds: None,
+                metadata: None,
+            })
+            .unwrap()
+            .resource
+            .resource_id;
+        store
+            .write(|tx| {
+                let event = WireEvent {
+                    seq: 1,
+                    event_id: "foreign-stop".into(),
+                    node_id: "foreign-node".into(),
+                    ts: tx.now,
+                    actor: "foreign".into(),
+                    kind: "resource.stopped".into(),
+                    payload: String::new(),
+                    prev_id: None,
+                    sig: String::new(),
+                };
+                project_foreign(tx, &event, &json!({ "resource_id": rid }))?;
+                let live: i64 = tx.query_row(
+                    "SELECT count(*) FROM resource_leases WHERE resource_id = ?1 AND released_at IS NULL",
+                    [&rid],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(live, 1);
+                Ok(())
+            })
+            .unwrap();
+    }
+
     #[test]
     fn signed_peer_collision_cannot_rewrite_local_hold() {
-        let (clock, _) = crate::Clock::manual(1_000_000);
+        let (clock, store_now) = crate::Clock::manual(1_000_000);
         let store = Store::open_in_memory(clock).unwrap();
         let (peer_clock, peer_now) = crate::Clock::manual(1_000_000);
         let peer = Store::open_in_memory(peer_clock).unwrap();
@@ -1479,8 +1703,9 @@ mod tests {
             ),
         );
         let report = store.ingest(&peer_id, &[event], &[]).unwrap();
-        assert_eq!(report.accepted, 1);
-        assert!(report.rejected.is_empty());
+        // The colliding event is now refused outright (D69), not stored and ignored.
+        assert_eq!(report.accepted, 0);
+        assert_eq!(report.rejected.len(), 1);
         let actual: (i64, bool, i64, Option<String>, i64) = store
             .read(|db| {
                 Ok(db.query_row(
@@ -1526,7 +1751,9 @@ mod tests {
         let (events, _) = peer.outbound_events(0, 100).unwrap();
         let report = store.ingest(&peer_id, &events, &[]).unwrap();
         assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+        // Both clocks move: a receiver never takes a foreign time past its own clock (D72).
         peer_now.store(1_001_000, std::sync::atomic::Ordering::SeqCst);
+        store_now.store(1_001_000, std::sync::atomic::Ordering::SeqCst);
         let updated = peer
             .acquire_holds(crate::AcquireHolds {
                 agent: peer_actor,
