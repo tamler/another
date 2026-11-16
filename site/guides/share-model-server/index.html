@@ -64,6 +64,7 @@ another release model_server:ollama@11434 --agent claude</code></pre>
       <p>Releasing ends a lease and does not stop the server. If the owner leaves while others borrow, the oldest borrower becomes the owner. Once the last lease ends, the resource shows as <code>lapsed</code>, and the next agent to borrow it adopts it as owner, so check that it is still answering first. After you really shut it down, the owner runs <code>another release</code> with <code>--stopped</code>.</p>
       <p>An unfenced session-end hook leaves leases in place until expiry or explicit release. To end an agent's session explicitly while keeping its resource leases, use:</p>
       <pre class="code-block shell" tabindex="0" aria-label="End a session and keep leases"><code>another heartbeat --agent claude --end --keep</code></pre>
+      <p>A later unfenced session-end hook leaves those leases in place too. Kept leases expire at the end of their TTL unless <code>another heartbeat</code> or <code>another resource heartbeat</code> renews them.</p>
       <p><a href="https://github.com/tamler/another/blob/main/docs/RESOURCES.md">The resource reference</a> has the details.</p>
     </section>
     <section class="guide-section" aria-labelledby="orphans">

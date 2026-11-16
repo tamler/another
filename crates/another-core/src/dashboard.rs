@@ -12,6 +12,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::activity::{self, ActivityKind, ActivitySummary, EventRow, Since};
+use crate::board::{BoardBlocked, BoardEdit, BoardQuery};
 use crate::error::{Error, Result};
 use crate::holds::{self, patterns_overlap};
 use crate::identity::{agent_from_row, AGENT_COLUMNS};
@@ -34,6 +35,7 @@ const DAY_MS: i64 = 86_400_000;
 const THREAD_LIMIT: usize = 40;
 const MESSAGES_PER_THREAD: usize = 40;
 const REQUEST_LIST_LIMIT: u32 = 200;
+const RECENT_EDITS_LIMIT: usize = 50;
 /// How many events a timeline query will scan before it stops.
 const SCAN_CAP: u32 = 2_000;
 
@@ -73,6 +75,24 @@ pub struct DashboardSnapshot {
     pub threads: Vec<DashThread>,
     pub resources: Vec<Resource>,
     pub peers: Vec<Peer>,
+    /// Paths the edit hook claimed before an edit in the last day, newest first.
+    pub edits: Vec<DashEdit>,
+    /// Edits the edit hook stopped in the last day, newest first.
+    pub blocked: Vec<DashBlocked>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DashEdit {
+    pub project: String,
+    #[serde(flatten)]
+    pub edit: BoardEdit,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DashBlocked {
+    pub project: String,
+    #[serde(flatten)]
+    pub blocked: BoardBlocked,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -240,7 +260,7 @@ fn parse_ts(ts: &str) -> Option<i64> {
         .map(|t| t.timestamp_millis())
 }
 
-fn presence(status: &str, last_seen_at: Option<&str>, now: i64) -> (&'static str, bool) {
+pub(crate) fn presence(status: &str, last_seen_at: Option<&str>, now: i64) -> (&'static str, bool) {
     let age = last_seen_at
         .and_then(parse_ts)
         .map(|t| now.saturating_sub(t));
@@ -478,6 +498,29 @@ impl Store {
             unread: agents.iter().map(|a| a.unread).sum(),
         };
 
+        // Recent edits and stopped edits come from the work board's read, over the last day.
+        let board = self.board(BoardQuery {
+            since_ms: Some(now - DAY_MS),
+            limit: RECENT_EDITS_LIMIT as u32,
+            ..Default::default()
+        })?;
+        let mut edits: Vec<DashEdit> = Vec::new();
+        let mut blocked: Vec<DashBlocked> = Vec::new();
+        for p in board.projects {
+            edits.extend(p.edits.into_iter().map(|edit| DashEdit {
+                project: p.project.clone(),
+                edit,
+            }));
+            blocked.extend(p.blocked.into_iter().map(|blocked| DashBlocked {
+                project: p.project.clone(),
+                blocked,
+            }));
+        }
+        edits.sort_by(|a, b| b.edit.at.cmp(&a.edit.at));
+        edits.truncate(RECENT_EDITS_LIMIT);
+        blocked.sort_by(|a, b| b.blocked.at.cmp(&a.blocked.at));
+        blocked.truncate(RECENT_EDITS_LIMIT);
+
         Ok(DashboardSnapshot {
             node: DashNode {
                 node_id: node.node_id,
@@ -507,6 +550,8 @@ impl Store {
             threads: extra.threads,
             resources,
             peers: active_peers,
+            edits,
+            blocked,
         })
     }
 

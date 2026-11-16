@@ -280,6 +280,18 @@ pub struct ActivitySummarizeArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct WorkBoardArgs {
+    /// Only this project (slug or absolute path) and sibling checkouts of its repository.
+    /// Required on a remote or hosted connection, and must be inside its project globs.
+    pub project: Option<String>,
+    /// Window for recent and stopped edits: a duration like `24h` or an RFC 3339 time.
+    /// Default: the last 24 hours.
+    pub since: Option<String>,
+    /// Items per list (default 20, at most 200).
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ResourceRegisterArgs {
     pub agent: String,
     pub kind: ResourceKind,
@@ -823,6 +835,42 @@ impl AnotherMcp {
         self.run(move |s| {
             let since = a.since.map(|v| Since::parse(&v, s.now())).transpose()?;
             s.activity_summary(since)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Read-only work board, per project: who holds which paths and until \
+        when, which paths the edit hook claimed for each agent recently, edits it stopped \
+        because another agent held the file, and what is waiting on whom (unread mail, \
+        acknowledgements, pending requests). Writes nothing. No message bodies."
+    )]
+    async fn work_board(
+        &self,
+        Parameters(a): Parameters<WorkBoardArgs>,
+    ) -> ToolResult<another_core::Board> {
+        // A remote caller is held to the one project its globs allowed (checked before this
+        // runs). Its board is confined: no sibling checkouts, and agent names, projects and
+        // patterns from other projects are hidden.
+        let remote = crate::remote::current_scope().is_some();
+        self.run(move |s| {
+            let since_ms = match a.since {
+                None => None,
+                Some(v) => match Since::parse(&v, s.now())? {
+                    Since::Time(t) => Some(t),
+                    Since::After(_) => {
+                        return Err(another_core::Error::Invalid(
+                            "work_board since takes a duration like 24h or an RFC 3339 time".into(),
+                        ))
+                    }
+                },
+            };
+            s.board(another_core::BoardQuery {
+                project: a.project,
+                confined: remote,
+                since_ms,
+                limit: a.limit.unwrap_or(0),
+            })
         })
         .await
     }

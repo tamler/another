@@ -81,7 +81,8 @@ async fn exposes_the_tool_surface() {
             "resource_release",
             "send_message",
             "threads",
-            "whats_new"
+            "whats_new",
+            "work_board"
         ]
     );
     client.cancel().await.unwrap();
@@ -352,6 +353,38 @@ async fn full_flow_over_mcp() {
     let summary = call_ok(&client, "activity_summarize", json!({})).await;
     assert_eq!(summary["requests"]["open"], 0);
     assert!(summary["text"].as_str().unwrap().contains("event(s) since"));
+
+    // The board is read-only: calling it adds no event.
+    let before = call_ok(&client, "activity_feed", json!({ "limit": 500 })).await["items"]
+        .as_array()
+        .unwrap()
+        .len();
+    let board = call_ok(&client, "work_board", json!({ "project": "site" })).await;
+    assert_eq!(board["project"], "site");
+    assert_eq!(board["projects"][0]["project"], "site");
+    assert_eq!(
+        board["requests"].as_array().unwrap().len(),
+        0,
+        "the request is done"
+    );
+    let after = call_ok(&client, "activity_feed", json!({ "limit": 500 })).await["items"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert_eq!(before, after);
+    assert_eq!(
+        call_err(
+            &client,
+            "work_board",
+            json!({ "since": "01ARZ3NDEKTSV4RRFFQ69G5FAV" })
+        )
+        .await,
+        "invalid"
+    );
+    assert_eq!(
+        call_err(&client, "work_board", json!({ "project": "nope" })).await,
+        "not_found"
+    );
 
     assert_eq!(
         call_err(&client, "fetch_inbox", json!({ "agent": "ghost" })).await,

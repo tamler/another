@@ -369,6 +369,20 @@ pub enum Command {
         #[arg(long, default_value = "24h")]
         since: String,
     },
+    /// Read-only work board, per project: who holds which paths and until when, which paths
+    /// the edit hook claimed for each agent recently, edits it stopped, and what is waiting
+    /// on whom (unread mail, acknowledgements, pending requests). Writes nothing.
+    Board {
+        /// Only this project (slug or path) and sibling checkouts of the same repository.
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        /// Window for recent and stopped edits: a duration (30m, 24h, 2d) or an RFC 3339 time.
+        #[arg(long, default_value = "24h")]
+        since: String,
+        /// Items per list (at most 200).
+        #[arg(long, default_value_t = another_core::DEFAULT_BOARD_LIMIT)]
+        limit: u32,
+    },
     /// Install, remove or run client hook packs.
     #[command(subcommand)]
     Hook(HookCmd),
@@ -893,6 +907,43 @@ fn project_dir(store: &Store, path: &Path) -> anyhow::Result<String> {
     Ok(real)
 }
 
+/// `another board`. Opens the database the way hooks do: nothing is created, migrated or
+/// swept, so reading the board leaves the database as it was.
+fn board_command(
+    home: &Path,
+    json: bool,
+    project: Option<&str>,
+    since: &str,
+    limit: u32,
+) -> anyhow::Result<ExitCode> {
+    if !home.join(another_core::DB_FILE).exists() {
+        anyhow::bail!(
+            "no Another database in {}; run `another init` first",
+            home.display()
+        );
+    }
+    let store = Store::open_quick(home, Duration::from_secs(5))?;
+    let since_ms = match Since::parse(since, store.now())? {
+        Since::Time(t) => t,
+        Since::After(_) => anyhow::bail!(
+            "board --since takes a duration like 24h or an RFC 3339 time, not an event id"
+        ),
+    };
+    let looks_like_path = |p: &str| p.contains('/') || p.contains('\\') || p == "." || p == "..";
+    let project = match project {
+        Some(p) if looks_like_path(p) => Some(abs(Path::new(p))?),
+        Some(p) => Some(p.to_string()),
+        None => None,
+    };
+    let board = store.board(another_core::BoardQuery {
+        project,
+        since_ms: Some(since_ms),
+        limit,
+        confined: false,
+    })?;
+    Ok(emit(json, &board, output::board))
+}
+
 /// Resolve `--project`: a path (ensured on the fly) or an existing slug; default cwd.
 fn project_key(store: &Store, actor: &str, project: Option<String>) -> anyhow::Result<String> {
     let looks_like_path = |p: &str| p.contains('/') || p.contains('\\') || p == "." || p == "..";
@@ -1111,6 +1162,14 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             "Backup verified and offline migration completed; retain the writer fence until matching clients are installed.".into()
         }));
     }
+    if let Command::Board {
+        project,
+        since,
+        limit,
+    } = &cli.command
+    {
+        return board_command(&another_home()?, json, project.as_deref(), since, *limit);
+    }
 
     if let Command::Session(SessionCmd::Exec { agent, command }) = &cli.command {
         // Resolving a session actor never creates or migrates a home, and is bounded.
@@ -1140,6 +1199,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         | Command::Daemon(_)
         | Command::Upgrade { .. }
         | Command::SqliteInfo
+        | Command::Board { .. }
         | Command::Remote(_) => {
             unreachable!("handled above")
         }
