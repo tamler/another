@@ -104,7 +104,7 @@ That `Done:` mail is the only thing the sender's inbox will ever receive about t
 
 ## 5b. Or the worker gives it back
 
-`release` returns the request to `open` with no owner, so anyone can claim it. Only the current owner can release. This is a second request, opened after the first one was completed.
+`release` returns the request to `open` with no owner, so anyone can claim it. Only the current owner can release. A due time that has already passed is cleared on release, as on takeover, so the request stays `open` and does not go stale again by itself. An owner who claims its own request again with `--due` moves the deadline; that writes a `request.updated` event (old and new due time), shown in the activity feed. This is a second request, opened after the first one was completed.
 
 ```text
 $ another send --from lead --to worker --subject "Port the fixture" --body "tests/fixtures" --ack --due 900
