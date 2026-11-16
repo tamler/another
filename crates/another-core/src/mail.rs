@@ -265,6 +265,10 @@ fn resolve_all(tx: &Tx<'_>, names: &[String]) -> Result<Vec<AgentRef>> {
 }
 
 pub(crate) fn send_tx(tx: &Tx<'_>, input: &SendMessage) -> Result<Message> {
+    send_inner_tx(tx, input, true)
+}
+
+fn send_inner_tx(tx: &Tx<'_>, input: &SendMessage, touch_sender: bool) -> Result<Message> {
     check_text(&input.subject, &input.body)?;
     if input.to.is_empty() {
         return Err(Error::Invalid("at least one recipient is required".into()));
@@ -272,7 +276,61 @@ pub(crate) fn send_tx(tx: &Tx<'_>, input: &SendMessage) -> Result<Message> {
     let sender = resolve_agent(tx, tx.node_id, &input.from)?;
     let to = resolve_all(tx, &input.to)?;
     let cc = resolve_all(tx, &input.cc)?;
+    deliver_tx(tx, input, &sender, &to, &cc, touch_sender)
+}
 
+/// An automatic notice from one local agent to another, both known by id. Nothing is
+/// resolved by display address, which can have become ambiguous since the ids were stored.
+/// `input.from`, `to` and `cc` are ignored; the sender is not touched.
+pub(crate) fn send_notice_tx(
+    tx: &Tx<'_>,
+    from_id: &str,
+    to_id: &str,
+    input: &SendMessage,
+) -> Result<Message> {
+    send_by_id_tx(tx, from_id, to_id, input, false)
+}
+
+/// A message from one local agent to another, both known by id, sent on the sender's
+/// explicit behalf: like [`send_notice_tx`], but the sender's activity is recorded.
+pub(crate) fn send_by_id_tx(
+    tx: &Tx<'_>,
+    from_id: &str,
+    to_id: &str,
+    input: &SendMessage,
+    touch_sender: bool,
+) -> Result<Message> {
+    check_text(&input.subject, &input.body)?;
+    let sender = agent_by_id(tx, from_id)?;
+    let to = [agent_by_id(tx, to_id)?];
+    deliver_tx(tx, input, &sender, &to, &[], touch_sender)
+}
+
+fn agent_by_id(tx: &Tx<'_>, agent_id: &str) -> Result<AgentRef> {
+    tx.query_row(
+        "SELECT agent_id, address, node_id FROM agents WHERE agent_id = ?1",
+        [agent_id],
+        |r| {
+            Ok(AgentRef {
+                id: r.get(0)?,
+                address: r.get(1)?,
+                node_id: r.get(2)?,
+            })
+        },
+    )
+    .optional()?
+    .ok_or_else(|| Error::NotFound(format!("unknown agent id {agent_id:?}")))
+}
+
+/// Store and deliver a message whose sender and recipients are already resolved.
+fn deliver_tx(
+    tx: &Tx<'_>,
+    input: &SendMessage,
+    sender: &AgentRef,
+    to: &[AgentRef],
+    cc: &[AgentRef],
+    touch_sender: bool,
+) -> Result<Message> {
     let message_id = new_id();
     let thread_id = match (&input.reply_to, &input.thread_id) {
         (Some(parent), given) => {
@@ -397,14 +455,16 @@ pub(crate) fn send_tx(tx: &Tx<'_>, input: &SendMessage) -> Result<Message> {
         create_request_tx(
             tx,
             request_id,
-            &sender,
+            sender,
             &message_id,
             &thread_id,
             &input.subject,
             req.due_in_seconds,
         )?;
     }
-    touch(tx, &sender.id)?;
+    if touch_sender {
+        touch(tx, &sender.id)?;
+    }
     load_message(tx, &message_id)
 }
 

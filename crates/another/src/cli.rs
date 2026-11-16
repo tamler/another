@@ -729,6 +729,13 @@ pub struct ProjectArg {
 
 #[derive(Debug, Subcommand)]
 pub enum HoldCmd {
+    /// Ask a local hold's owner to release it; reuse an open ask and close it when the hold ends.
+    RequestRelease {
+        #[command(flatten)]
+        agent: AgentArg,
+        /// Hold id from `another holds` or a conflict report.
+        hold_id: String,
+    },
     /// Acquire holds on paths/globs (exit code 3 on conflict; nothing is granted).
     Acquire {
         #[command(flatten)]
@@ -845,6 +852,21 @@ fn abs(path: &Path) -> anyhow::Result<String> {
     Ok(p.to_string_lossy().into_owned())
 }
 
+/// A project directory as the filesystem resolves it, the way the edit hook resolves files,
+/// so a symlinked spelling names the same project instead of registering a second one. A
+/// project already registered under the spelling as given, and not under the resolved one
+/// (rows from before paths were resolved), keeps its row.
+fn project_dir(store: &Store, path: &Path) -> anyhow::Result<String> {
+    let given = abs(path)?;
+    let real = hooks::resolve_existing(Path::new(&given))
+        .to_string_lossy()
+        .into_owned();
+    if real != given && store.project(&real).is_err() && store.project(&given).is_ok() {
+        return Ok(given);
+    }
+    Ok(real)
+}
+
 /// `another board`. Opens the database the way hooks do: nothing is created, migrated or
 /// swept, so reading the board leaves the database as it was.
 fn board_command(
@@ -887,9 +909,11 @@ fn project_key(store: &Store, actor: &str, project: Option<String>) -> anyhow::R
     let looks_like_path = |p: &str| p.contains('/') || p.contains('\\') || p == "." || p == "..";
     match project {
         Some(p) if !looks_like_path(&p) => Ok(p),
-        Some(p) => Ok(store.ensure_project(actor, &abs(Path::new(&p))?)?.abs_path),
+        Some(p) => Ok(store
+            .ensure_project(actor, &project_dir(store, Path::new(&p))?)?
+            .abs_path),
         None => Ok(store
-            .ensure_project(actor, &abs(&std::env::current_dir()?)?)?
+            .ensure_project(actor, &project_dir(store, &std::env::current_dir()?)?)?
             .abs_path),
     }
 }
@@ -1098,8 +1122,8 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Command::Project(ProjectCmd::Ensure { path }) => {
             let path = match path {
-                Some(p) => abs(&p)?,
-                None => abs(&std::env::current_dir()?)?,
+                Some(p) => project_dir(&store, &p)?,
+                None => project_dir(&store, &std::env::current_dir()?)?,
             };
             let p = store.ensure_project("cli", &path)?;
             emit(json, &p, |p| format!("{}  {}", p.slug, p.abs_path))
@@ -1301,6 +1325,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             } else {
                 emitted
             }
+        }
+        Command::Hold(HoldCmd::RequestRelease { agent, hold_id }) => {
+            let message = store.request_hold_release(&agent.agent, &hold_id)?;
+            emit(json, &message, output::sent)
         }
         Command::Hold(HoldCmd::Renew { agent, hold_ids }) => {
             let holds = store.renew_holds(&agent.agent, &hold_ids)?;
