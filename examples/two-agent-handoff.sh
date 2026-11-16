@@ -68,7 +68,13 @@ step request complete --agent bob@shop --note "reviewed, one nit" "$request"
 step inbox --agent alice@shop
 step thread "$message"
 # She acknowledges both, by id, as herself.
-notices=$("$another" --json inbox --agent alice@shop | field_all message_id | tr '\n' ' ')
+alice_inbox=$("$another" --json inbox --agent alice@shop)
+# Completing the request must have told alice: a "Done:" notice is in her inbox.
+printf '%s\n' "$alice_inbox" | grep -q '"subject": *"Done: Review the API change in src/api.rs"' || {
+    echo "alice got no Done: notice for the completed request: $alice_inbox" >&2
+    exit 1
+}
+notices=$(printf '%s\n' "$alice_inbox" | field_all message_id | tr '\n' ' ')
 # shellcheck disable=SC2086 # one id per word, by construction
 step ack --agent alice@shop $notices
 # With no hold ids, release lets go of all of alice's holds.
