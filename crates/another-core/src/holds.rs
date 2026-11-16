@@ -816,15 +816,21 @@ fn wait_for_conflicts_tx(
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        let is_new = old.as_ref().is_none_or(|(s, _, _)| *s != signature);
+        let is_new = old.is_none()
+            || recorded_wait_is_new(tx, &agent.id, &project.project_id, path, &blockers)?;
         let (retry_at, backoff) = match old {
-            Some((_, until, backoff)) if !is_new && until > tx.now => (until, backoff),
+            Some((stored, until, backoff)) if !is_new && stored == signature && until > tx.now => {
+                (until, backoff)
+            }
             old => {
-                let backoff = match old {
-                    Some((_, _, previous)) if !is_new => (previous * 2).min(300),
-                    _ => 30,
+                let (until, backoff) = match old {
+                    Some((_, until, previous)) if !is_new && until > tx.now => (until, previous),
+                    Some((_, _, previous)) if !is_new => {
+                        let backoff = (previous * 2).min(300);
+                        (tx.now + backoff * 1000, backoff)
+                    }
+                    _ => (tx.now + 30_000, 30),
                 };
-                let until = tx.now + backoff * 1000;
                 // The hold row carries the holder's id. Its display address may have become
                 // ambiguous since the hold was taken and is never resolved again here.
                 let first = conflicts
@@ -861,16 +867,39 @@ fn wait_for_conflicts_tx(
     Ok((first_notice, retry_after))
 }
 
-/// Whether `blockers` on `path` are a new conflict for this agent when the wait could
-/// not be recorded. Two records can prove the first notice already went out: the wait
-/// row, when there is one, by its stored blocker signature; and the agent's latest wait
-/// event for exactly this path, when it is a `hold.waiting` or `hold.wait_failed` naming
-/// the same hold ids. Both are checked, because a wait row keeps its old signature when
-/// the update to a changed blocker set failed, and the failure event is then the only
-/// record of what was announced. An event that ended the wait (`hold.available`,
-/// `hold.notify_failed`, `hold.wait.finished`), a different set of hold ids in both
-/// records, or no record at all means a first notice is due. Events for other agents,
-/// projects or paths never count, however many of them there are.
+/// A refreshed row is bookkeeping; only the last successful wait event records which
+/// blockers were announced and whose backoff applies. Terminal events end that record.
+fn recorded_wait_is_new(
+    tx: &Tx<'_>,
+    agent_id: &str,
+    project_id: &str,
+    path: &str,
+    blockers: &[&str],
+) -> Result<bool> {
+    let recorded: Option<(String, String)> = tx
+        .query_row(
+            "SELECT kind, payload FROM events
+             WHERE kind IN ('hold.waiting', 'hold.available', 'hold.notify_failed', 'hold.wait.finished')
+               AND json_extract(payload, '$.agent_id') = ?1
+               AND json_extract(payload, '$.project_id') = ?2
+               AND json_extract(payload, '$.path') = ?3
+             ORDER BY seq DESC LIMIT 1",
+            params![agent_id, project_id, path],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let announced = |payload: &str| {
+        serde_json::from_str::<Value>(payload)
+            .ok()
+            .and_then(|v| serde_json::from_value::<Vec<String>>(v["blockers"].clone()).ok())
+    };
+    Ok(!recorded.as_ref().is_some_and(|(kind, payload)| {
+        kind == "hold.waiting" && announced(payload).is_some_and(|stored| stored == blockers)
+    }))
+}
+
+/// A failed update may have announced another set without replacing the successful
+/// one. Either announcement suppresses a duplicate denial until the wait ends.
 fn failed_wait_is_new(
     tx: &Tx<'_>,
     agent_id: &str,
@@ -878,19 +907,8 @@ fn failed_wait_is_new(
     path: &str,
     blockers: &[&str],
 ) -> Result<bool> {
-    let recorded: Option<String> = tx
-        .query_row(
-            "SELECT blockers FROM hold_waits
-             WHERE agent_id = ?1 AND project_id = ?2 AND path = ?3",
-            params![agent_id, project_id, path],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if let Some(signature) = recorded {
-        let stored: Vec<String> = serde_json::from_str(&signature).unwrap_or_default();
-        if stored == blockers {
-            return Ok(false);
-        }
+    if !recorded_wait_is_new(tx, agent_id, project_id, path, blockers)? {
+        return Ok(false);
     }
     let latest: Option<(String, String)> = tx
         .query_row(
@@ -907,11 +925,10 @@ fn failed_wait_is_new(
         .optional()?;
     Ok(match latest {
         Some((kind, payload)) if kind == "hold.waiting" || kind == "hold.wait_failed" => {
-            let announced: Vec<String> = serde_json::from_str::<Value>(&payload)
+            serde_json::from_str::<Value>(&payload)
                 .ok()
-                .and_then(|v| serde_json::from_value(v["blockers"].clone()).ok())
-                .unwrap_or_default();
-            announced != blockers
+                .and_then(|v| serde_json::from_value::<Vec<String>>(v["blockers"].clone()).ok())
+                .is_none_or(|stored| stored != blockers)
         }
         _ => true,
     })
@@ -980,15 +997,46 @@ fn waits_to_recheck_tx(tx: &Tx<'_>) -> Result<Vec<WaitRow>> {
 fn ping_free_waiters_tx(tx: &Tx<'_>) -> Result<()> {
     for (agent_id, project_key, project_id, path, holder_id, blockers) in waits_to_recheck_tx(tx)? {
         let project = find_project(tx, tx.node_id, &project_key)?;
-        if !conflicts_for(
+        let conflicts = conflicts_for(
             tx,
             &project,
             &agent_id,
             &[(path.clone(), globset::escape(&path))],
             true,
-        )?
-        .is_empty()
-        {
+        )?;
+        if !conflicts.is_empty() {
+            let mut current: Vec<&str> =
+                conflicts.iter().map(|c| c.held.hold_id.as_str()).collect();
+            current.sort_unstable();
+            current.dedup();
+            // Retire processed ended IDs and capture replacement holds. Keep the original
+            // notice sender, retry deadline and backoff; this is not a waiter retry.
+            let refreshed = attempt(tx, "wait_refresh", || {
+                tx.emit(
+                    "system",
+                    "hold.wait.rechecked",
+                    json!({
+                        "agent_id": agent_id, "project_id": project_id,
+                        "path": path, "blockers": current,
+                    }),
+                )?;
+                tx.execute(
+                    "UPDATE hold_waits SET blockers = ?4
+                     WHERE agent_id = ?1 AND project_id = ?2 AND path = ?3",
+                    params![agent_id, project_id, path, serde_json::to_string(&current)?],
+                )?;
+                Ok(())
+            });
+            if let Err(error) = refreshed {
+                tx.emit(
+                    "system",
+                    "hold.recheck_failed",
+                    json!({
+                        "agent_id": agent_id, "project_id": project_id,
+                        "path": path, "blockers": current, "error": error.to_string(),
+                    }),
+                )?;
+            }
             continue;
         }
         // Naming the ended holds makes every ping distinct, so the push dedupe never
