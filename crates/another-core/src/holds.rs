@@ -156,11 +156,12 @@ const HOLD_SELECT: &str =
      JOIN agents a ON a.agent_id = h.agent_id
      LEFT JOIN projects ap ON ap.project_id = a.project_id";
 
-/// [`HOLD_SELECT`] plus the hold's project id (column 10) and that project's position in its
-/// repository (column 11).
+/// [`HOLD_SELECT`] plus the hold's project id (column 10), that project's position in its
+/// repository (column 11), its directory (column 12) and its repository key (column 13).
 const HOLD_SELECT_REPO: &str =
     "SELECT h.hold_id, p.slug, a.address, NULL, h.pattern, h.exclusive, h.reason,
-       h.ttl_seconds, h.created_at, h.expires_at, h.project_id, coalesce(pr.repo_prefix, '')
+       h.ttl_seconds, h.created_at, h.expires_at, h.project_id, coalesce(pr.repo_prefix, ''),
+       p.abs_path, coalesce(pr.repo_key, '')
      FROM holds h
      JOIN projects p ON p.project_id = h.project_id
      JOIN agents a ON a.agent_id = h.agent_id
@@ -346,6 +347,46 @@ fn overlap_on_volume(a: &str, b: &str, fold: bool) -> bool {
             && (literal_pattern(a).is_some() || !a.contains('['))
             && (literal_pattern(b).is_some() || !b.contains('['))
             && patterns_overlap(&a.to_lowercase(), &b.to_lowercase()))
+}
+
+/// `inner` relative to `outer`, `/`-separated (empty when they are the same directory),
+/// when `outer` is `inner` or one of its ancestors. Compared component by component, so
+/// `/a/b` is not an ancestor of `/a/bc`; letter case is ignored on a case-folding volume.
+fn dir_below(outer: &str, inner: &str, fold: bool) -> Option<String> {
+    let name = |c: std::path::Component<'_>| c.as_os_str().to_string_lossy().into_owned();
+    let outer: Vec<String> = Path::new(outer).components().map(name).collect();
+    let inner: Vec<String> = Path::new(inner).components().map(name).collect();
+    if outer.is_empty() || outer.len() > inner.len() {
+        return None;
+    }
+    let same = |a: &String, b: &String| {
+        if fold {
+            a.to_lowercase() == b.to_lowercase()
+        } else {
+            a == b
+        }
+    };
+    if !outer.iter().zip(&inner).all(|(a, b)| same(a, b)) {
+        return None;
+    }
+    Some(inner[outer.len()..].join("/"))
+}
+
+/// A literal path as a hold pattern that matches only itself: each glob metacharacter is
+/// written as a one-character class (`[*]`, `[[]`), the form hold patterns already use for
+/// literal names. A directory such as `app/[id]` then stays a literal prefix.
+fn glob_literal(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        if matches!(c, '*' | '?' | '[' | ']' | '{' | '}') {
+            out.push('[');
+            out.push(c);
+            out.push(']');
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Whether the volume holding the existing directory `dir` treats names that differ only
@@ -633,43 +674,76 @@ fn conflicts_for(
         .map_or((String::new(), String::new()), |l| {
             (crate::repo::stored_key(&l.key), l.prefix)
         });
-    // This project's holds, plus holds in any local project of the same repository.
+    // This project's holds, holds in any local project of the same repository, and holds in
+    // any other local project; the last are kept below only when one project's directory
+    // contains the other's (a lanes or notes folder outside git and a subfolder of it
+    // registered as its own project).
     let mut stmt = tx.prepare(&format!(
         "{HOLD_SELECT_REPO} WHERE h.released_at IS NULL AND h.expires_at > ?3
            AND h.agent_id != ?2
-           AND (h.project_id = ?1 OR (?4 != '' AND h.project_id IN
-                (SELECT project_id FROM project_repos WHERE repo_key = ?4)))
+           AND (h.project_id = ?1
+                OR (?4 != '' AND h.project_id IN
+                    (SELECT project_id FROM project_repos WHERE repo_key = ?4))
+                OR p.node_id = ?5)
          ORDER BY h.created_at"
     ))?;
     let others = stmt
         .query_map(
-            params![project.project_id, agent_id, tx.now, repo_key],
+            params![project.project_id, agent_id, tx.now, repo_key, tx.node_id],
             |r| {
                 Ok((
                     hold_from_row(r)?,
                     r.get::<_, String>(10)?,
                     r.get::<_, String>(11)?,
+                    r.get::<_, String>(12)?,
+                    r.get::<_, String>(13)?,
                 ))
             },
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let fold = folds_case(Path::new(&project.abs_path));
     let overlaps = |a: &str, b: &str| overlap_on_volume(a, b, fold);
+    // How a held hold's project relates to this one: both patterns as paths from a common
+    // directory, or `None` when the two projects cover different files.
+    let common = |pattern: &str,
+                  held: &Hold,
+                  held_project: &str,
+                  held_prefix: &str,
+                  held_dir: &str,
+                  held_key: &str|
+     -> Option<(String, String)> {
+        if held_project == project.project_id {
+            return Some((pattern.to_string(), held.pattern.clone()));
+        }
+        if !repo_key.is_empty() && held_key == repo_key {
+            // Compare as paths from the repository's top level.
+            return Some((
+                crate::repo::in_repo(&my_prefix, pattern),
+                crate::repo::in_repo(held_prefix, &held.pattern),
+            ));
+        }
+        // Nested directories: compare as paths from the outer project's directory.
+        if let Some(below) = dir_below(held_dir, &project.abs_path, fold) {
+            return Some((
+                crate::repo::in_repo(&glob_literal(&below), pattern),
+                held.pattern.clone(),
+            ));
+        }
+        dir_below(&project.abs_path, held_dir, fold).map(|below| {
+            (
+                pattern.to_string(),
+                crate::repo::in_repo(&glob_literal(&below), &held.pattern),
+            )
+        })
+    };
     let mut conflicts = Vec::new();
     for (requested, pattern) in patterns {
-        for (held, held_project, held_prefix) in &others {
+        for (held, held_project, held_prefix, held_dir, held_key) in &others {
             if !(exclusive || held.exclusive) {
                 continue;
             }
-            let overlap = if *held_project == project.project_id {
-                overlaps(pattern, &held.pattern)
-            } else {
-                // Compare as paths from the repository's top level.
-                overlaps(
-                    &crate::repo::in_repo(&my_prefix, pattern),
-                    &crate::repo::in_repo(held_prefix, &held.pattern),
-                )
-            };
+            let overlap = common(pattern, held, held_project, held_prefix, held_dir, held_key)
+                .is_some_and(|(mine, theirs)| overlaps(&mine, &theirs));
             if overlap {
                 conflicts.push(HoldConflict {
                     path: requested.clone(),
