@@ -43,6 +43,39 @@ another hook uninstall --client all
 
 Uninstall removes only entries that reference `another-hook.sh`, and deletes the wrapper once no client uses it. Both install and uninstall also clean up entries left by development builds from before the project was renamed (they referenced `wyres-hook.sh`, and Grok's file was `~/.grok/hooks/wyres.json`): install replaces them with current entries, and uninstall removes them.
 
+## Check it live
+
+`another hook status` only shows what is configured. To see a client actually run the hooks, without touching your real Another data, give one session a throwaway Another home. The wrapper uses `ANOTHER_HOME` when it is set:
+
+```bash
+proj=$(mktemp -d)/proj && mkdir -p "$proj" && cd "$proj" && git init -q .
+export ANOTHER_HOME=$(mktemp -d)/home
+another init
+another agent register lead --program claude --project "$proj"
+another agent register claude --program claude --project "$proj"
+another send --from lead@proj --to claude@proj --subject "PING-1" --body "live check"
+claude -p "Create hello.txt containing hi, then reply with the subject of any Another message you were shown, or NONE."
+another activity --since 10m
+```
+
+Use the client's name in place of `claude`: `codex` with `codex exec`, `grok` with `grok -p`.
+
+**What to look for:**
+- the reply names `PING-1`, which shows the session-start digest reached the model;
+- the activity feed shows the session start and end;
+- a hold on `hello.txt` taken by the edit hook, released at session end.
+
+If the model takes a hold itself with `another hold acquire` before editing (agents often follow coordination rules in their instructions), the edit hook finds that hold and takes none of its own.
+
+**Results on 16 Nov 2026,** with Another 0.1.0 on macOS, using these steps:
+
+| Client | Result |
+|---|---|
+| Claude Code 2.1.325 | all three checks pass |
+| Codex CLI 0.169.0 | all three pass, with the hooks already trusted under `/hooks`. The model took its hold itself, and `PreToolUse` ran for `apply_patch`. |
+| Grok CLI 1.0.77 | session start, digest announcement, edit guard hold and session end all ran. A headless `grok -p` did not approve the write (even with `--permission-mode acceptEdits`), and the model did not name the ping in two runs, so delivery of the digest to the model is not confirmed for headless Grok. Check it in an interactive session. |
+| Cursor | not checked (not installed on the test machine) |
+
 ## Per client
 
 | Client | Config written | Events | Notes |
