@@ -3,7 +3,14 @@
 //! the quick-tunnel URL becomes the server's public origin, the tunnel stops when the
 //! server does (a leftover `cloudflared` would keep the machine reachable), and each way of
 //! failing to start says what to do.
+//!
+//! The tests signal and, on a timeout, stop the processes they start, so they run only on a
+//! GitHub-hosted runner (`require_hosted_runner`, as for daemon, push and wake tests). Every
+//! process they start is stopped by its exact pid when a test ends, failed or not.
 #![cfg(unix)]
+
+#[path = "common/hosted_ci.rs"]
+mod hosted_ci;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -22,6 +29,7 @@ struct Fx {
 
 impl Fx {
     fn new() -> Fx {
+        hosted_ci::require_hosted_runner();
         let fx = Fx {
             dir: tempfile::tempdir().unwrap(),
         };
@@ -88,7 +96,7 @@ impl Fx {
                 return child.wait_with_output().unwrap();
             }
             if started.elapsed() > Duration::from_secs(60) {
-                let _ = child.kill();
+                stop(&mut child);
                 panic!(
                     "`another {args:?}` did not exit: {:?}",
                     child.wait_with_output()
@@ -105,6 +113,65 @@ impl Fx {
             .parse()
             .unwrap()
     }
+}
+
+/// A test that fails after the fake cloudflared started must not leave it running: stop
+/// the recorded pid (and only that pid) if it is still alive.
+impl Drop for Fx {
+    fn drop(&mut self) {
+        let Ok(text) = std::fs::read_to_string(self.pid_file()) else {
+            return;
+        };
+        if let Ok(pid) = text.trim().parse::<i32>() {
+            if alive(pid) {
+                let _ = Command::new("kill")
+                    .args(["-TERM", &pid.to_string()])
+                    .status();
+            }
+        }
+    }
+}
+
+/// A server the test started. Dropped while still running (a failed assertion), it is
+/// stopped like a timeout: SIGTERM first, so its own cleanup stops the tunnel.
+struct Running(Child);
+
+impl std::ops::Deref for Running {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Running {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        if matches!(self.0.try_wait(), Ok(None)) {
+            stop(&mut self.0);
+        }
+    }
+}
+
+/// Stop a child this test started: SIGTERM, so it can clean up; SIGKILL only if it is still
+/// running 5 s later.
+fn stop(child: &mut Child) {
+    let _ = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status();
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(5) {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn free_port() -> u16 {
@@ -141,7 +208,7 @@ fn wait_for(child: &mut Child, limit: Duration) -> std::process::ExitStatus {
             return status;
         }
         if started.elapsed() > limit {
-            let _ = child.kill();
+            stop(child);
             panic!("did not exit within {limit:?}");
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -212,16 +279,17 @@ fn a_quick_tunnel_serves_its_url_and_stops_with_the_server() {
         fx.cloudflared(&format!(
             "echo 'INF Requesting new quick Tunnel on trycloudflare.com...' >&2\n\
              echo 'INF |  https://{HOST}  |' >&2\n\
-             exec sleep 300"
+             exec sleep 60"
         ));
         let port = free_port();
         let bind = format!("127.0.0.1:{port}");
-        let mut child = fx
-            .another(&["remote", "up", "--bind", &bind])
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child = Running(
+            fx.another(&["remote", "up", "--bind", &bind])
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
         let rx = stderr_lines(&mut child);
         let text = until(&rx, "quick tunnel");
         assert!(
@@ -265,8 +333,8 @@ fn a_public_url_starts_no_tunnel() {
     let fx = Fx::new();
     let port = free_port();
     let bind = format!("127.0.0.1:{port}");
-    let mut child = fx
-        .another(&[
+    let mut child = Running(
+        fx.another(&[
             "remote",
             "up",
             "--bind",
@@ -277,7 +345,8 @@ fn a_public_url_starts_no_tunnel() {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .unwrap();
+        .unwrap(),
+    );
     let rx = stderr_lines(&mut child);
     let text = until(&rx, "https://another.example.com/mcp");
     assert!(!text.contains("quick tunnel"), "{text}");
@@ -364,7 +433,7 @@ fn failures_to_start_say_what_to_do() {
 fn a_server_that_cannot_bind_stops_its_tunnel() {
     let fx = Fx::new();
     fx.cloudflared(&format!(
-        "echo 'INF |  https://{HOST}  |' >&2\nexec sleep 300"
+        "echo 'INF |  https://{HOST}  |' >&2\nexec sleep 60"
     ));
     let taken = TcpListener::bind("127.0.0.1:0").unwrap();
     let bind = taken.local_addr().unwrap().to_string();
