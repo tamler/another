@@ -890,3 +890,442 @@ fn only_codex_gets_labels_and_a_description() {
     }
     assert!(has_key(&env.read(".codex/hooks.json"), "statusMessage"));
 }
+
+// ---------------------------------------------------------------------------
+// Cursor's opt-in edit guard (D76)
+
+fn cursor_status(env: &Env) -> Value {
+    let rows: Value = serde_json::from_str(&env.ok(&["--json", "hook", "status"])).unwrap();
+    rows.as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["client"] == "cursor")
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn cursor_edit_guard_is_opt_in_idempotent_and_never_fail_closed() {
+    let env = Env::new();
+    env.write(
+        ".cursor/hooks.json",
+        &json!({ "version": 1, "hooks": { "preToolUse": [{ "command": "policy.sh", "matcher": "Shell" }] } }),
+    );
+    // Without the flag: no guard, and status says so.
+    env.ok(&["hook", "install", "--client", "cursor"]);
+    let cursor = env.read(".cursor/hooks.json");
+    assert_eq!(ours(&cursor), 4);
+    assert_eq!(cursor_status(&env)["edit_guard"], false);
+
+    let out = env.ok(&[
+        "hook",
+        "install",
+        "--client",
+        "cursor",
+        "--cursor-edit-guard",
+    ]);
+    assert!(
+        out.contains("Cursor edit guard installed (preview)"),
+        "{out}"
+    );
+    let cursor = env.read(".cursor/hooks.json");
+    assert_eq!(ours(&cursor), 5);
+    let pre = cursor["hooks"]["preToolUse"].as_array().unwrap();
+    assert_eq!(
+        pre[0]["command"], "policy.sh",
+        "other hooks stay first and intact"
+    );
+    let guard = pre
+        .iter()
+        .find(|h| h["command"].as_str().unwrap().contains("another-hook.sh"))
+        .unwrap();
+    assert!(guard["command"]
+        .as_str()
+        .unwrap()
+        .ends_with("pre-edit --client cursor"));
+    assert_eq!(guard["matcher"], "^(Write|Delete)$");
+    assert_eq!(guard["timeout"], 5);
+    assert!(!has_key(&cursor, "failClosed"));
+    let status = cursor_status(&env);
+    assert_eq!(status["edit_guard"], true);
+    assert!(status.get("warnings").is_none(), "{status}");
+
+    // Idempotent: a second install changes nothing and backs nothing up.
+    let backups = env.backups(".cursor/hooks.json");
+    env.ok(&[
+        "hook",
+        "install",
+        "--client",
+        "cursor",
+        "--cursor-edit-guard",
+    ]);
+    assert_eq!(env.read(".cursor/hooks.json"), cursor);
+    assert_eq!(env.backups(".cursor/hooks.json"), backups);
+
+    // Someone sets failClosed on our entry: status warns, in text and JSON.
+    let mut edited = cursor.clone();
+    for h in edited["hooks"]["preToolUse"].as_array_mut().unwrap() {
+        if h["command"].as_str().unwrap().contains("another-hook.sh") {
+            h["failClosed"] = json!(true);
+        }
+    }
+    env.write(".cursor/hooks.json", &edited);
+    let status = cursor_status(&env);
+    assert!(status["warnings"][0]
+        .as_str()
+        .unwrap()
+        .contains("\"failClosed\": true"));
+    assert!(env.ok(&["hook", "status"]).contains("warning:"));
+    // A refresh rewrites our entry without the key.
+    env.ok(&[
+        "hook",
+        "install",
+        "--client",
+        "cursor",
+        "--cursor-edit-guard",
+    ]);
+    assert!(!has_key(&env.read(".cursor/hooks.json"), "failClosed"));
+
+    // An install without the flag takes the guard out again; the user's hook stays.
+    env.ok(&["hook", "install", "--client", "cursor"]);
+    let cursor = env.read(".cursor/hooks.json");
+    assert_eq!(ours(&cursor), 4);
+    assert_eq!(
+        cursor["hooks"]["preToolUse"],
+        json!([{ "command": "policy.sh", "matcher": "Shell" }])
+    );
+
+    // The flag needs Cursor, and only applies to install.
+    let out = env.run(&[
+        "hook",
+        "install",
+        "--client",
+        "claude",
+        "--cursor-edit-guard",
+    ]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--client cursor"));
+    env.ok(&["hook", "install", "--client", "all", "--cursor-edit-guard"]);
+    assert_eq!(ours(&env.read(".cursor/hooks.json")), 5);
+    // Uninstall removes the guard with everything else.
+    env.ok(&["hook", "uninstall", "--client", "cursor"]);
+    assert_eq!(
+        env.read(".cursor/hooks.json"),
+        json!({ "version": 1, "hooks": { "preToolUse": [{ "command": "policy.sh", "matcher": "Shell" }] } })
+    );
+}
+
+fn cursor_edit(repo: &Path, rel: &str) -> Value {
+    json!({
+        "conversation_id": "c1",
+        "workspace_roots": [repo],
+        "hook_event_name": "preToolUse",
+        "tool_name": "Write",
+        "tool_input": { "file_path": repo.join(rel) },
+    })
+}
+
+fn claude_edit(repo: &Path, rel: &str) -> Value {
+    json!({
+        "session_id": "s1",
+        "cwd": repo,
+        "tool_name": "Edit",
+        "tool_input": { "file_path": repo.join(rel) },
+    })
+}
+
+#[test]
+fn cursor_pre_edit_replies_in_cursors_deny_shape() {
+    let env = Env::new();
+    // Tool hooks never create the database; a session start does.
+    env.hook("session-start", "claude", &stdin_for(&env.repo, "s1"), &[]);
+    assert_eq!(
+        env.hook(
+            "pre-edit",
+            "claude",
+            &claude_edit(&env.repo, "src/a.rs"),
+            &[]
+        ),
+        ""
+    );
+    // Held by claude@shop: Cursor gets its own deny shape, which the reply check accepts.
+    let out = env.hook(
+        "pre-edit",
+        "cursor",
+        &cursor_edit(&env.repo, "src/a.rs"),
+        &[],
+    );
+    assert_eq!(out.lines().count(), 1, "{out}");
+    let v: Value = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(v["permission"], "deny");
+    assert!(v["agent_message"]
+        .as_str()
+        .unwrap()
+        .contains("src/a.rs is held by claude@shop"));
+    assert_eq!(v["user_message"], v["agent_message"]);
+    assert!(v.get("hookSpecificOutput").is_none());
+    let mut check = env
+        .cmd(&["hook", "check-reply", "--client", "cursor"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    check
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(out.as_bytes())
+        .unwrap();
+    assert!(check.wait().unwrap().success());
+    // A free file: nothing printed (never "allow").
+    assert_eq!(
+        env.hook(
+            "pre-edit",
+            "cursor",
+            &cursor_edit(&env.repo, "src/b.rs"),
+            &[]
+        ),
+        ""
+    );
+}
+
+#[test]
+fn check_reply_opens_no_home() {
+    let env = Env::new();
+    let missing = env.home.join("never-created");
+    for (input, ok) in [
+        (
+            r#"{"permission":"deny","user_message":"m","agent_message":"m"}"#,
+            true,
+        ),
+        (r#"{"permission":"allow"}"#, false),
+        ("", false),
+    ] {
+        let mut child = env
+            .cmd(&["hook", "check-reply", "--client", "cursor"])
+            .env("ANOTHER_HOME", &missing)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.success(), ok, "{input}");
+        assert!(out.stdout.is_empty());
+    }
+    assert!(!missing.exists());
+}
+
+/// Run a wrapper script under `sh` exactly as a client would: arguments, JSON on stdin, a
+/// minimal environment. Returns stdout and the exit code.
+#[cfg(unix)]
+fn run_wrapper(
+    env: &Env,
+    script: &Path,
+    args: &[&str],
+    stdin: &Value,
+    extra: &[(&str, &str)],
+) -> (String, Option<i32>) {
+    let mut cmd = Command::new("/bin/sh");
+    cmd.arg(script)
+        .args(args)
+        .env_clear()
+        .env("HOME", &env.home)
+        .env("PATH", "/usr/bin:/bin");
+    for (k, v) in extra {
+        cmd.env(k, v);
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // A wrapper that exits without reading stdin closes the pipe; that is fine here.
+    let _ = child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.to_string().as_bytes());
+    let out = child.wait_with_output().unwrap();
+    (String::from_utf8(out.stdout).unwrap(), out.status.code())
+}
+
+#[cfg(unix)]
+const GUARD_ARGS: [&str; 3] = ["pre-edit", "--client", "cursor"];
+
+#[cfg(unix)]
+#[test]
+fn cursor_wrapper_forwards_only_a_checked_deny() {
+    let env = Env::new();
+    env.ok(&[
+        "hook",
+        "install",
+        "--client",
+        "cursor",
+        "--cursor-edit-guard",
+    ]);
+    let script = env.another_home.join("hooks/another-hook.sh");
+    env.hook("session-start", "claude", &stdin_for(&env.repo, "s1"), &[]);
+    env.hook(
+        "pre-edit",
+        "claude",
+        &claude_edit(&env.repo, "src/a.rs"),
+        &[],
+    );
+
+    // Conflict: exactly the deny line, exit 0.
+    let (out, code) = run_wrapper(
+        &env,
+        &script,
+        &GUARD_ARGS,
+        &cursor_edit(&env.repo, "src/a.rs"),
+        &[],
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(out.lines().count(), 1, "{out}");
+    assert_eq!(
+        serde_json::from_str::<Value>(out.trim()).unwrap()["permission"],
+        "deny"
+    );
+
+    // No conflict: the hold is taken, nothing printed, exit 1 (Cursor: hook failed,
+    // action proceeds).
+    let (out, code) = run_wrapper(
+        &env,
+        &script,
+        &GUARD_ARGS,
+        &cursor_edit(&env.repo, "src/b.rs"),
+        &[],
+    );
+    assert_eq!((out.as_str(), code), ("", Some(1)));
+    let holds = env.ok(&["holds"]);
+    assert!(
+        holds.contains("cursor@shop") && holds.contains("src/b.rs"),
+        "{holds}"
+    );
+
+    // No database at the home it is pointed at: nothing printed, exit 1, nothing created.
+    let missing = env.home.join("no-home");
+    let (out, code) = run_wrapper(
+        &env,
+        &script,
+        &GUARD_ARGS,
+        &cursor_edit(&env.repo, "src/a.rs"),
+        &[("ANOTHER_HOME", missing.to_str().unwrap())],
+    );
+    assert_eq!((out.as_str(), code), ("", Some(1)));
+    assert!(!missing.join("another.db").exists());
+
+    // Every other route keeps exiting 0.
+    let (_, code) = run_wrapper(
+        &env,
+        &script,
+        &["post-tool", "--client", "cursor"],
+        &json!({}),
+        &[],
+    );
+    assert_eq!(code, Some(0));
+}
+
+#[cfg(unix)]
+#[test]
+fn cursor_wrapper_fails_open_on_every_bad_reply() {
+    let env = Env::new();
+    env.ok(&[
+        "hook",
+        "install",
+        "--client",
+        "cursor",
+        "--cursor-edit-guard",
+    ]);
+    let real = env!("CARGO_BIN_EXE_another");
+    let installed =
+        std::fs::read_to_string(env.another_home.join("hooks/another-hook.sh")).unwrap();
+    let quoted = format!("'{real}'");
+    assert!(installed.contains(&quoted), "{installed}");
+
+    // A stand-in binary: `hook check-reply` is the real one; `hook run` misbehaves as told.
+    let deny = r#"{"permission":"deny","user_message":"m","agent_message":"m"}"#;
+    let fake = env.home.join("fake-another");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = hook ] && [ \"$2\" = check-reply ]; then exec '{real}' \"$@\"; fi\n\
+             cat >/dev/null\n\
+             case \"$FAKE_MODE\" in\n\
+             \x20 deny) printf '%s\\n' '{deny}' ;;\n\
+             \x20 deny-exit3) printf '%s\\n' '{deny}'; exit 3 ;;\n\
+             \x20 partial) printf '%s' '{{\"permission\":\"deny\",\"user_mess' ;;\n\
+             \x20 deny-garbage) printf '%s\\n%s\\n' '{deny}' 'garbage' ;;\n\
+             \x20 deny-nul) printf '%s\\n\\000' '{deny}' ;;\n\
+             \x20 deny-newlines) printf '%s' '{deny}'; i=0; while [ $i -lt 9000 ]; do printf '\\n'; i=$((i+1)); done ;;\n\
+             \x20 deny-spaces) printf '%s' '{deny}'; head -c 1000000 /dev/zero | tr '\\000' ' ' ;;\n\
+             \x20 allow) printf '%s\\n' '{{\"permission\":\"allow\"}}' ;;\n\
+             \x20 crash) kill -SEGV $$ ;;\n\
+             \x20 empty) ;;\n\
+             esac\n\
+             exit 0\n"
+        ),
+    )
+    .unwrap();
+    set_mode(&fake, 0o755);
+    let script = env.home.join("wrapper-fake.sh");
+    std::fs::write(
+        &script,
+        installed.replace(&quoted, &format!("'{}'", fake.display())),
+    )
+    .unwrap();
+    let stdin = cursor_edit(&env.repo, "src/a.rs");
+
+    let (out, code) = run_wrapper(&env, &script, &GUARD_ARGS, &stdin, &[("FAKE_MODE", "deny")]);
+    assert_eq!(code, Some(0));
+    assert_eq!(out, format!("{deny}\n"), "a valid deny is forwarded as is");
+
+    for mode in [
+        "deny-exit3",
+        "partial",
+        "deny-garbage",
+        // REVIEW-IMPL IMPL-1: bytes a shell variable would drop must still reject.
+        "deny-nul",
+        "deny-newlines",
+        // Valid trailing whitespace, but far past the size cap.
+        "deny-spaces",
+        "allow",
+        "crash",
+        "empty",
+    ] {
+        let (out, code) = run_wrapper(&env, &script, &GUARD_ARGS, &stdin, &[("FAKE_MODE", mode)]);
+        assert_eq!((out.as_str(), code), ("", Some(1)), "mode {mode}");
+    }
+
+    // Grok runs Cursor's hook file too: it gets the ordinary always-exit-0 route.
+    let (out, code) = run_wrapper(
+        &env,
+        &script,
+        &GUARD_ARGS,
+        &stdin,
+        &[("FAKE_MODE", "partial"), ("GROK_HOOK_EVENT", "PreToolUse")],
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(out, r#"{"permission":"deny","user_mess"#);
+
+    // A missing binary: nothing printed, exit 1 for the guard, exit 0 elsewhere.
+    let gone = env.home.join("wrapper-missing.sh");
+    std::fs::write(&gone, installed.replace(&quoted, "'/nonexistent/another'")).unwrap();
+    let (out, code) = run_wrapper(&env, &gone, &GUARD_ARGS, &stdin, &[]);
+    assert_eq!((out.as_str(), code), ("", Some(1)));
+    let (out, code) = run_wrapper(
+        &env,
+        &gone,
+        &["prompt", "--client", "claude"],
+        &json!({}),
+        &[],
+    );
+    assert_eq!((out.as_str(), code), ("", Some(0)));
+}

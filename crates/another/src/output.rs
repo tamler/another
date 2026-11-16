@@ -257,13 +257,18 @@ pub struct HookStatus {
     /// Configuration presence does not verify whether Codex trusted or ran the hooks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trust_note: Option<&'static str>,
+    /// Cursor only: whether the opt-in edit guard entry is installed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edit_guard: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 pub fn hook_status(rows: &[HookStatus]) -> String {
     rows.iter()
         .map(|r| {
-            format!(
-                "{:<7} {:<13} {}\n{}",
+            let mut out = format!(
+                "{:<7} {:<13} {}\n",
                 r.client,
                 if r.installed {
                     "installed"
@@ -271,10 +276,17 @@ pub fn hook_status(rows: &[HookStatus]) -> String {
                     "not installed"
                 },
                 r.config,
-                r.trust_note
-                    .map(|note| format!("  {note}\n"))
-                    .unwrap_or_default()
-            )
+            );
+            if let Some(note) = r.trust_note {
+                out.push_str(&format!("  {note}\n"));
+            }
+            if r.edit_guard == Some(true) {
+                out.push_str("  edit guard installed (preview)\n");
+            }
+            for w in &r.warnings {
+                out.push_str(&format!("  warning: {w}\n"));
+            }
+            out
         })
         .collect()
 }
