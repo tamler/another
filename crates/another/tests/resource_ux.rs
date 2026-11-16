@@ -175,6 +175,43 @@ fn borrow_wait_takes_the_resource_once_it_is_free() {
     assert!(stdout.contains("owner b@shop until"), "{stdout}");
 }
 
+/// Review R1 of #161 (P2): a retry blocked on the database lock past the deadline must not
+/// succeed when the lock is let go. The test holds an immediate transaction for 2 s
+/// against `--wait 1`, frees the resource inside it, and commits: the late attempt gives up.
+#[test]
+fn borrow_wait_does_not_acquire_after_its_deadline() {
+    use std::io::{BufRead, BufReader};
+    let fx = Fx::new();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_another"))
+        .args(["borrow", "gpu:metal:0", "-a", "b", "--wait", "1"])
+        .current_dir(&fx.cwd)
+        .env("ANOTHER_HOME", &fx.home)
+        .env_remove("ANOTHER_AGENT")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut err = BufReader::new(child.stderr.take().unwrap());
+    let mut notice = String::new();
+    err.read_line(&mut notice).unwrap();
+    assert!(notice.contains("waiting up to 1s"), "{notice}");
+    let db = rusqlite::Connection::open(fx.home.join("another.db")).unwrap();
+    db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    db.execute_batch("UPDATE resource_leases SET expires_at = 0; COMMIT")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut err, &mut rest).unwrap();
+    assert!(
+        !out.status.success(),
+        "acquired after the wait: {}",
+        text(&out.stdout)
+    );
+    assert!(rest.contains("still held after 1s"), "{rest}");
+}
+
 #[test]
 fn borrow_wait_has_a_ceiling() {
     let fx = Fx::new();

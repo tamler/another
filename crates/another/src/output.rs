@@ -320,7 +320,7 @@ fn resource(r: &Resource) -> String {
         (None, None, None) => "-".to_string(),
     };
     let node = match (&r.node, r.reachable) {
-        (Some(n), Some(false)) => format!("  on {n}, not reachable from here"),
+        (Some(n), Some(false)) => format!("  on {n}; its endpoint is not reachable from here"),
         (Some(n), _) => format!("  on {n}"),
         (None, _) => String::new(),
     };
@@ -347,11 +347,13 @@ fn resource(r: &Resource) -> String {
             .as_deref()
             .map(|s| format!(" since {s}"))
             .unwrap_or_default();
-        let _ = writeln!(
-            out,
-            "{:9}no live lease{since}; borrowing it adopts it, and `another orphans` lists it",
-            ""
-        );
+        // Only the owning node can adopt a lapsed resource (`borrow_resource` refuses a
+        // foreign one with no live owner).
+        let next = match &r.node {
+            None => "borrowing it adopts it, and `another orphans` lists it".to_string(),
+            Some(n) => format!("only an agent on {n} can adopt it"),
+        };
+        let _ = writeln!(out, "{:9}no live lease{since}; {next}", "");
     }
     out
 }

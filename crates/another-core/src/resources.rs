@@ -174,6 +174,14 @@ impl ResourceRef {
             _ => Ok(ResourceRef::Id(raw.to_string())),
         }
     }
+
+    /// `kind name` or the id, for messages.
+    pub fn describe(&self) -> String {
+        match self {
+            ResourceRef::Id(id) => id.clone(),
+            ResourceRef::Name(kind, name) => format!("{} {name}", kind.as_str()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -818,8 +826,28 @@ impl Store {
         target: &ResourceRef,
         ttl_seconds: Option<i64>,
     ) -> Result<LeaseOutcome> {
+        self.borrow_resource_before(agent, target, ttl_seconds, None)
+    }
+
+    /// [`Store::borrow_resource`] that changes nothing once `deadline_ms` has passed. The
+    /// deadline is checked inside the write transaction, after its lock is taken, so a
+    /// borrow that waited on a busy database past its deadline gives up instead of
+    /// succeeding late (`another borrow --wait`).
+    pub fn borrow_resource_before(
+        &self,
+        agent: &str,
+        target: &ResourceRef,
+        ttl_seconds: Option<i64>,
+        deadline_ms: Option<i64>,
+    ) -> Result<LeaseOutcome> {
         let ttl = clamp_ttl(ttl_seconds)?;
         self.write(|tx| {
+            if deadline_ms.is_some_and(|d| tx.now > d) {
+                return Err(Error::Conflict(format!(
+                    "{} was not borrowed: the wait ended",
+                    target.describe()
+                )));
+            }
             crate::holds::sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, agent)?;
             let rid = resolve(tx, tx.node_id, target)?;

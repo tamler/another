@@ -31,7 +31,12 @@ another resource register model_server ollama@11434 --agent claude@shop --endpoi
 
 - **Commands**: `another resource list`, `another resource borrow` and `another resource return` are the same as `another resources`, `another borrow` and `another release`. The listing gives each resource's endpoint (or port, or pid), then one line per live lease, owner first: who holds it, as `owner` or `borrower`, and until when.
 - **Leases**: the registering agent holds the **owner** lease; others take **borrower** leases (shared resources only; `--exclusive` refuses borrowers). `refcount` is the number of live leases.
-- **Waiting**: `another borrow <target> --wait 600` keeps trying, every 2 seconds for up to 600 seconds (at most 3600), while another agent holds the resource exclusively. It fails at once on anything else. When the holder returns it, the waiting agent adopts it as owner. Without `--wait`, an exclusive resource is refused at once.
+- **Waiting**: `another borrow <target> --wait 600` keeps trying, every 2 seconds for up to 600 seconds (at most 3600), while another agent holds **a resource on this node** exclusively.
+  - It fails at once on anything else, including any refusal for a resource on another node.
+  - When the holder returns it, the waiting agent adopts it as owner.
+  - No attempt succeeds after the wait: the deadline is checked inside each attempt's database transaction, so an attempt delayed by a busy database gives up rather than succeeding late.
+  - Without `--wait`, an exclusive resource is refused at once.
+  - A lapsed resource on **another** node cannot be adopted from here; only an agent on its own node can adopt it, and the listing says so.
 - **TTL**: default 30 minutes, clamped to 1 minute-24 hours. `another heartbeat` (and the session hooks) renew every lease the agent holds; `another resource heartbeat` renews just resources.
 - **Release**: `another release <target> --agent X`. If the owner leaves while others borrow, the oldest borrower becomes owner. After shutting a resource down, the owner runs `another release <target> --agent X --stopped`.
 - **Session end**: `another heartbeat --end` (and the session-end hook) releases the agent's holds and resource leases. Add `--keep` to keep resource leases for a server meant to outlive the session.
