@@ -633,3 +633,176 @@ fn a_failed_anchor_write_does_not_leave_an_advanced_cursor() {
     sync(&alpha);
     assert_eq!(subjects(&alpha.store, "a1", "after failure").len(), 40);
 }
+
+/// Regression for the adversarial pass on #166 (FINDINGS-166 P2-1, test by claude@lanes).
+/// The restore loses an event alpha *did* receive (beta's mail). Beta resyncs first and
+/// pushes that event again under the same id, so alpha's received anchor is on the hub
+/// again, and the hub then writes past alpha's old cursor. Alpha's pushed anchor ("a lost")
+/// is one no other spoke can bring back, so alpha still resets and pushes it again.
+#[test]
+fn an_anchor_another_spoke_re_pushed_does_not_hide_the_restore() {
+    let root = tempfile::tempdir().unwrap();
+    let mut hub = Hub::start(root.path());
+    let alpha = spoke(root.path(), "alpha", Clock::System);
+    let beta = spoke(root.path(), "beta", Clock::System);
+    hub.join(&alpha);
+    hub.join(&beta);
+    register(&hub.store, "hq", None);
+    register(&alpha.store, "a1", None);
+    register(&beta.store, "b1", None);
+    for s in [&alpha, &beta, &alpha] {
+        sync(s);
+    }
+    let backup = root.path().join("hub-backup.db");
+    rusqlite::Connection::open(hub.home.join(DB_FILE))
+        .unwrap()
+        .execute("VACUUM INTO ?1", [backup.to_string_lossy()])
+        .unwrap();
+
+    // After the backup: alpha mails the hub; beta mails alpha, and alpha receives it last.
+    send(&alpha.store, "a1", "hq@@hub", "a lost");
+    sync(&alpha);
+    send(&beta.store, "b1", "a1@@alpha", "b lost");
+    sync(&beta);
+    sync(&alpha);
+    assert_eq!(subjects(&alpha.store, "a1", "b lost").len(), 1);
+    let anchor = alpha.store.last_relayed_event_id().unwrap();
+    let (_, old_cursor) = alpha.store.push_cursor(hub.store.node_id()).unwrap();
+
+    hub.restore(&backup);
+    assert!(subjects(&hub.store, "hq", "a lost").is_empty(), "restored");
+
+    // Beta notices on its own and pushes its history again, including "b lost".
+    let rb = sync(&beta);
+    println!("beta: hub_reset={} pushed={}", rb.hub_reset, rb.pushed);
+    let anchor_back = anchor
+        .as_deref()
+        .map(|id| event_ids(&hub.store).contains(id))
+        .unwrap_or(false);
+    println!("alpha's anchor {anchor:?} is on the hub again: {anchor_back}");
+
+    // The hub moves past alpha's old cursor.
+    let mut i = 0;
+    while hub.store.events(1).unwrap()[0].seq <= old_cursor + 5 {
+        send(&hub.store, "hq", "a1@@alpha", &format!("hq new {i}"));
+        i += 1;
+    }
+    let ra = sync(&alpha);
+    println!(
+        "alpha: hub_reset={} pulled={} applied={}; hq new sent={i}, received={}; hub has 'a lost': {}",
+        ra.hub_reset,
+        ra.pulled,
+        ra.applied,
+        subjects(&alpha.store, "a1", "hq new").len(),
+        subjects(&hub.store, "hq", "a lost").len()
+    );
+    assert_eq!(
+        subjects(&hub.store, "hq", "a lost").len(),
+        1,
+        "alpha's mail that the restore lost never reaches the hub again"
+    );
+    assert_eq!(
+        subjects(&alpha.store, "a1", "hq new").len(),
+        i,
+        "hub mail written below alpha's old cursor is skipped"
+    );
+    assert_converged(&hub, &alpha);
+}
+
+/// The hub-side variant FINDINGS-166 named but did not run. Alpha pushes nothing after the
+/// backup, so its pushed anchor survives the restore. Its received anchor is beta's mail,
+/// which beta pushes again, but at a lower hub `seq` than alpha received it at. New hub
+/// mail then lands at sequence numbers at or below alpha's old cursor. The `seq` sent with
+/// the received anchor no longer matches, so alpha resets instead of skipping that mail.
+#[test]
+fn a_re_pushed_anchor_at_a_new_seq_still_resets_so_hub_mail_below_the_cursor_arrives() {
+    let root = tempfile::tempdir().unwrap();
+    let mut hub = Hub::start(root.path());
+    let alpha = spoke(root.path(), "alpha", Clock::System);
+    let beta = spoke(root.path(), "beta", Clock::System);
+    hub.join(&alpha);
+    hub.join(&beta);
+    register(&hub.store, "hq", None);
+    register(&alpha.store, "a1", None);
+    register(&beta.store, "b1", None);
+    for s in [&alpha, &beta, &alpha] {
+        sync(s);
+    }
+    let backup = root.path().join("hub-backup.db");
+    rusqlite::Connection::open(hub.home.join(DB_FILE))
+        .unwrap()
+        .execute("VACUUM INTO ?1", [backup.to_string_lossy()])
+        .unwrap();
+
+    // After the backup: hub mail to alpha, then beta's mail to alpha, received last.
+    for i in 0..5 {
+        send(&hub.store, "hq", "a1@@alpha", &format!("hq lost {i}"));
+    }
+    send(&beta.store, "b1", "a1@@alpha", "b anchor");
+    sync(&beta);
+    sync(&alpha);
+    assert_eq!(subjects(&alpha.store, "a1", "b anchor").len(), 1);
+    let (_, old_cursor) = alpha.store.push_cursor(hub.store.node_id()).unwrap();
+
+    hub.restore(&backup);
+    assert!(sync(&beta).hub_reset, "beta notices the restore itself");
+    let anchor = alpha.store.last_relayed_event_id().unwrap().unwrap();
+    assert!(
+        event_ids(&hub.store).contains(&anchor),
+        "beta put alpha's received anchor back on the hub"
+    );
+
+    let first_new = hub.store.events(1).unwrap()[0].seq + 1;
+    assert!(
+        first_new <= old_cursor,
+        "new hub mail lands below alpha's cursor"
+    );
+    let mut sent = 0;
+    while hub.store.events(1).unwrap()[0].seq <= old_cursor + 5 {
+        send(&hub.store, "hq", "a1@@alpha", &format!("hq new {sent}"));
+        sent += 1;
+    }
+    let report = sync(&alpha);
+    assert!(
+        report.hub_reset,
+        "alpha resets: its anchor is at another seq"
+    );
+    assert_eq!(subjects(&alpha.store, "a1", "hq new").len(), sent);
+    assert_converged(&hub, &alpha);
+}
+
+/// Only the pushed anchor catches this one. Alpha receives nothing after the backup, so its
+/// received anchor survives the restore at the same `seq`, and its pull cursor never passed
+/// its own events, so the hub's log still reaches it. Only alpha's own mail was lost.
+#[test]
+fn a_restore_that_lost_only_this_spokes_own_events_is_detected() {
+    let root = tempfile::tempdir().unwrap();
+    let mut hub = Hub::start(root.path());
+    let alpha = spoke(root.path(), "alpha", Clock::System);
+    hub.join(&alpha);
+    register(&hub.store, "hq", None);
+    register(&alpha.store, "a1", None);
+    sync(&alpha);
+    send(&hub.store, "hq", "a1@@alpha", "before backup");
+    send(&alpha.store, "a1", "hq@@hub", "a kept");
+    sync(&alpha);
+    let backup = root.path().join("hub-backup.db");
+    rusqlite::Connection::open(hub.home.join(DB_FILE))
+        .unwrap()
+        .execute("VACUUM INTO ?1", [backup.to_string_lossy()])
+        .unwrap();
+
+    send(&alpha.store, "a1", "hq@@hub", "a only");
+    sync(&alpha);
+    assert_eq!(subjects(&hub.store, "hq", "a only").len(), 1);
+    hub.restore(&backup);
+    assert!(subjects(&hub.store, "hq", "a only").is_empty(), "restored");
+
+    let report = sync(&alpha);
+    assert!(
+        report.hub_reset,
+        "alpha's last pushed event is gone from the hub"
+    );
+    assert_eq!(subjects(&hub.store, "hq", "a only").len(), 1);
+    assert_converged(&hub, &alpha);
+}
