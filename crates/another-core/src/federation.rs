@@ -133,6 +133,25 @@ pub struct PullResponse {
     pub more: bool,
     /// Every node the hub knows (including itself), for addressing and signature checks.
     pub nodes: Vec<NodeEntry>,
+    /// The hub's log no longer contains what this spoke already received: the hub was
+    /// restored from an older copy, or replaced. No events are sent; the spoke rewinds both
+    /// cursors to zero and syncs again (ingest skips duplicates). Absent from older hubs.
+    #[serde(default)]
+    pub reset: bool,
+}
+
+/// What a spoke tells its hub on a pull so the hub can tell whether it was restored from an
+/// older copy (see [`Store::pull_for_from`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PullAnchors {
+    /// The last event the hub sent this spoke.
+    pub received: Option<String>,
+    /// The hub's `seq` for `received`, as sent. A restored hub can hold that event again,
+    /// pushed back by its author, but then at another `seq`.
+    pub received_seq: Option<i64>,
+    /// The last event of this spoke's own that the hub accepted. Only this spoke pushes its
+    /// own events, so no other spoke can put it back on a restored hub.
+    pub pushed: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -312,6 +331,73 @@ fn wire_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<WireEvent> {
 
 const WIRE_SELECT: &str =
     "SELECT seq, event_id, node_id, ts, actor, kind, payload, prev_id, sig FROM events";
+
+/// The anchor for a spoke's next pull and the hub `seq` it was sent at: the newest stored
+/// foreign event (no `seq` known), or the `anchor` and `seq` of a newer local
+/// `peer.anchored` / `peer.resynced` record. See [`Store::last_relayed_event_id`].
+fn relayed_anchor(conn: &Connection, local: &str) -> Result<Option<(String, Option<i64>)>> {
+    let newest: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT kind, event_id, payload FROM events
+             WHERE node_id != ?1
+                OR (node_id = ?1 AND kind IN ('peer.resynced', 'peer.anchored'))
+             ORDER BY seq DESC LIMIT 1",
+            [local],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    Ok(match newest {
+        Some((kind, _, payload)) if kind == "peer.resynced" || kind == "peer.anchored" => {
+            let p = serde_json::from_str::<Value>(&payload).unwrap_or(Value::Null);
+            p.get("anchor")
+                .and_then(Value::as_str)
+                .map(|id| (id.to_string(), p.get("seq").and_then(Value::as_i64)))
+        }
+        Some((_, event_id, _)) => Some((event_id, None)),
+        None => None,
+    })
+}
+
+/// The newest of this spoke's own events its hub accepted: the `anchor` of the newest local
+/// `peer.pushed` or `peer.resynced` record. A resync records it again, or `null` when the
+/// restored hub accepted nothing, so an event the hub later refuses cannot stay the anchor.
+fn pushed_anchor(conn: &Connection, local: &str) -> Result<Option<String>> {
+    let newest: Option<(String, String)> = conn
+        .query_row(
+            "SELECT kind, payload FROM events
+             WHERE node_id = ?1 AND kind IN ('peer.pushed', 'peer.resynced')
+             ORDER BY seq DESC LIMIT 1",
+            [local],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(newest.and_then(|(kind, payload)| {
+        let p = serde_json::from_str::<Value>(&payload).ok()?;
+        let key = if kind == "peer.pushed" {
+            "anchor"
+        } else {
+            "pushed"
+        };
+        p.get(key)?.as_str().map(str::to_string)
+    }))
+}
+
+/// Every node with a key, for a pull response's addressing and signature checks.
+fn known_nodes(conn: &Connection) -> Result<Vec<NodeEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT node_id, display_name, public_key FROM nodes WHERE public_key IS NOT NULL",
+    )?;
+    let nodes = stmt
+        .query_map([], |r| {
+            Ok(NodeEntry {
+                node_id: r.get(0)?,
+                display_name: r.get(1)?,
+                public_key: r.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(nodes)
+}
 
 /// (role, perms, revoked_at)
 type PeerRow = (String, Vec<Perm>, Option<i64>);
@@ -1091,7 +1177,9 @@ impl Store {
         signature: &str,
     ) -> Result<Vec<Perm>> {
         let denied = || Error::Forbidden("request not signed by a paired node".into());
-        if (self.now() - time_ms).abs() > 5 * 60 * 1000 {
+        // `time_ms` comes from an unauthenticated header: compare without overflow, so an
+        // extreme value can neither panic nor wrap past the window.
+        if self.now().abs_diff(time_ms) > 5 * 60 * 1000 {
             return Err(Error::Forbidden(
                 "request time is more than 5 minutes off; check the clocks".into(),
             ));
@@ -1362,24 +1450,28 @@ impl Store {
         })
     }
 
-    pub fn set_push_cursor(&self, peer: &str, seq: i64) -> Result<()> {
+    /// Spoke side: after a push batch to `peer`, commit the push cursor and, in the same
+    /// transaction, the pushed anchor: `last_accepted`, the batch's last event the hub
+    /// accepted or already held. A node-local `peer.pushed` records it when it changes.
+    pub fn advance_push(&self, peer: &str, seq: i64, last_accepted: Option<&str>) -> Result<()> {
         self.write(|tx| {
             tx.execute(
                 "UPDATE peers SET push_cursor = max(push_cursor, ?2), last_sync_at = ?3 WHERE node_id = ?1",
                 params![peer, seq, tx.now],
             )?;
+            if let Some(id) = last_accepted {
+                if pushed_anchor(tx, tx.node_id)?.as_deref() != Some(id) {
+                    tx.emit("system", "peer.pushed", json!({ "peer": peer, "anchor": id }))?;
+                }
+            }
             Ok(())
         })
     }
 
-    pub fn set_pull_cursor(&self, peer: &str, seq: i64) -> Result<()> {
-        self.write(|tx| {
-            tx.execute(
-                "UPDATE peers SET pull_cursor = max(pull_cursor, ?2), last_sync_at = ?3 WHERE node_id = ?1",
-                params![peer, seq, tx.now],
-            )?;
-            Ok(())
-        })
+    /// Spoke side: the newest of this node's own events its hub accepted, the pushed anchor
+    /// for [`Store::pull_for_from`].
+    pub fn last_pushed_event_id(&self) -> Result<Option<String>> {
+        self.read(|conn| pushed_anchor(conn, self.node_id()))
     }
 
     pub fn push_cursor(&self, peer: &str) -> Result<(i64, i64)> {
@@ -1394,12 +1486,58 @@ impl Store {
 
     /// Hub side: what a spoke receives after `after_seq` (its own events excluded).
     pub fn pull_for(&self, peer: &str, after_seq: i64, limit: u32) -> Result<PullResponse> {
+        self.pull_for_from(peer, after_seq, &PullAnchors::default(), limit)
+    }
+
+    /// [`Store::pull_for`] with the spoke's [`PullAnchors`]. The response is `reset`, with no
+    /// events, when this hub's log no longer reaches `after_seq`, no longer holds the received
+    /// anchor at the `seq` it was sent at, or no longer holds the spoke's last pushed event.
+    /// Each means the hub was restored from an older copy or replaced, so its sequence
+    /// numbers no longer match the spoke's cursors. The received anchor is checked only when
+    /// `after_seq > 0`.
+    pub fn pull_for_from(
+        &self,
+        peer: &str,
+        after_seq: i64,
+        anchors: &PullAnchors,
+        limit: u32,
+    ) -> Result<PullResponse> {
         self.read(|conn| {
             let Some((role, perms, None)) = peer_row(conn, peer)? else {
                 return Err(Error::Forbidden("not a paired node".into()));
             };
             if role != "spoke" {
                 return Err(Error::Forbidden("only spokes pull from a hub".into()));
+            }
+            let high: i64 =
+                conn.query_row("SELECT coalesce(max(seq), 0) FROM events", [], |r| r.get(0))?;
+            let seq_of = |id: &str| -> Result<Option<i64>> {
+                Ok(conn
+                    .query_row("SELECT seq FROM events WHERE event_id = ?1", [id], |r| {
+                        r.get(0)
+                    })
+                    .optional()?)
+            };
+            let received_lost = match anchors.received.as_deref().filter(|_| after_seq > 0) {
+                Some(id) => match (seq_of(id)?, anchors.received_seq) {
+                    (None, _) => true,
+                    (Some(at), Some(sent_at)) => at != sent_at,
+                    (Some(_), None) => false,
+                },
+                None => false,
+            };
+            let pushed_lost = match anchors.pushed.as_deref() {
+                Some(id) => seq_of(id)?.is_none(),
+                None => false,
+            };
+            if after_seq > high || received_lost || pushed_lost {
+                return Ok(PullResponse {
+                    events: Vec::new(),
+                    cursor: 0,
+                    more: false,
+                    nodes: known_nodes(conn)?,
+                    reset: true,
+                });
             }
             let scan = limit.saturating_mul(4).max(limit);
             let mut stmt = conn.prepare(&format!(
@@ -1430,24 +1568,100 @@ impl Store {
                 }
             }
             let more = more || events.len() as u32 >= limit;
-            let mut stmt = conn.prepare(
-                "SELECT node_id, display_name, public_key FROM nodes WHERE public_key IS NOT NULL",
-            )?;
-            let nodes = stmt
-                .query_map([], |r| {
-                    Ok(NodeEntry {
-                        node_id: r.get(0)?,
-                        display_name: r.get(1)?,
-                        public_key: r.get(2)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(PullResponse {
                 events,
                 cursor,
                 more,
-                nodes,
+                nodes: known_nodes(conn)?,
+                reset: false,
             })
+        })
+    }
+
+    /// Spoke side: the last event this node received from its hub, the anchor for
+    /// [`Store::pull_for_from`]. Events from other nodes reach a spoke only through its hub
+    /// and are stored in the order the hub sent them. When the last event the hub sent was
+    /// not stored (a duplicate or a rejected event), or after a resync, the newest record
+    /// is a local `peer.anchored` or `peer.resynced` event naming it (`anchor`).
+    pub fn last_relayed_event_id(&self) -> Result<Option<String>> {
+        Ok(self
+            .read(|conn| relayed_anchor(conn, self.node_id()))?
+            .map(|(id, _)| id))
+    }
+
+    /// Spoke side: every anchor for the next pull from the hub (see [`PullAnchors`]).
+    pub fn pull_anchors(&self) -> Result<PullAnchors> {
+        self.read(|conn| {
+            let local = self.node_id();
+            let (received, received_seq) = relayed_anchor(conn, local)?.unzip();
+            Ok(PullAnchors {
+                received,
+                received_seq: received_seq.flatten(),
+                pushed: pushed_anchor(conn, local)?,
+            })
+        })
+    }
+
+    /// Spoke side: after a pull page from `peer` is ingested, commit its cursor and the
+    /// anchor that goes with it **in one transaction**, so a failure or crash can never
+    /// leave an advanced cursor beside an older anchor (REVIEW-R2). `last_received` is the
+    /// last event the page carried, with the hub `seq` it was sent at. A node-local
+    /// `peer.anchored` records both whenever they change. A page with no events moves the
+    /// cursor and keeps the anchor.
+    pub fn advance_pull(
+        &self,
+        peer: &str,
+        seq: i64,
+        last_received: Option<(&str, i64)>,
+    ) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE peers SET pull_cursor = max(pull_cursor, ?2), last_sync_at = ?3 WHERE node_id = ?1",
+                params![peer, seq, tx.now],
+            )?;
+            if let Some((id, at)) = last_received {
+                if relayed_anchor(tx, tx.node_id)? != Some((id.to_string(), Some(at))) {
+                    tx.emit(
+                        "system",
+                        "peer.anchored",
+                        json!({ "peer": peer, "anchor": id, "seq": at }),
+                    )?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Spoke side: start over with `peer` from zero in both directions, after the hub
+    /// reported `reset`. Duplicates are skipped on both sides, so this is safe to repeat.
+    pub fn reset_sync_cursors(&self, peer: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE peers SET push_cursor = 0, pull_cursor = 0 WHERE node_id = ?1",
+                [peer],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Spoke side: record a completed resync with `peer`: the last event it sent and the
+    /// `seq` it was sent at (the received anchor), and the last of this node's events it
+    /// accepted (the pushed anchor), each `null` when there was none. A `peer.*` event never
+    /// leaves this node.
+    pub fn record_resync(
+        &self,
+        peer: &str,
+        anchor: Option<(&str, i64)>,
+        pushed: Option<&str>,
+    ) -> Result<()> {
+        let (id, seq) = anchor.unzip();
+        self.write(|tx| {
+            tx.emit(
+                "system",
+                "peer.resynced",
+                json!({ "peer": peer, "anchor": id, "seq": seq, "pushed": pushed }),
+            )?;
+            Ok(())
         })
     }
 
@@ -1858,6 +2072,26 @@ mod tests {
             })
             .unwrap();
         assert_eq!(peer_expiry, 2_801_000);
+    }
+
+    #[test]
+    fn extreme_request_times_are_refused_without_overflow() {
+        // `x-another-time` is read from an unauthenticated header before any signature
+        // check; found by the peer_request fuzz harness.
+        let (clock, _) = crate::Clock::manual(1_800_000_000_000);
+        let store = Store::open_in_memory(clock).unwrap();
+        // The last value made the old wrapping difference exactly i64::MIN, whose wrapping
+        // `abs` stays negative: it slipped past the window in a release build.
+        let wrap_to_min = 1_800_000_000_000i64.wrapping_add(i64::MIN);
+        for time in [i64::MIN, i64::MIN + 1, i64::MAX, wrap_to_min] {
+            let err = store
+                .verify_peer_request("node", "GET", "/fed/pull", time, b"", "sig")
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("more than 5 minutes off"),
+                "{time}: {err}"
+            );
+        }
     }
 
     #[test]
