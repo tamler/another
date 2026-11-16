@@ -128,6 +128,24 @@ impl Hub {
         self.serve();
     }
 
+    /// Stop, replace the database with `backup` as an operator restoring a copy would, and
+    /// serve again. Every connection to the old file is closed first: Windows cannot delete
+    /// an open file, and a leftover WAL would replay the newer writes into the copy.
+    fn restore(&mut self, backup: &Path) {
+        self.stop();
+        // The server's clones went with its runtime; dropping ours closes the file.
+        self.store = Store::open_in_memory(Clock::System).unwrap();
+        for suffix in ["", "-wal", "-shm"] {
+            match std::fs::remove_file(self.home.join(format!("{DB_FILE}{suffix}"))) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => panic!("cannot remove {DB_FILE}{suffix}: {e}"),
+            }
+        }
+        std::fs::copy(backup, self.home.join(DB_FILE)).unwrap();
+        self.restart();
+    }
+
     fn join(&self, spoke: &Spoke) {
         let code = self
             .store
@@ -455,12 +473,7 @@ fn restored_hub(hub_moves_on: usize) {
     assert_eq!(subjects(&hub.store, "hq", "after").len(), 3);
 
     // The hub is restored from the backup: its post-backup events are gone.
-    hub.stop();
-    for suffix in ["", "-wal", "-shm"] {
-        let _ = std::fs::remove_file(hub.home.join(format!("{DB_FILE}{suffix}")));
-    }
-    std::fs::copy(&backup, hub.home.join(DB_FILE)).unwrap();
-    hub.restart();
+    hub.restore(&backup);
     assert!(subjects(&hub.store, "hq", "after").is_empty(), "restored");
     let lost_high = hub.store.events(1).unwrap()[0].seq;
     let (_, old_cursor) = alpha.store.push_cursor(hub.store.node_id()).unwrap();
