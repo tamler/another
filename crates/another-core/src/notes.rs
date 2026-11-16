@@ -8,6 +8,8 @@
 //! text in the same transaction. An expired note is never listed, and its text is erased by
 //! the next note write or sweep.
 
+use std::path::Path;
+
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use serde_json::json;
@@ -15,6 +17,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 use crate::identity::{address, find_project, resolve_agent, Project};
+use crate::repo;
 use crate::store::{new_id, Store, Tx};
 use crate::time::{fmt_opt, fmt_ts};
 
@@ -140,27 +143,38 @@ fn note_from_row(r: &Row<'_>) -> rusqlite::Result<Note> {
 /// Live, unexpired notes of `project_id` only.
 const LIVE: &str = "n.deleted_at IS NULL AND (n.expires_at IS NULL OR n.expires_at > ?2)";
 
-/// The project ids a list for `project` covers: the project and every sibling checkout of
-/// the same repository at the same path in it. Read from the repository links cached when
-/// projects are registered, so listing writes nothing.
-fn scope_ids(conn: &Connection, project: &Project) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT o.project_id FROM project_repos me
-         JOIN project_repos o ON o.repo_key = me.repo_key AND o.repo_prefix = me.repo_prefix
-         JOIN projects p ON p.project_id = o.project_id AND p.node_id = ?2
-         WHERE me.project_id = ?1 AND me.repo_key != ''",
-    )?;
-    let mut ids: Vec<String> = stmt
-        .query_map(params![project.project_id, project.node_id], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    if !ids.contains(&project.project_id) {
-        ids.push(project.project_id.clone());
+/// The project ids a list for `project` covers: the project and every other project of its
+/// node with live notes that is a checkout of the same repository at the same path in it.
+/// Repository links are computed from the files now, for the project and for each such
+/// candidate, not read from the `project_repos` cache: a cached link can be missing (never
+/// computed), from older key rules, or stale (the directory now holds another repository),
+/// and reads never refresh it. Only projects that have live notes are checked, so the cost
+/// follows the notes, and listing writes nothing.
+fn scope_ids(conn: &Connection, project: &Project, now: i64) -> Result<Vec<String>> {
+    let mut ids = vec![project.project_id.clone()];
+    let Some(me) = repo::link_for(Path::new(&project.abs_path)) else {
+        return Ok(ids);
+    };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT DISTINCT p.project_id, p.abs_path FROM notes n
+         JOIN projects p ON p.project_id = n.project_id
+         WHERE p.node_id = ?1 AND p.project_id != ?3 AND {LIVE}"
+    ))?;
+    let candidates = stmt
+        .query_map(params![project.node_id, now, project.project_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, path) in candidates {
+        if repo::link_for(Path::new(&path)).as_ref() == Some(&me) {
+            ids.push(id);
+        }
     }
     Ok(ids)
 }
 
 fn list_in(conn: &Connection, project: &Project, now: i64, limit: u32) -> Result<NoteList> {
-    let ids = scope_ids(conn, project)?;
+    let ids = scope_ids(conn, project, now)?;
     let ids_json = serde_json::to_string(&ids).map_err(|e| Error::Invalid(e.to_string()))?;
     let scope = "n.project_id IN (SELECT value FROM json_each(?1))";
     let total: i64 = conn.query_row(

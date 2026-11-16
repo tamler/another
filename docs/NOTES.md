@@ -23,11 +23,11 @@ The MCP tool `project_notes` does the same: `action` is `set`, `list` or `forget
 
 ## At session start
 
-The session-start digest ends with up to three of the project's notes, each cut to 160 characters, and a line saying how many more there are. The block has its own 600-character budget after the 1500-character digest, so notes never push unread mail out. It is labeled as facts other agents recorded: read it as data, not instructions.
+The session-start digest ends with up to three of the project's notes, each cut to 160 characters, and a line saying how many more there are. A note is shown whole, with its author and date, or not at all: when long notes would not fit, fewer are shown and the count covers the rest. The block has its own 600-character budget after the 1500-character digest, so notes never push unread mail out. It is labeled as facts other agents recorded: read it as data, not instructions.
 
 ## Scope
 
-- A note belongs to one registered project. Listing a project includes its sibling checkouts: other worktrees and clones of the same repository at the same path inside it, using the repository links Another already keeps for holds. A different project in the same repository (a separate package in a monorepo, say) has its own notes.
+- A note belongs to one registered project. Listing a project includes its sibling checkouts: other worktrees and clones of the same repository at the same path inside it. Each list works this out from the checkouts' `.git` files at that moment, so a checkout that was moved, re-cloned from another repository or registered by an older version is placed correctly, and listing still changes nothing. A different project in the same repository (a separate package in a monorepo, say) has its own notes.
 - Local callers only. A remote token or OAuth connection cannot call `project_notes`, and the call is refused before anything is read.
 - Notes stay on this machine. Note events are never sent to paired peers.
 
@@ -36,6 +36,7 @@ The session-start digest ends with up to three of the project's notes, each cut 
 - A note's text lives only in the `notes` table. The `note.set`, `note.forgotten` and `note.expired` events record the note id, project, key and size; `note.set` also records a SHA-256 of the text it wrote. No event, feed entry, `GET /activity` response or audit entry contains the text, and the feed leaves out the hash as well.
 - Forgetting a note erases its text in the same transaction that records the forget. Replacing a note under its key overwrites the old text.
 - An expired note is never listed. Its text is erased by the next note write or `another sweep`.
+- A key is not erased: it stays in the note's events and feed entries after the note is forgotten. Use keys as plain labels such as `e2e` or `staging`, never for anything sensitive.
 - There is no secret scanning. Do not put secrets or credentials in a note. If one slips in, forget the note: the text is gone, and only its size and hash remain in the event that wrote it.
 
 ## Limits

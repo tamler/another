@@ -148,6 +148,134 @@ fn a_note_reaches_its_project_and_sibling_checkouts_only() {
     assert!(fx.texts(&fx.blog).is_empty(), "another project does not");
 }
 
+/// Everything a list must leave alone: cached repository links, events and notes.
+fn db_state(fx: &Fixture) -> Vec<String> {
+    let db = rusqlite::Connection::open(fx.home.join("another.db")).unwrap();
+    let mut out = Vec::new();
+    for sql in [
+        "SELECT project_id || '|' || repo_key || '|' || repo_prefix || '|' || checked_at
+         FROM project_repos ORDER BY project_id",
+        "SELECT 'events ' || count(*) FROM events",
+        "SELECT note_id || '|' || text || '|' || ifnull(deleted_at, '') FROM notes ORDER BY note_id",
+        "SELECT 'projects ' || count(*) FROM projects",
+    ] {
+        let mut stmt = db.prepare(sql).unwrap();
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+        out.extend(rows.map(Result::unwrap));
+    }
+    out
+}
+
+fn cache_sql(fx: &Fixture, project: &Path, sql: &str) {
+    let db = rusqlite::Connection::open(fx.home.join("another.db")).unwrap();
+    let changed = db
+        .execute(
+            &format!(
+                "{sql} WHERE project_id = (SELECT project_id FROM projects WHERE abs_path = ?1)"
+            ),
+            [fx.path(project)],
+        )
+        .unwrap();
+    assert_eq!(
+        changed, 1,
+        "the fixture project has a cached link to change"
+    );
+}
+
+#[test]
+fn a_missing_or_outdated_cached_link_does_not_hide_a_sibling() {
+    let fx = Fixture::new();
+    fx.set("alice", &fx.shop, None, "fact from shop").unwrap();
+    fx.clock.fetch_add(1000, Ordering::SeqCst);
+    fx.set("bob", &fx.shop_wt, None, "fact from the worktree")
+        .unwrap();
+    let both = ["fact from the worktree", "fact from shop"];
+
+    // A project whose link was never computed (registered before links existed).
+    cache_sql(&fx, &fx.shop_wt, "DELETE FROM project_repos");
+    let before = db_state(&fx);
+    assert_eq!(fx.texts(&fx.shop_wt), both, "listing the uncached sibling");
+    assert_eq!(
+        fx.texts(&fx.shop),
+        both,
+        "listing beside an uncached sibling"
+    );
+    assert_eq!(db_state(&fx), before, "a list writes nothing");
+
+    // A link cached under older key rules is not trusted either.
+    cache_sql(
+        &fx,
+        &fx.shop,
+        "UPDATE project_repos SET repo_key = 'v1:something-else'",
+    );
+    let before = db_state(&fx);
+    assert_eq!(fx.texts(&fx.shop_wt), both);
+    assert_eq!(fx.texts(&fx.shop), both);
+    assert_eq!(db_state(&fx), before, "a list writes nothing");
+    assert!(fx.texts(&fx.blog).is_empty());
+}
+
+#[test]
+fn a_stale_cached_link_does_not_show_another_repositorys_notes() {
+    let fx = Fixture::new();
+    fx.set("alice", &fx.shop, None, "fact from shop").unwrap();
+    fx.set("bob", &fx.shop_wt, None, "fact from the old worktree")
+        .unwrap();
+    // The worktree directory now holds a different repository; its cache still says shop.
+    std::fs::remove_file(fx.shop_wt.join(".git")).unwrap();
+    write(
+        &fx.shop_wt.join(".git/config"),
+        "[remote \"origin\"]\n\turl = https://example.com/elsewhere/blog.git\n",
+    );
+    let before = db_state(&fx);
+    assert_eq!(
+        fx.texts(&fx.shop_wt),
+        ["fact from the old worktree"],
+        "the directory sees only its own notes, not shop's"
+    );
+    assert_eq!(
+        fx.texts(&fx.shop),
+        ["fact from shop"],
+        "shop no longer sees notes of a directory that left the repository"
+    );
+    assert_eq!(db_state(&fx), before, "a list writes nothing");
+}
+
+#[test]
+fn a_different_path_in_the_same_repository_keeps_its_own_notes() {
+    let fx = Fixture::new();
+    let pkg = fx.shop.join("pkg");
+    let wt_pkg = fx.shop_wt.join("pkg");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::create_dir_all(&wt_pkg).unwrap();
+    for (name, project) in [("dave", &pkg), ("erin", &wt_pkg)] {
+        fx.store
+            .register_agent(RegisterAgent {
+                name: name.into(),
+                program: Program::Claude,
+                project: Some(fx.path(project)),
+                model: None,
+                description: None,
+            })
+            .unwrap();
+    }
+    fx.set("alice", &fx.shop, None, "fact from the top level")
+        .unwrap();
+    fx.set("dave", &pkg, None, "fact from pkg").unwrap();
+    // Without any cached links, the computed prefixes still keep the packages apart.
+    for project in [&fx.shop, &fx.shop_wt, &pkg, &wt_pkg] {
+        cache_sql(&fx, project, "DELETE FROM project_repos");
+    }
+    assert_eq!(fx.texts(&fx.shop), ["fact from the top level"]);
+    assert_eq!(fx.texts(&fx.shop_wt), ["fact from the top level"]);
+    assert_eq!(fx.texts(&pkg), ["fact from pkg"]);
+    assert_eq!(
+        fx.texts(&wt_pkg),
+        ["fact from pkg"],
+        "the same path in a sibling checkout shares the notes"
+    );
+}
+
 #[test]
 fn notes_list_newest_first_and_a_key_is_replaced_in_place() {
     let fx = Fixture::new();
