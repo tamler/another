@@ -242,8 +242,14 @@ fn resource_from_row(r: &Row<'_>) -> rusqlite::Result<Row0> {
             kind: kind.parse().unwrap_or(ResourceKind::LongJob),
             name: r.get(3)?,
             endpoint: r.get(4)?,
-            port: r.get(5)?,
-            pid: r.get(6)?,
+            // A peer's event can carry any integer here (a local registration cannot). One
+            // that does not fit is shown as absent instead of failing every listing.
+            port: r
+                .get::<_, Option<i64>>(5)?
+                .and_then(|v| u16::try_from(v).ok()),
+            pid: r
+                .get::<_, Option<i64>>(6)?
+                .and_then(|v| u32::try_from(v).ok()),
             project: r.get(7)?,
             purpose: r.get(8)?,
             mode: if mode == "exclusive" {
