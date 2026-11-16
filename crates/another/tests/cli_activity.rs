@@ -166,3 +166,21 @@ fn since_takes_a_time_or_an_event_cursor_and_refuses_anything_else() {
     let err = fx.fails(&["activity", "--since", "nonsense"]);
     assert!(err.contains("invalid since \"nonsense\""), "{err}");
 }
+
+/// `--since` is applied, not only parsed: a later time, or a duration that starts after the
+/// last event, leaves nothing in the feed or the summary. A duration counts back from now,
+/// not from the epoch (FINDINGS-209).
+#[test]
+fn since_leaves_out_events_before_it() {
+    let fx = Fx::new();
+    let future = "2999-01-01T00:00:00Z";
+    assert_eq!(fx.ok(&["activity", "--since", future]), "");
+    let v = fx.json(&["activity", "--summary", "--since", future]);
+    assert_eq!(v["counts"], serde_json::json!({}), "{v}");
+
+    std::thread::sleep(std::time::Duration::from_millis(1_500));
+    assert_eq!(fx.ok(&["activity", "--since", "1s"]), "");
+    let v = fx.json(&["activity", "--summary", "--since", "1s"]);
+    assert_eq!(v["counts"], serde_json::json!({}), "{v}");
+    assert_eq!(fx.ok(&["activity", "--since", "1h"]).lines().count(), 6);
+}
