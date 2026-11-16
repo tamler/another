@@ -187,8 +187,40 @@ fn frozen_historical_schema_and_legitimate_partial_index_are_accepted() {
             || row[1] == "announcements_by_fingerprint"
     });
     // v13 added only the notes table and its indexes (D70).
-    let (notes, mut kept): (Vec<Value>, Vec<Value>) =
+    let (notes, kept): (Vec<Value>, Vec<Value>) =
         rest.into_iter().partition(|row| row[2] == "notes");
+    // v14 added the group tables, their indexes and a queue index on requests, plus two
+    // columns on requests (D77).
+    let (groups, mut kept): (Vec<Value>, Vec<Value>) = kept.into_iter().partition(|row| {
+        matches!(row[2].as_str().unwrap(), "groups" | "group_members") || row[1] == "requests_queue"
+    });
+    let mut group_names: Vec<&str> = groups.iter().map(|row| row[1].as_str().unwrap()).collect();
+    group_names.sort_unstable();
+    assert_eq!(
+        group_names,
+        [
+            "group_members",
+            "groups",
+            "groups_live_name",
+            "requests_queue",
+            "sqlite_autoindex_group_members_1",
+            "sqlite_autoindex_groups_1",
+        ]
+    );
+    let requests = kept
+        .iter_mut()
+        .find(|row| row[0] == "table" && row[1] == "requests")
+        .unwrap();
+    let with_columns = requests[3].as_str().unwrap().to_owned();
+    let v8_requests = with_columns.replace(
+        "\n, group_id TEXT REFERENCES groups(group_id), priority INTEGER NOT NULL DEFAULT 2)",
+        "\n)",
+    );
+    assert_ne!(
+        with_columns, v8_requests,
+        "v14 appends exactly its two columns"
+    );
+    requests[3] = Value::String(v8_requests);
     let note_names: Vec<&str> = notes.iter().map(|row| row[1].as_str().unwrap()).collect();
     assert_eq!(
         note_names,
@@ -242,7 +274,7 @@ fn frozen_historical_schema_and_legitimate_partial_index_are_accepted() {
     assert_eq!(
         Value::Array(kept),
         historical,
-        "fresh schema diverges from frozen historical v8 catalogs outside the v9-v13 additions"
+        "fresh schema diverges from frozen historical v8 catalogs outside the v9-v14 additions"
     );
     let partial: i64 = db.query_row("SELECT partial FROM pragma_index_list('resources') WHERE name='resources_live_identity'", [], |r| r.get(0)).unwrap();
     assert_eq!(

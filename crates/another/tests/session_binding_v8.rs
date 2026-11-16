@@ -56,8 +56,8 @@ fn new_home_has_the_current_schema_and_pinned_sqlite() {
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
     assert_eq!(
-        version, 13,
-        "a fresh home is created at the current schema (v13: project notes)"
+        version, 14,
+        "a fresh home is created at the current schema (v14: group queues)"
     );
 }
 
@@ -231,7 +231,7 @@ fn starting_a_session_keeps_schema_and_historical_event_bytes() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        13
+        14
     );
     assert_eq!(
         snapshot(

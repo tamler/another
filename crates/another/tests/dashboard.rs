@@ -52,6 +52,7 @@ async fn serve(opts: HttpOptions) -> Running {
             body: "SECRET BODY for the local dashboard only".into(),
             request: Some(NewRequest {
                 due_in_seconds: Some(3600),
+                ..Default::default()
             }),
             ..Default::default()
         })

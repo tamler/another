@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::error::{Error, Result};
+use crate::groups::{resolve_group_for, GroupRef, Priority, GROUP_PREFIX};
 use crate::identity::{address, resolve_agent, AgentRef};
-use crate::requests::{create_request_tx, list_requests_for_inbox, Request};
+use crate::requests::{create_queue_request_tx, list_requests_for_inbox, Request};
 use crate::store::{new_id, Store, Tx};
 use crate::time::{fmt_opt, fmt_ts};
 
@@ -73,6 +74,8 @@ pub struct SendMessage {
 pub struct NewRequest {
     /// Request becomes `stale` if not done this many seconds after creation.
     pub due_in_seconds: Option<i64>,
+    /// Defaults to `normal`.
+    pub priority: Priority,
 }
 
 /// Input for [`Store::reply`].
@@ -248,6 +251,10 @@ pub(crate) fn load_message(conn: &Connection, message_id: &str) -> Result<Messag
     })?;
     for row in rows {
         let (role, addr) = row?;
+        if role == "queue" {
+            // A queue item's claimer, not a recipient of the message.
+            continue;
+        }
         if role == "cc" {
             msg.cc.push(addr);
         } else {
@@ -274,9 +281,33 @@ fn send_inner_tx(tx: &Tx<'_>, input: &SendMessage, touch_sender: bool) -> Result
         return Err(Error::Invalid("at least one recipient is required".into()));
     }
     let sender = resolve_agent(tx, tx.node_id, &input.from)?;
-    let to = resolve_all(tx, &input.to)?;
+    if input.cc.iter().any(|c| c.starts_with(GROUP_PREFIX)) {
+        return Err(Error::Invalid(
+            "a group can only be a `to` recipient of a request, not cc".into(),
+        ));
+    }
+    let (groups, direct): (Vec<&String>, Vec<&String>) =
+        input.to.iter().partition(|t| t.starts_with(GROUP_PREFIX));
+    let group = match groups.as_slice() {
+        [] => None,
+        [one] => {
+            if input.request.is_none() {
+                return Err(Error::Invalid(format!(
+                    "{one} is a group: send it a request (--request), not plain mail; groups queue work, they do not broadcast"
+                )));
+            }
+            Some(resolve_group_for(tx, tx.node_id, &sender, one)?)
+        }
+        _ => {
+            return Err(Error::Invalid(
+                "a request can be queued for one group at most".into(),
+            ))
+        }
+    };
+    let direct: Vec<String> = direct.into_iter().cloned().collect();
+    let to = resolve_all(tx, &direct)?;
     let cc = resolve_all(tx, &input.cc)?;
-    deliver_tx(tx, input, &sender, &to, &cc, touch_sender)
+    deliver_tx(tx, input, &sender, &to, &cc, group.as_ref(), touch_sender)
 }
 
 /// An automatic notice from one local agent to another, both known by id. Nothing is
@@ -303,7 +334,7 @@ pub(crate) fn send_by_id_tx(
     check_text(&input.subject, &input.body)?;
     let sender = agent_by_id(tx, from_id)?;
     let to = [agent_by_id(tx, to_id)?];
-    deliver_tx(tx, input, &sender, &to, &[], touch_sender)
+    deliver_tx(tx, input, &sender, &to, &[], None, touch_sender)
 }
 
 fn agent_by_id(tx: &Tx<'_>, agent_id: &str) -> Result<AgentRef> {
@@ -329,6 +360,7 @@ fn deliver_tx(
     sender: &AgentRef,
     to: &[AgentRef],
     cc: &[AgentRef],
+    group: Option<&GroupRef>,
     touch_sender: bool,
 ) -> Result<Message> {
     let message_id = new_id();
@@ -404,10 +436,7 @@ fn deliver_tx(
     let mut recipient_nodes = vec![tx.node_id.to_string()];
     recipient_nodes.extend(foreign_nodes);
     let request_id = input.request.as_ref().map(|_| new_id());
-    let event_id = tx.emit(
-        &sender.address,
-        "message.sent",
-        json!({
+    let mut payload = json!({
             "message_id": message_id,
             "thread_id": thread_id,
             "reply_to": input.reply_to,
@@ -425,8 +454,13 @@ fn deliver_tx(
                 .map(|(a, role)| json!({ "agent_id": a.id, "node_id": a.node_id, "role": role }))
                 .collect::<Vec<_>>(),
             "recipient_nodes": recipient_nodes,
-        }),
-    )?;
+    });
+    if let Some(g) = group {
+        // Queue items never leave this node (federation classifies these as Never).
+        payload["group_id"] = json!(g.id);
+        payload["group"] = json!(g.address());
+    }
+    let event_id = tx.emit(&sender.address, "message.sent", payload)?;
     tx.execute(
         "INSERT INTO messages (message_id, node_id, thread_id, reply_to, sender_id, subject, body,
            importance, ack_required, created_at, event_id)
@@ -452,7 +486,7 @@ fn deliver_tx(
         )?;
     }
     if let (Some(req), Some(request_id)) = (&input.request, &request_id) {
-        create_request_tx(
+        create_queue_request_tx(
             tx,
             request_id,
             sender,
@@ -460,6 +494,8 @@ fn deliver_tx(
             &thread_id,
             &input.subject,
             req.due_in_seconds,
+            group,
+            req.priority,
         )?;
     }
     if touch_sender {
@@ -524,13 +560,24 @@ impl Store {
 
     /// Messages delivered to `who`, newest first, plus counters and relevant requests.
     pub fn inbox(&self, who: &str, query: InboxQuery) -> Result<Inbox> {
+        self.inbox_scoped(who, query, false)
+    }
+
+    /// [`Store::inbox`] for a remote caller: with `hide_queues`, mail in a thread that holds
+    /// a group queue item, and queue items themselves, are left out of the list and the
+    /// counters (group queues are local-only in this release, D77).
+    pub fn inbox_scoped(&self, who: &str, query: InboxQuery, hide_queues: bool) -> Result<Inbox> {
         // Expire stale requests/holds first so the digest is current even without a daemon.
         self.sweep()?;
-        self.inbox_without_sweep(who, query)
+        self.read_inbox(who, query, hide_queues)
     }
 
     /// Read an inbox without changing hold or request lifecycle state.
     pub fn inbox_without_sweep(&self, who: &str, query: InboxQuery) -> Result<Inbox> {
+        self.read_inbox(who, query, false)
+    }
+
+    fn read_inbox(&self, who: &str, query: InboxQuery, hide_queues: bool) -> Result<Inbox> {
         self.read(|conn| {
             let me = resolve_agent(conn, self.node_id(), who)?;
             let (unread, urgent_unread, awaiting_ack): (u32, u32, u32) = conn.query_row(
@@ -539,8 +586,10 @@ impl Store {
                    count(*) FILTER (WHERE d.read_at IS NULL AND m.importance IN ('high', 'urgent')),
                    count(*) FILTER (WHERE m.ack_required = 1 AND d.acked_at IS NULL)
                  FROM deliveries d JOIN messages m ON m.message_id = d.message_id
-                 WHERE d.agent_id = ?1",
-                [&me.id],
+                 WHERE d.agent_id = ?1
+                   AND (?2 = 0 OR NOT EXISTS (SELECT 1 FROM requests q
+                         WHERE q.thread_id = m.thread_id AND q.group_id IS NOT NULL))",
+                params![me.id, hide_queues],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )?;
             let limit = if query.limit == 0 { 50 } else { query.limit };
@@ -550,12 +599,20 @@ impl Store {
                  WHERE d.agent_id = ?1
                    AND (?2 = 0 OR d.read_at IS NULL)
                    AND (?3 = 0 OR m.importance IN ('high', 'urgent'))
+                   AND (?5 = 0 OR NOT EXISTS (SELECT 1 FROM requests q
+                         WHERE q.thread_id = m.thread_id AND q.group_id IS NOT NULL))
                  ORDER BY m.created_at DESC, m.message_id DESC
                  LIMIT ?4",
             )?;
             let rows = stmt
                 .query_map(
-                    params![me.id, query.unread_only, query.urgent_only, limit],
+                    params![
+                        me.id,
+                        query.unread_only,
+                        query.urgent_only,
+                        limit,
+                        hide_queues
+                    ],
                     |r| {
                         Ok((
                             r.get::<_, String>(0)?,
@@ -577,7 +634,10 @@ impl Store {
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let requests = list_requests_for_inbox(conn, &me.id)?;
+            let mut requests = list_requests_for_inbox(conn, &me.id)?;
+            if hide_queues {
+                requests.retain(|r| r.group.is_none());
+            }
             Ok(Inbox {
                 agent: me.address,
                 unread,

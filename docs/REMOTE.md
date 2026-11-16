@@ -285,6 +285,7 @@ Bearer tokens and OAuth grants follow the same rules.
 | `orphans_list` | Lapsed registrations only; the process scan is never run for remote peers |
 | `resource_reap` | **Never** (remote reaping is disabled) |
 | `project_notes` | **Never** (project notes are local only; see [NOTES.md](NOTES.md)) |
+| Group queues: `send_message` to `group:…`, `claim_request` `next`, any action on a queue item | **Never** in this release. Queue items and group events are also left out of `fetch_inbox`, `whats_new`, `activity_feed` and `GET /activity` for remote callers ([QUEUES.md](QUEUES.md)) |
 
 `whats_new` is the call a chat app should make first. It returns unread subjects, open requests and a short activity list for that one agent, and a `next` field. Message bodies are not included. If nothing is waiting, `next` says so and the app should stop.
 

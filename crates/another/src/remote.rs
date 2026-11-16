@@ -247,8 +247,47 @@ pub fn authorize(
                 _ => Err(format!("this token can only register {}", scope.agent)),
             }
         }
-        "send_message" => acting(args, "from"),
-        "fetch_inbox" | "acknowledge" | "claim_request" | "heartbeat" | "resource_borrow"
+        // Group queues are local-only in this release (D77): no remote group send or pull;
+        // actions on a queue item by id are refused in the core's scoped path.
+        "send_message" => {
+            let names_group = ["to", "cc"].iter().any(|field| {
+                args.get(*field)
+                    .and_then(Value::as_array)
+                    .is_some_and(|list| {
+                        list.iter().any(|v| {
+                            v.as_str()
+                                .is_some_and(|s| s.starts_with(another_core::GROUP_PREFIX))
+                        })
+                    })
+            });
+            if names_group {
+                return Err("group queues are local-only in this release".into());
+            }
+            // A reply joins its parent's thread: none in a thread that holds a queue item.
+            if let Some(parent) = s(args, "reply_to") {
+                if store.is_queue_message(parent).map_err(err)? {
+                    return Err("group queues are local-only in this release".into());
+                }
+            }
+            acting(args, "from")
+        }
+        "claim_request" if s(args, "action") == Some("next") => {
+            Err("group queues are local-only in this release".into())
+        }
+        "acknowledge" => {
+            let ids = args
+                .get("message_ids")
+                .and_then(Value::as_array)
+                .map(|ids| ids.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+                .unwrap_or_default();
+            for id in ids {
+                if store.is_queue_message(id).map_err(err)? {
+                    return Err("group queues are local-only in this release".into());
+                }
+            }
+            acting(args, "agent")
+        }
+        "fetch_inbox" | "claim_request" | "heartbeat" | "resource_borrow"
         | "resource_release" | "resource_heartbeat" | "whats_new" => acting(args, "agent"),
         "hold_paths" => {
             acting(args, "agent")?;
@@ -260,7 +299,9 @@ pub fn authorize(
         }
         "threads" => match s(args, "thread_id") {
             Some(t) => {
-                if store.in_thread(&scope.agent_id, t).map_err(err)? {
+                if store.is_queue_thread(t).map_err(err)? {
+                    Err("group queues are local-only in this release".into())
+                } else if store.in_thread(&scope.agent_id, t).map_err(err)? {
                     Ok(())
                 } else {
                     Err("remote peers can only read threads they are part of".into())
@@ -289,6 +330,7 @@ pub async fn activity(
     Query(params): Query<ActivityParams>,
 ) -> Response {
     let peer = peer.map(|p| p.0);
+    let hide_queues = peer.is_some();
     let query_store = store.clone();
     let detail = format!(
         "since={:?} limit={:?} kinds={:?}",
@@ -308,11 +350,17 @@ pub async fn activity(
             .filter(|k| !k.trim().is_empty())
             .map(|k| k.trim().parse::<ActivityKind>())
             .collect::<another_core::Result<Vec<_>>>()?;
-        query_store.activity(ActivityQuery {
+        let mut feed = query_store.activity(ActivityQuery {
             since,
             limit: params.limit.unwrap_or(50),
             kinds,
-        })
+        })?;
+        if hide_queues {
+            // Group queues are local-only in this release (D77); a page may then hold
+            // fewer items than `limit`, and `next_since` still advances past them.
+            feed.items.retain(|i| !query_store.is_queue_event(i));
+        }
+        Ok::<_, another_core::Error>(feed)
     })
     .await;
     let (status, body, outcome) = match result {

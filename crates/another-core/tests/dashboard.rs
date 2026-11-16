@@ -46,6 +46,7 @@ fn setup() -> (Store, std::sync::Arc<std::sync::atomic::AtomicI64>) {
             importance: Importance::High,
             request: Some(NewRequest {
                 due_in_seconds: Some(3_600),
+                ..Default::default()
             }),
             ..Default::default()
         })

@@ -286,12 +286,14 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
                 "high" => " [high]",
                 _ => "",
             };
+            // A queue item names its group (D77); direct recipients, if any, follow.
+            let to = match p.get("group").and_then(Value::as_str) {
+                Some(group) if list("to").is_empty() => format!("group {group}"),
+                Some(group) => format!("group {group}, {}", list("to")),
+                None => list("to"),
+            };
             (
-                format!(
-                    "{actor} sent {kind} to {}: {}{urgency}",
-                    list("to"),
-                    s("subject")
-                ),
+                format!("{actor} sent {kind} to {to}: {}{urgency}", s("subject")),
                 json!({ "message_id": s("message_id"), "thread_id": s("thread_id"), "request_id": p.get("request_id") }),
             )
         }
@@ -312,11 +314,15 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             json!({ "request_id": s("request_id"), "thread_id": s("thread_id") }),
         ),
         "request.claimed" | "request.released" | "request.completed" | "request.cancelled"
-        | "request.stale" => {
+        | "request.stale" | "request.updated" => {
             let rid = s("request_id");
             let title = request_title(conn, &rid)?;
             let text = match row.kind.as_str() {
+                "request.claimed" if s("via") == "next" => {
+                    format!("{actor} took the next queued request: {title}")
+                }
                 "request.claimed" => format!("{actor} claimed request: {title}"),
+                "request.updated" => format!("{actor} moved the deadline of request: {title}"),
                 "request.released" => format!("{actor} released request: {title}"),
                 "request.completed" => format!("{actor} completed request: {title}"),
                 "request.cancelled" => format!("{actor} cancelled request: {title}"),
@@ -546,6 +552,40 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
                 json!({ "note_id": s("note_id"), "project_id": s("project_id") }),
             )
         }
+        // Groups (D77): names come from the tables; refs carry ids only.
+        "group.created" | "group.deleted" | "group.member_added" | "group.member_removed" => {
+            let gid = s("group_id");
+            let group: String = conn
+                .query_row(
+                    "SELECT g.name || '@' || p.slug FROM groups g
+                     JOIN projects p ON p.project_id = g.project_id WHERE g.group_id = ?1",
+                    [&gid],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or_else(|| "a group".to_string());
+            let member = || -> Result<String> {
+                Ok(conn
+                    .query_row(
+                        "SELECT address FROM agents WHERE agent_id = ?1",
+                        [s("agent_id")],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .optional()?
+                    .unwrap_or_else(|| "an agent".to_string()))
+            };
+            let text = match row.kind.as_str() {
+                "group.created" => format!("{actor} created group {group}"),
+                "group.deleted" => format!("{actor} deleted group {group}"),
+                "group.member_added" => format!("{actor} added {} to group {group}", member()?),
+                _ => format!("{actor} removed {} from group {group}", member()?),
+            };
+            let refs = match p.get("agent_id") {
+                Some(a) => json!({ "group_id": gid, "agent_id": a }),
+                None => json!({ "group_id": gid }),
+            };
+            (text, refs)
+        }
         other => (format!("{actor}: {other}"), p.clone()),
     };
     // Merged feed: events from other nodes carry their node's name.
@@ -706,7 +746,46 @@ fn read_events(
     Ok(out)
 }
 
+/// Whether an event, given its kind and the ids it names, concerns a group queue: a
+/// `group.*` event, one that carries a `group_id`, or one about a queue item's request,
+/// thread or mail (its message, replies, reads and acks).
+pub(crate) fn concerns_queue(conn: &Connection, kind: &str, ids: &Value) -> Result<bool> {
+    if kind.starts_with("group.") || !ids.get("group_id").unwrap_or(&Value::Null).is_null() {
+        return Ok(true);
+    }
+    let s = |k: &str| ids.get(k).and_then(Value::as_str);
+    if let Some(rid) = s("request_id") {
+        let queued = conn
+            .query_row(
+                "SELECT group_id IS NOT NULL FROM requests WHERE request_id = ?1",
+                [rid],
+                |r| r.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if queued {
+            return Ok(true);
+        }
+    }
+    if let Some(t) = s("thread_id") {
+        if crate::groups::is_queue_thread(conn, t)? {
+            return Ok(true);
+        }
+    }
+    match s("message_id") {
+        Some(m) => crate::groups::is_queue_message(conn, m),
+        None => Ok(false),
+    }
+}
+
 impl Store {
+    /// Whether a feed item belongs to a group queue: see [`concerns_queue`]. Remote callers
+    /// do not see these (group queues are local-only in this release, D77).
+    pub fn is_queue_event(&self, item: &ActivityItem) -> bool {
+        self.read(|conn| concerns_queue(conn, &item.kind, &item.refs))
+            .unwrap_or(true)
+    }
+
     /// Read the activity feed.
     pub fn activity(&self, query: ActivityQuery) -> Result<ActivityFeed> {
         let limit = match query.limit {
@@ -733,12 +812,27 @@ impl Store {
 
     /// Summarize activity since a point in time (default: the last hour).
     pub fn activity_summary(&self, since: Option<Since>) -> Result<ActivitySummary> {
+        self.activity_summary_scoped(since, false)
+    }
+
+    /// [`Store::activity_summary`] for a remote caller: with `hide_queues`, group queue events
+    /// are left out of the counts and highlights, and queue items out of the request totals
+    /// (group queues are local-only in this release, D77).
+    pub fn activity_summary_scoped(
+        &self,
+        since: Option<Since>,
+        hide_queues: bool,
+    ) -> Result<ActivitySummary> {
         self.sweep()?;
-        self.activity_summary_without_sweep(since)
+        self.summary(since, hide_queues)
     }
 
     /// Read the activity summary without expiring holds or requests.
     pub fn activity_summary_without_sweep(&self, since: Option<Since>) -> Result<ActivitySummary> {
+        self.summary(since, false)
+    }
+
+    fn summary(&self, since: Option<Since>, hide_queues: bool) -> Result<ActivitySummary> {
         let now = self.now();
         let since = since.unwrap_or(Since::Time(now - 3_600_000));
         self.read(|conn| {
@@ -751,7 +845,17 @@ impl Store {
                     .optional()?
                     .ok_or_else(|| Error::NotFound(format!("unknown event id {id:?}")))?,
             };
-            let rows = read_events(conn, Some(&since), &[], u32::MAX)?;
+            let mut rows = read_events(conn, Some(&since), &[], u32::MAX)?;
+            if hide_queues {
+                let mut kept = Vec::with_capacity(rows.len());
+                for r in rows {
+                    let payload: Value = serde_json::from_str(&r.payload).unwrap_or(Value::Null);
+                    if !concerns_queue(conn, &r.kind, &payload)? {
+                        kept.push(r);
+                    }
+                }
+                rows = kept;
+            }
             let mut counts: BTreeMap<String, u32> = BTreeMap::new();
             for r in &rows {
                 *counts
@@ -801,8 +905,8 @@ impl Store {
                 "SELECT count(*) FILTER (WHERE status = 'open'),
                         count(*) FILTER (WHERE status = 'claimed'),
                         count(*) FILTER (WHERE status = 'stale')
-                 FROM requests WHERE node_id = ?1",
-                [self.node_id()],
+                 FROM requests WHERE node_id = ?1 AND (?2 = 0 OR group_id IS NULL)",
+                params![self.node_id(), hide_queues],
                 |r| {
                     Ok(RequestCounts {
                         open: r.get(0)?,
@@ -851,18 +955,32 @@ impl Store {
 
     /// Compact catch-up for one agent. Message bodies and request notes are left out.
     pub fn whats_new(&self, agent: &str, since: Option<Since>, limit: u32) -> Result<WhatsNew> {
+        self.whats_new_scoped(agent, since, limit, false)
+    }
+
+    /// [`Store::whats_new`] for a remote caller: with `hide_queues`, group queue items and
+    /// their events are left out, and `next` counts only what is shown (group queues are
+    /// local-only in this release, D77).
+    pub fn whats_new_scoped(
+        &self,
+        agent: &str,
+        since: Option<Since>,
+        limit: u32,
+        hide_queues: bool,
+    ) -> Result<WhatsNew> {
         let limit = match limit {
             0 => 10,
             n => n.min(20),
         };
         let since = since.unwrap_or_else(|| Since::Time(self.now() - 86_400_000));
-        let inbox = self.inbox(
+        let inbox = self.inbox_scoped(
             agent,
             InboxQuery {
                 unread_only: true,
                 urgent_only: false,
                 limit,
             },
+            hide_queues,
         )?;
         let feed = self.activity(ActivityQuery {
             since: Some(since),
@@ -891,6 +1009,7 @@ impl Store {
         let requests = inbox
             .requests
             .iter()
+            .filter(|r| !(hide_queues && r.group.is_some()))
             .filter(|r| {
                 matches!(
                     r.status,
@@ -922,6 +1041,7 @@ impl Store {
                         | "token.revoked"
                 )
             })
+            .filter(|item| !(hide_queues && self.is_queue_event(item)))
             .collect::<Vec<_>>();
         let next = digest_next(
             &inbox.agent,

@@ -5,10 +5,10 @@ use crate::remote::{self, RemotePeer};
 use another_core::{
     AckOutcome, AcquireHolds, ActivityFeed, ActivityKind, ActivityQuery, ActivitySummary, Agent,
     AuditRecord, ForgottenNote, HeartbeatReport, Hold, HoldConflict, HoldFilter, Importance, Inbox,
-    InboxQuery, LeaseMode, LeaseOutcome, Message, NewNote, NewRequest, Note, NoteList, NoteTarget,
-    Program, Project, RegisterAgent, RegisterResource, Reply, Request, RequestAction,
-    RequestUpdate, Resource, ResourceFilter, ResourceKind, ResourceRef, SendMessage, SessionInfo,
-    SessionPhase, Since, Store, Thread, ThreadSummary,
+    InboxQuery, LeaseMode, LeaseOutcome, Message, NewNote, NewRequest, NextRequest, Note, NoteList,
+    NoteTarget, Priority, Program, Project, RegisterAgent, RegisterResource, Reply, Request,
+    RequestAction, RequestUpdate, Resource, ResourceFilter, ResourceKind, ResourceRef, SendMessage,
+    SessionInfo, SessionPhase, Since, Store, Thread, ThreadSummary,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -138,6 +138,8 @@ pub struct SendMessageArgs {
     pub create_request: bool,
     /// For requests: mark stale if not done within this many seconds.
     pub due_in_seconds: Option<i64>,
+    /// For requests: urgent | high | normal (default) | low.
+    pub priority: Option<Priority>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -191,13 +193,30 @@ pub struct AcknowledgeArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ClaimRequestArgs {
     pub agent: String,
-    pub request_id: String,
-    /// claim (default) | release | complete | cancel.
-    pub action: Option<RequestAction>,
+    /// The request. Not used with action `next`.
+    pub request_id: Option<String>,
+    /// claim (default) | release | complete | cancel | next. `next` atomically claims the
+    /// next item from your groups' queues (priority first, then due time, then age).
+    pub action: Option<ClaimAction>,
     /// Completion or cancellation note; on completion it is mailed to the requester.
     pub note: Option<String>,
-    /// On claim: new due time, in seconds from now.
+    /// On claim or next: new due time, in seconds from now.
     pub due_in_seconds: Option<i64>,
+    /// With next: only this group (`name` or `name@project`).
+    pub group: Option<String>,
+    /// With next: also take over stale items.
+    #[serde(default)]
+    pub include_stale: bool,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimAction {
+    Claim,
+    Release,
+    Complete,
+    Cancel,
+    Next,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema)]
@@ -559,6 +578,7 @@ impl AnotherMcp {
                         thread_id: None,
                         request: a.create_request.then_some(NewRequest {
                             due_in_seconds: a.due_in_seconds,
+                            priority: a.priority.unwrap_or_default(),
                         }),
                     })
                 }
@@ -571,14 +591,18 @@ impl AnotherMcp {
         description = "Fetch one agent's inbox when you need message bodies. Prefer whats_new first; it returns subjects only. Unread messages by default, plus counters and open requests addressed to or owned by the agent."
     )]
     async fn fetch_inbox(&self, Parameters(a): Parameters<FetchInboxArgs>) -> ToolResult<Inbox> {
+        let remote = crate::remote::current_scope().is_some();
         self.run(move |s| {
-            s.inbox(
+            // Group queues are local-only in this release (D77): a remote inbox leaves out
+            // queue items and mail in their threads, counters included.
+            s.inbox_scoped(
                 &a.agent,
                 InboxQuery {
                     unread_only: a.unread_only.unwrap_or(true),
                     urgent_only: a.urgent_only,
                     limit: a.limit.unwrap_or(20),
                 },
+                remote,
             )
         })
         .await
@@ -588,15 +612,30 @@ impl AnotherMcp {
         description = "Read a whole thread by thread_id, or list the threads an agent is part of."
     )]
     async fn threads(&self, Parameters(a): Parameters<ThreadsArgs>) -> ToolResult<ThreadsOut> {
+        // A remote read of a queue thread is refused by the gate; a remote listing leaves
+        // queue threads out (group queues are local-only in this release, D77).
+        let remote = crate::remote::current_scope().is_some();
         self.run(move |s| match (a.thread_id, a.agent) {
             (Some(id), _) => Ok(ThreadsOut {
                 thread: Some(s.thread(&id)?),
                 threads: None,
             }),
-            (None, Some(agent)) => Ok(ThreadsOut {
-                thread: None,
-                threads: Some(s.threads(&agent, a.limit.unwrap_or(20))?),
-            }),
+            (None, Some(agent)) => {
+                let mut threads = s.threads(&agent, a.limit.unwrap_or(20))?;
+                if remote {
+                    let mut kept = Vec::with_capacity(threads.len());
+                    for t in threads {
+                        if !s.is_queue_thread(&t.thread_id)? {
+                            kept.push(t);
+                        }
+                    }
+                    threads = kept;
+                }
+                Ok(ThreadsOut {
+                    thread: None,
+                    threads: Some(threads),
+                })
+            }
             (None, None) => Err(another_core::Error::Invalid(
                 "give thread_id or agent".into(),
             )),
@@ -617,7 +656,9 @@ impl AnotherMcp {
 
     #[tool(
         description = "Change a request's ownership: claim (default), release, complete, or cancel \
-        (creator only). Stale requests may be claimed by anyone."
+        (creator only). Stale requests may be claimed by anyone. action next takes the next \
+        item from your groups' work queues (no request_id); it fails with not_found when \
+        nothing is queued for you."
     )]
     async fn claim_request(
         &self,
@@ -625,11 +666,51 @@ impl AnotherMcp {
     ) -> ToolResult<Request> {
         let scope = crate::remote::current_scope();
         self.run(move |s| {
+            let action = match a.action.unwrap_or(ClaimAction::Claim) {
+                ClaimAction::Next => {
+                    if scope.is_some() {
+                        return Err(another_core::Error::Forbidden(
+                            "group queues are local-only in this release".into(),
+                        ));
+                    }
+                    if a.request_id.is_some() {
+                        return Err(another_core::Error::Invalid(
+                            "action next takes no request_id; use action claim for a known request"
+                                .into(),
+                        ));
+                    }
+                    let agent = a.agent.clone();
+                    return s
+                        .request_next(NextRequest {
+                            agent: a.agent,
+                            group: a.group,
+                            include_stale: a.include_stale,
+                            due_in_seconds: a.due_in_seconds,
+                        })?
+                        .ok_or_else(|| {
+                            another_core::Error::NotFound(format!(
+                                "nothing queued for {agent} in its groups"
+                            ))
+                        });
+                }
+                ClaimAction::Claim => RequestAction::Claim,
+                ClaimAction::Release => RequestAction::Release,
+                ClaimAction::Complete => RequestAction::Complete,
+                ClaimAction::Cancel => RequestAction::Cancel,
+            };
+            if a.group.is_some() || a.include_stale {
+                return Err(another_core::Error::Invalid(
+                    "group and include_stale apply to action next only".into(),
+                ));
+            }
+            let request_id = a.request_id.ok_or_else(|| {
+                another_core::Error::Invalid("request_id is required for this action".into())
+            })?;
             s.update_request_scoped(
                 RequestUpdate {
                     agent: a.agent,
-                    request_id: a.request_id,
-                    action: a.action.unwrap_or(RequestAction::Claim),
+                    request_id,
+                    action,
                     note: a.note,
                     due_in_seconds: a.due_in_seconds,
                 },
@@ -873,6 +954,7 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<WhatsNewArgs>,
     ) -> ToolResult<another_core::WhatsNew> {
+        let remote = crate::remote::current_scope().is_some();
         self.run(move |s| {
             let agent = a.agent.ok_or_else(|| {
                 another_core::Error::Invalid(
@@ -883,7 +965,8 @@ impl AnotherMcp {
                 Some(v) => Some(Since::parse(&v, s.now())?),
                 None => None,
             };
-            s.whats_new(&agent, since, a.limit.unwrap_or(10))
+            // Group queues are local-only in this release (D77).
+            s.whats_new_scoped(&agent, since, a.limit.unwrap_or(10), remote)
         })
         .await
     }
@@ -897,13 +980,19 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<ActivityFeedArgs>,
     ) -> ToolResult<ActivityFeed> {
+        let remote = crate::remote::current_scope().is_some();
         self.run(move |s| {
             let since = a.since.map(|v| Since::parse(&v, s.now())).transpose()?;
-            s.activity(ActivityQuery {
+            let mut feed = s.activity(ActivityQuery {
                 since,
                 limit: a.limit.unwrap_or(50),
                 kinds: a.kinds,
-            })
+            })?;
+            if remote {
+                // Group queues are local-only in this release (D77).
+                feed.items.retain(|i| !s.is_queue_event(i));
+            }
+            Ok(feed)
         })
         .await
     }
@@ -916,9 +1005,12 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<ActivitySummarizeArgs>,
     ) -> ToolResult<ActivitySummary> {
+        // Group queues are local-only in this release (D77): a remote summary counts and
+        // highlights no queue events, and its request totals leave queue items out.
+        let remote = crate::remote::current_scope().is_some();
         self.run(move |s| {
             let since = a.since.map(|v| Since::parse(&v, s.now())).transpose()?;
-            s.activity_summary(since)
+            s.activity_summary_scoped(since, remote)
         })
         .await
     }
