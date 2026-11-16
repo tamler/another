@@ -108,10 +108,21 @@ fresh() {
     fail "client configs still name the Another hook after uninstall"
   fi
 
-  step "daemon definition (dry run; nothing is loaded)"
-  out=$("$new" --json daemon install --dry-run)
-  expect "daemon dry run" '"dry_run": true' "$out"
-  [ ! -e "$work/home/Library/LaunchAgents" ] || fail "dry run wrote a LaunchAgent"
+  # `another daemon` manages launchd only until #142 adds systemd and Task Scheduler;
+  # elsewhere the command must at least refuse cleanly.
+  if [ "$(uname -s)" = Darwin ]; then
+    step "daemon definition (dry run; nothing is loaded)"
+    out=$("$new" --json daemon install --dry-run 2>&1) || fail "daemon dry run failed: $out"
+    expect "daemon dry run" '"dry_run": true' "$out"
+    [ ! -e "$work/home/Library/LaunchAgents" ] || fail "dry run wrote a LaunchAgent"
+  else
+    step "daemon definition: not supported on $(uname -s) yet, so it must refuse"
+    if out=$("$new" daemon install --dry-run 2>&1); then
+      echo "daemon install --dry-run succeeded here: $out"
+    else
+      expect "daemon refusal" "another:" "$out"
+    fi
+  fi
 
   step "fresh: ok"
 }
