@@ -480,3 +480,61 @@ fn human_output_has_a_fix_line_under_problems() {
         .unwrap();
     assert_eq!(lines[home + 1].trim(), "fix: another init");
 }
+
+/// Adversarial pass (claude@another-wake-e2e-20261116): a server on the default port that
+/// serves **another home** (another node id in its `/health`) is not this installation's
+/// server. MCP clients pointed at it write to a different database than the hooks read, the
+/// split doctor exists to catch. It must not read as `ok`.
+#[test]
+fn adv158_a_server_for_another_node_is_not_ok() {
+    let fx = Fx::new();
+    fx.init();
+    let (_, r) = fx.doctor_bind(&health_json(&format!(
+        r#"{{"ok":true,"node_id":"{OTHER}","auth":false,"dashboard":"local"}}"#
+    )));
+    assert_ne!(
+        status(&r, "server"),
+        "ok",
+        "a server for another node id passes as this home's server: {r}"
+    );
+    let detail = row(&r, "server")["detail"].as_str().unwrap();
+    assert!(detail.contains(&format!("serves node {OTHER}")), "{r}");
+    // Not this home's server, so the daemon row does not take it as an answer either.
+    assert!(row(&r, "server")["fix"].as_str().is_some(), "{r}");
+
+    // This home's own node, or an older server that does not say, is ok.
+    let ours: String = rusqlite::Connection::open(fx.db())
+        .unwrap()
+        .query_row("SELECT node_id FROM nodes WHERE is_local = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let (_, r) = fx.doctor_bind(&health_json(&format!(
+        r#"{{"ok":true,"node_id":"{ours}"}}"#
+    )));
+    assert_eq!(status(&r, "server"), "ok", "{r}");
+    let (_, r) = fx.doctor_bind(&health_json(r#"{"ok":true}"#));
+    assert_eq!(status(&r, "server"), "ok", "{r}");
+}
+
+const OTHER: &str = "01OTHERNODE000000000000000";
+
+/// Answers one `GET /health` with 200 and `body` as JSON.
+fn health_json(body: &str) -> String {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    let body = body.to_string();
+    std::thread::spawn(move || {
+        if let Ok((mut s, _)) = l.accept() {
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = s.write_all(head.as_bytes());
+            let _ = s.write_all(body.as_bytes());
+        }
+    });
+    addr
+}

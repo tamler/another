@@ -103,7 +103,7 @@ pub fn run(inputs: &Inputs) -> Report {
         .clone()
         .or_else(|| daemon.as_ref().ok().and_then(|d| d.bind.clone()))
         .unwrap_or_else(|| crate::serve::DEFAULT_BIND.to_string());
-    let (server_row, answered) = server(&bind);
+    let (server_row, answered) = server(&bind, store.as_ref().map(|s| s.node_id()));
     checks.push(server_row);
     let health = answered.then_some(bind.as_str());
     checks.push(daemon_check(daemon, &inputs.another_home, health));
@@ -391,9 +391,13 @@ fn runnable(p: &Path) -> bool {
     p.is_file()
 }
 
+/// Enough for `/health`'s small JSON object.
+const HEALTH_BODY_MAX: u64 = 16 * 1024;
+
 /// The one network call: `GET /health` on a numeric loopback address, with no proxy and
-/// no redirect followed. Returns the row and whether `/health` answered 2xx.
-fn server(bind: &str) -> (Check, bool) {
+/// no redirect followed. Returns the row and whether this home's server answered 2xx: a
+/// server that names another node (`local_node` is this database's) is a warning.
+fn server(bind: &str, local_node: Option<&str>) -> (Check, bool) {
     // A literal IP only: no name lookup, so no name can point it anywhere else.
     let loopback = bind
         .parse::<std::net::SocketAddr>()
@@ -420,10 +424,39 @@ fn server(bind: &str) -> (Check, bool) {
             .build(),
     );
     match agent.get(&format!("http://{bind}/health")).call() {
-        Ok(r) if r.status().is_success() => (
-            check("server", Level::Ok, format!("answering on {bind}")),
-            true,
-        ),
+        Ok(mut r) if r.status().is_success() => {
+            // `another serve` names its node. A server for another home (another node) is
+            // not this installation's: MCP clients would write where the hooks do not read.
+            let theirs = r
+                .body_mut()
+                .with_config()
+                .limit(HEALTH_BODY_MAX)
+                .read_to_string()
+                .ok()
+                .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
+                .and_then(|v| v["node_id"].as_str().map(str::to_string));
+            match (theirs, local_node) {
+                (Some(theirs), Some(ours)) if theirs != ours => (
+                    check(
+                        "server",
+                        Level::Warn,
+                        format!(
+                            "{bind} serves node {}, not this home's node {ours}",
+                            another_core::single_line(&theirs, 64)
+                        ),
+                    )
+                    .fix(
+                        "another daemon status, and check which ANOTHER_HOME the server on that \
+                         port was started with; pass --bind for this home's server",
+                    ),
+                    false,
+                ),
+                _ => (
+                    check("server", Level::Ok, format!("answering on {bind}")),
+                    true,
+                ),
+            }
+        }
         Ok(r) => (
             check(
                 "server",

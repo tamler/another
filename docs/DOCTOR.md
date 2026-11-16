@@ -24,7 +24,7 @@ skip  peers     not checked until the database check passes
 | `home` | `--home`, `$ANOTHER_HOME` or `~/.another` | it is missing or not a directory | on Unix, its mode is not `0700` |
 | `database` | `another.db`, opened read-only: the schema version against this build's, SQLite's `quick_check`, and the local node | the file is missing, not a database or damaged; the schema is newer than this build | the schema is older (a normal command migrates it); the database stayed locked for 2 s |
 | `hooks` | Each client's hook config (Claude Code, Codex, Grok, Cursor), and the wrapper script each one runs | never | a config runs a wrapper that is missing or not executable, or that belongs to another home |
-| `server` | One `GET /health` on a loopback address: `--bind`, else the daemon's, else `127.0.0.1:7466` | never | something answers, but not with 200. Nothing answering is `info` |
+| `server` | One `GET /health` on a loopback address: `--bind`, else the daemon's, else `127.0.0.1:7466` | never | something answers, but not with 200; or the server names another node than this home's (it serves another `ANOTHER_HOME`). Nothing answering is `info` |
 | `daemon` | The launchd service (macOS only) | never | it is installed but not loaded, or loaded but not answering. Serving a different home is `info` |
 | `peers` | Paired nodes: role, revocation and last sync | never | the hub has not synced for 24 hours, or a spoke for 7 days |
 
