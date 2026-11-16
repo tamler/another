@@ -582,6 +582,8 @@ fn hosted_linux_systemd_user_manager_runs_the_daemon() {
         env.cmd(&all).env("HOME", &real_home).output().unwrap()
     };
     if !reachable {
+        panic!("PROBE: no reachable user manager");
+        #[allow(unreachable_code)]
         eprintln!(
             "NOT RUN: this runner has no reachable systemd user manager; checking the refusal"
         );
