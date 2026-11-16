@@ -127,3 +127,22 @@ fn a_zero_grace_on_the_same_resource_does_reap() {
     assert!(called);
     assert_ne!(s.resource(&ResourceRef::Id(id)).unwrap().status, "lapsed");
 }
+
+/// `guarded_reap` checks the grace again inside its transaction: a resource that lapsed less
+/// than `grace` ago is refused as no longer eligible, and its process is never stopped. (The
+/// CLI plan also checks it, but a confirm can arrive after the plan; this is the last guard
+/// before a process is killed.)
+#[test]
+fn a_reap_inside_the_grace_period_is_refused_without_calling_stop() {
+    let (s, id) = lapsed();
+    let mut called = false;
+    let err = s
+        .guarded_reap(Some(&id), 4242, 600, "test", || {
+            called = true;
+            Ok(true)
+        })
+        .unwrap_err();
+    assert_eq!(err.code(), "conflict", "{err}");
+    assert!(!called, "stop ran inside the grace period");
+    assert_eq!(s.resource(&ResourceRef::Id(id)).unwrap().status, "lapsed");
+}
