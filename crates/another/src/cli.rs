@@ -818,6 +818,30 @@ pub enum HoldCmd {
 /// a request someone else owns), and bad arguments exit 2 (clap).
 pub const EXIT_CONFLICT: u8 = 3;
 
+/// Stack for the thread the binary runs on.
+const CLI_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+/// Run `f` (the whole binary: plugin dispatch, then the CLI) on a thread with a known stack.
+/// clap's derive builds the whole command tree in a few very large generated functions; in
+/// a debug build their frames use nearly all of a 1 MB stack, which is the main-thread
+/// default on Windows, so a pull request that adds a few arguments makes `another init`
+/// overflow there (seen on #170 and #177; reproduced on macOS with `ulimit -s 1024`).
+/// Plugin dispatch builds the same tree to check built-in names, so it runs on this thread
+/// too. If the thread cannot be started, `f` runs on the calling thread.
+pub fn with_cli_stack(f: fn() -> ExitCode) -> ExitCode {
+    match std::thread::Builder::new()
+        .name("another".into())
+        .stack_size(CLI_STACK_BYTES)
+        .spawn(f)
+    {
+        // A panic has already printed its message; exit as an uncaught panic would.
+        Ok(handle) => handle.join().unwrap_or(ExitCode::from(101)),
+        Err(_) => f(),
+    }
+}
+
+/// The CLI: parse the command line and run it. The binary calls it through
+/// [`with_cli_stack`].
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
     let log_file = match &cli.command {
