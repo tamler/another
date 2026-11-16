@@ -1497,6 +1497,56 @@ mod tests {
         assert_eq!(map["live"].tokens, 0);
     }
 
+    /// The IPv6 half of the client-metadata fetch guard (SSRF): an IPv4 address written as
+    /// IPv6 gets the IPv4 rules, and the IPv6 local ranges are refused. `metadata_host_must_be_public`
+    /// covers IPv4 only.
+    #[test]
+    fn metadata_host_must_be_public_over_ipv6() {
+        let allowed = |ip: &str, loopback: bool| ip_allowed(ip.parse().unwrap(), loopback);
+        // Public IPv6 addresses are fetched.
+        assert!(allowed("2606:4700:4700::1111", false));
+        assert!(allowed("2a00:1450:4001::200e", false));
+        // IPv4-mapped addresses follow the IPv4 rules, in both directions.
+        for local in [
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
+            "::ffff:172.16.5.4",
+            "::ffff:192.168.1.5",
+            "::ffff:169.254.169.254",
+            "::ffff:100.64.0.1",
+            "::ffff:0.1.2.3",
+        ] {
+            assert!(!allowed(local, false), "{local}");
+        }
+        assert!(allowed("::ffff:8.8.8.8", false));
+        assert!(
+            allowed("::ffff:127.0.0.1", true),
+            "mapped loopback when allowed"
+        );
+        assert!(
+            !allowed("::ffff:10.0.0.1", true),
+            "loopback mode allows only loopback"
+        );
+        // IPv6 loopback, unspecified, link-local, unique-local and multicast are refused.
+        for local in [
+            "::1",
+            "::",
+            "fe80::1",
+            "fe80::a9fe:a9fe",
+            "fc00::1",
+            "fd12:3456::1",
+            "ff02::1",
+            "ff05::2",
+        ] {
+            assert!(!allowed(local, false), "{local}");
+        }
+        assert!(allowed("::1", true), "IPv6 loopback when allowed");
+        assert!(
+            !allowed("fd12:3456::1", true),
+            "loopback mode allows only loopback"
+        );
+    }
+
     #[test]
     fn metadata_host_must_be_public() {
         assert!(ip_allowed("8.8.8.8".parse().unwrap(), false));
