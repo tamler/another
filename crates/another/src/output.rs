@@ -502,6 +502,11 @@ pub fn wake_targets(ts: &[WakeTarget]) -> String {
 pub fn wake_plans(ps: &[crate::wake::WakePlan]) -> String {
     ps.iter()
         .map(|p| match (&p.skipped, p.sent) {
+            _ if p.error.is_some() => format!(
+                "failed {}: {}\n",
+                p.agent,
+                p.error.as_deref().unwrap_or_default()
+            ),
             (_, true) => format!(
                 "woke {} via {} ({})\n",
                 p.agent,

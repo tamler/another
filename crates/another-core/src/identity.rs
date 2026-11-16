@@ -350,7 +350,7 @@ pub(crate) fn resolve_any(conn: &Connection, node_id: &str, who: &str) -> Result
             // `name@node` for a project-less agent on another node.
             Some(node) => resolve_remote(conn, who, name, Some(""), node),
             None => Err(Error::NotFound(format!(
-                "unknown agent {who:?}; register it with register_agent first"
+                "unknown agent {who:?}; register it first"
             ))),
         },
         [(id, addr, _, _)] => Ok(AgentRef {
@@ -392,7 +392,7 @@ fn resolve_remote(
         .collect::<rusqlite::Result<Vec<(String, String, String)>>>()?;
     match rows.len() {
         0 => Err(Error::NotFound(format!(
-            "unknown agent {who:?}; register it with register_agent first (or sync with its node)"
+            "unknown agent {who:?}; register it first (or sync with its node)"
         ))),
         1 => {
             let (id, address, node_id) = rows.remove(0);
