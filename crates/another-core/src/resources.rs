@@ -21,6 +21,21 @@ pub const MAX_LEASE_TTL_SECONDS: i64 = 24 * 60 * 60;
 /// written into the `resource.registered` event and synced to peers, so it stays small.
 pub const MAX_RESOURCE_METADATA_BYTES: usize = 64 * 1024;
 
+/// Resource metadata must be a JSON object of at most [`MAX_RESOURCE_METADATA_BYTES`] as
+/// serialized JSON. Local registration and a peer's `resource.registered` both apply it.
+pub(crate) fn check_metadata(metadata: &Value) -> Result<()> {
+    if !metadata.is_object() {
+        return Err(Error::Invalid("metadata must be a JSON object".into()));
+    }
+    let bytes = metadata.to_string().len();
+    if bytes > MAX_RESOURCE_METADATA_BYTES {
+        return Err(Error::Invalid(format!(
+            "metadata is {bytes} bytes as JSON; the limit is {MAX_RESOURCE_METADATA_BYTES}"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceKind {
@@ -652,15 +667,7 @@ impl Store {
             .metadata
             .clone()
             .unwrap_or(Value::Object(Default::default()));
-        if !metadata.is_object() {
-            return Err(Error::Invalid("metadata must be a JSON object".into()));
-        }
-        let metadata_bytes = metadata.to_string().len();
-        if metadata_bytes > MAX_RESOURCE_METADATA_BYTES {
-            return Err(Error::Invalid(format!(
-                "metadata is {metadata_bytes} bytes as JSON; the limit is {MAX_RESOURCE_METADATA_BYTES}"
-            )));
-        }
+        check_metadata(&metadata)?;
         self.write(|tx| {
             crate::holds::sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, &input.agent)?;

@@ -628,6 +628,11 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
         "resource.registered" => {
             agent("owner_id")?;
             project()?;
+            // The same metadata rule as a local registration, so a peer without it (an
+            // older build or a forged event) cannot store or relay oversized metadata.
+            if let Some(metadata) = p.get("metadata") {
+                crate::resources::check_metadata(metadata)?;
+            }
             resource()
         }
         "resource.adopted" => {

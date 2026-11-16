@@ -792,3 +792,51 @@ fn a_revoked_spokes_lease_release_reaches_other_spokes() {
         .unwrap();
     assert_eq!(mallory_owner, 0);
 }
+
+/// The metadata cap holds on the way in from a peer too: a paired node that never applied it
+/// (an older build) cannot store oversized or non-object metadata on the hub, which would then
+/// relay it to every other spoke. Small object metadata from the same peer still syncs.
+#[test]
+fn a_peers_resource_cannot_carry_oversized_or_non_object_metadata() {
+    let fed = Fed::new();
+    let spy = fed.mallory.agent("spy");
+    push(&fed.hub, &fed.mallory);
+    let register = |rid: &str, metadata: Value| {
+        fed.forge(
+            "resource.registered",
+            json!({ "resource_id": rid, "kind": "model_server", "name": format!("{rid}@1"),
+                    "lease_id": format!("lease-{rid}"), "owner_id": spy, "metadata": metadata }),
+        )
+    };
+    let stored = |rid: &str| -> Option<String> {
+        fed.hub
+            .sql()
+            .query_row(
+                "SELECT metadata FROM resources WHERE resource_id = ?1",
+                [rid],
+                |r| r.get(0),
+            )
+            .ok()
+    };
+    let ok = register("r-small", json!({ "backend": "metal" }));
+    assert!(ok.rejected.is_empty(), "{:?}", ok.rejected);
+    assert_eq!(stored("r-small").as_deref(), Some(r#"{"backend":"metal"}"#));
+
+    register(
+        "r-big",
+        json!({ "blob": "x".repeat(MAX_RESOURCE_METADATA_BYTES) }),
+    );
+    let big = stored("r-big");
+    assert!(
+        big.as_ref()
+            .is_none_or(|m| m.len() <= MAX_RESOURCE_METADATA_BYTES),
+        "a peer stored {} bytes of metadata",
+        big.map_or(0, |m| m.len())
+    );
+    register("r-array", json!([1, 2, 3]));
+    let array = stored("r-array");
+    assert!(
+        array.as_deref().is_none_or(|m| m.starts_with('{')),
+        "a peer stored non-object metadata {array:?}"
+    );
+}
