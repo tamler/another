@@ -95,11 +95,13 @@ Each message is announced once, by whichever channel claims it first: a mid-task
 - if another agent holds an overlapping path, nothing is taken and the edit is denied with a message like this one:
 
 ```text
-Another stopped this edit: src/api/routes.rs is held by codex@shop-review (exclusive hold on shop-review:src/api/**, "router refactor", until 2026-11-10T16:04:00.000Z). Leave it alone until the hold is released. Ask the holder with `another send --from claude@shop --to codex@shop-review --request --subject "Release src/api/routes.rs?"`, or work on other files and try again later.
+Another stopped this edit: src/api/routes.rs is held by codex@shop-review (exclusive hold on shop-review:src/api/**, "router refactor", until 2026-11-10T16:04:00.000Z). Worktrees of the same repository still conflict at merge. Leave it alone until the hold is released. Ask the holder with `another send --from claude@shop --to codex@shop-review --request --subject "Release src/api/routes.rs?"`, or work on other files and try again later.
 ```
 
 - if the agent already holds the file (or a directory or glob covering it) exclusively, nothing is written, unless that hold is past half its TTL, which renews it;
 - otherwise the agent gets a narrow exclusive hold on that one file, with the default 30 minute TTL and the reason "editing (taken by the edit hook)".
+
+The guard never takes a directory or glob hold. File targets are literal names, including new files and names such as `app/[id]/page.tsx` or `src/*.rs`. Glob characters are escaped in stored auto holds, so they do not match unrelated files. Directory hints in a tool envelope are skipped; for a patch, file headers take precedence over generic path fields. Directory and glob holds need an explicit `hold acquire` or `hold_paths` call. A directory hold blocks unrelated files below it too, so prefer file paths.
 
 Holds are checked across every checkout of the same repository on this machine: sibling worktrees and separate clones of one origin see each other's holds (see [HOLDS.md](HOLDS.md)). A session's holds, including the ones the guard took, are released at session end.
 
