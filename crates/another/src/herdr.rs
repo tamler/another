@@ -494,4 +494,83 @@ mod tests {
         seqs.dedup();
         assert_eq!(seqs.len(), callers, "parallel reports reused a sequence");
     }
+
+    const WORKER_HOME: &str = "ANOTHER_TEST_HERDR_SEQ_HOME";
+    const WORKER_INDEX: &str = "ANOTHER_TEST_HERDR_SEQ_INDEX";
+
+    /// The child side of the next test; does nothing unless started by it.
+    #[test]
+    fn herdr_seq_worker() {
+        let Some(home) = std::env::var_os(WORKER_HOME).map(PathBuf::from) else {
+            return;
+        };
+        let i = std::env::var(WORKER_INDEX).unwrap();
+        // Start together: wait for the parent's signal file.
+        let go = home.join("go");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !go.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let pane = Pane {
+            bin: home.join("no-such-herdr"),
+            id: "w1:p1".into(),
+        };
+        let blocked = status(AgentState::Blocked, Some(&format!("process {i}")));
+        let argv = report(&home, &pane, Some(&blocked)).expect("a new state is sent");
+        println!("SEQ={}", seq_of(&argv));
+    }
+
+    /// The same as the previous test across processes, as real hooks are.
+    #[test]
+    fn parallel_report_processes_after_a_backward_clock_step_get_unique_increasing_seqs() {
+        if std::env::var_os(WORKER_HOME).is_some() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let ahead = now_micros() + 3_600_000_000;
+        seed_last(dir.path(), "w1:p1", ahead);
+        let exe = std::env::current_exe().unwrap();
+        let workers: Vec<_> = (0..16)
+            .map(|i| {
+                std::process::Command::new(&exe)
+                    .args([
+                        "--exact",
+                        "herdr::tests::herdr_seq_worker",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(WORKER_HOME, dir.path())
+                    .env(WORKER_INDEX, i.to_string())
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        std::fs::write(dir.path().join("go"), b"").unwrap();
+        let mut seqs: Vec<u64> = workers
+            .into_iter()
+            .map(|w| {
+                let out = w.wait_with_output().unwrap();
+                assert!(out.status.success(), "worker failed");
+                String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .find_map(|l| l.split_once("SEQ=").map(|(_, n)| n.to_string()))
+                    .expect("worker printed its sequence")
+                    .split_whitespace()
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap()
+            })
+            .collect();
+        assert!(
+            seqs.iter().all(|s| *s > ahead),
+            "a sequence fell back to the clock: {seqs:?}"
+        );
+        seqs.sort_unstable();
+        seqs.dedup();
+        assert_eq!(seqs.len(), 16, "parallel processes reused a sequence");
+    }
 }
