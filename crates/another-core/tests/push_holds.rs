@@ -912,6 +912,10 @@ fn edit_guard_refuses_directories_and_keeps_glob_characters_literal() {
             .guard_edit("alice", &project, &[path.into()], "auto")
             .unwrap();
         assert_eq!(guard.held[0].pattern, globset::escape(path));
+        // Windows forbids `*` and `?` in file names, so such a file can only be new there.
+        if cfg!(windows) && path.contains(['*', '?']) {
+            continue;
+        }
         write(&fx.repos.main.join(path), "file");
         let again = fx
             .store
@@ -1168,14 +1172,10 @@ fn unannounced_mail_is_claimed_once() {
     let all = fx.store.unannounced("alice", "", 10).unwrap();
     assert_eq!(all.agent, "alice");
     assert_eq!((all.count, all.urgent), (3, 1));
-    // IDs use real time and random bits, independently of the store's manual clock.
-    // The query contract orders by ID, including IDs created in the same millisecond.
-    let mut expected = [&first, &second, &third];
-    expected.sort_by(|a, b| b.message_id.cmp(&a.message_id));
-    assert_eq!(
-        all.items.iter().map(|i| &i.message_id).collect::<Vec<_>>(),
-        expected.iter().map(|m| &m.message_id).collect::<Vec<_>>()
-    );
+    // Newest delivery first (#132). IDs use real time and random bits, so two created in
+    // the same millisecond need not sort in delivery order; the query does not use them.
+    let subjects: Vec<_> = all.items.iter().map(|i| i.subject.as_str()).collect();
+    assert_eq!(subjects, ["third", "second", "first"]);
     let request = all
         .items
         .iter()
@@ -1184,13 +1184,10 @@ fn unannounced_mail_is_claimed_once() {
     assert!(request.request_id.is_some());
     assert_eq!(request.from, "bob");
 
-    let newer = fx
-        .store
-        .unannounced("alice", &expected[2].message_id, 1)
-        .unwrap();
+    let newer = fx.store.unannounced("alice", &first.message_id, 1).unwrap();
     assert_eq!(newer.count, 2);
     assert_eq!(newer.items.len(), 1, "limit caps items, not the count");
-    assert_eq!(newer.items[0].message_id, expected[0].message_id);
+    assert_eq!(newer.items[0].message_id, third.message_id);
 
     // Review F2: a claim is exclusive. The first caller wins; a second (another hook, or
     // the daemon) gets nothing for the same message.
