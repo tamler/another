@@ -47,21 +47,25 @@ mkdir -p "$work/home" "$work/shop"
 HOME=$(native "$work/home")
 ANOTHER_HOME=$(native "$work/data")
 export HOME ANOTHER_HOME
-unset ANOTHER_AGENT ANOTHER_LOG
+unset ANOTHER_AGENT ANOTHER_LOG XDG_CONFIG_HOME
 git -C "$work/shop" init -q
 shop=$(native "$work/shop")
 
 # The client config files `hook install --client all` writes, relative to HOME.
 CLIENT_CONFIGS=".claude/settings.json .codex/hooks.json .cursor/hooks.json .grok/hooks/another.json"
 
-# The content of every client config (and the hook script), to compare installs.
+# The content of every client config and every hook wrapper script, to compare installs.
 configs_digest() {
   local f
   for f in $CLIENT_CONFIGS; do
     printf '== %s\n' "$f"
     cat "$work/home/$f" 2>/dev/null || printf 'missing\n'
   done
-  ls "$work/data/hooks" 2>/dev/null
+  for f in "$work/data/hooks"/*; do
+    [ -e "$f" ] || continue
+    printf '== %s\n' "${f##*/}"
+    cat "$f"
+  done
 }
 
 # Agents, a message and a hold, written by $1.
@@ -125,21 +129,23 @@ fresh() {
     fail "client configs still name the Another hook after uninstall"
   fi
 
-  # `another daemon` manages launchd only until #142 adds systemd and Task Scheduler;
-  # elsewhere the command must at least refuse cleanly.
-  if [ "$(uname -s)" = Darwin ]; then
-    step "daemon definition (dry run; nothing is loaded)"
-    out=$("$new" --json daemon install --dry-run 2>&1) || fail "daemon dry run failed: $out"
-    expect "daemon dry run" '"dry_run": true' "$out"
-    [ ! -e "$work/home/Library/LaunchAgents" ] || fail "dry run wrote a LaunchAgent"
-  else
-    step "daemon definition: not supported on $(uname -s) yet, so it must refuse"
-    if out=$("$new" daemon install --dry-run 2>&1); then
-      echo "daemon install --dry-run succeeded here: $out"
-    else
-      expect "daemon refusal" "another:" "$out"
-    fi
-  fi
+  # `another daemon` uses launchd, a systemd user unit or Task Scheduler. A dry run must
+  # succeed, plan a new definition for this platform's manager, and write nothing: no
+  # definition file and none of the directories one would go in.
+  local manager definition_dir
+  case "$(uname -s)" in
+    Darwin) manager=launchd definition_dir="$work/home/Library/LaunchAgents" ;;
+    Linux) manager=systemd definition_dir="$work/home/.config/systemd" ;;
+    MINGW* | MSYS* | CYGWIN*) manager=task_scheduler definition_dir="$work/data/daemon" ;;
+    *) fail "no daemon manager is expected on $(uname -s)" ;;
+  esac
+  step "daemon definition with $manager (dry run; nothing is written or loaded)"
+  out=$("$new" --json daemon install --dry-run 2>&1) || fail "daemon dry run failed: $out"
+  expect "daemon dry run" '"dry_run": true' "$out"
+  expect "daemon dry run" "\"manager\": \"$manager\"" "$out"
+  expect "daemon dry run" '"change": "create"' "$out"
+  expect "daemon dry run" '"commands": [' "$out"
+  [ ! -e "$definition_dir" ] || fail "the dry run wrote $definition_dir"
 
   step "fresh: ok"
 }
