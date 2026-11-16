@@ -54,3 +54,63 @@ fn a_release_request_for_a_file_with_a_line_break_is_one_line() {
         ask.subject
     );
 }
+
+/// A message stored before D75 may have a control character in its subject. Replying to
+/// it, and completing a request opened by it, must still work, with one-line subjects.
+#[test]
+fn replies_and_done_notices_to_old_subjects_are_one_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _project) = store(dir.path());
+    let sent = store
+        .send_message(SendMessage {
+            from: "alice@shop".into(),
+            to: vec!["bob@shop".into()],
+            subject: "placeholder".into(),
+            body: "body".into(),
+            request: Some(NewRequest::default()),
+            ..Default::default()
+        })
+        .unwrap();
+    let db = rusqlite::Connection::open(dir.path().join("home").join(DB_FILE)).unwrap();
+    db.execute(
+        "UPDATE messages SET subject = 'old\r\nsubject' WHERE message_id = ?1",
+        [&sent.message_id],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE requests SET title = 'old\r\nsubject' WHERE message_id = ?1",
+        [&sent.message_id],
+    )
+    .unwrap();
+
+    let reply = store
+        .reply(Reply {
+            from: "bob@shop".into(),
+            message_id: sent.message_id.clone(),
+            body: "ok".into(),
+            all: false,
+            importance: None,
+            ack_required: false,
+        })
+        .expect("a reply to an old subject must not fail");
+    assert_eq!(reply.subject, "Re: old  subject");
+
+    let request_id = sent.request_id.clone().unwrap();
+    store
+        .update_request(RequestUpdate {
+            agent: "bob@shop".into(),
+            request_id,
+            action: RequestAction::Complete,
+            note: Some("done".into()),
+            due_in_seconds: None,
+        })
+        .expect("completing a request with an old title must not fail");
+    let done: String = db
+        .query_row(
+            "SELECT subject FROM messages WHERE subject LIKE 'Done:%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(done, "Done: old  subject");
+}

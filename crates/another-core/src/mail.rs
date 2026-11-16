@@ -529,10 +529,12 @@ impl Store {
                 // Replying to your own message: address the original recipients.
                 to = original.to.clone();
             }
-            let subject = if original.subject.to_ascii_lowercase().starts_with("re:") {
-                original.subject.clone()
+            // The original may have been stored before D75; keep the reply one line.
+            let original_subject = single_line(&original.subject, MAX_SUBJECT_CHARS - 4);
+            let subject = if original_subject.to_ascii_lowercase().starts_with("re:") {
+                original_subject
             } else {
-                format!("Re: {}", original.subject)
+                format!("Re: {original_subject}")
             };
             send_tx(
                 tx,
