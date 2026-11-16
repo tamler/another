@@ -931,11 +931,11 @@ const CLI_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 /// Run `f` (the whole binary: plugin dispatch, then the CLI) on a thread with a known stack.
 /// clap's derive builds the whole command tree in a few very large generated functions; in
-/// a debug build their frames use most of a 1 MB stack, which is the main-thread default on
-/// Windows, so `another init` and `another --version` overflowed there once every argument
-/// had help text (review R1-1, reproduced on macOS with `ulimit -s 1024`). Plugin dispatch
-/// builds the same tree to check built-in names, so it runs on this thread too. If the
-/// thread cannot be started, `f` runs on the calling thread.
+/// a debug build their frames use nearly all of a 1 MB stack, which is the main-thread
+/// default on Windows, so a pull request that adds a few arguments makes `another init`
+/// overflow there (seen on #170 and #177; reproduced on macOS with `ulimit -s 1024`).
+/// Plugin dispatch builds the same tree to check built-in names, so it runs on this thread
+/// too. If the thread cannot be started, `f` runs on the calling thread.
 pub fn with_cli_stack(f: fn() -> ExitCode) -> ExitCode {
     match std::thread::Builder::new()
         .name("another".into())
