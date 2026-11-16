@@ -24,7 +24,7 @@ another hook install --client claude
 
 `--client` takes `claude`, `codex`, `grok`, `cursor`, or `all` (repeat or comma-separate). The installer:
 
-- writes one POSIX wrapper, `$ANOTHER_HOME/hooks/another-hook.sh` (default `~/.another/hooks/another-hook.sh`), which calls `another hook run <event> --client <client>` and always exits 0;
+- writes one POSIX wrapper, `$ANOTHER_HOME/hooks/another-hook.sh` (default `~/.another/hooks/another-hook.sh`), which calls `another hook run <event> --client <client>` and exits 0. The one exception is Cursor's opt-in edit guard (see "Cursor edit guard (preview)" below);
 - adds Another entries to each client's **user-level** config in your home directory (`~/.claude/settings.json`, `~/.codex/hooks.json`, `~/.grok/hooks/another.json`, `~/.cursor/hooks.json`). Hooks are global for that user, not per project; the project is worked out at run time from the client's working directory. Existing hooks and settings stay in place;
 - keeps each file's permissions (and owner, where allowed) when rewriting it, so a `0600` settings file stays `0600`; files it creates are `0600`. A symlinked config (e.g. from a dotfiles repo) is edited at its target and stays a symlink;
 - is idempotent: running it again changes nothing;
@@ -50,7 +50,35 @@ Uninstall removes only entries that reference `another-hook.sh`, and deletes the
 | Claude Code | `~/.claude/settings.json` | `SessionStart`, `UserPromptSubmit`, `SessionEnd`, `PostToolUse` (all tools), `PreToolUse` (`Edit\|Write\|MultiEdit\|NotebookEdit`) | Plain stdout is added to context at session start and prompts. Tool hooks answer in JSON: `additionalContext` after a tool, `permissionDecision: "deny"` before an edit. |
 | Codex CLI | `~/.codex/hooks.json` | Same five; `PreToolUse` matches `apply_patch\|Edit\|Write` | In the default trust flow, new hooks run only after you trust them: open Codex and review them under `/hooks` (see "Codex trust and coverage" below for the bypass flag). Each Another entry carries a `statusMessage` that says what it does, so it has a clear label and not only a bare command (see "Codex labels" below). The edit guard reads the file names from the `apply_patch` patch text. |
 | Grok CLI | `~/.grok/hooks/another.json` | Same five as Claude Code | User-level hooks need no trust step (`/hooks-trust` applies to project hooks). Grok maps `Edit`, `Write` and `MultiEdit` onto its own edit tools. See "Grok and shared hook files" below. |
-| Cursor (best effort) | `~/.cursor/hooks.json` | `sessionStart`, `beforeSubmitPrompt`, `sessionEnd`, `postToolUse` | Context is injected at session start and after tool calls (`additional_context`); the prompt hook just renews holds and lets the prompt through. No edit guard: Cursor blocks a tool call when a `preToolUse` reply is not valid JSON, and a hook that fails open prints nothing. |
+| Cursor (best effort) | `~/.cursor/hooks.json` | `sessionStart`, `beforeSubmitPrompt`, `sessionEnd`, `postToolUse`; with `--cursor-edit-guard`, also `preToolUse` (`^(Write\|Delete)$`) | Context is injected at session start and after tool calls (`additional_context`); the prompt hook just renews holds and lets the prompt through. The edit guard is opt-in and a preview: see "Cursor edit guard (preview)" below. |
+
+### Cursor edit guard (preview)
+
+```bash
+another hook install --client cursor --cursor-edit-guard
+```
+
+Cursor blocks a tool call when a `preToolUse` reply is not valid JSON. Because of that, the guard is opt-in, and its wrapper route works differently from every other hook (D75):
+
+- **A held file:** the wrapper prints one line, `{"permission":"deny","user_message":...,"agent_message":...}`, and exits 0.
+  - `another` builds that line with a JSON serializer.
+  - The wrapper forwards it only after `another` exited 0 and `another hook check-reply` accepted it as one complete deny object with nothing else in it.
+  - A message too long for the 8 KB cap is replaced by a short fixed deny, never cut.
+- **Everything else** prints nothing and exits 1, which Cursor's hook documentation treats as "hook failed, action proceeds". That covers a free file (the hold is taken, as for other clients), a missing binary or database, a crash, partial output or anything the check rejects.
+  - Another never replies `allow`, so it cannot skip Cursor's own approval prompts.
+  - A hung `another` is ended by Cursor's 5-second hook timeout, which Cursor also treats as a failure.
+- **Grok:** when Grok runs Cursor's hook file (`GROK_HOOK_EVENT` set), the ordinary route is used.
+- **`failClosed`:** Another never sets it. `another hook status` warns if an Another entry has `failClosed: true`, because Cursor would then block the edit whenever Another fails.
+- **Turning it off:** run `hook install --client cursor` again without the flag. Uninstall removes it too.
+
+Limits:
+- It has **not yet been checked against a running Cursor**:
+  - which tool names Cursor sends for edits;
+  - whether exit 1 shows the user an error on every edit;
+  - how the deny is displayed.
+- It matches only the `Write` and `Delete` tools that Cursor's documentation names.
+- Edits from Cursor's shell tool, Tab completions and the Cursor CLI are not guarded.
+- Project, team and enterprise Cursor hooks can add denials of their own; any deny wins in Cursor.
 
 ### Codex trust and coverage
 
@@ -130,7 +158,7 @@ Completed or cancelled requests never represent a fresh ask for dedupe. Cancelli
 Both tool hooks open the database without creating or migrating it and wait at most 50 ms (`post-tool`) or 300 ms (`pre-edit`) for a lock. The rule:
 
 - **Push fails open.** Missing database, old schema, locked database, unknown agent: the hook prints nothing and exits 0.
-- **The edit guard denies only a known conflict.** If it cannot check (the database is missing or locked), it lets the edit through and appends a line to `$ANOTHER_HOME/logs/hooks.log` saying why. That log is capped at 256 KB (one older copy is kept as `hooks.log.1`).
+- **The edit guard denies only a known conflict.** If it cannot check (the database is missing or locked), it lets the edit through and appends a line to `$ANOTHER_HOME/logs/hooks.log` saying why. For Cursor's guard, "lets the edit through" is an empty reply with exit 1 (see "Cursor edit guard (preview)"). That log is capped at 256 KB (one older copy is kept as `hooks.log.1`).
 
 With nothing new, `post-tool` only reads, and SQLite in WAL mode lets readers past a writer. Announcing needs the claim write: if another writer holds the database for longer than 50 ms, the notice is not shown on that call and arrives on the next one.
 

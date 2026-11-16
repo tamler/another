@@ -16,7 +16,7 @@ Several agents, one project, one machine. Another is a background messaging syst
 
 ### 2. Holds do not lock
 
-A path hold is not a disk lock. The edit hook stops covered Claude Code, Codex and Grok CLI edits on held paths. Shell edits bypass it, Cursor has no edit guard, and hooks can fail open. Use separate checkouts for isolation.
+A path hold is not a disk lock. The edit hook stops covered Claude Code, Codex and Grok CLI edits on held paths. Shell edits bypass it, Cursor's edit guard is an opt-in preview, and hooks can fail open. Use separate checkouts for isolation.
 
 ### 3. Mid-task notices
 
