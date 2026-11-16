@@ -813,7 +813,7 @@ pub fn main() -> ExitCode {
                 }
                 println!("{out}");
             } else {
-                eprintln!("another: {}", body.message);
+                eprintln!("another: {}", terminal_safe(&body.message));
                 if let Some(hint) = hint {
                     eprintln!("hint: {hint}");
                 }
@@ -1022,10 +1022,26 @@ fn emit<T: Serialize>(json: bool, value: &T, human: impl FnOnce(&T) -> String) -
     } else {
         let text = human(value);
         if !text.is_empty() {
-            println!("{}", text.trim_end());
+            println!("{}", terminal_safe(text.trim_end()));
         }
     }
     ExitCode::SUCCESS
+}
+
+/// Text for a person's terminal. Names, paths, subjects and reasons in human output come
+/// from other agents and other machines, and a file name can hold ESC or BEL: an OSC or
+/// CSI sequence there would retitle, clear or rewrite the operator's terminal. Every
+/// control or bidi-override character except the line breaks and tabs the renderers use
+/// for layout becomes `?` (the D75 rule, applied where text reaches a terminal). `--json`
+/// output is unchanged: JSON escapes them.
+fn terminal_safe(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\n' | '\t' => c,
+            c if another_core::is_unsafe_text_char(c) => '?',
+            c => c,
+        })
+        .collect()
 }
 
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
