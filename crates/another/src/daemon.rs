@@ -1039,6 +1039,14 @@ fn systemd_state(show: &str) -> (bool, Option<u32>) {
 
 /// Is the service installed, loaded, running and answering?
 pub fn status(env: &DaemonEnv) -> Result<DaemonStatus> {
+    let mut s = service(env)?;
+    s.healthy = s.bind.as_deref().is_some_and(healthy);
+    Ok(s)
+}
+
+/// What the service manager and the service's file say, with no network call: `healthy`
+/// is always false here. `another doctor` uses this and makes its own single `/health` call.
+pub fn service(env: &DaemonEnv) -> Result<DaemonStatus> {
     validate_label(&env.label)?;
     let path = env.file_path();
     let installed_text = read_definition(env.manager, &path);
@@ -1077,7 +1085,6 @@ pub fn status(env: &DaemonEnv) -> Result<DaemonStatus> {
     let bind = installed_text
         .as_deref()
         .and_then(|t| bind_in(env.manager, t));
-    let healthy = bind.as_deref().is_some_and(healthy);
     Ok(DaemonStatus {
         manager: env.manager,
         label: env.label.clone(),
@@ -1087,7 +1094,7 @@ pub fn status(env: &DaemonEnv) -> Result<DaemonStatus> {
         loaded,
         pid,
         bind,
-        healthy,
+        healthy: false,
         log: env.log_path().display().to_string(),
     })
 }
