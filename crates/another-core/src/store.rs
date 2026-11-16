@@ -619,6 +619,29 @@ CREATE TABLE announcements (
     PRIMARY KEY (agent_id, message_id)
 );
 "#,
+    // Durable, node-local subscriptions created by blocked file edits.
+    r#"
+CREATE TABLE hold_waits (
+    agent_id       TEXT NOT NULL REFERENCES agents(agent_id),
+    project_id     TEXT NOT NULL REFERENCES projects(project_id),
+    path           TEXT NOT NULL,
+    blockers       TEXT NOT NULL,
+    holder_id      TEXT NOT NULL REFERENCES agents(agent_id),
+    retry_at       INTEGER NOT NULL,
+    backoff_seconds INTEGER NOT NULL,
+    PRIMARY KEY (agent_id, project_id, path)
+);
+"#,
+    r#"
+CREATE TABLE request_holds (
+    request_id TEXT PRIMARY KEY REFERENCES requests(request_id),
+    hold_id    TEXT NOT NULL REFERENCES holds(hold_id)
+);
+CREATE INDEX request_holds_by_hold ON request_holds(hold_id);
+ALTER TABLE announcements ADD COLUMN fingerprint TEXT;
+ALTER TABLE announcements ADD COLUMN duplicate_of TEXT REFERENCES messages(message_id);
+CREATE INDEX announcements_by_fingerprint ON announcements(agent_id, fingerprint, announced_at);
+"#,
 ];
 
 /// Switch to WAL. While several connections convert a new database at once, SQLite answers
