@@ -1177,7 +1177,9 @@ impl Store {
         signature: &str,
     ) -> Result<Vec<Perm>> {
         let denied = || Error::Forbidden("request not signed by a paired node".into());
-        if (self.now() - time_ms).abs() > 5 * 60 * 1000 {
+        // `time_ms` comes from an unauthenticated header: compare without overflow, so an
+        // extreme value can neither panic nor wrap past the window.
+        if self.now().abs_diff(time_ms) > 5 * 60 * 1000 {
             return Err(Error::Forbidden(
                 "request time is more than 5 minutes off; check the clocks".into(),
             ));
@@ -2070,6 +2072,26 @@ mod tests {
             })
             .unwrap();
         assert_eq!(peer_expiry, 2_801_000);
+    }
+
+    #[test]
+    fn extreme_request_times_are_refused_without_overflow() {
+        // `x-another-time` is read from an unauthenticated header before any signature
+        // check; found by the peer_request fuzz harness.
+        let (clock, _) = crate::Clock::manual(1_800_000_000_000);
+        let store = Store::open_in_memory(clock).unwrap();
+        // The last value made the old wrapping difference exactly i64::MIN, whose wrapping
+        // `abs` stays negative: it slipped past the window in a release build.
+        let wrap_to_min = 1_800_000_000_000i64.wrapping_add(i64::MIN);
+        for time in [i64::MIN, i64::MIN + 1, i64::MAX, wrap_to_min] {
+            let err = store
+                .verify_peer_request("node", "GET", "/fed/pull", time, b"", "sig")
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("more than 5 minutes off"),
+                "{time}: {err}"
+            );
+        }
     }
 
     #[test]
