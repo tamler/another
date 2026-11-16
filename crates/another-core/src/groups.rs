@@ -334,7 +334,43 @@ pub(crate) fn groups_of(conn: &Connection, agent_id: &str) -> Result<Vec<Group>>
     refs.iter().map(|g| group_from_ref(conn, g)).collect()
 }
 
+/// A thread that holds a queue item. Remote callers neither read it, reply in it nor act on
+/// its mail (group queues are local-only in this release, D77), whatever else the thread
+/// contains: the claimer and any direct recipient of a mixed send are participants.
+pub(crate) fn is_queue_thread(conn: &Connection, thread_id: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM requests WHERE thread_id = ?1 AND group_id IS NOT NULL)",
+        [thread_id],
+        |r| r.get(0),
+    )?)
+}
+
+/// Whether `message_id` belongs to a queue thread. An unknown message is not.
+pub(crate) fn is_queue_message(conn: &Connection, message_id: &str) -> Result<bool> {
+    let thread: Option<String> = conn
+        .query_row(
+            "SELECT thread_id FROM messages WHERE message_id = ?1",
+            [message_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match thread {
+        Some(t) => is_queue_thread(conn, &t),
+        None => Ok(false),
+    }
+}
+
 impl Store {
+    /// Whether `thread_id` holds a group queue item; see the remote rules in QUEUES.md.
+    pub fn is_queue_thread(&self, thread_id: &str) -> Result<bool> {
+        self.read(|conn| is_queue_thread(conn, thread_id))
+    }
+
+    /// Whether `message_id` is in a thread that holds a group queue item.
+    pub fn is_queue_message(&self, message_id: &str) -> Result<bool> {
+        self.read(|conn| is_queue_message(conn, message_id))
+    }
+
     /// Create a group in `project` (path or slug); the creator becomes its first member.
     pub fn create_group(&self, agent: &str, project: &str, name: &str) -> Result<Group> {
         validate_name(name)?;

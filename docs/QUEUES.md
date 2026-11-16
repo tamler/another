@@ -70,5 +70,12 @@ Group changes are `group.created`, `group.member_added`, `group.member_removed` 
 ## Limits in this release
 
 - **Local only.** Groups, their members and queue items stay on this node and are never sent to peers. Federation shares neither group events, nor a queue item's message, nor any request event that carries a `group_id`.
-- **No remote access.** Remote token and OAuth callers cannot send to a group, take or act on a queue item, and do not see queue items or group events in `fetch_inbox`, `whats_new`, `activity_feed` or `GET /activity`. Scoped remote access is planned.
+- **No remote access.** Remote token and OAuth callers cannot do any of the following:
+  - send to a group;
+  - take or act on a queue item;
+  - read a thread that holds a queue item;
+  - reply in such a thread;
+  - acknowledge its mail.
+
+  This applies even to the item's claimer, or to a direct recipient of a message also sent to a group. Remote reads leave queue items, their threads and their events out of `fetch_inbox` (counters included), `whats_new`, `threads` listings, `activity_feed`, `activity_summarize` (counts, highlights and request totals), `work_board` (requests and mail counts) and `GET /activity`. A thread counts as a queue thread when it holds any queue item, whatever else it contains. Scoped remote access is planned.
 - **Not covered yet:** group management through MCP, queue counts in the session-start digest and the board, priority aging, and moving items between groups.

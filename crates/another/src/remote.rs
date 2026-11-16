@@ -263,12 +263,31 @@ pub fn authorize(
             if names_group {
                 return Err("group queues are local-only in this release".into());
             }
+            // A reply joins its parent's thread: none in a thread that holds a queue item.
+            if let Some(parent) = s(args, "reply_to") {
+                if store.is_queue_message(parent).map_err(err)? {
+                    return Err("group queues are local-only in this release".into());
+                }
+            }
             acting(args, "from")
         }
         "claim_request" if s(args, "action") == Some("next") => {
             Err("group queues are local-only in this release".into())
         }
-        "fetch_inbox" | "acknowledge" | "claim_request" | "heartbeat" | "resource_borrow"
+        "acknowledge" => {
+            let ids = args
+                .get("message_ids")
+                .and_then(Value::as_array)
+                .map(|ids| ids.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+                .unwrap_or_default();
+            for id in ids {
+                if store.is_queue_message(id).map_err(err)? {
+                    return Err("group queues are local-only in this release".into());
+                }
+            }
+            acting(args, "agent")
+        }
+        "fetch_inbox" | "claim_request" | "heartbeat" | "resource_borrow"
         | "resource_release" | "resource_heartbeat" | "whats_new" => acting(args, "agent"),
         "hold_paths" => {
             acting(args, "agent")?;
@@ -280,7 +299,9 @@ pub fn authorize(
         }
         "threads" => match s(args, "thread_id") {
             Some(t) => {
-                if store.in_thread(&scope.agent_id, t).map_err(err)? {
+                if store.is_queue_thread(t).map_err(err)? {
+                    Err("group queues are local-only in this release".into())
+                } else if store.in_thread(&scope.agent_id, t).map_err(err)? {
                     Ok(())
                 } else {
                     Err("remote peers can only read threads they are part of".into())

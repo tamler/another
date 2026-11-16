@@ -746,27 +746,44 @@ fn read_events(
     Ok(out)
 }
 
-impl Store {
-    /// Whether a feed item belongs to a group queue: a `group.*` event, or one about a
-    /// request (or its message) that a group queues.
-    pub fn is_queue_event(&self, item: &ActivityItem) -> bool {
-        if item.kind.starts_with("group.") {
-            return true;
+/// Whether an event, given its kind and the ids it names, concerns a group queue: a
+/// `group.*` event, one that carries a `group_id`, or one about a queue item's request,
+/// thread or mail (its message, replies, reads and acks).
+fn concerns_queue(conn: &Connection, kind: &str, ids: &Value) -> Result<bool> {
+    if kind.starts_with("group.") || !ids.get("group_id").unwrap_or(&Value::Null).is_null() {
+        return Ok(true);
+    }
+    let s = |k: &str| ids.get(k).and_then(Value::as_str);
+    if let Some(rid) = s("request_id") {
+        let queued = conn
+            .query_row(
+                "SELECT group_id IS NOT NULL FROM requests WHERE request_id = ?1",
+                [rid],
+                |r| r.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if queued {
+            return Ok(true);
         }
-        let Some(rid) = item.refs.get("request_id").and_then(Value::as_str) else {
-            return false;
-        };
-        self.read(|conn| {
-            Ok(conn
-                .query_row(
-                    "SELECT group_id IS NOT NULL FROM requests WHERE request_id = ?1",
-                    [rid],
-                    |r| r.get::<_, bool>(0),
-                )
-                .optional()?
-                .unwrap_or(false))
-        })
-        .unwrap_or(false)
+    }
+    if let Some(t) = s("thread_id") {
+        if crate::groups::is_queue_thread(conn, t)? {
+            return Ok(true);
+        }
+    }
+    match s("message_id") {
+        Some(m) => crate::groups::is_queue_message(conn, m),
+        None => Ok(false),
+    }
+}
+
+impl Store {
+    /// Whether a feed item belongs to a group queue: see [`concerns_queue`]. Remote callers
+    /// do not see these (group queues are local-only in this release, D77).
+    pub fn is_queue_event(&self, item: &ActivityItem) -> bool {
+        self.read(|conn| concerns_queue(conn, &item.kind, &item.refs))
+            .unwrap_or(true)
     }
 
     /// Read the activity feed.
@@ -795,12 +812,27 @@ impl Store {
 
     /// Summarize activity since a point in time (default: the last hour).
     pub fn activity_summary(&self, since: Option<Since>) -> Result<ActivitySummary> {
+        self.activity_summary_scoped(since, false)
+    }
+
+    /// [`Store::activity_summary`] for a remote caller: with `hide_queues`, group queue events
+    /// are left out of the counts and highlights, and queue items out of the request totals
+    /// (group queues are local-only in this release, D77).
+    pub fn activity_summary_scoped(
+        &self,
+        since: Option<Since>,
+        hide_queues: bool,
+    ) -> Result<ActivitySummary> {
         self.sweep()?;
-        self.activity_summary_without_sweep(since)
+        self.summary(since, hide_queues)
     }
 
     /// Read the activity summary without expiring holds or requests.
     pub fn activity_summary_without_sweep(&self, since: Option<Since>) -> Result<ActivitySummary> {
+        self.summary(since, false)
+    }
+
+    fn summary(&self, since: Option<Since>, hide_queues: bool) -> Result<ActivitySummary> {
         let now = self.now();
         let since = since.unwrap_or(Since::Time(now - 3_600_000));
         self.read(|conn| {
@@ -813,7 +845,17 @@ impl Store {
                     .optional()?
                     .ok_or_else(|| Error::NotFound(format!("unknown event id {id:?}")))?,
             };
-            let rows = read_events(conn, Some(&since), &[], u32::MAX)?;
+            let mut rows = read_events(conn, Some(&since), &[], u32::MAX)?;
+            if hide_queues {
+                let mut kept = Vec::with_capacity(rows.len());
+                for r in rows {
+                    let payload: Value = serde_json::from_str(&r.payload).unwrap_or(Value::Null);
+                    if !concerns_queue(conn, &r.kind, &payload)? {
+                        kept.push(r);
+                    }
+                }
+                rows = kept;
+            }
             let mut counts: BTreeMap<String, u32> = BTreeMap::new();
             for r in &rows {
                 *counts
@@ -863,8 +905,8 @@ impl Store {
                 "SELECT count(*) FILTER (WHERE status = 'open'),
                         count(*) FILTER (WHERE status = 'claimed'),
                         count(*) FILTER (WHERE status = 'stale')
-                 FROM requests WHERE node_id = ?1",
-                [self.node_id()],
+                 FROM requests WHERE node_id = ?1 AND (?2 = 0 OR group_id IS NULL)",
+                params![self.node_id(), hide_queues],
                 |r| {
                     Ok(RequestCounts {
                         open: r.get(0)?,
@@ -931,13 +973,14 @@ impl Store {
             n => n.min(20),
         };
         let since = since.unwrap_or_else(|| Since::Time(self.now() - 86_400_000));
-        let inbox = self.inbox(
+        let inbox = self.inbox_scoped(
             agent,
             InboxQuery {
                 unread_only: true,
                 urgent_only: false,
                 limit,
             },
+            hide_queues,
         )?;
         let feed = self.activity(ActivityQuery {
             since: Some(since),

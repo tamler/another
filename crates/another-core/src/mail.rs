@@ -560,13 +560,24 @@ impl Store {
 
     /// Messages delivered to `who`, newest first, plus counters and relevant requests.
     pub fn inbox(&self, who: &str, query: InboxQuery) -> Result<Inbox> {
+        self.inbox_scoped(who, query, false)
+    }
+
+    /// [`Store::inbox`] for a remote caller: with `hide_queues`, mail in a thread that holds
+    /// a group queue item, and queue items themselves, are left out of the list and the
+    /// counters (group queues are local-only in this release, D77).
+    pub fn inbox_scoped(&self, who: &str, query: InboxQuery, hide_queues: bool) -> Result<Inbox> {
         // Expire stale requests/holds first so the digest is current even without a daemon.
         self.sweep()?;
-        self.inbox_without_sweep(who, query)
+        self.read_inbox(who, query, hide_queues)
     }
 
     /// Read an inbox without changing hold or request lifecycle state.
     pub fn inbox_without_sweep(&self, who: &str, query: InboxQuery) -> Result<Inbox> {
+        self.read_inbox(who, query, false)
+    }
+
+    fn read_inbox(&self, who: &str, query: InboxQuery, hide_queues: bool) -> Result<Inbox> {
         self.read(|conn| {
             let me = resolve_agent(conn, self.node_id(), who)?;
             let (unread, urgent_unread, awaiting_ack): (u32, u32, u32) = conn.query_row(
@@ -575,8 +586,10 @@ impl Store {
                    count(*) FILTER (WHERE d.read_at IS NULL AND m.importance IN ('high', 'urgent')),
                    count(*) FILTER (WHERE m.ack_required = 1 AND d.acked_at IS NULL)
                  FROM deliveries d JOIN messages m ON m.message_id = d.message_id
-                 WHERE d.agent_id = ?1",
-                [&me.id],
+                 WHERE d.agent_id = ?1
+                   AND (?2 = 0 OR NOT EXISTS (SELECT 1 FROM requests q
+                         WHERE q.thread_id = m.thread_id AND q.group_id IS NOT NULL))",
+                params![me.id, hide_queues],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )?;
             let limit = if query.limit == 0 { 50 } else { query.limit };
@@ -586,12 +599,20 @@ impl Store {
                  WHERE d.agent_id = ?1
                    AND (?2 = 0 OR d.read_at IS NULL)
                    AND (?3 = 0 OR m.importance IN ('high', 'urgent'))
+                   AND (?5 = 0 OR NOT EXISTS (SELECT 1 FROM requests q
+                         WHERE q.thread_id = m.thread_id AND q.group_id IS NOT NULL))
                  ORDER BY m.created_at DESC, m.message_id DESC
                  LIMIT ?4",
             )?;
             let rows = stmt
                 .query_map(
-                    params![me.id, query.unread_only, query.urgent_only, limit],
+                    params![
+                        me.id,
+                        query.unread_only,
+                        query.urgent_only,
+                        limit,
+                        hide_queues
+                    ],
                     |r| {
                         Ok((
                             r.get::<_, String>(0)?,
@@ -613,7 +634,10 @@ impl Store {
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let requests = list_requests_for_inbox(conn, &me.id)?;
+            let mut requests = list_requests_for_inbox(conn, &me.id)?;
+            if hide_queues {
+                requests.retain(|r| r.group.is_none());
+            }
             Ok(Inbox {
                 agent: me.address,
                 unread,

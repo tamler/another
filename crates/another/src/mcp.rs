@@ -593,19 +593,17 @@ impl AnotherMcp {
     async fn fetch_inbox(&self, Parameters(a): Parameters<FetchInboxArgs>) -> ToolResult<Inbox> {
         let remote = crate::remote::current_scope().is_some();
         self.run(move |s| {
-            let mut inbox = s.inbox(
+            // Group queues are local-only in this release (D77): a remote inbox leaves out
+            // queue items and mail in their threads, counters included.
+            s.inbox_scoped(
                 &a.agent,
                 InboxQuery {
                     unread_only: a.unread_only.unwrap_or(true),
                     urgent_only: a.urgent_only,
                     limit: a.limit.unwrap_or(20),
                 },
-            )?;
-            if remote {
-                // Group queues are local-only in this release (D77).
-                inbox.requests.retain(|r| r.group.is_none());
-            }
-            Ok(inbox)
+                remote,
+            )
         })
         .await
     }
@@ -614,15 +612,30 @@ impl AnotherMcp {
         description = "Read a whole thread by thread_id, or list the threads an agent is part of."
     )]
     async fn threads(&self, Parameters(a): Parameters<ThreadsArgs>) -> ToolResult<ThreadsOut> {
+        // A remote read of a queue thread is refused by the gate; a remote listing leaves
+        // queue threads out (group queues are local-only in this release, D77).
+        let remote = crate::remote::current_scope().is_some();
         self.run(move |s| match (a.thread_id, a.agent) {
             (Some(id), _) => Ok(ThreadsOut {
                 thread: Some(s.thread(&id)?),
                 threads: None,
             }),
-            (None, Some(agent)) => Ok(ThreadsOut {
-                thread: None,
-                threads: Some(s.threads(&agent, a.limit.unwrap_or(20))?),
-            }),
+            (None, Some(agent)) => {
+                let mut threads = s.threads(&agent, a.limit.unwrap_or(20))?;
+                if remote {
+                    let mut kept = Vec::with_capacity(threads.len());
+                    for t in threads {
+                        if !s.is_queue_thread(&t.thread_id)? {
+                            kept.push(t);
+                        }
+                    }
+                    threads = kept;
+                }
+                Ok(ThreadsOut {
+                    thread: None,
+                    threads: Some(threads),
+                })
+            }
             (None, None) => Err(another_core::Error::Invalid(
                 "give thread_id or agent".into(),
             )),
@@ -992,9 +1005,12 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<ActivitySummarizeArgs>,
     ) -> ToolResult<ActivitySummary> {
+        // Group queues are local-only in this release (D77): a remote summary counts and
+        // highlights no queue events, and its request totals leave queue items out.
+        let remote = crate::remote::current_scope().is_some();
         self.run(move |s| {
             let since = a.since.map(|v| Since::parse(&v, s.now())).transpose()?;
-            s.activity_summary(since)
+            s.activity_summary_scoped(since, remote)
         })
         .await
     }

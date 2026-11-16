@@ -491,3 +491,174 @@ fn remote_callers_get_no_group_operations() {
         "nothing changed remotely"
     );
 }
+
+/// An authenticated remote MCP client for `secret` over a real loopback HTTP server.
+async fn remote_client(
+    store: &Store,
+    secret: &str,
+) -> (Client, tokio_util::sync::CancellationToken) {
+    let ct = tokio_util::sync::CancellationToken::new();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let opts = another::serve::HttpOptions {
+        auth: true,
+        bound_port: addr.port(),
+        ..Default::default()
+    };
+    let app = another::serve::http_router(store.clone(), ct.clone(), &opts);
+    let stop = ct.clone();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move { stop.cancelled_owned().await })
+        .await
+        .unwrap();
+    });
+    let transport = rmcp::transport::StreamableHttpClientTransport::from_config(
+        rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
+            format!("http://{addr}/mcp"),
+        )
+        .auth_header(secret.to_string()),
+    );
+    (ClientConfig::default().serve(transport).await.unwrap(), ct)
+}
+
+/// REVIEW-IMPL P2-1 and P2-2: once a queue item's thread has local participants (its claimer,
+/// or a direct recipient of a mixed send), no remote path reads it, replies in it, acts on its
+/// mail or summarizes it. Ordinary direct threads are unchanged.
+#[tokio::test]
+async fn remote_callers_cannot_reach_a_queue_thread_by_any_path() {
+    let (dir, store) = local_store();
+    store
+        .register_agent(RegisterAgent {
+            name: "carol".into(),
+            program: Program::Claude,
+            project: Some(dir.path().join("shop").to_string_lossy().into_owned()),
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    // A queue item sent to the group and, directly, to carol.
+    let item = store
+        .send_message(SendMessage {
+            from: "lead".into(),
+            to: vec!["group:reviewers".into(), "carol".into()],
+            subject: "private-queue-title".into(),
+            body: "private-queue-body".into(),
+            request: Some(NewRequest::default()),
+            ..Default::default()
+        })
+        .unwrap();
+    let claimed = store
+        .request_next(NextRequest {
+            agent: "bob".into(),
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+    // A direct thread, the control.
+    let direct = store
+        .send_message(SendMessage {
+            from: "lead".into(),
+            to: vec!["bob".into(), "carol".into()],
+            subject: "direct-control".into(),
+            body: "direct-body".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    for who in ["bob", "carol"] {
+        let token = store
+            .create_token(who, &["**".to_string()], None, None)
+            .unwrap();
+        let (remote, ct) = remote_client(&store, &token.secret).await;
+        let refused = |r: &CallToolResult, what: &str| {
+            assert_eq!(r.is_error, Some(true), "{who} {what}: {}", text(r));
+        };
+        let hidden = |r: &CallToolResult, what: &str| {
+            assert_ne!(r.is_error, Some(true), "{who} {what}: {}", text(r));
+            let t = text(r);
+            assert!(
+                !t.contains("private-queue") && !t.contains(&claimed.request_id),
+                "{who} {what} shows the queue item: {t}"
+            );
+        };
+        hidden(
+            &call(&remote, "threads", json!({"agent": who})).await,
+            "thread list",
+        );
+        refused(
+            &call(&remote, "threads", json!({"thread_id": item.thread_id})).await,
+            "thread read",
+        );
+        refused(
+            &call(
+                &remote,
+                "send_message",
+                json!({"from": who, "reply_to": item.message_id, "body": "remote reply"}),
+            )
+            .await,
+            "reply",
+        );
+        refused(
+            &call(
+                &remote,
+                "acknowledge",
+                json!({"agent": who, "message_ids": [item.message_id]}),
+            )
+            .await,
+            "acknowledge",
+        );
+        hidden(
+            &call(&remote, "fetch_inbox", json!({"agent": who})).await,
+            "inbox",
+        );
+        hidden(
+            &call(&remote, "whats_new", json!({"agent": who})).await,
+            "whats_new",
+        );
+        hidden(
+            &call(&remote, "activity_feed", json!({"limit": 200})).await,
+            "activity feed",
+        );
+        hidden(
+            &call(&remote, "activity_summarize", json!({})).await,
+            "summary",
+        );
+        hidden(
+            &call(&remote, "work_board", json!({"project": "shop"})).await,
+            "board",
+        );
+
+        // The direct thread works remotely as before.
+        let listed = call(&remote, "threads", json!({"agent": who})).await;
+        assert!(
+            text(&listed).contains("direct-control"),
+            "{}",
+            text(&listed)
+        );
+        let read = call(&remote, "threads", json!({"thread_id": direct.thread_id})).await;
+        assert!(text(&read).contains("direct-body"), "{}", text(&read));
+        let reply = call(
+            &remote,
+            "send_message",
+            json!({"from": who, "reply_to": direct.message_id, "body": "fine"}),
+        )
+        .await;
+        assert_ne!(reply.is_error, Some(true), "{}", text(&reply));
+
+        remote.cancel().await.unwrap();
+        ct.cancel();
+    }
+    // Locally, nothing is hidden.
+    let local = in_process(store.clone()).await;
+    let read = call(&local, "threads", json!({"thread_id": item.thread_id})).await;
+    assert!(
+        text(&read).contains("private-queue-body"),
+        "{}",
+        text(&read)
+    );
+    local.cancel().await.unwrap();
+}

@@ -44,7 +44,8 @@ pub struct BoardQuery {
     /// For a caller allowed to see only `project` (a remote connection): leave out sibling
     /// checkouts, and hide agent names, projects and hold patterns that belong only to
     /// other projects (the holder of a stopped edit; request senders, recipients and owners
-    /// registered elsewhere). Requires `project`.
+    /// registered elsewhere). Group queue items, and mail counts from their threads, are
+    /// left out too (local-only in this release, D77). Requires `project`.
     pub confined: bool,
     /// Edits and stopped edits at or after this time (ms). Default: the last 24 hours.
     pub since_ms: Option<i64>,
@@ -428,8 +429,9 @@ impl Store {
                 only,
                 if query.confined { only } else { None },
                 limit,
+                query.confined,
             )?;
-            let mail = load_mail_counts(conn)?;
+            let mail = load_mail_counts(conn, query.confined)?;
             let mut out_agents = Vec::new();
             for a in &agents {
                 if !agent_ids.contains(a.id.as_str()) {
@@ -555,8 +557,12 @@ fn load_agents(conn: &Connection, local: &str) -> Result<Vec<AgentRow>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// Per agent: unread, urgent unread, awaiting acknowledgement.
-fn load_mail_counts(conn: &Connection) -> Result<HashMap<String, (u32, u32, u32)>> {
+/// Per agent: unread, urgent unread, awaiting acknowledgement. With `hide_queues` (a remote
+/// board), mail in a thread that holds a group queue item is not counted (D77).
+fn load_mail_counts(
+    conn: &Connection,
+    hide_queues: bool,
+) -> Result<HashMap<String, (u32, u32, u32)>> {
     let mut stmt = conn.prepare(
         "SELECT d.agent_id,
                 count(*) FILTER (WHERE d.read_at IS NULL),
@@ -564,9 +570,11 @@ fn load_mail_counts(conn: &Connection) -> Result<HashMap<String, (u32, u32, u32)
                 count(*) FILTER (WHERE m.ack_required = 1 AND d.acked_at IS NULL)
          FROM deliveries d JOIN messages m ON m.message_id = d.message_id
          WHERE d.role != 'from'
+           AND (?1 = 0 OR NOT EXISTS (SELECT 1 FROM requests q
+                 WHERE q.thread_id = m.thread_id AND q.group_id IS NOT NULL))
          GROUP BY d.agent_id",
     )?;
-    let rows = stmt.query_map([], |r| {
+    let rows = stmt.query_map([hide_queues], |r| {
         Ok((r.get::<_, String>(0)?, (r.get(1)?, r.get(2)?, r.get(3)?)))
     })?;
     Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
@@ -578,7 +586,8 @@ type PendingRequests = (Vec<BoardRequest>, bool, HashMap<String, u32>);
 /// (a recipient) or owns. With `only`, a request is kept when its sender, owner or a
 /// recipient is one of those agents. With `visible`, participants outside that set are
 /// hidden: the sender becomes `None`, recipients are counted in `to_hidden`, and an owner
-/// sets `owner_hidden`.
+/// sets `owner_hidden`. With `hide_queues` (a remote board), group queue items are left out
+/// (D77).
 fn load_requests(
     conn: &Connection,
     local: &str,
@@ -586,6 +595,7 @@ fn load_requests(
     only: Option<&HashSet<&str>>,
     visible: Option<&HashSet<&str>>,
     limit: usize,
+    hide_queues: bool,
 ) -> Result<PendingRequests> {
     let seen = |id: &str| visible.map(|v| v.contains(id)).unwrap_or(true);
     let mut stmt = conn.prepare(
@@ -595,10 +605,11 @@ fn load_requests(
          JOIN agents ca ON ca.agent_id = r.created_by
          LEFT JOIN agents oa ON oa.agent_id = r.owner_id
          WHERE r.node_id = ?1 AND r.status IN ('open', 'claimed', 'stale')
+           AND (?2 = 0 OR r.group_id IS NULL)
          ORDER BY r.created_at, r.request_id",
     )?;
     let rows = stmt
-        .query_map([local], |r| {
+        .query_map(params![local, hide_queues], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
