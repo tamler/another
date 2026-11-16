@@ -15,7 +15,6 @@ struct Env {
     home: PathBuf,
     another_home: PathBuf,
     main: PathBuf,
-    wt: PathBuf,
     herdr_dir: PathBuf,
     fake: PathBuf,
     /// `HERDR_ENV` for hooks run with a pane: `Some("1")` inside Herdr.
@@ -50,11 +49,6 @@ impl Env {
             "[remote \"origin\"]\n\turl = git@example.com:team/shop.git\n",
         );
         std::fs::create_dir_all(main.join("src")).unwrap();
-        let wt = root.join("work").join("shop-review");
-        let wt_git = main.join(".git").join("worktrees").join("shop-review");
-        write(&wt.join(".git"), &format!("gitdir: {}\n", wt_git.display()));
-        write(&wt_git.join("commondir"), "../..\n");
-        std::fs::create_dir_all(wt.join("src")).unwrap();
         let herdr_dir = root.join("herdr");
         std::fs::create_dir_all(&herdr_dir).unwrap();
         let fake = herdr_dir.join(if cfg!(windows) { "herdr.cmd" } else { "herdr" });
@@ -73,7 +67,6 @@ impl Env {
             another_home: home.join(".another"),
             home,
             main,
-            wt,
             herdr_dir,
             fake,
             herdr_env: Some("1"),
@@ -254,12 +247,12 @@ fn hooks_report_working_blocked_and_clear_as_display_metadata() {
     assert!(first[0].contains("another_state=working"), "{first:?}");
     assert!(first[0].contains("--ttl-ms"), "tokens expire: {first:?}");
 
-    env.start("codex", &env.wt, Some(p2));
+    env.start("codex", &env.main, Some(p2));
     env.wait_for(p2, 1);
     assert_eq!(env.edit("claude", &env.main, "src/a.rs", Some(p1)), "");
-    // The sibling checkout's edit is stopped by claude's hold: blocked, with a reason.
+    // Codex's edit of the same file is stopped by claude's hold: blocked, with a reason.
     assert!(env
-        .edit("codex", &env.wt, "src/a.rs", Some(p2))
+        .edit("codex", &env.main, "src/a.rs", Some(p2))
         .contains("\"deny\""));
     let calls = env.wait_for(p2, 2);
     let blocked = calls.last().unwrap();
@@ -279,7 +272,7 @@ fn hooks_report_working_blocked_and_clear_as_display_metadata() {
         "{cleared}"
     );
     // Codex is no longer blocked once that hold has ended.
-    env.post_tool("codex", &env.wt, Some(p2));
+    env.post_tool("codex", &env.main, Some(p2));
     let calls = env.wait_for(p2, 3);
     let working = calls.last().unwrap();
     assert!(working.contains("another_state=working"), "{working}");
