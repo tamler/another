@@ -669,13 +669,52 @@ pub fn uninstall(env: &DaemonEnv, dry_run: bool) -> Result<DaemonReport> {
                 }
             }
             Manager::TaskScheduler => {
-                // Ending a task that is not running fails, which is fine. Deleting fails for
-                // a task that was never registered; that is fine only when the task list,
-                // which Task Scheduler did return, does not contain it.
-                let _ = exec(&commands[0]);
-                let deleted = exec(&commands[1])?;
-                if !deleted.status.success() {
-                    confirm_gone(env, task_presence(&env.label), &deleted)?;
+                // Deleting a task does not stop a program it is running, so the task has
+                // to be shown stopped before it is deleted. A task Task Scheduler confirms
+                // is not registered has nothing to stop or delete.
+                match task_run_state(&env.label) {
+                    TaskRun::Absent => {}
+                    TaskRun::Unknown(why) => {
+                        bail!(
+                            "could not read the state of the {} task: {why}. Nothing was stopped \
+                             or deleted, and {} was kept; run `another daemon uninstall` again \
+                             once Task Scheduler answers.",
+                            env.label,
+                            path.display()
+                        )
+                    }
+                    TaskRun::Running | TaskRun::Stopped => {
+                        // `/End` fails for a task that is not running; the state check
+                        // after it decides, not its exit status.
+                        let ended = exec(&commands[0])?;
+                        match wait_task_stopped(&env.label) {
+                            TaskRun::Stopped | TaskRun::Absent => {}
+                            TaskRun::Running => bail!(
+                                "the {} task is still running: `schtasks /End` said {}. It was \
+                                 not deleted, because deleting a task leaves its program \
+                                 running, and {} was kept; stop it (or fix the error) and run \
+                                 `another daemon uninstall` again.",
+                                env.label,
+                                stderr_of(&ended),
+                                path.display()
+                            ),
+                            TaskRun::Unknown(why) => bail!(
+                                "could not confirm that the {} task stopped (`schtasks /End` \
+                                 said {}; reading its state failed: {why}). It was not deleted, \
+                                 and {} was kept; run `another daemon uninstall` again once Task \
+                                 Scheduler answers.",
+                                env.label,
+                                stderr_of(&ended),
+                                path.display()
+                            ),
+                        }
+                        // Deleting fails for a task that is gone by now; that is fine only
+                        // when the task list confirms it.
+                        let deleted = exec(&commands[1])?;
+                        if !deleted.status.success() {
+                            confirm_gone(env, task_presence(&env.label), &deleted)?;
+                        }
+                    }
                 }
                 remove(&path, exists)?;
             }
@@ -773,6 +812,92 @@ fn unit_presence(unit: &str) -> Presence {
         Ok(out) => Presence::Unknown(stderr_of(&out)),
         Err(e) => Presence::Unknown(format!("{e:#}")),
     }
+}
+
+/// Task Scheduler's code for "the task is currently running" (`SCHED_S_TASK_RUNNING`,
+/// 0x41301). `schtasks /Query /V` shows it as the task's last result while it runs. It is a
+/// number, so unlike the status column it reads the same in every system language.
+const SCHED_S_TASK_RUNNING: &str = "267009";
+
+/// Whether a Task Scheduler task is running, from `schtasks /Query /TN <label> /V /FO CSV
+/// /NH` (its last-result column). `Absent` only when the task list confirms the task is
+/// not registered; a query that fails for any other reason is `Unknown`.
+#[derive(Debug, PartialEq, Eq)]
+enum TaskRun {
+    Running,
+    Stopped,
+    Absent,
+    Unknown(String),
+}
+
+fn task_run_state(label: &str) -> TaskRun {
+    match exec(&argv(&[
+        "schtasks", "/Query", "/TN", label, "/V", "/FO", "CSV", "/NH",
+    ])) {
+        Ok(out) if out.status.success() => {
+            let want = format!("\\{label}");
+            let text = String::from_utf8_lossy(&out.stdout);
+            // One row per trigger; the task name is the second column and the last
+            // result the seventh.
+            let rows: Vec<Vec<String>> = text
+                .lines()
+                .map(csv_fields)
+                .filter(|f| f.get(1).map(String::as_str) == Some(want.as_str()))
+                .collect();
+            if rows.is_empty() {
+                return TaskRun::Unknown(format!("schtasks did not list {want}"));
+            }
+            if rows
+                .iter()
+                .any(|f| f.get(6).map(|r| r.trim()) == Some(SCHED_S_TASK_RUNNING))
+            {
+                TaskRun::Running
+            } else {
+                TaskRun::Stopped
+            }
+        }
+        Ok(out) => match task_presence(label) {
+            Presence::Absent => TaskRun::Absent,
+            Presence::Present => TaskRun::Unknown(stderr_of(&out)),
+            Presence::Unknown(why) => TaskRun::Unknown(why),
+        },
+        Err(e) => TaskRun::Unknown(format!("{e:#}")),
+    }
+}
+
+/// After `/End`: give Task Scheduler up to three seconds to record the stop.
+fn wait_task_stopped(label: &str) -> TaskRun {
+    let mut state = task_run_state(label);
+    for _ in 0..30 {
+        if state != TaskRun::Running {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        state = task_run_state(label);
+    }
+    state
+}
+
+/// The fields of one CSV line as `schtasks /FO CSV` writes it: every field quoted, `""`
+/// for a quote inside a field.
+fn csv_fields(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut chars = line.trim_end_matches(['\r', '\n']).chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, quoted) {
+            ('"', true) if chars.peek() == Some(&'"') => {
+                field.push('"');
+                chars.next();
+            }
+            ('"', _) => quoted = !quoted,
+            (',', false) => fields.push(std::mem::take(&mut field)),
+            (c, _) => field.push(c),
+        }
+    }
+    fields.push(field);
+    fields
 }
 
 /// A Task Scheduler task, from the full task list (`schtasks /Query /FO CSV /NH`). Task
@@ -1048,6 +1173,17 @@ mod tests {
         e.user = Some("HOST\\someone".into());
         e.exe = "C:\\odd\"name\\another.exe".into();
         assert!(task_xml(&e).is_err(), "a double quote cannot be recorded");
+    }
+
+    #[test]
+    fn schtasks_csv_lines_split_like_schtasks_writes_them() {
+        let line = "\"HOST\",\"\\one.toanother.another\",\"N/A\",\"Running\",\"Interactive only\",\"11/16/2026, 9:00:00 AM\",\"267009\",\"HOST\\\\me\",\"C:\\\\x \"\"quoted\"\" y\"\r";
+        let f = csv_fields(line);
+        assert_eq!(f[1], "\\one.toanother.another");
+        assert_eq!(f[5], "11/16/2026, 9:00:00 AM", "a comma inside quotes");
+        assert_eq!(f[6], SCHED_S_TASK_RUNNING);
+        assert_eq!(f[8], "C:\\\\x \"quoted\" y", "a doubled quote is one quote");
+        assert_eq!(f.len(), 9);
     }
 
     #[test]

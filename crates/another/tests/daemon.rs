@@ -551,6 +551,19 @@ fn hosted_windows_task_scheduler_runs_the_daemon() {
         let status = wait_healthy(&env, &label, true);
         assert_eq!(status["healthy"], true, "after restart: {status}");
         assert!(env.another_home().join("logs").join("serve.log").is_file());
+        // Uninstall decides "still running" from this column (review round 2): a running
+        // task's last result is 267009, SCHED_S_TASK_RUNNING, in every system language.
+        let query = Command::new("schtasks")
+            .args(["/Query", "/TN", &label, "/V", "/FO", "CSV", "/NH"])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&query.stdout);
+        assert!(
+            text.lines()
+                .any(|l| l.contains(&format!("\"\\{label}\"")) && l.contains("\"267009\"")),
+            "a running task's last result is 267009: {text}"
+        );
     }));
     let removed = env.run(&["daemon", "uninstall", "--label", &label]);
     if let Err(panic) = result {
