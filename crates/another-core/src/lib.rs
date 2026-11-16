@@ -13,6 +13,7 @@ mod error;
 mod federation;
 mod holds;
 mod identity;
+pub mod keychain;
 mod mail;
 mod oauth;
 mod repo;
