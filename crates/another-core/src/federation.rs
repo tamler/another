@@ -318,6 +318,30 @@ fn wire_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<WireEvent> {
 const WIRE_SELECT: &str =
     "SELECT seq, event_id, node_id, ts, actor, kind, payload, prev_id, sig FROM events";
 
+/// The anchor for a spoke's next pull: the newest stored foreign event, or the `anchor` of a
+/// newer local `peer.anchored` / `peer.resynced` record. See [`Store::last_relayed_event_id`].
+fn relayed_anchor(conn: &Connection, local: &str) -> Result<Option<String>> {
+    let newest: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT kind, event_id, payload FROM events
+             WHERE node_id != ?1
+                OR (node_id = ?1 AND kind IN ('peer.resynced', 'peer.anchored'))
+             ORDER BY seq DESC LIMIT 1",
+            [local],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    Ok(match newest {
+        Some((kind, _, payload)) if kind == "peer.resynced" || kind == "peer.anchored" => {
+            serde_json::from_str::<Value>(&payload)
+                .ok()
+                .and_then(|p| p.get("anchor")?.as_str().map(str::to_string))
+        }
+        Some((_, event_id, _)) => Some(event_id),
+        None => None,
+    })
+}
+
 /// Every node with a key, for a pull response's addressing and signature checks.
 fn known_nodes(conn: &Connection) -> Result<Vec<NodeEntry>> {
     let mut stmt = conn.prepare(
@@ -1394,16 +1418,6 @@ impl Store {
         })
     }
 
-    pub fn set_pull_cursor(&self, peer: &str, seq: i64) -> Result<()> {
-        self.write(|tx| {
-            tx.execute(
-                "UPDATE peers SET pull_cursor = max(pull_cursor, ?2), last_sync_at = ?3 WHERE node_id = ?1",
-                params![peer, seq, tx.now],
-            )?;
-            Ok(())
-        })
-    }
-
     pub fn push_cursor(&self, peer: &str) -> Result<(i64, i64)> {
         self.read(|conn| {
             Ok(conn.query_row(
@@ -1501,26 +1515,31 @@ impl Store {
     /// not stored (a duplicate or a rejected event), or after a resync, the newest record
     /// is a local `peer.anchored` or `peer.resynced` event naming it (`anchor`).
     pub fn last_relayed_event_id(&self) -> Result<Option<String>> {
-        self.read(|conn| {
-            let newest: Option<(String, String, String)> = conn
-                .query_row(
-                    "SELECT kind, event_id, payload FROM events
-                     WHERE node_id != ?1
-                        OR (node_id = ?1 AND kind IN ('peer.resynced', 'peer.anchored'))
-                     ORDER BY seq DESC LIMIT 1",
-                    [self.node_id()],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .optional()?;
-            Ok(match newest {
-                Some((kind, _, payload)) if kind == "peer.resynced" || kind == "peer.anchored" => {
-                    serde_json::from_str::<Value>(&payload)
-                        .ok()
-                        .and_then(|p| p.get("anchor")?.as_str().map(str::to_string))
+        self.read(|conn| relayed_anchor(conn, self.node_id()))
+    }
+
+    /// Spoke side: after a pull page from `peer` is ingested, commit its cursor and the
+    /// anchor that goes with it **in one transaction**, so a failure or crash can never
+    /// leave an advanced cursor beside an older anchor (REVIEW-R2). `last_received` is the
+    /// last event the page carried. When it is not the newest stored foreign event (a
+    /// duplicate, or one this node rejected), a node-local `peer.anchored` names it. A page
+    /// with no events moves the cursor and keeps the anchor.
+    pub fn advance_pull(&self, peer: &str, seq: i64, last_received: Option<&str>) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE peers SET pull_cursor = max(pull_cursor, ?2), last_sync_at = ?3 WHERE node_id = ?1",
+                params![peer, seq, tx.now],
+            )?;
+            if let Some(id) = last_received {
+                if relayed_anchor(tx, tx.node_id)?.as_deref() != Some(id) {
+                    tx.emit(
+                        "system",
+                        "peer.anchored",
+                        json!({ "peer": peer, "anchor": id }),
+                    )?;
                 }
-                Some((_, event_id, _)) => Some(event_id),
-                None => None,
-            })
+            }
+            Ok(())
         })
     }
 
@@ -1544,24 +1563,6 @@ impl Store {
                 "system",
                 "peer.resynced",
                 json!({ "peer": peer, "anchor": anchor }),
-            )?;
-            Ok(())
-        })
-    }
-
-    /// Spoke side: after a pull, keep the anchor on the last event `peer` actually sent, when
-    /// that event was not stored (a duplicate or a rejected event) and so is not the newest
-    /// stored foreign event. Writes nothing when the anchor already names it. A `peer.*`
-    /// event never leaves this node.
-    pub fn record_anchor(&self, peer: &str, last_received: &str) -> Result<()> {
-        if self.last_relayed_event_id()?.as_deref() == Some(last_received) {
-            return Ok(());
-        }
-        self.write(|tx| {
-            tx.emit(
-                "system",
-                "peer.anchored",
-                json!({ "peer": peer, "anchor": last_received }),
             )?;
             Ok(())
         })

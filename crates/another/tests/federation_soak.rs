@@ -573,3 +573,63 @@ fn a_duplicate_only_pull_after_a_resync_still_moves_the_anchor() {
     assert_eq!(subjects(&alpha.store, "a1", "second restore").len(), 40);
     assert!(!sync(&alpha).hub_reset, "no reset loop");
 }
+
+/// REVIEW-R2 P2: a pull cursor must never be committed without the anchor that goes with
+/// it. Here recording the anchor fails (a database error on that one insert) during the
+/// duplicate-only pull. If the cursor had been committed anyway, a later restore would be
+/// missed and new mail skipped.
+#[test]
+fn a_failed_anchor_write_does_not_leave_an_advanced_cursor() {
+    let root = tempfile::tempdir().unwrap();
+    let mut hub = Hub::start(root.path());
+    let alpha = spoke(root.path(), "alpha", Clock::System);
+    let beta = spoke(root.path(), "beta", Clock::System);
+    hub.join(&alpha);
+    hub.join(&beta);
+    register(&hub.store, "hq", None);
+    register(&alpha.store, "a1", None);
+    register(&beta.store, "b1", None);
+    for s in [&alpha, &beta, &alpha] {
+        sync(s);
+    }
+    let backup = root.path().join("hub-backup.db");
+    rusqlite::Connection::open(hub.home.join(DB_FILE))
+        .unwrap()
+        .execute("VACUUM INTO ?1", [backup.to_string_lossy()])
+        .unwrap();
+    send(&beta.store, "b1", "a1@@alpha", "from beta");
+    sync(&beta);
+    sync(&alpha);
+    hub.restore(&backup);
+    assert!(sync(&alpha).hub_reset);
+    reset_cursors(&beta);
+    sync(&beta);
+
+    // Alpha's duplicate-only pull: the anchor write fails.
+    let db = rusqlite::Connection::open(alpha.home.join(DB_FILE)).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER refuse_anchor BEFORE INSERT ON events WHEN NEW.kind = 'peer.anchored'
+         BEGIN SELECT RAISE(ABORT, 'refused by test'); END;",
+    )
+    .unwrap();
+    let (_, cursor_before) = alpha.store.push_cursor(hub.store.node_id()).unwrap();
+    assert!(
+        fed::sync(&alpha.store).is_err(),
+        "the sync reports the failure"
+    );
+    let (_, cursor_after) = alpha.store.push_cursor(hub.store.node_id()).unwrap();
+    db.execute_batch("DROP TRIGGER refuse_anchor").unwrap();
+    drop(db);
+    assert_eq!(
+        cursor_after, cursor_before,
+        "the cursor did not move without its anchor"
+    );
+
+    // A later restore and new mail: nothing is skipped.
+    hub.restore(&backup);
+    for i in 0..40 {
+        send(&hub.store, "hq", "a1@@alpha", &format!("after failure {i}"));
+    }
+    sync(&alpha);
+    assert_eq!(subjects(&alpha.store, "a1", "after failure").len(), 40);
+}

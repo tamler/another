@@ -89,7 +89,7 @@ another sync --watch --every 30
 
   The spoke detects this from the hub's `reset` answer, rewinds both cursors to zero and syncs again in the same `another sync`. `another sync --json` reports `"hub_reset": true`, and a local `peer.resynced` event records it, so the next sync does not reset again.
 
-  The anchor the spoke sends is the last event the hub actually sent it, even when that event was not stored (a duplicate, or one this node rejected); a local `peer.anchored` event records it in that case. Then a second restore is noticed too. After a resync:
+  The anchor the spoke sends is the last event the hub actually sent it, even when that event was not stored (a duplicate, or one this node rejected); a local `peer.anchored` event records it in that case. Each pulled page commits its cursor and its anchor in one transaction, so a failed or interrupted sync never leaves one ahead of the other. Then a second restore is noticed too. After a resync:
   - every spoke's own events reach the hub again;
   - events only the hub wrote after the backup are gone, as with any restore.
 - **Limit.** Detection relies on the hub missing the last event the spoke received from it, or on the spoke's cursor being beyond the hub's log. A restore can go unnoticed when both of these hold:

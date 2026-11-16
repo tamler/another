@@ -342,11 +342,9 @@ pub fn sync(store: &Store) -> Result<SyncReport> {
                 "the hub at {url} reported its log reset twice in one sync; try again"
             ));
         }
+        // Each page already committed its cursor with its anchor; this records the resync,
+        // and clears the anchor when the restored hub sent nothing at all.
         store.record_resync(&hub, last.as_deref())?;
-    } else if let Some(id) = &last {
-        // Duplicates and rejected events are not stored; keep the anchor on what the hub
-        // last sent anyway, or a later restore could go unnoticed (REVIEW-R1 P2).
-        store.record_anchor(&hub, id)?;
     }
     Ok(report)
 }
@@ -391,15 +389,18 @@ fn sync_pass(
         if page.reset {
             return Ok(false);
         }
-        if let Some(e) = page.events.last() {
-            *last = Some(e.event_id.clone());
-        }
         report.pulled += page.events.len();
         let r = store.ingest(hub, &page.events, &page.nodes)?;
         report.applied += r.accepted;
         report.pull_duplicates += r.duplicates;
         report.pull_rejected.extend(r.rejected);
-        store.set_pull_cursor(hub, page.cursor)?;
+        // The cursor and the anchor (the last event the hub sent, stored or not) commit
+        // together, so neither can move without the other (REVIEW-R1 and R2 P2).
+        let page_last = page.events.last().map(|e| e.event_id.as_str());
+        store.advance_pull(hub, page.cursor, page_last)?;
+        if let Some(id) = page_last {
+            *last = Some(id.to_string());
+        }
         if !page.more || page.cursor == cursor {
             break;
         }
