@@ -31,6 +31,8 @@ pub struct WakePlan {
     pub sent: bool,
     /// Why nothing was sent.
     pub skipped: Option<String>,
+    /// The adapter failed (set by [`wake_all`], which carries on with the other agents).
+    pub error: Option<String>,
 }
 
 /// Overrides for a single wake.
@@ -151,6 +153,7 @@ pub fn wake(store: &Store, agent: &str, opts: &WakeOptions) -> Result<WakePlan> 
         commands: Vec::new(),
         sent: false,
         skipped: None,
+        error: None,
     };
     if plan.message.is_none() {
         if !opts.force {
@@ -308,13 +311,26 @@ fn stop_child(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-/// Wake every agent with a stored target that has something waiting.
+/// Wake every agent with a stored target that has something waiting. One agent's failed
+/// adapter (a pane that is gone, a stopped multiplexer) is recorded in its plan's `error`
+/// and does not stop the others from being woken.
 pub fn wake_all(store: &Store, opts: &WakeOptions) -> Result<Vec<WakePlan>> {
-    store
+    Ok(store
         .wake_targets()?
         .into_iter()
-        .map(|t| wake(store, &t.agent, opts))
-        .collect()
+        .map(|t| {
+            wake(store, &t.agent, opts).unwrap_or_else(|e| WakePlan {
+                via: opts.via.or(Some(t.via)),
+                target: opts.target.clone().or(Some(t.target)),
+                agent: t.agent,
+                message: None,
+                commands: Vec::new(),
+                sent: false,
+                skipped: None,
+                error: Some(format!("{e:#}")),
+            })
+        })
+        .collect())
 }
 
 /// The terminal this process runs in. When multiplexers are nested, `TERM_PROGRAM` names
