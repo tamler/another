@@ -12,7 +12,7 @@ It also works across machines today, through a self-hosted federation hub or aut
 
 Claude Code and Codex cannot see each other without something shared. They can edit the same files, start the same fix twice, or launch duplicate model servers. Another combines path holds, messages and requests, activity, and a registry for ports and model servers. Its mailbox is a way to address agents and exchange messages. It does not launch agents, assign their work, or enforce a resource limit.
 
-**Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1-6 complete. Hosted connectors (OAuth for ChatGPT, Claude, and other MCP clients) and the loopback dashboard are in this tree. See [docs/REMOTE.md](docs/REMOTE.md) and [docs/DASHBOARD.md](docs/DASHBOARD.md).
+**Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1-7 complete. Hosted connectors (OAuth for ChatGPT, Claude, and other MCP clients) and the loopback dashboard are in this tree. See [docs/REMOTE.md](docs/REMOTE.md) and [docs/DASHBOARD.md](docs/DASHBOARD.md).
 
 ## Why
 
@@ -182,11 +182,11 @@ Task guides, all listed on the [guides hub](site/guides/index.html) (website sou
 | Awareness | `whats_new` (one-call catch-up: unread subjects, open requests, recent activity), `activity_feed`, `activity_summarize` (summaries and ids, never message bodies), `work_board` (read-only: holds, recent and stopped edits, pending handoffs per project) |
 | Resources | `resource_find`, `resource_register`, `resource_borrow`, `resource_release`, `resource_heartbeat`, `orphans_list`, `resource_reap` (plan and request only) |
 
-Tool errors are `{"error": {"code", "message", "hint?"}}` with codes `not_found`, `invalid`, `conflict`, `ambiguous`, `forbidden`. `hint`, when present, says the next call to make.
+Tool errors are `{"error": {"code", "message", "hint?"}}`. The usual codes are `not_found`, `invalid`, `conflict`, `ambiguous` and `forbidden`; a storage or internal failure gives `db`, `io`, `json` or `internal`. `hint`, when present, says the next call to make. A call whose arguments do not match the tool's schema (a missing or wrongly typed parameter) fails before Another runs, with rmcp's plain-text message such as ``failed to deserialize parameters: missing field `agent` ``.
 
 ## CLI at a glance
 
-Every command takes `--json`. `--agent` and `--from` default to `$ANOTHER_AGENT`, and `--project` defaults to the current directory.
+Every command takes `--json`. `--agent` and `--from` default to `$ANOTHER_AGENT`. `another hold acquire` and `another hold check` default `--project` to the current directory. `another agent register` scopes the agent to a project only when you pass `--project`, and on listing commands such as `holds`, `resources` and `board`, `--project` is a filter.
 
 Logs go to stderr: `info` and above for `another serve`, `warn` and above for every other command. Set `$ANOTHER_LOG` to a [tracing filter](https://docs.rs/tracing-subscriber/0.3/tracing_subscriber/filter/struct.EnvFilter.html#directives) such as `debug` or `another::serve=warn` to change this; a value that does not parse is ignored.
 
@@ -222,7 +222,7 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 - Binds to loopback only, unless you pass `--auth` and `--allow-remote-bind`.
 - The dashboard is loopback-only. An `--auth` server does not serve it unless you pass `--dashboard`, and then it is read-only with message bodies omitted. Its `Host` must still be loopback on the bound port, not a tunnel name.
 - Remote tokens and OAuth grants each act as a single agent within project globs. A hosted client is approved on this machine; it is never approved by an HTTP request. Every remote call is audited.
-- Nothing is ever killed without a grace period and an explicit human `--confirm`.
+- Nothing is ever killed without an explicit human `--confirm`, and by default only after a 600-second grace period (`--grace` can shorten it).
 - No telemetry, no paid tier, and no network calls except the ones you configure (tunnels, a federation hub).
 
 ## Development

@@ -170,5 +170,5 @@ another hook run session-start --client claude < event.json
 
 - stdin may carry the client's JSON event; Another reads `cwd` (or `workspaceRoot` / `workspace_roots[0]`) and `session_id` (or `sessionId` / `conversation_id`) when present.
 - `post-tool` and `pre-edit` also read `tool_name` / `toolName` and `tool_input` / `toolInput`. The edit guard takes file names from `file_path`, `filePath`, `notebook_path`, `path` or `target_notebook`, and from the `*** Add File:`, `*** Update File:`, `*** Delete File:` and `*** Move to:` lines of a patch in `command`.
-- Exit status is always 0; on any error nothing is printed.
+- Exit status is always 0. On any error nothing is printed, except by Cursor's prompt hook, which still prints `{"continue": true}` so the prompt goes through.
 - Scripts that prefer explicit calls can use `another --json heartbeat --agent NAME --start|--end`, `another --json inbox --agent NAME --unread`, and `another --json activity --summary`.
