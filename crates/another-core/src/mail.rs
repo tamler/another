@@ -11,7 +11,7 @@ use crate::store::{new_id, Store, Tx};
 use crate::time::{fmt_opt, fmt_ts};
 
 const MAX_BODY_BYTES: usize = 256 * 1024;
-const MAX_SUBJECT_CHARS: usize = 300;
+pub const MAX_SUBJECT_CHARS: usize = 300;
 
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
@@ -180,9 +180,39 @@ pub struct AckOutcome {
     pub unchanged: Vec<String>,
 }
 
+/// Characters that must never reach a terminal from text another agent chose: C0 and C1
+/// controls and DEL (CR, LF, ESC, tab, …), plus Unicode bidirectional overrides and
+/// isolates, which can make text display in a different order than it is typed.
+pub fn is_unsafe_text_char(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// `text` as one line that is safe to type into or print on a terminal: every unsafe
+/// character (see [`is_unsafe_text_char`]) becomes a space, and the result is cut to
+/// `max_chars` characters (with `…` when cut). Used for subjects that arrive from other
+/// nodes and for everything a wake types (wake.rs).
+pub fn single_line(text: &str, max_chars: usize) -> String {
+    let clean: String = text
+        .chars()
+        .map(|c| if is_unsafe_text_char(c) { ' ' } else { c })
+        .collect();
+    if clean.chars().count() <= max_chars {
+        return clean;
+    }
+    let mut cut: String = clean.chars().take(max_chars.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
+}
+
 fn check_text(subject: &str, body: &str) -> Result<()> {
     if subject.trim().is_empty() {
         return Err(Error::Invalid("subject must not be empty".into()));
+    }
+    // A subject is typed into the recipient's terminal by a wake and printed by the CLI.
+    if subject.chars().any(is_unsafe_text_char) {
+        return Err(Error::Invalid(
+            "subject must be one line of text: no line breaks, tabs, escape or other control characters".into(),
+        ));
     }
     if subject.chars().count() > MAX_SUBJECT_CHARS {
         return Err(Error::Invalid(format!(
