@@ -103,12 +103,6 @@ pub fn candidates(name: &str, path: &OsStr) -> Vec<PathBuf> {
         .filter(|candidate| runnable(candidate))
         .collect()
 }
-
-/// The first of [`candidates`].
-pub fn find(name: &str, path: &OsStr) -> Option<PathBuf> {
-    candidates(name, path).into_iter().next()
-}
-
 #[cfg(unix)]
 fn runnable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -195,9 +189,9 @@ mod tests {
         let relative = pathdiff(dir.path(), &cwd);
         let path = std::env::join_paths([relative.clone()]).unwrap();
         assert!(!relative.is_absolute());
-        assert_eq!(find("rel", &path), None);
+        assert_eq!(candidates("rel", &path), Vec::<PathBuf>::new());
         let path = std::env::join_paths([dir.path()]).unwrap();
-        assert_eq!(find("rel", &path), Some(exe));
+        assert_eq!(candidates("rel", &path), vec![exe]);
     }
 
     /// `to` relative to `from`, by climbing to the root: enough for a test.
