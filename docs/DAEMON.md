@@ -37,29 +37,17 @@ another daemon uninstall
 
 ## Upgrading
 
-A running `another` keeps the code it started with, so after installing a new binary restart everything that was already running.
+A running `another` keeps its old code, and an already-open older process can continue using a home after its schema changes. Older hooks may fail open. Normal commands on an existing older home now refuse to migrate it automatically.
 
-1. **The launchd daemon (macOS).** `another daemon restart` relaunches the binary path recorded in the plist at install time, not whatever `another` is on your `PATH` now. If the new build is at the same path, restart:
+1. Stop the owned daemon, clients, hook invocations and MCP servers that can write the home, prevent them from restarting, and verify the writer fence. Include hand-run and remote servers. If any writer cannot be fenced, stop. Another cannot discover or stop every client for you.
+2. While the fence holds, preserve other needed home metadata and user hook/service configuration separately. Choose a new backup directory outside the home and run the new binary: `another upgrade --backup-dir <new-directory> --confirm-writer-fence`. The flag is your confirmation, not proof the program discovered every old client. On Unix and Windows this takes an SQLite online backup including committed WAL content, verifies database integrity, node identity and schema, and records its SHA-256 in `backup.json` before migration. Recognized source catalogs are v8-v11; v1-v7 and mismatched catalogs are refused before a backup is created. The backup contains the node's private key; protect it. An existing backup path is refused. Windows uses a private staged directory with retained handles, flushes the backup through a verified writable handle, then publishes the directory before migrating the source.
+3. If backup or migration fails, retain both home and backup and keep the fence. A commit error may be ambiguous; inspect the current schema and do not blindly rerun or restore. Install matching binary and hooks only after a successful upgrade. Check the daemon's recorded binary path and restart owned services and clients under the new version, then verify actual session and hold behavior before relying on it.
 
-   ```bash
-   another daemon restart
-   ```
+`another daemon restart` relaunches the binary path recorded in the plist at install time, not whatever `another` is on your `PATH` now. If the new build is at a different path, run the new binary's `another daemon install` instead, with the same `ANOTHER_HOME` (or `--home`), `--label` and `--bind` as the original install. Install records `ANOTHER_HOME` and `PATH` from the shell you run it in, so from a plain shell it would point the daemon at a different database, or, with another label, add a second daemon beside the old one. The plist (`~/Library/LaunchAgents/<label>.plist`, `one.toanother.another.plist` by default) shows what the old install recorded: the binary is the first `ProgramArguments` entry, the bind follows `--bind`, and `ANOTHER_HOME` and `PATH` are under `EnvironmentVariables`.
 
-   If it is at a different path (say `cargo install` put it in `~/.cargo/bin` but the plist names `~/.local/bin/another`), run the new binary's install instead, which rewrites the plist and reloads it. Run it with the same `ANOTHER_HOME` (or `--home`), `--label` and `--bind` as the original install. Install records `ANOTHER_HOME` and `PATH` from the shell you run it in, so from a plain shell it would point the daemon at a different database, or, with another label, add a second daemon beside the old one:
+For a restore or downgrade, first fence writers again and preserve the complete current home. Restore the verified backup and required metadata into a separate staging home, verify its SHA-256, node identity and SQLite integrity, and only then decide whether to replace the live home. The backup excludes writes committed after it: do not overwrite a newer home containing such writes without an explicit reviewed reconciliation or abandonment decision. Preserve both copies if uncertain. Never claim post-backup writes survived a restore.
 
-   ```bash
-   another daemon install
-   ```
-
-   The plist (`~/Library/LaunchAgents/<label>.plist`, `one.toanother.another.plist` by default) shows what the old install recorded: the binary is the first `ProgramArguments` entry, the bind follows `--bind`, and `ANOTHER_HOME` and `PATH` are under `EnvironmentVariables`.
-
-2. **A daemon under another service manager.** `another daemon` is macOS only. On Linux, restart the service, e.g. `systemctl --user restart another.service`, and check that its `ExecStart` names the new binary.
-
-3. **Every other long-running server.** That covers each client that runs `another serve --stdio` as its MCP server (restart the client or reconnect the server), a remote server started with `another remote up` or `another serve --auth`, and any `another serve` started by hand. Stop each one and start it again from the new binary.
-
-Hooks start a fresh process on every call and need nothing.
-
-Skipping this is unsafe when a release changes how repository keys are cached (the `project_repos` table, see [HOLDS.md](HOLDS.md#holds-across-worktrees)). The release after #103 does: keys now carry a `v2:` prefix. The new binary treats an old key as never computed and recomputes it. An old process does not understand the new keys, rewrites the ones it touches in the old form, and then compares keys of two formats. They never match, so it misses holds in sibling worktrees and clones and lets those edits through (it fails open). The new binary never misses one: it recomputes the old keys on its next check. Once no old process is left, the keys settle in the new form.
+The Rust library's public `wake::current_target`, `wake::capture_target` and `wake::release_target` helpers were removed because their signatures cannot distinguish a delayed hook from the current session incarnation. Use explicit `another wake set` and `another wake clear` for the exact actor; neither is a drop-in automatic-capture API.
 
 ## Elsewhere
 
@@ -107,7 +95,7 @@ Push runs only on a loopback server without `--auth`, so a second server publish
 
 ## Wake targets
 
-Session-start hooks record the pane an agent runs in: `$HERDR_PANE_ID` in Herdr, `$TMUX_PANE` in tmux, `$CMUX_SURFACE_ID` in cmux. When multiplexers are nested, `TERM_PROGRAM` names the innermost one. The session-end hook forgets the capture if it still points at that pane. To drop captures left behind by sessions that never ended cleanly:
+Unfenced session hooks do not capture or clear wake targets; set the target explicitly for the full session address. To drop older automatic captures left behind by sessions:
 
 ```bash
 another wake prune --dry-run

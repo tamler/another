@@ -189,7 +189,7 @@ pub async fn serve_stdio(store: Store, sweep_every: Duration) -> Result<()> {
     let ct = CancellationToken::new();
     spawn_sweeper(store.clone(), sweep_every, ct.clone());
     tracing::info!(node_id = store.node_id(), "serving MCP on stdio");
-    let service = AnotherMcp::new(store)
+    let service = AnotherMcp::for_stdio(store)
         .serve(rmcp::transport::stdio())
         .await
         .context("starting stdio MCP server")?;

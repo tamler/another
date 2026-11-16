@@ -63,6 +63,7 @@ impl Env {
             .env("HOME", &self.home)
             .env("ANOTHER_HOME", &self.another_home)
             .env_remove("ANOTHER_AGENT")
+            .env_remove("ANOTHER_AGENT_MODE")
             .env_remove("GROK_HOOK_EVENT")
             .env_remove("ANOTHER_LOG")
             .env_remove("HERDR_PANE_ID")
@@ -113,9 +114,16 @@ impl Env {
         String::from_utf8(out.stdout).unwrap()
     }
 
-    fn start(&self, client: &str, dir: &Path) {
+    fn start(&self, client: &str, dir: &Path) -> String {
         let stdin = json!({ "session_id": format!("{client}-s1"), "cwd": dir });
-        self.hook("session-start", client, &stdin);
+        let digest = self.hook("session-start", client, &stdin);
+        digest
+            .strip_prefix("Another: ")
+            .expect("session-start actor digest")
+            .split_whitespace()
+            .next()
+            .expect("session actor")
+            .to_owned()
     }
 
     fn edit(&self, client: &str, dir: &Path, file: &str) -> String {
@@ -158,22 +166,24 @@ fn board_needs_an_existing_database_and_creates_nothing() {
 #[test]
 fn board_shows_what_the_edit_hook_recorded_and_what_waits() {
     let env = Env::new();
-    env.start("claude", &env.main);
-    env.start("codex", &env.wt);
+    // Hooks open existing homes; only an explicit init creates one.
+    env.ok(&["init"]);
+    let claude_actor = env.start("claude", &env.main);
+    let codex_actor = env.start("codex", &env.wt);
     assert_eq!(env.edit("claude", &env.main, "src/a.rs"), "");
     // Codex in a sibling worktree is stopped on the same file.
     let stopped = env.edit("codex", &env.wt, "src/a.rs");
     assert!(
-        stopped.contains("held by claude@shop"),
+        stopped.contains(&format!("held by {claude_actor}")),
         "the edit hook did not stop codex: {stopped:?}; holds: {}",
         env.ok(&["--json", "holds"])
     );
     env.ok(&[
         "send",
         "--from",
-        "claude@shop",
+        &claude_actor,
         "--to",
-        "codex@shop-review",
+        &codex_actor,
         "--subject",
         "Review src/a.rs",
         "--body",
@@ -189,7 +199,7 @@ fn board_shows_what_the_edit_hook_recorded_and_what_waits() {
 
     let projects = board["projects"].as_array().unwrap();
     let shop = projects.iter().find(|p| p["project"] == "shop").unwrap();
-    assert_eq!(shop["holds"][0]["agent"], "claude@shop");
+    assert_eq!(shop["holds"][0]["agent"], claude_actor.as_str());
     assert_eq!(shop["holds"][0]["pattern"], "src/a.rs");
     assert_eq!(shop["holds"][0]["edit_hook"], true);
     assert_eq!(shop["edits"][0]["path"], "src/a.rs");
@@ -197,14 +207,14 @@ fn board_shows_what_the_edit_hook_recorded_and_what_waits() {
         .iter()
         .find(|p| p["project"] == "shop-review")
         .expect("sibling checkout is on the board for --project shop");
-    assert_eq!(review["blocked"][0]["agent"], "codex@shop-review");
-    assert_eq!(review["blocked"][0]["holder"], "claude@shop");
+    assert_eq!(review["blocked"][0]["agent"], codex_actor.as_str());
+    assert_eq!(review["blocked"][0]["holder"], claude_actor.as_str());
 
     let codex = board["agents"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|a| a["address"] == "codex@shop-review")
+        .find(|a| a["address"] == codex_actor.as_str())
         .unwrap();
     assert_eq!(codex["unread"], 1);
     assert_eq!(codex["awaiting_ack"], 1);
@@ -213,19 +223,19 @@ fn board_shows_what_the_edit_hook_recorded_and_what_waits() {
     assert!(!board.to_string().contains("secret body"));
 
     for want in [
-        "shop  ",
-        "claude@shop  src/a.rs  exclusive",
-        "(edit hook)",
-        "recent edits (paths the edit hook claimed)",
-        "stopped edits",
-        "codex@shop-review on src/a.rs, held by claude@shop (shop:src/a.rs)",
-        "\nAgents\n",
-        "codex@shop-review  live, seen ",
-        " ago: 1 unread, 1 to acknowledge, 1 request(s)",
-        "Pending requests",
-        "open  Review src/a.rs  from claude@shop to codex@shop-review",
+        "shop  ".to_string(),
+        format!("{claude_actor}  src/a.rs  exclusive"),
+        "(edit hook)".to_string(),
+        "recent edits (paths the edit hook claimed)".to_string(),
+        "stopped edits".to_string(),
+        format!("{codex_actor} on src/a.rs, held by {claude_actor} (shop:src/a.rs)"),
+        "\nAgents\n".to_string(),
+        format!("{codex_actor}  live, seen "),
+        " ago: 1 unread, 1 to acknowledge, 1 request(s)".to_string(),
+        "Pending requests".to_string(),
+        format!("open  Review src/a.rs  from {claude_actor} to {codex_actor}"),
     ] {
-        assert!(human.contains(want), "missing {want:?} in:\n{human}");
+        assert!(human.contains(&want), "missing {want:?} in:\n{human}");
     }
     assert!(!human.contains('\u{2014}'), "no em dashes in copy");
 

@@ -879,8 +879,9 @@ fn heartbeat_end_releases_holds_and_reports_digest() {
 #[test]
 fn concurrent_connections_share_one_database() {
     let dir = tempfile::tempdir().unwrap();
-    let a = Store::open(dir.path()).unwrap();
-    let b = Store::open(dir.path()).unwrap();
+    let home = dir.path().join("home");
+    let a = Store::open(&home).unwrap();
+    let b = Store::open(&home).unwrap();
     assert_eq!(a.node_id(), b.node_id());
     for name in ["x", "y"] {
         a.register_agent(RegisterAgent {

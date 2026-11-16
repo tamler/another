@@ -10,7 +10,7 @@ another hold acquire --agent claude@shop src/api/routes.rs
 another holds --project .
 ```
 
-Conflicts are all-or-nothing: if any requested path overlaps another agent's live hold, nothing is granted and the command exits with status 3. Session hooks renew an agent's holds and release them at session end.
+Conflicts are all-or-nothing: if any requested path overlaps another agent's live hold, nothing is granted and the command exits with status 3. Unfenced session hooks do not renew all holds or release them at session end; the edit guard can renew an own hold for a path it checks. Holds otherwise expire at their TTL or can be released explicitly by their exact actor.
 
 ## The edit guard
 
@@ -22,7 +22,7 @@ Manual holds also keep literal intent for bracketed or braced names anywhere in 
 
 A stopped edit automatically waits for the file. Do not keep retrying: repeat attempts get a short backoff, and Another sends one inbox ping after every conflicting hold clears. The file is not reserved by that ping. See [Waiting for a held file](HOOKS.md#waiting-for-a-held-file) for timing and delivery.
 
-To ask an owner to release a hold, use `another hold request-release --agent AGENT HOLD_ID` with an ID from `another holds` or a deny notice. The command reuses your outstanding request for that exact hold; it closes automatically when the hold is released or expires, including session end. A new hold is a new request. Unlinked free-text requests stay manual. This command is local CLI only; it does not add a remote release capability.
+To ask an owner to release a hold, use `another hold request-release --agent AGENT HOLD_ID` with an ID from `another holds` or a deny notice. The command reuses your outstanding request for that exact hold; it closes automatically when the hold is released or expires, including a release by an explicit `another heartbeat --end` (a hook session end leaves holds in place). A new hold is a new request. Unlinked free-text requests stay manual. This command is local CLI only; it does not add a remote release capability.
 
 ## Holds across worktrees
 

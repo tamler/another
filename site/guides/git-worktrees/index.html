@@ -56,7 +56,7 @@
     </section>
     <section class="guide-section" aria-labelledby="mail">
       <h2 id="mail">Talk across worktrees</h2>
-      <p>Run from the root of each worktree. <code>--project .</code> scopes the name to that worktree. A session's hook does the same thing automatically, naming it after the client and the nearest directory containing <code>.git</code>, such as <code>codex@shop-ui</code>.</p>
+      <p>Run from the root of each worktree. <code>--project .</code> scopes the name to that worktree. A session hook uses the client, session ID and nearest directory containing <code>.git</code> to derive a distinct actor; its start digest shows the full address.</p>
       <pre class="code-block shell" tabindex="0" aria-label="Register agents in two worktrees and send mail"><code>another init
 cd ../shop-parser
 another agent register parser --program claude --project .

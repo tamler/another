@@ -25,7 +25,7 @@ async fn serve(opts: HttpOptions) -> Running {
     let project = dir.path().join("shop");
     std::fs::create_dir(&project).unwrap();
     let project = project.to_str().unwrap().to_owned();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open(&dir.path().join("home")).unwrap();
     store
         .register_agent(RegisterAgent {
             name: "alice".into(),
@@ -606,7 +606,8 @@ fn resolve_matrix_matches_the_loopback_rule() {
 async fn dashboard_command_refuses_remote_bind_and_serves_loopback() {
     hosted_ci::require_hosted_runner();
     let dir = tempfile::tempdir().unwrap();
-    let home = dir.path();
+    let home = dir.path().join("home");
+    let home = home.as_path();
     let bad = Command::new(env!("CARGO_BIN_EXE_another"))
         .args(["dashboard", "--no-open", "--bind", "0.0.0.0:9"])
         .env("ANOTHER_HOME", home)

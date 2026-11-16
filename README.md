@@ -12,7 +12,7 @@ It also works across machines today, through a self-hosted federation hub or aut
 
 Claude Code and Codex cannot see each other without something shared. They can edit the same files, start the same fix twice, or launch duplicate model servers. Another combines path holds, messages and requests, activity, and a registry for ports and model servers. Its mailbox is a way to address agents and exchange messages. It does not launch agents, assign their work, or enforce a resource limit.
 
-**Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1-6 complete. Hosted connectors (OAuth for ChatGPT, Claude, and other MCP clients) and the loopback dashboard are in this tree. See [docs/REMOTE.md](docs/REMOTE.md) and [docs/DASHBOARD.md](docs/DASHBOARD.md).
+**Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1-7 complete. Hosted connectors (OAuth for ChatGPT, Claude, and other MCP clients) and the loopback dashboard are in this tree. Default hooks use advisory path holds. The experimental [strict controlled-edit pack](docs/CONTROLLED-EDITS.md) requires explicit opt-in and denies native edits; native Windows and integrated client acceptance remain pending. See [docs/REMOTE.md](docs/REMOTE.md) and [docs/DASHBOARD.md](docs/DASHBOARD.md).
 
 ## Why
 
@@ -25,7 +25,7 @@ This is the failure I kept hitting:
 
 What they get instead:
 
-- **Path holds, taken at the edit.** With the hook pack, each file an agent edits gets an expiring hold, and a Claude Code, Codex or Grok CLI edit to a file another agent holds is stopped with the holder's name, across worktrees and clones of the same repo. `another hold check` exits 3 on overlap and grants nothing. Edits made from a shell command get past the hook, and Cursor has no edit guard, so use another checkout when you need a real boundary.
+- **Advisory path holds, checked before an edit.** The default hook pack checks native file edits and takes expiring holds on project paths. A Claude Code, Codex or Grok CLI edit that conflicts is stopped when the client honors the hook response. The client reopens the path afterwards, so this is advisory coordination with no checked-object guarantee. `another hold check` exits 3 on overlap and grants nothing. Shell edits bypass hooks, and Cursor has no edit guard; use another checkout when you need a real boundary.
 - **Mail and requests.** `another send --request` opens work for an agent to claim. Claiming assigns an owner. An ack records receipt. If the request goes stale, someone else can take it.
 - **An activity feed**, so a session can ask who is doing what before it starts a duplicate.
 - **A resource registry**, so an agent borrows a running server instead of launching a duplicate. `another reap` needs a human `--confirm` on that machine. Remote peers cannot reap.
@@ -60,9 +60,7 @@ git clone https://github.com/tamler/another && cd another && cargo build --relea
 
 Once v0.1.0 is published, prebuilt binaries for macOS (arm64, x86_64) and Linux (static, x86_64, arm64) will be on [GitHub Releases](https://github.com/tamler/another/releases): unpack one and put `another` on your `PATH`. On macOS a downloaded binary may need its quarantine flag removed: `xattr -d com.apple.quarantine ./another`.
 
-On macOS, when replacing an existing `another` with a new build, **remove the old binary first** (`rm "$(command -v another)"`) and then copy the new one in. Copying over the old file in place leaves a stale code signature cached, and macOS kills the new binary on launch. `cargo install` replaces it safely.
-
-After upgrading, restart every `another` process that was already running, since it keeps the old code: run `another daemon restart` on macOS (or `another daemon install` from the new binary if it lives at a different path; on Linux, restart your service), restart each client that runs `another serve --stdio` (or reconnect its MCP server), and restart any `another remote up`, `another serve --auth` or hand-started `another serve`. This matters most when the upgrade changes how repository keys are cached, as the one after #103 does: an old process reading keys written by the new one does not see holds in sibling worktrees and lets those edits through. See [docs/DAEMON.md](docs/DAEMON.md#upgrading).
+Before upgrading an existing home, fence all writers: stop the daemon, clients, hooks and MCP processes you own, prevent them restarting, and verify no old process can write that home. If you cannot establish and maintain that fence, stop. Back up other required home metadata and user configuration separately. The new binary refuses to migrate an older populated home during normal open. While the fence is held, use `another upgrade --backup-dir <new-directory-outside-home> --confirm-writer-fence`; it creates and checks a protected SQLite online backup before migrating. The flag records your confirmation; it does not detect old clients for you. Keep the fence until matching binaries and hooks are installed, then restart clients and verify behavior. See [the upgrade and recovery procedure](docs/DAEMON.md#upgrading). Windows offline upgrade is currently unavailable until private backup ACL support is verified.
 
 **2. Create the local node** (`~/.another`, or `$ANOTHER_HOME`):
 
@@ -76,9 +74,9 @@ another init
 another hook install --client all
 ```
 
-For Codex, review and trust Another's new or changed hooks yourself in `/hooks`. In Codex's default trust flow, automatic mail delivery, heartbeats and edit holds do not run there until you do. Codex also offers `--dangerously-bypass-hook-trust`, which runs enabled hooks without persisted trust for that one invocation; Another does not recommend it. `another hook status` checks configuration presence, not trust or execution. Another cannot grant trust. See [Codex trust and coverage](docs/HOOKS.md#codex-trust-and-coverage).
+For Codex, review and trust Another's new or changed hooks yourself in `/hooks`. In Codex's default trust flow, automatic mail delivery and edit holds do not run there until you do. Codex also offers `--dangerously-bypass-hook-trust`, which runs enabled hooks without persisted trust for that one invocation; Another does not recommend it. `another hook status` checks configuration presence, not trust or execution. Another cannot grant trust. See [Codex trust and coverage](docs/HOOKS.md#codex-trust-and-coverage).
 
-Besides session start, prompts and session end, the pack adds a hook after each tool call (new mail shows up mid-task) and, for Claude Code, Codex and Grok, one before each file edit (the edit takes a hold, or is stopped when another agent holds the file). Both fail open. See [docs/HOOKS.md](docs/HOOKS.md).
+Besides session start, prompts and session end, the default pack adds a hook after each tool call for new mail and, for Claude Code, Codex and Grok, an advisory check before native file edits. Conflicts produce a denial; unavailable identity, database or wrapper means no advisory coverage. Scratch files outside projects remain unguarded. Hooks never create the home: run `another init` or `another hook install` first. `another hook install --client claude --strict-controlled` instead opts into blanket native-edit denial and a restricted tool for one existing file; only Claude Code 2.1.325 is recognized, with no creation, deletion or multi-file support. See [docs/HOOKS.md](docs/HOOKS.md) before opting in.
 
 **Optional: keep the daemon running** (macOS). It expires holds in the background and wakes idle Herdr agents when mail arrives:
 
@@ -186,6 +184,8 @@ Tool errors are `{"error": {"code", "message", "hint?"}}` with codes `not_found`
 ## CLI at a glance
 
 Every command takes `--json`. `--agent` and `--from` default to `$ANOTHER_AGENT`, and `--project` defaults to the current directory.
+
+`another sqlite-info` reports the SQLite version and source ID used by that executable; it uses an in-memory database and does not open or create an Another home.
 
 Logs go to stderr: `info` and above for `another serve`, `warn` and above for every other command. Set `$ANOTHER_LOG` to a [tracing filter](https://docs.rs/tracing-subscriber/0.3/tracing_subscriber/filter/struct.EnvFilter.html#directives) such as `debug` or `another::serve=warn` to change this; a value that does not parse is ignored.
 

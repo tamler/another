@@ -15,7 +15,7 @@ struct Node {
 
 fn node(name: &str) -> Node {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open(&dir.path().join("home")).unwrap();
     store.set_node_name(name).unwrap();
     Node { _dir: dir, store }
 }
@@ -117,7 +117,7 @@ fn pairing_rules() {
     let hub = start_hub();
     let unnamed = {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path()).unwrap();
+        let store = Store::open(&dir.path().join("home")).unwrap();
         (dir, store)
     };
     let code = hub
@@ -487,7 +487,7 @@ fn federation_cli() {
     let run = |args: &[&str]| {
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_another"))
             .args(args)
-            .env("ANOTHER_HOME", dir.path())
+            .env("ANOTHER_HOME", dir.path().join("home"))
             .output()
             .unwrap();
         (
