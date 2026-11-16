@@ -43,7 +43,11 @@ jobs:
       - name: Install this checkout
         run: cargo install --locked --path crates/another --root "$RUNNER_TEMP/new"
 
+      # 42f44c4 predates Windows support: on Windows it stores hold patterns with `\`
+      # (`src\a.rs`), which no released build ever wrote. The upgrade is checked on Linux
+      # and macOS; Windows gets it once there is a Windows build to upgrade from.
       - name: Install the old build
+        if: runner.os != 'Windows'
         run: |
           git worktree add --detach "$RUNNER_TEMP/old-src" "$OLD_REV"
           cargo install --locked --path "$RUNNER_TEMP/old-src/crates/another" --root "$RUNNER_TEMP/old"
@@ -52,6 +56,7 @@ jobs:
         run: scripts/e2e-install.sh fresh "$RUNNER_TEMP/new/bin/another"
 
       - name: Upgrade from the old build's schema
+        if: runner.os != 'Windows'
         run: scripts/e2e-install.sh upgrade "$RUNNER_TEMP/old/bin/another" "$RUNNER_TEMP/new/bin/another"
 
       - name: Uninstall
