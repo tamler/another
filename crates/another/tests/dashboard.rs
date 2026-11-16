@@ -746,3 +746,38 @@ async fn dashboard_command_refuses_remote_bind_and_serves_loopback() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+/// A valid `since` and `limit` are applied, not only parsed: a time after every fixture
+/// event leaves nothing, a recent duration keeps them, and `limit` caps the page.
+#[tokio::test]
+async fn activity_since_and_limit_are_applied() {
+    let srv = serve(HttpOptions {
+        dashboard: DashboardMode::Local,
+        ..Default::default()
+    })
+    .await;
+    let http = client();
+    let items = |query: &'static str| {
+        let http = http.clone();
+        let url = format!("{}/api/dash/activity?{query}", srv.base);
+        async move {
+            let res = http.get(url).send().await.unwrap();
+            assert_eq!(res.status().as_u16(), 200, "{query}");
+            let body: Value = serde_json::from_str(&res.text().await.unwrap()).unwrap();
+            body["items"].as_array().unwrap().len()
+        }
+    };
+    let all = items("since=all").await;
+    assert!(
+        all >= 2,
+        "the fixture needs two events to test limit, has {all}"
+    );
+    assert_eq!(
+        items("since=1h").await,
+        all,
+        "every fixture event is recent"
+    );
+    assert_eq!(items("since=2999-01-01T00:00:00Z").await, 0);
+    assert_eq!(items("limit=1").await, 1);
+    srv.ct.cancel();
+}
