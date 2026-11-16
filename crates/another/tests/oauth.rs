@@ -924,3 +924,312 @@ async fn oauth_endpoints_rate_limit_after_a_burst() {
 
     srv.ct.cancel();
 }
+
+const WEB_REDIRECT: &str = "https://chatgpt.com/connector_platform_oauth_redirect";
+
+/// A registered web client with an authorization request waiting for the operator: the
+/// client id, the URL the browser polls, and the user code the operator approves or denies.
+async fn begin(srv: &Server, http: &reqwest::Client, state: &str) -> (String, String, String) {
+    let registered: Value = http
+        .post(format!("{}/oauth/register", srv.base))
+        .json(&json!({
+            "client_name": "ChatGPT",
+            "redirect_uris": [WEB_REDIRECT],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+            "application_type": "web"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let client_id = registered["client_id"].as_str().unwrap().to_string();
+    let auth = http
+        .get(with_query(
+            &format!("{}/authorize", srv.base),
+            &[
+                ("response_type", "code"),
+                ("client_id", client_id.as_str()),
+                ("redirect_uri", WEB_REDIRECT),
+                ("code_challenge", CHALLENGE),
+                ("code_challenge_method", "S256"),
+                ("resource", &format!("{}/mcp", srv.base)),
+                ("state", state),
+                ("scope", "another offline_access"),
+            ],
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(auth.status(), 303);
+    let wait = auth.headers()["location"].to_str().unwrap().to_string();
+    let pending_url = format!(
+        "{}{}",
+        srv.base,
+        wait.replacen("/oauth/wait/", "/oauth/pending/", 1)
+    );
+    let pending: Value = http
+        .get(&pending_url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let user_code = pending["user_code"].as_str().unwrap().to_string();
+    (client_id, pending_url, user_code)
+}
+
+/// Run the flow through approval and code exchange: (access token, refresh token).
+async fn tokens(srv: &Server, http: &reqwest::Client) -> (String, String) {
+    let (client_id, pending_url, user_code) = begin(srv, http, "s").await;
+    srv.store
+        .approve_oauth(Approval {
+            user_code,
+            agent: "chatgpt".into(),
+            project_globs: vec![srv.work_glob.clone()],
+            label: None,
+        })
+        .unwrap();
+    let decided: Value = http
+        .get(&pending_url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let code = query_param(decided["redirect"].as_str().unwrap(), "code");
+    let res: Value = http
+        .post(format!("{}/oauth/token", srv.base))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(form(&[
+            ("grant_type", "authorization_code"),
+            ("code", &code),
+            ("redirect_uri", WEB_REDIRECT),
+            ("client_id", &client_id),
+            ("code_verifier", VERIFIER),
+            ("resource", &format!("{}/mcp", srv.base)),
+        ]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    (
+        res["access_token"].as_str().unwrap().to_string(),
+        res["refresh_token"].as_str().unwrap().to_string(),
+    )
+}
+
+async fn post_revoke(srv: &Server, http: &reqwest::Client, token: &str) -> reqwest::Response {
+    http.post(format!("{}/oauth/revoke", srv.base))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(form(&[("token", token)]))
+        .send()
+        .await
+        .unwrap()
+}
+
+/// Status of a refresh-token grant at the token endpoint.
+async fn refresh_status(srv: &Server, http: &reqwest::Client, refresh: &str) -> u16 {
+    http.post(format!("{}/oauth/token", srv.base))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh),
+            ("resource", &format!("{}/mcp", srv.base)),
+        ]))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+/// RFC 7009 at `/oauth/revoke`: revoking either token ends the whole grant, while a token
+/// that is unknown, malformed or carries the wrong secret is answered 200 and revokes nothing.
+#[tokio::test]
+async fn the_revocation_endpoint_ends_the_grant_and_ignores_forged_tokens() {
+    let srv = start().await;
+    let http = http();
+    let resource = format!("{}/mcp", srv.base);
+
+    let audited = || {
+        srv.store
+            .audit_log(1000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.operation == "oauth.revoke")
+            .collect::<Vec<_>>()
+    };
+    for revoke_with in ["access", "refresh"] {
+        let (access, refresh) = tokens(&srv, &http).await;
+        srv.store.verify_access_token(&access, &resource).unwrap();
+        let before = audited().len();
+
+        // Forged and unknown tokens: 200 (no oracle), and the grant is untouched.
+        // Well-formed forgeries (`<prefix><id>_<64 hex>`) reach the secret check:
+        // the real id with one secret digit changed, and an unknown id with the real secret.
+        let flip = |t: &str| {
+            let last = if t.ends_with('0') { "1" } else { "0" };
+            format!("{}{last}", &t[..t.len() - 1])
+        };
+        let (prefix, rest) = access.split_at("anoat_".len());
+        let (_, secret) = rest.split_once('_').unwrap();
+        let unknown = format!("{prefix}01AAAAAAAAAAAAAAAAAAAAAAAA_{secret}");
+        let forgeries = [
+            String::new(),
+            "garbage".into(),
+            format!("{refresh}x"),
+            flip(&access),
+            flip(&refresh),
+            unknown,
+        ];
+        for t in &forgeries {
+            let res = post_revoke(&srv, &http, t).await;
+            assert_eq!(res.status(), 200, "{t:?}");
+        }
+        srv.store
+            .verify_access_token(&access, &resource)
+            .expect("a forged revocation revoked a live grant");
+        assert_eq!(audited().len(), before, "a forged revocation was audited");
+
+        // The real token revokes the grant: both tokens stop working.
+        let token = if revoke_with == "access" {
+            &access
+        } else {
+            &refresh
+        };
+        let res = post_revoke(&srv, &http, token).await;
+        assert_eq!(res.status(), 200);
+        assert_eq!(
+            res.headers()["cache-control"].to_str().unwrap(),
+            "no-store",
+            "{revoke_with}"
+        );
+        assert!(
+            srv.store.verify_access_token(&access, &resource).is_err(),
+            "{revoke_with}: the access token still verifies"
+        );
+        assert_eq!(
+            refresh_status(&srv, &http, &refresh).await,
+            400,
+            "{revoke_with}"
+        );
+        // One audit row for the revocation, naming the grant's agent.
+        let rows = audited();
+        assert_eq!(rows.len(), before + 1, "{rows:?}");
+        let last = rows.iter().max_by_key(|e| e.audit_id).unwrap();
+        assert_eq!(last.agent.as_deref(), Some("chatgpt"), "{last:?}");
+        assert_eq!(
+            last.detail.as_deref(),
+            Some(format!("client token kind {revoke_with}").as_str())
+        );
+        // Revoking again is still 200. (It currently writes another `oauth.revoke ok` row
+        // although nothing changes; that is not asserted here either way.)
+        assert_eq!(post_revoke(&srv, &http, token).await.status(), 200);
+    }
+
+    // Only a form body is accepted.
+    let json = http
+        .post(format!("{}/oauth/revoke", srv.base))
+        .header("content-type", "application/json")
+        .body("{\"token\":\"x\"}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(json.status(), 415);
+    srv.ct.cancel();
+}
+
+/// `another oauth deny`: the browser is sent back with `error=access_denied` (and the
+/// client's state and our issuer), and a denied request can never be approved after all.
+#[tokio::test]
+async fn a_denied_authorization_returns_access_denied_and_stays_denied() {
+    let srv = start().await;
+    let http = http();
+    let (_, pending_url, user_code) = begin(&srv, &http, "from-the-app").await;
+    let listed = srv.store.oauth_pending().unwrap();
+    assert!(
+        listed.iter().any(|p| p.user_code == user_code),
+        "{listed:?}"
+    );
+
+    let denied = srv.store.deny_oauth(&user_code).unwrap();
+    assert_eq!(denied.user_code, user_code);
+    assert!(srv
+        .store
+        .oauth_pending()
+        .unwrap()
+        .iter()
+        .all(|p| p.user_code != user_code));
+
+    let decided: Value = http
+        .get(&pending_url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(decided["status"], "denied", "{decided}");
+    let back = decided["redirect"].as_str().unwrap();
+    assert!(back.starts_with(WEB_REDIRECT), "{back}");
+    assert_eq!(query_param(back, "error"), "access_denied");
+    assert_eq!(query_param(back, "state"), "from-the-app");
+    assert!(back.contains("iss="), "{back}");
+    assert!(!back.contains("code="), "{back}");
+
+    // Neither approval nor a second denial changes a decided request.
+    let approve = srv.store.approve_oauth(Approval {
+        user_code: user_code.clone(),
+        agent: "chatgpt".into(),
+        project_globs: vec![srv.work_glob.clone()],
+        label: None,
+    });
+    assert!(approve.is_err(), "a denied request was approved");
+    assert!(srv.store.oauth_grants().unwrap().is_empty());
+    let again = srv.store.deny_oauth(&user_code).unwrap_err();
+    assert_eq!(again.code(), "conflict", "{again}");
+    let unknown = srv.store.deny_oauth("ZZZZ-ZZZZ").unwrap_err();
+    assert_eq!(unknown.code(), "not_found", "{unknown}");
+    srv.ct.cancel();
+}
+
+/// `another oauth grants` / `oauth revoke <grant>`: the operator sees the grant and ends it,
+/// and every token issued for it stops working. Revoking twice keeps the first time.
+#[tokio::test]
+async fn revoking_a_grant_ends_every_token_issued_for_it() {
+    let srv = start().await;
+    let http = http();
+    let resource = format!("{}/mcp", srv.base);
+    let (access, refresh) = tokens(&srv, &http).await;
+
+    let grants = srv.store.oauth_grants().unwrap();
+    assert_eq!(grants.len(), 1, "{grants:?}");
+    let g = &grants[0];
+    assert_eq!(g.client_name, "ChatGPT");
+    assert_eq!(g.project_globs, vec![srv.work_glob.clone()]);
+    assert!(g.revoked_at.is_none());
+
+    let revoked = srv.store.revoke_oauth_grant(&g.grant_id).unwrap();
+    let at = revoked.revoked_at.clone().expect("revoked_at set");
+    assert!(srv.store.verify_access_token(&access, &resource).is_err());
+    assert_eq!(refresh_status(&srv, &http, &refresh).await, 400);
+
+    let again = srv.store.revoke_oauth_grant(&g.grant_id).unwrap();
+    assert_eq!(again.revoked_at.as_deref(), Some(at.as_str()));
+    assert_eq!(
+        srv.store
+            .revoke_oauth_grant("no-such-grant")
+            .unwrap_err()
+            .code(),
+        "not_found"
+    );
+    srv.ct.cancel();
+}
