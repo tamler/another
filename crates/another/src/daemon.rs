@@ -687,7 +687,16 @@ pub fn uninstall(env: &DaemonEnv, dry_run: bool) -> Result<DaemonReport> {
                         // `/End` fails for a task that is not running; the state check
                         // after it decides, not its exit status.
                         let ended = exec(&commands[0])?;
-                        match wait_task_stopped(&env.label) {
+                        let (state, serving) = wait_task_down(&env.label, &bind);
+                        match state {
+                            TaskRun::Stopped | TaskRun::Absent if serving => bail!(
+                                "the {} task stopped, but {bind} still answers /health, so the \
+                                 server it started may still be running (or another server uses \
+                                 that address). Nothing was deleted, and {} was kept; stop that \
+                                 server and run `another daemon uninstall` again.",
+                                env.label,
+                                path.display()
+                            ),
                             TaskRun::Stopped | TaskRun::Absent => {}
                             TaskRun::Running => bail!(
                                 "the {} task is still running: `schtasks /End` said {}. It was \
@@ -865,17 +874,22 @@ fn task_run_state(label: &str) -> TaskRun {
     }
 }
 
-/// After `/End`: give Task Scheduler up to three seconds to record the stop.
-fn wait_task_stopped(label: &str) -> TaskRun {
-    let mut state = task_run_state(label);
-    for _ in 0..30 {
-        if state != TaskRun::Running {
-            break;
+/// After `/End`: wait up to ten seconds until Task Scheduler shows the task not running
+/// and nothing answers `GET /health` on the daemon's address. `/End` returns before the
+/// server has exited (on a hosted runner the old server was still answering, and a `/Run`
+/// right after it failed to bind), so the task's state alone does not prove the server is
+/// gone. Returns the last task state and whether the address still answered.
+fn wait_task_down(label: &str, bind: &str) -> (TaskRun, bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let state = task_run_state(label);
+        let serving = healthy(bind);
+        let down = !serving && matches!(state, TaskRun::Stopped | TaskRun::Absent);
+        if down || std::time::Instant::now() >= deadline {
+            return (state, serving);
         }
-        std::thread::sleep(Duration::from_millis(100));
-        state = task_run_state(label);
+        std::thread::sleep(Duration::from_millis(200));
     }
-    state
 }
 
 /// The fields of one CSV line as `schtasks /FO CSV` writes it: every field quoted, `""`
@@ -939,7 +953,31 @@ pub fn restart(env: &DaemonEnv) -> Result<()> {
             must(&argv(&["systemctl", "--user", "restart", &env.unit_name()]))?;
         }
         Manager::TaskScheduler => {
-            let _ = exec(&argv(&["schtasks", "/End", "/TN", &env.label]));
+            // `/End` fails for a task that is not running, so its exit status is not used.
+            // `/Run` waits until the old server is gone, or the new one cannot bind.
+            let bind = read_definition(env.manager, &env.file_path())
+                .and_then(|t| bind_in(env.manager, &t))
+                .unwrap_or_else(|| env.bind.clone());
+            let ended = exec(&argv(&["schtasks", "/End", "/TN", &env.label]))?;
+            let (state, serving) = wait_task_down(&env.label, &bind);
+            if state == TaskRun::Running || serving {
+                bail!(
+                    "the old {} server did not stop within 10 seconds (`schtasks /End` said {}; \
+                     task {}; {bind} {}), so it was not started again",
+                    env.label,
+                    stderr_of(&ended),
+                    if state == TaskRun::Running {
+                        "still running"
+                    } else {
+                        "not running"
+                    },
+                    if serving {
+                        "still answers /health"
+                    } else {
+                        "is free"
+                    }
+                );
+            }
             must(&argv(&["schtasks", "/Run", "/TN", &env.label]))?;
         }
     }

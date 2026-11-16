@@ -300,4 +300,62 @@ fn task_scheduler_cases(fakes: &Fakes, env: &DaemonEnv) {
     assert!(daemon::status(env).unwrap().loaded);
     fakes.task(false, false);
     assert!(!daemon::status(env).unwrap().loaded);
+
+    // The task shows stopped, but something still answers /health on the daemon's
+    // address: on a hosted runner `/End` returned while the old server kept serving. Not
+    // proved stopped, so nothing is deleted.
+    let (serving_env, _server) = with_health_server(env);
+    let (result, kept, calls) = task_uninstall(fakes, &serving_env, true, true, "ok");
+    let err = format!(
+        "{:#}",
+        result.expect_err("a server still answering is an error")
+    );
+    assert!(kept);
+    assert!(!deleted(&calls), "{calls:?}");
+    assert!(err.contains("still answers /health"), "{err}");
+
+    // Restart waits for the old server to go before `/Run`, and refuses while it answers.
+    fakes.task(true, true);
+    fakes.mode("ok");
+    let err = format!(
+        "{:#}",
+        daemon::restart(&serving_env).expect_err("old server still answering")
+    );
+    assert!(err.contains("did not stop"), "{err}");
+    assert!(
+        !fakes.calls().iter().any(|c| c.starts_with("/Run")),
+        "{:?}",
+        fakes.calls()
+    );
+    // Restart reads the address from the installed definition: put back the plain one.
+    fakes.mode("ok");
+    daemon::install(env, false, false).unwrap();
+    fakes.task(true, true);
+    fakes.mode("ok");
+    daemon::restart(env).unwrap();
+    let calls = fakes.calls();
+    let end = calls.iter().position(|c| c.starts_with("/End"));
+    let run = calls.iter().position(|c| c.starts_with("/Run"));
+    assert!(end.is_some() && end < run, "{calls:?}");
+}
+
+/// A copy of `env` whose address has a tiny server answering `GET /health` with 200,
+/// standing in for a daemon that outlived its task. The server lives as long as the
+/// returned listener's thread, i.e. the rest of the test process.
+fn with_health_server(env: &DaemonEnv) -> (DaemonEnv, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        }
+    });
+    let mut env = env.clone();
+    env.bind = format!("127.0.0.1:{port}");
+    (env, server)
 }

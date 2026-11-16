@@ -543,52 +543,21 @@ fn hosted_windows_task_scheduler_runs_the_daemon() {
     let label = test_label("hosted");
     let bind = free_bind();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // TEMPORARY DIAGNOSTIC: record Task Scheduler's view and the processes at each step.
-        let diag = |step: &str| -> String {
-            let q = |args: &[&str]| {
-                let o = Command::new(args[0])
-                    .args(&args[1..])
-                    .stdin(Stdio::null())
-                    .output()
-                    .unwrap();
-                format!(
-                    "{}{}",
-                    String::from_utf8_lossy(&o.stdout),
-                    String::from_utf8_lossy(&o.stderr)
-                )
-            };
-            format!(
-                "=== {step}\n{}\n{}\n",
-                q(&["schtasks", "/Query", "/TN", &label, "/V", "/FO", "LIST"]),
-                q(&[
-                    "tasklist",
-                    "/V",
-                    "/FO",
-                    "CSV",
-                    "/FI",
-                    "IMAGENAME eq another.exe"
-                ])
-            )
-        };
-        let mut log = String::new();
         env.json(&["daemon", "install", "--label", &label, "--bind", &bind]);
-        log.push_str(&diag("right after install"));
         let status = wait_healthy(&env, &label, true);
-        log.push_str(&diag("healthy after install"));
         assert_eq!(status["loaded"], true, "{status}");
         assert_eq!(status["healthy"], true, "{status}");
+        // Before review round 2, `/Run` here raced the old server, which `/End` had not yet
+        // stopped: the new one failed to bind and `/health` came from the dying old one.
+        // The task-state check below catches that: the task must be running again.
         env.json(&["daemon", "restart", "--label", &label]);
-        log.push_str(&diag("right after restart"));
         let status = wait_healthy(&env, &label, true);
-        log.push_str(&diag("healthy after restart"));
-        let serve_log = std::fs::read_to_string(env.another_home().join("logs").join("serve.log"))
-            .unwrap_or_default();
-        panic!("DIAGNOSTIC\n{log}\n=== serve.log\n{serve_log}\n=== status {status}");
-        #[allow(unreachable_code)]
         assert_eq!(status["healthy"], true, "after restart: {status}");
         assert!(env.another_home().join("logs").join("serve.log").is_file());
         // Uninstall decides "still running" from this column (review round 2): a running
         // task's last result is 267009, SCHED_S_TASK_RUNNING, in every system language.
+        // Give a new instance that could not bind time to exit first.
+        std::thread::sleep(std::time::Duration::from_secs(3));
         let query = Command::new("schtasks")
             .args(["/Query", "/TN", &label, "/V", "/FO", "CSV", "/NH"])
             .stdin(Stdio::null())
