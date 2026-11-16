@@ -1179,8 +1179,29 @@ async fn a_denied_authorization_returns_access_denied_and_stays_denied() {
         "{listed:?}"
     );
 
-    let denied = srv.store.deny_oauth(&user_code).unwrap();
+    // The code is accepted in any case, as typed from the consent page, and comes back
+    // normalized. (From #184.)
+    let denied = srv
+        .store
+        .deny_oauth(&format!("  {}  ", user_code.to_ascii_uppercase()))
+        .unwrap();
     assert_eq!(denied.user_code, user_code);
+    assert_eq!(denied.client_name, "ChatGPT");
+    // Exactly one audit row, `denied`, naming the client and its redirect host. (From #184.)
+    let audit: Vec<_> = srv
+        .store
+        .audit_log(100)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.operation == "oauth.deny")
+        .collect();
+    assert_eq!(audit.len(), 1, "{audit:?}");
+    assert_eq!(audit[0].outcome, "denied");
+    let detail = audit[0].detail.as_deref().unwrap_or_default();
+    assert!(
+        detail.contains("\"ChatGPT\"") && detail.contains("chatgpt.com"),
+        "{detail}"
+    );
     assert!(srv
         .store
         .oauth_pending()
