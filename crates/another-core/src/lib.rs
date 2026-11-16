@@ -7,6 +7,7 @@
 
 mod activity;
 mod board;
+mod commit_check;
 pub mod crypto;
 mod dashboard;
 mod error;
@@ -32,6 +33,9 @@ pub use board::{
     Board, BoardAgent, BoardBlocked, BoardEdit, BoardHold, BoardProject, BoardQuery, BoardRequest,
     BOARD_EVENT_SCAN_CAP, DEFAULT_BOARD_LIMIT, DEFAULT_BOARD_WINDOW_MS, EDIT_HOOK_HOLD_REASON,
     MAX_BOARD_LIMIT,
+};
+pub use commit_check::{
+    is_busy_error, CommitCheck, CommitConflict, CommitGroup, CommitReader, CommitSkip,
 };
 pub use dashboard::{
     DashAccess, DashActivityItem, DashActivityPage, DashActivityQuery, DashAgent, DashBlocked,

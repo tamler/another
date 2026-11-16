@@ -24,6 +24,8 @@ A stopped edit automatically waits for the file. Do not keep retrying: repeat at
 
 To ask an owner to release a hold, use `another hold request-release --agent AGENT HOLD_ID` with an ID from `another holds` or a deny notice. The command reuses your outstanding request for that exact hold; it closes automatically when the hold is released or expires, including session end. A new hold is a new request. Unlinked free-text requests stay manual. This command is local CLI only; it does not add a remote release capability.
 
+Edits made through a shell (`sed -i`, a script) are invisible to the edit guard. The opt-in commit guard covers part of that gap: at `git commit` time it warns when a staged file is under another agent's live hold, and lets the commit go ahead. It reads only and never blocks a commit. See [Commit guard (opt-in)](HOOKS.md#commit-guard-opt-in).
+
 ## Holds across worktrees
 
 Each checkout is its own project, but holds are checked across every local project in the same git repository. Two worktrees of one repository, or two clones of one origin, collide on the same files:

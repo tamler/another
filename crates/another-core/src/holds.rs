@@ -158,7 +158,7 @@ const HOLD_SELECT: &str =
 
 /// [`HOLD_SELECT`] plus the hold's project id (column 10) and that project's position in its
 /// repository (column 11).
-const HOLD_SELECT_REPO: &str =
+pub(crate) const HOLD_SELECT_REPO: &str =
     "SELECT h.hold_id, p.slug, a.address, NULL, h.pattern, h.exclusive, h.reason,
        h.ttl_seconds, h.created_at, h.expires_at, h.project_id, coalesce(pr.repo_prefix, '')
      FROM holds h
@@ -166,7 +166,7 @@ const HOLD_SELECT_REPO: &str =
      JOIN agents a ON a.agent_id = h.agent_id
      LEFT JOIN project_repos pr ON pr.project_id = h.project_id";
 
-fn hold_from_row(r: &Row<'_>) -> rusqlite::Result<Hold> {
+pub(crate) fn hold_from_row(r: &Row<'_>) -> rusqlite::Result<Hold> {
     let name: String = r.get(2)?;
     let agent_slug: Option<String> = r.get(3)?;
     Ok(Hold {
@@ -340,7 +340,7 @@ pub fn patterns_overlap(a: &str, b: &str) -> bool {
 /// on-disk case; this catches new ones. Folding only ever adds overlaps, and it is skipped
 /// when either pattern has a character class: lowercasing `[!a-z]` would change which
 /// names the class excludes.
-fn overlap_on_volume(a: &str, b: &str, fold: bool) -> bool {
+pub(crate) fn overlap_on_volume(a: &str, b: &str, fold: bool) -> bool {
     patterns_overlap(a, b)
         || (fold
             && (literal_pattern(a).is_some() || !a.contains('['))
@@ -352,7 +352,7 @@ fn overlap_on_volume(a: &str, b: &str, fold: bool) -> bool {
 /// in letter case as the same entry (APFS and NTFS by default, ext4 not). Found without
 /// writing: the last name of `dir` with letters is respelled in the other case, and the
 /// result counts only if it is the very same directory. Unknown counts as case-sensitive.
-fn folds_case(dir: &Path) -> bool {
+pub(crate) fn folds_case(dir: &Path) -> bool {
     let Ok(real) = std::fs::metadata(dir) else {
         return false;
     };
