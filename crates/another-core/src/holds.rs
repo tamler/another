@@ -1321,6 +1321,9 @@ impl Store {
         if input.paths.is_empty() {
             return Err(Error::Invalid("no paths given".into()));
         }
+        if let Some(reason) = &input.reason {
+            crate::mail::check_line("a hold reason", reason)?;
+        }
         let ttl = clamp_ttl(input.ttl_seconds)?;
         self.write(|tx| {
             sweep_tx(tx)?;

@@ -204,16 +204,24 @@ pub fn single_line(text: &str, max_chars: usize) -> String {
     cut
 }
 
+/// Refuse text that would be printed on a terminal (a subject, a held path, a hold reason,
+/// an agent description) if it has an unsafe character (see [`is_unsafe_text_char`]).
+/// `what` names the field in the error.
+pub(crate) fn check_line(what: &str, text: &str) -> Result<()> {
+    if text.chars().any(is_unsafe_text_char) {
+        return Err(Error::Invalid(format!(
+            "{what} must be one line of text: no line breaks, tabs, escape or other control characters"
+        )));
+    }
+    Ok(())
+}
+
 fn check_text(subject: &str, body: &str) -> Result<()> {
     if subject.trim().is_empty() {
         return Err(Error::Invalid("subject must not be empty".into()));
     }
     // A subject is typed into the recipient's terminal by a wake and printed by the CLI.
-    if subject.chars().any(is_unsafe_text_char) {
-        return Err(Error::Invalid(
-            "subject must be one line of text: no line breaks, tabs, escape or other control characters".into(),
-        ));
-    }
+    check_line("subject", subject)?;
     if subject.chars().count() > MAX_SUBJECT_CHARS {
         return Err(Error::Invalid(format!(
             "subject is longer than {MAX_SUBJECT_CHARS} characters"
