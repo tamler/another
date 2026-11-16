@@ -297,12 +297,10 @@ pub fn process_info(pid: u32) -> Option<ProcInfo> {
 /// Whether a process is running (exited-but-unreaped zombies count as gone).
 #[cfg(not(windows))]
 pub fn alive(pid: u32) -> bool {
-    run("ps", &["-o", "stat=", "-p", &pid.to_string()])
-        .map(|out| {
-            let stat = out.trim();
-            !stat.is_empty() && !stat.starts_with('Z')
-        })
-        .unwrap_or(false)
+    run("ps", &["-o", "stat=", "-p", &pid.to_string()]).is_ok_and(|out| {
+        let stat = out.trim();
+        !stat.is_empty() && !stat.starts_with('Z')
+    })
 }
 
 #[cfg(windows)]

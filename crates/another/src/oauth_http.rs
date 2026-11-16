@@ -117,8 +117,7 @@ impl OAuthConfig {
     pub fn host_value(&self) -> String {
         self.issuer
             .split_once("://")
-            .map(|(_, rest)| rest.to_string())
-            .unwrap_or_else(|| self.hostname.clone())
+            .map_or_else(|| self.hostname.clone(), |(_, rest)| rest.to_string())
     }
 }
 
@@ -209,7 +208,10 @@ impl Default for RateLimiter {
 
 impl RateLimiter {
     fn take(&self, key: &str, capacity: u32, every: Duration) -> Result<(), u64> {
-        let mut map = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut map = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = Instant::now();
         // A bucket is stale once it has refilled and gone quiet. Drop those
         // first. A full clear would also forget clients who are still limited.
@@ -410,7 +412,7 @@ pub(crate) fn split_host_header(header: &str) -> Option<(String, Option<u16>)> {
         }
         let port = authority.port_u16();
         if let Some(port) = port {
-            let raw = header.rsplit_once(':').map(|(_, text)| text).unwrap_or("");
+            let raw = header.rsplit_once(':').map_or("", |(_, text)| text);
             if raw != port.to_string() {
                 return None;
             }
@@ -661,13 +663,10 @@ async fn authorize(
             "response_type must be code".into(),
         ));
     }
-    let resource = match q.resource.as_deref() {
-        Some(r) => r,
-        None => {
-            return fail(OAuthFail::InvalidRequest(
-                "resource is required and must be this server's MCP URL".into(),
-            ));
-        }
+    let Some(resource) = q.resource.as_deref() else {
+        return fail(OAuthFail::InvalidRequest(
+            "resource is required and must be this server's MCP URL".into(),
+        ));
     };
     match canonical_resource(resource) {
         Ok(got) if got == cfg.resource => {}
@@ -1080,7 +1079,7 @@ async fn pending(
         tokio::task::spawn_blocking(move || store.oauth_request_public(&id))
             .await
             .ok()
-            .and_then(|r| r.ok())
+            .and_then(Result::ok)
             .flatten()
     };
     let mut body = json!({
@@ -1212,11 +1211,8 @@ async fn token(
     }
     let remote = client_ip(&headers);
     let client_id = form.client_id.clone().unwrap_or_default();
-    let resource = match form.resource.clone() {
-        Some(r) => r,
-        None => {
-            return oauth_json(&OAuthFail::InvalidRequest("resource is required".into()));
-        }
+    let Some(resource) = form.resource.clone() else {
+        return oauth_json(&OAuthFail::InvalidRequest("resource is required".into()));
     };
     if canonical_resource(&resource).ok().as_deref() != Some(cfg.resource.as_str()) {
         return oauth_json(&OAuthFail::InvalidTarget(format!(
@@ -1491,7 +1487,10 @@ mod tests {
         // The quiet one-token buckets have refilled. The live one has not.
         assert!(limits.take("live", 1, Duration::from_secs(60)).is_err());
         assert!(limits.take("fresh", 1, Duration::from_secs(60)).is_ok());
-        let map = limits.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let map = limits
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(map.len() <= RATE_LIMIT_CAP);
         assert!(map.contains_key("live"));
         assert_eq!(map["live"].tokens, 0);
