@@ -14,4 +14,5 @@ pub mod reap;
 pub mod remote;
 pub mod scan;
 pub mod serve;
+pub mod templates;
 pub mod wake;
