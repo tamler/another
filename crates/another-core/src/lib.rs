@@ -11,6 +11,7 @@ pub mod crypto;
 mod dashboard;
 mod error;
 mod federation;
+mod groups;
 mod holds;
 mod identity;
 mod mail;
@@ -46,6 +47,7 @@ pub use federation::{
     reachable, IngestReport, Invite, NodeEntry, PairRequest, PairResponse, Peer, Perm,
     PullResponse, PushRequest, Rejected, WireEvent,
 };
+pub use groups::{Group, Priority, QueueCounts, GROUP_PREFIX};
 pub use holds::{
     is_repo_wide, patterns_overlap, AcquireHolds, EditGuard, HeartbeatReport, Hold, HoldConflict,
     HoldFilter, HoldReport, SessionInfo, SessionPhase, SweepReport, DEFAULT_HOLD_TTL_SECONDS,
@@ -70,7 +72,9 @@ pub use oauth::{
     PendingAuthorization, PendingView, RefreshExchange, RegisteredClient, ACCESS_TTL_SECS,
 };
 pub use repo::{link_for as repo_link_for, normalize_remote, RepoLink};
-pub use requests::{Request, RequestAction, RequestFilter, RequestStatus, RequestUpdate};
+pub use requests::{
+    NextRequest, Request, RequestAction, RequestFilter, RequestStatus, RequestUpdate,
+};
 pub use resources::{
     derive_port, Lease, LeaseMode, LeaseOutcome, RegisterResource, Resource, ResourceFilter,
     ResourceKind, ResourceRef, DEFAULT_LEASE_TTL_SECONDS, MAX_LEASE_TTL_SECONDS,

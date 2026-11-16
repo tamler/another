@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::error::{Error, Result};
+use crate::groups::{resolve_group_for, GroupRef, Priority, GROUP_PREFIX};
 use crate::identity::{address, resolve_agent, AgentRef};
-use crate::requests::{create_request_tx, list_requests_for_inbox, Request};
+use crate::requests::{create_queue_request_tx, list_requests_for_inbox, Request};
 use crate::store::{new_id, Store, Tx};
 use crate::time::{fmt_opt, fmt_ts};
 
@@ -73,6 +74,8 @@ pub struct SendMessage {
 pub struct NewRequest {
     /// Request becomes `stale` if not done this many seconds after creation.
     pub due_in_seconds: Option<i64>,
+    /// Defaults to `normal`.
+    pub priority: Priority,
 }
 
 /// Input for [`Store::reply`].
@@ -248,6 +251,10 @@ pub(crate) fn load_message(conn: &Connection, message_id: &str) -> Result<Messag
     })?;
     for row in rows {
         let (role, addr) = row?;
+        if role == "queue" {
+            // A queue item's claimer, not a recipient of the message.
+            continue;
+        }
         if role == "cc" {
             msg.cc.push(addr);
         } else {
@@ -274,9 +281,33 @@ fn send_inner_tx(tx: &Tx<'_>, input: &SendMessage, touch_sender: bool) -> Result
         return Err(Error::Invalid("at least one recipient is required".into()));
     }
     let sender = resolve_agent(tx, tx.node_id, &input.from)?;
-    let to = resolve_all(tx, &input.to)?;
+    if input.cc.iter().any(|c| c.starts_with(GROUP_PREFIX)) {
+        return Err(Error::Invalid(
+            "a group can only be a `to` recipient of a request, not cc".into(),
+        ));
+    }
+    let (groups, direct): (Vec<&String>, Vec<&String>) =
+        input.to.iter().partition(|t| t.starts_with(GROUP_PREFIX));
+    let group = match groups.as_slice() {
+        [] => None,
+        [one] => {
+            if input.request.is_none() {
+                return Err(Error::Invalid(format!(
+                    "{one} is a group: send it a request (--request), not plain mail; groups queue work, they do not broadcast"
+                )));
+            }
+            Some(resolve_group_for(tx, tx.node_id, &sender, one)?)
+        }
+        _ => {
+            return Err(Error::Invalid(
+                "a request can be queued for one group at most".into(),
+            ))
+        }
+    };
+    let direct: Vec<String> = direct.into_iter().cloned().collect();
+    let to = resolve_all(tx, &direct)?;
     let cc = resolve_all(tx, &input.cc)?;
-    deliver_tx(tx, input, &sender, &to, &cc, touch_sender)
+    deliver_tx(tx, input, &sender, &to, &cc, group.as_ref(), touch_sender)
 }
 
 /// An automatic notice from one local agent to another, both known by id. Nothing is
@@ -303,7 +334,7 @@ pub(crate) fn send_by_id_tx(
     check_text(&input.subject, &input.body)?;
     let sender = agent_by_id(tx, from_id)?;
     let to = [agent_by_id(tx, to_id)?];
-    deliver_tx(tx, input, &sender, &to, &[], touch_sender)
+    deliver_tx(tx, input, &sender, &to, &[], None, touch_sender)
 }
 
 fn agent_by_id(tx: &Tx<'_>, agent_id: &str) -> Result<AgentRef> {
@@ -329,6 +360,7 @@ fn deliver_tx(
     sender: &AgentRef,
     to: &[AgentRef],
     cc: &[AgentRef],
+    group: Option<&GroupRef>,
     touch_sender: bool,
 ) -> Result<Message> {
     let message_id = new_id();
@@ -404,10 +436,7 @@ fn deliver_tx(
     let mut recipient_nodes = vec![tx.node_id.to_string()];
     recipient_nodes.extend(foreign_nodes);
     let request_id = input.request.as_ref().map(|_| new_id());
-    let event_id = tx.emit(
-        &sender.address,
-        "message.sent",
-        json!({
+    let mut payload = json!({
             "message_id": message_id,
             "thread_id": thread_id,
             "reply_to": input.reply_to,
@@ -425,8 +454,13 @@ fn deliver_tx(
                 .map(|(a, role)| json!({ "agent_id": a.id, "node_id": a.node_id, "role": role }))
                 .collect::<Vec<_>>(),
             "recipient_nodes": recipient_nodes,
-        }),
-    )?;
+    });
+    if let Some(g) = group {
+        // Queue items never leave this node (federation classifies these as Never).
+        payload["group_id"] = json!(g.id);
+        payload["group"] = json!(g.address());
+    }
+    let event_id = tx.emit(&sender.address, "message.sent", payload)?;
     tx.execute(
         "INSERT INTO messages (message_id, node_id, thread_id, reply_to, sender_id, subject, body,
            importance, ack_required, created_at, event_id)
@@ -452,7 +486,7 @@ fn deliver_tx(
         )?;
     }
     if let (Some(req), Some(request_id)) = (&input.request, &request_id) {
-        create_request_tx(
+        create_queue_request_tx(
             tx,
             request_id,
             sender,
@@ -460,6 +494,8 @@ fn deliver_tx(
             &thread_id,
             &input.subject,
             req.due_in_seconds,
+            group,
+            req.priority,
         )?;
     }
     if touch_sender {

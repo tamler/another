@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use another_core::{
     AcquireHolds, ActivityKind, ActivityQuery, HoldFilter, Importance, InboxQuery, LeaseMode,
-    NewRequest, Program, RegisterAgent, RegisterResource, Reply, RequestAction, RequestFilter,
-    RequestStatus, RequestUpdate, ResourceFilter, ResourceKind, ResourceRef, SendMessage,
-    SessionInfo, SessionPhase, Since, Store,
+    NewRequest, NextRequest, Priority, Program, RegisterAgent, RegisterResource, Reply,
+    RequestAction, RequestFilter, RequestStatus, RequestUpdate, ResourceFilter, ResourceKind,
+    ResourceRef, SendMessage, SessionInfo, SessionPhase, Since, Store,
 };
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
@@ -144,6 +144,9 @@ pub enum Command {
         /// Request due time in seconds (implies --request).
         #[arg(long)]
         due: Option<i64>,
+        /// Request priority: urgent, high, normal or low (implies --request).
+        #[arg(long)]
+        priority: Option<String>,
         /// Post into an existing thread.
         #[arg(long)]
         thread: Option<String>,
@@ -204,22 +207,35 @@ pub enum Command {
         /// Owner name or name@project.
         #[arg(long)]
         owner: Option<String>,
+        /// Only items of this group's queue (name@project).
+        #[arg(long)]
+        group: Option<String>,
         #[arg(long, default_value_t = 50)]
         limit: u32,
     },
-    /// Claim, release, complete or cancel a request.
+    /// Claim, release, complete or cancel a request; `next` takes the next queue item.
     Request {
-        /// claim | release | complete | cancel
+        /// claim | release | complete | cancel | next
         action: String,
-        request_id: String,
+        /// The request (not for `next`).
+        request_id: Option<String>,
         #[command(flatten)]
         agent: AgentArg,
         #[arg(long)]
         note: Option<String>,
-        /// On claim: due in this many seconds.
+        /// On claim or next: due in this many seconds.
         #[arg(long)]
         due: Option<i64>,
+        /// With next: only this group (name or name@project).
+        #[arg(long)]
+        group: Option<String>,
+        /// With next: also take over stale items.
+        #[arg(long)]
+        include_stale: bool,
     },
+    /// Groups: named sets of agents that share a work queue (`send --to group:<name>`).
+    #[command(subcommand)]
+    Group(GroupCmd),
     /// Acquire, check, renew or release path holds.
     #[command(subcommand)]
     Hold(HoldCmd),
@@ -437,6 +453,58 @@ pub struct WakeRun {
     /// Print the adapter commands without running them.
     #[arg(long)]
     dry_run: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GroupCmd {
+    /// Create a group in a project; you become its first member.
+    Create {
+        name: String,
+        #[command(flatten)]
+        agent: AgentArg,
+        #[command(flatten)]
+        project: ProjectArg,
+    },
+    /// Join a group (name, or name@project).
+    Join {
+        group: String,
+        #[command(flatten)]
+        agent: AgentArg,
+    },
+    /// Leave a group. Items you own stay yours.
+    Leave {
+        group: String,
+        #[command(flatten)]
+        agent: AgentArg,
+    },
+    /// Add another agent to a group.
+    Add {
+        group: String,
+        #[command(flatten)]
+        agent: AgentArg,
+        #[arg(long)]
+        member: String,
+    },
+    /// Remove an agent from a group.
+    Remove {
+        group: String,
+        #[command(flatten)]
+        agent: AgentArg,
+        #[arg(long)]
+        member: String,
+    },
+    /// List groups with their members and queue counts.
+    List {
+        /// Project path or slug (default: every project).
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+    },
+    /// Delete a group with no open, claimed or stale items.
+    Delete {
+        group: String,
+        #[command(flatten)]
+        agent: AgentArg,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1324,8 +1392,14 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             ack,
             request,
             due,
+            priority,
             thread,
         } => {
+            let opens = request || due.is_some() || priority.is_some();
+            let priority = priority
+                .map(|p| p.parse::<Priority>())
+                .transpose()?
+                .unwrap_or_default();
             let m = store.send_message(SendMessage {
                 from,
                 to,
@@ -1336,8 +1410,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 ack_required: ack,
                 reply_to: None,
                 thread_id: thread,
-                request: (request || due.is_some()).then_some(NewRequest {
+                request: opens.then_some(NewRequest {
                     due_in_seconds: due,
+                    priority,
                 }),
             })?;
             emit(json, &m, output::sent)
@@ -1401,11 +1476,13 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Requests {
             status,
             owner,
+            group,
             limit,
         } => {
             let reqs = store.requests(RequestFilter {
                 status: status.map(|s| s.parse::<RequestStatus>()).transpose()?,
                 owner,
+                group,
                 limit,
             })?;
             emit(json, &reqs, |r| output::requests(r))
@@ -1416,7 +1493,43 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             agent,
             note,
             due,
+            group,
+            include_stale,
+        } if action == "next" => {
+            if let Some(id) = request_id {
+                anyhow::bail!(
+                    "`request next` takes no request id (got {id}); use `request claim {id}`"
+                );
+            }
+            if note.is_some() {
+                anyhow::bail!("`request next` takes no --note");
+            }
+            let r = store.request_next(NextRequest {
+                agent: agent.agent,
+                group,
+                include_stale,
+                due_in_seconds: due,
+            })?;
+            emit(json, &r, |r| match r {
+                Some(r) => output::requests(std::slice::from_ref(r)),
+                None => "nothing queued for you".to_string(),
+            })
+        }
+        Command::Request {
+            action,
+            request_id,
+            agent,
+            note,
+            due,
+            group,
+            include_stale,
         } => {
+            if group.is_some() || include_stale {
+                anyhow::bail!("--group and --include-stale apply to `request next` only");
+            }
+            let Some(request_id) = request_id else {
+                anyhow::bail!("`request {action}` needs a request id");
+            };
             let r = store.update_request(RequestUpdate {
                 agent: agent.agent,
                 request_id,
@@ -1425,6 +1538,52 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 due_in_seconds: due,
             })?;
             emit(json, &r, |r| output::requests(std::slice::from_ref(r)))
+        }
+        Command::Group(GroupCmd::Create {
+            name,
+            agent,
+            project,
+        }) => {
+            let project = project_key(&store, &agent.agent, project.project)?;
+            let g = store.create_group(&agent.agent, &project, &name)?;
+            emit(json, &g, |g| format!("created group {}", g.address))
+        }
+        Command::Group(GroupCmd::Join { group, agent }) => {
+            let g = store.join_group(&agent.agent, &group, None)?;
+            emit(json, &g, |g| output::groups(std::slice::from_ref(g)))
+        }
+        Command::Group(GroupCmd::Leave { group, agent }) => {
+            let g = store.leave_group(&agent.agent, &group, None)?;
+            emit(json, &g, |g| output::groups(std::slice::from_ref(g)))
+        }
+        Command::Group(GroupCmd::Add {
+            group,
+            agent,
+            member,
+        }) => {
+            let g = store.join_group(&agent.agent, &group, Some(&member))?;
+            emit(json, &g, |g| output::groups(std::slice::from_ref(g)))
+        }
+        Command::Group(GroupCmd::Remove {
+            group,
+            agent,
+            member,
+        }) => {
+            let g = store.leave_group(&agent.agent, &group, Some(&member))?;
+            emit(json, &g, |g| output::groups(std::slice::from_ref(g)))
+        }
+        Command::Group(GroupCmd::List { project }) => {
+            let project = project
+                .map(|p| project_lookup(&store, Some(p)))
+                .transpose()?;
+            let gs = store.groups(project.as_deref())?;
+            emit(json, &gs, |gs| output::groups(gs))
+        }
+        Command::Group(GroupCmd::Delete { group, agent }) => {
+            store.delete_group(&agent.agent, &group)?;
+            emit(json, &serde_json::json!({ "deleted": group }), |_| {
+                format!("deleted group {group}")
+            })
         }
         Command::Hold(HoldCmd::Acquire {
             agent,

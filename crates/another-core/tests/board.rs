@@ -208,6 +208,7 @@ fn reading_the_board_writes_nothing() {
         "Due soon",
         Some(NewRequest {
             due_in_seconds: Some(60),
+            ..Default::default()
         }),
     );
     // Past the hold's TTL and the request's due time, with no sweep in between.

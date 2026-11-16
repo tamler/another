@@ -189,3 +189,5 @@ $ another activity --since 1h --kinds request
 - Requests stay on one node. Sending `--request` to an agent on another node fails; send plain mail instead.
 
 MCP clients do the same through `send_message` with `create_request`, `acknowledge`, and `claim_request` with an `action` of `claim`, `release`, `complete` or `cancel`.
+
+Every request also has a priority (`--priority urgent|high|normal|low`, default `normal`). To hand work to whichever of several agents is free, send the request to a group instead of a person, and let them take it with `another request next`: see [QUEUES.md](QUEUES.md).

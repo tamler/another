@@ -713,6 +713,7 @@ fn overdue_requests_go_stale_and_can_be_taken_over() {
             body: "".into(),
             request: Some(NewRequest {
                 due_in_seconds: Some(600),
+                ..Default::default()
             }),
             ..Default::default()
         })

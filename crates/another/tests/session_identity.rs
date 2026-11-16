@@ -4,11 +4,35 @@ use std::process::{Command, Stdio};
 use serde_json::json;
 
 /// Take a current home back to exactly main's v8 schema, keeping every v8 row: drop the
-/// notes (v13), admission (v11/v12) and hold-fix (v9/v10) objects and rebuild
-/// `announcements` with its v8 text, which the frozen v8 catalog compares.
+/// group-queue (v14), notes (v13), admission (v11/v12) and hold-fix (v9/v10) objects and
+/// rebuild `requests` and `announcements` with their v8 text, which the frozen v8 catalog
+/// compares.
 #[cfg(unix)]
-const TO_V8: &str =
-    "DROP TABLE notes; DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret;
+const TO_V8: &str = "PRAGMA legacy_alter_table = ON;
+DROP INDEX requests_queue; DROP TABLE group_members; DROP TABLE groups;
+ALTER TABLE requests RENAME TO requests_v14;
+CREATE TABLE requests (
+    request_id TEXT PRIMARY KEY,
+    node_id    TEXT NOT NULL REFERENCES nodes(node_id),
+    message_id TEXT NOT NULL REFERENCES messages(message_id),
+    thread_id  TEXT NOT NULL,
+    title      TEXT NOT NULL,
+    created_by TEXT NOT NULL REFERENCES agents(agent_id),
+    owner_id   TEXT REFERENCES agents(agent_id),
+    status     TEXT NOT NULL,
+    due_at     INTEGER,
+    note       TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    claimed_at INTEGER,
+    closed_at  INTEGER
+);
+INSERT INTO requests SELECT request_id, node_id, message_id, thread_id, title, created_by,
+    owner_id, status, due_at, note, created_at, updated_at, claimed_at, closed_at FROM requests_v14;
+DROP TABLE requests_v14;
+CREATE INDEX requests_by_status ON requests(status, due_at);
+PRAGMA legacy_alter_table = OFF;
+DROP TABLE notes; DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret;
 DROP TABLE request_holds; DROP TABLE hold_waits;
 ALTER TABLE announcements RENAME TO announcements_v12;
 CREATE TABLE announcements (
@@ -360,7 +384,7 @@ fn old_home_requires_explicit_fenced_upgrade_and_verified_wal_backup() {
         migrated
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        13
+        14
     );
     assert!(command(&["status"]).status.success());
 }
@@ -477,7 +501,7 @@ fn v8_home_upgrades_to_v12_keeping_history_and_gaining_one_admission_key() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        13
+        14
     );
     assert_eq!(events(&db), history, "the upgrade rewrote history");
     let (keys, length): (i64, i64) = db
@@ -675,7 +699,7 @@ fn upgrade_commit_write_failure_is_reported_as_uncertain_json() {
     let version: i64 = keeper
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert!(version == 8 || version == 13, "unexpected schema {version}");
+    assert!(version == 8 || version == 14, "unexpected schema {version}");
     assert_eq!(
         keeper
             .query_row("SELECT display_name FROM nodes", [], |r| r

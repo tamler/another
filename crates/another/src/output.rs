@@ -162,13 +162,51 @@ pub fn requests(rs: &[Request]) -> String {
                 .as_deref()
                 .map(|d| format!(" due {d}"))
                 .unwrap_or_default();
+            let priority = match r.priority {
+                another_core::Priority::Normal => String::new(),
+                p => format!(" {}", p.as_str()),
+            };
+            let group = r
+                .group
+                .as_deref()
+                .map(|g| format!(" queue {g}"))
+                .unwrap_or_default();
             format!(
-                "{:<9} {:<16} {}  (from {}{due})  [{}]\n",
+                "{:<9} {:<16} {}  (from {}{due}{priority}{group})  [{}]\n",
                 r.status.as_str(),
                 owner,
                 r.title,
                 r.created_by,
                 r.request_id
+            )
+        })
+        .collect()
+}
+
+pub fn groups(gs: &[another_core::Group]) -> String {
+    if gs.is_empty() {
+        return "no groups (create one with `another group create <name>`)".to_string();
+    }
+    gs.iter()
+        .map(|g| {
+            let q = &g.queue;
+            let [urgent, high, normal, low] = q.open_by_priority;
+            let oldest = q
+                .oldest_open_at
+                .as_deref()
+                .map(|o| format!(", oldest open {o}"))
+                .unwrap_or_default();
+            format!(
+                "{}  members: {}\n  queue: {} open (urgent {urgent}, high {high}, normal {normal}, low {low}), {} claimed, {} stale{oldest}\n",
+                g.address,
+                if g.members.is_empty() {
+                    "none".to_string()
+                } else {
+                    g.members.join(", ")
+                },
+                q.open,
+                q.claimed,
+                q.stale
             )
         })
         .collect()

@@ -247,7 +247,27 @@ pub fn authorize(
                 _ => Err(format!("this token can only register {}", scope.agent)),
             }
         }
-        "send_message" => acting(args, "from"),
+        // Group queues are local-only in this release (D77): no remote group send or pull;
+        // actions on a queue item by id are refused in the core's scoped path.
+        "send_message" => {
+            let names_group = ["to", "cc"].iter().any(|field| {
+                args.get(*field)
+                    .and_then(Value::as_array)
+                    .is_some_and(|list| {
+                        list.iter().any(|v| {
+                            v.as_str()
+                                .is_some_and(|s| s.starts_with(another_core::GROUP_PREFIX))
+                        })
+                    })
+            });
+            if names_group {
+                return Err("group queues are local-only in this release".into());
+            }
+            acting(args, "from")
+        }
+        "claim_request" if s(args, "action") == Some("next") => {
+            Err("group queues are local-only in this release".into())
+        }
         "fetch_inbox" | "acknowledge" | "claim_request" | "heartbeat" | "resource_borrow"
         | "resource_release" | "resource_heartbeat" | "whats_new" => acting(args, "agent"),
         "hold_paths" => {
@@ -289,6 +309,7 @@ pub async fn activity(
     Query(params): Query<ActivityParams>,
 ) -> Response {
     let peer = peer.map(|p| p.0);
+    let hide_queues = peer.is_some();
     let query_store = store.clone();
     let detail = format!(
         "since={:?} limit={:?} kinds={:?}",
@@ -308,11 +329,17 @@ pub async fn activity(
             .filter(|k| !k.trim().is_empty())
             .map(|k| k.trim().parse::<ActivityKind>())
             .collect::<another_core::Result<Vec<_>>>()?;
-        query_store.activity(ActivityQuery {
+        let mut feed = query_store.activity(ActivityQuery {
             since,
             limit: params.limit.unwrap_or(50),
             kinds,
-        })
+        })?;
+        if hide_queues {
+            // Group queues are local-only in this release (D77); a page may then hold
+            // fewer items than `limit`, and `next_since` still advances past them.
+            feed.items.retain(|i| !query_store.is_queue_event(i));
+        }
+        Ok::<_, another_core::Error>(feed)
     })
     .await;
     let (status, body, outcome) = match result {

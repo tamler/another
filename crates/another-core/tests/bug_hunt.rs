@@ -118,6 +118,7 @@ fn bh5_absurd_durations_are_refused() {
                 subject: "s".into(),
                 request: Some(NewRequest {
                     due_in_seconds: Some(secs),
+                    ..Default::default()
                 }),
                 ..Default::default()
             })
@@ -135,6 +136,7 @@ fn bh5_absurd_durations_are_refused() {
             subject: "s".into(),
             request: Some(NewRequest {
                 due_in_seconds: Some(3600),
+                ..Default::default()
             }),
             ..Default::default()
         })

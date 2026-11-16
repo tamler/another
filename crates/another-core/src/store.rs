@@ -1596,6 +1596,33 @@ CREATE UNIQUE INDEX notes_live_key ON notes(project_id, key)
     WHERE key IS NOT NULL AND deleted_at IS NULL;
 CREATE INDEX notes_live ON notes(project_id, deleted_at, updated_at);
 "#,
+    // v14: group work queues. A group is a named set of local agents in one project; a
+    // request addressed to it is a queue item (`group_id` set) that members pull with
+    // `request next`. Every request gets a priority (0 urgent .. 3 low; 2 normal).
+    r#"
+CREATE TABLE groups (
+    group_id   TEXT PRIMARY KEY,
+    node_id    TEXT NOT NULL REFERENCES nodes(node_id),
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    name       TEXT NOT NULL,
+    created_by TEXT NOT NULL REFERENCES agents(agent_id),
+    created_at INTEGER NOT NULL,
+    deleted_at INTEGER,
+    event_id   TEXT NOT NULL
+);
+CREATE UNIQUE INDEX groups_live_name ON groups(project_id, name) WHERE deleted_at IS NULL;
+CREATE TABLE group_members (
+    group_id  TEXT NOT NULL REFERENCES groups(group_id),
+    agent_id  TEXT NOT NULL REFERENCES agents(agent_id),
+    joined_at INTEGER NOT NULL,
+    event_id  TEXT NOT NULL,
+    PRIMARY KEY (group_id, agent_id)
+);
+ALTER TABLE requests ADD COLUMN group_id TEXT REFERENCES groups(group_id);
+ALTER TABLE requests ADD COLUMN priority INTEGER NOT NULL DEFAULT 2;
+CREATE INDEX requests_queue ON requests(group_id, status, priority, due_at, created_at)
+    WHERE group_id IS NOT NULL;
+"#,
 ];
 
 /// Index in [`MIGRATIONS`] of the migration that creates `admission_secret`.
@@ -1687,6 +1714,7 @@ fn schema_manifest(version: i64) -> Option<&'static str> {
         11 => Some(include_str!("v11_schema_manifest.json")),
         12 => Some(include_str!("v12_schema_manifest.json")),
         13 => Some(include_str!("v13_schema_manifest.json")),
+        14 => Some(include_str!("v14_schema_manifest.json")),
         _ => None,
     }
 }
@@ -2191,8 +2219,8 @@ mod upgrade_tests {
     /// accepted as an upgrade source, checked against their own catalog, and recorded with
     /// their true version.
     #[test]
-    fn v8_through_v12_homes_take_the_offline_upgrade() {
-        for source in [8usize, 9, 10, 11, 12] {
+    fn v8_through_v13_homes_take_the_offline_upgrade() {
+        for source in [8usize, 9, 10, 11, 12, 13] {
             let temp = tempfile::tempdir().unwrap();
             let (home, node) = home_at(temp.path(), source);
             let db = Connection::open(home.join(DB_FILE)).unwrap();
@@ -3070,7 +3098,44 @@ mod hold_upgrade_tests {
     use super::*;
     use crate::{AcquireHolds, NewRequest, Program, RegisterAgent, SendMessage};
 
+    /// Undo v14 (group queues) on a current database: drop the group tables and rebuild
+    /// `requests` from the frozen v13 catalog's exact SQL, keeping its rows.
+    pub(super) fn reduce_to_v13(db: &Connection) {
+        let v13: Vec<serde_json::Value> =
+            serde_json::from_str(schema_manifest(13).unwrap()).unwrap();
+        let sql_of = |name: &str| -> String {
+            v13.iter()
+                .find(|o| o["name"] == name)
+                .and_then(|o| o["sql"].as_str())
+                .unwrap()
+                .to_string()
+        };
+        db.execute_batch(
+            "PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON;
+             DROP INDEX requests_queue; DROP TABLE group_members; DROP TABLE groups;
+             ALTER TABLE requests RENAME TO requests_v14;",
+        )
+        .unwrap();
+        db.execute_batch(&sql_of("requests")).unwrap();
+        db.execute_batch(
+            "INSERT INTO requests (request_id, node_id, message_id, thread_id, title, created_by,
+               owner_id, status, due_at, note, created_at, updated_at, claimed_at, closed_at)
+             SELECT request_id, node_id, message_id, thread_id, title, created_by,
+               owner_id, status, due_at, note, created_at, updated_at, claimed_at, closed_at
+             FROM requests_v14;
+             DROP TABLE requests_v14;",
+        )
+        .unwrap();
+        db.execute_batch(&sql_of("requests_by_status")).unwrap();
+        db.execute_batch(
+            "PRAGMA legacy_alter_table = OFF; PRAGMA foreign_keys = ON; PRAGMA user_version = 13;",
+        )
+        .unwrap();
+        verify_schema_against(db, schema_manifest(13).unwrap(), None).unwrap();
+    }
+
     pub(super) fn reduce_to_v8(db: &Connection) {
+        reduce_to_v13(db);
         db.execute_batch("DROP TABLE notes; DROP TABLE admission_holds; DROP TABLE admissions; DROP TABLE admission_secret; DROP TABLE hold_waits; DROP TABLE request_holds; ALTER TABLE announcements RENAME TO announcements_v12;").unwrap();
         db.execute_batch(MIGRATIONS[7]).unwrap();
         db.execute_batch("INSERT INTO announcements SELECT agent_id,message_id,channel,announced_at FROM announcements_v12; DROP TABLE announcements_v12; PRAGMA user_version=8;").unwrap();
@@ -3080,7 +3145,7 @@ mod hold_upgrade_tests {
     #[test]
     fn recognized_sources_publish_readable_verified_backups_and_restore_in_isolation() {
         use sha2::{Digest, Sha256};
-        for source in [8, 9, 10, 11, 12] {
+        for source in [8, 9, 10, 11, 12, 13] {
             let temp = tempfile::tempdir().unwrap();
             let home = temp.path().join("home");
             let store = Store::open(&home).unwrap();
@@ -3241,9 +3306,9 @@ mod hold_upgrade_tests {
     #[test]
     fn schema_versions_after_v8_are_hold_waits_then_request_holds() {
         // v1-v8 are main's released schema. v9 and v10 belong to the hold fixes (D62, D63),
-        // v11 and v12 to admissions (D66, D67), v13 to project notes (D70); a later
-        // migration must append after them, never reuse any of these numbers.
-        assert_eq!(MIGRATIONS.len(), 13);
+        // v11 and v12 to admissions (D66, D67), v13 to project notes (D70), v14 to group
+        // queues (D77); a later migration must append after them, never reuse any of these.
+        assert_eq!(MIGRATIONS.len(), 14);
         let v8 = catalog_at(8);
         let v9 = catalog_at(9);
         let v10 = catalog_at(10);
@@ -3323,6 +3388,38 @@ mod hold_upgrade_tests {
             removed(&v12, &v13).is_empty(),
             "the notes migration leaves every earlier object as it was"
         );
+        let v14 = catalog_at(14);
+        let sorted = |mut v: Vec<String>| {
+            v.sort();
+            v
+        };
+        assert_eq!(
+            sorted(names(added(&v13, &v14))),
+            sorted(
+                [
+                    "table groups on groups",
+                    "fk groups",
+                    "index groups_live_name on groups",
+                    "table group_members on group_members",
+                    "fk group_members",
+                    "index requests_queue on requests",
+                    "table requests on requests",
+                    "fk requests",
+                ]
+                .map(String::from)
+                .to_vec()
+            ),
+            "v14 adds the group tables and two columns on requests"
+        );
+        assert_eq!(
+            sorted(names(removed(&v13, &v14))),
+            sorted(
+                ["table requests on requests", "fk requests"]
+                    .map(String::from)
+                    .to_vec()
+            ),
+            "v14 changes only the requests table among earlier objects"
+        );
     }
 
     // Both supported platforms must complete the public offline path and read its backup.
@@ -3391,6 +3488,7 @@ mod hold_upgrade_tests {
 
         // Take the home back to exactly main's v8 schema, keeping every v8 row.
         let db = Connection::open(home.join(DB_FILE)).unwrap();
+        reduce_to_v13(&db);
         db.execute_batch(
             "DROP TABLE notes;
              DROP TABLE admission_holds;

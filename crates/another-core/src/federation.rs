@@ -184,13 +184,17 @@ fn classify(kind: &str, payload: &Value, origin: &str) -> Share {
     let not_origin =
         |nodes: Vec<String>| -> Vec<String> { nodes.into_iter().filter(|n| n != origin).collect() };
     match kind.split('.').next().unwrap_or_default() {
-        // Project notes are node-local (D70).
-        "token" | "peer" | "oauth" | "note" => return Share::Never,
+        // Project notes are node-local (D70); so are groups and their queues.
+        "token" | "peer" | "oauth" | "note" | "group" => return Share::Never,
         _ => {}
     }
     match kind {
         "node.created" | "node.renamed" | "project.ensured" | "agent.registered" => {
             Share::Directory
+        }
+        // A queue item's message stays on this node whatever its recipients say.
+        "message.sent" if !payload.get("group_id").unwrap_or(&Value::Null).is_null() => {
+            Share::Never
         }
         "message.sent" => {
             let nodes = not_origin(strings(payload, "recipient_nodes"));
@@ -1701,6 +1705,37 @@ mod tests {
         assert_eq!(
             classify("resource.borrowed", &json!({ "resource_node": "B" }), o),
             Share::Feed(vec!["B".into()])
+        );
+    }
+
+    #[test]
+    fn group_queues_never_federate() {
+        let o = "A";
+        for kind in [
+            "group.created",
+            "group.member_added",
+            "group.member_removed",
+            "group.deleted",
+        ] {
+            assert_eq!(classify(kind, &json!({}), o), Share::Never, "{kind}");
+        }
+        // Even a hand-built queue-item message naming a foreign node stays local.
+        assert_eq!(
+            classify(
+                "message.sent",
+                &json!({ "group_id": "g1", "recipient_nodes": ["A", "B"] }),
+                o
+            ),
+            Share::Never
+        );
+        assert_eq!(
+            classify(
+                "message.sent",
+                &json!({ "group_id": null, "recipient_nodes": ["A", "B"] }),
+                o
+            ),
+            Share::Mail(vec!["B".into()]),
+            "ordinary mail is unchanged"
         );
     }
 
