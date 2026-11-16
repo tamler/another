@@ -62,7 +62,7 @@ Once v0.1.0 is published, prebuilt binaries for macOS (arm64, x86_64) and Linux 
 
 On macOS, when replacing an existing `another` with a new build, **remove the old binary first** (`rm "$(command -v another)"`) and then copy the new one in. Copying over the old file in place leaves a stale code signature cached, and macOS kills the new binary on launch. `cargo install` replaces it safely.
 
-After upgrading, restart every `another` process that was already running, since it keeps the old code: run `another daemon restart` on macOS (or `another daemon install` from the new binary if it lives at a different path; on Linux, restart your service), restart each client that runs `another serve --stdio` (or reconnect its MCP server), and restart any `another remote up`, `another serve --auth` or hand-started `another serve`. This matters most when the upgrade changes how repository keys are cached, as the one after #103 does: an old process reading keys written by the new one does not see holds in sibling worktrees and lets those edits through. See [docs/DAEMON.md](docs/DAEMON.md#upgrading).
+After upgrading, restart every `another` process that was already running, since it keeps the old code: run `another daemon restart` (or `another daemon install` from the new binary if it lives at a different path), restart each client that runs `another serve --stdio` (or reconnect its MCP server), and restart any `another remote up`, `another serve --auth` or hand-started `another serve`. This matters most when the upgrade changes how repository keys are cached, as the one after #103 does: an old process reading keys written by the new one does not see holds in sibling worktrees and lets those edits through. See [docs/DAEMON.md](docs/DAEMON.md#upgrading).
 
 **2. Create the local node** (`~/.another`, or `$ANOTHER_HOME`):
 
@@ -80,7 +80,7 @@ For Codex, review and trust Another's new or changed hooks yourself in `/hooks`.
 
 Besides session start, prompts and session end, the pack adds a hook after each tool call (new mail shows up mid-task) and, for Claude Code, Codex and Grok, one before each file edit (the edit takes a hold, or is stopped when another agent holds the file). Both fail open. See [docs/HOOKS.md](docs/HOOKS.md).
 
-**Optional: keep the daemon running** (macOS). It expires holds in the background and wakes idle Herdr agents when mail arrives:
+**Optional: keep the daemon running** (a launchd LaunchAgent on macOS, a systemd user unit on Linux, a Task Scheduler logon task on Windows). It expires holds in the background and wakes idle Herdr agents when mail arrives:
 
 ```bash
 another daemon install
@@ -159,13 +159,14 @@ Task guides, all listed on the [guides hub](site/guides/index.html) (website sou
 |---|---|
 | [docs/HOOKS.md](docs/HOOKS.md) | Hook packs for each client; trust steps; the digest; mid-task notices; the edit guard; failing open |
 | [docs/HOLDS.md](docs/HOLDS.md) | Path holds, holds across worktrees of one repository, whole-project holds |
-| [docs/DAEMON.md](docs/DAEMON.md) | The background daemon (launchd), waking idle Herdr agents, `another stats` |
+| [docs/DAEMON.md](docs/DAEMON.md) | The background daemon (launchd, systemd user unit, Task Scheduler), waking idle Herdr agents, `another stats` |
 | [docs/RESOURCES.md](docs/RESOURCES.md) | Resource registry, orphans, human-approved reaping |
 | [docs/REMOTE.md](docs/REMOTE.md) | Remote peers: bearer tokens, OAuth for ChatGPT and Claude, tunnels, audit log |
 | [docs/FEDERATION.md](docs/FEDERATION.md) | Several machines: node keys, pairing, sync, permissions |
 | [docs/WAKE.md](docs/WAKE.md) | `another wake` adapters (tmux, cmux, Herdr) and the Herdr plugin |
 | [docs/DASHBOARD.md](docs/DASHBOARD.md) | Local web dashboard (`another dashboard`, `GET /ui`) |
 | [docs/BOARD.md](docs/BOARD.md) | `another board`: who holds what, recent and stopped edits, pending handoffs, per project; writes nothing |
+| [docs/PLUGINS.md](docs/PLUGINS.md) | External commands: `another <name>` runs `another-<name>` from `PATH`; the rules and the trust model |
 | [docs/SPEC.md](docs/SPEC.md) | Research and product spec |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | Locked defaults and every design decision made while building |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute (clean-room rules, checks, MSRV) |
@@ -199,12 +200,13 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 | Holds | `another hold acquire\|check\|renew\|release`, `another holds` (conflicts exit with status 3; `--repo-wide` for a whole-project hold) |
 | Sessions and feed | `another heartbeat [--start\|--end [--keep]]`, `another activity [--since 1h] [--kinds mail,request] [--summary]`, `another stats [--since 48h]`, `another board [--project P] [--since 24h]` (read-only; [docs/BOARD.md](docs/BOARD.md)) |
 | Hooks | `another hook install\|uninstall --client <c>\|all [--dry-run]`, `another hook status` |
-| Daemon | `another daemon install\|uninstall\|status\|restart` (macOS launchd), `another serve [--no-wake]` |
+| Daemon | `another daemon install\|uninstall\|status\|restart` (launchd, systemd user unit, Task Scheduler), `another serve [--no-wake]` |
 | Resources | `another resources` (or `resource list`), `another resource register`, `another borrow [--wait SECONDS]` (or `resource borrow`), `another release` (or `resource return`), `another orphans`, `another reap <target> [--confirm]` |
 | Remote peers | `another serve --auth`, `another remote up`, `another token create\|list\|revoke`, `another oauth approve\|deny\|list\|revoke`, `another audit` |
 | Federation | `another pair invite\|join\|revoke`, `another peers`, `another sync [--watch]`, `another serve --federation` |
 | Wake | `another wake [--agent X\|--all]`, `another wake set\|clear\|list\|prune` |
 | Dashboard | `another dashboard` (loopback UI), or `GET /ui` on a loopback `another serve` |
+| External commands | `another <name> [args]` runs `another-<name>` from `PATH` when `<name>` is not built in, like git ([docs/PLUGINS.md](docs/PLUGINS.md)) |
 
 ## Concepts
 
