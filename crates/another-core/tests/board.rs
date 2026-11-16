@@ -652,7 +652,8 @@ fn a_later_edit_or_an_old_stop_does_not_leave_an_agent_blocked() {
         fx.edit("bob@shop-wt", &fx.wt, "src/a.rs").conflicts.len(),
         1
     );
-    assert_eq!(state(&fx, "bob@shop-wt").state, AgentState::Blocked);
+    let first = state(&fx, "bob@shop-wt");
+    assert_eq!(first.state, AgentState::Blocked);
 
     fx.advance_secs(1);
     assert!(fx
@@ -665,12 +666,26 @@ fn a_later_edit_or_an_old_stop_does_not_leave_an_agent_blocked() {
         "bob moved on to another file"
     );
 
+    // Back to the held file inside the 30-second backoff: the guard still denies it, but
+    // with unchanged blockers it writes no event (D62), so the board cannot see the retry.
     fx.advance_secs(1);
     assert_eq!(
         fx.edit("bob@shop-wt", &fx.wt, "src/a.rs").conflicts.len(),
         1
     );
-    assert_eq!(state(&fx, "bob@shop-wt").state, AgentState::Blocked);
+    assert_eq!(state(&fx, "bob@shop-wt").state, AgentState::Working);
+
+    // A retry after the window ends starts a new one (`hold.waiting`): blocked again, with
+    // the same message as the first stop.
+    fx.advance_secs(30);
+    assert_eq!(
+        fx.edit("bob@shop-wt", &fx.wt, "src/a.rs").conflicts.len(),
+        1
+    );
+    let again = state(&fx, "bob@shop-wt");
+    assert_eq!(again.state, AgentState::Blocked);
+    assert_eq!(again.message, first.message);
+    assert_eq!(again.blocked_by, first.blocked_by);
 
     // Alice's hold (30 minutes) is still live, but the stop is older than the live window.
     fx.advance_secs(11 * 60);

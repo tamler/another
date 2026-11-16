@@ -4,7 +4,9 @@
 //! - `unknown`: the session ended (stored status `offline`), as Herdr says when it has no
 //!   signal.
 //! - `blocked`: the agent's newest edit-hook outcome in the live window is a stopped edit
-//!   (`hold.blocked`) and at least one hold that stopped it is still live.
+//!   (`hold.blocked`, or `hold.waiting`/`hold.wait_failed` for a retry) and at least one
+//!   hold that stopped it is still live. A retry inside an unexpired backoff window writes
+//!   no event (D62), so it is not seen until that window ends.
 //! - `working`: seen within the live window (the dashboard's `live` presence).
 //! - `idle`: an open session that has been quiet longer than that.
 //!
@@ -80,7 +82,8 @@ pub(crate) fn current_stops(
     let mut stmt = conn.prepare(
         "SELECT kind, payload FROM events
          WHERE node_id = ?1 AND seq > ?2 AND ts >= ?3
-           AND kind IN ('hold.blocked', 'hold.acquired', 'hold.updated')
+           AND kind IN ('hold.blocked', 'hold.waiting', 'hold.wait_failed',
+                        'hold.acquired', 'hold.updated')
            AND (?4 IS NULL OR json_extract(payload, '$.agent_id') = ?4)
          ORDER BY seq DESC",
     )?;
@@ -98,33 +101,49 @@ pub(crate) fn current_stops(
         if decided.contains_key(agent) {
             continue;
         }
-        if kind != "hold.blocked" {
-            // Only a hold the edit hook took means the agent went on to edit something.
-            if p.get("auto").and_then(Value::as_bool) == Some(true) {
-                decided.insert(agent.to_string(), None);
+        let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        // (hold id, path, holder as recorded) for each hold that stopped this attempt.
+        let stopped_by: Vec<(String, String, Option<String>)> = match kind.as_str() {
+            "hold.blocked" => p
+                .get("conflicts")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|c| (text(c, "hold_id"), text(c, "path"), Some(text(c, "holder"))))
+                .collect(),
+            // A retry with unchanged blockers writes no second `hold.blocked` (D62). One
+            // that starts a new backoff window, or fails to record its wait, writes one of
+            // these, with the blocking hold ids for one path and no holder name.
+            "hold.waiting" | "hold.wait_failed" => p
+                .get("blockers")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(|h| (h.to_string(), text(&p, "path"), None))
+                .collect(),
+            _ => {
+                // Only a hold the edit hook took means the agent went on to edit something.
+                if p.get("auto").and_then(Value::as_bool) == Some(true) {
+                    decided.insert(agent.to_string(), None);
+                }
+                continue;
             }
-            continue;
-        }
+        };
         let mut live: Vec<(String, String, String)> = Vec::new();
-        for c in p
-            .get("conflicts")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let text = |k: &str| c.get(k).and_then(Value::as_str).unwrap_or("").to_string();
-            let hold = text("hold_id");
-            let is_live = conn
+        for (hold, path, recorded) in stopped_by {
+            let current: Option<String> = conn
                 .query_row(
-                    "SELECT 1 FROM holds WHERE hold_id = ?1 AND released_at IS NULL
-                       AND expires_at > ?2",
+                    "SELECT a.address FROM holds h JOIN agents a ON a.agent_id = h.agent_id
+                     WHERE h.hold_id = ?1 AND h.released_at IS NULL AND h.expires_at > ?2",
                     params![hold, now],
-                    |_| Ok(()),
+                    |r| r.get(0),
                 )
-                .optional()?
-                .is_some();
-            if is_live && !live.iter().any(|(h, _, _)| *h == hold) {
-                live.push((hold, text("path"), text("holder")));
+                .optional()?;
+            if let Some(current) = current {
+                if !live.iter().any(|(h, _, _)| *h == hold) {
+                    live.push((hold, path, recorded.unwrap_or(current)));
+                }
             }
         }
         let stop = live.first().map(|(_, path, holder)| {
