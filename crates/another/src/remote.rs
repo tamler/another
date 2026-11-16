@@ -231,9 +231,12 @@ pub fn authorize(
                 (None, None) => Ok(()),
                 (Some(p), Some(_)) => {
                     project(Some(p), true)?;
-                    let same = store.projects().map_err(err)?.into_iter().any(|x| {
-                        (x.abs_path == p || x.slug == p) && Some(&x.slug) == slug.as_ref()
-                    });
+                    // Resolve the project as registration will, so any spelling of the
+                    // token's own directory (a trailing slash, `./`, `..`, a native Windows
+                    // path) is the same project, not a different one.
+                    let same = store
+                        .project(p)
+                        .is_ok_and(|x| Some(&x.slug) == slug.as_ref());
                     if same {
                         Ok(())
                     } else {
