@@ -40,7 +40,7 @@ pub use dashboard::{
 };
 pub use error::{Error, ErrorBody, Result};
 pub use federation::{
-    reachable, IngestReport, Invite, NodeEntry, PairRequest, PairResponse, Peer, Perm,
+    reachable, IngestReport, Invite, NodeEntry, PairRequest, PairResponse, Peer, Perm, PullAnchors,
     PullResponse, PushRequest, Rejected, WireEvent,
 };
 pub use holds::{
