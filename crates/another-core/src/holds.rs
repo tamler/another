@@ -1033,7 +1033,7 @@ fn failed_wait_is_new(
 /// Run `f` inside a savepoint. On error only its own work is rolled back and the error is
 /// returned; the surrounding transaction stays usable. The event chain is unaffected, since
 /// each emit reads its predecessor from the table.
-fn attempt<T>(tx: &Tx<'_>, name: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+pub(crate) fn attempt<T>(tx: &Tx<'_>, name: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
     tx.execute_batch(&format!("SAVEPOINT {name}"))?;
     match f() {
         Ok(v) => {
@@ -1264,6 +1264,7 @@ pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
     complete_hold_requests_tx(tx)?;
     ping_free_waiters_tx(tx)?;
     let stale_requests = stale_overdue_tx(tx)?;
+    crate::requests::remind_due_soon_tx(tx)?;
     let expired_leases = crate::resources::expire_leases_tx(tx)?;
     Ok(SweepReport {
         expired_holds: expired.len(),
