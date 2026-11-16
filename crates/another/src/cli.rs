@@ -773,6 +773,10 @@ pub enum HookCmd {
         /// Show what would change without writing anything.
         #[arg(long)]
         dry_run: bool,
+        /// Also install Cursor's edit guard (preview; not yet checked against a running
+        /// Cursor). An install without it removes the guard again.
+        #[arg(long)]
+        cursor_edit_guard: bool,
     },
     /// Remove Another hooks from client configs, leaving other hooks untouched.
     Uninstall {
@@ -788,6 +792,13 @@ pub enum HookCmd {
         /// Client event kind.
         event: HookEvent,
         /// Which client emitted the event.
+        #[arg(long)]
+        client: Client,
+    },
+    /// Called by the hook wrapper: exit 0 only if stdin is a complete, valid reply for the
+    /// client (Cursor's edit guard deny). Opens no database.
+    #[command(hide = true)]
+    CheckReply {
         #[arg(long)]
         client: Client,
     },
@@ -2524,10 +2535,24 @@ fn hook_command(
             }
             Ok(ExitCode::SUCCESS)
         }
-        HookCmd::Install { client, dry_run } | HookCmd::Uninstall { client, dry_run } => {
-            let install = matches!(cmd, HookCmd::Install { .. });
+        HookCmd::CheckReply { client } => Ok(if hooks::check_reply_stdin(*client) {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        }),
+        HookCmd::Install {
+            client,
+            dry_run,
+            cursor_edit_guard,
+        } => {
             let env = HookEnv::detect(another_home()?)?;
-            let report = hooks::install(&env, &clients(client), install, *dry_run)?;
+            let report =
+                hooks::install(&env, &clients(client), true, *dry_run, *cursor_edit_guard)?;
+            Ok(emit(json, &report, output::hook_report))
+        }
+        HookCmd::Uninstall { client, dry_run } => {
+            let env = HookEnv::detect(another_home()?)?;
+            let report = hooks::install(&env, &clients(client), false, *dry_run, false)?;
             Ok(emit(json, &report, output::hook_report))
         }
         HookCmd::Status => {
@@ -2536,12 +2561,19 @@ fn hook_command(
                 .iter()
                 .map(|c| {
                     let path = c.config_path(&env.home);
+                    let cursor = *c == Client::Cursor;
                     output::HookStatus {
                         client: c.as_str().to_string(),
                         installed: std::fs::read_to_string(&path)
                             .is_ok_and(|t| t.contains(hooks::MARKER)),
                         config: path.display().to_string(),
                         trust_note: (*c == Client::Codex).then_some(hooks::CODEX_TRUST_NOTE),
+                        edit_guard: cursor.then(|| hooks::cursor_guard_installed(&env)),
+                        warnings: if cursor {
+                            hooks::cursor_guard_warnings(&env)
+                        } else {
+                            Vec::new()
+                        },
                     }
                 })
                 .collect();

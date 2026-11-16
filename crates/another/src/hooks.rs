@@ -87,8 +87,9 @@ impl Client {
         }
     }
 
-    /// The hook entries Another installs for this client.
-    fn specs(self) -> Vec<HookSpec> {
+    /// The hook entries Another installs for this client. Cursor's edit guard is included
+    /// only with `cursor_guard` (`hook install --cursor-edit-guard`, D75).
+    fn specs(self, cursor_guard: bool) -> Vec<HookSpec> {
         let spec = |key, event, timeout, matcher| HookSpec {
             key,
             event,
@@ -96,14 +97,18 @@ impl Client {
             matcher,
         };
         match self {
-            Client::Cursor => vec![
-                spec("sessionStart", HookEvent::SessionStart, 10, None),
-                spec("beforeSubmitPrompt", HookEvent::Prompt, 5, None),
-                spec("sessionEnd", HookEvent::SessionEnd, 3, None),
-                // No edit guard: Cursor blocks a tool call when a preToolUse reply is not
-                // valid JSON, and a hook that fails open prints nothing.
-                spec("postToolUse", HookEvent::PostTool, 5, None),
-            ],
+            Client::Cursor => {
+                let mut specs = vec![
+                    spec("sessionStart", HookEvent::SessionStart, 10, None),
+                    spec("beforeSubmitPrompt", HookEvent::Prompt, 5, None),
+                    spec("sessionEnd", HookEvent::SessionEnd, 3, None),
+                    spec("postToolUse", HookEvent::PostTool, 5, None),
+                ];
+                if cursor_guard {
+                    specs.push(cursor_guard_spec());
+                }
+                specs
+            }
             _ => {
                 let edits = if self == Client::Codex {
                     CODEX_EDIT_TOOLS
@@ -124,6 +129,20 @@ impl Client {
 
 /// Claude Code's file edit tools. Grok maps these names onto its own edit tools.
 const EDIT_TOOLS: &str = "Edit|Write|MultiEdit|NotebookEdit";
+/// Cursor's file-changing tools as its hook documentation names them. Which names Cursor
+/// actually sends for edits has not been probed yet (lane SPEC P1).
+const CURSOR_EDIT_TOOLS: &str = "^(Write|Delete)$";
+/// Cursor's event for the edit guard.
+const CURSOR_GUARD_KEY: &str = "preToolUse";
+
+fn cursor_guard_spec() -> HookSpec {
+    HookSpec {
+        key: CURSOR_GUARD_KEY,
+        event: HookEvent::PreEdit,
+        timeout: 5,
+        matcher: Some(CURSOR_EDIT_TOOLS),
+    }
+}
 /// Codex edits files with `apply_patch`, which its matchers also accept as `Edit` or `Write`.
 const CODEX_EDIT_TOOLS: &str = "apply_patch|Edit|Write";
 
@@ -139,6 +158,9 @@ fn codex_status(event: HookEvent) -> &'static str {
         HookEvent::SessionEnd => "Another: closing this session",
     }
 }
+
+/// Install note for Cursor's opt-in edit guard.
+pub const CURSOR_GUARD_NOTE: &str = "Cursor edit guard installed (preview): Another stops an agent edit of a file another agent holds. It has not yet been checked against a running Cursor, and it matches only the Write and Delete tools Cursor documents. Edits from Cursor's shell tool, Tab completions and the Cursor CLI are not guarded. A hook entry with failClosed: true would make Another's failures block edits; another hook status warns about one.";
 
 /// Top-level `description` for Codex's hooks.json, set only when the file has none.
 const CODEX_DESCRIPTION: &str =
@@ -277,16 +299,35 @@ fn script_text(env: &HookEnv) -> String {
     format!(
         "#!/bin/sh\n\
          # Another hook wrapper, written by `another hook install`; removed by `another hook uninstall`.\n\
-         # It always exits 0: a missing another never blocks the agent. The pre-edit hook\n\
-         # may still print a deny when it cannot check holds after waiting for a lock.\n\
+         # It always exits 0: a missing another never blocks the agent. The pre-edit hook
+\
+         # may still print a deny when it cannot check holds after waiting for a lock.
+\
+         # The one exception is Cursor's edit guard (D75): Cursor blocks a tool call whose
+\
+         # reply it cannot parse, so a reply is printed only after another exited 0 and
+\
+         # checked it. Anything else prints nothing and exits 1, which Cursor treats as a
+\
+         # failed hook and lets the edit proceed.
+\
          ANOTHER_BIN={exe}\n\
          if [ ! -x \"$ANOTHER_BIN\" ]; then\n\
-         \x20 ANOTHER_BIN=$(command -v another 2>/dev/null) || exit 0\n\
+         \x20 ANOTHER_BIN=$(command -v another 2>/dev/null) || ANOTHER_BIN=\n\
          fi\n\
          if [ -z \"${{ANOTHER_HOME:-}}\" ]; then\n\
          \x20 ANOTHER_HOME={home}\n\
          \x20 export ANOTHER_HOME\n\
          fi\n\
+         if [ \"$#\" -eq 3 ] && [ \"$1\" = pre-edit ] && [ \"$2\" = --client ] && [ \"$3\" = cursor ] && [ -z \"${{GROK_HOOK_EVENT:-}}\" ]; then\n\
+         \x20 [ -n \"$ANOTHER_BIN\" ] || exit 1\n\
+         \x20 ANOTHER_REPLY=$(\"$ANOTHER_BIN\" hook run \"$@\" 2>/dev/null) || exit 1\n\
+         \x20 [ -n \"$ANOTHER_REPLY\" ] || exit 1\n\
+         \x20 printf '%s\\n' \"$ANOTHER_REPLY\" | \"$ANOTHER_BIN\" hook check-reply --client cursor >/dev/null 2>&1 || exit 1\n\
+         \x20 printf '%s\\n' \"$ANOTHER_REPLY\"\n\
+         \x20 exit 0\n\
+         fi\n\
+         [ -n \"$ANOTHER_BIN\" ] || exit 0\n\
          \"$ANOTHER_BIN\" hook run \"$@\" 2>/dev/null\n\
          exit 0\n",
         exe = sh_quote(&env.exe.to_string_lossy()),
@@ -349,8 +390,14 @@ fn array_entry<'a>(map: &'a mut Map<String, Value>, key: &str) -> Result<&'a mut
         .with_context(|| format!("hooks.{key} is not an array; not modifying it"))
 }
 
-/// Add or refresh our entries in a config, leaving every other key and hook alone.
-fn install_into(client: Client, env: &HookEnv, root: &mut Map<String, Value>) -> Result<()> {
+/// Add or refresh our entries in a config, leaving every other key and hook alone. For
+/// Cursor, `cursor_guard` decides whether our edit guard entry is there afterwards.
+fn install_into(
+    client: Client,
+    env: &HookEnv,
+    root: &mut Map<String, Value>,
+    cursor_guard: bool,
+) -> Result<()> {
     if client == Client::Cursor && !root.contains_key("version") {
         root.insert("version".into(), json!(1));
     }
@@ -366,7 +413,10 @@ fn install_into(client: Client, env: &HookEnv, root: &mut Map<String, Value>) ->
         }
     }
     let hooks = object_entry(root, "hooks")?;
-    for spec in client.specs() {
+    if client == Client::Cursor && !cursor_guard {
+        remove_ours(client, hooks, CURSOR_GUARD_KEY);
+    }
+    for spec in client.specs(cursor_guard) {
         let command = command_for(env, client, spec.event);
         let groups = array_entry(hooks, spec.key)?;
         let timeout = spec.timeout;
@@ -375,10 +425,15 @@ fn install_into(client: Client, env: &HookEnv, root: &mut Map<String, Value>) ->
             ours["statusMessage"] = json!(codex_status(spec.event));
         }
         if client == Client::Cursor {
-            // Cursor: a flat list of hook definitions per event.
+            // Cursor: a flat list of hook definitions per event. Our entry never sets
+            // `failClosed`: Another's failure path must let the edit through.
+            let mut entry = json!({ "command": command, "timeout": timeout });
+            if let Some(m) = spec.matcher {
+                entry["matcher"] = json!(m);
+            }
             match groups.iter_mut().find(|h| is_ours(h)) {
-                Some(h) => *h = json!({ "command": command, "timeout": timeout }),
-                None => groups.push(json!({ "command": command, "timeout": timeout })),
+                Some(h) => *h = entry,
+                None => groups.push(entry),
             }
             let mut kept = false;
             groups.retain(|h| !is_ours(h) || !std::mem::replace(&mut kept, true));
@@ -437,27 +492,31 @@ fn uninstall_from(client: Client, root: &mut Map<String, Value>) {
     let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) else {
         return;
     };
-    for spec in client.specs() {
-        let key = spec.key;
-        let Some(groups) = hooks.get_mut(key).and_then(Value::as_array_mut) else {
-            continue;
-        };
-        let before = groups.len();
-        if client == Client::Cursor {
-            groups.retain(|h| !is_ours(h));
-        } else {
-            groups.retain_mut(|g| {
-                let Some(hs) = g.get_mut("hooks").and_then(Value::as_array_mut) else {
-                    return true;
-                };
-                let n = hs.len();
-                hs.retain(|h| !is_ours(h));
-                !(hs.is_empty() && n > 0)
-            });
-        }
-        if groups.is_empty() && before > 0 {
-            hooks.remove(key);
-        }
+    for spec in client.specs(true) {
+        remove_ours(client, hooks, spec.key);
+    }
+}
+
+/// Remove our entries under one event key, dropping the list only when we emptied it.
+fn remove_ours(client: Client, hooks: &mut Map<String, Value>, key: &str) {
+    let Some(groups) = hooks.get_mut(key).and_then(Value::as_array_mut) else {
+        return;
+    };
+    let before = groups.len();
+    if client == Client::Cursor {
+        groups.retain(|h| !is_ours(h));
+    } else {
+        groups.retain_mut(|g| {
+            let Some(hs) = g.get_mut("hooks").and_then(Value::as_array_mut) else {
+                return true;
+            };
+            let n = hs.len();
+            hs.retain(|h| !is_ours(h));
+            !(hs.is_empty() && n > 0)
+        });
+    }
+    if groups.is_empty() && before > 0 {
+        hooks.remove(key);
     }
 }
 
@@ -469,7 +528,12 @@ fn render(root: &Map<String, Value>) -> Result<String> {
     Ok(serde_json::to_string_pretty(root)? + "\n")
 }
 
-fn plan_config(client: Client, env: &HookEnv, install: bool) -> Result<FileChange> {
+fn plan_config(
+    client: Client,
+    env: &HookEnv,
+    install: bool,
+    cursor_guard: bool,
+) -> Result<FileChange> {
     let path = client.config_path(&env.home);
     let existing = read_json(&path)?;
     let (before, mut root) = match existing {
@@ -483,7 +547,7 @@ fn plan_config(client: Client, env: &HookEnv, install: bool) -> Result<FileChang
         );
     }
     let (change, after) = if install {
-        install_into(client, env, &mut root)?;
+        install_into(client, env, &mut root, cursor_guard)?;
         let after = render(&root)?;
         let change = match &before {
             None => ChangeKind::Create,
@@ -617,17 +681,22 @@ fn plan_script(env: &HookEnv, install: bool, still_used: bool) -> FileChange {
     }
 }
 
-/// Install (or with `install = false`, uninstall) hooks for `clients`.
+/// Install (or with `install = false`, uninstall) hooks for `clients`. `cursor_guard` adds
+/// Cursor's edit guard on install; an install without it removes that entry (D75).
 pub fn install(
     env: &HookEnv,
     clients: &[Client],
     install: bool,
     dry_run: bool,
+    cursor_guard: bool,
 ) -> Result<HookReport> {
+    if cursor_guard && !(install && clients.contains(&Client::Cursor)) {
+        bail!("--cursor-edit-guard applies only to `hook install` with --client cursor (or all)");
+    }
     // Plan everything first so a bad config aborts before anything is written.
     let mut changes = clients
         .iter()
-        .map(|c| plan_config(*c, env, install))
+        .map(|c| plan_config(*c, env, install, cursor_guard))
         .collect::<Result<Vec<_>>>()?;
     let still_used = !install
         && Client::ALL
@@ -684,8 +753,12 @@ pub fn install(
         }
         if clients.contains(&Client::Cursor) {
             notes.push(
-                "Cursor takes injected context at session start and after tool calls; its prompt hook just renews holds, and the edit guard is not installed there."
-                    .to_string(),
+                if cursor_guard {
+                    CURSOR_GUARD_NOTE
+                } else {
+                    "Cursor takes injected context at session start and after tool calls; its prompt hook just renews holds. The edit guard is opt-in there: add --cursor-edit-guard."
+                }
+                .to_string(),
             );
         }
     }
@@ -1571,6 +1644,96 @@ pub fn deny_message(
     truncate(out, 1000)
 }
 
+/// Largest Cursor reply Another prints, and the most `hook check-reply` reads.
+pub const MAX_CURSOR_REPLY: usize = 8 * 1024;
+/// Sent instead when the full deny would exceed [`MAX_CURSOR_REPLY`].
+const CURSOR_FALLBACK_DENY: &str = "Another stopped this edit: another agent holds this file. Run `another holds` to see who, or work on other files.";
+
+/// Cursor's `preToolUse` deny reply: one line of JSON built by serde, never cut mid-JSON.
+pub fn cursor_deny(reason: &str) -> String {
+    let reply = |text: &str| {
+        json!({ "permission": "deny", "user_message": text, "agent_message": text }).to_string()
+    };
+    let full = reply(reason);
+    if full.len() <= MAX_CURSOR_REPLY {
+        full
+    } else {
+        reply(CURSOR_FALLBACK_DENY)
+    }
+}
+
+/// The only reply the Cursor edit guard forwards (D75).
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CursorDeny {
+    permission: String,
+    user_message: String,
+    agent_message: String,
+}
+
+/// Whether `text` is a reply the wrapper may forward to `client`: for Cursor, one complete
+/// deny object with both messages and nothing else (no unknown or duplicate fields, no
+/// trailing data), within [`MAX_CURSOR_REPLY`]. Opens no database and reads no home.
+pub fn reply_is_valid(client: Client, text: &str) -> bool {
+    if client != Client::Cursor || text.len() > MAX_CURSOR_REPLY + 1 {
+        return false;
+    }
+    serde_json::from_str::<CursorDeny>(text).is_ok_and(|r| {
+        r.permission == "deny" && !r.user_message.is_empty() && !r.agent_message.is_empty()
+    })
+}
+
+/// `hook check-reply`: read at most [`MAX_CURSOR_REPLY`] + 2 bytes of stdin and say whether
+/// they are a valid reply. Larger input is invalid.
+pub fn check_reply_stdin(client: Client) -> bool {
+    let mut raw = Vec::new();
+    if std::io::stdin()
+        .lock()
+        .take(MAX_CURSOR_REPLY as u64 + 2)
+        .read_to_end(&mut raw)
+        .is_err()
+    {
+        return false;
+    }
+    std::str::from_utf8(&raw).is_ok_and(|t| reply_is_valid(client, t))
+}
+
+/// Problems with an installed Cursor edit guard that `hook status` reports: an entry of ours
+/// with `failClosed: true`, which turns Another's fail-open path into blocked edits.
+pub fn cursor_guard_warnings(env: &HookEnv) -> Vec<String> {
+    let path = Client::Cursor.config_path(&env.home);
+    let Ok(Some((_, root))) = read_json(&path) else {
+        return Vec::new();
+    };
+    let Some(hooks) = root.get("hooks").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let fail_closed = hooks
+        .values()
+        .filter_map(Value::as_array)
+        .flatten()
+        .any(|h| is_ours(h) && h.get("failClosed").and_then(Value::as_bool) == Some(true));
+    if fail_closed {
+        vec![format!(
+            "{} has an Another hook with \"failClosed\": true. Cursor then blocks the action whenever that hook fails, so Another can no longer fail open; remove the key.",
+            path.display()
+        )]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Whether the Cursor config has our edit guard entry.
+pub fn cursor_guard_installed(env: &HookEnv) -> bool {
+    let Ok(Some((_, root))) = read_json(&Client::Cursor.config_path(&env.home)) else {
+        return false;
+    };
+    root.get("hooks")
+        .and_then(|h| h.get(CURSOR_GUARD_KEY))
+        .and_then(Value::as_array)
+        .is_some_and(|a| a.iter().any(is_ours))
+}
+
 /// `pre-edit`: hold each file about to be edited, or stop the edit when another agent
 /// holds it. Prints a deny only for a real conflict; nothing otherwise (printing "allow"
 /// would skip the client's own permission prompts).
@@ -1685,6 +1848,9 @@ fn pre_edit(
             format!("Another: this edit is still blocked. {path} is held by {holder}. {NO_PING_NOTICE} Retry after {retry_after} seconds, or work on other files.")
         }
     };
+    if client == Client::Cursor {
+        return Ok(cursor_deny(&reason));
+    }
     Ok(json!({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -2362,14 +2528,97 @@ mod tests {
     #[test]
     fn every_client_gets_post_tool_and_only_safe_clients_get_the_edit_guard() {
         for client in Client::ALL {
-            let specs = client.specs();
+            let specs = client.specs(false);
             assert!(specs.iter().any(|s| s.event == HookEvent::PostTool));
             let guard = specs.iter().find(|s| s.event == HookEvent::PreEdit);
             match client {
-                Client::Cursor => assert!(guard.is_none()),
+                Client::Cursor => assert!(guard.is_none(), "Cursor's guard is opt-in"),
                 Client::Codex => assert_eq!(guard.unwrap().matcher, Some(CODEX_EDIT_TOOLS)),
                 _ => assert_eq!(guard.unwrap().matcher, Some(EDIT_TOOLS)),
             }
+        }
+        let cursor = Client::Cursor.specs(true);
+        let guard = cursor
+            .iter()
+            .find(|s| s.event == HookEvent::PreEdit)
+            .unwrap();
+        assert_eq!(guard.key, "preToolUse");
+        assert_eq!(guard.matcher, Some("^(Write|Delete)$"));
+        // The opt-in changes nothing for the other clients.
+        for client in [Client::Claude, Client::Codex, Client::Grok] {
+            assert_eq!(client.specs(true).len(), client.specs(false).len());
+        }
+    }
+
+    #[test]
+    fn cursor_deny_is_one_valid_line_for_hostile_text() {
+        let hostile = [
+            "plain".to_string(),
+            "quote \" backslash \\ end".to_string(),
+            "new\nline\r\nand\ttab".to_string(),
+            "control \u{1b}[31m \u{0} \u{7}".to_string(),
+            "unicode ✓ é 中文 \u{2028} \u{2029}".to_string(),
+            "x".repeat(1000),
+            "\u{1}".repeat(1000),
+        ];
+        for reason in &hostile {
+            let reply = cursor_deny(reason);
+            assert!(!reply.contains('\n') && !reply.contains('\r'), "{reply}");
+            assert!(reply.len() <= MAX_CURSOR_REPLY);
+            assert!(reply_is_valid(Client::Cursor, &reply), "{reply}");
+            assert!(reply_is_valid(Client::Cursor, &format!("{reply}\n")));
+            let v: Value = serde_json::from_str(&reply).unwrap();
+            assert_eq!(v["permission"], "deny");
+            let full =
+                json!({ "permission": "deny", "user_message": reason, "agent_message": reason })
+                    .to_string();
+            let expected = if full.len() <= MAX_CURSOR_REPLY {
+                reason.as_str()
+            } else {
+                CURSOR_FALLBACK_DENY
+            };
+            assert_eq!(v["user_message"], expected);
+            assert_eq!(v["agent_message"], expected);
+        }
+        // Escaping can push a long reason past the cap: a fixed deny replaces it whole.
+        let reply = cursor_deny(&"\u{1}".repeat(1000));
+        let v: Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["user_message"], CURSOR_FALLBACK_DENY);
+    }
+
+    #[test]
+    fn only_a_complete_cursor_deny_passes_the_reply_check() {
+        let ok = r#"{"permission":"deny","user_message":"m","agent_message":"m"}"#;
+        assert!(reply_is_valid(Client::Cursor, ok));
+        for bad in [
+            "",
+            "\n",
+            r#"{"permission":"deny","user_mess"#,
+            r#"{"permission":"deny","user_message":"m","agent_message":"m"} trailing"#,
+            r#"{"permission":"deny","user_message":"m","agent_message":"m"}{"permission":"allow"}"#,
+            r#"{"permission":"allow"}"#,
+            r#"{"permission":"allow","user_message":"m","agent_message":"m"}"#,
+            r#"{"permission":"ask","user_message":"m","agent_message":"m"}"#,
+            r#"{"permission":"deny","user_message":"m"}"#,
+            r#"{"permission":"deny","user_message":"","agent_message":"m"}"#,
+            r#"{"permission":"deny","user_message":"m","agent_message":"m","updated_input":{}}"#,
+            r#"{"permission":"deny","permission":"deny","user_message":"m","agent_message":"m"}"#,
+            r#"{"permission":"deny","user_message":1,"agent_message":"m"}"#,
+            r#"["deny"]"#,
+            "Another stopped this edit",
+        ] {
+            assert!(!reply_is_valid(Client::Cursor, bad), "{bad}");
+        }
+        let long = format!(
+            r#"{{"permission":"deny","user_message":"{}","agent_message":"m"}}"#,
+            "x".repeat(MAX_CURSOR_REPLY)
+        );
+        assert!(!reply_is_valid(Client::Cursor, &long), "over the cap");
+        for client in [Client::Claude, Client::Codex, Client::Grok] {
+            assert!(
+                !reply_is_valid(client, ok),
+                "only Cursor replies are checked"
+            );
         }
     }
 }
