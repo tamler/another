@@ -76,15 +76,60 @@ fn template_mistakes_are_refused() {
             "no field",
         ),
         (vec!["fix", "--field", "issue=a\nb"], "one line"),
+        (
+            vec!["fix", "--field", "issue=x", "--field", "issue=y"],
+            "twice",
+        ),
+        (
+            vec!["fix", "--field", "issue=x", "--field", "noequals"],
+            "key=value",
+        ),
         (vec!["nope"], "unknown template"),
     ] {
         let mut args: Vec<&str> = base.to_vec();
         args.extend(extra.iter().copied());
         let out = another(dir.path(), &args);
-        assert!(!out.status.success(), "{args:?} succeeded");
+        // A usage error, like clap's (spec test 2).
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(err.contains(expect), "{args:?}: {err}");
     }
+    // Under --json the same mistake is a JSON usage error.
+    let out = another(
+        dir.path(),
+        &[
+            "--json",
+            "send",
+            "--from",
+            "lead",
+            "--to",
+            "bob",
+            "--template",
+            "fix",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["error"]["code"], "usage", "{v}");
+    // A template with no sender anywhere is a usage error too.
+    let out = another(
+        dir.path(),
+        &[
+            "send",
+            "--to",
+            "bob",
+            "--template",
+            "fix",
+            "--field",
+            "issue=x",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no sender"));
+    // A message without a template is unchanged: clap still requires a sender.
+    let out = another(dir.path(), &["send", "--to", "bob", "-s", "hi"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--from"));
     // A template writes the subject and the body itself.
     let out = another(
         dir.path(),

@@ -66,14 +66,14 @@ fn gap_template_list_honours_json() {
     );
 }
 
-/// T3. "A missing or unknown field is refused, with the field named." A main field that
-/// makes the subject invalid (too long, or a tab) is refused by the generic subject rule,
-/// which does not say that the `target` field caused it.
+/// T3. "A missing or unknown field is refused, with the field named." A main field with a
+/// tab is refused by the generic subject rule, which does not say that the `target` field
+/// caused it. (Author's change: the over-long case of this test now expects the subject to
+/// be cut, as SPEC.md says and REVIEW-R1 asked; see `a_long_main_field_is_cut_in_the_subject`.)
 #[test]
 fn gap_a_bad_main_field_is_refused_with_the_field_named() {
     let (_d, home) = home();
-    let long = "x".repeat(300);
-    for target in [long.as_str(), "a\tb"] {
+    for target in ["a\tb", "a\u{1b}[2Jb"] {
         let out = another(
             &home,
             None,

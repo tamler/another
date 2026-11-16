@@ -835,10 +835,11 @@ pub fn main() -> ExitCode {
     match run(cli) {
         Ok(code) => code,
         Err(err) => {
+            let usage = err.is::<crate::templates::UsageError>();
             let body = match err.downcast_ref::<another_core::Error>() {
                 Some(e) => e.body(),
                 None => another_core::ErrorBody {
-                    code: "error",
+                    code: if usage { "usage" } else { "error" },
                     message: format!("{err:#}"),
                 },
             };
@@ -857,6 +858,9 @@ pub fn main() -> ExitCode {
             }
             if body.code == "conflict" {
                 ExitCode::from(EXIT_CONFLICT)
+            } else if usage {
+                // A template mistake is a bad command line, like clap's own errors.
+                ExitCode::from(2)
             } else {
                 ExitCode::FAILURE
             }
@@ -1303,8 +1307,12 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             template,
             fields,
         } => {
+            // Optional to clap only so that `--template list` works without it.
             let Some(from) = from else {
-                anyhow::bail!("no sender: pass --from or set ANOTHER_AGENT");
+                return Err(crate::templates::UsageError(
+                    "no sender: pass --from or set ANOTHER_AGENT".into(),
+                )
+                .into());
             };
             // A template writes the subject and body, and always opens a request.
             let (subject, body) = match &template {

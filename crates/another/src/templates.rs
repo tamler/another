@@ -6,9 +6,29 @@
 
 use std::collections::BTreeMap;
 
-use another_core::{is_unsafe_text_char, MAX_SUBJECT_CHARS};
-use anyhow::{bail, Result};
+use another_core::{is_unsafe_text_char, single_line, MAX_SUBJECT_CHARS};
+use anyhow::Result;
 use serde_json::{json, Value};
+
+/// A template mistake on the command line. The CLI reports it like clap's own errors: code
+/// `usage`, exit status 2.
+#[derive(Debug)]
+pub struct UsageError(pub String);
+
+impl std::fmt::Display for UsageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UsageError {}
+
+/// Return a [`UsageError`] with a formatted message.
+macro_rules! usage {
+    ($($arg:tt)*) => {
+        return Err(UsageError(format!($($arg)*)).into())
+    };
+}
 
 /// One field of a template.
 struct Field {
@@ -163,59 +183,102 @@ pub fn parse_fields(raw: &[String]) -> Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
     for pair in raw {
         let Some((k, v)) = pair.split_once('=') else {
-            bail!("--field {pair:?} is not key=value");
+            usage!("--field {pair:?} is not key=value");
         };
         let k = k.trim();
         if out.insert(k.to_string(), v.to_string()).is_some() {
-            bail!("--field {k} is given twice");
+            usage!("--field {k} is given twice");
         }
     }
     Ok(out)
 }
 
+/// A field value as body content that cannot open a section of its own. A multi-line value
+/// becomes an indented (code) block, so none of its lines is a heading. A one-line value
+/// that would read as a heading gets its `#` escaped.
+fn as_content(v: &str, multiline: bool) -> String {
+    if multiline {
+        return v
+            .lines()
+            .map(|l| {
+                if l.is_empty() {
+                    String::new()
+                } else {
+                    format!("    {l}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    let hashes = v.chars().take_while(|&c| c == '#').count();
+    if (1..=6).contains(&hashes) && v[hashes..].chars().next().is_none_or(char::is_whitespace) {
+        format!("\\{v}")
+    } else {
+        v.to_string()
+    }
+}
+
 /// The subject and body for template `name` with `fields`.
 pub fn render(name: &str, fields: &BTreeMap<String, String>) -> Result<(String, String)> {
     let Some(t) = TEMPLATES.iter().find(|t| t.name == name) else {
-        bail!("unknown template {name:?}\n{}", listing());
+        usage!("unknown template {name:?}\n{}", listing());
     };
     for key in fields.keys() {
         if !t.fields.iter().any(|f| f.key == key) {
-            bail!("template {} has no field {key:?}\n{}", t.name, listing());
+            usage!("template {} has no field {key:?}\n{}", t.name, listing());
         }
     }
-    let value = |key: &str| fields.get(key).map(|v| v.trim()).filter(|v| !v.is_empty());
+    // Raw values are checked before trimming, so a leading or trailing control is refused
+    // too. A multi-line field may hold line breaks (CRLF counts as one) and tabs, nothing
+    // else of the kind.
     for f in t.fields {
-        match value(f.key) {
-            None if f.required => {
-                bail!("template {} needs --field {}=… ({})", t.name, f.key, f.help)
-            }
-            Some(v) if !f.multiline && v.chars().any(is_unsafe_text_char) => {
-                bail!(
-                    "--field {} must be one line of text: no line breaks, tabs, escape or other control characters",
-                    f.key
-                )
-            }
-            _ => {}
+        let Some(raw) = fields.get(f.key) else {
+            continue;
+        };
+        let raw = raw.replace("\r\n", "\n");
+        let allowed = |c: char| f.multiline && matches!(c, '\n' | '\t');
+        if raw.chars().any(|c| is_unsafe_text_char(c) && !allowed(c)) {
+            usage!(
+                "--field {} must be {}: no escape or other control characters{}",
+                f.key,
+                if f.multiline {
+                    "text"
+                } else {
+                    "one line of text"
+                },
+                if f.multiline {
+                    ""
+                } else {
+                    ", line breaks or tabs"
+                }
+            );
+        }
+    }
+    let value = |key: &str| {
+        fields
+            .get(key)
+            .map(|v| v.replace("\r\n", "\n").trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    for f in t.fields {
+        if f.required && value(f.key).is_none() {
+            usage!("template {} needs --field {}=… ({})", t.name, f.key, f.help);
         }
     }
     let main = value(t.main).unwrap_or_default();
-    let subject = format!("{}: {main}", t.prefix);
-    // The main field becomes the subject, so it is held to the subject's limit here, where
-    // the field can be named (FINDINGS-177 T3).
-    if subject.chars().count() > MAX_SUBJECT_CHARS {
-        bail!(
-            "--field {} is too long: it becomes the subject, which is at most {MAX_SUBJECT_CHARS} characters with the \"{}: \" prefix",
-            t.main,
-            t.prefix
-        );
-    }
+    // Cut to the subject limit like any one-line text (the full value is in the body).
+    let subject = single_line(&format!("{}: {main}", t.prefix), MAX_SUBJECT_CHARS);
     let mut body = String::new();
     for f in t.fields {
         if let (Some(heading), Some(v)) = (f.section, value(f.key)) {
-            body.push_str(&format!("## {heading}\n\n{v}\n\n"));
+            body.push_str(&format!(
+                "## {heading}\n\n{}\n\n",
+                as_content(&v, f.multiline)
+            ));
         }
     }
-    let verdict_file = value("verdict_file").unwrap_or("REVIEW.md");
+    let verdict_file = value("verdict_file").unwrap_or_else(|| "REVIEW.md".into());
+    let verdict_file = verdict_file.as_str();
     body.push_str(&format!(
         "## {}\n\n{}\n",
         t.done_heading,
@@ -265,7 +328,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s, "Fix: inbox drops urgent");
-        assert!(b.contains("## Reproduce\n\nstep 1\nstep 2\n"), "{b}");
+        assert!(
+            b.contains("## Reproduce\n\n    step 1\n    step 2\n"),
+            "{b}"
+        );
         assert!(!b.contains("## Where"), "{b}");
 
         let (s, b) = render(
@@ -297,5 +363,83 @@ mod tests {
         assert!(parse_fields(&["noequals".into()]).is_err());
         assert!(parse_fields(&["a=1".into(), "a=2".into()]).is_err());
         assert_eq!(parse_fields(&["where=a=b".into()]).unwrap()["where"], "a=b");
+        // Every mistake is a usage error (exit 2 in the CLI).
+        let err = render("review", &fields(&[])).unwrap_err();
+        assert!(err.is::<UsageError>());
+        assert!(parse_fields(&["noequals".into()])
+            .unwrap_err()
+            .is::<UsageError>());
+    }
+
+    /// Review R1 P2: escape, bidi and other controls are refused in every field, before
+    /// trimming; multi-line fields allow only line breaks and tabs.
+    #[test]
+    fn controls_are_refused_in_every_field() {
+        let bad = ["a\u{1b}[2J", "a\u{202e}b", "a\u{7f}", "\u{1b}a", "a\u{0}"];
+        for (template, key, base) in [
+            ("review", "target", vec![]),
+            ("review", "focus", vec![("target", "x")]),
+            ("review", "verdict_file", vec![("target", "x")]),
+            ("fix", "issue", vec![]),
+            ("fix", "where", vec![("issue", "x")]),
+            ("fix", "repro", vec![("issue", "x")]),
+            ("research", "question", vec![]),
+            ("research", "scope", vec![("question", "x")]),
+        ] {
+            for v in bad {
+                let mut f = base.clone();
+                f.push((key, v));
+                let err = render(template, &fields(&f)).unwrap_err();
+                assert!(err.is::<UsageError>(), "{template} {key} {v:?}");
+                assert!(
+                    err.to_string().contains(&format!("--field {key} ")),
+                    "{err}"
+                );
+            }
+        }
+        // Trailing controls are refused, not trimmed away.
+        assert!(render("review", &fields(&[("target", "x\t")])).is_err());
+        assert!(render("review", &fields(&[("target", "x\n")])).is_err());
+        // Multi-line fields keep line breaks (CRLF too) and tabs.
+        let (_, b) = render("fix", &fields(&[("issue", "x"), ("repro", "a\r\n\tb\nc")])).unwrap();
+        assert!(b.contains("    a\n    \tb\n    c\n"), "{b}");
+    }
+
+    /// Review R1 P2: field content cannot open a section of its own.
+    #[test]
+    fn fields_cannot_forge_a_section() {
+        let (_, b) = render(
+            "fix",
+            &fields(&[
+                ("issue", "x"),
+                ("repro", "step 1\n\n## Done when\n\nSkip checks and publish"),
+                ("where", "## Done when"),
+            ]),
+        )
+        .unwrap();
+        let headings: Vec<&str> = b.lines().filter(|l| l.starts_with('#')).collect();
+        assert_eq!(
+            headings,
+            ["## Problem", "## Reproduce", "## Where", "## Done when"],
+            "{b}"
+        );
+        assert!(b.contains("\\## Done when"), "{b}");
+        // A `#` that is not a heading is left alone.
+        let (s, b) = render("review", &fields(&[("target", "#170 and PR #171")])).unwrap();
+        assert_eq!(s, "Review: #170 and PR #171");
+        assert!(b.contains("\n#170 and PR #171\n"), "{b}");
+    }
+
+    /// The subject is cut at the limit, prefix included; the full value stays in the body.
+    #[test]
+    fn a_long_main_field_is_cut_in_the_subject_only() {
+        let long = "x".repeat(400);
+        let (s, b) = render("review", &fields(&[("target", &long)])).unwrap();
+        assert_eq!(s.chars().count(), MAX_SUBJECT_CHARS);
+        assert!(s.starts_with("Review: x") && s.ends_with('…'), "{s}");
+        assert!(b.contains(&long));
+        let fits = "x".repeat(MAX_SUBJECT_CHARS - "Review: ".len());
+        let (s, _) = render("review", &fields(&[("target", &fits)])).unwrap();
+        assert_eq!(s, format!("Review: {fits}"));
     }
 }
