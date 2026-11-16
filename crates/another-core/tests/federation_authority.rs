@@ -947,3 +947,50 @@ fn adv210_hold_update_cannot_take_another_nodes_hold() {
     assert_rejected(&report, "hold.updated naming alpha's hold");
     assert_eq!(row(), before);
 }
+
+/// A lease ends or renews only by its holder's word (or, for release and expiry, the word
+/// of the node that owns the resource). Mallory is neither for the hub's own lease, so its
+/// signed `resource.renewed`, `resource.released` and `resource.lease_expired` change
+/// nothing. The payloads leave out `resource_id`, as an attacker would, so only the
+/// projection's guards stand between them and the lease.
+#[test]
+fn lease_renewal_release_and_expiry_cannot_touch_another_nodes_lease() {
+    let fed = Fed::new();
+    fed.hub.agent("alice");
+    fed.hub.agent("bob");
+    let (_, _, lease) = fed.hub_resource();
+    let state = || {
+        fed.hub
+            .sql()
+            .query_row(
+                "SELECT ttl_seconds, expires_at, released_at FROM resource_leases
+                 WHERE lease_id = ?1",
+                [&lease],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+    let before = state();
+    assert_eq!(before.2, None, "bob's lease is live");
+
+    // A renewal that also asks for a different TTL, so any renewal shows at T0.
+    let ttl = if before.0 == 300 { 600 } else { 300 };
+    fed.forge(
+        "resource.renewed",
+        json!({ "lease_ids": [lease], "ttl_seconds": ttl }),
+    );
+    assert_eq!(state(), before, "renewed by another node");
+    fed.forge(
+        "resource.released",
+        json!({ "lease_ids": [lease], "reason": "forged" }),
+    );
+    assert_eq!(state(), before, "released by another node");
+    fed.forge("resource.lease_expired", json!({ "lease_id": lease }));
+    assert_eq!(state(), before, "expired by another node");
+}
