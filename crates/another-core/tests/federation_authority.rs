@@ -792,3 +792,37 @@ fn a_revoked_spokes_lease_release_reaches_other_spokes() {
         .unwrap();
     assert_eq!(mallory_owner, 0);
 }
+
+/// A local send refuses a body over 256 KiB; a paired spoke's signed `message.sent` is held to
+/// the same limit, so the hub neither stores nor relays a larger body. A body of exactly the
+/// limit still arrives. (FINDINGS-main-peer-mail-body-w9T, failing test by its finder.)
+#[test]
+fn a_peers_message_body_is_capped_like_a_local_one() {
+    let fed = Fed::new();
+    let alice = fed.hub.agent("alice");
+    let sender = fed.mallory.agent("m");
+    push(&fed.hub, &fed.mallory);
+    let mail = |id: &str, body: String| {
+        fed.forge(
+            "message.sent",
+            json!({ "message_id": id, "sender_id": sender,
+                    "subject": "hello", "body": body, "importance": "normal",
+                    "recipients": [{ "agent_id": alice, "node_id": fed.hub.id(), "role": "to" }],
+                    "recipient_nodes": [fed.hub.id()] }),
+        )
+    };
+    let stored = |id: &str| -> Option<String> {
+        fed.hub_one("SELECT body FROM messages WHERE message_id = ?1", id)
+    };
+
+    let report = mail("mallory-big-mail", "x".repeat(256 * 1024 + 1));
+    assert_rejected(&report, "a body one byte over the limit");
+    assert_eq!(stored("mallory-big-mail"), None);
+
+    let report = mail("mallory-full-mail", "x".repeat(256 * 1024));
+    assert!(report.rejected.is_empty(), "{report:?}");
+    assert_eq!(
+        stored("mallory-full-mail").map(|b| b.len()),
+        Some(256 * 1024)
+    );
+}

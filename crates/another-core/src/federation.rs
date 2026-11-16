@@ -618,6 +618,11 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
         }
         "message.sent" => {
             agent("sender_id")?;
+            // The same body limit as a local send, so a peer without it (an older build or a
+            // forged event) cannot store or relay an oversized body.
+            if let Some(body) = p.get("body").and_then(Value::as_str) {
+                crate::mail::check_body(body)?;
+            }
             owned("message", "messages", "message_id", "message_id")
         }
         "hold.acquired" | "hold.updated" => {
