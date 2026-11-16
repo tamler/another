@@ -195,12 +195,23 @@ fn clamp_ttl(ttl: Option<i64>) -> Result<i64> {
 
 /// The trailing port in `ollama@11434`, `tcp:0.0.0.0:5432` or `http://127.0.0.1:5173/x`.
 pub fn derive_port(text: &str) -> Option<u16> {
+    // The authority ends at the path, the query or the fragment, whichever comes first.
     let host = text
         .split_once("://")
         .map_or(text, |(_, rest)| rest)
-        .split('/')
+        .split(['/', '?', '#'])
         .next()
         .unwrap_or_default();
+    // A bare IPv6 address (`::1`, `fe80::8080`, `fe80::1%en0`) has no port; its last group
+    // is part of the address. A port on IPv6 is written `[addr]:port`.
+    let is_ipv6 = |s: &str| {
+        s.split('%')
+            .next()
+            .is_some_and(|a| a.parse::<std::net::Ipv6Addr>().is_ok())
+    };
+    if is_ipv6(host) || host.rsplit_once('@').is_some_and(|(_, h)| is_ipv6(h)) {
+        return None;
+    }
     host.rsplit([':', '@'])
         .next()
         .filter(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
