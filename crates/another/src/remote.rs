@@ -210,6 +210,9 @@ pub fn authorize(
     match tool {
         "resource_reap" => Err("reaping is never available to remote peers".into()),
         "activity_feed" | "activity_summarize" | "resource_find" => Ok(()),
+        // The board names agents, paths and request titles across projects: a remote peer
+        // sees one project inside its globs.
+        "work_board" => project(s(args, "project"), true),
         "orphans_list" => {
             // Remote peers see lapsed registrations only, never a process scan.
             args.insert("scan".into(), Value::Bool(false));

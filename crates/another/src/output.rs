@@ -614,6 +614,176 @@ pub fn trial_stats(s: &another_core::TrialStats) -> String {
     out
 }
 
+/// `12m ago` / `3h ago` relative to `now`; the raw text when either time does not parse.
+fn ago(at: &str, now: i64) -> String {
+    match another_core::parse_ts(at) {
+        Some(t) => format!("{} ago", span((now - t).max(0) / 1000)),
+        None => at.to_string(),
+    }
+}
+
+fn span(secs: i64) -> String {
+    match secs {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 86_400 => format!("{}h{:02}m", s / 3600, (s % 3600) / 60),
+        s => format!("{}d{:02}h", s / 86_400, (s % 86_400) / 3600),
+    }
+}
+
+pub fn board(b: &another_core::Board) -> String {
+    let now = another_core::parse_ts(&b.now).unwrap_or(0);
+    let mut out = String::new();
+    let scope = b
+        .project
+        .as_deref()
+        .map(|p| format!(", {p}"))
+        .unwrap_or_default();
+    let _ = writeln!(
+        out,
+        "Board for {}{scope} at {} (edits since {})",
+        b.node, b.now, b.since
+    );
+    if b.projects.is_empty() {
+        let _ = writeln!(out, "\nNo live holds and no edits in this window.");
+    }
+    for p in &b.projects {
+        let _ = writeln!(out, "\n{}  {}", p.project, p.path);
+        if p.holds.is_empty() {
+            let _ = writeln!(out, "  holds: none");
+        } else {
+            let _ = writeln!(out, "  holds");
+        }
+        for h in &p.holds {
+            let kind = if h.exclusive { "exclusive" } else { "shared" };
+            let why = if h.edit_hook {
+                "edit hook".to_string()
+            } else {
+                h.reason.clone().unwrap_or_default()
+            };
+            let _ = writeln!(
+                out,
+                "    {}  {}  {kind}, held {}, lapses in {}{}",
+                h.agent,
+                h.pattern,
+                ago(&h.since, now).trim_end_matches(" ago"),
+                span(h.expires_in_seconds.max(0)),
+                if why.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({why})")
+                }
+            );
+        }
+        if !p.edits.is_empty() {
+            let _ = writeln!(out, "  recent edits (paths the edit hook claimed)");
+            for e in &p.edits {
+                let _ = writeln!(out, "    {}  {}  {}", ago(&e.at, now), e.agent, e.path);
+            }
+        }
+        if !p.blocked.is_empty() {
+            let _ = writeln!(out, "  stopped edits");
+            for s in &p.blocked {
+                let held_by = match (&s.holder, &s.holder_project, &s.pattern) {
+                    (Some(h), Some(hp), Some(pat)) => format!("held by {h} ({hp}:{pat})"),
+                    _ => "held in a project outside this view".to_string(),
+                };
+                let _ = writeln!(
+                    out,
+                    "    {}  {} on {}, {held_by}",
+                    ago(&s.at, now),
+                    s.agent,
+                    s.path
+                );
+            }
+        }
+        if p.truncated {
+            let _ = writeln!(out, "  (more edits than --limit shows)");
+        }
+    }
+    if b.history_truncated {
+        let _ = writeln!(
+            out,
+            "\n(edit history stopped after {} events; older edits in this window may be missing. Narrow --since or --project.)",
+            another_core::BOARD_EVENT_SCAN_CAP
+        );
+    }
+    let _ = writeln!(out, "\nAgents");
+    if b.agents.is_empty() {
+        let _ = writeln!(
+            out,
+            "  none with holds, unread mail, acknowledgements or requests"
+        );
+    }
+    for a in &b.agents {
+        let mut bits = Vec::new();
+        if a.unread > 0 {
+            bits.push(if a.urgent_unread > 0 {
+                format!("{} unread ({} urgent)", a.unread, a.urgent_unread)
+            } else {
+                format!("{} unread", a.unread)
+            });
+        }
+        if a.awaiting_ack > 0 {
+            bits.push(format!("{} to acknowledge", a.awaiting_ack));
+        }
+        if a.requests > 0 {
+            bits.push(format!("{} request(s)", a.requests));
+        }
+        if a.holds > 0 {
+            bits.push(format!("{} hold(s)", a.holds));
+        }
+        let seen = a
+            .last_seen_at
+            .as_deref()
+            .map(|t| format!(", seen {}", ago(t, now)))
+            .unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "  {}  {}{seen}: {}",
+            a.address,
+            a.presence,
+            bits.join(", ")
+        );
+    }
+    if !b.requests.is_empty() {
+        let _ = writeln!(out, "\nPending requests");
+    }
+    for r in &b.requests {
+        let status = if r.overdue {
+            "overdue"
+        } else {
+            r.status.as_str()
+        };
+        let mut to = r.to.clone();
+        if r.to_hidden > 0 {
+            to.push(format!("{} outside this view", r.to_hidden));
+        }
+        let to = if to.is_empty() {
+            "nobody".to_string()
+        } else {
+            to.join(", ")
+        };
+        let owner = match (&r.owner, r.owner_hidden) {
+            (Some(o), _) => format!(", owner {o}"),
+            (None, true) => ", owner outside this view".to_string(),
+            (None, false) => String::new(),
+        };
+        let from = r.from.as_deref().unwrap_or("an agent outside this view");
+        let _ = writeln!(
+            out,
+            "  {status}  {}  from {from} to {to}{owner}, opened {}  [{}]",
+            r.title,
+            ago(&r.created_at, now),
+            r.request_id
+        );
+    }
+    if b.requests_truncated {
+        let _ = writeln!(out, "  (more requests than --limit shows)");
+    }
+    out
+}
+
 pub fn daemon_status(s: &crate::daemon::DaemonStatus) -> String {
     let yes = |b: bool| if b { "yes" } else { "no" };
     format!(
