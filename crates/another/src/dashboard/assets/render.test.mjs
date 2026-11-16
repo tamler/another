@@ -133,4 +133,43 @@ assert(
   "a hash that is not a selector aborted render"
 );
 
+// D70: agent cards show Herdr's states, and a blocked agent says why.
+const states = page("");
+const withAgents = snap("States", "open");
+const agent = (address, state, blocked_message) => ({
+  agent_id: address,
+  address,
+  name: address.split("@")[0],
+  project: "shop",
+  program: "claude",
+  model: null,
+  description: null,
+  status: state === "unknown" ? "offline" : "active",
+  presence: state === "unknown" ? "offline" : state === "idle" ? "idle" : "live",
+  state,
+  blocked_message,
+  stale: false,
+  last_seen_at: new Date().toISOString(),
+  node: null,
+  local: true,
+  unread: 0,
+});
+withAgents.agents = [
+  agent("alice@shop", "working", null),
+  agent("bob@shop", "blocked", "src/a.rs is held by <alice@shop>"),
+  agent("carol@shop", "idle", null),
+];
+states.window.__anotherDash.render(withAgents);
+const cards = states.window.document.getElementById("agents-body");
+const headings = [...cards.querySelectorAll("h3")].map((h) => h.firstChild.textContent);
+assert(
+  JSON.stringify(headings) === JSON.stringify(["Blocked", "Working", "Idle"]),
+  "agents are grouped by state, blocked first: " + JSON.stringify(headings)
+);
+const badges = [...cards.querySelectorAll(".presence")].map((b) => b.textContent);
+assert(badges.includes("blocked") && badges.includes("working"), "state badges: " + badges);
+const reason = cards.querySelector(".card .reason");
+assert(reason && reason.textContent === "src/a.rs is held by <alice@shop>", "blocked reason is shown as text");
+assert(!cards.innerHTML.includes("<alice@shop>"), "the reason is escaped");
+
 console.log("dashboard render test ok");

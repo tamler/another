@@ -23,7 +23,7 @@ use crate::time::fmt_ts;
 use crate::Peer;
 
 /// An agent seen within this window, with status `active`, is live.
-const LIVE_MS: i64 = 10 * 60 * 1000;
+pub(crate) const LIVE_MS: i64 = 10 * 60 * 1000;
 /// An `active` agent quieter than [`LIVE_MS`] but within this window is idle.
 const IDLE_MS: i64 = 6 * 60 * 60 * 1000;
 /// Offline and last seen longer ago than this: hidden in the dashboard by default.
@@ -151,6 +151,10 @@ pub struct DashAgent {
     pub status: String,
     /// Derived: `live`, `idle` or `offline`.
     pub presence: String,
+    /// Herdr's terms (D70): `idle`, `working`, `blocked` or `unknown`.
+    pub state: crate::AgentState,
+    /// Why the agent is blocked.
+    pub blocked_message: Option<String>,
     /// Offline and not seen for a day. The UI hides these until asked.
     pub stale: bool,
     pub last_seen_at: Option<String>,
@@ -370,16 +374,27 @@ impl Store {
         let hour = self.activity_summary(Some(Since::Time(now - HOUR_MS)))?;
         let day = self.activity_summary(Some(Since::Time(now - DAY_MS)))?;
         let extra = self.read(|conn| load_extra(conn, self.node_id(), now, view.bodies))?;
+        let stops =
+            self.read(|conn| crate::agent_state::current_stops(conn, self.node_id(), now, None))?;
 
         let mut agents: Vec<DashAgent> = extra
             .agents
             .into_iter()
             .map(|agent| {
                 let (presence, stale) = presence(&agent.status, agent.last_seen_at.as_deref(), now);
+                let local = agent.node.is_none();
+                let status = crate::agent_state::status_of(
+                    &agent.status,
+                    agent.last_seen_at.as_deref(),
+                    now,
+                    local.then(|| stops.get(&agent.agent_id)).flatten(),
+                );
                 DashAgent {
                     unread: extra.unread.get(&agent.agent_id).copied().unwrap_or(0),
-                    local: agent.node.is_none(),
+                    local,
                     presence: presence.to_string(),
+                    state: status.state,
+                    blocked_message: status.message,
                     stale,
                     agent_id: agent.agent_id,
                     address: agent.address,

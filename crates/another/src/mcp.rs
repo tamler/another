@@ -821,7 +821,9 @@ impl AnotherMcp {
         description = "Read-only work board, per project: who holds which paths and until \
         when, which paths the edit hook claimed for each agent recently, edits it stopped \
         because another agent held the file, and what is waiting on whom (unread mail, \
-        acknowledgements, pending requests). Writes nothing. No message bodies."
+        acknowledgements, pending requests). Each agent has a state in Herdr's terms: \
+        idle, working, blocked (with blocked_message naming the file and holder) or \
+        unknown. Writes nothing. No message bodies."
     )]
     async fn work_board(
         &self,

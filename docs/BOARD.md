@@ -22,7 +22,13 @@ For each project with live holds, recent edits or stopped edits, most recently a
 
 Then, for the whole node or the filtered project:
 
-- **Agents.** Each agent with a hold, unread mail, a message waiting for its acknowledgement, or a pending request. Presence (`live`, `idle`, `offline`) follows the same rule as the dashboard.
+- **Agents.** Each agent with a hold, unread mail, a message waiting for its acknowledgement, a pending request, or a stopped edit. Each one has a `state` in Herdr's terms, the same as on the dashboard (D70):
+  - `blocked`: its last edit-hook outcome in the past 10 minutes stopped an edit, and a hold that stopped it is still live. `blocked_message` says which file and who holds it; a confined board leaves the message out, because the holder can belong to another project.
+  - `working`: seen within 10 minutes. Another has no turn-end hook, so this means recent activity, not a running turn.
+  - `idle`: an open session that has been quieter than that.
+  - `unknown`: the session ended.
+
+  `presence` (`live`, `idle`, `offline`) stays in the JSON output and follows the dashboard's rule.
 - **Pending requests.** Open, claimed and stale requests, oldest first, with sender, recipients and owner. Claimed work counts against its owner; open or stale work counts against its recipients.
 
 No message bodies are included.

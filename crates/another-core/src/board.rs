@@ -135,6 +135,10 @@ pub struct BoardAgent {
     pub project: Option<String>,
     /// `live`, `idle` or `offline`, the same rule as the dashboard.
     pub presence: String,
+    /// Herdr's terms (D70): `idle`, `working`, `blocked` or `unknown`, as on the dashboard.
+    pub state: crate::AgentState,
+    /// Why the agent is blocked, such as `src/a.rs is held by alice@shop`.
+    pub blocked_message: Option<String>,
     pub last_seen_at: Option<String>,
     pub unread: u32,
     /// Unread and high or urgent.
@@ -430,6 +434,7 @@ impl Store {
                 limit,
             )?;
             let mail = load_mail_counts(conn)?;
+            let stops = crate::agent_state::current_stops(conn, &local, now, None)?;
             let mut out_agents = Vec::new();
             for a in &agents {
                 if !agent_ids.contains(a.id.as_str()) {
@@ -439,15 +444,26 @@ impl Store {
                     mail.get(&a.id).copied().unwrap_or((0, 0, 0));
                 let pending = named.get(&a.id).copied().unwrap_or(0);
                 let holds = holders.get(&a.id).copied().unwrap_or(0);
-                if unread + awaiting_ack + pending + holds == 0 {
+                let last_seen = fmt_opt(a.last_seen_at);
+                let status = crate::agent_state::status_of(
+                    &a.status,
+                    last_seen.as_deref(),
+                    now,
+                    stops.get(&a.id),
+                );
+                let blocked = status.state == crate::AgentState::Blocked;
+                if unread + awaiting_ack + pending + holds == 0 && !blocked {
                     continue;
                 }
-                let last_seen = fmt_opt(a.last_seen_at);
                 let (presence, _) = presence(&a.status, last_seen.as_deref(), now);
                 out_agents.push(BoardAgent {
                     address: a.address.clone(),
                     project: a.project.clone(),
                     presence: presence.to_string(),
+                    state: status.state,
+                    // The reason names the holder, who may belong to a project outside a
+                    // confined view.
+                    blocked_message: if query.confined { None } else { status.message },
                     last_seen_at: last_seen,
                     unread,
                     urgent_unread,

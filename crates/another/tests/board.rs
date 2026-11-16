@@ -209,6 +209,8 @@ fn board_shows_what_the_edit_hook_recorded_and_what_waits() {
     assert_eq!(codex["unread"], 1);
     assert_eq!(codex["awaiting_ack"], 1);
     assert_eq!(codex["requests"], 1);
+    assert_eq!(codex["state"], "blocked");
+    assert_eq!(codex["blocked_message"], "src/a.rs is held by claude@shop");
     assert_eq!(board["requests"][0]["title"], "Review src/a.rs");
     assert!(!board.to_string().contains("secret body"));
 
@@ -220,7 +222,8 @@ fn board_shows_what_the_edit_hook_recorded_and_what_waits() {
         "stopped edits",
         "codex@shop-review on src/a.rs, held by claude@shop (shop:src/a.rs)",
         "\nAgents\n",
-        "codex@shop-review  live, seen ",
+        // Stopped by claude's hold, which is still live: blocked, with the reason (D70).
+        "codex@shop-review  blocked (src/a.rs is held by claude@shop), seen ",
         " ago: 1 unread, 1 to acknowledge, 1 request(s)",
         "Pending requests",
         "open  Review src/a.rs  from claude@shop to codex@shop-review",
@@ -244,5 +247,7 @@ fn an_empty_board_says_so() {
     env.ok(&["init"]);
     let human = env.ok(&["board"]);
     assert!(human.contains("No live holds and no edits in this window."));
-    assert!(human.contains("none with holds, unread mail, acknowledgements or requests"));
+    assert!(
+        human.contains("none with holds, unread mail, acknowledgements, requests or stopped edits")
+    );
 }

@@ -181,8 +181,18 @@ fn board_shows_holds_edits_stopped_edits_and_handoffs() {
     );
     let alice = b.agents.iter().find(|a| a.address == "alice@shop").unwrap();
     assert_eq!((alice.holds, alice.unread), (1, 0));
-    // bob has nothing waiting and holds nothing.
-    assert!(b.agents.iter().all(|a| a.address != "bob@shop-wt"));
+    // bob has nothing waiting and holds nothing, but he is listed because his edit is
+    // stopped by a hold that is still live (D70).
+    let bob = b
+        .agents
+        .iter()
+        .find(|a| a.address == "bob@shop-wt")
+        .expect("a blocked agent is listed");
+    assert_eq!(bob.state, AgentState::Blocked);
+    assert_eq!(
+        (bob.unread, bob.awaiting_ack, bob.requests, bob.holds),
+        (0, 0, 0, 0)
+    );
 
     assert_eq!(b.requests.len(), 1);
     let r = &b.requests[0];
@@ -561,4 +571,125 @@ fn the_event_scan_cap_counts_relevant_events_and_reports_when_hit() {
     );
     let all = fx.board(None);
     assert!(all.history_truncated);
+}
+
+fn state(fx: &Fx, agent: &str) -> AgentStatus {
+    fx.store.agent_status(agent).unwrap()
+}
+
+/// D70: agents report Herdr's states. Recent activity is `working`, a quiet session is
+/// `idle`, an edit stopped by a hold that is still live is `blocked` with a message, and an
+/// ended session is `unknown`. The board, the dashboard and `agent_status` agree.
+#[test]
+fn agent_state_follows_herdr_idle_working_and_blocked() {
+    let fx = Fx::new();
+    assert_eq!(state(&fx, "alice@shop").state, AgentState::Working);
+    assert!(fx
+        .edit("alice@shop", &fx.main, "src/a.rs")
+        .conflicts
+        .is_empty());
+    assert_eq!(
+        fx.edit("bob@shop-wt", &fx.wt, "src/a.rs").conflicts.len(),
+        1
+    );
+
+    let bob = state(&fx, "bob@shop-wt");
+    assert_eq!(bob.state, AgentState::Blocked);
+    let message = bob.message.clone().expect("a blocked agent says why");
+    assert!(
+        message.contains("src/a.rs") && message.contains("alice@shop"),
+        "{message}"
+    );
+    assert_eq!(bob.blocked_by.len(), 1);
+    assert_eq!(state(&fx, "alice@shop").message, None);
+
+    // The board lists a blocked agent even when nothing else is waiting on it.
+    let board = fx.board(None);
+    let row = board
+        .agents
+        .iter()
+        .find(|a| a.address == "bob@shop-wt")
+        .expect("a blocked agent is on the board");
+    assert_eq!(row.state, AgentState::Blocked);
+    assert_eq!(row.blocked_message.as_deref(), Some(message.as_str()));
+    let dash = fx.store.dashboard_snapshot(DashboardView::LOCAL).unwrap();
+    let row = dash
+        .agents
+        .iter()
+        .find(|a| a.address == "bob@shop-wt")
+        .unwrap();
+    assert_eq!(row.state, AgentState::Blocked);
+    assert_eq!(row.blocked_message.as_deref(), Some(message.as_str()));
+    assert_eq!(
+        serde_json::to_value(row.state).unwrap(),
+        serde_json::json!("blocked"),
+        "states serialize with Herdr's spelling"
+    );
+
+    // When the hold ends, bob is no longer blocked.
+    fx.store.release_holds("alice@shop", &[]).unwrap();
+    assert_eq!(state(&fx, "bob@shop-wt").state, AgentState::Working);
+
+    // Quiet past the live window: idle. An ended session: unknown.
+    fx.advance_secs(11 * 60);
+    assert_eq!(state(&fx, "alice@shop").state, AgentState::Idle);
+    fx.store.heartbeat("carol@blog", true).unwrap();
+    let carol = state(&fx, "carol@blog");
+    assert_eq!(carol.state, AgentState::Unknown);
+    assert_eq!(carol.message, None);
+}
+
+/// A stop is the agent's current state only until it edits something else, the hold ends,
+/// or the stop falls out of the live window.
+#[test]
+fn a_later_edit_or_an_old_stop_does_not_leave_an_agent_blocked() {
+    let fx = Fx::new();
+    assert!(fx
+        .edit("alice@shop", &fx.main, "src/a.rs")
+        .conflicts
+        .is_empty());
+    assert_eq!(
+        fx.edit("bob@shop-wt", &fx.wt, "src/a.rs").conflicts.len(),
+        1
+    );
+    assert_eq!(state(&fx, "bob@shop-wt").state, AgentState::Blocked);
+
+    fx.advance_secs(1);
+    assert!(fx
+        .edit("bob@shop-wt", &fx.wt, "src/b.rs")
+        .conflicts
+        .is_empty());
+    assert_eq!(
+        state(&fx, "bob@shop-wt").state,
+        AgentState::Working,
+        "bob moved on to another file"
+    );
+
+    fx.advance_secs(1);
+    assert_eq!(
+        fx.edit("bob@shop-wt", &fx.wt, "src/a.rs").conflicts.len(),
+        1
+    );
+    assert_eq!(state(&fx, "bob@shop-wt").state, AgentState::Blocked);
+
+    // Alice's hold (30 minutes) is still live, but the stop is older than the live window.
+    fx.advance_secs(11 * 60);
+    let bob = state(&fx, "bob@shop-wt");
+    assert_eq!(bob.state, AgentState::Idle);
+    assert_eq!(bob.message, None);
+}
+
+#[test]
+fn reading_agent_state_writes_nothing() {
+    let fx = Fx::new();
+    assert!(fx
+        .edit("alice@shop", &fx.main, "src/a.rs")
+        .conflicts
+        .is_empty());
+    fx.edit("bob@shop-wt", &fx.wt, "src/a.rs");
+    let before = fx.store.events(100_000).unwrap().len();
+    for agent in ["alice@shop", "bob@shop-wt", "carol@blog"] {
+        state(&fx, agent);
+    }
+    assert_eq!(fx.store.events(100_000).unwrap().len(), before);
 }
