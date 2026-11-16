@@ -33,7 +33,7 @@ No message bodies are included.
 |---|---|---|
 | `--project`, `-p` | all projects | A slug or a path. Sibling checkouts of the same repository (see [HOLDS.md](HOLDS.md)) are included, because their holds conflict |
 | `--since` | `24h` | Window for recent and stopped edits: a duration (`30m`, `2h`, `2d`) or an RFC 3339 time. Holds and requests are always current |
-| `--limit` | `20` | Items per list, at most 200. Holds are never cut. A cut list says so |
+| `--limit` | `20` | Items per list, at most 200. Holds are never cut. A cut list says so. A separate cap on how much edit history is scanned is described under Limits |
 
 ## Sample
 
@@ -78,4 +78,21 @@ Because nothing is swept, a hold past its expiry is left out by its expiry time,
 - **Edits are the edit hook's record, not a diff.** The hook writes an event when it takes a hold. Later edits under a hold the agent already has write nothing, so the board shows the first edit of each file per hold, not every edit, and never line counts. Edits made without the hook (an agent with no hook pack, a human in an editor) are not on the board.
 - **This node only.** Holds and edit events are node-local, like `another holds`. Requests and mail stored on this node are included.
 - **Sibling checkouts** come from the repository cache Another fills in as projects are used (the edit hook, hold commands, `another holds`). The board reads that cache and never refreshes it, so a checkout no command has touched yet is not grouped with its siblings.
-- **Remote connections** (bearer token or OAuth grant) must pass a `project` inside their globs. They see that one project and its agents, without sibling checkouts.
+- **History scan cap.** One read scans at most 5,000 edit-hook and stopped-edit events, newest first. Only events that can appear on the board count: they must be in the window and in a project in view, and manual hold changes don't count. If there are more, the oldest ones in the window are left out and the board says so: `history_truncated: true` in JSON, and a closing note in the text output. A narrower `--since` or `--project` brings them back.
+
+## Remote connections
+
+A bearer token or OAuth grant must pass a `project` inside its globs, and gets a **confined** board (`confined: true`):
+
+- **That one project only.** Sibling checkouts are left out, because their paths may be outside the globs.
+- **Agents.** Only agents registered to that project are listed.
+- **Stopped edits.** A stopped edit in the project is shown with the stopped agent and the path. If the holder's project is outside the view, `holder`, `holder_project` and `pattern` are `null`.
+- **Requests.** A request is listed when its sender, a recipient or its owner is registered to the project. Participants registered elsewhere are not named:
+  - a hidden sender is `null`;
+  - hidden recipients are counted in `to_hidden`;
+  - a hidden owner sets `owner_hidden: true`.
+
+  The title is shown, because the request involves the project.
+- **Holds and edits** in the project name the agent that holds or edited the file, wherever that agent is registered, like `hold_paths` with `action: list`.
+
+The local CLI and the dashboard are never confined. With `--project`, the local board also includes sibling checkouts, and it shows every name.

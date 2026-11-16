@@ -157,13 +157,14 @@ fn board_shows_holds_edits_stopped_edits_and_handoffs() {
     assert_eq!(wt.blocked.len(), 1);
     let s = &wt.blocked[0];
     assert_eq!(
-        (s.agent.as_str(), s.path.as_str(), s.holder.as_str()),
-        ("bob@shop-wt", "src/a.rs", "alice@shop")
+        (s.agent.as_str(), s.path.as_str(), s.holder.as_deref()),
+        ("bob@shop-wt", "src/a.rs", Some("alice@shop"))
     );
     assert_eq!(
-        (s.holder_project.as_str(), s.pattern.as_str()),
-        ("shop", "src/a.rs")
+        (s.holder_project.as_deref(), s.pattern.as_deref()),
+        (Some("shop"), Some("src/a.rs"))
     );
+    assert!(!b.confined && !b.history_truncated);
 
     // Nothing happened in blog; it has no section.
     assert!(b.projects.iter().all(|p| p.project != "blog"));
@@ -187,8 +188,8 @@ fn board_shows_holds_edits_stopped_edits_and_handoffs() {
     let r = &b.requests[0];
     assert_eq!(r.title, "Review the parser");
     assert_eq!(
-        (r.from.as_str(), r.to.clone()),
-        ("alice@shop", vec!["carol@blog".to_string()])
+        (r.from.as_deref(), r.to.clone(), r.to_hidden, r.owner_hidden),
+        (Some("alice@shop"), vec!["carol@blog".to_string()], 0, false)
     );
     assert_eq!((r.status.as_str(), r.overdue), ("open", false));
 
@@ -262,7 +263,7 @@ fn project_filter_includes_sibling_checkouts_only() {
         .store
         .board(BoardQuery {
             project: Some("shop".into()),
-            exact_project: true,
+            confined: true,
             ..Default::default()
         })
         .unwrap();
@@ -376,8 +377,188 @@ fn dashboard_snapshot_lists_recent_and_stopped_edits() {
         ("shop", "src/a.rs")
     );
     assert_eq!(snap.blocked.len(), 1);
-    assert_eq!(snap.blocked[0].blocked.holder, "alice@shop");
+    assert_eq!(
+        snap.blocked[0].blocked.holder.as_deref(),
+        Some("alice@shop")
+    );
     let v = serde_json::to_value(&snap).unwrap();
     assert_eq!(v["edits"][0]["agent"], "alice@shop");
     assert_eq!(v["blocked"][0]["project"], "shop-wt");
+}
+
+/// Review round 1, P1 x2: a confined board (what a remote caller gets) must not name agents,
+/// projects or hold patterns that belong only to other projects, even inside records that
+/// are in view: the holder of a stopped edit, and request senders, recipients and owners.
+#[test]
+fn a_confined_board_hides_details_from_other_projects() {
+    let fx = Fx::new();
+    // alice (shop) holds src/a.rs; bob (shop-wt, the sibling checkout) is stopped on it.
+    fx.edit("alice@shop", &fx.main, "src/a.rs");
+    assert_eq!(
+        fx.edit("bob@shop-wt", &fx.wt, "src/a.rs").conflicts.len(),
+        1
+    );
+    // A request from shop to shop-wt and blog, and one from blog to shop-wt that carol owns.
+    fx.send(
+        "alice@shop",
+        "bob@shop-wt",
+        "Mixed recipients",
+        Some(NewRequest::default()),
+    );
+    fx.store
+        .send_message(SendMessage {
+            from: "alice@shop".into(),
+            to: vec!["bob@shop-wt".into(), "carol@blog".into()],
+            cc: vec![],
+            subject: "Two projects".into(),
+            body: "x".into(),
+            importance: Importance::Normal,
+            ack_required: false,
+            reply_to: None,
+            thread_id: None,
+            request: Some(NewRequest::default()),
+        })
+        .unwrap();
+    fx.send(
+        "carol@blog",
+        "bob@shop-wt",
+        "From outside",
+        Some(NewRequest::default()),
+    );
+    let outside = fx
+        .board(None)
+        .requests
+        .iter()
+        .find(|r| r.title == "From outside")
+        .unwrap()
+        .request_id
+        .clone();
+    fx.store
+        .update_request(RequestUpdate {
+            agent: "carol@blog".into(),
+            request_id: outside,
+            action: RequestAction::Claim,
+            note: None,
+            due_in_seconds: None,
+        })
+        .unwrap();
+
+    // The local, sibling-aware view keeps every name.
+    let local = fx.board(Some(&fx.wt));
+    let blocked = &project(&local, "shop-wt").blocked[0];
+    assert_eq!(blocked.holder.as_deref(), Some("alice@shop"));
+
+    let b = fx
+        .store
+        .board(BoardQuery {
+            project: Some("shop-wt".into()),
+            confined: true,
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(b.confined);
+    let slugs: Vec<&str> = b.projects.iter().map(|p| p.project.as_str()).collect();
+    assert_eq!(slugs, ["shop-wt"]);
+    let s = &b.projects[0].blocked[0];
+    assert_eq!(
+        (s.agent.as_str(), s.path.as_str()),
+        ("bob@shop-wt", "src/a.rs")
+    );
+    assert_eq!(
+        (&s.holder, &s.holder_project, &s.pattern),
+        (&None, &None, &None)
+    );
+
+    let by_title = |t: &str| b.requests.iter().find(|r| r.title == t).unwrap();
+    let mixed = by_title("Mixed recipients");
+    assert_eq!(
+        mixed.from, None,
+        "alice is registered to shop, outside the view"
+    );
+    assert_eq!(mixed.to, ["bob@shop-wt"]);
+    let two = by_title("Two projects");
+    assert_eq!(
+        (two.to.clone(), two.to_hidden),
+        (vec!["bob@shop-wt".to_string()], 1)
+    );
+    let claimed = by_title("From outside");
+    assert_eq!(
+        (claimed.from.as_deref(), claimed.owner.as_deref()),
+        (None, None)
+    );
+    assert!(claimed.owner_hidden);
+    let agents: Vec<&str> = b.agents.iter().map(|a| a.address.as_str()).collect();
+    assert_eq!(agents, ["bob@shop-wt"]);
+
+    let text = serde_json::to_string(&b).unwrap();
+    for leaked in ["alice@shop", "carol@blog", "\"shop\"", "blog"] {
+        assert!(!text.contains(leaked), "{leaked} leaked: {text}");
+    }
+
+    let unnamed = fx.store.board(BoardQuery {
+        confined: true,
+        ..Default::default()
+    });
+    assert!(matches!(unnamed, Err(Error::Invalid(_))));
+}
+
+/// Review round 1, P2: the event scan cap counts only events the board can show, and
+/// reaching it is reported instead of silently dropping in-window edits.
+#[test]
+fn the_event_scan_cap_counts_relevant_events_and_reports_when_hit() {
+    let fx = Fx::new();
+    fx.edit("alice@shop", &fx.main, "src/first.rs");
+    let db = rusqlite::Connection::open(fx._dir.path().join("home").join(DB_FILE)).unwrap();
+    // Copies of that event, in the same window: `n` of them, with `auto` set as given and
+    // in the given project.
+    let copies = |n: u32, auto: bool, project_id: Option<&str>, tag: &str| {
+        db.execute(
+            "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < ?1)
+             INSERT INTO events (event_id, node_id, ts, actor, kind, payload)
+             SELECT ?4 || x, e.node_id, e.ts, e.actor, 'hold.updated',
+                    json_set(e.payload, '$.auto', json(?2), '$.pattern', 'src/' || ?4 || x,
+                             '$.project_id', coalesce(?3, json_extract(e.payload, '$.project_id')))
+             FROM n CROSS JOIN (SELECT * FROM events WHERE kind = 'hold.acquired' LIMIT 1) e",
+            rusqlite::params![n, if auto { "true" } else { "false" }, project_id, tag],
+        )
+        .unwrap();
+    };
+    let blog_id = fx
+        .store
+        .projects()
+        .unwrap()
+        .into_iter()
+        .find(|p| p.slug == "blog")
+        .unwrap()
+        .project_id;
+    // Manual hold updates, and edit-hook events in another project, do not count.
+    copies(BOARD_EVENT_SCAN_CAP, false, None, "manual-");
+    copies(BOARD_EVENT_SCAN_CAP, true, Some(&blog_id), "blog-");
+    let shop = || {
+        fx.store
+            .board(BoardQuery {
+                project: Some("shop".into()),
+                confined: true,
+                ..Default::default()
+            })
+            .unwrap()
+    };
+    let b = shop();
+    assert_eq!(
+        b.projects[0].edits.len(),
+        1,
+        "manual updates must not use up the cap"
+    );
+    assert!(!b.history_truncated);
+
+    // More edit-hook events in view than the cap: reported.
+    copies(BOARD_EVENT_SCAN_CAP, true, None, "auto-");
+    let b = shop();
+    assert!(b.history_truncated);
+    assert!(
+        b.projects[0].truncated,
+        "the edit list is also cut at its limit"
+    );
+    let all = fx.board(None);
+    assert!(all.history_truncated);
 }

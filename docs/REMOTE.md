@@ -281,7 +281,7 @@ Bearer tokens and OAuth grants follow the same rules.
 | `register_agent` | Only the connection's own identity |
 | `threads` | Only threads the agent sent or received in |
 | `activity_feed`, `activity_summarize`, `resource_find` | Node-wide, read-only awareness (no message bodies) |
-| `work_board` | A `project` matching the globs (required); that one project, without sibling checkouts |
+| `work_board` | A `project` matching the globs (required). Returns a confined board: that one project, no sibling checkouts, and agents, projects and hold patterns from other projects hidden ([BOARD.md](BOARD.md#remote-connections)) |
 | `orphans_list` | Lapsed registrations only; the process scan is never run for remote peers |
 | `resource_reap` | **Never** (remote reaping is disabled) |
 

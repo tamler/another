@@ -877,7 +877,7 @@ fn board_command(
         project,
         since_ms: Some(since_ms),
         limit,
-        exact_project: false,
+        confined: false,
     })?;
     Ok(emit(json, &board, output::board))
 }

@@ -684,21 +684,29 @@ pub fn board(b: &another_core::Board) -> String {
         if !p.blocked.is_empty() {
             let _ = writeln!(out, "  stopped edits");
             for s in &p.blocked {
+                let held_by = match (&s.holder, &s.holder_project, &s.pattern) {
+                    (Some(h), Some(hp), Some(pat)) => format!("held by {h} ({hp}:{pat})"),
+                    _ => "held in a project outside this view".to_string(),
+                };
                 let _ = writeln!(
                     out,
-                    "    {}  {} on {}, held by {} ({}:{})",
+                    "    {}  {} on {}, {held_by}",
                     ago(&s.at, now),
                     s.agent,
-                    s.path,
-                    s.holder,
-                    s.holder_project,
-                    s.pattern
+                    s.path
                 );
             }
         }
         if p.truncated {
             let _ = writeln!(out, "  (more edits than --limit shows)");
         }
+    }
+    if b.history_truncated {
+        let _ = writeln!(
+            out,
+            "\n(edit history stopped after {} events; older edits in this window may be missing. Narrow --since or --project.)",
+            another_core::BOARD_EVENT_SCAN_CAP
+        );
     }
     let _ = writeln!(out, "\nAgents");
     if b.agents.is_empty() {
@@ -747,21 +755,25 @@ pub fn board(b: &another_core::Board) -> String {
         } else {
             r.status.as_str()
         };
-        let to = if r.to.is_empty() {
+        let mut to = r.to.clone();
+        if r.to_hidden > 0 {
+            to.push(format!("{} outside this view", r.to_hidden));
+        }
+        let to = if to.is_empty() {
             "nobody".to_string()
         } else {
-            r.to.join(", ")
+            to.join(", ")
         };
-        let owner = r
-            .owner
-            .as_deref()
-            .map(|o| format!(", owner {o}"))
-            .unwrap_or_default();
+        let owner = match (&r.owner, r.owner_hidden) {
+            (Some(o), _) => format!(", owner {o}"),
+            (None, true) => ", owner outside this view".to_string(),
+            (None, false) => String::new(),
+        };
+        let from = r.from.as_deref().unwrap_or("an agent outside this view");
         let _ = writeln!(
             out,
-            "  {status}  {}  from {} to {to}{owner}, opened {}  [{}]",
+            "  {status}  {}  from {from} to {to}{owner}, opened {}  [{}]",
             r.title,
-            r.from,
             ago(&r.created_at, now),
             r.request_id
         );

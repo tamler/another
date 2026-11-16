@@ -828,7 +828,8 @@ impl AnotherMcp {
         Parameters(a): Parameters<WorkBoardArgs>,
     ) -> ToolResult<another_core::Board> {
         // A remote caller is held to the one project its globs allowed (checked before this
-        // runs); sibling checkouts may fall outside them.
+        // runs). Its board is confined: no sibling checkouts, and agent names, projects and
+        // patterns from other projects are hidden.
         let remote = crate::remote::current_scope().is_some();
         self.run(move |s| {
             let since_ms = match a.since {
@@ -844,7 +845,7 @@ impl AnotherMcp {
             };
             s.board(another_core::BoardQuery {
                 project: a.project,
-                exact_project: remote,
+                confined: remote,
                 since_ms,
                 limit: a.limit.unwrap_or(0),
             })

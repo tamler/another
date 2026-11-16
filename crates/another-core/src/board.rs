@@ -30,18 +30,22 @@ pub const DEFAULT_BOARD_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 /// Default and largest number of items in each list.
 pub const DEFAULT_BOARD_LIMIT: u32 = 20;
 pub const MAX_BOARD_LIMIT: u32 = 200;
-/// How many hold events one read will scan, newest first.
-const EVENT_SCAN_CAP: u32 = 5_000;
+/// How many edit-hook and stopped-edit events in view one read will scan, newest first.
+/// The cap applies after the window, project and edit-hook filters; reaching it sets
+/// [`Board::history_truncated`].
+pub const BOARD_EVENT_SCAN_CAP: u32 = 5_000;
 
 /// Input for [`Store::board`].
 #[derive(Debug, Clone, Default)]
 pub struct BoardQuery {
     /// Project slug or absolute path. Sibling checkouts of the same repository are included
-    /// unless `exact_project` is set.
+    /// unless `confined` is set.
     pub project: Option<String>,
-    /// With `project`, leave out sibling checkouts (a remote caller's globs name projects,
-    /// and a sibling may be outside them).
-    pub exact_project: bool,
+    /// For a caller allowed to see only `project` (a remote connection): leave out sibling
+    /// checkouts, and hide agent names, projects and hold patterns that belong only to
+    /// other projects (the holder of a stopped edit; request senders, recipients and owners
+    /// registered elsewhere). Requires `project`.
+    pub confined: bool,
     /// Edits and stopped edits at or after this time (ms). Default: the last 24 hours.
     pub since_ms: Option<i64>,
     /// Items per list (default 20, at most 200).
@@ -57,6 +61,11 @@ pub struct Board {
     pub since: String,
     /// The project filter, when one was given.
     pub project: Option<String>,
+    /// Details from outside `project` are hidden (see [`BoardQuery::confined`]).
+    pub confined: bool,
+    /// The scan of edit-hook and stopped-edit events stopped at [`BOARD_EVENT_SCAN_CAP`];
+    /// older edits inside the window may be missing. Narrow `since` or `project`.
+    pub history_truncated: bool,
     /// Projects with live holds, recent edits or stopped edits; most recently active first.
     /// A project named by the filter is listed even when it is quiet.
     pub projects: Vec<BoardProject>,
@@ -113,10 +122,11 @@ pub struct BoardBlocked {
     /// The agent that was stopped.
     pub agent: String,
     pub path: String,
-    /// Who held it, in which project, under which pattern.
-    pub holder: String,
-    pub holder_project: String,
-    pub pattern: String,
+    /// Who held it, in which project, under which pattern. `None` on a confined board when
+    /// the holding project is outside the view.
+    pub holder: Option<String>,
+    pub holder_project: Option<String>,
+    pub pattern: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -144,9 +154,15 @@ pub struct BoardRequest {
     pub status: String,
     /// Past its due time but not yet marked stale (nothing has swept since).
     pub overdue: bool,
-    pub from: String,
+    /// `None` on a confined board when the sender is registered outside the view.
+    pub from: Option<String>,
+    /// Recipients in view.
     pub to: Vec<String>,
+    /// Recipients hidden because they are registered outside the view (confined boards).
+    pub to_hidden: u32,
     pub owner: Option<String>,
+    /// The request has an owner who is registered outside the view (confined boards).
+    pub owner_hidden: bool,
     pub created_at: String,
     pub updated_at: String,
     pub due_at: Option<String>,
@@ -177,6 +193,11 @@ impl Store {
             n => n.min(MAX_BOARD_LIMIT),
         } as usize;
         let local = self.node_id().to_string();
+        if query.confined && query.project.is_none() {
+            return Err(crate::error::Error::Invalid(
+                "a confined board needs a project".into(),
+            ));
+        }
         self.read(|conn| {
             let node: String = conn.query_row(
                 "SELECT display_name FROM nodes WHERE node_id = ?1",
@@ -187,11 +208,20 @@ impl Store {
             // The projects in view: all of this node's, or the named one and its siblings.
             let scope: Option<HashSet<String>> = match &query.project {
                 None => None,
-                Some(key) => Some(project_scope(conn, &local, key, !query.exact_project)?),
+                Some(key) => Some(project_scope(conn, &local, key, !query.confined)?),
             };
             let in_scope = |id: &str| scope.as_ref().map(|s| s.contains(id)).unwrap_or(true);
             let by_id: HashMap<&str, &ProjectRow> =
                 projects.iter().map(|p| (p.id.as_str(), p)).collect();
+            // Slugs of the projects in view, for details that name a project by slug.
+            let slugs_in_view: HashSet<&str> = projects
+                .iter()
+                .filter(|p| in_scope(&p.id))
+                .map(|p| p.slug.as_str())
+                .collect();
+            // On a confined board, keep a stopped edit's holder only when the holding
+            // project is in view.
+            let show_project = |slug: &str| !query.confined || slugs_in_view.contains(slug);
 
             let mut sections: BTreeMap<String, BoardProject> = BTreeMap::new();
             let mut latest: HashMap<String, i64> = HashMap::new();
@@ -278,25 +308,45 @@ impl Store {
                 }
             }
 
-            // Edits and stopped edits, newest first, from this node's own events.
+            // Edits and stopped edits, newest first, from this node's own events. Only events
+            // that can appear on this board count toward the scan cap: edit-hook holds and
+            // stopped edits, in the window, in a project in view.
+            let mut history_truncated = false;
             {
+                let scope_json: Option<String> = scope
+                    .as_ref()
+                    .map(|s| serde_json::to_string(&s.iter().collect::<Vec<_>>()))
+                    .transpose()?;
                 let mut stmt = conn.prepare(
                     "SELECT ts, actor, kind, payload FROM events
                      WHERE node_id = ?1 AND ts >= ?2
-                       AND kind IN ('hold.acquired', 'hold.updated', 'hold.blocked')
-                     ORDER BY seq DESC LIMIT ?3",
+                       AND (kind = 'hold.blocked'
+                            OR (kind IN ('hold.acquired', 'hold.updated')
+                                AND json_extract(payload, '$.auto') = 1))
+                       AND (?3 IS NULL OR json_extract(payload, '$.project_id')
+                                          IN (SELECT value FROM json_each(?3)))
+                     ORDER BY seq DESC LIMIT ?4",
                 )?;
-                let rows = stmt.query_map(params![local, since, EVENT_SCAN_CAP], |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?,
-                    ))
-                })?;
+                let rows = stmt
+                    .query_map(
+                        params![local, since, scope_json, BOARD_EVENT_SCAN_CAP + 1],
+                        |r| {
+                            Ok((
+                                r.get::<_, i64>(0)?,
+                                r.get::<_, String>(1)?,
+                                r.get::<_, String>(2)?,
+                                r.get::<_, String>(3)?,
+                            ))
+                        },
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                if rows.len() > BOARD_EVENT_SCAN_CAP as usize {
+                    history_truncated = true;
+                }
                 let mut seen: HashSet<(String, String, String)> = HashSet::new();
-                for row in rows {
-                    let (ts, actor, kind, payload) = row?;
+                for (ts, actor, kind, payload) in
+                    rows.into_iter().take(BOARD_EVENT_SCAN_CAP as usize)
+                {
                     let p: Value = serde_json::from_str(&payload).unwrap_or(Value::Null);
                     let text = |v: &Value, k: &str| {
                         v.get(k).and_then(Value::as_str).unwrap_or("").to_string()
@@ -322,13 +372,15 @@ impl Store {
                                 s.truncated = true;
                                 break;
                             }
+                            let holder_project = text(c, "project");
+                            let shown = show_project(&holder_project);
                             s.blocked.push(BoardBlocked {
                                 at: fmt_ts(ts),
                                 agent: actor.clone(),
                                 path: text(c, "path"),
-                                holder: text(c, "holder"),
-                                holder_project: text(c, "project"),
-                                pattern: text(c, "pattern"),
+                                holder: shown.then(|| text(c, "holder")),
+                                pattern: shown.then(|| text(c, "pattern")),
+                                holder_project: shown.then_some(holder_project),
                             });
                         }
                         continue;
@@ -368,8 +420,15 @@ impl Store {
                 .filter(|a| scope.is_none() || a.project_id.as_deref().is_some_and(&in_scope))
                 .map(|a| a.id.as_str())
                 .collect();
-            let (requests, requests_truncated, named) =
-                load_requests(conn, &local, now, scope.as_ref().map(|_| &agent_ids), limit)?;
+            let only = scope.as_ref().map(|_| &agent_ids);
+            let (requests, requests_truncated, named) = load_requests(
+                conn,
+                &local,
+                now,
+                only,
+                if query.confined { only } else { None },
+                limit,
+            )?;
             let mail = load_mail_counts(conn)?;
             let mut out_agents = Vec::new();
             for a in &agents {
@@ -408,6 +467,8 @@ impl Store {
                 now: fmt_ts(now),
                 since: fmt_ts(since),
                 project: query.project.clone(),
+                confined: query.confined,
+                history_truncated,
                 projects: out_projects.into_iter().map(|(_, s)| s).collect(),
                 agents: out_agents,
                 requests,
@@ -515,14 +576,18 @@ type PendingRequests = (Vec<BoardRequest>, bool, HashMap<String, u32>);
 
 /// Pending requests stored on this node, oldest first, and how many each agent is named on
 /// (a recipient) or owns. With `only`, a request is kept when its sender, owner or a
-/// recipient is one of those agents.
+/// recipient is one of those agents. With `visible`, participants outside that set are
+/// hidden: the sender becomes `None`, recipients are counted in `to_hidden`, and an owner
+/// sets `owner_hidden`.
 fn load_requests(
     conn: &Connection,
     local: &str,
     now: i64,
     only: Option<&HashSet<&str>>,
+    visible: Option<&HashSet<&str>>,
     limit: usize,
 ) -> Result<PendingRequests> {
+    let seen = |id: &str| visible.map(|v| v.contains(id)).unwrap_or(true);
     let mut stmt = conn.prepare(
         "SELECT r.request_id, r.title, r.status, r.due_at, r.created_at, r.updated_at,
                 r.created_by, ca.address, r.owner_id, oa.address, r.message_id
@@ -588,14 +653,19 @@ fn load_requests(
             truncated = true;
             continue;
         }
+        let owner_shown = owner_id.as_deref().is_none_or(&seen);
+        let (to_shown, to_hidden): (Vec<_>, Vec<_>) =
+            to.into_iter().partition(|(a, _)| seen(a.as_str()));
         out.push(BoardRequest {
             request_id: id,
             title,
             overdue: status == "open" && due.is_some_and(|d| d <= now),
             status,
-            from,
-            to: to.into_iter().map(|(_, a)| a).collect(),
-            owner,
+            from: seen(&from_id).then_some(from),
+            to: to_shown.into_iter().map(|(_, a)| a).collect(),
+            to_hidden: to_hidden.len() as u32,
+            owner: if owner_shown { owner } else { None },
+            owner_hidden: !owner_shown,
             created_at: fmt_ts(created),
             updated_at: fmt_ts(updated),
             due_at: fmt_opt(due),
