@@ -448,9 +448,12 @@ pub(crate) fn allowed_towards(conn: &Connection, node: &str, perm: Perm) -> Resu
 /// TCP reachability of a foreign resource from this machine.
 pub fn reachable(endpoint: Option<&str>, port: Option<u16>) -> bool {
     use std::net::{TcpStream, ToSocketAddrs};
+    // The authority: after `scheme://`, up to the first `/`, `?` or `#`, without a
+    // `user@` prefix (FINDINGS-main-reachable; `derive_port` cuts the same way).
     let host = endpoint
         .map(|e| e.split_once("://").map_or(e, |(_, rest)| rest))
-        .map(|e| e.split('/').next().unwrap_or_default().to_string());
+        .map(|e| e.split(['/', '?', '#']).next().unwrap_or_default())
+        .map(|e| e.rsplit_once('@').map_or(e, |(_, host)| host).to_string());
     let (host, port) = match host {
         Some(h) if h.starts_with('[') => {
             let (addr, rest) = h.split_once(']').unwrap_or((&h, ""));
