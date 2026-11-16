@@ -167,13 +167,14 @@ fn db_state(fx: &Fixture) -> Vec<String> {
 }
 
 fn cache_sql(fx: &Fixture, project: &Path, sql: &str) {
+    // By slug: the stored path is the canonical one, which differs from the fixture's on
+    // some platforms (Windows).
+    let slug = fx.store.notes(&fx.path(project), 1).unwrap().project;
     let db = rusqlite::Connection::open(fx.home.join("another.db")).unwrap();
     let changed = db
         .execute(
-            &format!(
-                "{sql} WHERE project_id = (SELECT project_id FROM projects WHERE abs_path = ?1)"
-            ),
-            [fx.path(project)],
+            &format!("{sql} WHERE project_id = (SELECT project_id FROM projects WHERE slug = ?1)"),
+            [slug],
         )
         .unwrap();
     assert_eq!(
