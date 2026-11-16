@@ -49,7 +49,7 @@ another request next --agent bob@shop --include-stale --due 3600
 - **Atomic:** the pick and the claim happen in one write transaction, so two agents (or processes) can never claim one item from the same state. A later stale takeover is a reassignment, recorded with the previous owner.
 - **Nothing queued:** `next` prints `nothing queued for you` (JSON `null`) and writes nothing of its own. Like every request command, it first marks overdue requests stale, and that transition is recorded once.
 - **Deadline:** without `--due`, a future due time from the sender is kept and a past one is cleared.
-- **Claim by id:** `another request claim <id>` works on queue items for members only.
+- **Claim by id:** `another request claim <id>` works on queue items for members only. Completing an unclaimed item takes it too, so it is also for members, plus the item's sender; an owner may complete its own item even after leaving.
 - **The thread:** the claimer gets the item's message in its thread, already marked read, so `reply` and the `Done:` mail work as for any request. If the claimer was already a direct recipient, its mail is left as it was (still unread if it was).
 - **Release and complete:** release puts the item back as open, dropping a past deadline. Completion mails the sender `Done:` as usual.
 
@@ -61,7 +61,7 @@ Every queue event carries `group_id` and `priority`:
 
 - `request.created`;
 - `request.claimed`, with `via: "next"` or `"id"`;
-- `request.released`, `request.cancelled` and `request.stale`;
+- `request.released`, `request.cancelled` and `request.stale`, including one marked from the dashboard;
 - `request.updated`, when an owner moves a queue item's deadline;
 - `request.completed`, with `claimed_at` and `duration_ms` (both `null` for an item completed without a claim).
 
@@ -69,6 +69,6 @@ Group changes are `group.created`, `group.member_added`, `group.member_removed` 
 
 ## Limits in this release
 
-- **Local only.** Groups, their members and queue items stay on this node and are never sent to peers.
+- **Local only.** Groups, their members and queue items stay on this node and are never sent to peers. Federation shares neither group events, nor a queue item's message, nor any request event that carries a `group_id`.
 - **No remote access.** Remote token and OAuth callers cannot send to a group, take or act on a queue item, and do not see queue items or group events in `fetch_inbox`, `whats_new`, `activity_feed` or `GET /activity`. Scoped remote access is planned.
 - **Not covered yet:** group management through MCP, queue counts in the session-start digest and the board, priority aging, and moving items between groups.

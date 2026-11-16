@@ -534,7 +534,14 @@ impl Store {
                 }
                 payload
             };
-            if let (RequestAction::Claim, Some(q)) = (input.action, &queue) {
+            // Taking a queue item, by claim or by completing it unclaimed, is for members. The
+            // owner may still complete its own item after leaving, and the sender its own.
+            let takes = match input.action {
+                RequestAction::Claim => true,
+                RequestAction::Complete => !owned_by_me && creator_id != me.id,
+                RequestAction::Release | RequestAction::Cancel => false,
+            };
+            if let (true, Some(q)) = (takes, &queue) {
                 if !is_member(tx, &q.group_id, &me.id)? {
                     return Err(Error::Forbidden(format!(
                         "{} is not a member of the group that queues request {rid}; join it first",

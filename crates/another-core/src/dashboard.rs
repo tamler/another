@@ -705,11 +705,11 @@ impl Store {
     pub fn expire_request_from_dashboard(&self, request_id: &str) -> Result<Request> {
         self.write(|tx| {
             requests::stale_overdue_tx(tx)?;
-            let (node_id, status): (String, String) = tx
+            let (node_id, status, group_id): (String, String, Option<String>) = tx
                 .query_row(
-                    "SELECT node_id, status FROM requests WHERE request_id = ?1",
+                    "SELECT node_id, status, group_id FROM requests WHERE request_id = ?1",
                     [request_id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()?
                 .ok_or_else(|| Error::NotFound(format!("unknown request {request_id:?}")))?;
@@ -724,15 +724,16 @@ impl Store {
                 ))),
                 "stale" => requests::get_request(tx, request_id),
                 "open" | "claimed" => {
-                    tx.emit(
-                        "dashboard",
-                        "request.stale",
-                        serde_json::json!({
-                            "request_id": request_id,
-                            "from": status,
-                            "reason": "dashboard",
-                        }),
-                    )?;
+                    let mut payload = serde_json::json!({
+                        "request_id": request_id,
+                        "from": status,
+                        "reason": "dashboard",
+                    });
+                    // Every event about a queue item carries its group, which keeps it local.
+                    if let Some(g) = &group_id {
+                        payload["group_id"] = serde_json::json!(g);
+                    }
+                    tx.emit("dashboard", "request.stale", payload)?;
                     tx.execute(
                         "UPDATE requests SET status = 'stale', updated_at = ?2 WHERE request_id = ?1",
                         params![request_id, tx.now],

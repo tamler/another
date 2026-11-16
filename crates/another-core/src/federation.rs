@@ -192,8 +192,14 @@ fn classify(kind: &str, payload: &Value, origin: &str) -> Share {
         "node.created" | "node.renamed" | "project.ensured" | "agent.registered" => {
             Share::Directory
         }
-        // A queue item's message stays on this node whatever its recipients say.
+        // A queue item stays on this node: its message whatever its recipients say, and every
+        // request event about it, all of which carry its group (FINDINGS-152 F1).
         "message.sent" if !payload.get("group_id").unwrap_or(&Value::Null).is_null() => {
+            Share::Never
+        }
+        k if k.starts_with("request.")
+            && !payload.get("group_id").unwrap_or(&Value::Null).is_null() =>
+        {
             Share::Never
         }
         "message.sent" => {
@@ -1737,6 +1743,27 @@ mod tests {
             Share::Mail(vec!["B".into()]),
             "ordinary mail is unchanged"
         );
+        // Every request event about a queue item stays local (FINDINGS-152 F1).
+        for kind in [
+            "request.created",
+            "request.claimed",
+            "request.updated",
+            "request.released",
+            "request.completed",
+            "request.cancelled",
+            "request.stale",
+        ] {
+            assert_eq!(
+                classify(kind, &json!({ "request_id": "r", "group_id": "g1" }), o),
+                Share::Never,
+                "{kind}"
+            );
+            assert_eq!(
+                classify(kind, &json!({ "request_id": "r", "group_id": null }), o),
+                Share::Feed(vec![]),
+                "{kind} on a direct request is unchanged"
+            );
+        }
     }
 
     #[test]

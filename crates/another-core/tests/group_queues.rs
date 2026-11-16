@@ -557,3 +557,58 @@ fn concurrent_next_never_hands_out_an_item_twice() {
         .count();
     assert_eq!(claims, total);
 }
+
+/// Adversarial F1 (review of #152): QUEUES.md and D77 say queue items "stay on this node
+/// and are never sent to peers". Nothing of a queue item may be offered to a hub: no event
+/// that names its group, and not its subject.
+#[test]
+fn adv152_queue_item_events_never_leave_the_node() {
+    let fx = Fx::new();
+    fx.reviewers();
+    let rid = fx.queue("Review the secret migration", Priority::High, None);
+    let taken = fx.next("bob").expect("bob takes the item");
+    assert_eq!(taken.request_id, rid);
+    fx.act("bob", &rid, RequestAction::Complete, None).unwrap();
+
+    let (out, _) = fx.store.outbound_events(0, 10_000).unwrap();
+    let leaked: Vec<String> = out
+        .iter()
+        .filter(|e| e.payload.contains("group_id") || e.payload.contains("secret migration"))
+        .map(|e| format!("{} {}", e.kind, e.payload))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "queue item events offered to peers:\n{}",
+        leaked.join("\n")
+    );
+}
+
+/// Adversarial probe (review of #152): an agent outside the group, who neither sent nor
+/// owns a queue item, may not release, complete or cancel it.
+#[test]
+fn adv152_outsiders_cannot_act_on_a_queue_item() {
+    let fx = Fx::new();
+    fx.reviewers();
+    let rid = fx.queue("Review", Priority::Normal, None);
+    for action in [
+        RequestAction::Release,
+        RequestAction::Complete,
+        RequestAction::Cancel,
+    ] {
+        assert!(
+            fx.act("carol", &rid, action, None).is_err(),
+            "carol could {action:?} an open queue item"
+        );
+    }
+    fx.next("bob").unwrap();
+    for action in [
+        RequestAction::Release,
+        RequestAction::Complete,
+        RequestAction::Cancel,
+    ] {
+        assert!(
+            fx.act("carol", &rid, action, None).is_err(),
+            "carol could {action:?} bob's queue item"
+        );
+    }
+}
