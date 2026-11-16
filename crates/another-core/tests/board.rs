@@ -704,7 +704,7 @@ fn a_later_edit_or_an_old_stop_does_not_leave_an_agent_blocked() {
 }
 
 /// R1 P2a: an event written while the clock was stepped back must not hide a stop that is
-/// still recent. (D70: a step back of up to 24 hours is covered.)
+/// still recent. (D70: a step back of up to an hour is covered.)
 #[test]
 fn a_clock_step_back_does_not_erase_a_recent_live_stop() {
     let fx = Fx::new();

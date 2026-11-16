@@ -62,8 +62,10 @@ pub(crate) struct Stop {
     pub holds: Vec<String>,
 }
 
-/// How far the local clock may have stepped back without hiding a recent stop.
-const FLOOR_SLACK_MS: i64 = 24 * 3600 * 1000;
+/// How far the local clock may have stepped back without hiding a recent stop. Every read
+/// scans this much history beyond the window, so it covers real corrections (NTP steps are
+/// seconds, a wrong time zone an hour) without walking a busy day (R5 N1).
+const FLOOR_SLACK_MS: i64 = 3600 * 1000;
 
 /// Agents of `node` whose newest edit-hook outcome within the live window is a stop with a
 /// blocker that is still live, keyed by agent id. With `only`, just that agent.
@@ -75,7 +77,7 @@ pub(crate) fn current_stops(
 ) -> Result<HashMap<String, Stop>> {
     let since = now - LIVE_MS;
     // Local events are appended in sequence order, and their times follow it unless the clock
-    // stepped back. The newest event from a day before the window bounds the scan, so a step
+    // stepped back. The newest event from an hour before the window bounds the scan, so a step
     // back of up to `FLOOR_SLACK_MS` cannot push a recent stop below the floor (R1 P2a).
     let floor: i64 = conn
         .query_row(
@@ -240,5 +242,78 @@ impl Store {
             now,
             stops.get(&me.id),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::{AcquireHolds, Clock, Program, RegisterAgent};
+
+    const HOUR_MS: i64 = 3600 * 1000;
+
+    /// SQLite steps spent reading a quiet agent's state after `hours` of hold renewals by
+    /// another agent, `per_hour` of them each hour.
+    fn steps_for_quiet_read(hours: i64, per_hour: i64) -> u64 {
+        let (clock, now) = Clock::manual(1_800_000_000_000);
+        let store = Store::open_in_memory(clock).unwrap();
+        let project = store.ensure_project("t", "/w/shop").unwrap().abs_path;
+        for name in ["alice", "bob"] {
+            store
+                .register_agent(RegisterAgent {
+                    name: name.into(),
+                    program: Program::Other,
+                    project: Some(project.clone()),
+                    model: None,
+                    description: None,
+                })
+                .unwrap();
+        }
+        for _ in 0..hours * per_hour {
+            now.fetch_add(HOUR_MS / per_hour, Ordering::SeqCst);
+            store
+                .acquire_holds(AcquireHolds {
+                    agent: "alice".into(),
+                    project: project.clone(),
+                    paths: vec!["src/a.rs".into()],
+                    ttl_seconds: Some(1800),
+                    exclusive: true,
+                    reason: Some("long work".into()),
+                    repo_wide: false,
+                })
+                .unwrap();
+        }
+        let steps = Arc::new(AtomicU64::new(0));
+        let counter = steps.clone();
+        store
+            .read(|conn| {
+                conn.progress_handler(
+                    1,
+                    Some(move || {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                        false
+                    }),
+                );
+                let _clear = Deadline(conn);
+                let me = resolve_agent(conn, store.node_id(), "bob")?;
+                current_stops(conn, store.node_id(), store.now(), Some(&me.id))
+            })
+            .unwrap();
+        steps.load(Ordering::Relaxed)
+    }
+
+    /// R5 N1: a quiet agent's read walks the live window and the clock-step slack, not the
+    /// whole day, so a day of history costs about what two hours of it do.
+    #[test]
+    fn a_quiet_agents_read_does_not_walk_a_busy_day() {
+        let day = steps_for_quiet_read(24, 120);
+        let two_hours = steps_for_quiet_read(2, 120);
+        assert!(
+            day < two_hours * 2,
+            "a day of history took {day} steps, two hours took {two_hours}"
+        );
     }
 }
