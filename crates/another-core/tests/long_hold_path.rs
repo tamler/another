@@ -111,3 +111,49 @@ fn the_costliest_globs_at_the_limit_never_panic() {
         }
     }
 }
+
+/// FINDINGS-180: patterns that never passed `normalize_path` (a peer's, or a path joined
+/// to a prefix) reach the overlap checks. Run on a 2 MiB stack, like tokio's blocking
+/// threads: no length or shape panics or overflows the stack (which would abort the whole
+/// process). Anything longer than four times the path limit counts as overlapping.
+/// Nested alternations (`{a,{b,{c,d}}}` repeated) are left out: they do not panic, but at
+/// 4096 bytes one check takes seconds, a separate cost issue (queue item 49).
+#[test]
+fn overlap_checks_on_unchecked_patterns_never_panic_or_overflow() {
+    let cap = 4 * MAX_HOLD_PATH_BYTES;
+    let mut cases = Vec::new();
+    for filler in ["a", "*", "**/", "a/", "[a-z]", "{a,b}", "{**,x}/"] {
+        for len in [MAX_HOLD_PATH_BYTES, cap, cap + 1, 500_008] {
+            let mut p = String::from("src/");
+            while p.len() + filler.len() <= len {
+                p.push_str(filler);
+            }
+            while p.len() < len {
+                p.push('a');
+            }
+            cases.push((filler, len, p));
+        }
+    }
+    // A deep literal path against a short glob walks the path, not the glob.
+    let deep = format!("{}x.rs", "a/".repeat((MAX_HOLD_PATH_BYTES - 4) / 2));
+    let small = std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(move || {
+            for (filler, len, p) in &cases {
+                for (a, b) in [(p.as_str(), "src/x.rs"), ("src/x.rs", p.as_str())] {
+                    let got = std::panic::catch_unwind(|| patterns_overlap(a, b));
+                    assert!(got.is_ok(), "{filler:?} at {len} bytes panicked");
+                    if *len > cap {
+                        assert_eq!(got.ok(), Some(true), "{filler:?} at {len}");
+                    }
+                }
+            }
+            for glob in ["**/x.rs", "**/a/**/x.rs", "*/**/*.rs"] {
+                assert!(patterns_overlap(glob, &deep), "{glob}");
+            }
+        })
+        .unwrap();
+    small
+        .join()
+        .expect("the overlap checks ran on a 2 MiB stack");
+}
