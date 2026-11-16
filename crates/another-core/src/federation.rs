@@ -611,6 +611,9 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
         }
         "agent.registered" => {
             agent("agent_id")?;
+            // The local name rule, so a peer without it (an older build or a forged event)
+            // cannot add an agent whose name is oversized, look-alike or not addressable.
+            crate::identity::validate_name(p.get("name").and_then(Value::as_str).unwrap_or(""))?;
             project()
         }
         "session.started" | "session.ended" | "delivery.read" | "delivery.acked" => {
