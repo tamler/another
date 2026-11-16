@@ -34,7 +34,8 @@ exit 0
 
 /// The fake Task Scheduler keeps state in marker files: `registered` and `running`. As
 /// documented for the real one, `/Delete` removes the registration but leaves a running
-/// program running. `mode` can deny everything, or only `/End`, `/Delete` or `/Query`.
+/// program running. `mode` can deny everything, or only `/End`, `/Delete`, `/Query`, or
+/// `/End` and `/Query` together.
 /// `/Query /TN <label> /V /FO CSV /NH` reports the last result 267009 (task running)
 /// while `running` exists; `/Query /FO CSV /NH` lists the registered tasks.
 const SCHTASKS: &str = r#"#!/bin/sh
@@ -47,7 +48,7 @@ missing() { echo 'ERROR: The system cannot find the file specified.' >&2; exit 1
 [ "$mode" = denied ] && deny
 case "$1" in
   /End)
-    [ "$mode" = end_denied ] && deny
+    case "$mode" in end_denied|end_query_denied) deny ;; esac
     [ -f "$dir/registered" ] || missing
     if [ -f "$dir/running" ]; then rm -f "$dir/running"; echo 'SUCCESS: terminated.'; exit 0; fi
     echo 'ERROR: The task is not running.' >&2; exit 1 ;;
@@ -56,7 +57,7 @@ case "$1" in
     [ -f "$dir/registered" ] || missing
     rm -f "$dir/registered"; echo 'SUCCESS: deleted.'; exit 0 ;;
   /Query)
-    [ "$mode" = query_denied ] && deny
+    case "$mode" in query_denied|end_query_denied) deny ;; esac
     if [ "$2" = /TN ]; then
       [ -f "$dir/registered" ] || missing
       result=0
@@ -312,7 +313,29 @@ fn task_scheduler_cases(fakes: &Fakes, env: &DaemonEnv) {
     );
     assert!(kept);
     assert!(!deleted(&calls), "{calls:?}");
-    assert!(err.contains("still answers /health"), "{err}");
+    assert!(err.contains("still in use"), "{err}");
+
+    // Review round 3: the task shows stopped and nothing answers /health, but a hung
+    // server still holds the address. A failed health check is not a stop.
+    let (hung_env, _hung) = with_hung_listener(env);
+    let (result, kept, calls) = task_uninstall(fakes, &hung_env, true, true, "ok");
+    let err = format!("{:#}", result.expect_err("a held address is an error"));
+    assert!(kept, "the definition stays for a retry");
+    assert!(!deleted(&calls), "{calls:?}");
+    assert!(fakes.is("registered"));
+    assert!(err.contains("still in use"), "{err}");
+    fakes.task(true, true);
+    fakes.mode("ok");
+    let err = format!(
+        "{:#}",
+        daemon::restart(&hung_env).expect_err("a held address blocks /Run")
+    );
+    assert!(err.contains("did not stop"), "{err}");
+    assert!(
+        !fakes.calls().iter().any(|c| c.starts_with("/Run")),
+        "{:?}",
+        fakes.calls()
+    );
 
     // Restart waits for the old server to go before `/Run`, and refuses while it answers.
     fakes.task(true, true);
@@ -330,6 +353,23 @@ fn task_scheduler_cases(fakes: &Fakes, env: &DaemonEnv) {
     // Restart reads the address from the installed definition: put back the plain one.
     fakes.mode("ok");
     daemon::install(env, false, false).unwrap();
+
+    // Review round 3: /End and every state query are refused, so the old server is not
+    // shown stopped. Restart must not /Run, and says why.
+    fakes.task(true, true);
+    fakes.mode("end_query_denied");
+    let err = format!(
+        "{:#}",
+        daemon::restart(env).expect_err("an unknown stop state blocks /Run")
+    );
+    assert!(err.contains("could not confirm"), "{err}");
+    assert!(err.contains("Access is denied"), "{err}");
+    assert!(
+        !fakes.calls().iter().any(|c| c.starts_with("/Run")),
+        "{:?}",
+        fakes.calls()
+    );
+    assert!(fakes.is("running"), "nothing was stopped");
     fakes.task(true, true);
     fakes.mode("ok");
     daemon::restart(env).unwrap();
@@ -358,4 +398,14 @@ fn with_health_server(env: &DaemonEnv) -> (DaemonEnv, std::thread::JoinHandle<()
     let mut env = env.clone();
     env.bind = format!("127.0.0.1:{port}");
     (env, server)
+}
+
+/// A copy of `env` whose address is held by a listener that never accepts, standing in
+/// for a hung server that outlived its task: connections queue, `GET /health` times out,
+/// and the port stays taken. The listener lives as long as the returned value.
+fn with_hung_listener(env: &DaemonEnv) -> (DaemonEnv, std::net::TcpListener) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut env = env.clone();
+    env.bind = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
+    (env, listener)
 }

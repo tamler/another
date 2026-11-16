@@ -687,13 +687,14 @@ pub fn uninstall(env: &DaemonEnv, dry_run: bool) -> Result<DaemonReport> {
                         // `/End` fails for a task that is not running; the state check
                         // after it decides, not its exit status.
                         let ended = exec(&commands[0])?;
-                        let (state, serving) = wait_task_down(&env.label, &bind);
+                        let (state, taken) = wait_task_down(&env.label, &bind);
                         match state {
-                            TaskRun::Stopped | TaskRun::Absent if serving => bail!(
-                                "the {} task stopped, but {bind} still answers /health, so the \
-                                 server it started may still be running (or another server uses \
-                                 that address). Nothing was deleted, and {} was kept; stop that \
-                                 server and run `another daemon uninstall` again.",
+                            TaskRun::Stopped | TaskRun::Absent if taken => bail!(
+                                "the {} task stopped, but {bind} is still in use, so the server \
+                                 it started may still be running, even if it does not answer \
+                                 (or another program uses that address). Nothing was deleted, \
+                                 and {} was kept; stop that server and run `another daemon \
+                                 uninstall` again.",
                                 env.label,
                                 path.display()
                             ),
@@ -875,21 +876,37 @@ fn task_run_state(label: &str) -> TaskRun {
 }
 
 /// After `/End`: wait up to ten seconds until Task Scheduler shows the task not running
-/// and nothing answers `GET /health` on the daemon's address. `/End` returns before the
-/// server has exited (on a hosted runner the old server was still answering, and a `/Run`
-/// right after it failed to bind), so the task's state alone does not prove the server is
-/// gone. Returns the last task state and whether the address still answered.
+/// and the daemon's address is free. `/End` returns before the server has exited (on a
+/// hosted runner the old server was still answering, and a `/Run` right after it failed
+/// to bind), so the task's state alone does not prove the server is gone. Neither does a
+/// failed `GET /health`: a hung server times out or errors while it still holds the port
+/// (review round 3). Returns the last task state and whether the address was still taken.
 fn wait_task_down(label: &str, bind: &str) -> (TaskRun, bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         let state = task_run_state(label);
-        let serving = healthy(bind);
-        let down = !serving && matches!(state, TaskRun::Stopped | TaskRun::Absent);
+        let taken = address_taken(bind);
+        let down = !taken && matches!(state, TaskRun::Stopped | TaskRun::Absent);
         if down || std::time::Instant::now() >= deadline {
-            return (state, serving);
+            return (state, taken);
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// Whether something still holds the daemon's address. The only positive proof that the
+/// old server let go is binding the address ourselves (and closing it at once), so any
+/// failure, including an address that does not resolve, counts as taken.
+fn address_taken(bind: &str) -> bool {
+    use std::net::ToSocketAddrs;
+    let Ok(addrs) = bind.to_socket_addrs() else {
+        return true;
+    };
+    let addrs: Vec<_> = addrs.collect();
+    addrs.is_empty()
+        || addrs
+            .iter()
+            .any(|addr| std::net::TcpListener::bind(addr).is_err())
 }
 
 /// The fields of one CSV line as `schtasks /FO CSV` writes it: every field quoted, `""`
@@ -959,8 +976,19 @@ pub fn restart(env: &DaemonEnv) -> Result<()> {
                 .and_then(|t| bind_in(env.manager, &t))
                 .unwrap_or_else(|| env.bind.clone());
             let ended = exec(&argv(&["schtasks", "/End", "/TN", &env.label]))?;
-            let (state, serving) = wait_task_down(&env.label, &bind);
-            if state == TaskRun::Running || serving {
+            // `/Run` only after the task is shown stopped (or gone) and the address is
+            // free; an unreadable state is not a stop (review round 3).
+            let (state, taken) = wait_task_down(&env.label, &bind);
+            if let TaskRun::Unknown(why) = &state {
+                bail!(
+                    "could not confirm that the old {} server stopped (`schtasks /End` said {}; \
+                     reading the task's state failed: {why}), so it was not started again; run \
+                     `another daemon restart` again once Task Scheduler answers",
+                    env.label,
+                    stderr_of(&ended)
+                );
+            }
+            if state == TaskRun::Running || taken {
                 bail!(
                     "the old {} server did not stop within 10 seconds (`schtasks /End` said {}; \
                      task {}; {bind} {}), so it was not started again",
@@ -971,11 +999,7 @@ pub fn restart(env: &DaemonEnv) -> Result<()> {
                     } else {
                         "not running"
                     },
-                    if serving {
-                        "still answers /health"
-                    } else {
-                        "is free"
-                    }
+                    if taken { "is still in use" } else { "is free" }
                 );
             }
             must(&argv(&["schtasks", "/Run", "/TN", &env.label]))?;
