@@ -183,7 +183,10 @@ pub fn link_for(dir: &Path) -> Option<RepoLink> {
         let target = text
             .lines()
             .find_map(|l| l.trim().strip_prefix("gitdir:"))?;
-        join_lexical(top, target.trim())
+        // Git writes a relative gitdir from the `.git` file's real location, so resolve
+        // symlinks in `top` first: a worktree opened through a symlink still finds its git dir.
+        let real_top = std::fs::canonicalize(top).unwrap_or_else(|_| top.to_path_buf());
+        join_lexical(&real_top, target.trim())
     };
     let common = match read_small(&git_dir.join("commondir")) {
         Some(c) if !c.trim().is_empty() => join_lexical(&git_dir, c.trim()),
