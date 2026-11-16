@@ -60,6 +60,15 @@ struct Fed {
     seq: AtomicU64,
 }
 
+impl Fed {
+    /// An absolute project directory under the test's temporary root, on every platform.
+    fn project_dir(&self, name: &str) -> String {
+        let dir = self._dir.path().join("projects").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.to_string_lossy().into_owned()
+    }
+}
+
 fn pair(hub: &Node, spoke: &Node) {
     let code = hub
         .store
@@ -434,7 +443,7 @@ fn leases_and_holds_cannot_name_another_nodes_agent() {
     let project = fed
         .mallory
         .store
-        .ensure_project("test", "/mallory/shop")
+        .ensure_project("test", &fed.project_dir("mallory-shop"))
         .unwrap();
     push(&fed.hub, &fed.mallory);
     let report = fed.forge(
@@ -463,7 +472,7 @@ fn a_nodes_own_events_still_sync() {
     let project = fed
         .alpha
         .store
-        .ensure_project("test", "/alpha/shop")
+        .ensure_project("test", &fed.project_dir("alpha-shop"))
         .unwrap();
     fed.alpha.store.heartbeat("carol", true).unwrap();
     fed.alpha
