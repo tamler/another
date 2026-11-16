@@ -257,24 +257,26 @@ pub struct HookStatus {
     /// Configuration presence does not verify whether Codex trusted or ran the hooks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trust_note: Option<&'static str>,
+    /// How the installed pack differs from what `hook install` writes now (empty: current).
+    pub drift: Vec<String>,
 }
 
 pub fn hook_status(rows: &[HookStatus]) -> String {
     rows.iter()
         .map(|r| {
-            format!(
-                "{:<7} {:<13} {}\n{}",
-                r.client,
-                if r.installed {
-                    "installed"
-                } else {
-                    "not installed"
-                },
-                r.config,
-                r.trust_note
-                    .map(|note| format!("  {note}\n"))
-                    .unwrap_or_default()
-            )
+            let state = match (r.installed, r.drift.is_empty()) {
+                (false, _) => "not installed",
+                (true, true) => "installed",
+                (true, false) => "out of date",
+            };
+            let mut out = format!("{:<7} {:<13} {}\n", r.client, state, r.config);
+            for d in &r.drift {
+                out.push_str(&format!("  {d}\n"));
+            }
+            if let Some(note) = r.trust_note {
+                out.push_str(&format!("  {note}\n"));
+            }
+            out
         })
         .collect()
 }

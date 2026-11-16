@@ -442,6 +442,70 @@ fn contains_ours(root: &Map<String, Value>) -> bool {
     serde_json::to_string(root).is_ok_and(|s| mentions_ours(&s))
 }
 
+/// How an installed hook pack differs from what `hook install` would write now: missing
+/// events, changed entries (command, timeout, matcher, labels), and a missing, stale or
+/// non-executable wrapper. Empty when the client has no Another hooks, or none differ.
+/// Compares parsed JSON, so formatting alone is never drift. Reads only.
+pub fn drift(env: &HookEnv, client: Client) -> Vec<String> {
+    let path = client.config_path(&env.home);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    if !contains_ours_text(&text) {
+        return Vec::new();
+    }
+    let install = format!("another hook install --client {}", client.as_str());
+    let root = match read_json(&path) {
+        Ok(Some((_, root))) => root,
+        _ => {
+            return vec![format!(
+                "{} is not a JSON object; fix it, then run `{install}`",
+                path.display()
+            )]
+        }
+    };
+    let mut out = Vec::new();
+    let hooks = root.get("hooks").and_then(Value::as_object);
+    for spec in client.specs() {
+        let present = hooks
+            .and_then(|h| h.get(spec.key))
+            .is_some_and(|v| mentions_ours(&v.to_string()));
+        if !present {
+            out.push(format!("no Another hook for {}", spec.key));
+        }
+    }
+    let mut wanted = root.clone();
+    if out.is_empty() && install_into(client, env, &mut wanted).is_ok() && wanted != root {
+        out.push(format!(
+            "Another's entries differ from what `{install}` writes (command, timeout, matcher or label)"
+        ));
+    }
+    let script = env.script_path();
+    match std::fs::read_to_string(&script) {
+        Err(_) => out.push(format!("the wrapper {} is missing", script.display())),
+        Ok(t) if t != script_text(env) => out.push(format!(
+            "the wrapper {} calls a different another binary or home than this one",
+            script.display()
+        )),
+        Ok(_) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if std::fs::metadata(&script).is_ok_and(|m| m.permissions().mode() & 0o111 == 0) {
+                    out.push(format!(
+                        "the wrapper {} is not executable",
+                        script.display()
+                    ));
+                }
+            }
+        }
+    }
+    if !out.is_empty() {
+        out.push(format!("run `{install}` to repair"));
+    }
+    out
+}
+
 fn render(root: &Map<String, Value>) -> Result<String> {
     Ok(serde_json::to_string_pretty(root)? + "\n")
 }

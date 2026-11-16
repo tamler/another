@@ -1840,6 +1840,7 @@ fn hook_command(
                             .is_ok_and(|t| t.contains(hooks::MARKER)),
                         config: path.display().to_string(),
                         trust_note: (*c == Client::Codex).then_some(hooks::CODEX_TRUST_NOTE),
+                        drift: hooks::drift(&env, *c),
                     }
                 })
                 .collect();
