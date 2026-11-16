@@ -73,6 +73,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "another-fuzz"
+version = "0.1.0"
+dependencies = [
+ "another",
+ "another-core",
+ "clap",
+ "rmcp",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
