@@ -154,17 +154,34 @@ impl Store {
     /// so a busy database fails fast instead of stalling the agent. Fails when the database
     /// is missing or its schema is not current; a normal [`Store::open`] fixes both.
     pub fn open_quick(home: &Path, busy: std::time::Duration) -> Result<Store> {
+        Self::open_existing(home, busy, false)
+    }
+
+    /// [`Store::open_quick`] on a read-only connection, for `another doctor`: every read
+    /// works, any write fails, and closing it cannot checkpoint the WAL into the main
+    /// file (a read-write connection that closes may do that, which changes the file's
+    /// bytes though not its contents).
+    pub fn open_read_only(home: &Path, busy: std::time::Duration) -> Result<Store> {
+        Self::open_existing(home, busy, true)
+    }
+
+    fn open_existing(home: &Path, busy: std::time::Duration, read_only: bool) -> Result<Store> {
         use rusqlite::OpenFlags;
         let path = home.join(DB_FILE);
+        let mode = if read_only {
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+        } else {
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+        };
         let conn = Connection::open_with_flags(
             &path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_URI
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            mode | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         conn.busy_timeout(busy)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        if !read_only {
+            conn.pragma_update(None, "synchronous", "NORMAL")?;
+        }
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version != MIGRATIONS.len() as i64 {
             return Err(Error::Invalid(format!(

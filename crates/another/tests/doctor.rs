@@ -173,6 +173,118 @@ fn a_fresh_home_is_ok_and_doctor_changes_nothing() {
     }
 }
 
+/// Every row of every table, read through one connection: a logical write by doctor that
+/// leaves the main file alone (it lands in a live WAL) still shows here.
+fn dump(conn: &rusqlite::Connection) -> Vec<String> {
+    let tables: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let mut out = Vec::new();
+    for t in tables {
+        let mut stmt = conn.prepare(&format!("SELECT * FROM \"{t}\"")).unwrap();
+        let cols = stmt.column_count();
+        let mut rows: Vec<String> = stmt
+            .query_map([], |r| {
+                let mut cells = Vec::new();
+                for i in 0..cols {
+                    let v: rusqlite::types::Value = r.get(i)?;
+                    cells.push(format!("{v:?}"));
+                }
+                Ok(cells.join("|"))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        rows.sort();
+        out.push(format!("{t}: {}", rows.join("; ")));
+    }
+    out.push(format!(
+        "user_version {}",
+        conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap()
+    ));
+    out
+}
+
+/// Review R1 of the spec: with a live WAL holding committed frames, the main file's hash
+/// says nothing. Compare every table, and the hook configs, before and after.
+#[cfg(unix)]
+#[test]
+fn doctor_changes_no_row_even_with_a_live_wal() {
+    let fx = Fx::new();
+    fx.init();
+    assert!(fx
+        .cmd(&["agent", "register", "w", "--program", "codex"])
+        .status
+        .success());
+    // Hold a connection open and commit through it, so the frames stay in the WAL.
+    let held = rusqlite::Connection::open(fx.db()).unwrap();
+    held.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    held.execute("UPDATE agents SET description = 'in the wal'", [])
+        .unwrap();
+    let wal = fx.home.join("another.db-wal");
+    assert!(std::fs::metadata(&wal).unwrap().len() > 0, "no WAL frames");
+    let settings = fx.user.join(".claude").join("settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    std::fs::write(&settings, r#"{"hooks":{}}"#).unwrap();
+
+    let rows_before = dump(&held);
+    let main_before = sha(&fx.db());
+    let settings_before = sha(&settings);
+    let (code, r) = fx.doctor();
+    assert_eq!(code, Some(0), "{r}");
+    assert_eq!(status(&r, "database"), "ok", "{r}");
+    assert_eq!(dump(&held), rows_before);
+    assert_eq!(sha(&fx.db()), main_before);
+    assert_eq!(sha(&settings), settings_before);
+}
+
+/// The one network call follows no redirect: a `/health` answering 302 to a second
+/// listener leaves that listener untouched.
+#[test]
+fn a_health_redirect_is_not_followed() {
+    let fx = Fx::new();
+    fx.init();
+    let second = TcpListener::bind("127.0.0.1:0").unwrap();
+    second.set_nonblocking(true).unwrap();
+    let target = second.local_addr().unwrap();
+    let first = TcpListener::bind("127.0.0.1:0").unwrap();
+    let bind = first.local_addr().unwrap().to_string();
+    let server = std::thread::spawn(move || {
+        if let Ok((mut s, _)) = first.accept() {
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf);
+            let reply = format!(
+                "HTTP/1.1 302 Found\r\nlocation: http://{target}/health\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+            );
+            let _ = s.write_all(reply.as_bytes());
+        }
+    });
+    let (_, r) = fx.doctor_bind(&bind);
+    server.join().unwrap();
+    assert_eq!(status(&r, "server"), "warn", "{r}");
+    assert!(
+        second.accept().is_err(),
+        "doctor followed the redirect to {target}"
+    );
+}
+
+/// Only a literal loopback IP is contacted; a name is never looked up.
+#[test]
+fn a_named_bind_is_skipped_not_resolved() {
+    let fx = Fx::new();
+    fx.init();
+    let (_, r) = fx.doctor_bind(&format!(
+        "localhost:{}",
+        closed_port().rsplit(':').next().unwrap()
+    ));
+    assert_eq!(status(&r, "server"), "skip", "{r}");
+}
+
 #[test]
 fn an_older_schema_warns_and_a_newer_one_fails_without_touching_the_file() {
     let fx = Fx::new();

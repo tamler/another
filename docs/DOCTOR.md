@@ -34,16 +34,30 @@ Statuses are `ok`, `info` (optional and not set up), `warn`, `fail` and `skip` (
 
 - **It changes nothing.**
   - It does not create the home or the database, and it does not migrate the database or write an event.
-  - It does not edit a hook config or touch the daemon.
-  - SQLite may leave the empty `another.db-shm` and `another.db-wal` files that any reader of the database creates.
-- **It contacts nothing but loopback.** The one network call is `/health` on a loopback address. It never contacts a federation peer, a tunnel or any remote host, and a non-loopback `--bind` is skipped, not dialled.
+  - Every database read goes through read-only connections, which also cannot checkpoint the WAL into the main file.
+  - It does not edit a hook config or touch the daemon; for the daemon it only reads launchd's record and the plist.
+  - One exception: SQLite may leave the empty `another.db-shm` and `another.db-wal` files that any reader of the database creates.
+- **It contacts nothing but loopback.**
+  - There is exactly one network call, `GET /health`, to a literal loopback address (`127.0.0.1:PORT` or `[::1]:PORT`), with no proxy and no redirect followed.
+  - A host name or any other address given with `--bind` is skipped, not looked up or dialled.
+  - It never contacts a federation peer, a tunnel or any remote host.
 - **It runs no fix.** Each `fix:` is a command for you to run.
 - **Not checked:** tokens and OAuth grants, tunnels, Herdr, tmux and cmux, and the resource scanner's permissions.
+
+## How long it takes
+
+Usually well under a second. It is not bounded overall:
+- **Bounded.** A locked database is waited on for at most 2 s, and `/health` gets 2 s.
+- **Not bounded.**
+  - `quick_check` reads the whole database, so its time grows with the database's size.
+  - On macOS the daemon row runs `id -u` and `launchctl print`, with no timeout of their own. A stuck `launchd` holds `doctor` up with it.
+
+Press Ctrl-C to stop it; it has changed nothing.
 
 ## A damaged database
 
 If `database` fails with a `quick_check` complaint:
 - stop `another serve` and the daemon (`another daemon uninstall` on macOS);
-- copy `another.db` and any `-wal` and `-shm` files somewhere safe before trying anything else.
+- copy `another.db` **together with** its `-wal` and `-shm` files somewhere safe before trying anything else. Committed data can sit in the `-wal` file, so a copy of `another.db` alone may be missing it.
 
 SQLite's `.recover` command (in the `sqlite3` shell) can often salvage the rows. Another has no backup or restore command yet.

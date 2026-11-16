@@ -95,14 +95,18 @@ pub fn run(inputs: &Inputs) -> Report {
     }
     checks.push(hook_check(&inputs.another_home));
 
+    // launchd and the plist only; the one `/health` call is the server check's, and the
+    // daemon row reuses its answer when both name the same address.
     let daemon = daemon_status(&inputs.another_home);
     let bind = inputs
         .bind
         .clone()
         .or_else(|| daemon.as_ref().ok().and_then(|d| d.bind.clone()))
         .unwrap_or_else(|| crate::serve::DEFAULT_BIND.to_string());
-    checks.push(server(&bind));
-    checks.push(daemon_check(daemon, &inputs.another_home));
+    let (server_row, answered) = server(&bind);
+    checks.push(server_row);
+    let health = answered.then_some(bind.as_str());
+    checks.push(daemon_check(daemon, &inputs.another_home, health));
     checks.push(match &store {
         Some(store) => peers(store),
         None => check(
@@ -221,7 +225,7 @@ fn database(home: &Path) -> (Check, Option<Store>) {
         Err(e) => {
             return (
                 check("database", Level::Fail, format!("could not read it: {e}"))
-                    .fix("stop another serve and the daemon, keep a copy of another.db, and see docs/DOCTOR.md"),
+                    .fix("stop another serve and the daemon, copy another.db together with its -wal and -shm files, and see docs/DOCTOR.md"),
                 None,
             )
         }
@@ -233,7 +237,7 @@ fn database(home: &Path) -> (Check, Option<Store>) {
                 Level::Fail,
                 format!("SQLite quick_check: {}", inspected.quick_check),
             )
-            .fix("stop another serve and the daemon, keep a copy of another.db, and see docs/DOCTOR.md"),
+            .fix("stop another serve and the daemon, copy another.db together with its -wal and -shm files, and see docs/DOCTOR.md"),
             None,
         );
     }
@@ -260,7 +264,7 @@ fn database(home: &Path) -> (Check, Option<Store>) {
             None,
         );
     }
-    match Store::open_quick(home, WAIT) {
+    match Store::open_read_only(home, WAIT) {
         Ok(store) => {
             let node = store
                 .node()
@@ -387,13 +391,24 @@ fn runnable(p: &Path) -> bool {
     p.is_file()
 }
 
-/// `GET /health` on a loopback address only.
-fn server(bind: &str) -> Check {
-    if crate::serve::local_bind(bind).is_err() {
-        return check(
-            "server",
-            Level::Skip,
-            format!("{bind} is not a loopback address; doctor only checks loopback"),
+/// The one network call: `GET /health` on a numeric loopback address, with no proxy and
+/// no redirect followed. Returns the row and whether `/health` answered 2xx.
+fn server(bind: &str) -> (Check, bool) {
+    // A literal IP only: no name lookup, so no name can point it anywhere else.
+    let loopback = bind
+        .parse::<std::net::SocketAddr>()
+        .is_ok_and(|a| a.ip().is_loopback());
+    if !loopback {
+        return (
+            check(
+                "server",
+                Level::Skip,
+                format!(
+                    "{bind} is not a numeric loopback address (127.0.0.1:PORT or [::1]:PORT); \
+                     doctor only contacts loopback"
+                ),
+            ),
+            false,
         );
     }
     let agent = ureq::Agent::new_with_config(
@@ -405,21 +420,30 @@ fn server(bind: &str) -> Check {
             .build(),
     );
     match agent.get(&format!("http://{bind}/health")).call() {
-        Ok(r) if r.status().is_success() => {
-            check("server", Level::Ok, format!("answering on {bind}"))
-        }
-        Ok(r) => check(
-            "server",
-            Level::Warn,
-            format!("{bind} answered /health with {}", r.status().as_u16()),
-        )
-        .fix("another daemon restart, or restart another serve; is something else on that port?"),
-        Err(_) => check(
-            "server",
-            Level::Info,
-            format!("nothing answering on {bind}"),
-        )
-        .fix("another daemon install (macOS) or run another serve"),
+        Ok(r) if r.status().is_success() => (
+            check("server", Level::Ok, format!("answering on {bind}")),
+            true,
+        ),
+        Ok(r) => (
+            check(
+                "server",
+                Level::Warn,
+                format!("{bind} answered /health with {}", r.status().as_u16()),
+            )
+            .fix(
+                "another daemon restart, or restart another serve; is something else on that port?",
+            ),
+            false,
+        ),
+        Err(_) => (
+            check(
+                "server",
+                Level::Info,
+                format!("nothing answering on {bind}"),
+            )
+            .fix("another daemon install (macOS) or run another serve"),
+            false,
+        ),
     }
 }
 
@@ -432,7 +456,7 @@ fn daemon_status(another_home: &Path) -> anyhow::Result<crate::daemon::DaemonSta
         crate::daemon::DEFAULT_LABEL.into(),
         crate::serve::DEFAULT_BIND.into(),
     )?;
-    crate::daemon::status(&env)
+    crate::daemon::service(&env)
 }
 
 /// The `ANOTHER_HOME` a launchd plist written by `another daemon install` serves.
@@ -448,7 +472,12 @@ fn plist_home(plist: &str) -> Option<PathBuf> {
     Some(PathBuf::from(value))
 }
 
-fn daemon_check(status: anyhow::Result<crate::daemon::DaemonStatus>, another_home: &Path) -> Check {
+/// `answered`: the address the server check found answering `/health`, if any.
+fn daemon_check(
+    status: anyhow::Result<crate::daemon::DaemonStatus>,
+    another_home: &Path,
+    answered: Option<&str>,
+) -> Check {
     if !cfg!(target_os = "macos") {
         return check("daemon", Level::Skip, "the launchd daemon is macOS only");
     }
@@ -484,15 +513,39 @@ fn daemon_check(status: anyhow::Result<crate::daemon::DaemonStatus>, another_hom
         )
         .fix("another daemon restart; see docs/DAEMON.md");
     }
-    if !s.healthy {
+    let pid = s.pid.map(|p| format!(", pid {p}")).unwrap_or_default();
+    let Some(bind) = s.bind.as_deref() else {
         return check(
             "daemon",
             Level::Warn,
-            format!("{} loaded but /health does not answer", s.label),
+            format!("{} loaded{pid}, but its plist names no --bind", s.label),
         )
-        .fix(format!("another daemon restart; see {}", s.log));
+        .fix("another daemon install (rewrites the plist)");
+    };
+    match answered {
+        Some(a) if a == bind => {}
+        None => {
+            return check(
+                "daemon",
+                Level::Warn,
+                format!(
+                    "{} loaded{pid}, but /health on {bind} did not answer",
+                    s.label
+                ),
+            )
+            .fix(format!("another daemon restart; see {}", s.log));
+        }
+        Some(_) => {
+            return check(
+                "daemon",
+                Level::Ok,
+                format!(
+                    "{} loaded{pid}; its {bind} was not the address checked",
+                    s.label
+                ),
+            )
+        }
     }
-    let pid = s.pid.map(|p| format!(", pid {p}")).unwrap_or_default();
     check(
         "daemon",
         Level::Ok,

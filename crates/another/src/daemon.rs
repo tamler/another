@@ -353,6 +353,14 @@ fn healthy(bind: &str) -> bool {
 
 /// Is the service installed, loaded, running and answering?
 pub fn status(env: &DaemonEnv) -> Result<DaemonStatus> {
+    let mut s = service(env)?;
+    s.healthy = s.bind.as_deref().is_some_and(healthy);
+    Ok(s)
+}
+
+/// What launchd and the plist say about the service, with no network call: `healthy` is
+/// always false here. `another doctor` uses this and makes its own single `/health` call.
+pub fn service(env: &DaemonEnv) -> Result<DaemonStatus> {
     ensure_macos()?;
     validate_label(&env.label)?;
     let path = env.plist_path();
@@ -366,7 +374,6 @@ pub fn status(env: &DaemonEnv) -> Result<DaemonStatus> {
         .find_map(|l| l.trim().strip_prefix("pid = "))
         .and_then(|p| p.trim().parse().ok());
     let bind = installed_text.as_deref().and_then(bind_in);
-    let healthy = bind.as_deref().is_some_and(healthy);
     Ok(DaemonStatus {
         label: env.label.clone(),
         plist: path.display().to_string(),
@@ -374,7 +381,7 @@ pub fn status(env: &DaemonEnv) -> Result<DaemonStatus> {
         loaded,
         pid,
         bind,
-        healthy,
+        healthy: false,
         log: env.log_path().display().to_string(),
     })
 }
