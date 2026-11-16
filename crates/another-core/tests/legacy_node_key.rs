@@ -172,3 +172,30 @@ fn reopening_keeps_the_key_and_the_signatures() {
         ));
     }
 }
+
+/// adv205: a home that already has a key but holds unsigned local events gets them signed on
+/// open with its existing key, not a new one.
+#[test]
+fn adv205_unsigned_local_events_are_signed_with_the_existing_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = legacy_home(dir.path());
+    drop(Store::open(db.parent().unwrap()).unwrap());
+    let keys = local_keys(&db);
+    Connection::open(&db)
+        .unwrap()
+        .execute("UPDATE events SET sig = NULL WHERE node_id = ?1", [&keys.0])
+        .unwrap();
+
+    drop(Store::open(db.parent().unwrap()).unwrap());
+
+    assert_eq!(local_keys(&db), keys, "the existing key is kept");
+    let public = keys.1.unwrap();
+    for r in rows(&db).into_iter().filter(|r| r.node_id == keys.0) {
+        let sig = r
+            .sig
+            .unwrap_or_else(|| panic!("{} was not signed", r.event_id));
+        let msg =
+            crypto::event_message(&r.event_id, &r.node_id, r.ts, &r.actor, &r.kind, &r.payload);
+        assert!(crypto::verify(&public, &msg, &sig), "{}", r.event_id);
+    }
+}
