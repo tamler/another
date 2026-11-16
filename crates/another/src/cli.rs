@@ -905,7 +905,7 @@ fn abs(path: &Path) -> anyhow::Result<String> {
 /// so a symlinked spelling names the same project instead of registering a second one. A
 /// project already registered under the spelling as given, and not under the resolved one
 /// (rows from before paths were resolved), keeps its row.
-fn project_dir(store: &Store, path: &Path) -> anyhow::Result<String> {
+pub(crate) fn project_dir(store: &Store, path: &Path) -> anyhow::Result<String> {
     let given = abs(path)?;
     let real = hooks::resolve_existing(Path::new(&given))
         .to_string_lossy()
@@ -972,7 +972,7 @@ fn project_key(store: &Store, actor: &str, project: Option<String>) -> anyhow::R
 /// its literal directory part is resolved and the pattern kept (`alias/**` with
 /// `alias -> src` becomes `src/**`). Paths that resolve outside the project are passed on
 /// as given.
-fn resolve_hold_paths(store: &Store, project: &str, paths: Vec<String>) -> Vec<String> {
+pub(crate) fn resolve_hold_paths(store: &Store, project: &str, paths: Vec<String>) -> Vec<String> {
     let Ok(p) = store.project(project) else {
         return paths;
     };
