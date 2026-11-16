@@ -42,7 +42,10 @@ fn code(res: &CallToolResult) -> Option<String> {
         .as_str()
         .unwrap()
         .to_string();
-    let body: Value = serde_json::from_str(&text).unwrap();
+    // rmcp reports a parameter error as plain text, not JSON: show it rather than the
+    // parse error (FINDINGS-157).
+    let body: Value = serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("tool error is not JSON ({e}): {text}"));
     body["error"]["code"].as_str().map(str::to_string)
 }
 
