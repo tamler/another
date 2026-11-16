@@ -50,6 +50,20 @@ fn agent_names_are_1_to_64_ascii_letters_digits_dash_underscore_or_dot() {
     assert_eq!(s.agents().unwrap().len(), 4);
 }
 
+/// Names are case-sensitive: `bob` and `Bob` are two agents, and an address must match the
+/// case exactly (FINDINGS-199 note 2 asked for this to be pinned either way).
+#[test]
+fn agent_names_are_case_sensitive() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(dir.path(), "node");
+    let lower = register(&s, "bob", None).unwrap();
+    let upper = register(&s, "Bob", None).unwrap();
+    assert_ne!(lower.agent_id, upper.agent_id);
+    assert_eq!(s.agent("bob").unwrap().agent_id, lower.agent_id);
+    assert_eq!(s.agent("Bob").unwrap().agent_id, upper.agent_id);
+    assert_eq!(s.agent("BOB").unwrap_err().code(), "not_found");
+}
+
 #[test]
 fn an_address_with_more_than_three_parts_is_invalid() {
     let dir = tempfile::tempdir().unwrap();
