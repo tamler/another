@@ -198,9 +198,10 @@ another send --from lead --to worker --template research --field question="Which
 
 - `--template` opens a request, as `--request` does. `--due`, `--ack`, `--cc` and `--thread` work as usual.
 - The template writes the subject and the body, so `--subject` and `--body` cannot be combined with it.
-- Fields are one line each, except `repro` and `scope`.
-- A missing required field, or an unknown one, is refused and named.
-- `--template list` shows the templates and their fields.
+- Fields are one line of text each (no line breaks, tabs or other control characters), except `repro` and `scope`.
+- The main field becomes the subject after its prefix, so together they are held to the subject's 300-character limit.
+- A missing required field, an unknown one, or one that breaks these rules is refused and named.
+- `another send --template list` shows the templates and their fields. It needs no sender or recipient, and `--json` prints them as JSON.
 - Only the message and the request are stored; the subject prefix (`Review:`, `Fix:`, `Research:`) is how you find them later.
 
 ## What this does not do

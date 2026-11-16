@@ -6,7 +6,9 @@
 
 use std::collections::BTreeMap;
 
+use another_core::{is_unsafe_text_char, MAX_SUBJECT_CHARS};
 use anyhow::{bail, Result};
+use serde_json::{json, Value};
 
 /// One field of a template.
 struct Field {
@@ -134,6 +136,28 @@ pub fn listing() -> String {
     out
 }
 
+/// The listing under `--json`: each template's name, subject prefix, main field and fields.
+pub fn listing_json() -> Value {
+    Value::Array(
+        TEMPLATES
+            .iter()
+            .map(|t| {
+                json!({
+                    "name": t.name,
+                    "subject_prefix": t.prefix,
+                    "main_field": t.main,
+                    "fields": t.fields.iter().map(|f| json!({
+                        "key": f.key,
+                        "required": f.required,
+                        "multiline": f.multiline,
+                        "help": f.help,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+    )
+}
+
 /// Parse `key=value` pairs; a key may not repeat.
 pub fn parse_fields(raw: &[String]) -> Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
@@ -165,14 +189,26 @@ pub fn render(name: &str, fields: &BTreeMap<String, String>) -> Result<(String, 
             None if f.required => {
                 bail!("template {} needs --field {}=… ({})", t.name, f.key, f.help)
             }
-            Some(v) if !f.multiline && v.contains(['\n', '\r']) => {
-                bail!("--field {} must be one line", f.key)
+            Some(v) if !f.multiline && v.chars().any(is_unsafe_text_char) => {
+                bail!(
+                    "--field {} must be one line of text: no line breaks, tabs, escape or other control characters",
+                    f.key
+                )
             }
             _ => {}
         }
     }
     let main = value(t.main).unwrap_or_default();
     let subject = format!("{}: {main}", t.prefix);
+    // The main field becomes the subject, so it is held to the subject's limit here, where
+    // the field can be named (FINDINGS-177 T3).
+    if subject.chars().count() > MAX_SUBJECT_CHARS {
+        bail!(
+            "--field {} is too long: it becomes the subject, which is at most {MAX_SUBJECT_CHARS} characters with the \"{}: \" prefix",
+            t.main,
+            t.prefix
+        );
+    }
     let mut body = String::new();
     for f in t.fields {
         if let (Some(heading), Some(v)) = (f.section, value(f.key)) {

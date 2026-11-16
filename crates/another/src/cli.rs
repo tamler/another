@@ -102,8 +102,13 @@ pub enum Command {
     /// Send a message.
     Send {
         /// Sender: name or name@project (default: $ANOTHER_AGENT).
-        #[arg(long, short = 'f', env = "ANOTHER_AGENT")]
-        from: String,
+        #[arg(
+            long,
+            short = 'f',
+            env = "ANOTHER_AGENT",
+            required_unless_present = "template"
+        )]
+        from: Option<String>,
         /// Recipients (repeat or comma-separate).
         #[arg(
             long,
@@ -1048,6 +1053,20 @@ fn emit<T: Serialize>(json: bool, value: &T, human: impl FnOnce(&T) -> String) -
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     let json = cli.json;
     let home = cli.home.as_deref();
+    // The template listing needs no sender, recipient or database (FINDINGS-177 T1, T2).
+    if let Command::Send {
+        template: Some(t), ..
+    } = &cli.command
+    {
+        if t == "list" {
+            if json {
+                println!("{}", crate::templates::listing_json());
+            } else {
+                print!("{}", crate::templates::listing());
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
+    }
     if let Command::Serve {
         stdio,
         bind,
@@ -1243,10 +1262,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             template,
             fields,
         } => {
-            if template.as_deref() == Some("list") {
-                print!("{}", crate::templates::listing());
-                return Ok(ExitCode::SUCCESS);
-            }
+            let Some(from) = from else {
+                anyhow::bail!("no sender: pass --from or set ANOTHER_AGENT");
+            };
             // A template writes the subject and body, and always opens a request.
             let (subject, body) = match &template {
                 Some(name) => {
