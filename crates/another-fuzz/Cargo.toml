@@ -1,0 +1,17 @@
+[package]
+name = "another-fuzz"
+description = "Fuzz harnesses for Another (run by fuzz/ under libFuzzer, and by a stable smoke test)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+another-core.workspace = true
+another = { path = "../another" }
+serde_json.workspace = true
+tokio.workspace = true
+rmcp = { workspace = true, features = ["client"] }
+clap.workspace = true

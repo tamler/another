@@ -2,7 +2,9 @@
 # "3" keeps every fresh resolve within `rust-version`, including `cargo install --git`,
 # which reads this file but not the lockfile or `.cargo/config.toml`.
 resolver = "3"
-members = ["crates/another-core", "crates/another"]
+members = ["crates/another-core", "crates/another", "crates/another-fuzz"]
+# `fuzz/` (cargo-fuzz, nightly) depends on crates/another-fuzz but is its own workspace.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"
