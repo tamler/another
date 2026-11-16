@@ -259,3 +259,35 @@ mod unix {
         );
     }
 }
+
+/// Adversarial F1 (review of #153): a file this user cannot execute (an execute bit for
+/// group or others only) earlier on PATH must not shadow a runnable one later on PATH, the
+/// way `execvp` and shells skip it.
+#[cfg(unix)]
+#[test]
+fn adv153_an_entry_this_user_cannot_run_does_not_shadow_a_later_one() {
+    use std::os::unix::fs::PermissionsExt;
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let blocked = install_self_copy(first.path(), "shadow");
+    // Executable for the group only: not for this user (the file's owner).
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o010)).unwrap();
+    install_self_copy(second.path(), "shadow");
+    let out = another(
+        &[first.path(), second.path()],
+        &home.path().join("none"),
+        &["shadow", "--version"],
+    );
+    assert!(
+        out.status.success(),
+        "exit {:?}: {}",
+        out.status.code(),
+        text(&out.stderr)
+    );
+    assert!(
+        text(&out.stdout).starts_with("another "),
+        "{}",
+        text(&out.stdout)
+    );
+}

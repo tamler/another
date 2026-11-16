@@ -7,7 +7,8 @@
 //!   name a path, an option or a hidden file;
 //! - only absolute `PATH` entries are searched, in order, so the current directory is never
 //!   searched by accident (an empty or `.` entry);
-//! - on Unix the file must be a regular file with an execute bit; on Windows it must be
+//! - on Unix the file must be a regular file with an execute bit, and one this user is not
+//!   allowed to run is skipped for the next (as `execvp` does); on Windows it must be
 //!   `another-<name>.exe` (never a `.bat` or `.cmd`, which would go through `cmd.exe`);
 //! - the arguments after `<name>` are passed unchanged, with no shell, and stdin, stdout and
 //!   stderr are inherited. Nothing is added to the environment, and the database is not opened;
@@ -32,8 +33,32 @@ pub fn dispatch() -> Option<ExitCode> {
         return None;
     }
     let path = std::env::var_os("PATH")?;
-    let exe = find(name, &path)?;
-    Some(run(&exe, &args[2..]))
+    let found = candidates(name, &path);
+    if found.is_empty() {
+        return None;
+    }
+    Some(run_first(&found, &args[2..]))
+}
+
+/// Run the first candidate that starts. One this user is not allowed to execute (an
+/// execute bit for group or others only) is skipped, as `execvp` and shells skip it, so it
+/// cannot shadow a runnable one later on `PATH`. Any other failure to start stops there.
+fn run_first(found: &[PathBuf], args: &[OsString]) -> ExitCode {
+    let mut denied = None;
+    for exe in found {
+        match run(exe, args) {
+            Ok(code) => return code,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => denied = Some((exe, e)),
+            Err(e) => {
+                eprintln!("another: could not run {}: {e}", exe.display());
+                return ExitCode::from(126);
+            }
+        }
+    }
+    if let Some((exe, e)) = denied {
+        eprintln!("another: could not run {}: {e}", exe.display());
+    }
+    ExitCode::from(126)
 }
 
 /// A name that can only ever form a plain file name: lowercase ASCII letters, digits and
@@ -69,13 +94,19 @@ fn file_name(name: &str) -> String {
     }
 }
 
-/// The first absolute `PATH` entry holding a runnable `another-<name>`.
-pub fn find(name: &str, path: &OsStr) -> Option<PathBuf> {
+/// Every `another-<name>` in an absolute `PATH` entry that looks runnable, in `PATH` order.
+pub fn candidates(name: &str, path: &OsStr) -> Vec<PathBuf> {
     let file = file_name(name);
     std::env::split_paths(path)
         .filter(|dir| dir.is_absolute())
         .map(|dir| dir.join(&file))
-        .find(|candidate| runnable(candidate))
+        .filter(|candidate| runnable(candidate))
+        .collect()
+}
+
+/// The first of [`candidates`].
+pub fn find(name: &str, path: &OsStr) -> Option<PathBuf> {
+    candidates(name, path).into_iter().next()
 }
 
 #[cfg(unix)]
@@ -90,25 +121,19 @@ fn runnable(path: &Path) -> bool {
 }
 
 /// Replace this process with the executable, so its exit status and any signal are ours.
+/// Returns only when the executable could not be started.
 #[cfg(unix)]
-fn run(exe: &Path, args: &[OsString]) -> ExitCode {
+fn run(exe: &Path, args: &[OsString]) -> std::io::Result<ExitCode> {
     use std::os::unix::process::CommandExt;
-    let err = std::process::Command::new(exe).args(args).exec();
-    eprintln!("another: could not run {}: {err}", exe.display());
-    ExitCode::from(126)
+    Err(std::process::Command::new(exe).args(args).exec())
 }
 
 /// Run the executable and exit with its status. Windows exit codes are 32-bit, wider than
 /// `ExitCode` allows, so this exits directly.
 #[cfg(not(unix))]
-fn run(exe: &Path, args: &[OsString]) -> ExitCode {
-    match std::process::Command::new(exe).args(args).status() {
-        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
-        Err(err) => {
-            eprintln!("another: could not run {}: {err}", exe.display());
-            ExitCode::from(126)
-        }
-    }
+fn run(exe: &Path, args: &[OsString]) -> std::io::Result<ExitCode> {
+    let status = std::process::Command::new(exe).args(args).status()?;
+    std::process::exit(status.code().unwrap_or(1))
 }
 
 #[cfg(test)]
