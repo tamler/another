@@ -952,6 +952,258 @@ fn hold_free_ping_waits_for_every_holder_and_covers_expiry() {
 }
 
 #[test]
+fn ended_one_of_two_blockers_does_not_keep_unrelated_writes_slow() {
+    use std::time::Instant;
+    let mut timings = Vec::new();
+    for n in [400, 2000] {
+        let fx = Fx::new();
+        let main = fx.project(&fx.repos.main);
+        let wt = fx.project(&fx.repos.wt);
+        let other = fx.project(&fx.repos.other);
+        let time_unrelated = |label: &str| {
+            (0..5)
+                .map(|i| {
+                    let started = Instant::now();
+                    fx.store.heartbeat("carol", false).unwrap();
+                    let guard = fx
+                        .store
+                        .guard_edit("carol", &other, &[format!("{label}{i}.rs")], "auto")
+                        .unwrap();
+                    assert!(guard.conflicts.is_empty());
+                    started.elapsed()
+                })
+                .min()
+                .unwrap()
+        };
+        let baseline = time_unrelated("before");
+        for agent in ["alice", "carol"] {
+            fx.store
+                .acquire_holds(AcquireHolds {
+                    agent: agent.into(),
+                    project: main.clone(),
+                    paths: vec!["src/**".into()],
+                    ttl_seconds: Some(3600),
+                    exclusive: false,
+                    reason: None,
+                    repo_wide: false,
+                })
+                .unwrap();
+        }
+        for i in 0..n {
+            assert_eq!(
+                fx.store
+                    .guard_edit("bob", &wt, &[format!("src/f{i}.rs")], "auto")
+                    .unwrap()
+                    .conflicts
+                    .len(),
+                2
+            );
+        }
+        fx.store.release_holds("alice", &[]).unwrap();
+        assert!(fx
+            .store
+            .inbox("bob", InboxQuery::default())
+            .unwrap()
+            .messages
+            .is_empty());
+        let loaded = time_unrelated("after");
+        eprintln!("two holders, {n} waits: baseline {baseline:?}, remaining blocker {loaded:?}");
+        timings.push((n, baseline, loaded));
+        let db = rusqlite::Connection::open(fx.repos.home.join("another.db")).unwrap();
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM hold_waits", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            n
+        );
+        fx.store.release_holds("carol", &[]).unwrap();
+        let pings = || {
+            db.query_row(
+                "SELECT count(*) FROM messages WHERE subject LIKE 'Hold free:%'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(pings(), n);
+        fx.store.sweep().unwrap();
+        assert_eq!(pings(), n);
+    }
+    assert!(
+        timings
+            .iter()
+            .all(|(_, baseline, loaded)| *loaded < *baseline * 10),
+        "ended blockers keep unrelated writes expensive: {timings:?}"
+    );
+}
+
+#[test]
+fn still_blocked_recheck_tracks_replacement_without_resetting_announcements() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    let wt = fx.project(&fx.repos.wt);
+    let take = |agent: &str| {
+        fx.store
+            .acquire_holds(AcquireHolds {
+                agent: agent.into(),
+                project: main.clone(),
+                paths: vec!["src/**".into()],
+                ttl_seconds: Some(3600),
+                exclusive: false,
+                reason: None,
+                repo_wide: false,
+            })
+            .unwrap()
+    };
+    take("alice");
+    take("carol");
+    let edit = || {
+        fx.store
+            .guard_edit("bob", &wt, &["src/a.rs".into()], "auto")
+            .unwrap()
+    };
+    assert!(edit().first_notice);
+    let db = rusqlite::Connection::open(fx.repos.home.join("another.db")).unwrap();
+    let state = || {
+        db.query_row(
+            "SELECT blockers, holder_id, retry_at, backoff_seconds FROM hold_waits",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .unwrap()
+    };
+    let original = state();
+    let blocked_events = || {
+        fx.kinds()
+            .iter()
+            .filter(|kind| *kind == "hold.blocked")
+            .count()
+    };
+    assert_eq!(blocked_events(), 1);
+    fx.store.release_holds("alice", &[]).unwrap();
+    fx.store.sweep().unwrap();
+    let remaining = state();
+    let ids: Vec<String> = serde_json::from_str(&remaining.0).unwrap();
+    assert_eq!(ids.len(), 1, "processed ended blockers must be retired");
+    assert_eq!(
+        (&remaining.1, remaining.2, remaining.3),
+        (&original.1, original.2, original.3),
+        "bookkeeping must not reset the original sender/backoff"
+    );
+    assert_eq!(blocked_events(), 1, "bookkeeping is not another denial");
+    // A waiter retry still observes the changed conflict set as a first notice once.
+    assert!(edit().first_notice);
+    assert!(!edit().first_notice);
+    assert_eq!(blocked_events(), 2);
+    let replacement = take("alice").granted[0].hold_id.clone();
+    fx.store.release_holds("carol", &[]).unwrap();
+    fx.store.sweep().unwrap();
+    let replaced: Vec<String> = serde_json::from_str(&state().0).unwrap();
+    assert_eq!(replaced, [replacement]);
+    assert!(fx
+        .store
+        .inbox("bob", InboxQuery::default())
+        .unwrap()
+        .messages
+        .is_empty());
+    assert!(
+        edit().first_notice,
+        "a replacement hold is a newly announced conflict"
+    );
+    assert!(!edit().first_notice);
+    assert_eq!(blocked_events(), 3);
+    fx.store.release_holds("alice", &[]).unwrap();
+    fx.store.sweep().unwrap();
+    assert_eq!(
+        fx.store
+            .inbox("bob", InboxQuery::default())
+            .unwrap()
+            .messages
+            .len(),
+        1
+    );
+    fx.store.sweep().unwrap();
+    assert_eq!(
+        fx.store
+            .inbox("bob", InboxQuery::default())
+            .unwrap()
+            .messages
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn blocked_recheck_update_failure_does_not_fail_release_or_lose_the_wait() {
+    let fx = Fx::new();
+    let wt = fx.project(&fx.repos.wt);
+    let broad = fx
+        .acquire("alice", &fx.repos.main, &["src/**"])
+        .unwrap()
+        .granted[0]
+        .hold_id
+        .clone();
+    let narrow = fx
+        .acquire("alice", &fx.repos.main, &["src/a.rs"])
+        .unwrap()
+        .granted[0]
+        .hold_id
+        .clone();
+    assert_eq!(
+        fx.store
+            .guard_edit("bob", &wt, &["src/a.rs".into()], "auto")
+            .unwrap()
+            .conflicts
+            .len(),
+        2
+    );
+    let db = rusqlite::Connection::open(fx.repos.home.join(DB_FILE)).unwrap();
+    db.execute_batch("CREATE TRIGGER refresh_failure BEFORE UPDATE ON hold_waits BEGIN SELECT RAISE(ABORT, 'injected refresh failure'); END;").unwrap();
+    fx.store.release_holds("alice", &[narrow]).unwrap();
+    assert!(fx.kinds().iter().any(|kind| kind == "hold.recheck_failed"));
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM hold_waits", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert!(fx
+        .store
+        .inbox("bob", InboxQuery::default())
+        .unwrap()
+        .messages
+        .is_empty());
+    db.execute_batch("DROP TRIGGER refresh_failure;").unwrap();
+    fx.store.sweep().unwrap();
+    let blockers: String = db
+        .query_row("SELECT blockers FROM hold_waits", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Vec<String>>(&blockers)
+            .unwrap()
+            .as_slice(),
+        std::slice::from_ref(&broad)
+    );
+    fx.store.release_holds("alice", &[broad]).unwrap();
+    fx.store.sweep().unwrap();
+    assert_eq!(
+        fx.store
+            .inbox("bob", InboxQuery::default())
+            .unwrap()
+            .messages
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn edit_guard_refuses_directories_and_keeps_glob_characters_literal() {
     let fx = Fx::new();
     let project = fx.project(&fx.repos.main);
