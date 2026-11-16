@@ -717,7 +717,7 @@ pub fn board(b: &another_core::Board) -> String {
     if b.agents.is_empty() {
         let _ = writeln!(
             out,
-            "  none with holds, unread mail, acknowledgements or requests"
+            "  none with holds, unread mail, acknowledgements, requests or stopped edits"
         );
     }
     for a in &b.agents {
@@ -743,12 +743,21 @@ pub fn board(b: &another_core::Board) -> String {
             .as_deref()
             .map(|t| format!(", seen {}", ago(t, now)))
             .unwrap_or_default();
+        let reason = a
+            .blocked_message
+            .as_deref()
+            .map(|m| format!(" ({m})"))
+            .unwrap_or_default();
+        let waiting = if bits.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", bits.join(", "))
+        };
         let _ = writeln!(
             out,
-            "  {}  {}{seen}: {}",
+            "  {}  {}{reason}{seen}{waiting}",
             a.address,
-            a.presence,
-            bits.join(", ")
+            a.state.as_str(),
         );
     }
     if !b.requests.is_empty() {

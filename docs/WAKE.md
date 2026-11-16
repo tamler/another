@@ -66,3 +66,20 @@ another wake --agent codex@shop --force --message "New mail in Another: run fetc
 ```bash
 herdr plugin install tamler/another/integrations/herdr
 ```
+
+## Herdr pane status
+
+When a hook runs inside a Herdr pane (`HERDR_ENV=1` with `HERDR_PANE_ID` and `HERDR_BIN_PATH` set), it shows the agent's Another state in that pane. These are the same states as `another board` and the dashboard (D70). Outside Herdr nothing is sent.
+
+```bash
+"$HERDR_BIN_PATH" pane report-metadata "$HERDR_PANE_ID" --source another \
+  --token another_state=blocked --token "another=blocked: src/a.rs is held by claude@shop" \
+  --seq <microseconds> --ttl-ms 1800000
+```
+
+- `another_state` is `working`, `idle` or `blocked`, and `another` gives the reason while the agent is blocked. Both tokens appear in `herdr pane get` and `herdr agent list`. Add `$another_state` or `$another` to an Agent sidebar row to see them there.
+- These tokens are display-only metadata. Herdr's own integration for the client in that pane (Claude Code, Codex and others) keeps its `idle`/`working`/`blocked` state, notifications, `herdr agent wait` and session restore. Another never sends `report-agent` or `release-agent`, because either would take that authority over; Herdr's guide asks hooks that run next to its integrations to use metadata instead. For the same reason Another reports no resume command, and it has none of its own.
+- Reports run in the background through the Herdr CLI, so they also work on Windows. A missing or failing `herdr` is ignored and never slows or fails a hook. Working out the state gets 20 ms per hook; on a store too busy for that, the hook sends nothing and the pane keeps its last state.
+- An unchanged state is not sent again; it is refreshed before the tokens expire (30 minutes). The session-end hook clears both tokens.
+- The last report for each pane is kept in `$ANOTHER_HOME/hooks/state/herdr-status.sqlite`, a small cache separate from Another's database. A hook decides whether to send and reserves the next `--seq`, `max(now in microseconds, last + 1)`, in one write transaction. Parallel hooks in a pane therefore never repeat a number, and a backward clock step never lowers it. A hook that cannot get that lock within 200 ms skips its report. A pane with no row yet starts above the last number in the per-pane `herdr-<pane>.json` file that earlier builds of this feature kept in the same directory, so upgrading never lowers it either.
+- A report whose `herdr` could not be started is sent again by the next hook. Another does not wait for Herdr's answer, so a report Herdr rejects is only repaired by the next change or refresh. If the cache file is deleted while Herdr still remembers a higher number for that pane, reports are ignored until the clock passes it.

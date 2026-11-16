@@ -124,9 +124,11 @@ p { margin: 0; }
 .card .who { font-weight: 650; font-size: 0.98rem; }
 .card .meta, .sub { color: var(--muted); font-size: 0.8rem; margin-top: 3px; }
 .presence { float: right; font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; padding: 2px 7px; border-radius: 999px; }
-.presence.live { background: var(--live-soft); color: var(--live); }
+.presence.working { background: var(--live-soft); color: var(--live); }
 .presence.idle { background: var(--idle-soft); color: var(--idle); }
-.presence.offline { background: var(--off-soft); color: var(--off); }
+.presence.blocked { background: var(--bad-soft); color: var(--bad); }
+.presence.unknown { background: var(--off-soft); color: var(--off); }
+.card .reason { color: var(--bad); font-size: 0.8rem; margin-top: 3px; overflow-wrap: anywhere; }
 
 .group { margin-top: 16px; }
 .group h3 { font-size: 0.95rem; color: var(--muted); margin-bottom: 8px; }

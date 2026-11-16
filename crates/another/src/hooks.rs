@@ -1030,6 +1030,30 @@ fn keepalive_throttled(store: &Store, another_home: &Path, agent: &str) {
     }
 }
 
+/// How long a hook spends working out the agent's state for Herdr before giving up.
+const HERDR_STATUS_BUDGET: Duration = Duration::from_millis(20);
+
+/// Inside a Herdr pane, show the agent's Another state as pane metadata (D70); `end` clears
+/// it. Display only and best effort: it never fails the hook, and a state that takes longer
+/// than [`HERDR_STATUS_BUDGET`] to work out is not reported (the pane keeps its last one).
+fn report_herdr(store: &Store, env: &HookEnv, agent: &str, end: bool) {
+    let Some(pane) = crate::herdr::Pane::from_env() else {
+        return;
+    };
+    let status = if end {
+        None
+    } else {
+        match store.agent_status_within(agent, HERDR_STATUS_BUDGET) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::debug!(error = %e, "herdr status skipped");
+                return;
+            }
+        }
+    };
+    crate::herdr::report(&env.another_home, &pane, status.as_ref());
+}
+
 /// `post-tool`: mention mail that arrived mid-task, in the client's context format.
 /// Prints nothing when nothing is new or the agent is not registered yet.
 fn post_tool(store: &Store, env: &HookEnv, client: Client, dir: &Path) -> Result<String> {
@@ -1038,6 +1062,7 @@ fn post_tool(store: &Store, env: &HookEnv, client: Client, dir: &Path) -> Result
         return Ok(String::new());
     };
     keepalive_throttled(store, &env.another_home, &agent);
+    report_herdr(store, env, &agent, false);
     // The claim and its `push.notified` evidence are one transaction: a notice is shown
     // only if it was recorded, and only by the one caller that won it.
     let Some(notice) = prompt_notice(store, &agent, "post_tool", client)? else {
@@ -1229,7 +1254,13 @@ pub fn deny_message(
 /// `pre-edit`: hold each file about to be edited, or stop the edit when another agent
 /// holds it. Prints a deny only for a real conflict; nothing otherwise (printing "allow"
 /// would skip the client's own permission prompts).
-fn pre_edit(store: &Store, client: Client, dir: &Path, input: &HookInput) -> Result<String> {
+fn pre_edit(
+    store: &Store,
+    env: &HookEnv,
+    client: Client,
+    dir: &Path,
+    input: &HookInput,
+) -> Result<String> {
     let paths = input.edit_paths();
     if paths.is_empty() {
         return Ok(String::new());
@@ -1312,6 +1343,7 @@ fn pre_edit(store: &Store, client: Client, dir: &Path, input: &HookInput) -> Res
             conflicts.extend(guard.conflicts);
         }
     }
+    report_herdr(store, env, &agent, false);
     if conflicts.is_empty() {
         return Ok(String::new());
     }
@@ -1353,7 +1385,7 @@ pub fn run(
     };
     match event {
         HookEvent::PostTool => return post_tool(store, env, client, &dir),
-        HookEvent::PreEdit => return pre_edit(store, client, &dir, &input),
+        HookEvent::PreEdit => return pre_edit(store, env, client, &dir, &input),
         _ => {}
     }
     let root = project_root(&dir);
@@ -1367,6 +1399,7 @@ pub fn run(
         HookEvent::SessionStart => {
             store.session(&agent, SessionPhase::Start, info)?;
             crate::wake::capture_target(store, &agent);
+            report_herdr(store, env, &agent, false);
             let digest = session_digest(store, &agent)?;
             // New mail shown here should not be announced again on the next prompt.
             let _ = prompt_notice(store, &agent, "session_start", client);
@@ -1378,6 +1411,7 @@ pub fn run(
         }
         HookEvent::Prompt => {
             store.session(&agent, SessionPhase::Beat, info)?;
+            report_herdr(store, env, &agent, false);
             if client == Client::Cursor {
                 // Cursor's prompt hook cannot add context; just let the prompt through.
                 json!({ "continue": true }).to_string()
@@ -1390,6 +1424,7 @@ pub fn run(
         HookEvent::SessionEnd => {
             store.session(&agent, SessionPhase::End, info)?;
             crate::wake::release_target(store, &agent);
+            report_herdr(store, env, &agent, true);
             String::new()
         }
         HookEvent::PostTool | HookEvent::PreEdit => unreachable!("handled above"),

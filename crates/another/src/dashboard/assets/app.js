@@ -173,14 +173,16 @@ function renderAgents(snap, now) {
     $("agents-body").innerHTML = '<p class="empty">No agents yet. <span class="path">another agent register</span> adds the first one.</p>';
     return;
   }
-  const groups = new Map();
+  // Herdr's states (D70): blocked, working, idle; unknown is an ended session.
+  const order = [["blocked", "Blocked"], ["working", "Working"], ["idle", "Idle"], ["unknown", "Away"]];
+  const groups = new Map(order.map(([, name]) => [name, []]));
   for (const agent of shown) {
-    const key = agent.presence === "live" ? "Live" : agent.presence === "idle" ? "Idle" : "Away";
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(agent);
+    const found = order.find(([state]) => state === agent.state);
+    groups.get(found ? found[1] : "Away").push(agent);
   }
   let html = "";
   for (const [name, agents] of groups) {
+    if (!agents.length) continue;
     html += '<div class="group"><h3>' + esc(name) + "<span>" + agents.length + "</span></h3><div class=\"cards\">";
     for (const agent of agents) {
       const unread = agent.unread ? agent.unread + " unread" : "no unread";
@@ -188,8 +190,9 @@ function renderAgents(snap, now) {
       const node = agent.node ? " · " + agent.node : "";
       html +=
         '<article class="card ' + esc(agent.program) + '">' +
-        '<span class="presence ' + esc(agent.presence) + '">' + esc(agent.presence) + "</span>" +
+        '<span class="presence ' + esc(agent.state) + '">' + esc(agent.state) + "</span>" +
         '<div class="who">' + esc(agent.address) + "</div>" +
+        (agent.blocked_message ? '<div class="reason">' + esc(agent.blocked_message) + "</div>" : "") +
         '<div class="meta">' + esc(programName(agent.program)) + " · " + esc(where) + esc(node) + "</div>" +
         '<div class="meta">' + esc(unread) + " · seen " + esc(rel(agent.last_seen_at, now)) + "</div>" +
         (agent.description ? '<div class="sub">' + esc(agent.description) + "</div>" : "") +

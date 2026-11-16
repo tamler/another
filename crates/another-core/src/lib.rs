@@ -6,6 +6,7 @@
 //! breaking migration.
 
 mod activity;
+mod agent_state;
 mod board;
 pub mod crypto;
 mod dashboard;
@@ -28,6 +29,7 @@ pub use activity::{
     ActivityFeed, ActivityItem, ActivityKind, ActivityQuery, ActivitySummary, AgentPresence,
     DigestMessage, DigestRequest, RequestCounts, Since, WhatsNew,
 };
+pub use agent_state::{AgentState, AgentStatus};
 pub use board::{
     Board, BoardAgent, BoardBlocked, BoardEdit, BoardHold, BoardProject, BoardQuery, BoardRequest,
     BOARD_EVENT_SCAN_CAP, DEFAULT_BOARD_LIMIT, DEFAULT_BOARD_WINDOW_MS, EDIT_HOOK_HOLD_REASON,

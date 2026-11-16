@@ -270,6 +270,12 @@ async fn full_flow_over_mcp() {
     let board = call_ok(&client, "work_board", json!({ "project": "site" })).await;
     assert_eq!(board["project"], "site");
     assert_eq!(board["projects"][0]["project"], "site");
+    for agent in board["agents"].as_array().unwrap() {
+        assert!(
+            ["idle", "working", "blocked", "unknown"].contains(&agent["state"].as_str().unwrap()),
+            "work_board agents carry a Herdr state: {agent}"
+        );
+    }
     assert_eq!(
         board["requests"].as_array().unwrap().len(),
         0,
