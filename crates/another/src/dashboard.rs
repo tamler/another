@@ -379,6 +379,7 @@ async fn activity(
         before_id: params.before,
         limit: params.limit.unwrap_or(80),
         include_bodies,
+        hide_queues: state.mode.view().hide_queues,
     };
     match block(move || store.dashboard_activity(query)).await {
         Ok(page) => Json(page).into_response(),

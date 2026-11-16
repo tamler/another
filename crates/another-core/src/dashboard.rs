@@ -46,16 +46,22 @@ pub struct DashboardView {
     pub bodies: bool,
     /// Allow the local confirm actions (release a stale hold, expire a request).
     pub actions: bool,
+    /// Leave group queue items, their threads and their events out (group queues are
+    /// local-only in this release, D77): the redacted dashboard serves whoever can reach an
+    /// authenticated server.
+    pub hide_queues: bool,
 }
 
 impl DashboardView {
     pub const LOCAL: Self = Self {
         bodies: true,
         actions: true,
+        hide_queues: false,
     };
     pub const REDACTED: Self = Self {
         bodies: false,
         actions: false,
+        hide_queues: true,
     };
 }
 
@@ -225,6 +231,8 @@ pub struct DashActivityQuery {
     pub before_id: Option<String>,
     pub limit: u32,
     pub include_bodies: bool,
+    /// Leave group queue events out (the redacted dashboard; see [`DashboardView`]).
+    pub hide_queues: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -361,15 +369,21 @@ impl Store {
         self.sweep()?;
         let node = self.node()?;
         let holds = self.holds(crate::HoldFilter::default())?;
-        let requests = self.requests(crate::RequestFilter {
+        let mut requests = self.requests(crate::RequestFilter {
             limit: REQUEST_LIST_LIMIT,
             ..Default::default()
         })?;
+        if view.hide_queues {
+            requests.retain(|r| r.group.is_none());
+        }
         let resources = self.find_resources(ResourceFilter::default())?;
         let peers = self.peers()?;
-        let hour = self.activity_summary(Some(Since::Time(now - HOUR_MS)))?;
-        let day = self.activity_summary(Some(Since::Time(now - DAY_MS)))?;
-        let extra = self.read(|conn| load_extra(conn, self.node_id(), now, view.bodies))?;
+        let hour =
+            self.activity_summary_scoped(Some(Since::Time(now - HOUR_MS)), view.hide_queues)?;
+        let day =
+            self.activity_summary_scoped(Some(Since::Time(now - DAY_MS)), view.hide_queues)?;
+        let extra =
+            self.read(|conn| load_extra(conn, self.node_id(), now, view.bodies, view.hide_queues))?;
 
         let mut agents: Vec<DashAgent> = extra
             .agents
@@ -612,6 +626,12 @@ impl Store {
                 {
                     continue;
                 }
+                if query.hide_queues {
+                    let ids: Value = serde_json::from_str(&row.payload).unwrap_or(Value::Null);
+                    if activity::concerns_queue(conn, &row.kind, &ids)? {
+                        continue;
+                    }
+                }
                 if !agent_matches(&row.actor, agent_filter) {
                     continue;
                 }
@@ -775,7 +795,15 @@ struct Extra {
     seq: i64,
 }
 
-fn load_extra(conn: &Connection, local: &str, now: i64, include_bodies: bool) -> Result<Extra> {
+/// The snapshot's extra reads. With `hide_queues`, unread counts, request counts and the
+/// thread list leave out group queue items and their threads.
+fn load_extra(
+    conn: &Connection,
+    local: &str,
+    now: i64,
+    include_bodies: bool,
+    hide_queues: bool,
+) -> Result<Extra> {
     let agents = {
         let mut stmt = conn.prepare(&format!(
             "SELECT {AGENT_COLUMNS} FROM agents a
@@ -787,9 +815,15 @@ fn load_extra(conn: &Connection, local: &str, now: i64, include_bodies: bool) ->
     };
     let unread = {
         let mut stmt = conn.prepare(
-            "SELECT agent_id, count(*) FROM deliveries WHERE read_at IS NULL GROUP BY agent_id",
+            "SELECT d.agent_id, count(*) FROM deliveries d JOIN messages m ON m.message_id = d.message_id
+             WHERE d.read_at IS NULL
+               AND (?1 = 0 OR NOT EXISTS (SELECT 1 FROM requests q
+                     WHERE q.thread_id = m.thread_id AND q.group_id IS NOT NULL))
+             GROUP BY d.agent_id",
         )?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))?;
+        let rows = stmt.query_map([hide_queues], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?))
+        })?;
         rows.collect::<rusqlite::Result<HashMap<_, _>>>()?
     };
     let projects = {
@@ -848,15 +882,17 @@ fn load_extra(conn: &Connection, local: &str, now: i64, include_bodies: bool) ->
         map
     };
     let request_counts = {
-        let mut stmt = conn
-            .prepare("SELECT status, count(*) FROM requests WHERE node_id = ?1 GROUP BY status")?;
-        let rows = stmt.query_map([local], |r| {
+        let mut stmt = conn.prepare(
+            "SELECT status, count(*) FROM requests
+             WHERE node_id = ?1 AND (?2 = 0 OR group_id IS NULL) GROUP BY status",
+        )?;
+        let rows = stmt.query_map(params![local, hide_queues], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?))
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     let seq: i64 = conn.query_row("SELECT coalesce(max(seq), 0) FROM events", [], |r| r.get(0))?;
-    let threads = load_threads(conn, local, include_bodies)?;
+    let threads = load_threads(conn, local, include_bodies, hide_queues)?;
     Ok(Extra {
         agents,
         unread,
@@ -869,17 +905,24 @@ fn load_extra(conn: &Connection, local: &str, now: i64, include_bodies: bool) ->
     })
 }
 
-fn load_threads(conn: &Connection, local: &str, include_bodies: bool) -> Result<Vec<DashThread>> {
+fn load_threads(
+    conn: &Connection,
+    local: &str,
+    include_bodies: bool,
+    hide_queues: bool,
+) -> Result<Vec<DashThread>> {
     let mut stmt = conn.prepare(
         "SELECT m.thread_id, max(m.created_at),
                 (SELECT subject FROM messages f WHERE f.message_id = m.thread_id)
          FROM messages m
+         WHERE ?2 = 0 OR NOT EXISTS (SELECT 1 FROM requests q
+                 WHERE q.thread_id = m.thread_id AND q.group_id IS NOT NULL)
          GROUP BY m.thread_id
          ORDER BY max(m.created_at) DESC
          LIMIT ?1",
     )?;
     let threads = stmt
-        .query_map([THREAD_LIMIT as i64], |r| {
+        .query_map(params![THREAD_LIMIT as i64, hide_queues], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, i64>(1)?,

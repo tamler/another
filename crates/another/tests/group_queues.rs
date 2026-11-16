@@ -662,3 +662,98 @@ async fn remote_callers_cannot_reach_a_queue_thread_by_any_path() {
     );
     local.cancel().await.unwrap();
 }
+
+/// REVIEW-IMPL-R2 P2: the redacted dashboard (`--auth --dashboard`) is a read path for
+/// whoever can reach the server, so it leaves queue items, their threads and their events
+/// out of the snapshot and the activity search, as every other remote read does. A direct
+/// request is the control. The local dashboard still shows everything.
+#[tokio::test]
+async fn the_redacted_dashboard_shows_no_queue_items() {
+    let (_dir, store) = local_store();
+    let item = store
+        .send_message(SendMessage {
+            from: "lead".into(),
+            to: vec!["group:reviewers".into()],
+            subject: "private-queue-title".into(),
+            body: "b".into(),
+            request: Some(NewRequest::default()),
+            ..Default::default()
+        })
+        .unwrap();
+    let claimed = store
+        .request_next(NextRequest {
+            agent: "bob".into(),
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+    store
+        .send_message(SendMessage {
+            from: "lead".into(),
+            to: vec!["bob".into()],
+            subject: "direct-control-request".into(),
+            body: "b".into(),
+            request: Some(NewRequest::default()),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let get = |mode: another::dashboard::DashboardMode| {
+        let store = store.clone();
+        async move {
+            let ct = tokio_util::sync::CancellationToken::new();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let opts = another::serve::HttpOptions {
+                auth: mode == another::dashboard::DashboardMode::Redacted,
+                bound_port: addr.port(),
+                dashboard: mode,
+                ..Default::default()
+            };
+            let app = another::serve::http_router(store, ct.clone(), &opts);
+            let stop = ct.clone();
+            tokio::spawn(async move {
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .with_graceful_shutdown(async move { stop.cancelled_owned().await })
+                .await
+                .unwrap();
+            });
+            let http = reqwest::Client::new();
+            let mut out = Vec::new();
+            for path in ["/api/dash", "/api/dash/activity?limit=200"] {
+                let resp = http
+                    .get(format!("http://{addr}{path}"))
+                    .send()
+                    .await
+                    .unwrap();
+                assert!(resp.status().is_success(), "{path}: {}", resp.status());
+                out.push(resp.text().await.unwrap());
+            }
+            ct.cancel();
+            out
+        }
+    };
+
+    let redacted = get(another::dashboard::DashboardMode::Redacted).await;
+    for (path, text) in ["/api/dash", "/api/dash/activity"].iter().zip(&redacted) {
+        assert!(
+            !text.contains("private-queue-title")
+                && !text.contains(&claimed.request_id)
+                && !text.contains(&item.thread_id),
+            "redacted {path} shows the queue item: {text}"
+        );
+    }
+    assert!(
+        redacted[0].contains("direct-control-request"),
+        "the direct request is still shown: {}",
+        redacted[0]
+    );
+    let local = get(another::dashboard::DashboardMode::Local).await;
+    assert!(
+        local[0].contains("private-queue-title"),
+        "the local dashboard shows everything"
+    );
+}

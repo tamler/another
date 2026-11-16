@@ -749,7 +749,7 @@ fn read_events(
 /// Whether an event, given its kind and the ids it names, concerns a group queue: a
 /// `group.*` event, one that carries a `group_id`, or one about a queue item's request,
 /// thread or mail (its message, replies, reads and acks).
-fn concerns_queue(conn: &Connection, kind: &str, ids: &Value) -> Result<bool> {
+pub(crate) fn concerns_queue(conn: &Connection, kind: &str, ids: &Value) -> Result<bool> {
     if kind.starts_with("group.") || !ids.get("group_id").unwrap_or(&Value::Null).is_null() {
         return Ok(true);
     }

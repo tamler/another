@@ -240,6 +240,20 @@ fn next_takes_priority_then_due_then_age_then_id() {
 }
 
 #[test]
+fn items_queued_in_the_same_millisecond_come_out_in_send_order() {
+    // Request ids are ULIDs, whose tails are random within one millisecond, so
+    // ordering by id alone would shuffle items that share a `created_at`.
+    let fx = Fx::new();
+    fx.reviewers();
+    let sent: Vec<String> = (0..20)
+        .map(|i| fx.queue(&format!("item {i}"), Priority::Normal, None))
+        .collect();
+    let order: Vec<String> =
+        std::iter::from_fn(|| fx.next("alice").map(|r| r.request_id)).collect();
+    assert_eq!(order, sent);
+}
+
+#[test]
 fn stale_items_are_taken_only_when_asked_and_after_open_ones_of_their_priority() {
     let fx = Fx::new();
     fx.reviewers();

@@ -395,7 +395,7 @@ impl Store {
                          WHERE node_id = ?1 AND group_id IN (SELECT value FROM json_each(?2))
                            AND status IN {statuses}
                          ORDER BY priority, CASE status WHEN 'open' THEN 0 ELSE 1 END,
-                           due_at IS NULL, due_at, created_at, request_id
+                           due_at IS NULL, due_at, created_at, rowid, request_id
                          LIMIT 1"
                     ),
                     params![tx.node_id, groups_json],
