@@ -116,9 +116,29 @@ fn a_hub_error_in_sync_watch_cannot_retitle_the_terminal() {
     std::thread::spawn(move || {
         for stream in hub.incoming().take(20) {
             let Ok(mut s) = stream else { continue };
+            // Read the whole request before answering: closing on an unread body resets
+            // the connection, and the client then reports that instead of the 500.
+            let mut req = Vec::new();
             let mut buf = [0u8; 8192];
-            let _ = s.read(&mut buf);
-            let body = "{\"error\":{\"code\":\"internal\",\"message\":\"hub says \u{1b}]0;pwned\u{7} \u{1b}[2J done\"}}";
+            let mut want = None;
+            while want.is_none_or(|n| req.len() < n) {
+                let Ok(got @ 1..) = s.read(&mut buf) else {
+                    break;
+                };
+                req.extend_from_slice(&buf[..got]);
+                if want.is_none() {
+                    if let Some(end) = req.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&req[..end]).to_ascii_lowercase();
+                        let len = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        want = Some(end + 4 + len);
+                    }
+                }
+            }
+            let body ="{\"error\":{\"code\":\"internal\",\"message\":\"hub says \u{1b}]0;pwned\u{7} \u{1b}[2J done\"}}";
             let _ = write!(
                 s,
                 "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
