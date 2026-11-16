@@ -5,6 +5,7 @@ pub mod daemon;
 pub mod dashboard;
 pub mod fed;
 pub mod hooks;
+pub mod log_export;
 pub mod mcp;
 pub mod oauth_http;
 mod output;

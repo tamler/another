@@ -379,6 +379,37 @@ pub enum Command {
         #[arg(long, default_value_t = 20)]
         limit: u32,
     },
+    /// Export the event log or the audit log.
+    #[command(subcommand)]
+    Log(LogCmd),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LogCmd {
+    /// Write the event log (or, with --audit, the audit log) as JSON Lines on stdout,
+    /// oldest first. Everything in the log is included, message bodies too. The last line
+    /// on stderr names the cursor for the next `--since`.
+    Export {
+        /// A duration (30m, 2h, 1d), an RFC 3339 time, or an event id to continue after
+        /// (with --audit: an audit id).
+        #[arg(long)]
+        since: Option<String>,
+        /// Up to and including this RFC 3339 time.
+        #[arg(long)]
+        until: Option<String>,
+        /// Only these event kinds (repeat or comma-separate).
+        #[arg(long, value_delimiter = ',')]
+        kind: Vec<String>,
+        /// `local` (this node's own events, the default) or `all` (peers' events too).
+        #[arg(long, default_value = "local", value_parser = ["local", "all"])]
+        node: String,
+        /// Export the audit log of remote calls instead of the event log.
+        #[arg(long)]
+        audit: bool,
+        /// Stop after this many lines.
+        #[arg(long)]
+        limit: Option<u64>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -1097,6 +1128,27 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     {
         return board_command(&another_home()?, json, project.as_deref(), since, *limit);
     }
+    // Read-only: opened without creating or migrating, like the board.
+    if let Command::Log(LogCmd::Export {
+        since,
+        until,
+        kind,
+        node,
+        audit,
+        limit,
+    }) = &cli.command
+    {
+        let args = crate::log_export::ExportArgs {
+            since: since.clone(),
+            until: until.clone(),
+            kinds: kind.clone(),
+            all_nodes: node == "all",
+            audit: *audit,
+            limit: *limit,
+        };
+        crate::log_export::run(&another_home()?, &args)?;
+        return Ok(ExitCode::SUCCESS);
+    }
 
     let store = open(home)?;
     let code = match cli.command {
@@ -1105,6 +1157,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         | Command::Hook(_)
         | Command::Daemon(_)
         | Command::Board { .. }
+        | Command::Log(_)
         | Command::Remote(_) => {
             unreachable!("handled above")
         }

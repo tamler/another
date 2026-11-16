@@ -10,6 +10,7 @@ mod board;
 pub mod crypto;
 mod dashboard;
 mod error;
+mod export;
 mod federation;
 mod holds;
 mod identity;
@@ -39,6 +40,7 @@ pub use dashboard::{
     DashboardSnapshot, DashboardView,
 };
 pub use error::{Error, ErrorBody, Result};
+pub use export::{ExportFilter, MAX_EXPORT_PAGE};
 pub use federation::{
     reachable, IngestReport, Invite, NodeEntry, PairRequest, PairResponse, Peer, Perm,
     PullResponse, PushRequest, Rejected, WireEvent,
