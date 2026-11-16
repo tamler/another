@@ -20,15 +20,23 @@ fn another(home: &Path, agent: Option<&str>, args: &[&str]) -> Output {
 fn home() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
-    assert!(another(&home, None, &["init"]).status.success());
+    // The child's status and stderr are printed on failure (Windows CI showed only that
+    // `init` failed).
+    let ok = |out: Output| {
+        assert!(
+            out.status.success(),
+            "{:?}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+    ok(another(&home, None, &["init"]));
     for name in ["lead", "worker"] {
-        assert!(another(
+        ok(another(
             &home,
             None,
-            &["agent", "register", name, "--program", "claude"]
-        )
-        .status
-        .success());
+            &["agent", "register", name, "--program", "claude"],
+        ));
     }
     (dir, home)
 }
