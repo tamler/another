@@ -114,6 +114,26 @@ fn the_name_must_be_the_first_argument() {
         home.path(),
         &["--json", "selfcopy", "--version"],
     );
+    // Not dispatched: under --json the unknown command is a JSON usage error on stdout
+    // (exit 2), and the external command never ran (it would print its version).
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stdout));
+    let err: serde_json::Value = serde_json::from_slice(&out.stdout).expect("a JSON error");
+    assert_eq!(err["error"]["code"], "usage", "{err}");
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unrecognized subcommand"),
+        "{err}"
+    );
+    assert!(!text(&out.stdout).contains("another "), "the plugin ran");
+    assert!(
+        std::fs::read_dir(home.path()).unwrap().next().is_none(),
+        "a home was created"
+    );
+
+    // Without --json, clap's own text on stderr, as before.
+    let out = another(&[bin.path()], home.path(), &["--home", "x", "selfcopy"]);
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stdout));
     assert!(text(&out.stderr).contains("unrecognized subcommand"));
 }

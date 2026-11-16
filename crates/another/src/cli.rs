@@ -870,33 +870,83 @@ pub enum HoldCmd {
 /// a request someone else owns), and bad arguments exit 2 (clap).
 pub const EXIT_CONFLICT: u8 = 3;
 
+/// Whether `--json` was passed as an option: before any `--`, after which every argument
+/// is a plain value (review R1-3).
+fn json_requested() -> bool {
+    std::env::args_os()
+        .skip(1)
+        .take_while(|a| a != "--")
+        .any(|a| a == "--json")
+}
+
+/// A bad command line under `--json`, as a JSON error on stdout (exit 2, as clap), so a
+/// script reading stdout always gets an object. Kept out of `main` (and never inlined) so
+/// its temporaries do not grow the frame every command starts in: a debug build's main
+/// thread on Windows has only 1 MB of stack (review R1-1).
+#[inline(never)]
+fn usage_error_json(e: &clap::Error) -> ExitCode {
+    // clap's error paragraph (up to its blank line, before "Usage:"), on one line.
+    let text = e.to_string();
+    let message = text
+        .lines()
+        .take_while(|l| !l.trim().is_empty())
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_start_matches("error: ")
+        .to_string();
+    println!(
+        "{}",
+        serde_json::json!({ "error": {
+            "code": "usage",
+            "message": message,
+            "hint": "Run the command with --help for its arguments.",
+        }})
+    );
+    ExitCode::from(2)
+}
+
+/// `another completions <shell>`, outside `run` for the same stack reason.
+#[inline(never)]
+fn completions_command(shell: clap_complete::Shell) -> anyhow::Result<ExitCode> {
+    let mut script = Vec::new();
+    clap_complete::generate(shell, &mut Cli::command(), "another", &mut script);
+    // A closed pipe (`| head`) is not an error.
+    match std::io::Write::write_all(&mut std::io::stdout(), &script) {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e.into()),
+        _ => Ok(ExitCode::SUCCESS),
+    }
+}
+
+/// Stack for the thread the binary runs on.
+const CLI_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+/// Run `f` (the whole binary: plugin dispatch, then the CLI) on a thread with a known stack.
+/// clap's derive builds the whole command tree in a few very large generated functions; in
+/// a debug build their frames use most of a 1 MB stack, which is the main-thread default on
+/// Windows, so `another init` and `another --version` overflowed there once every argument
+/// had help text (review R1-1, reproduced on macOS with `ulimit -s 1024`). Plugin dispatch
+/// builds the same tree to check built-in names, so it runs on this thread too. If the
+/// thread cannot be started, `f` runs on the calling thread.
+pub fn with_cli_stack(f: fn() -> ExitCode) -> ExitCode {
+    match std::thread::Builder::new()
+        .name("another".into())
+        .stack_size(CLI_STACK_BYTES)
+        .spawn(f)
+    {
+        // A panic has already printed its message; exit as an uncaught panic would.
+        Ok(handle) => handle.join().unwrap_or(ExitCode::from(101)),
+        Err(_) => f(),
+    }
+}
+
+/// The CLI: parse the command line and run it. The binary calls it through
+/// [`with_cli_stack`].
 pub fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
-        // With --json, a bad command line is a JSON error on stdout too (exit 2, as clap),
-        // so a script reading stdout always gets an object. --help and --version still
-        // print as usual.
-        Err(e) if e.use_stderr() && std::env::args_os().any(|a| a == "--json") => {
-            // clap's error paragraph (up to its blank line, before "Usage:"), on one line.
-            let text = e.to_string();
-            let message = text
-                .lines()
-                .take_while(|l| !l.trim().is_empty())
-                .map(str::trim)
-                .collect::<Vec<_>>()
-                .join(" ")
-                .trim_start_matches("error: ")
-                .to_string();
-            println!(
-                "{}",
-                serde_json::json!({ "error": {
-                    "code": "usage",
-                    "message": message,
-                    "hint": "Run the command with --help for its arguments.",
-                }})
-            );
-            return ExitCode::from(2);
-        }
+        // --help and --version still print as usual.
+        Err(e) if e.use_stderr() && json_requested() => return usage_error_json(&e),
         Err(e) => e.exit(),
     };
     init_tracing(matches!(
@@ -1257,13 +1307,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     }
     // Needs no database: generated from the command definitions.
     if let Command::Completions { shell } = &cli.command {
-        let mut script = Vec::new();
-        clap_complete::generate(*shell, &mut Cli::command(), "another", &mut script);
-        // A closed pipe (`| head`) is not an error.
-        return match std::io::Write::write_all(&mut std::io::stdout(), &script) {
-            Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e.into()),
-            _ => Ok(ExitCode::SUCCESS),
-        };
+        return completions_command(*shell);
     }
 
     let store = open(home)?;

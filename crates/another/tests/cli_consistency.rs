@@ -182,3 +182,44 @@ fn completion_scripts_generate_for_every_shell() {
     // No database is needed, so none is created.
     assert!(!dir.path().join("another.db").exists());
 }
+
+/// Review R1-3: after `--` every argument is a value, so a literal `--json` there does not
+/// switch the usage error to JSON.
+#[test]
+fn a_literal_json_after_double_dash_is_not_the_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = another(dir.path(), dir.path(), &["inbox", "--", "--json"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(!String::from_utf8_lossy(&out.stderr).is_empty());
+}
+
+/// Review R1-1: the binary must not depend on a large main-thread stack. Windows gives a
+/// debug build's main thread 1 MB, and clap's derive used nearly all of it; the CLI now runs
+/// on its own thread. A 256 KB limit here (via `ulimit -s`) leaves no doubt.
+#[cfg(unix)]
+#[test]
+fn the_cli_runs_with_a_small_main_thread_stack() {
+    let dir = tempfile::tempdir().unwrap();
+    for args in ["init", "--version", "status --help", "nosuchcommand"] {
+        let out = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("ulimit -s 256 && exec \"$0\" {args}"))
+            .arg(BIN)
+            .env("ANOTHER_HOME", dir.path())
+            .env_remove("ANOTHER_AGENT")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!err.contains("overflowed its stack"), "{args}: {err}");
+        assert!(
+            out.status.code().is_some(),
+            "{args}: killed by a signal: {err}"
+        );
+    }
+}
