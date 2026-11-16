@@ -84,8 +84,8 @@ pub struct TrialStats {
     pub blocked: Vec<BlockedEdit>,
     /// Most recent first, at most 50.
     pub wakes: Vec<WakeRecord>,
-    /// Every event this node recorded in the period, per UTC day, oldest first. Days with
-    /// none are left out.
+    /// Every event this node wrote in the period (not events ingested from peers), per UTC
+    /// day, oldest first. Days with none are left out.
     pub events_per_day: Vec<DayCount>,
     /// Not the period: this node's state when the stats were read.
     pub now: CurrentState,
