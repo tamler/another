@@ -116,3 +116,25 @@ fn a_submodule_without_origin_does_not_take_the_superprojects_key() {
     assert_eq!(inner.key, format!("git:{}", modules.to_string_lossy()));
     assert_ne!(inner.key, outer.key);
 }
+
+/// adv237: a relative-path worktree opened through a symlink whose parent is not the
+/// worktree's real parent. Git resolves `gitdir: ../main/...` from the `.git` file's real
+/// location, so the worktree still belongs to `main`; a lexical join from the symlinked path
+/// lands next to the symlink instead.
+#[cfg(unix)]
+#[test]
+fn adv237_a_symlinked_relative_worktree_still_shares_the_checkouts_key() {
+    let dir = tempfile::tempdir().unwrap();
+    relative_worktree(dir.path(), Some("git@example.com:me/shop.git"));
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("wt-a"), elsewhere.join("wt")).unwrap();
+
+    let main = repo_link_for(&dir.path().join("main")).unwrap();
+    let via_link =
+        repo_link_for(&elsewhere.join("wt")).expect("the symlinked worktree is still a repository");
+    assert_eq!(
+        via_link.key, main.key,
+        "opened through a symlink, the worktree got a key of its own"
+    );
+}
