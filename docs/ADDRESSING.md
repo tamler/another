@@ -165,7 +165,7 @@ The installed hooks never hit this: a hook acts as `<client>@<project>` for the 
 | Message | Meaning | Fix |
 |---|---|---|
 | `agent name "codex" is ambiguous: ... one of: codex@shop, codex@billing` | More than one project has the name | Use one of the listed addresses |
-| `unknown agent "codex@payments"; register it with register_agent first (or sync with its node)` | No project on this node has that slug or path, and no paired node is known by that name | Check `another agent list`; register the agent, or fix the slug |
+| `unknown agent "codex@payments"; register it first (or sync with its node)` | No project on this node has that slug or path, and no paired node is known by that name | Check `another agent list`; register the agent, or fix the slug |
 | `invalid agent address "codex@shop@local@x": use name, name@project or name@project@node` | More than two `@` | Use one of the three forms |
 | `codex@shop@laptop belongs to another node; agents act only on their own node` | The address is valid but the agent lives on a paired node | A remote agent can receive mail; it cannot be `--agent` or `--from` here |
 
