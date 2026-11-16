@@ -453,7 +453,7 @@ fn windows_install_writes_a_per_user_logon_task() {
         .to_string();
     assert!(
         text.contains(&format!(
-            "<Arguments>--home \"{home}\" serve --bind {bind} --log-file \"{log}\"</Arguments>"
+            "<Arguments>--home &quot;{home}&quot; serve --bind {bind} --log-file &quot;{log}&quot;</Arguments>"
         )),
         "{text}"
     );

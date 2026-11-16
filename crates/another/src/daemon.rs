@@ -344,10 +344,8 @@ fn utf16(text: &str) -> Vec<u8> {
 
 fn from_utf16(bytes: &[u8]) -> Option<String> {
     let body = bytes.strip_prefix(&[0xFF, 0xFE])?;
-    let units: Vec<u16> = body
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .collect();
+    let (pairs, _) = body.as_chunks::<2>();
+    let units: Vec<u16> = pairs.iter().map(|c| u16::from_le_bytes(*c)).collect();
     String::from_utf16(&units).ok()
 }
 
