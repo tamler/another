@@ -124,3 +124,21 @@ fn agents_in_same_named_projects_get_distinct_addresses() {
     assert_eq!(unread("alice@shop-2"), 1);
     assert_eq!(unread("alice@shop"), 0);
 }
+
+/// Slugs are ASCII only, so an address cannot be spelled with look-alike letters: a
+/// directory named with a Cyrillic `ѕ` (U+0455) does not get the slug `ѕhop`, which would read
+/// as `shop` in `alice@ѕhop`.
+#[test]
+fn a_slug_keeps_only_ascii_letters() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store();
+    for (rel, want) in [
+        (vec!["\u{455}hop"], "hop"),
+        (vec!["caf\u{e9}"], "caf"),
+        (vec!["\u{65e5}\u{672c}"], "project"),
+    ] {
+        let p = s.ensure_project("t", &path(&dir, &rel)).unwrap();
+        assert!(p.slug.is_ascii(), "{rel:?} gave {:?}", p.slug);
+        assert_eq!(p.slug, want, "{rel:?}");
+    }
+}
