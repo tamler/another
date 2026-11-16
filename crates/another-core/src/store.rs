@@ -183,6 +183,10 @@ impl Store {
             conn.pragma_update(None, "synchronous", "NORMAL")?;
         }
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version > MIGRATIONS.len() as i64 {
+            // A normal open refuses this too; only a newer build can use the database.
+            return Err(newer_schema(version));
+        }
         if version != MIGRATIONS.len() as i64 {
             return Err(Error::Invalid(format!(
                 "database schema is v{version}, this build expects v{}; a normal open migrates it",
@@ -718,6 +722,15 @@ fn use_wal(conn: &Connection) -> Result<()> {
     }
 }
 
+/// A database a newer build has migrated: this build must not touch it. The normal and the
+/// quick open say the same thing, so the CLI and the hook log give the same fix.
+fn newer_schema(version: i64) -> Error {
+    Error::Invalid(format!(
+        "database schema v{version} is newer than this another build supports (v{}); upgrade another",
+        MIGRATIONS.len()
+    ))
+}
+
 fn migrate(conn: &mut Connection) -> Result<()> {
     // Read the version inside each write transaction: another process may have applied a
     // step while this one waited for the lock (several sessions opening a new home at once).
@@ -726,10 +739,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         let current: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         let current = usize::try_from(current).unwrap_or(0);
         if current > MIGRATIONS.len() {
-            return Err(Error::Invalid(format!(
-                "database schema v{current} is newer than this another build supports (v{}); upgrade another",
-                MIGRATIONS.len()
-            )));
+            return Err(newer_schema(current as i64));
         }
         let Some(sql) = MIGRATIONS.get(current) else {
             return Ok(());
