@@ -1033,7 +1033,8 @@ fn emit<T: Serialize>(json: bool, value: &T, human: impl FnOnce(&T) -> String) -
 /// CSI sequence there would retitle, clear or rewrite the operator's terminal. Every
 /// control or bidi-override character except the line breaks and tabs the renderers use
 /// for layout becomes `?` (the D75 rule, applied where text reaches a terminal). `--json`
-/// output is unchanged: JSON escapes them.
+/// output keeps the exact text: JSON escapes C0 controls, but DEL, C1 and bidi characters
+/// stay raw UTF-8, for the reading program to handle (D82).
 fn terminal_safe(text: &str) -> String {
     text.chars()
         .map(|c| match c {

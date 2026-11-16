@@ -92,8 +92,85 @@ fn a_held_file_name_cannot_retitle_or_clear_the_terminal() {
     let out = run(&["hold", "release", "-a", "b", "nosuch"]);
     assert!(!has_control(&out.stderr));
 
-    // --json keeps the exact text, escaped by JSON.
+    // --json keeps the exact text: JSON escapes the C0 controls (ESC, BEL); the bidi
+    // override stays raw UTF-8 (D82), and the value decodes to what was held.
     let out = run(&["--json", "holds"]);
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(v.to_string().contains("\\u001b]0;pwned"), "{v}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains('\u{202e}'));
+    assert_eq!(v[0]["pattern"].as_str(), Some(hostile), "{v}");
+}
+
+/// Review R1 of #176 (P2): `sync --watch` keeps going after a failed round and prints the
+/// error itself, outside `main`'s error path. The error can quote the hub's reply, which
+/// another machine wrote. A fake hub answers 500 with an OSC title sequence in its
+/// message; the watch line must carry it cleaned.
+#[cfg(unix)]
+#[test]
+fn a_hub_error_in_sync_watch_cannot_retitle_the_terminal() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+
+    let hub = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", hub.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in hub.incoming().take(20) {
+            let Ok(mut s) = stream else { continue };
+            let mut buf = [0u8; 8192];
+            let _ = s.read(&mut buf);
+            let body = "{\"error\":{\"code\":\"internal\",\"message\":\"hub says \u{1b}]0;pwned\u{7} \u{1b}[2J done\"}}";
+            let _ = write!(
+                s,
+                "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+
+    // A spoke paired with a hub at `url`, through the store (no hub process).
+    let dir = tempfile::tempdir().unwrap();
+    let spoke_home = dir.path().join("spoke");
+    {
+        let hub_store = another_core::Store::open(&dir.path().join("hub")).unwrap();
+        hub_store.set_node_name("hub").unwrap();
+        let spoke = another_core::Store::open(&spoke_home).unwrap();
+        spoke.set_node_name("spoke").unwrap();
+        let code = hub_store
+            .create_invite(&url, &another_core::Perm::ALL, 3600)
+            .unwrap();
+        let (invite, req) = spoke.prepare_join(&code).unwrap();
+        let resp = hub_store.accept_pairing(&req).unwrap();
+        spoke.complete_join(&invite, &resp).unwrap();
+    }
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_another"))
+        .args(["sync", "--watch"])
+        .current_dir(dir.path())
+        .env("ANOTHER_HOME", &spoke_home)
+        .env_remove("ANOTHER_AGENT")
+        .env_remove("ANOTHER_LOG")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut err = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    let mut got = String::new();
+    while err.read_line(&mut line).unwrap_or(0) > 0 {
+        if line.contains("sync failed") {
+            got = line.clone();
+            break;
+        }
+        line.clear();
+    }
+    // Stop the one process this test started, by its own id, with SIGTERM.
+    let _ = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status();
+    let _ = child.wait();
+
+    assert!(got.contains("hub says"), "no watch error line: {got:?}");
+    assert!(!has_control(got.trim_end().as_bytes()), "{got:?}");
+    assert!(got.contains("?]0;pwned?"), "{got:?}");
 }
