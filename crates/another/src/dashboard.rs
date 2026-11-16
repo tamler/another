@@ -418,8 +418,8 @@ async fn stream(
                 }
             }
             tokio::select! {
-                _ = tx.closed() => break,
-                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                () = tx.closed() => break,
+                () = tokio::time::sleep(Duration::from_secs(2)) => {}
             }
         }
     });
