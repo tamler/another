@@ -20,10 +20,22 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
+/// The temp dir as a client would report it. Canonicalizing resolves macOS's
+/// `/var` -> `/private/var` link, but on Windows it adds a `\\?\` verbatim prefix that no
+/// client sends in `cwd`, so drop that prefix there.
+fn client_path(p: &Path) -> PathBuf {
+    let real = std::fs::canonicalize(p).unwrap();
+    #[cfg(windows)]
+    if let Some(plain) = real.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        return PathBuf::from(plain);
+    }
+    real
+}
+
 impl Env {
     fn new() -> Env {
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let root = client_path(dir.path());
         let main = root.join("work").join("shop");
         write(
             &main.join(".git/config"),
@@ -150,9 +162,12 @@ fn board_shows_what_the_edit_hook_recorded_and_what_waits() {
     env.start("codex", &env.wt);
     assert_eq!(env.edit("claude", &env.main, "src/a.rs"), "");
     // Codex in a sibling worktree is stopped on the same file.
-    assert!(env
-        .edit("codex", &env.wt, "src/a.rs")
-        .contains("held by claude@shop"));
+    let stopped = env.edit("codex", &env.wt, "src/a.rs");
+    assert!(
+        stopped.contains("held by claude@shop"),
+        "the edit hook did not stop codex: {stopped:?}; holds: {}",
+        env.ok(&["--json", "holds"])
+    );
     env.ok(&[
         "send",
         "--from",
