@@ -85,7 +85,11 @@ another sync --watch --every 30
 - **Hub restart.** Everything is in the hub's database, so a restarted hub carries on where it stopped. Spokes resume from their cursors.
 - **Spoke offline for days.** On its next `another sync`, the spoke pushes its backlog and pulls everyone else's in pages of 500 until caught up. Days-old holds arrive already expired, so other nodes see only the spoke's current holds as live.
 - **Replays are harmless.** Every event has a unique id, and both sides skip events they already have. Resending from zero changes nothing.
-- **Hub restored from an older backup.** The hub's sequence numbers go back, so a spoke's cursors point past the hub's log: new hub events would be skipped, and the spoke's events the hub lost would never be sent again. The spoke detects this from the hub's `reset` answer, rewinds both cursors to zero and syncs again in the same `another sync`. `another sync --json` reports `"hub_reset": true`, and a local `peer.resynced` event records it, so the next sync does not reset again. After that:
+- **Hub restored from an older backup.** A spoke keeps two cursors: how far it has pushed its own events (its own sequence numbers), and how far it has pulled (the hub's sequence numbers). A restore takes the hub's sequence back. The pull cursor then points past the hub's log, so new hub events would be skipped. The push cursor says the spoke's events reached the hub, but the restore lost some of them, so they would never be sent again.
+
+  The spoke detects this from the hub's `reset` answer, rewinds both cursors to zero and syncs again in the same `another sync`. `another sync --json` reports `"hub_reset": true`, and a local `peer.resynced` event records it, so the next sync does not reset again.
+
+  The anchor the spoke sends is the last event the hub actually sent it, even when that event was not stored (a duplicate, or one this node rejected); a local `peer.anchored` event records it in that case. Then a second restore is noticed too. After a resync:
   - every spoke's own events reach the hub again;
   - events only the hub wrote after the backup are gone, as with any restore.
 - **Limit.** Detection relies on the hub missing the last event the spoke received from it, or on the spoke's cursor being beyond the hub's log. A restore can go unnoticed when both of these hold:

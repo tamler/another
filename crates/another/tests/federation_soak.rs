@@ -516,3 +516,60 @@ fn restored_hub(hub_moves_on: usize) {
     );
     assert_converged(&hub, &alpha);
 }
+
+/// REVIEW-R1 P2: after a resync, a pull that brings only events this spoke already has (a
+/// second spoke re-pushing its history) inserts nothing. The anchor must still move to the
+/// last event the hub sent, or a second restore goes unnoticed and new mail is skipped.
+#[test]
+fn a_duplicate_only_pull_after_a_resync_still_moves_the_anchor() {
+    let root = tempfile::tempdir().unwrap();
+    let mut hub = Hub::start(root.path());
+    let alpha = spoke(root.path(), "alpha", Clock::System);
+    let beta = spoke(root.path(), "beta", Clock::System);
+    hub.join(&alpha);
+    hub.join(&beta);
+    register(&hub.store, "hq", None);
+    register(&alpha.store, "a1", None);
+    register(&beta.store, "b1", None);
+    for s in [&alpha, &beta, &alpha] {
+        sync(s);
+    }
+    let backup = root.path().join("hub-backup.db");
+    rusqlite::Connection::open(hub.home.join(DB_FILE))
+        .unwrap()
+        .execute("VACUUM INTO ?1", [backup.to_string_lossy()])
+        .unwrap();
+
+    // Beta mails alpha through the hub; alpha's anchor is now beta's mail.
+    send(&beta.store, "b1", "a1@@alpha", "from beta");
+    sync(&beta);
+    sync(&alpha);
+    assert_eq!(subjects(&alpha.store, "a1", "from beta").len(), 1);
+
+    // First restore: alpha notices and resyncs; its anchor is older, surviving history.
+    hub.restore(&backup);
+    assert!(sync(&alpha).hub_reset, "first restore noticed");
+    // Beta starts over and pushes its mail again; alpha gets it only as duplicates.
+    reset_cursors(&beta);
+    sync(&beta);
+    let r = sync(&alpha);
+    assert!(!r.hub_reset);
+    assert!(
+        r.pull_duplicates > 0 && r.applied == 0,
+        "alpha had it all already: {r:?}"
+    );
+
+    // Second restore, then enough new hub mail to pass alpha's old cursor.
+    hub.restore(&backup);
+    for i in 0..40 {
+        send(
+            &hub.store,
+            "hq",
+            "a1@@alpha",
+            &format!("second restore {i}"),
+        );
+    }
+    assert!(sync(&alpha).hub_reset, "second restore noticed");
+    assert_eq!(subjects(&alpha.store, "a1", "second restore").len(), 40);
+    assert!(!sync(&alpha).hub_reset, "no reset loop");
+}

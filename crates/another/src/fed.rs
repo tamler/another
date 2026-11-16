@@ -343,6 +343,10 @@ pub fn sync(store: &Store) -> Result<SyncReport> {
             ));
         }
         store.record_resync(&hub, last.as_deref())?;
+    } else if let Some(id) = &last {
+        // Duplicates and rejected events are not stored; keep the anchor on what the hub
+        // last sent anyway, or a later restore could go unnoticed (REVIEW-R1 P2).
+        store.record_anchor(&hub, id)?;
     }
     Ok(report)
 }

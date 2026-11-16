@@ -1497,22 +1497,23 @@ impl Store {
 
     /// Spoke side: the last event this node received from its hub, the anchor for
     /// [`Store::pull_for_from`]. Events from other nodes reach a spoke only through its hub
-    /// and are stored in the order the hub sent them. After a resync, the newest event is
-    /// the local `peer.resynced` record, whose `anchor` is the last event the hub sent then:
-    /// the newest stored foreign event may be one the restored hub no longer has.
+    /// and are stored in the order the hub sent them. When the last event the hub sent was
+    /// not stored (a duplicate or a rejected event), or after a resync, the newest record
+    /// is a local `peer.anchored` or `peer.resynced` event naming it (`anchor`).
     pub fn last_relayed_event_id(&self) -> Result<Option<String>> {
         self.read(|conn| {
             let newest: Option<(String, String, String)> = conn
                 .query_row(
                     "SELECT kind, event_id, payload FROM events
-                     WHERE node_id != ?1 OR kind = 'peer.resynced'
+                     WHERE node_id != ?1
+                        OR (node_id = ?1 AND kind IN ('peer.resynced', 'peer.anchored'))
                      ORDER BY seq DESC LIMIT 1",
                     [self.node_id()],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()?;
             Ok(match newest {
-                Some((kind, _, payload)) if kind == "peer.resynced" => {
+                Some((kind, _, payload)) if kind == "peer.resynced" || kind == "peer.anchored" => {
                     serde_json::from_str::<Value>(&payload)
                         .ok()
                         .and_then(|p| p.get("anchor")?.as_str().map(str::to_string))
@@ -1543,6 +1544,24 @@ impl Store {
                 "system",
                 "peer.resynced",
                 json!({ "peer": peer, "anchor": anchor }),
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Spoke side: after a pull, keep the anchor on the last event `peer` actually sent, when
+    /// that event was not stored (a duplicate or a rejected event) and so is not the newest
+    /// stored foreign event. Writes nothing when the anchor already names it. A `peer.*`
+    /// event never leaves this node.
+    pub fn record_anchor(&self, peer: &str, last_received: &str) -> Result<()> {
+        if self.last_relayed_event_id()?.as_deref() == Some(last_received) {
+            return Ok(());
+        }
+        self.write(|tx| {
+            tx.emit(
+                "system",
+                "peer.anchored",
+                json!({ "peer": peer, "anchor": last_received }),
             )?;
             Ok(())
         })
