@@ -892,7 +892,7 @@ fn only_codex_gets_labels_and_a_description() {
 }
 
 // ---------------------------------------------------------------------------
-// Cursor's opt-in edit guard (D75)
+// Cursor's opt-in edit guard (D76)
 
 fn cursor_status(env: &Env) -> Value {
     let rows: Value = serde_json::from_str(&env.ok(&["--json", "hook", "status"])).unwrap();

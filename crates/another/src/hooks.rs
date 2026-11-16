@@ -79,7 +79,7 @@ impl Client {
     }
 
     /// The hook entries Another installs for this client. Cursor's edit guard is included
-    /// only with `cursor_guard` (`hook install --cursor-edit-guard`, D75).
+    /// only with `cursor_guard` (`hook install --cursor-edit-guard`, D76).
     fn specs(self, cursor_guard: bool) -> Vec<HookSpec> {
         let spec = |key, event, timeout, matcher| HookSpec {
             key,
@@ -278,7 +278,7 @@ fn script_text(env: &HookEnv) -> String {
         "#!/bin/sh\n\
          # Another hook wrapper, written by `another hook install`; removed by `another hook uninstall`.\n\
          # It exits 0, so a missing or failing another never blocks the agent. The one exception\n\
-         # is Cursor's edit guard (D75): Cursor blocks a tool call whose reply it cannot parse,\n\
+         # is Cursor's edit guard (D76): Cursor blocks a tool call whose reply it cannot parse,\n\
          # so a reply is printed only after another exited 0 and checked it. Anything else\n\
          # prints nothing and exits 1, which Cursor treats as a failed hook and lets the edit\n\
          # proceed.\n\
@@ -656,7 +656,7 @@ fn plan_script(env: &HookEnv, install: bool, still_used: bool) -> FileChange {
 }
 
 /// Install (or with `install = false`, uninstall) hooks for `clients`. `cursor_guard` adds
-/// Cursor's edit guard on install; an install without it removes that entry (D75).
+/// Cursor's edit guard on install; an install without it removes that entry (D76).
 pub fn install(
     env: &HookEnv,
     clients: &[Client],
@@ -1311,7 +1311,7 @@ pub fn cursor_deny(reason: &str) -> String {
     }
 }
 
-/// The only reply the Cursor edit guard forwards (D75).
+/// The only reply the Cursor edit guard forwards (D76).
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CursorDeny {
