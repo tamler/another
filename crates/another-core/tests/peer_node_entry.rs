@@ -255,3 +255,50 @@ fn a_name_from_the_hubs_list_that_is_invalid_or_taken_is_not_applied() {
         Some(gamma.node_id())
     );
 }
+
+/// Nodes are addressed by display name or by id, so another node's id is a taken name on
+/// every path that names a node: a peer's node list, a signed rename, a local rename and
+/// pairing. Otherwise `bob@@<alpha's id>`, the form that resolves an ambiguity, is ambiguous.
+/// (FINDINGS-248-w9Y.)
+#[test]
+fn another_nodes_id_is_a_taken_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = node(dir.path(), "hub");
+    let alpha = node(dir.path(), "alpha");
+    let mallory = node(dir.path(), "mallory");
+    pair(&hub, &alpha);
+    pair(&hub, &mallory);
+    let alpha_id = alpha.node_id().to_string();
+
+    // A spoke's own entry in its node list.
+    hub.ingest(mallory.node_id(), &[], &[entry(&mallory, &alpha_id)])
+        .unwrap();
+    assert_eq!(name_on(&hub, &mallory), "mallory", "node list");
+
+    // A signed node.renamed. mallory does not know alpha, so its own rename succeeds.
+    mallory.set_node_name(&alpha_id).unwrap();
+    let (events, _) = mallory.outbound_events(0, 10_000).unwrap();
+    let report = hub.ingest(mallory.node_id(), &events, &[]).unwrap();
+    assert!(
+        report
+            .rejected
+            .iter()
+            .any(|r| r.reason.contains("another node already has")),
+        "node.renamed: {report:?}"
+    );
+    assert_eq!(name_on(&hub, &mallory), "mallory", "node.renamed");
+
+    // A local rename on the hub.
+    let err = hub.set_node_name(&alpha_id).unwrap_err();
+    assert_eq!(err.code(), "conflict", "set_node_name: {err}");
+
+    // Pairing a node that calls itself by alpha's id.
+    let joiner = node(dir.path(), "joiner");
+    joiner.set_node_name(&alpha_id).unwrap();
+    let code = hub
+        .create_invite("https://hub.example", &Perm::ALL, 3600)
+        .unwrap();
+    let (_, req) = joiner.prepare_join(&code).unwrap();
+    let err = hub.accept_pairing(&req).unwrap_err();
+    assert_eq!(err.code(), "conflict", "pairing: {err}");
+}

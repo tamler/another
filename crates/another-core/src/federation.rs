@@ -273,22 +273,28 @@ fn require_named(entry: &NodeEntry) -> Result<()> {
     Ok(())
 }
 
+/// Whether `name` already names a node other than `node_id`. A node is addressed by its
+/// display name or its id (`identity.rs` `resolve_remote`), so another node's id is taken
+/// too: otherwise `name@project@<node id>`, the form that resolves an ambiguity, is ambiguous.
+fn node_name_taken(conn: &Connection, name: &str, node_id: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM nodes WHERE (display_name = ?1 OR node_id = ?1) AND node_id != ?2",
+            params![name, node_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
 /// `listed` as a peer's node list may apply it. The name is used only when a local rename
 /// would accept it: valid, not the `local` placeholder, and not another node's. Otherwise a
 /// known node keeps its name, and an unknown one is recorded under its id, which names no
 /// one else, so its key is still learned and its signed events still verify.
 fn listed_entry(tx: &Tx<'_>, listed: &NodeEntry) -> Result<NodeEntry> {
-    let taken = tx
-        .query_row(
-            "SELECT 1 FROM nodes WHERE display_name = ?1 AND node_id != ?2",
-            params![listed.display_name, listed.node_id],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some();
     let usable = validate_node_name(&listed.display_name).is_ok()
         && listed.display_name != "local"
-        && !taken;
+        && !node_name_taken(tx, &listed.display_name, &listed.node_id)?;
     let display_name = if usable {
         listed.display_name.clone()
     } else {
@@ -627,15 +633,7 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
             else {
                 return Ok(());
             };
-            let taken = conn
-                .query_row(
-                    "SELECT 1 FROM nodes WHERE display_name = ?1 AND node_id != ?2",
-                    params![name, origin],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some();
-            if taken {
+            if node_name_taken(conn, name, origin)? {
                 return Err(Error::Forbidden(format!(
                     "{kind} names {name:?}, which another node already has"
                 )));
@@ -1155,15 +1153,7 @@ impl Store {
     pub fn set_node_name(&self, name: &str) -> Result<NodeEntry> {
         validate_node_name(name)?;
         self.write(|tx| {
-            let taken = tx
-                .query_row(
-                    "SELECT 1 FROM nodes WHERE display_name = ?1 AND is_local = 0",
-                    [name],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some();
-            if taken {
+            if node_name_taken(tx, name, tx.node_id)? {
                 return Err(Error::Conflict(format!(
                     "another known node is already named {name:?}"
                 )));
@@ -1344,14 +1334,7 @@ impl Store {
                 return Err(denied());
             }
             let hub = local_entry(tx)?;
-            let clash = tx
-                .query_row(
-                    "SELECT 1 FROM nodes WHERE display_name = ?1 AND node_id != ?2",
-                    params![req.node.display_name, req.node.node_id],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some();
+            let clash = node_name_taken(tx, &req.node.display_name, &req.node.node_id)?;
             if clash || req.node.node_id == hub.node_id {
                 return Err(Error::Conflict(format!(
                     "a node named {:?} is already known; rename the joining node",
