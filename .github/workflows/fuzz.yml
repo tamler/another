@@ -42,7 +42,8 @@ jobs:
           workspaces: fuzz
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --version 0.12.0 --locked
+        # 0.12.0's locked dependencies no longer build on current nightly.
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
 
       - name: Run ${{ matrix.target }}
         working-directory: fuzz
