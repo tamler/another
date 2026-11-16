@@ -409,6 +409,24 @@ fn every_failure_lets_the_commit_through() {
     let out = env.guard(&env.path_with(&env.bin), &["--no-such-flag"]);
     assert!(String::from_utf8_lossy(&out.stderr).contains("hold check skipped"));
 
+    // A bad argument that is not UTF-8 (review IMPL-4: this once panicked, exit 101).
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let mut c = Command::new(env!("CARGO_BIN_EXE_another"));
+        env.base(&mut c);
+        let out = c
+            .args(["hook", "pre-commit", "--agent"])
+            .arg(std::ffi::OsStr::from_bytes(b"\xff"))
+            .current_dir(&env.repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("hold check skipped"),
+            "{out:?}"
+        );
+    }
+
     // The snippet with a binary that crashes.
     let crash = env.root.join("crash-bin");
     executable(&crash.join("another"), "#!/bin/sh\nkill -SEGV $$\n");
@@ -446,6 +464,38 @@ fn an_untrusted_listing_is_not_checked() {
     }
 }
 
+/// FINDINGS-159 G1: SQLite creates the `-wal` and `-shm` files even for a read-only open,
+/// so a home the committer cannot write to is a visible skip, not a silent pass. The data
+/// itself is unchanged either way.
+#[test]
+fn a_home_without_write_access_is_reported_as_not_checked() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = Env::new();
+    env.hold("bob", "src/f0.rs", None);
+    env.change("src/f0.rs");
+    env.git_ok(&env.repo, &["add", "src/f0.rs"]);
+    let before = env.dump();
+    for side in ["another.db-wal", "another.db-shm"] {
+        let _ = std::fs::remove_file(env.another_home.join(side));
+    }
+    let mode = |m| std::fs::set_permissions(&env.another_home, std::fs::Permissions::from_mode(m));
+    mode(0o555).unwrap();
+    // Root ignores the mode; the case cannot be made there.
+    let writable = std::fs::write(env.another_home.join("probe"), b"").is_ok();
+    let out = env.guard(&env.path_with(&env.bin), &[]);
+    mode(0o755).unwrap();
+    if writable {
+        return;
+    }
+    assert!(out.status.success(), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("hold check skipped: read-only open failed"),
+        "{err}"
+    );
+    assert_eq!(before, env.dump());
+}
+
 #[test]
 fn a_cut_listing_gives_a_lower_bound() {
     let env = Env::new();
@@ -475,6 +525,16 @@ fn a_cut_listing_gives_a_lower_bound() {
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["listing_cut"], true, "{v}");
     assert_eq!(v["staged_at_least"], 0, "{v}");
+    assert_eq!(v["complete"], false, "{v}");
+    // Review IMPL-2: the human text says so too, even with no complete entry, and the
+    // commit still goes ahead.
+    let out = env.guard(&dir.to_string_lossy(), &[]);
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("of at least 0 staged file(s)") && err.contains("listing cut"),
+        "{err}"
+    );
 
     // A complete name far longer than any real path (this once crashed the guard inside
     // globset): skipped and counted, and the guard still exits 0.

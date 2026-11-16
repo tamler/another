@@ -321,6 +321,58 @@ fn a_spent_budget_is_reported_as_incomplete() {
     assert!(!check.links_complete);
 }
 
+/// Review IMPL-1: a budget that runs out during matching (not before it starts) stops the
+/// work there, and the result says which paths were not checked.
+#[test]
+fn a_budget_that_runs_out_while_matching_stops_the_check() {
+    let fx = Fx::new();
+    let root = fx.main.parent().unwrap();
+    // 100 glob holds in a sibling checkout: each staged path is compared with all of them.
+    let r = fx
+        .store
+        .acquire_holds(AcquireHolds {
+            agent: "bob".into(),
+            project: path(&root.join("shop-current")),
+            paths: (0..100).map(|i| format!("d{i}/**/*.rs")).collect(),
+            ttl_seconds: Some(3600),
+            exclusive: true,
+            reason: None,
+            repo_wide: false,
+        })
+        .unwrap();
+    assert!(r.conflicts.is_empty());
+    let paths: Vec<String> = (0..4096)
+        .map(|i| format!("d{}/x/f{i}.rs", i % 100))
+        .collect();
+    let groups = vec![CommitGroup {
+        dir: path(&fx.main),
+        paths: paths.clone(),
+    }];
+    let reader = fx.reader();
+    let started = Instant::now();
+    let check = reader
+        .check(Some("alice"), &groups, started + Duration::from_millis(100))
+        .unwrap();
+    let took = started.elapsed();
+    // Unbounded, this takes minutes. The slack covers a slow CI runner.
+    assert!(took < Duration::from_secs(2), "took {took:?}");
+    assert!(!check.links_complete);
+    assert!(check.checked < paths.len(), "{}", check.checked);
+    let budget = check
+        .skipped
+        .iter()
+        .filter(|s| s.reason == "time budget")
+        .count();
+    assert!(budget > 0);
+    assert_eq!(check.checked + check.skipped.len(), paths.len());
+    // Conflicts found before the deadline are kept: every checked path is under a hold.
+    assert!(check.conflicts.len() >= check.checked, "{check:?}");
+    assert!(check
+        .conflicts
+        .iter()
+        .all(|c| c.held.agent == "bob@shop-current"));
+}
+
 #[test]
 fn open_refuses_a_missing_database_and_a_schema_mismatch() {
     let dir = tempfile::tempdir().unwrap();

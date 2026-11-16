@@ -451,6 +451,14 @@ pub fn render_text(o: &Outcome) -> String {
         return finish(lines);
     }
     let Some(check) = &o.check else {
+        // No check ran: nothing was staged, or the listing was cut before its first
+        // complete entry. Only the second needs saying.
+        if o.listing_cut {
+            lines.push(format!(
+                "another: checked 0 of at least {} staged file(s); the rest not checked (listing cut at the size limit)",
+                o.staged
+            ));
+        }
         return finish(lines);
     };
     let top = o.top.as_deref().unwrap_or("");

@@ -1,8 +1,9 @@
 //! Read-only hold check for the advisory pre-commit guard (`another hook pre-commit`).
 //!
 //! It answers "is any staged file under another agent's live hold?" with the edit guard's
-//! matching, and writes nothing: no sweep, no event, no project registration, no
-//! repository-link cache refresh. The database is opened with SQLite's read-only flag.
+//! matching, and changes no data: no sweep, no event, no project registration, no
+//! repository-link cache refresh. The database is opened with SQLite's read-only flag
+//! (SQLite may still create the `-wal` and `-shm` files next to it).
 //!
 //! The edit guard refreshes the repository links of projects that hold live holds before
 //! it compares them (`link_unlinked`), so a sibling checkout whose link was never cached,
@@ -12,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection, OpenFlags, MAIN_DB};
@@ -82,6 +84,73 @@ pub fn is_busy_error(e: &Error) -> bool {
     )
 }
 
+/// Whether `e` is SQLite reporting a statement interrupted by the deadline watchdog.
+fn is_interrupted(e: &Error) -> bool {
+    matches!(
+        e,
+        Error::Db(rusqlite::Error::SqliteFailure(f, _))
+            if f.code == rusqlite::ErrorCode::OperationInterrupted
+    )
+}
+
+/// Mark the check incomplete for the time budget: the path at `at` and every one after it
+/// is skipped. Conflicts and skips already recorded stay.
+fn budget_ran_out(out: &mut CommitCheck, groups: &[CommitGroup], at: (usize, usize)) {
+    out.links_complete = false;
+    let (gi, pi) = at;
+    for (i, group) in groups.iter().enumerate().skip(gi) {
+        let from = if i == gi { pi } else { 0 };
+        for p in group.paths.iter().skip(from) {
+            let path = if p.len() > MAX_NAME_BYTES {
+                p.chars().take(200).collect()
+            } else {
+                p.clone()
+            };
+            out.skipped.push(CommitSkip {
+                path,
+                reason: "time budget".into(),
+            });
+        }
+    }
+}
+
+/// Interrupts the connection's running statement at the deadline, from its own thread.
+/// Dropping it before then stops the thread without interrupting anything.
+struct Watchdog {
+    stop: Option<mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Watchdog {
+    fn start(handle: rusqlite::InterruptHandle, deadline: Instant) -> Watchdog {
+        let (stop, rx) = mpsc::channel::<()>();
+        // If no thread can be started, the loops' own deadline checks still apply.
+        let thread = std::thread::Builder::new()
+            .name("another-commit-deadline".into())
+            .spawn(move || {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if let Err(mpsc::RecvTimeoutError::Timeout) = rx.recv_timeout(left) {
+                    handle.interrupt();
+                }
+            })
+            .ok();
+        Watchdog {
+            stop: Some(stop),
+            thread,
+        }
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        // Closing the channel wakes the thread at once.
+        drop(self.stop.take());
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
 /// A glob metacharacter in a staged name: the name is never treated as a pattern.
 fn has_glob_char(path: &str) -> bool {
     path.contains(['*', '?', '[', '{'])
@@ -140,7 +209,12 @@ impl CommitReader {
 
     /// Check `groups` against live holds. `agent` (`name` or `name@project`) is the
     /// committer: its own holds are left out when it resolves to an agent of this node.
-    /// Work stops at `deadline`; the result then says it is incomplete.
+    ///
+    /// Work stops at `deadline`: the path and hold loops check it, a lock wait is capped to
+    /// the time left, and a statement still running at the deadline is interrupted. The
+    /// result then has `links_complete` false, every path not fully checked skipped for
+    /// "time budget", and the conflicts already found. Reading a project's files to work out
+    /// its repository link is not interrupted; the deadline is checked between projects.
     pub fn check(
         &self,
         agent: Option<&str>,
@@ -151,6 +225,29 @@ impl CommitReader {
             links_complete: true,
             ..CommitCheck::default()
         };
+        self.conn
+            .busy_timeout(deadline.saturating_duration_since(Instant::now()))?;
+        let _watchdog = Watchdog::start(self.conn.get_interrupt_handle(), deadline);
+        let mut at = (0, 0);
+        match self.check_into(&mut out, agent, groups, deadline, &mut at) {
+            Ok(true) => {}
+            Ok(false) => budget_ran_out(&mut out, groups, at),
+            Err(e) if is_interrupted(&e) => budget_ran_out(&mut out, groups, at),
+            Err(e) => return Err(e),
+        }
+        Ok(out)
+    }
+
+    /// The body of [`Self::check`]. `at` is the group and path being worked on; `Ok(false)`
+    /// means the deadline passed there, before that path was fully checked.
+    fn check_into(
+        &self,
+        out: &mut CommitCheck,
+        agent: Option<&str>,
+        groups: &[CommitGroup],
+        deadline: Instant,
+        at: &mut (usize, usize),
+    ) -> Result<bool> {
         let agent_id = match agent {
             None => None,
             Some(who) => match resolve_agent(&self.conn, &self.node_id, who) {
@@ -169,7 +266,11 @@ impl CommitReader {
         out.links_complete = complete;
         let holds = self.live_holds(now, agent_id.as_deref())?;
 
-        for group in groups {
+        for (gi, group) in groups.iter().enumerate() {
+            *at = (gi, 0);
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
             let project = match find_project(&self.conn, &self.node_id, &group.dir) {
                 Ok(p) => p,
                 Err(Error::NotFound(_)) => {
@@ -183,16 +284,6 @@ impl CommitReader {
                 }
                 Err(e) => return Err(e),
             };
-            if Instant::now() >= deadline {
-                out.links_complete = false;
-                for p in &group.paths {
-                    out.skipped.push(CommitSkip {
-                        path: p.clone(),
-                        reason: "time budget".into(),
-                    });
-                }
-                continue;
-            }
             let mine = match links.get(&project.project_id) {
                 Some(l) => l.clone(),
                 None => self.link_of(&project)?,
@@ -200,7 +291,11 @@ impl CommitReader {
             let (my_key, my_prefix) =
                 mine.map_or((String::new(), String::new()), |l| (l.key, l.prefix));
             let fold = folds_case(Path::new(&project.abs_path));
-            for raw in &group.paths {
+            for (pi, raw) in group.paths.iter().enumerate() {
+                *at = (gi, pi);
+                if Instant::now() >= deadline {
+                    return Ok(false);
+                }
                 // An empty name would normalize to the whole project and match every hold.
                 if raw.is_empty() {
                     out.skipped.push(CommitSkip {
@@ -237,6 +332,12 @@ impl CommitReader {
                 };
                 out.checked += 1;
                 for (held, held_project) in &holds {
+                    // Matching a glob is the slow part: stop between holds, and count this
+                    // path as not checked (conflicts it already showed are kept).
+                    if Instant::now() >= deadline {
+                        out.checked -= 1;
+                        return Ok(false);
+                    }
                     let overlap = if *held_project == project.project_id {
                         overlap_on_volume(&pattern, &held.pattern, fold)
                     } else {
@@ -263,7 +364,7 @@ impl CommitReader {
                 }
             }
         }
-        Ok(out)
+        Ok(true)
     }
 
     /// Live holds on this node's projects, without the committer's own, with the id of the
@@ -307,14 +408,14 @@ impl CommitReader {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut links = HashMap::new();
         for p in &projects {
+            if Instant::now() >= deadline {
+                return Ok((links, false));
+            }
             match cached(&self.conn, &p.project_id)? {
                 Some(link) => {
                     links.insert(p.project_id.clone(), link);
                 }
                 None => {
-                    if Instant::now() >= deadline {
-                        return Ok((links, false));
-                    }
                     links.insert(p.project_id.clone(), link_for(Path::new(&p.abs_path)));
                 }
             }

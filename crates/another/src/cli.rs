@@ -696,7 +696,7 @@ pub enum HookCmd {
         client: Client,
     },
     /// Git pre-commit hook: warn when a staged file is under another agent's live hold.
-    /// Advisory: never blocks the commit, always exits 0, writes nothing.
+    /// Advisory: never blocks the commit, always exits 0, changes no data.
     PreCommit {
         /// The committer, whose own holds are left out (default: $ANOTHER_AGENT).
         #[arg(short, long, env = "ANOTHER_AGENT")]
