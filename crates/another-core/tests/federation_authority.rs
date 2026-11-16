@@ -840,3 +840,205 @@ fn a_peers_resource_cannot_carry_oversized_or_non_object_metadata() {
         "a peer stored non-object metadata {array:?}"
     );
 }
+
+/// A hold belongs to the node that took it: a signed `hold.renewed`, `hold.released` or
+/// `hold.expired` from another spoke that names alpha's hold changes nothing on the hub.
+#[test]
+fn hold_renewal_release_and_expiry_cannot_touch_another_nodes_hold() {
+    let fed = Fed::new();
+    let shop = fed.project_dir("alpha-shop");
+    fed.alpha
+        .store
+        .register_agent(RegisterAgent {
+            name: "alice".into(),
+            program: Program::Claude,
+            project: Some(shop.clone()),
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    let hold_id = fed
+        .alpha
+        .store
+        .acquire_holds(AcquireHolds {
+            agent: "alice@alpha-shop".into(),
+            project: shop,
+            paths: vec!["src/a.rs".into()],
+            ttl_seconds: Some(1800),
+            exclusive: true,
+            reason: None,
+            repo_wide: false,
+        })
+        .unwrap()
+        .granted[0]
+        .hold_id
+        .clone();
+    assert!(push(&fed.hub, &fed.alpha).rejected.is_empty());
+    let state = || {
+        fed.hub
+            .sql()
+            .query_row(
+                "SELECT expires_at, renewed_at, released_at FROM holds WHERE hold_id = ?1",
+                [&hold_id],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, Option<i64>>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+    // Every node's clock stands at T0, and a projection never dates an event after the
+    // receiver's clock, so a renewal now would write the values the hold already has. Date
+    // the hub's copy earlier, so that any renewal shows.
+    fed.hub
+        .sql()
+        .execute(
+            "UPDATE holds SET renewed_at = ?2, expires_at = ?2 + 60000 WHERE hold_id = ?1",
+            rusqlite::params![hold_id, T0 - 10_000],
+        )
+        .unwrap();
+    let before = state();
+    assert_eq!(before, (T0 + 50_000, Some(T0 - 10_000), None));
+
+    fed.forge("hold.renewed", json!({ "hold_ids": [hold_id] }));
+    assert_eq!(state(), before, "renewed by another node");
+    fed.forge(
+        "hold.released",
+        json!({ "hold_ids": [hold_id], "reason": "forged" }),
+    );
+    assert_eq!(state(), before, "released by another node");
+    fed.forge("hold.expired", json!({ "hold_id": hold_id }));
+    assert_eq!(state(), before, "expired by another node");
+}
+
+/// adv210: a `hold.updated` from mallory that names alpha's hold, with mallory's own agent
+/// and project, is refused and leaves the hold as it was.
+#[test]
+fn adv210_hold_update_cannot_take_another_nodes_hold() {
+    let fed = Fed::new();
+    let shop = fed.project_dir("alpha-shop");
+    fed.alpha
+        .store
+        .register_agent(RegisterAgent {
+            name: "alice".into(),
+            program: Program::Claude,
+            project: Some(shop.clone()),
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    let hold_id = fed
+        .alpha
+        .store
+        .acquire_holds(AcquireHolds {
+            agent: "alice@alpha-shop".into(),
+            project: shop,
+            paths: vec!["src/a.rs".into()],
+            ttl_seconds: Some(1800),
+            exclusive: true,
+            reason: None,
+            repo_wide: false,
+        })
+        .unwrap()
+        .granted[0]
+        .hold_id
+        .clone();
+    assert!(push(&fed.hub, &fed.alpha).rejected.is_empty());
+    let mshop = fed.project_dir("mallory-shop");
+    let spy = fed
+        .mallory
+        .store
+        .register_agent(RegisterAgent {
+            name: "spy".into(),
+            program: Program::Claude,
+            project: Some(mshop.clone()),
+            model: None,
+            description: None,
+        })
+        .unwrap()
+        .agent_id;
+    let mproject = fed
+        .mallory
+        .store
+        .ensure_project("test", &mshop)
+        .unwrap()
+        .project_id;
+    push(&fed.hub, &fed.mallory);
+    let row = || {
+        fed.hub
+            .sql()
+            .query_row(
+                "SELECT node_id, agent_id, exclusive, reason, expires_at FROM holds WHERE hold_id = ?1",
+                [&hold_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, bool>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+    let before = row();
+    let report = fed.forge(
+        "hold.updated",
+        json!({ "hold_id": hold_id, "project_id": mproject, "agent_id": spy,
+                "pattern": "src/a.rs", "exclusive": false, "reason": "taken",
+                "ttl_seconds": 60 }),
+    );
+    assert_rejected(&report, "hold.updated naming alpha's hold");
+    assert_eq!(row(), before);
+}
+
+/// A lease ends or renews only by its holder's word (or, for release and expiry, the word
+/// of the node that owns the resource). Mallory is neither for the hub's own lease, so its
+/// signed `resource.renewed`, `resource.released` and `resource.lease_expired` change
+/// nothing. The payloads leave out `resource_id`, as an attacker would, so only the
+/// projection's guards stand between them and the lease.
+#[test]
+fn lease_renewal_release_and_expiry_cannot_touch_another_nodes_lease() {
+    let fed = Fed::new();
+    fed.hub.agent("alice");
+    fed.hub.agent("bob");
+    let (_, _, lease) = fed.hub_resource();
+    let state = || {
+        fed.hub
+            .sql()
+            .query_row(
+                "SELECT ttl_seconds, expires_at, released_at FROM resource_leases
+                 WHERE lease_id = ?1",
+                [&lease],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+    let before = state();
+    assert_eq!(before.2, None, "bob's lease is live");
+
+    // A renewal that also asks for a different TTL, so any renewal shows at T0.
+    let ttl = if before.0 == 300 { 600 } else { 300 };
+    fed.forge(
+        "resource.renewed",
+        json!({ "lease_ids": [lease], "ttl_seconds": ttl }),
+    );
+    assert_eq!(state(), before, "renewed by another node");
+    fed.forge(
+        "resource.released",
+        json!({ "lease_ids": [lease], "reason": "forged" }),
+    );
+    assert_eq!(state(), before, "released by another node");
+    fed.forge("resource.lease_expired", json!({ "lease_id": lease }));
+    assert_eq!(state(), before, "expired by another node");
+}
