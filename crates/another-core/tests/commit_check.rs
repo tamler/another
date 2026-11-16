@@ -38,7 +38,13 @@ impl Fx {
     fn new() -> Fx {
         let dir = tempfile::tempdir().unwrap();
         // Resolved, so registered paths match what the guard computes (macOS /private).
-        let root = std::fs::canonicalize(dir.path()).unwrap();
+        // Not on Windows, where `canonicalize` returns a verbatim `\\?\C:\…` path that no
+        // registered project uses; its temp paths are already plain there.
+        let root = if cfg!(windows) {
+            dir.path().to_path_buf()
+        } else {
+            std::fs::canonicalize(dir.path()).unwrap()
+        };
         let main = root.join("shop");
         write(
             &main.join(".git/config"),
@@ -103,12 +109,13 @@ impl Fx {
         Connection::open(self.home.join(DB_FILE)).unwrap()
     }
 
+    /// A worktree's project, by its slug (the directory name), which does not depend on how
+    /// the platform spells the path.
     fn project_id(&self, wt: &str) -> String {
-        let dir = path(&self.main.parent().unwrap().join(wt));
         self.db()
             .query_row(
-                "SELECT project_id FROM projects WHERE abs_path = ?1",
-                [dir],
+                "SELECT project_id FROM projects WHERE slug = ?1",
+                [wt],
                 |r| r.get(0),
             )
             .unwrap()
