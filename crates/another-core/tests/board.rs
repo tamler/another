@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use another_core::*;
 
@@ -700,6 +701,74 @@ fn a_later_edit_or_an_old_stop_does_not_leave_an_agent_blocked() {
     let bob = state(&fx, "bob@shop-wt");
     assert_eq!(bob.state, AgentState::Idle);
     assert_eq!(bob.message, None);
+}
+
+/// R1 P2a: an event written while the clock was stepped back must not hide a stop that is
+/// still recent. (D70: a step back of up to 24 hours is covered.)
+#[test]
+fn a_clock_step_back_does_not_erase_a_recent_live_stop() {
+    let fx = Fx::new();
+    assert!(fx
+        .edit("alice@shop", &fx.main, "src/a.rs")
+        .conflicts
+        .is_empty());
+    fx.edit("bob@shop-wt", &fx.wt, "src/a.rs");
+    assert_eq!(state(&fx, "bob@shop-wt").state, AgentState::Blocked);
+
+    // The clock steps back eleven minutes, an unrelated event is written, and it returns.
+    fx.clock.fetch_sub(11 * 60 * 1000, Ordering::SeqCst);
+    fx.store
+        .ensure_project("blog-2", &path(&fx.blog.join("sub")))
+        .unwrap();
+    fx.clock.fetch_add(11 * 60 * 1000, Ordering::SeqCst);
+
+    let bob = state(&fx, "bob@shop-wt");
+    assert_eq!(bob.state, AgentState::Blocked, "{bob:?}");
+    let board = fx.board(None);
+    let row = board
+        .agents
+        .iter()
+        .find(|a| a.address == "bob@shop-wt")
+        .unwrap();
+    assert_eq!(row.state, AgentState::Blocked);
+}
+
+/// R1 P2b: the hook's state read has a deadline. Past it the read is abandoned with an
+/// error (no state is guessed), and the connection is left without the deadline.
+#[test]
+fn a_state_read_past_its_budget_gives_up_and_leaves_no_deadline_behind() {
+    let fx = Fx::new();
+    assert!(fx
+        .edit("alice@shop", &fx.main, "src/a.rs")
+        .conflicts
+        .is_empty());
+    fx.edit("bob@shop-wt", &fx.wt, "src/a.rs");
+    // Hold renewals that decide nothing, newer than bob's stop, so the read must pass them.
+    for _ in 0..300 {
+        fx.store
+            .acquire_holds(AcquireHolds {
+                agent: "alice@shop".into(),
+                project: path(&fx.main),
+                paths: vec!["src/a.rs".into()],
+                ttl_seconds: Some(1800),
+                exclusive: true,
+                reason: Some("long work".into()),
+                repo_wide: false,
+            })
+            .unwrap();
+    }
+    assert!(fx
+        .store
+        .agent_status_within("bob@shop-wt", Duration::ZERO)
+        .is_err());
+    // Later reads on the same connection are not cut short.
+    assert_eq!(state(&fx, "bob@shop-wt").state, AgentState::Blocked);
+    fx.board(None);
+    let bob = fx
+        .store
+        .agent_status_within("bob@shop-wt", Duration::from_secs(60))
+        .unwrap();
+    assert_eq!(bob.state, AgentState::Blocked);
 }
 
 #[test]

@@ -1030,8 +1030,12 @@ fn keepalive_throttled(store: &Store, another_home: &Path, agent: &str) {
     }
 }
 
+/// How long a hook spends working out the agent's state for Herdr before giving up.
+const HERDR_STATUS_BUDGET: Duration = Duration::from_millis(20);
+
 /// Inside a Herdr pane, show the agent's Another state as pane metadata (D70); `end` clears
-/// it. Display only and best effort: it never fails or slows the hook.
+/// it. Display only and best effort: it never fails the hook, and a state that takes longer
+/// than [`HERDR_STATUS_BUDGET`] to work out is not reported (the pane keeps its last one).
 fn report_herdr(store: &Store, env: &HookEnv, agent: &str, end: bool) {
     let Some(pane) = crate::herdr::Pane::from_env() else {
         return;
@@ -1039,7 +1043,7 @@ fn report_herdr(store: &Store, env: &HookEnv, agent: &str, end: bool) {
     let status = if end {
         None
     } else {
-        match store.agent_status(agent) {
+        match store.agent_status_within(agent, HERDR_STATUS_BUDGET) {
             Ok(s) => Some(s),
             Err(e) => {
                 tracing::debug!(error = %e, "herdr status skipped");

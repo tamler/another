@@ -14,6 +14,7 @@
 //! Another has no turn-end hook, so `working` means recent activity, not a running turn.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -61,6 +62,9 @@ pub(crate) struct Stop {
     pub holds: Vec<String>,
 }
 
+/// How far the local clock may have stepped back without hiding a recent stop.
+const FLOOR_SLACK_MS: i64 = 24 * 3600 * 1000;
+
 /// Agents of `node` whose newest edit-hook outcome within the live window is a stop with a
 /// blocker that is still live, keyed by agent id. With `only`, just that agent.
 pub(crate) fn current_stops(
@@ -70,23 +74,28 @@ pub(crate) fn current_stops(
     only: Option<&str>,
 ) -> Result<HashMap<String, Stop>> {
     let since = now - LIVE_MS;
-    // Local events are appended in time order, so the newest event before the window bounds
-    // the scan to the events inside it.
+    // Local events are appended in sequence order, and their times follow it unless the clock
+    // stepped back. The newest event from a day before the window bounds the scan, so a step
+    // back of up to `FLOOR_SLACK_MS` cannot push a recent stop below the floor (R1 P2a).
     let floor: i64 = conn
         .query_row(
             "SELECT seq FROM events WHERE node_id = ?1 AND ts < ?2 ORDER BY seq DESC LIMIT 1",
-            params![node, since],
+            params![node, since - FLOOR_SLACK_MS],
             |r| r.get(0),
         )
         .optional()?
         .unwrap_or(0);
+    // Only stops and the holds the edit hook took decide a state, so SQLite drops the rest.
+    // For one agent the newest such row decides alone (R1 P2b).
     let mut stmt = conn.prepare(
         "SELECT kind, payload FROM events
          WHERE node_id = ?1 AND seq > ?2 AND ts >= ?3
-           AND kind IN ('hold.blocked', 'hold.waiting', 'hold.wait_failed',
-                        'hold.acquired', 'hold.updated')
+           AND (kind IN ('hold.blocked', 'hold.waiting', 'hold.wait_failed')
+                OR (kind IN ('hold.acquired', 'hold.updated')
+                    AND json_extract(payload, '$.auto') = 1))
            AND (?4 IS NULL OR json_extract(payload, '$.agent_id') = ?4)
-         ORDER BY seq DESC",
+         ORDER BY seq DESC
+         LIMIT CASE WHEN ?4 IS NULL THEN -1 ELSE 1 END",
     )?;
     let rows = stmt
         .query_map(params![node, floor, since, only], |r| {
@@ -124,10 +133,9 @@ pub(crate) fn current_stops(
                 .map(|h| (h.to_string(), text(&p, "path"), None))
                 .collect(),
             _ => {
-                // Only a hold the edit hook took means the agent went on to edit something.
-                if p.get("auto").and_then(Value::as_bool) == Some(true) {
-                    decided.insert(agent.to_string(), None);
-                }
+                // A hold the edit hook took (the query keeps only those): the agent went on
+                // to edit something.
+                decided.insert(agent.to_string(), None);
                 continue;
             }
         };
@@ -191,24 +199,46 @@ pub(crate) fn status_of(
     }
 }
 
+/// Clears the connection's progress handler when dropped, on every path out.
+struct Deadline<'c>(&'c Connection);
+
+impl Drop for Deadline<'_> {
+    fn drop(&mut self) {
+        self.0.progress_handler(0, None::<fn() -> bool>);
+    }
+}
+
 impl Store {
     /// One local agent's state in Herdr's terms (see the module docs). Reads only.
     pub fn agent_status(&self, agent: &str) -> Result<AgentStatus> {
-        let now = self.now();
+        self.read(|conn| self.agent_status_on(conn, agent))
+    }
+
+    /// [`Store::agent_status`], abandoned with an error once `budget` has passed, so a busy
+    /// store cannot slow the caller by more than about that (R1 P2b).
+    pub fn agent_status_within(&self, agent: &str, budget: Duration) -> Result<AgentStatus> {
         self.read(|conn| {
-            let me = resolve_agent(conn, self.node_id(), agent)?;
-            let (status, last_seen): (String, Option<i64>) = conn.query_row(
-                "SELECT status, last_seen_at FROM agents WHERE agent_id = ?1",
-                [&me.id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            let stops = current_stops(conn, self.node_id(), now, Some(&me.id))?;
-            Ok(status_of(
-                &status,
-                fmt_opt(last_seen).as_deref(),
-                now,
-                stops.get(&me.id),
-            ))
+            let deadline = Instant::now() + budget;
+            conn.progress_handler(1000, Some(move || Instant::now() >= deadline));
+            let _clear = Deadline(conn);
+            self.agent_status_on(conn, agent)
         })
+    }
+
+    fn agent_status_on(&self, conn: &Connection, agent: &str) -> Result<AgentStatus> {
+        let now = self.now();
+        let me = resolve_agent(conn, self.node_id(), agent)?;
+        let (status, last_seen): (String, Option<i64>) = conn.query_row(
+            "SELECT status, last_seen_at FROM agents WHERE agent_id = ?1",
+            [&me.id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let stops = current_stops(conn, self.node_id(), now, Some(&me.id))?;
+        Ok(status_of(
+            &status,
+            fmt_opt(last_seen).as_deref(),
+            now,
+            stops.get(&me.id),
+        ))
     }
 }
