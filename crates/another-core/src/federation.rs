@@ -1468,6 +1468,13 @@ impl Store {
                 return Err(Error::Forbidden("not a paired node".into()));
             };
             for n in nodes {
+                // A weak key in the directory (a hub may have pinned one before keys were
+                // checked) is never pinned here, but it does not stop the rest of the page
+                // from syncing: events from that node then fail as from an unknown origin
+                // (FINDINGS-197 adv197).
+                if crypto::decode_public(&n.public_key).is_ok_and(|k| k.is_weak()) {
+                    continue;
+                }
                 upsert_node(tx, n)?;
             }
             let mut report = IngestReport::default();

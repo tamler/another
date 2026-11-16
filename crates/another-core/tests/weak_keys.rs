@@ -126,7 +126,8 @@ fn pairing_with_a_weak_key_is_refused() {
 }
 
 /// A spoke does not pin a weak key from the hub's directory, so nothing can be relayed
-/// "from" that node with the degenerate signature.
+/// "from" that node with the degenerate signature. The entry is skipped, not fatal: the page
+/// still syncs (see `adv197_...`), and the forged event fails as from an unknown origin.
 #[test]
 fn a_weak_key_in_the_directory_is_refused() {
     let dir = tempfile::tempdir().unwrap();
@@ -143,7 +144,13 @@ fn a_weak_key_in_the_directory_is_refused() {
         &[forged_event(&ghost.node_id)],
         std::slice::from_ref(&ghost),
     );
-    assert!(res.is_err(), "{res:?}");
+    let report = res.expect("a weak directory entry is skipped, not fatal");
+    assert_eq!(report.accepted, 0, "{report:?}");
+    assert_eq!(report.rejected.len(), 1, "{report:?}");
+    assert!(
+        report.rejected[0].reason.contains("unknown origin node"),
+        "{report:?}"
+    );
     assert_eq!(spoke.pinned_key(&ghost.node_id), None);
     let stored: i64 = Connection::open(&spoke.db)
         .unwrap()
@@ -256,4 +263,49 @@ fn a_degenerate_request_signature_is_refused() {
         )
         .unwrap_err();
     assert_eq!(err.code(), "forbidden", "{err}");
+}
+
+/// adv197: a hub that pinned a weak key before this fix still lists it in every pull
+/// response. An upgraded spoke must keep syncing the honest events; one legacy entry in the
+/// directory must not stop federation for everyone.
+#[test]
+fn adv197_a_legacy_weak_key_on_the_hub_does_not_stop_spokes_syncing() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = Node::new(dir.path(), "hub");
+    let spoke = Node::new(dir.path(), "spoke");
+    let other = Node::new(dir.path(), "other");
+    pair(&hub, &spoke);
+    pair(&hub, &other);
+
+    // An honest event from another spoke reaches the hub.
+    other
+        .store
+        .register_agent(RegisterAgent {
+            name: "bob".into(),
+            program: Program::Claude,
+            project: None,
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    let (events, _) = other.store.outbound_events(0, 10_000).unwrap();
+    let report = hub.store.ingest(&other.id(), &events, &[]).unwrap();
+    assert!(report.rejected.is_empty(), "{report:?}");
+
+    // A weak key pinned on the hub before the upgrade.
+    Connection::open(&hub.db)
+        .unwrap()
+        .execute(
+            "INSERT INTO nodes (node_id, display_name, role, is_local, created_at, public_key)
+             VALUES ('01GHOSTGHOSTGHOSTGHOSTGHOS', 'ghost', 'peer', 0, 0, ?1)",
+            params![weak_key()],
+        )
+        .unwrap();
+
+    let pull = hub.store.pull_for(&spoke.id(), 0, 10_000).unwrap();
+    assert!(!pull.events.is_empty());
+    let res = spoke.store.ingest(&hub.id(), &pull.events, &pull.nodes);
+    let report = res.expect("the honest events still sync past one legacy weak key");
+    assert!(report.accepted > 0, "{report:?}");
+    assert_eq!(spoke.pinned_key("01GHOSTGHOSTGHOSTGHOSTGHOS"), None);
 }
