@@ -6,7 +6,8 @@
 //! - `blocked`: the agent's newest edit-hook outcome in the live window is a stopped edit
 //!   (`hold.blocked`, or `hold.waiting`/`hold.wait_failed` for a retry) and at least one
 //!   hold that stopped it is still live. A retry inside an unexpired backoff window writes
-//!   no event (D62), so it is not seen until that window ends.
+//!   no event (D62) and is never seen. Only the next attempt after the backoff ends records
+//!   one, so nothing bounds how long such a retry stays invisible.
 //! - `working`: seen within the live window (the dashboard's `live` presence).
 //! - `idle`: an open session that has been quiet longer than that.
 //!

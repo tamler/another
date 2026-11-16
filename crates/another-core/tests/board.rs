@@ -675,9 +675,12 @@ fn a_later_edit_or_an_old_stop_does_not_leave_an_agent_blocked() {
     );
     assert_eq!(state(&fx, "bob@shop-wt").state, AgentState::Working);
 
+    // The window ending changes nothing by itself: no event, so still working (REVIEW-R3).
+    fx.advance_secs(30);
+    assert_eq!(state(&fx, "bob@shop-wt").state, AgentState::Working);
+
     // A retry after the window ends starts a new one (`hold.waiting`): blocked again, with
     // the same message as the first stop.
-    fx.advance_secs(30);
     assert_eq!(
         fx.edit("bob@shop-wt", &fx.wt, "src/a.rs").conflicts.len(),
         1

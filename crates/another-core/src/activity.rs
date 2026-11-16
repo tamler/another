@@ -312,11 +312,18 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             json!({ "request_id": s("request_id"), "thread_id": s("thread_id") }),
         ),
         "request.claimed" | "request.released" | "request.completed" | "request.cancelled"
-        | "request.stale" => {
+        | "request.stale" | "request.updated" => {
             let rid = s("request_id");
             let title = request_title(conn, &rid)?;
             let text = match row.kind.as_str() {
                 "request.claimed" => format!("{actor} claimed request: {title}"),
+                "request.updated" => match p.get("due_at").and_then(Value::as_i64) {
+                    Some(due) => format!(
+                        "{actor} moved the deadline of request: {title} (now {})",
+                        fmt_ts(due)
+                    ),
+                    None => format!("{actor} removed the deadline of request: {title}"),
+                },
                 "request.released" => format!("{actor} released request: {title}"),
                 "request.completed" => format!("{actor} completed request: {title}"),
                 "request.cancelled" => format!("{actor} cancelled request: {title}"),

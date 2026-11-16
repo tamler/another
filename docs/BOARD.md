@@ -23,7 +23,7 @@ For each project with live holds, recent edits or stopped edits, most recently a
 Then, for the whole node or the filtered project:
 
 - **Agents.** Each agent with a hold, unread mail, a message waiting for its acknowledgement, a pending request, or a stopped edit. Each one has a `state` in Herdr's terms, the same as on the dashboard (D70):
-  - `blocked`: its last edit-hook outcome in the past 10 minutes stopped an edit, and a hold that stopped it is still live. Retrying the same file while its wait is backing off is denied without a new event ([HOOKS.md](HOOKS.md)), so the board sees such a retry only once the backoff window ends, at most 5 minutes later. `blocked_message` says which file and who holds it; a confined board leaves the message out, because the holder can belong to another project.
+  - `blocked`: its last edit-hook outcome in the past 10 minutes stopped an edit, and a hold that stopped it is still live. Retrying the same file while its wait is backing off is denied without a new event ([HOOKS.md](HOOKS.md)), so the board does not see that retry. The agent shows as `blocked` again only after its next attempt at the file once the backoff has ended. There is no time bound on that: an agent that waits as told stays `working`, then `idle`. `blocked_message` says which file and who holds it; a confined board leaves the message out, because the holder can belong to another project.
   - `working`: seen within 10 minutes. Another has no turn-end hook, so this means recent activity, not a running turn.
   - `idle`: an open session that has been quieter than that.
   - `unknown`: the session ended.

@@ -43,6 +43,12 @@ another wake --agent codex@shop --dry-run
 ```
 
 - The default message is a one-line inbox summary: unread count, urgent count, open requests and up to three subjects. Message bodies are never included.
+- **Nothing a sender chose is typed as a key press.**
+  - Before any adapter types or shows the line, control characters in it (line breaks, tabs, escape) become spaces.
+  - Each subject is cut to 80 characters, and the line to 1,000.
+  - For cmux, which unescapes backslash sequences, a backslash in the text becomes `/`, so only the final `\n` submits the line.
+  - `--message` text is cleaned the same way.
+  - `send` refuses a subject with control characters, and subjects arriving from another node are stored without them (D75).
 - An agent with nothing unread and no open requests is skipped unless you pass `--force`. `--message` replaces the text. The default text names the real commands (the `fetch_inbox`, `send_message` and `acknowledge` tools, or `another inbox`, `another reply`, `another ack`).
 - Agents take custom text literally, so name commands that exist. There is no `another mail` command. For example:
 
