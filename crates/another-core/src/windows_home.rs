@@ -72,7 +72,9 @@ fn directory_file(path: &Path) -> io::Result<File> {
         .open(path)?;
     let info = file.metadata()?;
     if !info.is_dir() || info.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(refused());
+        return Err(refused_because(
+            "a path component is not a plain directory (reparse point or file)",
+        ));
     }
     Ok(file)
 }
@@ -80,7 +82,9 @@ fn directory_file(path: &Path) -> io::Result<File> {
 fn exact_name(parent: &Path, name: &std::ffi::OsStr) -> io::Result<()> {
     let text = name.to_str().ok_or_else(refused)?;
     if text.is_empty() || text.trim() != text || text.ends_with('.') || text.contains(':') {
-        return Err(refused());
+        return Err(refused_because(
+            "a path component has an ambiguous spelling",
+        ));
     }
     let mut matches = 0;
     let mut exact = false;
@@ -97,7 +101,9 @@ fn exact_name(parent: &Path, name: &std::ffi::OsStr) -> io::Result<()> {
         exact |= found == text;
     }
     if !exact || matches != 1 {
-        return Err(refused());
+        return Err(refused_because(
+            "a path component is not spelled exactly as its directory entry (8.3 short name, case difference or duplicate)",
+        ));
     }
     Ok(())
 }
@@ -107,23 +113,23 @@ pub fn pin_directory(path: &Path) -> io::Result<PinnedDirectory> {
     let drive = match components.next() {
         Some(Component::Prefix(prefix)) => match prefix.kind() {
             Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
-            _ => return Err(refused()),
+            _ => return Err(refused_because("the path is not on a local drive letter")),
         },
-        _ => return Err(refused()),
+        _ => return Err(refused_because("the path is not absolute")),
     };
     if components.next() != Some(Component::RootDir) {
-        return Err(refused());
+        return Err(refused_because("the path is not absolute"));
     }
     let mut spelling = PathBuf::from(format!("{}:\\", char::from(drive)));
     // SAFETY: wide returns a live NUL-terminated drive root. 3 is DRIVE_FIXED.
     if unsafe { GetDriveTypeW(wide(&spelling)?.as_ptr()) } != 3 {
-        return Err(refused());
+        return Err(refused_because("the drive is not a fixed local disk"));
     }
     let mut file = directory_file(&spelling)?;
     let mut ancestors = Vec::new();
     for component in components {
         let Component::Normal(name) = component else {
-            return Err(refused());
+            return Err(refused_because("the path contains '.' or '..' components"));
         };
         exact_name(&spelling, name)?;
         spelling.push(name);
@@ -346,6 +352,15 @@ fn refused() -> io::Error {
     )
 }
 
+/// A refusal that names the check that failed, so an operator can act on it. The reason
+/// never contains a path, SID or other machine data.
+fn refused_because(reason: &'static str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!("Windows handle security could not be verified: {reason}"),
+    )
+}
+
 struct SecurityDescriptor(*mut c_void);
 
 impl Drop for SecurityDescriptor {
@@ -474,13 +489,14 @@ pub fn inspect_private_handle(
         return Err(refused());
     }
     if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(refused());
+        return Err(refused_because("the object is a reparse point"));
     }
     let is_directory = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
-    if is_directory != (kind == ObjectKind::Directory)
-        || (!is_directory && info.nNumberOfLinks != 1)
-    {
-        return Err(refused());
+    if is_directory != (kind == ObjectKind::Directory) {
+        return Err(refused_because("the object is not the expected kind"));
+    }
+    if !is_directory && info.nNumberOfLinks != 1 {
+        return Err(refused_because("the file has more than one hard link"));
     }
     let mut volume_flags = 0u32;
     if unsafe {
@@ -497,7 +513,7 @@ pub fn inspect_private_handle(
     } == 0
         || volume_flags & FILE_PERSISTENT_ACLS == 0
     {
-        return Err(refused());
+        return Err(refused_because("the volume does not keep persistent ACLs"));
     }
 
     let user = current_user_sid()?;
@@ -525,19 +541,24 @@ pub fn inspect_private_handle(
     let mut control = 0u16;
     let mut revision = 0u32;
     // SAFETY: pointers are from a successful GetSecurityInfo and live for descriptor's lifetime.
-    if unsafe { IsValidSid(owner) } == 0
-        || unsafe { EqualSid(owner, user.as_ptr()) } == 0
-        || unsafe { IsValidAcl(dacl) } == 0
+    if unsafe { IsValidSid(owner) } == 0 || unsafe { EqualSid(owner, user.as_ptr()) } == 0 {
+        return Err(refused_because("the owner is not the current user"));
+    }
+    if unsafe { IsValidAcl(dacl) } == 0
         || unsafe { GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) } == 0
         || control & SE_DACL_PRESENT == 0
-        || (is_directory && control & SE_DACL_PROTECTED == 0)
     {
-        return Err(refused());
+        return Err(refused_because("the object has no valid DACL"));
+    }
+    if is_directory && control & SE_DACL_PROTECTED == 0 {
+        return Err(refused_because(
+            "the directory inherits permissions from its parent (DACL not protected)",
+        ));
     }
     // SAFETY: IsValidAcl accepted this ACL and it remains owned by `descriptor`.
     let ace_count = unsafe { (*dacl).AceCount } as usize;
     if ace_count == 0 || ace_count > ACE_LIMIT {
-        return Err(refused());
+        return Err(refused_because("the DACL is empty or too large"));
     }
     let mut user_access = 0u32;
     for index in 0..ace_count {
@@ -555,7 +576,9 @@ pub fn inspect_private_handle(
             || (flags & (INHERIT_ONLY | NO_PROPAGATE) != 0 && flags & INHERITANCE_TARGETS == 0)
             || size < 16
         {
-            return Err(refused());
+            return Err(refused_because(
+                "the DACL has a deny, audit or unrecognized entry",
+            ));
         }
         // SAFETY: this is a standard allowed ACE with enough bytes for its fixed prefix.
         let ace = unsafe { &*raw_ace.cast::<ACCESS_ALLOWED_ACE>() };
@@ -574,19 +597,26 @@ pub fn inspect_private_handle(
             && unsafe { EqualSid(sid, system.as_ptr()) } == 0
             && unsafe { EqualSid(sid, admins.as_ptr()) } == 0
         {
-            return Err(refused());
+            return Err(refused_because(
+                "the DACL grants access to someone other than the user, SYSTEM or Administrators",
+            ));
         }
         let mask = mapped_mask(ace.Mask);
         if mask & !FILE_ALL_ACCESS != 0 {
-            return Err(refused());
+            return Err(refused_because("the DACL grants non-file rights"));
         }
         if is_user && flags & INHERIT_ONLY == 0 {
             user_access |= mask;
         }
     }
     let required = mapped_mask(required_access);
-    if required == 0 || required & !FILE_ALL_ACCESS != 0 || user_access & required != required {
+    if required == 0 || required & !FILE_ALL_ACCESS != 0 {
         return Err(refused());
+    }
+    if user_access & required != required {
+        return Err(refused_because(
+            "the DACL does not grant the current user the needed access",
+        ));
     }
     Ok(HandleEvidence {
         volume_serial: info.dwVolumeSerialNumber,
