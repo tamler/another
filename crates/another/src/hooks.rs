@@ -304,7 +304,8 @@ fn script_text(env: &HookEnv) -> String {
          # The one exception is Cursor's edit guard (D76): Cursor blocks a tool call whose\n\
          # reply it cannot parse, so a reply is printed only after another exited 0 and\n\
          # checked it. Anything else prints nothing and exits 1, which Cursor treats as a\n\
-         # failed hook and lets the edit proceed.\n\
+         # failed hook and lets the edit proceed. The reply is kept as raw bytes in a\n\
+         # temporary file, capped in size, and the exact bytes checked are the bytes printed.\n\
          ANOTHER_BIN={exe}\n\
          if [ ! -x \"$ANOTHER_BIN\" ]; then\n\
          \x20 ANOTHER_BIN=$(command -v another 2>/dev/null) || ANOTHER_BIN=\n\
@@ -315,10 +316,14 @@ fn script_text(env: &HookEnv) -> String {
          fi\n\
          if [ \"$#\" -eq 3 ] && [ \"$1\" = pre-edit ] && [ \"$2\" = --client ] && [ \"$3\" = cursor ] && [ -z \"${{GROK_HOOK_EVENT:-}}\" ]; then\n\
          \x20 [ -n \"$ANOTHER_BIN\" ] || exit 1\n\
-         \x20 ANOTHER_REPLY=$(\"$ANOTHER_BIN\" hook run \"$@\" 2>/dev/null) || exit 1\n\
-         \x20 [ -n \"$ANOTHER_REPLY\" ] || exit 1\n\
-         \x20 printf '%s\\n' \"$ANOTHER_REPLY\" | \"$ANOTHER_BIN\" hook check-reply --client cursor >/dev/null 2>&1 || exit 1\n\
-         \x20 printf '%s\\n' \"$ANOTHER_REPLY\"\n\
+         \x20 ANOTHER_OUT=$(mktemp \"${{TMPDIR:-/tmp}}/another-reply.XXXXXX\") || exit 1\n\
+         \x20 ANOTHER_RC=$(mktemp \"${{TMPDIR:-/tmp}}/another-rc.XXXXXX\") || {{ rm -f \"$ANOTHER_OUT\"; exit 1; }}\n\
+         \x20 trap 'rm -f \"$ANOTHER_OUT\" \"$ANOTHER_RC\"' EXIT\n\
+         \x20 {{ \"$ANOTHER_BIN\" hook run \"$@\" 2>/dev/null; echo \"$?\" > \"$ANOTHER_RC\"; }} | head -c {cap} > \"$ANOTHER_OUT\"\n\
+         \x20 [ \"$(cat \"$ANOTHER_RC\")\" = 0 ] || exit 1\n\
+         \x20 [ -s \"$ANOTHER_OUT\" ] || exit 1\n\
+         \x20 \"$ANOTHER_BIN\" hook check-reply --client cursor < \"$ANOTHER_OUT\" >/dev/null 2>&1 || exit 1\n\
+         \x20 cat \"$ANOTHER_OUT\"\n\
          \x20 exit 0\n\
          fi\n\
          [ -n \"$ANOTHER_BIN\" ] || exit 0\n\
@@ -326,6 +331,9 @@ fn script_text(env: &HookEnv) -> String {
          exit 0\n",
         exe = sh_quote(&env.exe.to_string_lossy()),
         home = sh_quote(&env.another_home.to_string_lossy()),
+        // One byte more than `hook check-reply` accepts, so an oversized reply is rejected
+        // rather than cut to a size that might parse.
+        cap = MAX_CURSOR_REPLY + 2,
     )
 }
 
