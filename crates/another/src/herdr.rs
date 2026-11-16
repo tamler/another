@@ -204,13 +204,40 @@ fn needs_send(
     }
 }
 
+/// The file in which the build before the SQLite cache kept `pane`'s last report.
+fn legacy_cache_path(state_dir: &Path, pane: &str) -> PathBuf {
+    let mut safe = String::from("herdr-");
+    for b in pane.bytes() {
+        if b.is_ascii_alphanumeric() || b == b'-' {
+            safe.push(b as char);
+        } else {
+            safe.push_str(&format!("_{b:02x}"));
+        }
+    }
+    state_dir.join(format!("{safe}.json"))
+}
+
+/// The sequence number of `pane`'s last report under the previous JSON cache, 0 when there
+/// is none or it cannot be read. Herdr may already have accepted it, so the SQLite cache
+/// starts above it.
+fn legacy_watermark(state_dir: &Path, pane: &str) -> u64 {
+    std::fs::read(legacy_cache_path(state_dir, pane))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v.get("seq").and_then(serde_json::Value::as_u64))
+        .unwrap_or(0)
+}
+
 /// In one write transaction: decide whether `state`/`note` must be sent for `pane`, and if
 /// so record it and reserve its sequence number, `max(now_us, last + 1)`. Parallel callers
 /// are serialized by SQLite's write lock, so each reservation is above every earlier one,
 /// whatever the clock says. The write lock is only taken when a plain read shows that
-/// something may need sending; the decision is made again inside the transaction.
+/// something may need sending; the decision is made again inside the transaction. A pane
+/// with no row yet starts above the previous JSON cache's watermark in `state_dir`, read
+/// under the same lock; once the row exists it carries that watermark on.
 fn reserve(
     conn: &mut Connection,
+    state_dir: &Path,
     pane: &str,
     state: Option<&str>,
     note: Option<&str>,
@@ -225,9 +252,10 @@ fn reserve(
     if !needs_send(last.as_ref(), state, note, now_ms) {
         return Ok(None);
     }
-    let last_seq = last
-        .map(|(_, _, seq, _)| u64::try_from(seq).unwrap_or(0))
-        .unwrap_or(0);
+    let last_seq = match last {
+        Some((_, _, seq, _)) => u64::try_from(seq).unwrap_or(0),
+        None => legacy_watermark(state_dir, pane),
+    };
     // Sequence numbers are stored as SQLite integers; past `i64::MAX` nothing can follow.
     let Some(seq) = last_seq
         .checked_add(1)
@@ -268,9 +296,10 @@ fn reserve_retrying(
     note: Option<&str>,
 ) -> rusqlite::Result<Option<u64>> {
     let deadline = std::time::Instant::now() + LOCK_WAIT;
+    let state_dir = path.parent().unwrap_or(Path::new("."));
     loop {
         let attempt = open_cache(path)
-            .and_then(|mut conn| reserve(&mut conn, pane, state, note, now_micros()));
+            .and_then(|mut conn| reserve(&mut conn, state_dir, pane, state, note, now_micros()));
         match attempt {
             Err(e) if is_busy(&e) && std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(2));
@@ -452,6 +481,52 @@ mod tests {
     fn seq_of(argv: &[String]) -> u64 {
         let i = argv.iter().position(|x| x == "--seq").unwrap();
         argv[i + 1].parse().unwrap()
+    }
+
+    /// #144 review R2 (P2): the build before the SQLite cache kept each pane's last report
+    /// in `hooks/state/herdr-<encoded pane>.json`. Its sequence number is the watermark
+    /// Herdr may already have accepted, so the first report after the upgrade must be
+    /// above it even when the clock has stepped back since.
+    #[test]
+    fn upgrading_from_the_json_cache_keeps_its_sequence_watermark() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("hooks").join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let ahead = now_micros() + 3_600_000_000;
+        // Exact file names and contents the previous build wrote.
+        for (file, seq) in [
+            ("herdr-w1_3ap1.json", ahead),
+            ("herdr-w1_3ap2_2f_2e_2e_2fx.json", ahead + 7),
+        ] {
+            std::fs::write(
+                state.join(file),
+                format!(r#"{{"state":"working","note":null,"seq":{seq},"at_ms":1}}"#),
+            )
+            .unwrap();
+        }
+        let bin = fake_herdr(dir.path());
+        let blocked = status(AgentState::Blocked, Some("x is held by y"));
+        for (pane, legacy) in [("w1:p1", ahead), ("w1:p2/../x", ahead + 7)] {
+            let pane = Pane {
+                bin: bin.clone(),
+                id: pane.into(),
+            };
+            let first = report(dir.path(), &pane, Some(&blocked)).expect("a change is sent");
+            assert_eq!(seq_of(&first), legacy + 1, "{}", pane.id);
+            let next = report(dir.path(), &pane, None).expect("a change is sent");
+            assert_eq!(seq_of(&next), legacy + 2, "the watermark is carried on");
+        }
+        // A pane with no legacy file starts from the clock; an unreadable one is treated as
+        // absent rather than failing the report.
+        std::fs::write(state.join("herdr-w1_3ap3.json"), "{\"seq\": tru").unwrap();
+        for pane in ["w1:p9", "w1:p3"] {
+            let pane = Pane {
+                bin: bin.clone(),
+                id: pane.into(),
+            };
+            let sent = report(dir.path(), &pane, Some(&blocked)).expect("sent");
+            assert!(seq_of(&sent) < ahead, "{}", pane.id);
+        }
     }
 
     #[test]
