@@ -1129,7 +1129,7 @@ fn board_command(
         ),
     };
     let project = match project {
-        Some(p) if looks_like_path(p) => Some(abs(Path::new(p))?),
+        Some(p) if looks_like_path(p) => Some(project_dir(&store, Path::new(p))?),
         Some(p) => Some(p.to_string()),
         None => None,
     };
@@ -1568,7 +1568,12 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             model,
             description,
         }) => {
-            let project = project.as_deref().map(abs).transpose()?;
+            // Resolved like every other project path, so the spelling used here (a
+            // symlink, a Windows short name) names the project MCP and hooks name.
+            let project = project
+                .as_deref()
+                .map(|p| project_dir(&store, Path::new(p)))
+                .transpose()?;
             let a = store.register_agent(RegisterAgent {
                 name,
                 program: program.parse::<Program>()?,
