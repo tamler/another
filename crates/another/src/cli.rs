@@ -382,6 +382,14 @@ pub enum Command {
         #[arg(long, default_value = "24h")]
         since: String,
     },
+    /// Check this installation: binary, home, database, hooks, server, daemon, peers. Read-only;
+    /// prints the command that fixes each problem. Exits 1 only when a check fails.
+    Doctor {
+        /// Loopback address to check for a running server (default: the daemon's, else
+        /// 127.0.0.1:7466). Non-loopback addresses are not contacted.
+        #[arg(long)]
+        bind: Option<String>,
+    },
     /// Read-only work board, per project: who holds which paths and until when, which paths
     /// the edit hook claimed for each agent recently, edits it stopped, and what is waiting
     /// on whom (unread mail, acknowledgements, pending requests). Writes nothing.
@@ -1251,6 +1259,19 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     {
         return board_command(&another_home()?, json, project.as_deref(), since, *limit);
     }
+    if let Command::Doctor { bind } = &cli.command {
+        // Before any Store::open, which would create the home and migrate the database.
+        let report = crate::doctor::run(&crate::doctor::Inputs {
+            another_home: another_home()?,
+            bind: bind.clone(),
+        });
+        let printed = emit(json, &report, crate::doctor::render);
+        return Ok(if report.ok {
+            printed
+        } else {
+            ExitCode::FAILURE
+        });
+    }
 
     let store = open(home)?;
     let code = match cli.command {
@@ -1259,6 +1280,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         | Command::Hook(_)
         | Command::Daemon(_)
         | Command::Board { .. }
+        | Command::Doctor { .. }
         | Command::Remote(_) => {
             unreachable!("handled above")
         }

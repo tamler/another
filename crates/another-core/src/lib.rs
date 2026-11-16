@@ -68,7 +68,7 @@ pub use resources::{
     MIN_LEASE_TTL_SECONDS,
 };
 pub use stats::{BlockedEdit, TrialStats, WakeRecord};
-pub use store::{default_home, Clock, Event, NodeInfo, Store, DB_FILE};
+pub use store::{default_home, Clock, DbInspection, Event, NodeInfo, Store, DB_FILE};
 pub use time::{fmt_ts, parse_ts};
 pub use tokens::{AuditEntry, AuditRecord, NewToken, Token, TokenScope};
 pub use wake::{WakeTarget, WakeVia};

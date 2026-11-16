@@ -3,6 +3,7 @@
 pub mod cli;
 pub mod daemon;
 pub mod dashboard;
+pub mod doctor;
 pub mod fed;
 pub mod hooks;
 pub mod mcp;
