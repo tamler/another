@@ -267,3 +267,36 @@ async fn token_refuses_secrets_foreign_resources_and_other_grants() {
     }
     srv.ct.cancel();
 }
+
+/// No `response_type` at all is refused like a wrong one: back to the registered redirect
+/// with `unsupported_response_type`, and nothing left waiting for approval.
+#[tokio::test]
+async fn authorize_refuses_a_missing_response_type() {
+    let srv = start().await;
+    let (_, registered) = register(&srv, client(json!({}))).await;
+    let client_id = registered["client_id"].as_str().unwrap().to_string();
+    let mcp = format!("{}/mcp", srv.base);
+    let pairs = [
+        ("client_id", client_id.as_str()),
+        ("redirect_uri", REDIRECT),
+        ("code_challenge", CHALLENGE),
+        ("code_challenge_method", "S256"),
+        ("state", "st-1"),
+        ("resource", mcp.as_str()),
+    ];
+    let res = http()
+        .get(format!("{}/authorize?{}", srv.base, form(&pairs)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 303);
+    let location = res.headers()["location"].to_str().unwrap().to_string();
+    assert!(location.starts_with(REDIRECT), "{location}");
+    assert!(
+        location.contains("error=unsupported_response_type"),
+        "{location}"
+    );
+    assert!(!location.contains("code="), "{location}");
+    assert!(srv.store.oauth_pending().unwrap().is_empty());
+    srv.ct.cancel();
+}
