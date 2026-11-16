@@ -983,8 +983,8 @@ async fn begin(srv: &Server, http: &reqwest::Client, state: &str) -> (String, St
     (client_id, pending_url, user_code)
 }
 
-/// Run the flow through approval and code exchange: (access token, refresh token).
-async fn tokens(srv: &Server, http: &reqwest::Client) -> (String, String) {
+/// Run the flow through approval and code exchange: (client id, access token, refresh token).
+async fn tokens(srv: &Server, http: &reqwest::Client) -> (String, String, String) {
     let (client_id, pending_url, user_code) = begin(srv, http, "s").await;
     srv.store
         .approve_oauth(Approval {
@@ -1021,6 +1021,7 @@ async fn tokens(srv: &Server, http: &reqwest::Client) -> (String, String) {
         .await
         .unwrap();
     (
+        client_id,
         res["access_token"].as_str().unwrap().to_string(),
         res["refresh_token"].as_str().unwrap().to_string(),
     )
@@ -1035,18 +1036,36 @@ async fn post_revoke(srv: &Server, http: &reqwest::Client, token: &str) -> reqwe
         .unwrap()
 }
 
-/// Status of a refresh-token grant at the token endpoint.
-async fn refresh_status(srv: &Server, http: &reqwest::Client, refresh: &str) -> u16 {
+/// A refresh-token grant at the token endpoint, as the client sends it.
+async fn refresh_grant(
+    srv: &Server,
+    http: &reqwest::Client,
+    client_id: &str,
+    refresh: &str,
+) -> reqwest::Response {
     http.post(format!("{}/oauth/token", srv.base))
         .header("content-type", "application/x-www-form-urlencoded")
         .body(form(&[
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh),
+            ("client_id", client_id),
             ("resource", &format!("{}/mcp", srv.base)),
         ]))
         .send()
         .await
         .unwrap()
+}
+
+/// Status of [`refresh_grant`]. `a_forged_refresh_token_is_refused_and_ends_nothing` shows it is
+/// 200 for a live token, so a 400 from it means the token was refused.
+async fn refresh_status(
+    srv: &Server,
+    http: &reqwest::Client,
+    client_id: &str,
+    refresh_token: &str,
+) -> u16 {
+    refresh_grant(srv, http, client_id, refresh_token)
+        .await
         .status()
         .as_u16()
 }
@@ -1068,7 +1087,7 @@ async fn the_revocation_endpoint_ends_the_grant_and_ignores_forged_tokens() {
             .collect::<Vec<_>>()
     };
     for revoke_with in ["access", "refresh"] {
-        let (access, refresh) = tokens(&srv, &http).await;
+        let (client_id, access, refresh) = tokens(&srv, &http).await;
         srv.store.verify_access_token(&access, &resource).unwrap();
         let before = audited().len();
 
@@ -1117,7 +1136,7 @@ async fn the_revocation_endpoint_ends_the_grant_and_ignores_forged_tokens() {
             "{revoke_with}: the access token still verifies"
         );
         assert_eq!(
-            refresh_status(&srv, &http, &refresh).await,
+            refresh_status(&srv, &http, &client_id, &refresh).await,
             400,
             "{revoke_with}"
         );
@@ -1208,7 +1227,7 @@ async fn revoking_a_grant_ends_every_token_issued_for_it() {
     let srv = start().await;
     let http = http();
     let resource = format!("{}/mcp", srv.base);
-    let (access, refresh) = tokens(&srv, &http).await;
+    let (client_id, access, refresh) = tokens(&srv, &http).await;
 
     let grants = srv.store.oauth_grants().unwrap();
     assert_eq!(grants.len(), 1, "{grants:?}");
@@ -1220,7 +1239,7 @@ async fn revoking_a_grant_ends_every_token_issued_for_it() {
     let revoked = srv.store.revoke_oauth_grant(&g.grant_id).unwrap();
     let at = revoked.revoked_at.clone().expect("revoked_at set");
     assert!(srv.store.verify_access_token(&access, &resource).is_err());
-    assert_eq!(refresh_status(&srv, &http, &refresh).await, 400);
+    assert_eq!(refresh_status(&srv, &http, &client_id, &refresh).await, 400);
 
     let again = srv.store.revoke_oauth_grant(&g.grant_id).unwrap();
     assert_eq!(again.revoked_at.as_deref(), Some(at.as_str()));
@@ -1231,5 +1250,65 @@ async fn revoking_a_grant_ends_every_token_issued_for_it() {
             .code(),
         "not_found"
     );
+    srv.ct.cancel();
+}
+
+/// A refresh token with the right id but the wrong secret is refused like any invalid one
+/// (`invalid_grant`). It must not count as reuse either: the real refresh token still works
+/// afterwards, so a guess at a token cannot end someone else's grant.
+#[tokio::test]
+async fn a_forged_refresh_token_is_refused_and_ends_nothing() {
+    let srv = start().await;
+    let http = http();
+    let resource = format!("{}/mcp", srv.base);
+    let (client_id, access, refresh) = tokens(&srv, &http).await;
+    let last = if refresh.ends_with('0') { "1" } else { "0" };
+    let forged = format!("{}{last}", &refresh[..refresh.len() - 1]);
+    let res = refresh_grant(&srv, &http, &client_id, &forged).await;
+    assert_eq!(res.status(), 400);
+    assert_eq!(res.json::<Value>().await.unwrap()["error"], "invalid_grant");
+    srv.store
+        .verify_access_token(&access, &resource)
+        .expect("a forged refresh ended the grant");
+    assert_eq!(refresh_status(&srv, &http, &client_id, &refresh).await, 200);
+    srv.ct.cancel();
+}
+
+/// `another oauth approve` refuses a code nobody is waiting with, and a request past its
+/// expiry: that one is marked expired, so the browser stops waiting, and no grant exists.
+#[tokio::test]
+async fn approving_an_unknown_or_expired_code_grants_nothing() {
+    let srv = start().await;
+    let http = http();
+    let approve = |code: &str| {
+        srv.store.approve_oauth(Approval {
+            user_code: code.into(),
+            agent: "chatgpt".into(),
+            project_globs: vec![srv.work_glob.clone()],
+            label: None,
+        })
+    };
+    assert_eq!(approve("ZZZZ-ZZZZ").unwrap_err().code(), "not_found");
+
+    let (_, pending_url, user_code) = begin(&srv, &http, "s").await;
+    let db = rusqlite::Connection::open(srv.store.db_path().unwrap()).unwrap();
+    db.execute("UPDATE oauth_requests SET expires_at = 0", [])
+        .unwrap();
+    drop(db);
+    let err = approve(&user_code).unwrap_err();
+    assert_eq!(err.code(), "invalid", "{err}");
+    assert!(err.to_string().contains("expired"), "{err}");
+    let decided: Value = http
+        .get(&pending_url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(decided["status"], "expired", "{decided}");
+    assert!(srv.store.oauth_grants().unwrap().is_empty());
+    // Expired is final: a second approval is a conflict, not a fresh try.
+    assert_eq!(approve(&user_code).unwrap_err().code(), "conflict");
     srv.ct.cancel();
 }
