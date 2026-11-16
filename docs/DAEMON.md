@@ -139,5 +139,10 @@ another --json stats --since 48h
 | Herdr wakes sent and failed | `push.woke` events, with the agent, pane, outcome and message ids |
 | Messages pushed, and how many were then read, acknowledged or answered | Pushed message ids, checked against later reads, acknowledgements and replies by the same agent |
 | Requests created, claimed and completed | `request.*` events |
+| Events per day | Every event this node recorded in the period, counted per UTC day (`events_per_day`; days with none are left out) |
+
+It also reads a few gauges at that moment, whatever the period (`now` in JSON, "Right now" in text):
+- **Live holds:** this node's holds not released and not yet expired.
+- **Requests open, claimed and stale:** an open or claimed request already past its due time counts as stale even before a sweep marks it.
 
 The JSON form adds the 50 most recent stopped edits and wakes. Each line traces back to events you can read with `another events` or `another activity`.

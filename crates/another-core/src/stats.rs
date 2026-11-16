@@ -84,6 +84,33 @@ pub struct TrialStats {
     pub blocked: Vec<BlockedEdit>,
     /// Most recent first, at most 50.
     pub wakes: Vec<WakeRecord>,
+    /// Every event this node recorded in the period, per UTC day, oldest first. Days with
+    /// none are left out.
+    pub events_per_day: Vec<DayCount>,
+    /// Not the period: this node's state when the stats were read.
+    pub now: CurrentState,
+}
+
+/// Events recorded on one UTC day.
+#[derive(Debug, Clone, Default, Serialize, schemars::JsonSchema)]
+pub struct DayCount {
+    /// `YYYY-MM-DD`, UTC.
+    pub day: String,
+    pub events: u32,
+}
+
+/// Gauges at the moment of reading, for this node.
+#[derive(Debug, Clone, Default, Serialize, schemars::JsonSchema)]
+pub struct CurrentState {
+    /// Holds not released and not yet expired.
+    pub holds_live: u32,
+    /// Open requests nobody has claimed, not past their due time.
+    pub requests_open: u32,
+    /// Claimed requests not past their due time.
+    pub requests_claimed: u32,
+    /// Requests marked stale, plus open or claimed ones already past their due time that
+    /// no sweep has marked yet.
+    pub requests_stale: u32,
 }
 
 fn ids(message_ids: &[String]) -> Value {
@@ -379,6 +406,41 @@ impl Store {
                     out.pushes_acted_on += 1;
                 }
             }
+            let mut days = conn.prepare(
+                "SELECT ts / 86400000 AS day, count(*) FROM events
+                 WHERE node_id = ?1 AND seq > ?2 AND ts >= ?3
+                 GROUP BY day ORDER BY day",
+            )?;
+            out.events_per_day = days
+                .query_map(params![self.node_id(), after_seq, after_ts], |r| {
+                    let day: i64 = r.get(0)?;
+                    let count: i64 = r.get(1)?;
+                    Ok(DayCount {
+                        day: fmt_ts(day * 86_400_000).chars().take(10).collect(),
+                        events: u32::try_from(count).unwrap_or(u32::MAX),
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let now = self.now();
+            out.now.holds_live = conn.query_row(
+                "SELECT count(*) FROM holds
+                 WHERE node_id = ?1 AND released_at IS NULL AND expires_at > ?2",
+                params![self.node_id(), now],
+                |r| r.get(0),
+            )?;
+            let (open, claimed, stale): (u32, u32, u32) = conn.query_row(
+                "SELECT
+                   count(*) FILTER (WHERE status = 'open' AND (due_at IS NULL OR due_at > ?2)),
+                   count(*) FILTER (WHERE status = 'claimed' AND (due_at IS NULL OR due_at > ?2)),
+                   count(*) FILTER (WHERE status = 'stale'
+                     OR (status IN ('open', 'claimed') AND due_at <= ?2))
+                 FROM requests WHERE node_id = ?1",
+                params![self.node_id(), now],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            out.now.requests_open = open;
+            out.now.requests_claimed = claimed;
+            out.now.requests_stale = stale;
             Ok(out)
         })
     }
