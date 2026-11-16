@@ -756,6 +756,11 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
             if !project_exists(tx, &project)? || !agent_exists(tx, &agent)? {
                 return Ok(());
             }
+            // A local hold path is at most this long (`normalize_path`); a longer peer one
+            // is not stored, so it never reaches the overlap checks (FINDINGS-180).
+            if s("pattern").is_some_and(|pat| pat.len() > crate::holds::MAX_HOLD_PATH_BYTES) {
+                return Ok(());
+            }
             let ttl = p
                 .get("ttl_seconds")
                 .and_then(Value::as_i64)
