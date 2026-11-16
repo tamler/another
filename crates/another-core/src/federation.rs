@@ -446,6 +446,91 @@ fn spoke_may_publish(perms: &[Perm], from: &str, ev: &WireEvent, payload: &Value
     }
 }
 
+/// The node that owns the row `id` in `table`, if this node knows it.
+fn owner_of(conn: &Connection, table: &str, column: &str, id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT node_id FROM {table} WHERE {column} = ?1"),
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// A signature proves only who sent an event. Before a foreign event is stored, check that
+/// every agent, project, message, hold and resource it would create or change belongs to
+/// its origin node. An object this node does not know yet cannot be rewritten, so it
+/// passes; the projection then records it under the origin. Mail may name recipients and
+/// a borrow may name a resource on any node: those are the cross-node operations
+/// federation exists for, and the permission checks in `spoke_may_publish` cover them.
+fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> Result<()> {
+    let owned = |what: &str, table: &str, column: &str, key: &str| -> Result<()> {
+        let Some(id) = p.get(key).and_then(Value::as_str) else {
+            return Ok(());
+        };
+        match owner_of(conn, table, column, id)? {
+            Some(node) if node != origin => Err(Error::Forbidden(format!(
+                "{kind} names {what} {id}, which belongs to another node"
+            ))),
+            _ => Ok(()),
+        }
+    };
+    let agent = |key: &str| owned("agent", "agents", "agent_id", key);
+    let project = || owned("project", "projects", "project_id", "project_id");
+    let resource = || owned("resource", "resources", "resource_id", "resource_id");
+    match kind {
+        "agent.registered" => {
+            agent("agent_id")?;
+            project()
+        }
+        "session.started" | "session.ended" | "delivery.read" | "delivery.acked" => {
+            agent("agent_id")
+        }
+        "message.sent" => {
+            agent("sender_id")?;
+            owned("message", "messages", "message_id", "message_id")
+        }
+        "hold.acquired" | "hold.updated" => {
+            agent("agent_id")?;
+            project()?;
+            owned("hold", "holds", "hold_id", "hold_id")
+        }
+        "resource.registered" => {
+            agent("owner_id")?;
+            project()?;
+            resource()
+        }
+        "resource.adopted" => {
+            agent("agent_id")?;
+            resource()
+        }
+        "resource.borrowed" => agent("agent_id"),
+        "resource.transferred" => {
+            resource()?;
+            // The lease's resource decides, whatever resource_id the payload claims.
+            let lease_resource: Option<String> = match p.get("lease_id").and_then(Value::as_str) {
+                Some(lease) => conn
+                    .query_row(
+                        "SELECT r.node_id FROM resource_leases l
+                         JOIN resources r ON r.resource_id = l.resource_id WHERE l.lease_id = ?1",
+                        [lease],
+                        |r| r.get(0),
+                    )
+                    .optional()?,
+                None => None,
+            };
+            match lease_resource {
+                Some(node) if node != origin => Err(Error::Forbidden(format!(
+                    "{kind} names a lease on a resource that belongs to another node"
+                ))),
+                _ => Ok(()),
+            }
+        }
+        "resource.stopped" | "resource.reaped" => resource(),
+        _ => Ok(()),
+    }
+}
+
 fn agent_exists(conn: &Connection, id: &str) -> Result<bool> {
     Ok(conn
         .query_row("SELECT 1 FROM agents WHERE agent_id = ?1", [id], |_| Ok(()))
@@ -781,8 +866,9 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                 )?;
                 tx.execute(
                     "UPDATE resource_leases SET released_at = ?2, release_reason = 'stopped'
-                     WHERE resource_id = ?1 AND released_at IS NULL",
-                    params![rid, ts],
+                     WHERE resource_id = ?1 AND released_at IS NULL
+                       AND EXISTS (SELECT 1 FROM resources WHERE resource_id = ?1 AND node_id = ?3)",
+                    params![rid, ts, origin],
                 )?;
             }
         }
@@ -1323,6 +1409,10 @@ impl Store {
                     report.rejected.push(reject(e.to_string()));
                     continue;
                 }
+                if let Err(e) = foreign_authority(tx, &ev.node_id, &ev.kind, &payload) {
+                    report.rejected.push(reject(e.to_string()));
+                    continue;
+                }
                 let inserted = tx.execute(
                     "INSERT OR IGNORE INTO events (event_id, node_id, ts, actor, kind, payload, prev_id, sig)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -1391,6 +1481,63 @@ mod tests {
             assert_eq!(actual, (expiry, true));
             Ok(())
         }).unwrap();
+    }
+
+    /// The projection itself, not only the ingest check, keeps a foreign stop away from this
+    /// node's leases.
+    #[test]
+    fn foreign_stop_cannot_end_local_leases() {
+        let (clock, _) = crate::Clock::manual(1_000_000);
+        let store = Store::open_in_memory(clock).unwrap();
+        store
+            .register_agent(crate::RegisterAgent {
+                name: "owner".into(),
+                program: crate::Program::Claude,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+        let rid = store
+            .register_resource(crate::RegisterResource {
+                agent: "owner".into(),
+                kind: crate::ResourceKind::Port,
+                name: "tcp:127.0.0.1:1".into(),
+                endpoint: None,
+                port: Some(1),
+                pid: None,
+                project: None,
+                purpose: None,
+                mode: crate::LeaseMode::Shared,
+                ttl_seconds: None,
+                metadata: None,
+            })
+            .unwrap()
+            .resource
+            .resource_id;
+        store
+            .write(|tx| {
+                let event = WireEvent {
+                    seq: 1,
+                    event_id: "foreign-stop".into(),
+                    node_id: "foreign-node".into(),
+                    ts: tx.now,
+                    actor: "foreign".into(),
+                    kind: "resource.stopped".into(),
+                    payload: String::new(),
+                    prev_id: None,
+                    sig: String::new(),
+                };
+                project_foreign(tx, &event, &json!({ "resource_id": rid }))?;
+                let live: i64 = tx.query_row(
+                    "SELECT count(*) FROM resource_leases WHERE resource_id = ?1 AND released_at IS NULL",
+                    [&rid],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(live, 1);
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]
@@ -1479,8 +1626,9 @@ mod tests {
             ),
         );
         let report = store.ingest(&peer_id, &[event], &[]).unwrap();
-        assert_eq!(report.accepted, 1);
-        assert!(report.rejected.is_empty());
+        // The colliding event is now refused outright (D69), not stored and ignored.
+        assert_eq!(report.accepted, 0);
+        assert_eq!(report.rejected.len(), 1);
         let actual: (i64, bool, i64, Option<String>, i64) = store
             .read(|db| {
                 Ok(db.query_row(
