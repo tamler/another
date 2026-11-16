@@ -84,17 +84,22 @@ fn invalid(why: impl Into<String>) -> Error {
     Error::Invalid(why.into())
 }
 
-/// `text` if it is a public key written in its one canonical form, the way
-/// [`crypto::public_of`] writes it. Decoding is lenient (it trims whitespace), so without
-/// this one key could take several spellings and slip past the no-reuse and equality
-/// checks below (FINDINGS-192).
+/// `text` if it is a usable public key written in its one canonical form, the way
+/// [`crypto::public_of`] writes it.
+/// - Decoding is lenient (it trims whitespace), so without the form check one key could
+///   take several spellings and slip past the no-reuse and equality checks below
+///   (FINDINGS-192).
+/// - A small-order (weak) key is refused: some "signature" verifies under it for every
+///   message, so a rotation to it would let anyone sign as the node (FINDINGS-192-b).
 pub fn canonical_key(text: &str) -> Result<&str> {
     let key = crypto::decode_public(text)?;
-    if crypto::b64(key.as_bytes()) == text {
-        Ok(text)
-    } else {
-        Err(invalid("public key is not in canonical form"))
+    if crypto::b64(key.as_bytes()) != text {
+        return Err(invalid("public key is not in canonical form"));
     }
+    if key.is_weak() {
+        return Err(invalid("public key is a small-order (weak) key"));
+    }
+    Ok(text)
 }
 
 /// Check one rotation event against the receiver's position for its origin node, and
@@ -126,7 +131,7 @@ pub fn verify_link(ev: &WireEvent, at: &KeyPosition, earlier: &[String]) -> Resu
         &ev.kind,
         &ev.payload,
     );
-    if !crypto::verify(&at.key, &signed, &ev.sig) {
+    if !crypto::verify_strict(&at.key, &signed, &ev.sig) {
         return Err(invalid(format!(
             "rotation {} is not signed by the node's current key",
             ev.event_id
@@ -157,7 +162,7 @@ pub fn verify_link(ev: &WireEvent, at: &KeyPosition, earlier: &[String]) -> Resu
         &p.new_public_key,
         &p.chain,
     );
-    if !crypto::verify(&p.new_public_key, &msg, &p.proof) {
+    if !crypto::verify_strict(&p.new_public_key, &msg, &p.proof) {
         return Err(invalid(format!(
             "rotation {} has no valid proof from its new key",
             ev.event_id
@@ -449,6 +454,42 @@ mod tests {
             got.is_err(),
             "reused K0 accepted as {:?}",
             got.map(|p| p.key)
+        );
+    }
+
+    /// Review of #192 (w9Z:p1): the identity point is a valid 32-byte encoding but a
+    /// small-order key. With non-strict verification, R = identity and s = 0 is a "signature"
+    /// that verifies for every message, so its proof needs no private key, and after the
+    /// rotation anyone could sign as the node.
+    #[test]
+    fn review192_rotation_to_a_small_order_key_is_refused() {
+        let k0 = key();
+        let d0 = chain_genesis(NODE, &crypto::public_of(&k0));
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        let weak = crypto::b64(&identity);
+        let mut sig = [0u8; 64];
+        sig[0] = 1; // R = identity (compressed y = 1), s = 0
+        let forged = crypto::b64(&sig);
+        let any_message = crypto::verify(&weak, b"any message at all", &forged);
+        let p = RotationPayload {
+            node_id: NODE.into(),
+            old_public_key: crypto::public_of(&k0),
+            new_public_key: weak.clone(),
+            chain: d0.clone(),
+            proof: forged.clone(),
+        };
+        let ev = signed("R1", &k0, serde_json::to_string(&p).unwrap());
+        let at = KeyPosition {
+            key: crypto::public_of(&k0),
+            chain: d0,
+        };
+        let link = verify_link(&ev, &at, &[]);
+        println!("forged signature verifies under the weak key for any message: {any_message}");
+        println!("rotation to the weak key: {link:?}");
+        assert!(
+            link.is_err(),
+            "a rotation to a small-order key was accepted"
         );
     }
 }

@@ -102,6 +102,25 @@ pub fn verify(public_b64: &str, message: &[u8], signature_b64: &str) -> bool {
     key.verify(message, &sig).is_ok()
 }
 
+/// [`verify`] with Ed25519's strict rules: a small-order (weak) key or a non-canonical or
+/// small-order signature component is refused. Key rotations use it, because accepting a
+/// weak key would let a signature verify for every message.
+pub fn verify_strict(public_b64: &str, message: &[u8], signature_b64: &str) -> bool {
+    let Ok(key) = decode_public(public_b64) else {
+        return false;
+    };
+    if key.is_weak() {
+        return false;
+    }
+    let Ok(sig_bytes) = unb64(signature_b64) else {
+        return false;
+    };
+    let Ok(sig) = Signature::from_slice(&sig_bytes) else {
+        return false;
+    };
+    key.verify_strict(message, &sig).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
