@@ -259,7 +259,7 @@ fn upsert_node(tx: &Tx<'_>, node: &NodeEntry) -> Result<()> {
     if node.node_id == tx.node_id {
         return Ok(());
     }
-    crypto::decode_public(&node.public_key)?;
+    crypto::decode_peer_public(&node.public_key)?;
     let known: Option<(String, Option<String>)> = tx
         .query_row(
             "SELECT display_name, public_key FROM nodes WHERE node_id = ?1",
@@ -411,7 +411,9 @@ fn verify_wire(conn: &Connection, ev: &WireEvent) -> Result<()> {
         &ev.kind,
         &ev.payload,
     );
-    if crypto::verify(&key, &msg, &ev.sig) {
+    // Strict: a weak key pinned before keys were checked cannot verify the degenerate
+    // signature (FINDINGS-main-weak-keys).
+    if crypto::verify_strict(&key, &msg, &ev.sig) {
         Ok(())
     } else {
         Err(Error::Forbidden("bad event signature".into()))
@@ -1112,7 +1114,7 @@ impl Store {
                 return Err(denied());
             };
             let msg = crypto::request_message(method, path_and_query, time_ms, body);
-            if crypto::verify(&key, &msg, signature) {
+            if crypto::verify_strict(&key, &msg, signature) {
                 Ok(perms_of(&perms))
             } else {
                 Err(denied())
@@ -1208,7 +1210,7 @@ impl Store {
     /// Hub side: accept a pairing request carrying a valid, unused invite.
     pub fn accept_pairing(&self, req: &PairRequest) -> Result<PairResponse> {
         validate_node_name(&req.node.display_name)?;
-        crypto::decode_public(&req.node.public_key)?;
+        crypto::decode_peer_public(&req.node.public_key)?;
         self.write(|tx| {
             let denied = || Error::Forbidden("invalid, used or expired invite".into());
             let row: Option<(String, String, i64, Option<i64>)> = tx
