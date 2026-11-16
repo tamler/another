@@ -146,3 +146,24 @@ fn adv242_urgent_counts_follow_reads_and_the_hook_digest_counts_high_too() {
     let digest = s.unannounced("bob", "", 10).unwrap();
     assert_eq!((digest.count, digest.urgent), (3, 1), "{digest:?}");
 }
+
+/// Every other place that reports urgent mail counts `high` too, not only the inbox: the
+/// hook's unannounced notice, the heartbeat report and the work board.
+#[test]
+fn high_counts_as_urgent_in_the_notice_the_heartbeat_and_the_board() {
+    let s = store();
+    for level in LEVELS {
+        send(&s, level);
+    }
+    let notice = s.unannounced("bob", "", 10).unwrap();
+    assert_eq!((notice.count, notice.urgent), (4, 2), "unannounced");
+    let beat = s.heartbeat("bob", false).unwrap();
+    assert_eq!((beat.unread, beat.urgent_unread), (4, 2), "heartbeat");
+    let board = s.board(BoardQuery::default()).unwrap();
+    let bob = board
+        .agents
+        .iter()
+        .find(|a| a.address.starts_with("bob"))
+        .expect("bob is on the board");
+    assert_eq!((bob.unread, bob.urgent_unread), (4, 2), "board");
+}
