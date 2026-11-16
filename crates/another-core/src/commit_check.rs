@@ -114,30 +114,36 @@ fn budget_ran_out(out: &mut CommitCheck, groups: &[CommitGroup], at: (usize, usi
     }
 }
 
-/// Interrupts the connection's running statement at the deadline, from its own thread.
-/// Dropping it before then stops the thread without interrupting anything.
+/// How often the watchdog interrupts again once the deadline has passed.
+const REINTERRUPT: Duration = Duration::from_millis(5);
+
+/// Interrupts the connection from its own thread once the deadline has passed, and again
+/// every [`REINTERRUPT`] until it is dropped. One interrupt is not enough: SQLite drops an
+/// interrupt that arrives while no statement runs, so a statement that starts later would
+/// run unbounded. Dropping the watchdog stops the thread at once.
 struct Watchdog {
     stop: Option<mpsc::Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Watchdog {
-    fn start(handle: rusqlite::InterruptHandle, deadline: Instant) -> Watchdog {
+    /// `None` when no thread could be started; the caller must then not query at all.
+    fn start(handle: rusqlite::InterruptHandle, deadline: Instant) -> Option<Watchdog> {
         let (stop, rx) = mpsc::channel::<()>();
-        // If no thread can be started, the loops' own deadline checks still apply.
         let thread = std::thread::Builder::new()
             .name("another-commit-deadline".into())
             .spawn(move || {
-                let left = deadline.saturating_duration_since(Instant::now());
-                if let Err(mpsc::RecvTimeoutError::Timeout) = rx.recv_timeout(left) {
+                let mut wait = deadline.saturating_duration_since(Instant::now());
+                while let Err(mpsc::RecvTimeoutError::Timeout) = rx.recv_timeout(wait) {
                     handle.interrupt();
+                    wait = REINTERRUPT;
                 }
             })
-            .ok();
-        Watchdog {
+            .ok()?;
+        Some(Watchdog {
             stop: Some(stop),
-            thread,
-        }
+            thread: Some(thread),
+        })
     }
 }
 
@@ -198,13 +204,36 @@ impl CommitReader {
         self.conn.is_readonly(MAIN_DB).unwrap_or(false)
     }
 
-    /// This node's registered project directories.
-    pub fn project_dirs(&self) -> Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT abs_path FROM projects WHERE node_id = ?1 ORDER BY abs_path")?;
-        let rows = stmt.query_map([&self.node_id], |r| r.get(0))?;
-        Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
+    /// This node's registered project directories, or `None` when `deadline` passes first
+    /// (or no deadline watchdog could be started).
+    pub fn project_dirs(&self, deadline: Instant) -> Result<Option<Vec<String>>> {
+        let Some(_watchdog) = self.arm(deadline)? else {
+            return Ok(None);
+        };
+        let read = || -> Result<Vec<String>> {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT abs_path FROM projects WHERE node_id = ?1 ORDER BY abs_path")?;
+            let rows = stmt.query_map([&self.node_id], |r| r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
+        };
+        match read() {
+            Ok(dirs) => Ok(Some(dirs)),
+            Err(e) if is_interrupted(&e) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Bound this connection's work by `deadline`: lock waits get the time left, and a
+    /// watchdog interrupts statements once it has passed. `None` when the deadline has
+    /// already passed or no watchdog could be started; then nothing may be queried.
+    fn arm(&self, deadline: Instant) -> Result<Option<Watchdog>> {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(None);
+        }
+        self.conn.busy_timeout(left)?;
+        Ok(Watchdog::start(self.conn.get_interrupt_handle(), deadline))
     }
 
     /// Check `groups` against live holds. `agent` (`name` or `name@project`) is the
@@ -225,9 +254,11 @@ impl CommitReader {
             links_complete: true,
             ..CommitCheck::default()
         };
-        self.conn
-            .busy_timeout(deadline.saturating_duration_since(Instant::now()))?;
-        let _watchdog = Watchdog::start(self.conn.get_interrupt_handle(), deadline);
+        // No deadline or no watchdog: no query runs, and every path is reported unchecked.
+        let Some(_watchdog) = self.arm(deadline)? else {
+            budget_ran_out(&mut out, groups, (0, 0));
+            return Ok(out);
+        };
         let mut at = (0, 0);
         match self.check_into(&mut out, agent, groups, deadline, &mut at) {
             Ok(true) => {}
@@ -248,6 +279,9 @@ impl CommitReader {
         deadline: Instant,
         at: &mut (usize, usize),
     ) -> Result<bool> {
+        // Every query below starts only while time is left (review IMPL-R2-1); one that is
+        // still running at the deadline is interrupted by the watchdog.
+        let expired = || Instant::now() >= deadline;
         let agent_id = match agent {
             None => None,
             Some(who) => match resolve_agent(&self.conn, &self.node_id, who) {
@@ -255,6 +289,7 @@ impl CommitReader {
                     out.agent = Some(a.address.clone());
                     Some(a.id)
                 }
+                Err(e) if is_interrupted(&e) => return Err(e),
                 Err(e) => {
                     out.agent_note = Some(format!("{who}: {e}"));
                     None
@@ -262,8 +297,13 @@ impl CommitReader {
             },
         };
         let now = crate::time::now_ms();
+        if expired() {
+            return Ok(false);
+        }
         let (links, complete) = self.effective_links(now, deadline)?;
-        out.links_complete = complete;
+        if !complete || expired() {
+            return Ok(false);
+        }
         let holds = self.live_holds(now, agent_id.as_deref())?;
 
         for (gi, group) in groups.iter().enumerate() {
@@ -286,6 +326,7 @@ impl CommitReader {
             };
             let mine = match links.get(&project.project_id) {
                 Some(l) => l.clone(),
+                None if expired() => return Ok(false),
                 None => self.link_of(&project)?,
             };
             let (my_key, my_prefix) =
@@ -429,5 +470,143 @@ impl CommitReader {
             Some(link) => link,
             None => link_for(Path::new(&project.abs_path)),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AcquireHolds, Program, RegisterAgent, Store};
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    /// When each statement on a traced connection started, and its SQL. Only
+    /// `no_query_starts_after_the_deadline` traces, so the tests do not share entries.
+    static STARTED: Mutex<Vec<(Instant, String)>> = Mutex::new(Vec::new());
+
+    fn record(event: rusqlite::trace::TraceEvent<'_>) {
+        if let rusqlite::trace::TraceEvent::Stmt(stmt, _) = event {
+            STARTED
+                .lock()
+                .unwrap()
+                .push((Instant::now(), stmt.sql().into_owned()));
+        }
+    }
+
+    /// A home with `n` projects whose repository links are not cached and whose git
+    /// configs are large (about 240 KB, under the 256 KiB read cap), so working out
+    /// their links takes time. Each has a live hold.
+    fn slow_links(n: usize) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let home = root.join("home");
+        let store = Store::open(&home).unwrap();
+        let config: String = std::iter::once("[core]\n".to_string())
+            .chain((0..60_000).map(|i| format!("\tk{i} = v\n")))
+            .collect();
+        let register = |name: &str, project: &Path| {
+            store
+                .register_agent(RegisterAgent {
+                    name: name.into(),
+                    program: Program::Claude,
+                    project: Some(project.to_string_lossy().into_owned()),
+                    model: None,
+                    description: None,
+                })
+                .unwrap();
+        };
+        let main = root.join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        register("alice", &main);
+        for i in 0..n {
+            let p = root.join(format!("p{i}"));
+            std::fs::create_dir_all(p.join(".git")).unwrap();
+            std::fs::write(p.join(".git/config"), &config).unwrap();
+            register(&format!("b{i}"), &p);
+            store
+                .acquire_holds(AcquireHolds {
+                    agent: format!("b{i}"),
+                    project: p.to_string_lossy().into_owned(),
+                    paths: vec!["src/x.rs".into()],
+                    ttl_seconds: Some(3600),
+                    exclusive: true,
+                    reason: None,
+                    repo_wide: false,
+                })
+                .unwrap();
+        }
+        drop(store);
+        let db = Connection::open(home.join(DB_FILE)).unwrap();
+        db.execute("DELETE FROM project_repos", []).unwrap();
+        (dir, home, main)
+    }
+
+    /// Review IMPL-R2-1. SQLite forgets an interrupt that arrives between statements, so a
+    /// query started after the deadline used to run unbounded: the live-hold query ran
+    /// after the link work had used up the budget. Now no query starts once the deadline
+    /// has passed, whether it passed before the check or during the link work.
+    #[test]
+    fn no_query_starts_after_the_deadline() {
+        // 40 configs of 240 KB: well over the 1 ms budget below to work out on any machine
+        // (the assertion on `links` makes sure the budget did run out during that work).
+        let (_dir, home, main) = slow_links(40);
+        let groups = [CommitGroup {
+            dir: main.to_string_lossy().into_owned(),
+            paths: vec!["src/x.rs".into(), "src/y.rs".into()],
+        }];
+        for budget in [None, Some(Duration::from_millis(1))] {
+            let reader = CommitReader::open(&home, Duration::from_millis(300)).unwrap();
+            let stmt = rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT;
+            reader.conn.trace_v2(stmt, Some(record));
+            STARTED.lock().unwrap().clear();
+            let deadline = match budget {
+                // Already spent when the check starts.
+                None => Instant::now(),
+                Some(b) => Instant::now() + b,
+            };
+            let check = reader.check(Some("alice"), &groups, deadline).unwrap();
+            reader.conn.trace_v2(stmt, None);
+            let started = std::mem::take(&mut *STARTED.lock().unwrap());
+            let late: Vec<&String> = started
+                .iter()
+                .filter(|(t, _)| *t > deadline)
+                .map(|(_, sql)| sql)
+                .collect();
+            assert!(late.is_empty(), "{budget:?}: started late: {late:?}");
+            if budget.is_none() {
+                assert!(started.is_empty(), "{started:?}");
+            } else {
+                // The case under test: the deadline passed during the link work, which
+                // read some of the cached-link rows (one query per project) but not all.
+                let links = started
+                    .iter()
+                    .filter(|(_, sql)| sql.contains("project_repos"))
+                    .count();
+                assert!(links > 0 && links < 40, "{links} link lookups");
+            }
+            assert!(!check.links_complete, "{budget:?}");
+            assert_eq!(check.checked + check.skipped.len(), 2, "{check:?}");
+        }
+    }
+
+    /// The watchdog keeps interrupting after the deadline, so a statement that starts late
+    /// (here on purpose) is still stopped.
+    #[test]
+    fn a_statement_started_after_the_deadline_is_interrupted() {
+        let conn = Connection::open_in_memory().unwrap();
+        let deadline = Instant::now() + Duration::from_millis(5);
+        let _w = Watchdog::start(conn.get_interrupt_handle(), deadline).unwrap();
+        // Let the first interrupt land while nothing runs.
+        std::thread::sleep(Duration::from_millis(30));
+        let started = Instant::now();
+        let r: rusqlite::Result<i64> = conn.query_row(
+            "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c)
+             SELECT count(*) FROM c",
+            [],
+            |r| r.get(0),
+        );
+        let err = Error::Db(r.unwrap_err());
+        assert!(is_interrupted(&err), "{err:?}");
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

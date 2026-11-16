@@ -24,3 +24,5 @@ tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Tests only: commit_check's deadline test records when each statement starts.
+rusqlite = { workspace = true, features = ["trace"] }

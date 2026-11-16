@@ -384,15 +384,26 @@ fn check_inner(
             Err(e) => not_utf8.push(String::from_utf8_lossy(e.as_bytes()).into_owned()),
         }
     }
-    let reader = match CommitReader::open(home, DB_BUSY) {
+    // The open's own reads are two one-row lookups; its lock wait is what could take time,
+    // and it gets no more than the budget has left.
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        out.skipped = Some("time budget spent before the database was read".into());
+        return out;
+    }
+    let reader = match CommitReader::open(home, DB_BUSY.min(left)) {
         Ok(r) => r,
         Err(e) => {
             out.skipped = Some(db_reason(&e, true));
             return out;
         }
     };
-    let registered = match reader.project_dirs() {
-        Ok(r) => r,
+    let registered = match reader.project_dirs(deadline) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            out.skipped = Some("time budget spent before the database was read".into());
+            return out;
+        }
         Err(e) => {
             out.skipped = Some(db_reason(&e, false));
             return out;
