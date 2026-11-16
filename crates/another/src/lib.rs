@@ -3,6 +3,7 @@
 pub mod cli;
 pub mod daemon;
 pub mod dashboard;
+pub mod doctor;
 pub mod fed;
 pub mod hooks;
 pub mod log_export;
@@ -14,4 +15,5 @@ pub mod reap;
 pub mod remote;
 pub mod scan;
 pub mod serve;
+pub mod templates;
 pub mod wake;

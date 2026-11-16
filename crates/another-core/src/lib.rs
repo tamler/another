@@ -42,7 +42,7 @@ pub use dashboard::{
 pub use error::{Error, ErrorBody, Result};
 pub use export::{ExportFilter, MAX_EXPORT_PAGE};
 pub use federation::{
-    reachable, IngestReport, Invite, NodeEntry, PairRequest, PairResponse, Peer, Perm,
+    reachable, IngestReport, Invite, NodeEntry, PairRequest, PairResponse, Peer, Perm, PullAnchors,
     PullResponse, PushRequest, Rejected, WireEvent,
 };
 pub use holds::{
@@ -70,7 +70,7 @@ pub use resources::{
     MIN_LEASE_TTL_SECONDS,
 };
 pub use stats::{BlockedEdit, TrialStats, WakeRecord};
-pub use store::{default_home, Clock, Event, NodeInfo, Store, DB_FILE};
+pub use store::{default_home, Clock, DbInspection, Event, NodeInfo, Store, DB_FILE};
 pub use time::{fmt_ts, parse_ts};
 pub use tokens::{AuditEntry, AuditRecord, NewToken, Token, TokenScope};
 pub use wake::{WakeTarget, WakeVia};

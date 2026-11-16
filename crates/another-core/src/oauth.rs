@@ -13,6 +13,8 @@
 //! written to the event log.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use std::fmt::Write as _;
+
 use base64::Engine;
 use globset::GlobBuilder;
 use rusqlite::{params, OptionalExtension};
@@ -301,7 +303,7 @@ fn insert_audit(tx: &Tx<'_>, entry: AuditRecord) -> Result<()> {
 /// no query, no userinfo, default ports omitted, one trailing slash stripped.
 pub fn canonical_resource(raw: &str) -> std::result::Result<String, String> {
     let raw = raw.trim();
-    if raw.is_empty() || raw.chars().any(|c| c.is_whitespace()) {
+    if raw.is_empty() || raw.chars().any(char::is_whitespace) {
         return Err("resource must be an absolute URI".into());
     }
     let Some((scheme, rest)) = raw.split_once("://") else {
@@ -395,18 +397,18 @@ fn parse_port(raw: &str) -> std::result::Result<u16, String> {
         })
 }
 
+/// A redirect URI's parts. The port is validated by `parse_redirect` but not kept: exact
+/// matching compares whole strings, and the loopback rule (RFC 8252 §7.3) ignores it.
 #[derive(Debug, Clone)]
 struct ParsedRedirect {
     scheme: String,
     host: String,
-    #[allow(dead_code)]
-    port: Option<u16>,
     path: String,
     query: Option<String>,
 }
 
 fn parse_redirect(raw: &str) -> Option<ParsedRedirect> {
-    if raw.contains('#') || raw.contains('@') || raw.chars().any(|c| c.is_whitespace()) {
+    if raw.contains('#') || raw.contains('@') || raw.chars().any(char::is_whitespace) {
         return None;
     }
     let (scheme, rest) = raw.split_once("://")?;
@@ -421,7 +423,8 @@ fn parse_redirect(raw: &str) -> Option<ParsedRedirect> {
     if authority.is_empty() {
         return None;
     }
-    let (host, port) = split_host_port(authority).ok()?;
+    // An invalid port still rejects the URI.
+    let (host, _) = split_host_port(authority).ok()?;
     let (path, query) = match rest.split_once('?') {
         Some((p, q)) => (p.to_string(), Some(q.to_string())),
         None => (
@@ -436,7 +439,6 @@ fn parse_redirect(raw: &str) -> Option<ParsedRedirect> {
     Some(ParsedRedirect {
         scheme,
         host,
-        port,
         path,
         query,
     })
@@ -489,9 +491,7 @@ pub fn redirect_matches(registered: &[String], requested: &str) -> bool {
 }
 
 pub fn redirect_host(uri: &str) -> String {
-    parse_redirect(uri)
-        .map(|p| p.host)
-        .unwrap_or_else(|| "unknown".into())
+    parse_redirect(uri).map_or_else(|| "unknown".into(), |p| p.host)
 }
 
 /// Authorization error redirect, including the issuer (`iss`) on every response.
@@ -511,9 +511,7 @@ pub fn error_redirect(
 }
 
 pub fn redirect_is_loopback(uri: &str) -> bool {
-    parse_redirect(uri)
-        .map(|p| p.scheme == "http" && is_loopback_host(&p.host))
-        .unwrap_or(false)
+    parse_redirect(uri).is_some_and(|p| p.scheme == "http" && is_loopback_host(&p.host))
 }
 
 /// Check a Client ID Metadata Document. `document_url` is the URL the client presented.
@@ -630,7 +628,10 @@ fn form_encode(s: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(b as char);
             }
-            _ => out.push_str(&format!("%{b:02X}")),
+            _ => {
+                // Writing to a String cannot fail.
+                let _ = write!(out, "%{b:02X}");
+            }
         }
     }
     out
