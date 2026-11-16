@@ -792,3 +792,76 @@ fn a_revoked_spokes_lease_release_reaches_other_spokes() {
         .unwrap();
     assert_eq!(mallory_owner, 0);
 }
+
+/// A hold belongs to the node that took it: a signed `hold.renewed`, `hold.released` or
+/// `hold.expired` from another spoke that names alpha's hold changes nothing on the hub.
+#[test]
+fn hold_renewal_release_and_expiry_cannot_touch_another_nodes_hold() {
+    let fed = Fed::new();
+    let shop = fed.project_dir("alpha-shop");
+    fed.alpha
+        .store
+        .register_agent(RegisterAgent {
+            name: "alice".into(),
+            program: Program::Claude,
+            project: Some(shop.clone()),
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    let hold_id = fed
+        .alpha
+        .store
+        .acquire_holds(AcquireHolds {
+            agent: "alice@alpha-shop".into(),
+            project: shop,
+            paths: vec!["src/a.rs".into()],
+            ttl_seconds: Some(1800),
+            exclusive: true,
+            reason: None,
+            repo_wide: false,
+        })
+        .unwrap()
+        .granted[0]
+        .hold_id
+        .clone();
+    assert!(push(&fed.hub, &fed.alpha).rejected.is_empty());
+    let state = || {
+        fed.hub
+            .sql()
+            .query_row(
+                "SELECT expires_at, renewed_at, released_at FROM holds WHERE hold_id = ?1",
+                [&hold_id],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, Option<i64>>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+    // Every node's clock stands at T0, and a projection never dates an event after the
+    // receiver's clock, so a renewal now would write the values the hold already has. Date
+    // the hub's copy earlier, so that any renewal shows.
+    fed.hub
+        .sql()
+        .execute(
+            "UPDATE holds SET renewed_at = ?2, expires_at = ?2 + 60000 WHERE hold_id = ?1",
+            rusqlite::params![hold_id, T0 - 10_000],
+        )
+        .unwrap();
+    let before = state();
+    assert_eq!(before, (T0 + 50_000, Some(T0 - 10_000), None));
+
+    fed.forge("hold.renewed", json!({ "hold_ids": [hold_id] }));
+    assert_eq!(state(), before, "renewed by another node");
+    fed.forge(
+        "hold.released",
+        json!({ "hold_ids": [hold_id], "reason": "forged" }),
+    );
+    assert_eq!(state(), before, "released by another node");
+    fed.forge("hold.expired", json!({ "hold_id": hold_id }));
+    assert_eq!(state(), before, "expired by another node");
+}
