@@ -253,6 +253,150 @@ fn a_new_deadline_or_a_takeover_rearms_the_reminder() {
     assert_eq!(fx.kinds(&rid, "due_soon"), 3);
 }
 
+/// R1 (review R1 P2-1): one due-soon reminder per (request, owner, deadline) for the life of
+/// the request, whatever moves happen in between.
+#[test]
+fn the_same_deadline_is_never_reminded_twice_to_the_same_owner() {
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let fx = Fx::new();
+    // Two hours: lead 24 min, so the window opens 96 min in.
+    let rid = fx.open(Some(7200));
+    fx.act("worker", &rid, RequestAction::Claim, None);
+    let d1 = T0 + 7200 * 1000;
+    fx.advance_secs(100 * 60);
+    fx.sweep();
+    assert_eq!(fx.kinds(&rid, "due_soon"), 1);
+
+    // D1 -> D2 -> D1 within the window: D1 was already reminded.
+    fx.act("worker", &rid, RequestAction::Claim, Some(7200));
+    let now = fx.store.now();
+    fx.act(
+        "worker",
+        &rid,
+        RequestAction::Claim,
+        Some((d1 - now) / 1000),
+    );
+    assert_eq!(fx.store.request(&rid).unwrap().due_at, Some(fmt_ts(d1)));
+    fx.sweep();
+    assert_eq!(fx.kinds(&rid, "due_soon"), 1, "D1 again");
+
+    // A same-value deadline update.
+    fx.act(
+        "worker",
+        &rid,
+        RequestAction::Claim,
+        Some((d1 - now) / 1000),
+    );
+    fx.sweep();
+    assert_eq!(fx.kinds(&rid, "due_soon"), 1, "same value");
+
+    // Release and reclaim by the same owner keeps the future deadline. The new claim's
+    // window (20 min left: lead 5 min) opens; the owner is still reminded only once.
+    fx.act("worker", &rid, RequestAction::Release, None);
+    fx.act("worker", &rid, RequestAction::Claim, None);
+    assert_eq!(fx.store.request(&rid).unwrap().due_at, Some(fmt_ts(d1)));
+    fx.advance_secs(16 * 60);
+    fx.sweep();
+    assert_eq!(fx.kinds(&rid, "due_soon"), 1, "release and reclaim");
+
+    // A different owner taking over with the same deadline is reminded in its own right,
+    // with the lead computed from its own claim (20 min left: lead 5 min).
+    let fx = Fx::new();
+    let rid = fx.open(Some(7200));
+    fx.act("worker", &rid, RequestAction::Claim, None);
+    fx.advance_secs(100 * 60);
+    fx.sweep();
+    assert_eq!(fx.kinds(&rid, "due_soon"), 1);
+    fx.act("worker", &rid, RequestAction::Release, None);
+    fx.act("other", &rid, RequestAction::Claim, None);
+    fx.sweep();
+    assert_eq!(
+        fx.kinds(&rid, "due_soon"),
+        1,
+        "not yet in the new owner's window"
+    );
+    fx.advance_secs(16 * 60);
+    fx.sweep();
+    assert_eq!(fx.kinds(&rid, "due_soon"), 2);
+    assert_eq!(fx.mail("other", "Due soon:").len(), 1);
+}
+
+#[test]
+fn the_window_edges_are_exact() {
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    // Exactly five minutes left at the claim: eligible, and the window opens at once.
+    let fx = Fx::new();
+    let rid = fx.open(Some(300));
+    fx.act("worker", &rid, RequestAction::Claim, None);
+    fx.sweep();
+    assert_eq!(fx.kinds(&rid, "due_soon"), 1);
+
+    // 299 seconds: never.
+    let fx = Fx::new();
+    let rid = fx.open(Some(299));
+    fx.act("worker", &rid, RequestAction::Claim, None);
+    fx.advance_secs(298);
+    fx.sweep();
+    assert_eq!(fx.kinds(&rid, "due_soon"), 0);
+
+    // A one-hour claim: the window opens exactly 12 minutes before the deadline.
+    let fx = Fx::new();
+    let rid = fx.open(Some(3600));
+    fx.act("worker", &rid, RequestAction::Claim, None);
+    fx.advance_secs(48 * 60 - 1);
+    fx.sweep();
+    assert_eq!(
+        fx.kinds(&rid, "due_soon"),
+        0,
+        "one second before the window"
+    );
+    fx.advance_secs(1);
+    fx.sweep();
+    assert_eq!(fx.kinds(&rid, "due_soon"), 1, "at the window's start");
+
+    // One second before the deadline is still in time; at the deadline it is overdue.
+    let fx = Fx::new();
+    let rid = fx.open(Some(3600));
+    fx.act("worker", &rid, RequestAction::Claim, None);
+    fx.advance_secs(3599);
+    fx.sweep();
+    assert_eq!(fx.kinds(&rid, "due_soon"), 1);
+    let fx = Fx::new();
+    let rid = fx.open(Some(3600));
+    fx.act("worker", &rid, RequestAction::Claim, None);
+    fx.advance_secs(3600);
+    fx.sweep();
+    assert_eq!(fx.kinds(&rid, "due_soon"), 0);
+    assert_eq!(fx.kinds(&rid, "overdue"), 1);
+}
+
+/// Review R1 P2-3: reminders run in the full sweep, not on every write. Sending mail does
+/// not sweep; reading an inbox does.
+#[test]
+fn only_a_sweep_sends_the_due_soon_reminder() {
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let fx = Fx::new();
+    let rid = fx.open(Some(3600));
+    fx.act("worker", &rid, RequestAction::Claim, None);
+    fx.advance_secs(50 * 60);
+    fx.open_from("other", "lead", None);
+    fx.store
+        .send_message(SendMessage {
+            from: "worker".into(),
+            to: vec!["lead".into()],
+            subject: "progress".into(),
+            body: "halfway".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(fx.kinds(&rid, "due_soon"), 0, "sending does not sweep");
+    assert_eq!(
+        fx.mail("worker", "Due soon:").len(),
+        1,
+        "the inbox read sweeps"
+    );
+}
+
 #[test]
 fn a_missed_window_sends_only_the_overdue_notice() {
     let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
@@ -310,6 +454,7 @@ fn an_unclaimed_overdue_request_tells_only_the_requester() {
     let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let fx = Fx::new();
     let rid = fx.open(Some(600));
+    let requests_before = fx.store.requests(RequestFilter::default()).unwrap().len();
     fx.advance_secs(601);
     let got = fx.mail("lead", "Overdue:");
     assert_eq!(got.len(), 1);
@@ -317,6 +462,17 @@ fn an_unclaimed_overdue_request_tells_only_the_requester() {
         got[0].body.contains("nobody claiming it"),
         "{}",
         got[0].body
+    );
+    // A notice from the requester to itself says it is automatic, and opens no request.
+    assert!(
+        got[0].body.ends_with("(Automatic notice from Another.)"),
+        "{}",
+        got[0].body
+    );
+    assert_eq!(got[0].request_id, None);
+    assert_eq!(
+        fx.store.requests(RequestFilter::default()).unwrap().len(),
+        requests_before
     );
     assert!(
         fx.mail("worker", "Overdue:").is_empty(),
@@ -350,6 +506,22 @@ fn a_dashboard_mark_stale_sends_no_notice() {
     fx.advance_secs(2 * 3600);
     fx.sweep();
     assert!(fx.reminders(&rid).is_empty(), "{:?}", fx.reminders(&rid));
+}
+
+/// The dashboard's own past-due pass is a natural transition and still notifies; only the
+/// request the person marked is silent.
+#[test]
+fn a_dashboard_mark_still_notifies_other_overdue_requests() {
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let fx = Fx::new();
+    let overdue = fx.open(Some(600));
+    fx.act("worker", &overdue, RequestAction::Claim, None);
+    let marked = fx.open(Some(7200));
+    fx.act("worker", &marked, RequestAction::Claim, None);
+    fx.advance_secs(601);
+    fx.store.expire_request_from_dashboard(&marked).unwrap();
+    assert_eq!(fx.kinds(&overdue, "overdue"), 1);
+    assert!(fx.reminders(&marked).is_empty());
 }
 
 #[test]
@@ -446,6 +618,17 @@ fn a_failed_notice_never_blocks_the_sweep() {
     assert_eq!(failed.len(), 1, "{failed:?}");
     assert_eq!(failed[0].payload["request_id"], failing.as_str());
     assert_eq!(failed[0].payload["kind"], "overdue");
+    // No partial message was left behind for the failed notice.
+    let thread = fx.store.request(&failing).unwrap().thread_id;
+    let leftovers: i64 = rusqlite::Connection::open(fx.dir.path().join("home").join("another.db"))
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM messages WHERE thread_id = ?1 AND subject LIKE 'Overdue:%'",
+            [&thread],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(leftovers, 0);
 }
 
 #[test]
@@ -465,6 +648,20 @@ fn the_environment_opt_out_stops_reminders_but_not_staleness() {
     unsafe { std::env::remove_var("ANOTHER_REQUEST_REMINDERS") };
     assert_eq!(status, RequestStatus::Stale);
     assert!(reminders.is_empty(), "{reminders:?}");
+
+    // The setting is per process and read at each sweep: a sweep without it, still inside
+    // the window, sends the reminder the opted-out sweep skipped.
+    let fx = Fx::new();
+    let rid = fx.open(Some(3600));
+    fx.act("worker", &rid, RequestAction::Claim, None);
+    fx.advance_secs(50 * 60);
+    unsafe { std::env::set_var("ANOTHER_REQUEST_REMINDERS", "OFF") };
+    fx.sweep();
+    let skipped = fx.kinds(&rid, "due_soon");
+    unsafe { std::env::remove_var("ANOTHER_REQUEST_REMINDERS") };
+    assert_eq!(skipped, 0);
+    fx.sweep();
+    assert_eq!(fx.kinds(&rid, "due_soon"), 1);
 }
 
 #[test]

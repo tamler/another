@@ -233,6 +233,9 @@ pub(crate) fn stale_overdue_tx(tx: &Tx<'_>) -> Result<usize> {
     Ok(overdue.len())
 }
 
+/// The last line of every reminder: it is not written by the agent it comes from.
+const AUTOMATIC: &str = "(Automatic notice from Another.)";
+
 /// Shortest and longest time before a deadline that the owner is reminded.
 const REMINDER_LEAD_MIN_MS: i64 = 5 * 60 * 1000;
 const REMINDER_LEAD_MAX_MS: i64 = 60 * 60 * 1000;
@@ -320,7 +323,8 @@ fn send_overdue_notice_tx(tx: &Tx<'_>, row: &ReminderRow) -> Result<()> {
                 owner_id.as_str(),
                 format!(
                     "Passed its due time {due}. Owner: {}. Anyone may take it over with \
-                     another request claim {rid}, or cancel it with another request cancel {rid}.",
+                     another request claim {rid}, or cancel it with another request cancel {rid}. \
+                     {AUTOMATIC}",
                     owner.address
                 ),
             )
@@ -329,7 +333,8 @@ fn send_overdue_notice_tx(tx: &Tx<'_>, row: &ReminderRow) -> Result<()> {
             row.creator_id.as_str(),
             format!(
                 "Passed its due time {due} with nobody claiming it. Anyone may take it with \
-                 another request claim {rid}, or cancel it with another request cancel {rid}."
+                 another request claim {rid}, or cancel it with another request cancel {rid}. \
+                 {AUTOMATIC}"
             ),
         ),
     };
@@ -348,7 +353,8 @@ fn send_overdue_notice_tx(tx: &Tx<'_>, row: &ReminderRow) -> Result<()> {
     )
 }
 
-/// Remind each owner whose claimed deadline is within its lead, once per claim and deadline.
+/// Remind each owner whose claimed deadline is within its lead, once per owner and deadline.
+/// Runs only in the full sweep (`sweep_tx`), not on every write.
 /// A window missed entirely (nothing swept before the deadline) gets no late reminder: the
 /// overdue notice covers it.
 pub(crate) fn remind_due_soon_tx(tx: &Tx<'_>) -> Result<()> {
@@ -391,20 +397,23 @@ pub(crate) fn remind_due_soon_tx(tx: &Tx<'_>) -> Result<()> {
         if row.due_at - lead > tx.now {
             continue;
         }
-        // One reminder per (request, claim, deadline): a new claim or a moved deadline
-        // re-arms it. Reminder events are few, at most two per deadline.
-        let sent: bool = tx.query_row(
-            "SELECT EXISTS (SELECT 1 FROM events WHERE kind = 'request.reminded'
-               AND json_extract(payload, '$.request_id') = ?1
-               AND json_extract(payload, '$.kind') = 'due_soon'
-               AND json_extract(payload, '$.due_at') = ?2
-               AND json_extract(payload, '$.claimed_at') = ?3)",
-            params![row.request_id, row.due_at, claimed_at],
-            |r| r.get(0),
-        )?;
         let Some(owner_id) = row.owner_id.as_deref() else {
             continue;
         };
+        let subject = format!("Due soon: {}", crate::mail::single_line(&row.title, 290));
+        // The body starts with this deadline, so the reminder mail itself is the record.
+        let marker = format!("Due at {} (", fmt_ts(row.due_at));
+        // One reminder per (request, owner, deadline) for the life of the request: moving the
+        // deadline away and back, or releasing and reclaiming, does not repeat it. The lookup
+        // reads only this request's thread (`messages_by_thread`) and the delivery's key.
+        let sent: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM messages m
+               JOIN deliveries d ON d.message_id = m.message_id AND d.agent_id = ?3
+               WHERE m.thread_id = ?1 AND m.sender_id = ?2 AND m.subject = ?4
+                 AND substr(m.body, 1, length(?5)) = ?5)",
+            params![row.thread_id, row.creator_id, owner_id, subject, marker],
+            |r| r.get(0),
+        )?;
         if sent {
             continue;
         }
@@ -419,11 +428,11 @@ pub(crate) fn remind_due_soon_tx(tx: &Tx<'_>) -> Result<()> {
                 kind: "due_soon",
                 from_id: &row.creator_id,
                 to_id: owner_id,
-                subject: format!("Due soon: {}", crate::mail::single_line(&row.title, 290)),
+                subject,
                 body: format!(
-                    "Due at {} (in {minutes} min). Complete it with another request complete \
-                     {rid}, or release it with another request release {rid} if you cannot finish.",
-                    fmt_ts(row.due_at)
+                    "{marker}in {minutes} min). Complete it with another request complete \
+                     {rid}, or release it with another request release {rid} if you cannot \
+                     finish. {AUTOMATIC}"
                 ),
                 extra,
             },
