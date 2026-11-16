@@ -26,6 +26,8 @@ another wake list
 another wake clear --agent codex@shop
 ```
 
+A target is 1-200 printable characters and must not start with `-`: adapters pass it on a command line, and Herdr takes it as a positional argument, so a leading `-` would be read as an option. A wake also refuses such a target when it comes from `--target`, from a target stored before this rule, or from Herdr's default of the agent's name.
+
 When an Another session hook runs inside Herdr (`$HERDR_PANE_ID`), tmux (`$TMUX_PANE`) or cmux (`$CMUX_SURFACE_ID`), it records that pane automatically; with nested multiplexers, `TERM_PROGRAM` picks the innermost. The session-end hook forgets the capture again if it still points at that pane, and `another wake prune` drops captures whose pane is gone or whose agent has left. Automatic captures never replace a target you set by hand, and pruning never removes one. Herdr agents default to the Another agent's bare name when no target is stored.
 
 ## Waking
