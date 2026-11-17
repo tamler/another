@@ -6,7 +6,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use another_core::{
     AdmitItem, EditItem, ProposeItem, QueueCaller, QueueItem, QueueState, Store, DB_FILE,
@@ -1377,6 +1377,7 @@ fn own_address_and_fixed_text_are_never_cut() {
     );
 }
 
+#[cfg(unix)]
 fn percentile_95(mut times: Vec<Duration>) -> Duration {
     times.sort();
     times[(times.len() * 95).div_ceil(100) - 1]
@@ -1475,7 +1476,7 @@ fn hook_cost() {
     assert!(installed.status.success(), "{}", text(&installed.stderr));
     let wrapper = env.another_home.join("hooks").join("another-hook.sh");
     let run = |event: &str, stdin: &Value| -> Duration {
-        let started = Instant::now();
+        let started = std::time::Instant::now();
         let mut child = Command::new(&wrapper)
             .args([event, "--client", "claude"])
             .env_clear()
@@ -1565,9 +1566,11 @@ fn hooks_fail_silent() {
         }
     };
 
-    // No home, and none can be made.
+    // No home, and none can be made: its parent is a file.
     let env = Env::new();
-    silent(&env, Path::new("/dev/null/no-home"), "no home");
+    let blocker = env.repo.join("a-file");
+    std::fs::write(&blocker, "").unwrap();
+    silent(&env, &blocker.join("no-home"), "no home");
 
     // A schema newer than this build.
     let (env, _) = seated("claude");
@@ -1645,8 +1648,12 @@ fn install_writes_no_stop_entry() {
     assert_eq!(wrappers, ["another-hook.sh"], "one wrapper, as on main");
 
     // The Codex entries are what main writes, byte for byte, so Codex asks for no new trust.
+    // The path stands inside a JSON string; a checkout may have given the fixture CRLF.
     let wrapper = env.another_home.join("hooks").join("another-hook.sh");
-    let expected = CODEX_CONFIG_ON_MAIN.replace("@WRAPPER@", wrapper.to_str().unwrap());
+    let in_json = serde_json::to_string(wrapper.to_str().unwrap()).unwrap();
+    let expected = CODEX_CONFIG_ON_MAIN
+        .replace("\r\n", "\n")
+        .replace("@WRAPPER@", in_json.trim_matches('"'));
     assert_eq!(
         std::fs::read_to_string(env.home.join(".codex/hooks.json")).unwrap(),
         expected

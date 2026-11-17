@@ -3146,8 +3146,9 @@ mod tests {
         let store = Store::open_in_memory(clock).unwrap();
         let ready = ready_sql();
         let statements = [OWN_LIMIT_SQL, HELD_SQL, ready.as_str(), GIVEN_UP_SQL];
-        // The four statements above are every queue statement of the read.
-        let source = include_str!("queue.rs");
+        // The four statements above are every queue statement of the read. A checkout may
+        // have given this file CRLF line ends.
+        let source = include_str!("queue.rs").replace("\r\n", "\n");
         let from = source.find("pub fn queue_offer").unwrap();
         let body = &source[from..from + source[from..].find("\n    }\n").unwrap()];
         for call in ["standing", "first_ready", "given_up_at"] {
