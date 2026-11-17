@@ -4,7 +4,7 @@
 
 ## Status
 
-Milestones 1 to 7 are complete and on `main`: local core (tamler/another#1), mail checking and the activity feed (#2), the resource registry (#3), the authenticated remote peer (#4), federation (#5), wake adapters and release builds (M6), and hosted connectors (#99). Their briefs are in this file's git history and their decisions are D1 to D81.
+The seven original build milestones are complete and on `main` (they are not the scope ids M1 to M10 below): local core (tamler/another#1), mail checking and the activity feed (#2), the resource registry (#3), the authenticated remote peer (#4), federation (#5), wake adapters and release builds (M6), and hosted connectors (#99). Their briefs are in this file's git history and their decisions are D1 to D81.
 
 The current work is **v0.1.0, the single-node queue release**, approved by the project owner on 17 Nov 2026. Target tag date: 1 Dec 2026.
 
@@ -12,7 +12,7 @@ The current work is **v0.1.0, the single-node queue release**, approved by the p
 
 The scope page is the source of truth; this is the short form. Every item has an id there.
 
-- **M1** Queue with admission: proposed, ready, claimed, done; atomic `next`.
+- **M1** Queue with admission: proposed, ready, claimed, done; each admitted item records who admitted it and when; atomic `next`, which refuses an agent at its owner-set limit of claimed, unfinished items.
 - **M2** Durable record of claims, handoffs and results; a claim is released only on a confirmed session end or after a long grace period.
 - **M3** Upgrade safety: backup before migrate, refuse unknown schemas, doctor flags a build and database mismatch.
 - **M4** Path holds: existing behaviour, admitted fixes only.
