@@ -1434,6 +1434,12 @@ pub fn run(
             store.session(&agent, SessionPhase::Start, info)?;
             crate::wake::stamp_session(store, &agent, session_id, client.as_str(), &dir, true);
             let digest = session_digest(store, &agent)?;
+            if client == Client::Grok {
+                // Grok reads only a top-level `systemMessage` from a SessionStart hook and
+                // shows it as a notice; nothing documents it reaching the model. The mail
+                // stays unannounced so the post-tool notice, which the model sees, carries it.
+                return Ok(json!({ "systemMessage": digest }).to_string());
+            }
             // New mail shown here should not be announced again on the next prompt.
             let _ = prompt_notice(store, &agent, "session_start", client);
             if client == Client::Cursor {
@@ -1448,6 +1454,10 @@ pub fn run(
             if client == Client::Cursor {
                 // Cursor's prompt hook cannot add context; just let the prompt through.
                 json!({ "continue": true }).to_string()
+            } else if client == Client::Grok {
+                // Grok discards an allowing prompt hook's stdout. Claiming mail here would
+                // mark it announced unseen; leave it for the post-tool notice.
+                String::new()
             } else {
                 prompt_notice(store, &agent, "prompt", client)?
                     .map(|n| n.text)

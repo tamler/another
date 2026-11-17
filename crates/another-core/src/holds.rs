@@ -1217,6 +1217,43 @@ fn renew_tx(tx: &Tx<'_>, actor: &str, holds: &[(String, i64)]) -> Result<()> {
     Ok(())
 }
 
+/// The waiter's own session end ends its waits in projects `scope` may see (all of them
+/// locally), each with a `hold.wait.finished` event, reason `session_end`. A hold released
+/// later then pings nobody who has gone, and the agent's next conflict is a first notice.
+fn end_waits_tx(
+    tx: &Tx<'_>,
+    me: &crate::identity::AgentRef,
+    scope: Option<&TokenScope>,
+) -> Result<()> {
+    let waits: Vec<(String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT project_id, path FROM hold_waits WHERE agent_id = ?1
+             ORDER BY project_id, path",
+        )?;
+        let rows = stmt
+            .query_map([&me.id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    for (project, path) in waits {
+        if let Some(s) = scope {
+            if !crate::tokens::scope_allows_project(tx, s, &project)? {
+                continue;
+            }
+        }
+        tx.emit(
+            &me.address,
+            "hold.wait.finished",
+            json!({ "agent_id": me.id, "project_id": project, "path": path, "reason": "session_end" }),
+        )?;
+        tx.execute(
+            "DELETE FROM hold_waits WHERE agent_id = ?1 AND project_id = ?2 AND path = ?3",
+            params![me.id, project, path],
+        )?;
+    }
+    Ok(())
+}
+
 /// Live holds owned by `agent_id` in projects `scope` may see (all of them locally),
 /// optionally limited to `only` ids (error on unknown ids; one outside the scope is unknown).
 fn owned_holds(
@@ -1715,8 +1752,13 @@ impl Store {
         scope: Option<&TokenScope>,
     ) -> Result<HeartbeatReport> {
         self.write(|tx| {
-            sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, agent)?;
+            // A leaving waiter's waits end first: the sweep below may expire the last
+            // blocker, and must not ping the agent that is going away (#149 review P2).
+            if phase == SessionPhase::End {
+                end_waits_tx(tx, &me, scope)?;
+            }
+            sweep_tx(tx)?;
             let owned = owned_holds(tx, &me.id, &[], scope)?;
             let session_payload = || {
                 json!({

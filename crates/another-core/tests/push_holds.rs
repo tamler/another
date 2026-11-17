@@ -2326,3 +2326,115 @@ fn wait_update_failure_does_not_renotice_unchanged_blockers() {
     assert_eq!(inbox.messages.len(), 1);
     assert_eq!(inbox.messages[0].message.subject, "Hold free: src/a.rs");
 }
+
+/// H1 (hold-ends): a waiter's own session end drops its waits with a `session_end`
+/// `hold.wait.finished` event, so a hold released later does not ping an agent that has
+/// gone. Another waiter keeps its wait and is pinged; a returning agent gets a first notice.
+#[test]
+fn a_waiters_session_end_drops_its_waits() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    fx.acquire("alice", &fx.repos.main, &["src/a.rs"]).unwrap();
+    for waiter in ["bob", "carol"] {
+        let guard = fx
+            .store
+            .guard_edit(waiter, &main, &["src/a.rs".into()], "auto")
+            .unwrap();
+        assert_eq!(guard.conflicts.len(), 1);
+        assert!(guard.first_notice && guard.wait_recorded);
+    }
+    let waits = |agent: &str| -> i64 {
+        let db = rusqlite::Connection::open(fx.repos.home.join("another.db")).unwrap();
+        db.query_row(
+            "SELECT count(*) FROM hold_waits w JOIN agents a ON a.agent_id = w.agent_id
+             WHERE a.name = ?1",
+            [agent],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!((waits("bob"), waits("carol")), (1, 1));
+
+    fx.store.heartbeat("bob", true).unwrap();
+    assert_eq!((waits("bob"), waits("carol")), (0, 1));
+    let finished: Vec<_> = fx
+        .store
+        .events(10_000)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "hold.wait.finished")
+        .collect();
+    assert_eq!(finished.len(), 1, "{finished:?}");
+    assert_eq!(finished[0].payload["reason"], "session_end");
+    assert_eq!(finished[0].payload["path"], "src/a.rs");
+    assert!(finished[0].actor.starts_with("bob"), "{:?}", finished[0]);
+
+    fx.store.release_holds("alice", &[]).unwrap();
+    let pinged = |agent: &str| {
+        fx.store
+            .inbox(agent, InboxQuery::default())
+            .unwrap()
+            .messages
+            .iter()
+            .filter(|m| m.message.subject == "Hold free: src/a.rs")
+            .count()
+    };
+    assert_eq!((pinged("bob"), pinged("carol")), (0, 1));
+
+    // Back again, bob's next conflict is a first notice with a new wait.
+    fx.acquire("alice", &fx.repos.main, &["src/a.rs"]).unwrap();
+    let guard = fx
+        .store
+        .guard_edit("bob", &main, &["src/a.rs".into()], "auto")
+        .unwrap();
+    assert!(guard.first_notice && guard.wait_recorded);
+    assert_eq!(waits("bob"), 1);
+}
+
+/// REVIEW-IMPL P2 on #149: session end sweeps expired holds. A blocker that expired just
+/// before the waiter ends must not ping the waiter that is leaving; others still get it.
+#[test]
+fn a_waiters_session_end_is_not_pinged_by_its_own_sweep() {
+    let fx = Fx::new();
+    let main = fx.project(&fx.repos.main);
+    fx.store
+        .acquire_holds(AcquireHolds {
+            agent: "alice".into(),
+            project: main.clone(),
+            paths: vec!["src/a.rs".into()],
+            ttl_seconds: Some(600),
+            exclusive: false,
+            reason: None,
+            repo_wide: false,
+        })
+        .unwrap();
+    for waiter in ["bob", "carol"] {
+        let guard = fx
+            .store
+            .guard_edit(waiter, &main, &["src/a.rs".into()], "auto")
+            .unwrap();
+        assert!(guard.wait_recorded);
+    }
+    // Alice's hold lapses; no sweep runs until bob's session end.
+    fx.advance_secs(601);
+    fx.store.heartbeat("bob", true).unwrap();
+    let pinged = |agent: &str| {
+        fx.store
+            .inbox(agent, InboxQuery::default())
+            .unwrap()
+            .messages
+            .iter()
+            .filter(|m| m.message.subject == "Hold free: src/a.rs")
+            .count()
+    };
+    assert_eq!((pinged("bob"), pinged("carol")), (0, 1));
+    let reasons: Vec<_> = fx
+        .store
+        .events(10_000)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "hold.wait.finished" && e.actor.starts_with("bob"))
+        .map(|e| e.payload["reason"].clone())
+        .collect();
+    assert_eq!(reasons, vec![serde_json::json!("session_end")]);
+}
