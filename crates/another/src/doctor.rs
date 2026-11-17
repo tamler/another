@@ -265,8 +265,14 @@ fn database(home: &Path) -> (Check, Option<Store>) {
     if v > want {
         let by = match &inspected.origin.migrated {
             Some(stamp) if stamp.schema == v => format!(
-                "; last migrated by a {} build of another {}",
-                stamp.build, stamp.version
+                "; last migrated by a {} build of another {}{}",
+                stamp.build,
+                stamp.version,
+                stamp
+                    .binary
+                    .as_ref()
+                    .map(|path| format!(" at {path}"))
+                    .unwrap_or_default()
             ),
             _ => String::new(),
         };
@@ -287,22 +293,55 @@ fn database(home: &Path) -> (Check, Option<Store>) {
             check(
                 "database",
                 Level::Fail,
-                format!("schema v{v} does not match this build's v{v}: another build changed it"),
+                format!(
+                    "schema v{v} does not match this build's v{v}: a different build changed it{}",
+                    if inspected.differs.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (tables that differ: {})", inspected.differs.join(", "))
+                    }
+                ),
             )
             .fix(format!("use the build that wrote it, or {restore}")),
             None,
         );
     }
-    if v < want && inspected.development_build && !inspected.created_by_development_build {
+    // The store's own verdict on a pending migration, so doctor and a normal command agree
+    // (also under --dev-migrate, and for an empty database, which is created, not migrated).
+    if inspected.blocked && inspected.in_build_directory {
         return (
             check(
                 "database",
                 Level::Fail,
                 format!(
-                    "schema v{v}, and this development build (v{want}) did not create this home, so it will not migrate it"
+                    "schema v{v}, and this binary runs from a Cargo build directory, which makes it a development build (v{want}); it will not migrate a home that is not a development home"
+                ),
+            )
+            .fix("copy this binary out of the Cargo build directory to a directory on your PATH, or install it with cargo install --locked --path crates/another, and use that copy; to migrate with this binary anyway, pass --dev-migrate (a backup is taken first)"),
+            None,
+        );
+    }
+    if inspected.blocked {
+        return (
+            check(
+                "database",
+                Level::Fail,
+                format!(
+                    "schema v{v}, and this development build (v{want}) did not create this home or a release build has used it since, so it will not migrate it"
                 ),
             )
             .fix("use the installed another for this home; to migrate it with this build anyway, pass --dev-migrate (a backup is taken first)"),
+            None,
+        );
+    }
+    if v == 0 {
+        return (
+            check(
+                "database",
+                Level::Warn,
+                format!("empty database (schema v0), this build creates schema v{want} in it"),
+            )
+            .fix("another init"),
             None,
         );
     }

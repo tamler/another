@@ -69,9 +69,12 @@ pub use resources::{
 };
 pub use stats::{BlockedEdit, TrialStats, WakeRecord};
 pub use store::{
-    allow_dev_migrate, apply_schema, default_home, Build, BuildStamp, Clock, DbInspection, Event,
-    HomeOrigin, NodeInfo, Store, BACKUP_DIR, DB_FILE, ORIGIN_FILE,
+    allow_dev_migrate, default_home, BuildStamp, Clock, DbInspection, Event, HomeOrigin, NodeInfo,
+    Store, Verified, BACKUP_DIR, DB_FILE, ORIGIN_FILE,
 };
+/// For the workspace's tests only: build a home at an older schema, and open as another build.
+#[cfg(feature = "test-support")]
+pub use store::{apply_schema, Build};
 pub use time::{fmt_ts, parse_ts};
 pub use tokens::{AuditEntry, AuditRecord, NewToken, Token, TokenScope};
 pub use wake::{refuse_option_like_target, WakeTarget, WakeVia};

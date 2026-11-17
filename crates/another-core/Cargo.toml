@@ -22,5 +22,11 @@ base64.workspace = true
 schemars.workspace = true
 tracing.workspace = true
 
+[features]
+# Seams for this workspace's tests (build an older home, open as another build). Off in
+# every shipped build.
+test-support = []
+
 [dev-dependencies]
+another-core = { path = ".", features = ["test-support"] }
 tempfile.workspace = true
