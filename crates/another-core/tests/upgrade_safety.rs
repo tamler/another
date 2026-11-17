@@ -13,11 +13,13 @@ const PEER: &str = "01PEERPEERPEERPEERPEERPEER";
 const RELEASE: Build = Build {
     development: false,
     allow_dev_migrate: false,
+    in_build_directory: false,
     binary: None,
 };
 const DEVELOPMENT: Build = Build {
     development: true,
     allow_dev_migrate: false,
+    in_build_directory: false,
     binary: None,
 };
 
@@ -237,6 +239,7 @@ fn the_explicit_flag_lets_a_development_build_migrate_after_a_backup() {
     let build = Build {
         development: true,
         allow_dev_migrate: true,
+        in_build_directory: false,
         binary: None,
     };
     Store::open_as(&home, build).unwrap();
@@ -360,7 +363,6 @@ fn inspect_reports_what_doctor_needs() {
 // the review's findings.
 
 const INSTALLED: &str = "/opt/installed/bin/another";
-const WORKTREE: &str = "/src/worktree/target/release/another";
 
 /// An older home that the release binary at `INSTALLED` created.
 fn installed_home(dir: &Path) -> PathBuf {
@@ -376,38 +378,69 @@ fn installed_home(dir: &Path) -> PathBuf {
     home
 }
 
-/// A release-profile compile whose executable is at `path`.
-fn release_profile(path: &str) -> Build {
-    Build::release_profile(Some(PathBuf::from(path)))
+/// A binary at `root/relative`. With `built`, its directory is a Cargo build directory as
+/// `cargo build` leaves one: Cargo's `.fingerprint` directory sits beside the binary.
+fn binary_at(root: &Path, relative: &str, built: bool) -> PathBuf {
+    let binary = root.join(relative);
+    let dir = binary.parent().unwrap();
+    std::fs::create_dir_all(dir).unwrap();
+    if built {
+        std::fs::create_dir(dir.join(".fingerprint")).unwrap();
+    }
+    std::fs::write(&binary, "a binary").unwrap();
+    binary
 }
 
-/// Which release-profile binaries count as development builds: those still inside a Cargo
-/// build directory. No install layout is one of them.
+/// A release-profile compile still in the build directory of a worktree under `root`.
+fn worktree_build(root: &Path) -> Build {
+    let binary = binary_at(
+        &root.join(format!("worktree-{}", ulid_like())),
+        "target/release/another",
+        true,
+    );
+    Build::release_profile(Some(binary))
+}
+
+/// A name no other call in this test process has used.
+fn ulid_like() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Which release-profile binaries count as development builds: those whose own directory is
+/// a Cargo build directory, told by what is in it and not by what it is called.
 #[test]
-fn a_release_binary_inside_a_cargo_build_directory_is_a_development_build() {
+fn a_release_binary_in_a_cargo_build_directory_is_a_development_build() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
     for inside in [
-        WORKTREE,
-        "/src/worktree/target/aarch64-apple-darwin/release/another",
-        "/src/worktree/target/debug/another",
-        "/src/worktree/target/x86_64-unknown-linux-gnu/debug/another",
-        "/src/worktree/target/release/deps/another-0123456789abcdef",
-        "/src/worktree/target/release/examples/demo",
+        "wt/target/release/another",
+        "wt/target/aarch64-apple-darwin/release/another",
+        "wt/target/debug/another",
+        // A target directory by another name, a custom profile, a capital letter.
+        "shared-cargo-out/release/another",
+        "wt2/target/dist/another",
+        "wt3/Target/release/another",
     ] {
-        assert!(release_profile(inside).development, "{inside}");
+        let build = Build::release_profile(Some(binary_at(root, inside, true)));
+        assert!(build.development, "{inside}");
     }
     for installed in [
-        INSTALLED,
-        "/Users/me/.cargo/bin/another",
-        "/Users/me/.local/bin/another",
-        "/opt/another-0.1.1-aarch64-apple-darwin/another",
-        "/opt/homebrew/Cellar/another/0.1.1/bin/another",
-        "/usr/local/target/another",
-        "/srv/release/target/bin/another",
-        "/home/me/release/another",
+        "home/.cargo/bin/another",
+        "home/.local/bin/another",
+        "opt/another-0.1.1-aarch64-apple-darwin/another",
+        "opt/homebrew/Cellar/another/0.1.1/bin/another",
+        // Directory names alone decide nothing.
+        "app/target/release/another",
+        "x/target/tools/release/another",
+        "y/target/release/bin/another",
     ] {
-        assert!(!release_profile(installed).development, "{installed}");
+        let build = Build::release_profile(Some(binary_at(root, installed, false)));
+        assert!(!build.development, "{installed}");
     }
-    // A build that cannot say where it is counts as an ordinary release build.
+    // A path that is not there, and a build that cannot say where it is, count as ordinary
+    // release builds.
+    assert!(!Build::release_profile(Some(INSTALLED.into())).development);
     assert!(!Build::release_profile(None).development);
 
     // This test binary: a debug build, with its own path fully resolved.
@@ -424,35 +457,41 @@ fn a_release_build_in_a_worktree_refuses_the_installed_home() {
     let dir = tempfile::tempdir().unwrap();
     let home = installed_home(dir.path());
     let before = files(&home);
-    let err = Store::open_as(&home, release_profile(WORKTREE))
+    let worktree = worktree_build(dir.path());
+    let binary = worktree.binary.clone().unwrap().display().to_string();
+    let err = Store::open_as(&home, worktree.clone())
         .err()
         .expect("a build still in its build directory");
     assert_eq!(err.code(), "invalid", "{err}");
     let text = err.to_string();
+    // The message names the binary, says why it counts as a development build, and gives
+    // the ways out for someone whose install this is: copy it out, install it, or the flag.
     assert!(
-        text.contains("development build") && text.contains("--dev-migrate"),
+        text.contains("development build")
+            && text.contains(&binary)
+            && text.contains("Cargo build directory")
+            && text.contains("copy this binary out")
+            && text.contains("cargo install --locked --path crates/another")
+            && text.contains("--dev-migrate"),
         "{text}"
     );
+    assert!(!text.contains("use the installed another"), "{text}");
     assert_eq!(files(&home), before, "a refused open wrote to the home");
     assert!(backups(&home).is_empty());
     let wait = std::time::Duration::from_secs(2);
-    assert!(
-        Store::inspect_as(&home, wait, &release_profile(WORKTREE))
-            .unwrap()
-            .blocked
-    );
+    assert!(Store::inspect_as(&home, wait, &worktree).unwrap().blocked);
 
     // With the flag it migrates, after a backup, and its stamp says what it was.
     let flagged = Build {
         allow_dev_migrate: true,
-        ..release_profile(WORKTREE)
+        ..worktree
     };
     Store::open_as(&home, flagged).unwrap();
     assert_eq!(version(&home.join(DB_FILE)), current());
     assert_eq!(backups(&home).len(), 1);
     let migrated = origin(&home).migrated.unwrap();
     assert_eq!(migrated.build, "development");
-    assert_eq!(migrated.binary.as_deref(), Some(WORKTREE));
+    assert_eq!(migrated.binary, Some(binary));
 }
 
 /// An installed release build migrates with no flag wherever it is: the same path, a new
@@ -530,7 +569,7 @@ fn a_flagged_run_does_not_free_later_development_builds() {
     let next = older_home(&next);
     std::fs::copy(home.join(ORIGIN_FILE), next.join(ORIGIN_FILE)).unwrap();
     assert!(Store::open_as(&next, DEVELOPMENT).is_err());
-    assert!(Store::open_as(&next, release_profile(WORKTREE)).is_err());
+    assert!(Store::open_as(&next, worktree_build(dir.path())).is_err());
 }
 
 /// A home only development builds have touched stays free for them, flag or no flag.
@@ -539,7 +578,7 @@ fn a_home_only_development_builds_touched_stays_free() {
     let dir = tempfile::tempdir().unwrap();
     let home = older_home(dir.path());
     record(&home, "development");
-    drop(Store::open_as(&home, release_profile(WORKTREE)).unwrap());
+    drop(Store::open_as(&home, worktree_build(dir.path())).unwrap());
     assert!(origin(&home).adopted.is_none(), "not release use");
 
     let next = dir.path().join("next");
@@ -697,11 +736,12 @@ fn quick_opens_refuse_a_schema_the_normal_open_refuses() {
     for err in [
         Store::open_quick(&home, busy).err().expect("quick"),
         Store::open_read_only(&home, busy).err().expect("read-only"),
-        Store::open(&home).err().expect("normal"),
     ] {
         assert!(err.to_string().contains("does not match"), "{err}");
     }
-    assert_eq!(files(&home), before);
+    assert_eq!(files(&home), before, "a quick open writes nothing");
+    let err = Store::open(&home).err().expect("normal");
+    assert!(err.to_string().contains("does not match"), "{err}");
 }
 
 /// The table check is remembered against SQLite's schema cookie, so opens after the first
@@ -894,25 +934,60 @@ fn the_backup_just_taken_is_never_pruned() {
         "a real, restorable backup"
     );
     assert_eq!(peers(taken[0]), 1);
-    assert_eq!(kept.len(), 3, "{kept:?}");
+    assert!(later.iter().all(|p| p.exists()), "{kept:?}");
 }
 
+/// A backup whose name is dated in the future (a clock that was wrong once, a file copied
+/// in) is left alone: never deleted, and it does not take one of the three places.
 #[test]
-fn a_failed_migration_deletes_no_backup() {
+fn a_backup_dated_in_the_future_is_left_alone_and_takes_no_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = older_home(dir.path());
+    let old = seed_backups(&home, 3);
+    let future = home.join(BACKUP_DIR).join("another-v9-20990101T000000Z.db");
+    std::fs::write(&future, "from a clock set ahead").unwrap();
+
+    Store::open_as(&home, RELEASE).unwrap();
+    assert!(future.exists(), "a future-dated backup was deleted");
+    assert!(!old[0].exists(), "the oldest real backup goes");
+    assert!(
+        old[1].exists() && old[2].exists(),
+        "the two newest real backups stay beside the new one"
+    );
+    assert_eq!(backup_files(&home).len(), 4, "three, and the future one");
+}
+
+/// A migration that fails after its backup was taken rolls the database back, so that
+/// backup is a copy of a database that is still there: it is removed again, and it alone.
+/// Retrying a failing migration therefore does not fill the disk.
+#[test]
+fn a_failed_migration_removes_only_the_backup_it_took() {
     let dir = tempfile::tempdir().unwrap();
     let home = older_home(dir.path());
     let old = seed_backups(&home, 6);
     // The backup is taken, then the record cannot be written, so the migration rolls back.
     std::fs::create_dir(home.join(ORIGIN_FILE)).unwrap();
-    assert!(Store::open_as(&home, RELEASE).is_err());
-    assert_eq!(version(&home.join(DB_FILE)), current() - 1);
-    assert!(old.iter().all(|p| p.exists()), "a failed migration pruned");
-    assert_eq!(
-        backup_files(&home).len(),
-        7,
-        "the six old ones and the one just taken"
-    );
+    for attempt in 1..=3 {
+        let err = Store::open_as(&home, RELEASE).err().expect("no record");
+        assert!(err.to_string().contains("could not write"), "{err}");
+        assert_eq!(version(&home.join(DB_FILE)), current() - 1);
+        assert_eq!(peers(&home.join(DB_FILE)), 1);
+        assert!(old.iter().all(|p| p.exists()), "a failed migration pruned");
+        assert_eq!(
+            backup_files(&home),
+            old,
+            "attempt {attempt} left its backup behind"
+        );
+    }
     assert_hand_made_files_stay(&home);
+
+    // Once the cause is gone the migration goes through and keeps its backup.
+    std::fs::remove_dir(home.join(ORIGIN_FILE)).unwrap();
+    Store::open_as(&home, RELEASE).unwrap();
+    assert_eq!(version(&home.join(DB_FILE)), current());
+    assert!(backup_files(&home)
+        .iter()
+        .any(|p| !old.contains(p) && version(p) == current() - 1));
 }
 
 /// Ruling 6: a database swapped for one with the same version and the same schema cookie
@@ -933,10 +1008,26 @@ fn a_swapped_database_is_caught_by_the_next_normal_open() {
     c.pragma_update(None, "schema_version", cookie).unwrap();
     drop(c);
     assert_eq!(origin(&home).verified.unwrap().cookie, cookie);
+    let busy = std::time::Duration::from_millis(50);
+    Store::open_quick(&home, busy).expect("the mark still vouches for it");
+    let db_before = std::fs::read(&db).unwrap();
 
     let err = Store::open(&home).err().expect("the normal open checks");
     assert!(err.to_string().contains("does not match"), "{err}");
     assert!(Store::open_as(&home, RELEASE).is_err());
+
+    // The refusal takes the mark away, so quick opens and hooks stop accepting the
+    // database too. Nothing else in the record changes, and the database is not written.
+    let after = origin(&home);
+    assert!(after.verified.is_none(), "the mark outlived the refusal");
+    assert!(after.created.is_some());
+    assert_eq!(std::fs::read(&db).unwrap(), db_before);
+    for err in [
+        Store::open_quick(&home, busy).err().expect("quick"),
+        Store::open_read_only(&home, busy).err().expect("read-only"),
+    ] {
+        assert!(err.to_string().contains("does not match"), "{err}");
+    }
 }
 
 /// P2-4: the quick open's refusal of an older schema says what a normal open would really

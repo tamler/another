@@ -4,11 +4,16 @@
 #
 #   scripts/e2e-install.sh fresh   NEW_BIN
 #   scripts/e2e-install.sh upgrade OLD_BIN NEW_BIN
+#   scripts/e2e-install.sh build-directory OLD_BIN BUILT_BIN NEW_BIN
 #
 # fresh:   a first run on an empty home, messages and holds, client hook packs installed,
 #          reinstalled (no change) and removed, the daemon definition in dry-run.
 # upgrade: a home written by OLD_BIN (an older schema) is opened by NEW_BIN, which must
 #          migrate it and keep its agents, mail and holds; OLD_BIN must then refuse it.
+# build-directory: a home written by OLD_BIN is refused by BUILT_BIN, a release build run
+#          straight from its Cargo build directory (a development build, docs/DOCTOR.md),
+#          which must name the ways out and write nothing; NEW_BIN, the installed copy of
+#          the same build, then migrates it.
 #
 # Everything happens under a temporary HOME and ANOTHER_HOME; nothing outside is touched.
 set -euo pipefail
@@ -177,6 +182,36 @@ upgrade() {
   step "upgrade: ok"
 }
 
+build_directory() {
+  local old built new out
+  old=$(exe "$1")
+  built=$(exe "$2")
+  new=$(exe "$3")
+  [ -d "$(dirname "$built")/.fingerprint" ] || fail "$built is not in a Cargo build directory"
+  step "home written by the old build"
+  seed "$old"
+  verify "$old"
+
+  step "the release build run from its build directory refuses to migrate it"
+  if out=$("$built" status 2>&1); then
+    fail "a binary in a Cargo build directory migrated an existing home: $out"
+  fi
+  expect "refusal from the build directory" "development build" "$out"
+  expect "refusal from the build directory" "copy this binary out" "$out"
+  expect "refusal from the build directory" "--dev-migrate" "$out"
+  [ ! -e "$work/data/backups" ] || fail "the refused run took a backup"
+  [ ! -e "$work/data/build.json" ] || fail "the refused run wrote build.json"
+  # Still the old schema: the old build reads it as before.
+  verify "$old"
+
+  step "the installed copy of the same build migrates it"
+  verify "$new"
+  ls "$work/data/backups"/another-v*.db >/dev/null 2>&1 || fail "the migration left no backup"
+  [ -s "$work/data/build.json" ] || fail "the migration left no build.json"
+
+  step "build-directory: ok"
+}
+
 case "${1:-}" in
   fresh)
     [ $# -eq 2 ] || fail "usage: $0 fresh NEW_BIN"
@@ -186,7 +221,11 @@ case "${1:-}" in
     [ $# -eq 3 ] || fail "usage: $0 upgrade OLD_BIN NEW_BIN"
     upgrade "$2" "$3"
     ;;
+  build-directory)
+    [ $# -eq 4 ] || fail "usage: $0 build-directory OLD_BIN BUILT_BIN NEW_BIN"
+    build_directory "$2" "$3" "$4"
+    ;;
   *)
-    fail "usage: $0 fresh NEW_BIN | upgrade OLD_BIN NEW_BIN"
+    fail "usage: $0 fresh NEW_BIN | upgrade OLD_BIN NEW_BIN | build-directory OLD_BIN BUILT_BIN NEW_BIN"
     ;;
 esac

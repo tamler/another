@@ -52,11 +52,13 @@ The website source lives in [site/](site/README.md). `sh site/build.sh` checks t
 cargo install --locked --git https://github.com/tamler/another another
 ```
 
-Or build from a checkout (the binary ends up at `target/release/another`):
+Or install from a checkout, which builds it and puts `another` in Cargo's bin directory (`~/.cargo/bin`):
 
 ```bash
-git clone https://github.com/tamler/another && cd another && cargo build --release --locked
+git clone https://github.com/tamler/another && cd another && cargo install --locked --path crates/another
 ```
+
+You can also build it and copy the binary out yourself: `cargo build --release --locked`, then copy `target/release/another` to a directory on your `PATH`. Do not run it from `target/release`. A binary run from inside a Cargo build directory counts as a development build: it will not migrate an existing home to a newer schema without `--dev-migrate` (see [docs/DOCTOR.md](docs/DOCTOR.md#upgrades-and-backups)).
 
 Once v0.1.0 is published, prebuilt binaries for macOS (arm64, x86_64) and Linux (static, x86_64, arm64) will be on [GitHub Releases](https://github.com/tamler/another/releases): unpack one and put `another` on your `PATH`. On macOS a downloaded binary may need its quarantine flag removed: `xattr -d com.apple.quarantine ./another`.
 

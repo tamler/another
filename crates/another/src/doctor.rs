@@ -308,6 +308,19 @@ fn database(home: &Path) -> (Check, Option<Store>) {
     }
     // The store's own verdict on a pending migration, so doctor and a normal command agree
     // (also under --dev-migrate, and for an empty database, which is created, not migrated).
+    if inspected.blocked && inspected.in_build_directory {
+        return (
+            check(
+                "database",
+                Level::Fail,
+                format!(
+                    "schema v{v}, and this binary runs from a Cargo build directory, which makes it a development build (v{want}); it will not migrate a home that is not a development home"
+                ),
+            )
+            .fix("copy this binary out of the Cargo build directory to a directory on your PATH, or install it with cargo install --locked --path crates/another, and use that copy; to migrate with this binary anyway, pass --dev-migrate (a backup is taken first)"),
+            None,
+        );
+    }
     if inspected.blocked {
         return (
             check(
