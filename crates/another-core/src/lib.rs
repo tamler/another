@@ -50,9 +50,9 @@ pub use holds::{
 };
 pub use identity::{Agent, Program, Project, RegisterAgent};
 pub use mail::{
-    is_unsafe_text_char, single_line, AckOutcome, Importance, Inbox, InboxItem, InboxQuery,
-    Message, NewRequest, Reply, SendMessage, Thread, ThreadSummary, UnreadAfter, UnreadItem,
-    MAX_SUBJECT_CHARS,
+    is_unsafe_text_char, reply_subject, single_line, AckOutcome, Importance, Inbox, InboxItem,
+    InboxQuery, Message, NewRequest, Reply, SendMessage, Thread, ThreadSummary, UnreadAfter,
+    UnreadItem, MAX_SUBJECT_CHARS,
 };
 pub use oauth::{
     canonical_resource, error_redirect, redirect_host, redirect_is_loopback, redirect_matches,
@@ -68,7 +68,7 @@ pub use resources::{
     MIN_LEASE_TTL_SECONDS,
 };
 pub use stats::{BlockedEdit, TrialStats, WakeRecord};
-pub use store::{default_home, Clock, Event, NodeInfo, Store, DB_FILE};
+pub use store::{default_home, Clock, DbInspection, Event, NodeInfo, Store, DB_FILE};
 pub use time::{fmt_ts, parse_ts};
 pub use tokens::{AuditEntry, AuditRecord, NewToken, Token, TokenScope};
-pub use wake::{WakeTarget, WakeVia};
+pub use wake::{refuse_option_like_target, WakeTarget, WakeVia};

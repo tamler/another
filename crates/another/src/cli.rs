@@ -107,18 +107,40 @@ pub enum Command {
     /// Send a message.
     Send {
         /// Sender: name or name@project (default: $ANOTHER_AGENT).
-        #[arg(long, short = 'f', env = "ANOTHER_AGENT")]
-        from: String,
+        #[arg(
+            long,
+            short = 'f',
+            env = "ANOTHER_AGENT",
+            required_unless_present = "template"
+        )]
+        from: Option<String>,
         /// Recipients (repeat or comma-separate).
-        #[arg(long, short = 't', value_delimiter = ',', required = true)]
+        #[arg(
+            long,
+            short = 't',
+            value_delimiter = ',',
+            required_unless_present = "template"
+        )]
         to: Vec<String>,
         #[arg(long, value_delimiter = ',')]
         cc: Vec<String>,
-        #[arg(long, short = 's')]
-        subject: String,
+        #[arg(
+            long,
+            short = 's',
+            required_unless_present = "template",
+            conflicts_with = "template"
+        )]
+        subject: Option<String>,
         /// Message body; `-` reads stdin.
-        #[arg(long, short = 'b', default_value = "")]
+        #[arg(long, short = 'b', default_value = "", conflicts_with = "template")]
         body: String,
+        /// Open a request from a template (review | fix | research) that writes the subject
+        /// and body; `--template list` shows them and their fields. Implies --request.
+        #[arg(long)]
+        template: Option<String>,
+        /// A template field as key=value (repeatable), e.g. --field target="PR #170".
+        #[arg(long = "field", value_name = "KEY=VALUE", requires = "template")]
+        fields: Vec<String>,
         #[arg(long, short = 'i', default_value = "normal")]
         importance: String,
         /// Ask recipients to acknowledge.
@@ -359,6 +381,14 @@ pub enum Command {
         /// Start point: a duration (30m, 48h, 2d), an RFC 3339 time, or an event id.
         #[arg(long, default_value = "24h")]
         since: String,
+    },
+    /// Check this installation: binary, home, database, hooks, server, daemon, peers. Read-only;
+    /// prints the command that fixes each problem. Exits 1 only when a check fails.
+    Doctor {
+        /// Loopback address to check for a running server (default: the daemon's, else
+        /// 127.0.0.1:7466). Non-loopback addresses are not contacted.
+        #[arg(long)]
+        bind: Option<String>,
     },
     /// Read-only work board, per project: who holds which paths and until when, which paths
     /// the edit hook claimed for each agent recently, edits it stopped, and what is waiting
@@ -837,10 +867,11 @@ pub fn main() -> ExitCode {
     match run(cli) {
         Ok(code) => code,
         Err(err) => {
+            let usage = err.is::<crate::templates::UsageError>();
             let body = match err.downcast_ref::<another_core::Error>() {
                 Some(e) => e.body(),
                 None => another_core::ErrorBody {
-                    code: "error",
+                    code: if usage { "usage" } else { "error" },
                     message: format!("{err:#}"),
                 },
             };
@@ -859,6 +890,9 @@ pub fn main() -> ExitCode {
             }
             if body.code == "conflict" {
                 ExitCode::from(EXIT_CONFLICT)
+            } else if usage {
+                // A template mistake is a bad command line, like clap's own errors.
+                ExitCode::from(2)
             } else {
                 ExitCode::FAILURE
             }
@@ -1095,6 +1129,20 @@ fn emit<T: Serialize>(json: bool, value: &T, human: impl FnOnce(&T) -> String) -
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     let json = cli.json;
     let home = cli.home.as_deref();
+    // The template listing needs no sender, recipient or database (FINDINGS-177 T1, T2).
+    if let Command::Send {
+        template: Some(t), ..
+    } = &cli.command
+    {
+        if t == "list" {
+            if json {
+                println!("{}", crate::templates::listing_json());
+            } else {
+                print!("{}", crate::templates::listing());
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
+    }
     if let Command::Serve {
         stdio,
         bind,
@@ -1211,6 +1259,19 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     {
         return board_command(&another_home()?, json, project.as_deref(), since, *limit);
     }
+    if let Command::Doctor { bind } = &cli.command {
+        // Before any Store::open, which would create the home and migrate the database.
+        let report = crate::doctor::run(&crate::doctor::Inputs {
+            another_home: another_home()?,
+            bind: bind.clone(),
+        });
+        let printed = emit(json, &report, crate::doctor::render);
+        return Ok(if report.ok {
+            printed
+        } else {
+            ExitCode::FAILURE
+        });
+    }
 
     let store = open(home)?;
     let code = match cli.command {
@@ -1219,6 +1280,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         | Command::Hook(_)
         | Command::Daemon(_)
         | Command::Board { .. }
+        | Command::Doctor { .. }
         | Command::Remote(_) => {
             unreachable!("handled above")
         }
@@ -1288,18 +1350,38 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             request,
             due,
             thread,
+            template,
+            fields,
         } => {
+            // Optional to clap only so that `--template list` works without it.
+            let Some(from) = from else {
+                return Err(crate::templates::UsageError(
+                    "no sender: pass --from or set ANOTHER_AGENT".into(),
+                )
+                .into());
+            };
+            // A template writes the subject and body, and always opens a request.
+            let (subject, body) = match &template {
+                Some(name) => {
+                    let fields = crate::templates::parse_fields(&fields)?;
+                    crate::templates::render(name, &fields)?
+                }
+                None => (subject.unwrap_or_default(), body_arg(body)?),
+            };
+            if to.is_empty() {
+                anyhow::bail!("no recipients: pass --to");
+            }
             let m = store.send_message(SendMessage {
                 from,
                 to,
                 cc,
                 subject,
-                body: body_arg(body)?,
+                body,
                 importance: importance.parse::<Importance>()?,
                 ack_required: ack,
                 reply_to: None,
                 thread_id: thread,
-                request: (request || due.is_some()).then_some(NewRequest {
+                request: (request || due.is_some() || template.is_some()).then_some(NewRequest {
                     due_in_seconds: due,
                 }),
             })?;
