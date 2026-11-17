@@ -16,7 +16,7 @@ Where the old draft's candidates went:
 | Pre-commit hold guard | Scope N4, nice to have |
 | `another daemon` on Linux | On `main` (D71); scope M8 |
 | An edit guard for Cursor | Scope N3, nice to have |
-| "Needs you" list | Scope M7, limited to stuck agents, failed wakes and items awaiting admission |
+| "Needs you" list | On `main` (D94): `another needs`, scope M7. The rest of M7, the read-only scan in `another doctor` for lapsed resources and unregistered listeners, is on `main` too |
 | Opt-in version check | Cut as a feature; schema and build checks are scope M3 |
 | Plugins and extensions | External commands are frozen (D79); the rest is a non-goal |
 | MCP resources and `subscribe` | Cut from v0.1.0 |

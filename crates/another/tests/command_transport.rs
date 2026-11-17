@@ -323,11 +323,11 @@ impl Fx {
 }
 
 /// Characters a target may not hold beyond controls: zero-width and other invisible
-/// format characters, bidirectional marks, overrides and isolates, and the line and
-/// paragraph separators.
-const INVISIBLE: [char; 12] = [
+/// format characters, bidirectional marks, overrides and isolates, the line and
+/// paragraph separators, and the Arabic letter mark.
+const INVISIBLE: [char; 13] = [
     '\u{200B}', '\u{200D}', '\u{200F}', '\u{202A}', '\u{202E}', '\u{2060}', '\u{2066}', '\u{2069}',
-    '\u{FEFF}', '\u{2028}', '\u{2029}', '\u{200E}',
+    '\u{FEFF}', '\u{2028}', '\u{2029}', '\u{200E}', '\u{061C}',
 ];
 
 fn config(value: Value) -> Config {

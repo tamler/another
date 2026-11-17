@@ -55,6 +55,8 @@ const MAX_POINTER_CHARS: usize = 500;
 pub const QUEUE_SESSION_CLIENTS: [&str; 1] = ["claude"];
 /// A session row not seen for this long is deleted by the queue sweep.
 const SESSION_ROW_KEPT_MS: i64 = 30 * 86_400_000;
+/// The longest session id the queue stores. Client ids are far shorter.
+const MAX_SESSION_ID_BYTES: usize = 256;
 
 const AUTOMATIC: &str = "(Automatic notice from Another.)";
 const FAST_LANE_IS_THE_OWNERS: &str =
@@ -456,6 +458,28 @@ pub struct QuietClaim {
     pub unbound: bool,
     /// When the session the claim is bound to was last seen by a hook.
     pub session_last_seen_at: Option<String>,
+    /// Why the claim is listed, the first that holds: `name_quiet` (nothing from the
+    /// claimer's name for an hour), `session_quiet` (the name is active and the claim's
+    /// own session has been quiet for an hour) or `old_unbound` (the name is active and
+    /// the claim, tied to no session, is at least one grace period old).
+    pub reason: String,
+    /// How long since a hook of the claim's session ran; `None` when it has no session.
+    pub session_quiet_for_seconds: Option<i64>,
+    /// How long ago the claim was made.
+    #[serde(skip)]
+    pub claimed_for_seconds: i64,
+}
+
+/// One claimed item and the session its claim is bound to: see [`Store::queue_claims`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueClaimed {
+    /// The item's `Q` number.
+    pub item: String,
+    /// The claimer's address.
+    pub agent: String,
+    /// The session the claim is bound to; `None` when it is bound to none, or when that
+    /// session's row no longer exists.
+    pub session: Option<String>,
 }
 
 /// What one run of the queue sweep did.
@@ -714,7 +738,7 @@ fn to_item(conn: &Connection, row: ItemRow, with_history: bool) -> Result<QueueI
         (Some(id), Some(at)) => Some(QueueClaim {
             agent: address_of(conn, id)?,
             at: fmt_ts(at),
-            session_bound: row.claim_session.is_some(),
+            session_bound: session_seen(conn, &row)?.is_some(),
         }),
         _ => None,
     };
@@ -761,6 +785,22 @@ fn to_item(conn: &Connection, row: ItemRow, with_history: bool) -> Result<QueueI
         done_condition: row.done_condition,
         priority: row.priority,
     })
+}
+
+/// When a hook last reported the session a claim is bound to. `None` when the item is not
+/// claimed, the claim names no session, or that session's row no longer exists: such a
+/// claim is bound to nothing, because no session's end will release it.
+fn session_seen(conn: &Connection, row: &ItemRow) -> Result<Option<i64>> {
+    let (Some(claimer), Some(session)) = (&row.claimer_id, &row.claim_session) else {
+        return Ok(None);
+    };
+    Ok(conn
+        .query_row(
+            "SELECT seen_at FROM queue_sessions WHERE agent_id = ?1 AND session_id = ?2",
+            params![claimer, session],
+            |r| r.get(0),
+        )
+        .optional()?)
 }
 
 /// The item as it now is, with its history.
@@ -1268,13 +1308,16 @@ fn unclaim_tx(
     Ok(())
 }
 
-/// The session id a hook call carries, when its client is one whose ids are relied on.
+/// The session id a hook call carries, when its client is one whose ids are relied on. An
+/// id over [`MAX_SESSION_ID_BYTES`] is no id: nothing is stored or bound under it.
 fn hook_session(info: &SessionInfo) -> Option<&str> {
     let client = info.client.as_deref()?;
     if !QUEUE_SESSION_CLIENTS.contains(&client) {
         return None;
     }
-    info.session_id.as_deref().filter(|id| !id.is_empty())
+    info.session_id
+        .as_deref()
+        .filter(|id| !id.is_empty() && id.len() <= MAX_SESSION_ID_BYTES)
 }
 
 /// A local hook of a session reported in: make or refresh the session's row. A row that
@@ -2346,6 +2389,36 @@ impl Store {
         })
     }
 
+    /// Every claimed item of this node with its claimer and the session the claim is bound
+    /// to, oldest claim first. No limit: [`Store::queue_list`] stops at 100 rows. Read only.
+    pub fn queue_claims(&self) -> Result<Vec<QueueClaimed>> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {ITEM_COLUMNS} FROM queue_items
+                 WHERE node_id = ?1 AND state = 'claimed' AND claimer_id IS NOT NULL
+                 ORDER BY claimed_at, seq"
+            ))?;
+            let rows = stmt
+                .query_map([self.node_id()], row_from)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut claims = Vec::new();
+            for row in rows {
+                let Some(claimer) = &row.claimer_id else {
+                    continue;
+                };
+                claims.push(QueueClaimed {
+                    item: row.label(),
+                    agent: address_of(conn, claimer)?,
+                    session: match session_seen(conn, &row)? {
+                        Some(_) => row.claim_session.clone(),
+                        None => None,
+                    },
+                });
+            }
+            Ok(claims)
+        })
+    }
+
     /// What needs the owner: decisions waiting, quiet claims, ready items nobody can take,
     /// failed notices and self-admitted items. Read only; listing releases nothing.
     pub fn queue_needs_owner(&self) -> Result<QueueNeedsOwner> {
@@ -2380,28 +2453,30 @@ impl Store {
                 };
                 let last_sign = claimed_at.max(last_seen(conn, claimer)?.unwrap_or(0));
                 // A bound claim whose session row is gone is treated as unbound.
-                let session_seen: Option<i64> = match &row.claim_session {
-                    Some(session) => conn
-                        .query_row(
-                            "SELECT seen_at FROM queue_sessions
-                             WHERE agent_id = ?1 AND session_id = ?2",
-                            params![claimer, session],
-                            |r| r.get(0),
-                        )
-                        .optional()?,
-                    None => None,
-                };
+                let session_seen = session_seen(conn, &row)?;
                 let quiet = |since: i64| now.saturating_sub(since) >= QUIET_MS;
-                // Listed: a quiet name, a claim no session's end will release, and a claim
-                // whose own session is quiet even though the name is active.
-                if !quiet(last_sign) && session_seen.is_some_and(|seen| !quiet(seen)) {
+                // Listed, by the first that holds: a quiet name; a claim whose own session
+                // is quiet though the name is active; a claim no session's end will
+                // release, once it is a grace period old. A younger unbound claim under an
+                // active name is not listed: nothing stored says which session made it.
+                let reason = if quiet(last_sign) {
+                    "name_quiet"
+                } else if session_seen.is_some_and(quiet) {
+                    "session_quiet"
+                } else if session_seen.is_none() && now.saturating_sub(claimed_at) >= grace_ms {
+                    "old_unbound"
+                } else {
                     continue;
-                }
+                };
                 quiet_claims.push(QuietClaim {
                     quiet_for_seconds: now.saturating_sub(last_sign) / 1000,
                     grace_ends_at: fmt_ts(last_sign.saturating_add(grace_ms)),
                     unbound: session_seen.is_none(),
                     session_last_seen_at: session_seen.map(fmt_ts),
+                    reason: reason.to_string(),
+                    session_quiet_for_seconds: session_seen
+                        .map(|seen| now.saturating_sub(seen) / 1000),
+                    claimed_for_seconds: now.saturating_sub(claimed_at) / 1000,
                     item: to_item(conn, row, false)?,
                 });
             }

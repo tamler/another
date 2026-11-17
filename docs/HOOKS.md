@@ -5,8 +5,8 @@ Another is hooks-first (see [DECISIONS.md](DECISIONS.md)): agents learn about ne
 | Moment | What Another does | Output |
 |---|---|---|
 | Session start | Registers the agent if needed, records `session.started`, renews holds, and records where the session can be woken: its session row, inside Herdr or inside a transport configured in `transports.json` (tmux, cmux) | Inbox + last-hour activity digest (≤ 1500 characters) |
-| Each prompt | Heartbeat (renews holds, marks the agent active); inside Herdr or a configured transport, stamps the session's row | One line, only for mail not announced before; otherwise nothing |
-| After each tool call (`post-tool`) | Checks for mail not announced yet; at most once a minute per session marks the agent active, renews holds past half their TTL and, inside Herdr or a configured transport, stamps the session's row | One line of context mid-task when there is new mail; otherwise nothing |
+| Each prompt | Heartbeat (renews holds, marks the agent active, keeps the session's queue row seen and runs the check that releases other agents' claims past the grace period); inside Herdr or a configured transport, stamps the session's row | One line, only for mail not announced before; otherwise nothing |
+| After each tool call (`post-tool`) | Checks for mail not announced yet; at most once a minute per session marks the agent active, keeps the session's queue row seen, renews holds past half their TTL and, inside Herdr or a configured transport, stamps the session's row | One line of context mid-task when there is new mail; otherwise nothing |
 | Before a file edit (`pre-edit`) | Takes a narrow hold on each file about to change, or stops the edit if another agent holds it; inside Herdr or a configured transport, stamps the session's row at most once a minute. It renews no hold and does not mark the agent active: that is `post-tool`'s job, so an agent whose edit is refused does not keep its own holds alive by trying again | Nothing when the edit may go ahead; a denial naming the holder when it may not |
 | Session end | Records `session.ended`, releases the agent's holds, returns the queue items that session claimed (see "Session ids and the queue" below), deletes that session's row, forgets a tmux or cmux pane that an earlier build captured for the agent (whether or not that transport is configured; a Herdr capture only when the session ends in that pane; a target set with `another wake set` is kept), marks the agent offline | Nothing |
 
@@ -166,6 +166,7 @@ What the code does where a fact is not established:
 - **A resumed conversation.** If it reuses its id, its row is opened again and it keeps counting as the same session. If it gets a new id, it is a new row; the old row stays open until it has not been seen for the grace period, and while both count the name has two sessions and a new claim is bound to neither.
 - **A prompt or tool hook that carried no id** would leave the session's row to go stale after the grace period. A claim already bound to it is still released by its end hook; a later claim is unbound.
 - **A session end that never arrives** (a killed pane) releases nothing; the grace period or an admitter does.
+- **A session id longer than 256 bytes** is no id for the queue: the session gets no queue row and its claims are unbound. Client ids are far shorter; only a crafted one is that long. A claim that was bound to a longer id by an earlier build is not released by that session's end hook; the grace period still applies. The transport layer's rows and the `session.started` and `session.ended` events still store the id as given.
 
 ## The digest
 

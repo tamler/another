@@ -54,9 +54,9 @@ pub use holds::{
 };
 pub use identity::{Agent, Program, Project, RegisterAgent};
 pub use mail::{
-    is_unsafe_text_char, reply_subject, single_line, AckOutcome, Importance, Inbox, InboxItem,
-    InboxQuery, Message, NewRequest, Reply, SendMessage, Thread, ThreadSummary, UnreadAfter,
-    UnreadItem, MAX_SUBJECT_CHARS,
+    display_line, is_unsafe_text_char, reply_subject, single_line, AckOutcome, Importance, Inbox,
+    InboxItem, InboxQuery, Message, NewRequest, Reply, SendMessage, Thread, ThreadSummary,
+    UnreadAfter, UnreadItem, MAX_SUBJECT_CHARS,
 };
 pub use oauth::{
     canonical_resource, error_redirect, redirect_host, redirect_is_loopback, redirect_matches,
@@ -66,9 +66,9 @@ pub use oauth::{
 };
 pub use queue::{
     AdmitItem, AuditFinding, DoneItem, EditItem, FailedNotice, NewQueueDelegate, PointerKind,
-    ProposeItem, QueueAdmitted, QueueAudit, QueueCaller, QueueClaim, QueueDelegate, QueueEdited,
-    QueueFilter, QueueGrace, QueueHistoryEntry, QueueItem, QueueKind, QueueLimit, QueueLimits,
-    QueueNeedsOwner, QueueNext, QueuePriority, QueueRefusal, QueueResult, QueueState,
+    ProposeItem, QueueAdmitted, QueueAudit, QueueCaller, QueueClaim, QueueClaimed, QueueDelegate,
+    QueueEdited, QueueFilter, QueueGrace, QueueHistoryEntry, QueueItem, QueueKind, QueueLimit,
+    QueueLimits, QueueNeedsOwner, QueueNext, QueuePriority, QueueRefusal, QueueResult, QueueState,
     QueueSweepReport, QuietClaim, ReleaseItem, SelfAdmitted, DEFAULT_QUEUE_GRACE_SECONDS,
     DEFAULT_QUEUE_LIMIT, MAX_QUEUE_GRACE_SECONDS, MAX_QUEUE_LIMIT, MIN_QUEUE_GRACE_SECONDS,
     QUEUE_SESSION_CLIENTS,

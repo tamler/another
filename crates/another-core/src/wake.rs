@@ -62,12 +62,13 @@ pub struct WakeTarget {
 /// A character that is not a control and still cannot be seen, or changes the order in
 /// which text is shown: zero-width characters and directional marks (U+200B to U+200F),
 /// bidirectional embeddings and overrides (U+202A to U+202E), the word joiner, invisible
-/// operators and bidirectional isolates (U+2060 to U+2069), the byte order mark, and the
-/// line and paragraph separators.
-fn is_invisible(c: char) -> bool {
+/// operators and bidirectional isolates (U+2060 to U+2069), the byte order mark, the
+/// line and paragraph separators, and the Arabic letter mark (U+061C).
+pub(crate) fn is_invisible(c: char) -> bool {
     matches!(
         c,
-        '\u{200B}'..='\u{200F}'
+        '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
             | '\u{202A}'..='\u{202E}'
             | '\u{2060}'..='\u{2069}'
             | '\u{FEFF}'

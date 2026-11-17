@@ -1131,7 +1131,9 @@ fn the_owner_list_shows_each_section() {
             "quiet_for_seconds",
             "grace_ends_at",
             "unbound",
-            "session_last_seen_at"
+            "session_last_seen_at",
+            "reason",
+            "session_quiet_for_seconds"
         ]
     );
     assert_eq!(
@@ -3815,7 +3817,18 @@ fn every_lapse_tells_the_agent() {
 
 // T37
 #[test]
-fn the_owner_list_marks_unbound_and_stale_bound_claims() {
+fn quiet_claim_reasons() {
+    /// The quiet claims as (label, reason), in list order.
+    fn reasons(fx: &Fx) -> Vec<(String, String)> {
+        fx.store
+            .queue_needs_owner()
+            .unwrap()
+            .quiet_claims
+            .into_iter()
+            .map(|q| (q.item.label, q.reason))
+            .collect()
+    }
+
     let fx = Fx::new();
     // Bound to a session that goes quiet while a sibling keeps the name active.
     let stale = fx.ready("bound, its session quiet");
@@ -3832,49 +3845,59 @@ fn the_owner_list_marks_unbound_and_stale_bound_claims() {
     let before = fx.snapshot();
     let list = fx.store.queue_needs_owner().unwrap();
     assert_eq!(fx.snapshot(), before, "the read writes nothing");
+    assert!(
+        list.quiet_claims.is_empty(),
+        "a fresh unbound claim is not listed: {:?}",
+        list.quiet_claims
+    );
+
+    // What a healthy shared name does lists nothing: a sibling's `heartbeat --end`, a
+    // sibling that sits idle, and a sibling whose pane the transport no longer lists.
+    fx.start("cy", "idle sibling");
+    fx.store
+        .stamp_transport_session("cy", "gone sibling", "herdr", "w1:p1", "claude", "/work")
+        .unwrap();
+    fx.store
+        .observe_transport_sessions("herdr", Ok(&[]), None)
+        .unwrap();
+    fx.advance(2 * HOUR);
+    fx.store.heartbeat("cy", true).unwrap();
+    fx.start("ann", "sibling");
+    fx.prompt("bob", "busy");
+    let list = fx.store.queue_needs_owner().unwrap();
     assert_eq!(
         list.quiet_claims
             .iter()
-            .map(|q| q.item.label.as_str())
+            .map(|q| (q.item.label.as_str(), q.reason.as_str()))
             .collect::<Vec<_>>(),
-        [unbound.label.as_str()],
-        "an unbound claim is listed from the start"
+        [(stale.label.as_str(), "session_quiet")],
+        "only the bound claim whose own session is quiet"
     );
-    assert!(list.quiet_claims[0].unbound);
-    assert_eq!(list.quiet_claims[0].session_last_seen_at, None);
-
-    fx.advance(2 * HOUR);
-    fx.start("ann", "sibling");
-    fx.prompt("bob", "busy");
-    fx.store.heartbeat("cy", false).unwrap();
-    let list = fx.store.queue_needs_owner().unwrap();
-    let by_label = |label: &str| list.quiet_claims.iter().find(|q| q.item.label == label);
-    let q = by_label(&stale.label).expect("listed although a sibling keeps the name active");
+    let q = &list.quiet_claims[0];
     assert!(!q.unbound);
     assert_eq!(q.session_last_seen_at.as_deref(), Some(fmt_ts(T0).as_str()));
+    assert_eq!(q.session_quiet_for_seconds, Some(7200));
     assert_eq!(q.quiet_for_seconds, 0, "the name itself is active");
     assert_eq!(q.grace_ends_at, fmt_ts(T0 + 2 * HOUR + DAY));
-    assert!(
-        by_label(&live.label).is_none(),
-        "a bound claim with an active session is not listed"
-    );
-    let q = by_label(&unbound.label).unwrap();
-    assert!(q.unbound);
-    assert_eq!(list.quiet_claims.len(), 2);
-    // A bound claim is listed once its name has been quiet for an hour, with its session.
+    let v = serde_json::to_value(q).unwrap();
+    assert_eq!(v["reason"], "session_quiet");
+    assert_eq!(v["session_quiet_for_seconds"], 7200);
+
+    // A quiet name comes first of the reasons, for a bound claim and an unbound one.
     fx.advance(HOUR);
     let list = fx.store.queue_needs_owner().unwrap();
-    let q = list
-        .quiet_claims
-        .iter()
-        .find(|q| q.item.label == live.label)
-        .unwrap();
+    let by_label = |label: &str| list.quiet_claims.iter().find(|q| q.item.label == label);
+    let q = by_label(&live.label).unwrap();
+    assert_eq!(q.reason, "name_quiet");
     assert!(!q.unbound);
-    assert_eq!(
-        q.session_last_seen_at.as_deref(),
-        Some(fmt_ts(T0 + 2 * HOUR).as_str())
-    );
+    assert_eq!(q.session_quiet_for_seconds, Some(3600));
     assert_eq!(q.quiet_for_seconds, 3600);
+    let q = by_label(&stale.label).unwrap();
+    assert_eq!(q.reason, "name_quiet", "reason 1 before reason 2");
+    let q = by_label(&unbound.label).unwrap();
+    assert_eq!(q.reason, "name_quiet");
+    assert!(q.unbound);
+    assert_eq!(q.session_quiet_for_seconds, None);
     // A bound claim whose session row is gone is treated as unbound.
     fx.db()
         .execute("DELETE FROM queue_sessions WHERE session_id = 'busy'", [])
@@ -3888,4 +3911,118 @@ fn the_owner_list_marks_unbound_and_stale_bound_claims() {
     assert!(q.unbound);
     assert_eq!(q.session_last_seen_at, None);
     assert!(fx.released().is_empty(), "listing releases nothing");
+
+    // An unbound claim under a name that stays active: listed once it is one grace period
+    // old, and not one millisecond earlier.
+    let fx = Fx::new();
+    let old = fx.ready("unbound under an active name");
+    assert_eq!(fx.claim("cy").label, old.label);
+    fx.advance(DAY - 1);
+    fx.store.heartbeat("cy", false).unwrap();
+    assert!(reasons(&fx).is_empty(), "{:?}", reasons(&fx));
+    fx.advance(1);
+    assert_eq!(
+        reasons(&fx),
+        [(old.label.clone(), "old_unbound".to_string())]
+    );
+    let list = fx.store.queue_needs_owner().unwrap();
+    assert!(list.quiet_claims[0].unbound);
+    assert_eq!(list.quiet_claims[0].quiet_for_seconds, 0);
+    // A sign of life does not clear it.
+    fx.store.heartbeat("cy", false).unwrap();
+    assert_eq!(
+        reasons(&fx),
+        [(old.label.clone(), "old_unbound".to_string())]
+    );
+    // With nothing heard for an hour it is a quiet name first.
+    fx.advance(HOUR);
+    assert_eq!(
+        reasons(&fx),
+        [(old.label.clone(), "name_quiet".to_string())]
+    );
+    assert!(fx.released().is_empty(), "listing releases nothing");
+
+    // The grace period is the owner's setting: at 2 hours the claim is listed after 2 hours.
+    let fx = Fx::new();
+    fx.store.queue_set_grace(&owner(), 2 * 3600).unwrap();
+    let short = fx.ready("unbound, a short grace period");
+    assert_eq!(fx.claim("cy").label, short.label);
+    fx.advance(2 * HOUR - 1);
+    fx.store.heartbeat("cy", false).unwrap();
+    assert!(reasons(&fx).is_empty(), "{:?}", reasons(&fx));
+    fx.advance(1);
+    assert_eq!(reasons(&fx), [(short.label, "old_unbound".to_string())]);
+}
+
+#[test]
+fn session_bound_follows_the_session_row() {
+    let fx = Fx::new();
+    let item = fx.ready("bound to a session");
+    fx.start("ann", "s1");
+    let claimed = fx.claim("ann");
+    assert!(claimed.claim.unwrap().session_bound);
+    let claims = fx.store.queue_claims().unwrap();
+    assert_eq!(claims.len(), 1);
+    assert_eq!(
+        (
+            claims[0].item.as_str(),
+            claims[0].agent.as_str(),
+            claims[0].session.as_deref()
+        ),
+        (item.label.as_str(), "ann", Some("s1"))
+    );
+
+    fx.db()
+        .execute("DELETE FROM queue_sessions WHERE session_id = 's1'", [])
+        .unwrap();
+    assert_eq!(fx.claim_session(&item.label).as_deref(), Some("s1"));
+    assert!(
+        !fx.item(&item.label).claim.unwrap().session_bound,
+        "the column alone binds nothing"
+    );
+    let claims = fx.store.queue_claims().unwrap();
+    assert_eq!(claims[0].session, None);
+}
+
+#[test]
+fn an_overlong_session_id_binds_nothing() {
+    let fx = Fx::new();
+    let item = fx.ready("claimed by a session with a crafted id");
+    fx.start("ann", &"x".repeat(257));
+    assert_eq!(fx.session_rows(), 0, "257 bytes make no session row");
+    assert!(!fx.claim("ann").claim.unwrap().session_bound);
+    assert_eq!(fx.claim_session(&item.label), None);
+
+    let fx = Fx::new();
+    let item = fx.ready("claimed by a session with the longest id");
+    let longest = "x".repeat(256);
+    fx.start("ann", &longest);
+    assert_eq!(fx.session_rows(), 1);
+    assert!(fx.claim("ann").claim.unwrap().session_bound);
+    assert_eq!(fx.claim_session(&item.label), Some(longest));
+}
+
+#[test]
+fn claims_past_one_hundred_are_not_lost() {
+    let fx = Fx::new();
+    let mut names = Vec::new();
+    for n in 0..8 {
+        let name = format!("worker{n}");
+        register(&fx.store, &name);
+        fx.store
+            .queue_set_limit(&owner(), &name, MAX_QUEUE_LIMIT)
+            .unwrap();
+        names.push(name);
+    }
+    for n in 0..150 {
+        fx.ready(&format!("item {n}"));
+    }
+    for n in 0..150 {
+        fx.claim(&names[n % names.len()]);
+    }
+    let claims = fx.store.queue_claims().unwrap();
+    assert_eq!(claims.len(), 150);
+    let distinct: BTreeSet<&str> = claims.iter().map(|c| c.item.as_str()).collect();
+    assert_eq!(distinct.len(), 150);
+    assert!(claims.iter().all(|c| c.session.is_none()));
 }

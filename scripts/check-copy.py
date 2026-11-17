@@ -56,7 +56,7 @@ def files():
     for path in sorted(docs.rglob("*")):
         if path.is_file() and path.suffix.lower() in TEXT_SUFFIXES:
             yield path
-    for name in ("cli.rs", "queue_cli.rs"):
+    for name in ("cli.rs", "queue_cli.rs", "needs.rs"):
         cli = ROOT / "crates" / "another" / "src" / name
         if not cli.is_file():
             raise SystemExit(f"missing {cli}")
@@ -100,6 +100,7 @@ def assert_sources() -> None:
         "docs/REMOTE.md",
         "crates/another/src/cli.rs",
         "crates/another/src/queue_cli.rs",
+        "crates/another/src/needs.rs",
     ):
         if required not in rels:
             raise SystemExit(f"copy check does not scan {required}")
