@@ -798,6 +798,11 @@ mod orphan_scan {
             if json {
                 args.insert(0, "--json");
             }
+            self.on_path(path, &args)
+        }
+
+        /// Any command with `PATH` set to `path`.
+        fn on_path(&self, path: &str, args: &[&str]) -> Output {
             Command::new(env!("CARGO_BIN_EXE_another"))
                 .args(args)
                 .env("HOME", &self.user)
@@ -1146,6 +1151,95 @@ mod orphan_scan {
         let (_, r) = fx.doctor_json_on_path(&fx.fake_lsof(""));
         assert_eq!(status(&r, "resources"), "ok", "{r}");
         assert_eq!(detail(&r, "resources"), "none lapsed");
+    }
+
+    /// Review R1, P2-1: `lsof` output that is not field output (a line starting with a
+    /// multi-byte character, empty lines, a lone tag, a very long line) is read as no
+    /// listener. Doctor keeps every row and its exit status, and `another orphans`, which
+    /// reads the same output, does not stop either.
+    #[test]
+    fn garbage_from_lsof_costs_no_row_and_no_exit_status() {
+        let fx = Fx::with_agent();
+        let id = fx.job("eval-run");
+        fx.ok(&["release", &id, "--agent", "alice"]);
+        let long = "\u{e9}".repeat(100_000);
+        let path = fx.fake_lsof(&format!(
+            "\u{e9}x\n\n\np\nn\n\u{1f600}\n{long}\nn{long}:80\np{long}\nc\u{e9}\nn\u{e9}:\u{e9}\n"
+        ));
+
+        let (code, r) = fx.doctor_json_on_path(&path);
+        assert_eq!(code, Some(0), "{r}");
+        assert_eq!(r["checks"].as_array().unwrap().len(), 10, "{r}");
+        assert_eq!(status(&r, "resources"), "warn", "{r}");
+        assert_eq!(detail(&r, "listeners"), "none unregistered (lsof)", "{r}");
+        let text = fx.doctor_on_path(&path, false);
+        assert_eq!(text.status.code(), Some(0));
+        assert!(String::from_utf8_lossy(&text.stdout).contains("\nok    listeners none"));
+
+        let orphans = fx.on_path(&path, &["--json", "orphans"]);
+        assert_eq!(
+            orphans.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&orphans.stderr)
+        );
+        let listed: Value = serde_json::from_slice(&orphans.stdout).unwrap();
+        assert_eq!(listed["orphans"].as_array().unwrap().len(), 1, "{listed}");
+        assert_eq!(listed["orphans"][0]["source"], "lapsed_lease");
+    }
+
+    /// Review R1, P2-2: doctor contacts nothing but loopback `/health`. `another resources`
+    /// tries a connection to a live resource another node owns, at whatever endpoint that
+    /// node registered; doctor's read must not. The endpoint here is a listener this test
+    /// holds, and nothing may arrive on it.
+    #[test]
+    fn doctor_does_not_connect_to_another_nodes_resource() {
+        let fx = Fx::with_agent();
+        let theirs = TcpListener::bind("127.0.0.1:0").unwrap();
+        theirs.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", theirs.local_addr().unwrap());
+        let reg = fx.ok(&[
+            "resource",
+            "register",
+            "dev_server",
+            "theirs",
+            "--agent",
+            "alice",
+            "--endpoint",
+            &endpoint,
+        ]);
+        let id = reg["resource"]["resource_id"].as_str().unwrap();
+        let c = rusqlite::Connection::open(fx.db()).unwrap();
+        c.execute(
+            "INSERT INTO nodes (node_id, display_name, created_at) VALUES (?1, 'other-box', 1)",
+            [OTHER],
+        )
+        .unwrap();
+        c.execute(
+            "UPDATE resources SET node_id = ?1 WHERE resource_id = ?2",
+            [OTHER, id],
+        )
+        .unwrap();
+        drop(c);
+        let path = fx.fake_lsof("");
+        let untouched = |after: &str| match theirs.accept() {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            other => panic!("{after} reached the other node's endpoint: {other:?}"),
+        };
+
+        let (code, r) = fx.doctor_json_on_path(&path);
+        assert_eq!(code, Some(0), "{r}");
+        assert_eq!(status(&r, "resources"), "ok", "{r}");
+        untouched("doctor --json");
+        assert_eq!(fx.doctor_on_path(&path, false).status.code(), Some(0));
+        untouched("doctor");
+
+        // The fixture is one the probe would reach: `another resources` does connect.
+        let listed = fx.ok(&["resources"]);
+        assert_eq!(listed[0]["node"], "other-box", "{listed}");
+        assert_eq!(listed[0]["status"], "live", "{listed}");
+        assert_eq!(listed[0]["reachable"], true, "{listed}");
+        assert!(theirs.accept().is_ok(), "the probe never arrived");
     }
 }
 

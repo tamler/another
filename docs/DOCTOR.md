@@ -64,7 +64,7 @@ Usually well under a second. It is not bounded overall:
 - **Not bounded.**
   - `quick_check` reads the whole database, so its time grows with the database's size.
   - On macOS the daemon row runs `id -u` and `launchctl print`, with no timeout of their own. A stuck `launchd` holds `doctor` up with it.
-  - The orphan scan runs `lsof` or `ss` once, and `ps` once for each listener it finds and each lapsed resource with a pid, with no timeout of their own.
+  - The orphan scan runs `lsof` or `ss` once, and `ps` once for each unregistered listener and each lapsed resource with a pid, with no timeout of their own. A stuck `lsof` holds `doctor` up with it, and the time grows with the number of unregistered listeners ([known limits](#the-orphan-scan)).
 
 Press Ctrl-C to stop it; it has changed nothing.
 
@@ -73,12 +73,17 @@ Press Ctrl-C to stop it; it has changed nothing.
 The `resources` and `listeners` rows are the scan behind `another orphans` ([RESOURCES.md](RESOURCES.md#orphans)), run without the sweep that command starts with. They show what is left over; `another orphans` gives the full list, with ids, pids and command lines. Doctor names no command that stops or releases anything.
 
 - **`resources`** counts this node's registered resources with no live lease and names up to five, with how long each has been lapsed. A resource another node owns is not listed; it is dealt with on that node.
-  - Doctor reads what the last sweep recorded. This node's lease that ran out since then still counts as live until a sweep expires it, so its resource is not listed yet. `another serve` sweeps every 30 seconds, and `another sweep`, `another resources` and `another orphans` each sweep when run.
+  - Doctor reads what the last sweep recorded. This node's lease that ran out since then still counts as live until a sweep expires it, so its resource is not listed yet. `another serve` sweeps every 30 seconds, and `another sweep`, `another resources`, `another orphans`, `another inbox`, `another requests` and `another activity` each sweep when run. The hook packs read the inbox at each turn, so in a home with active agents the gap is short.
   - A resource whose only leases were another node's and have run out is listed as `not recorded by a sweep yet` in place of a time.
 - **`listeners`** counts listening TCP sockets that match no registered resource by pid or port, and names up to five by port and program name. System services and Another itself are left out.
   - It is `info`, never a warning, and never changes the exit status. A dev server you started by hand and never registered is counted here; that is expected.
-  - The row runs external programs: `lsof -nP -iTCP -sTCP:LISTEN`, or `ss -ltnp` when `lsof` is missing or fails, and `ps` for each listener's command. They are found on `PATH` and run with no timeout.
+  - The row runs external programs, found on `PATH`: `lsof -nP -iTCP -sTCP:LISTEN -FpcLn`, or `ss -ltnpH` when `lsof` is missing or fails. Then `ps -o user=,etime=,command= -p <pid>` runs once for each unregistered listener that is not a system service, and once for each lapsed resource registered with a pid. It does not run for a listener that a registered resource accounts for.
   - When neither `lsof` nor `ss` can run, the row says the listener scan did not run and gives the reason. The `resources` row and the exit status are unaffected. Without `ps`, a listener is named as `lsof` or `ss` named it.
+  - Output from `lsof` that is not its field output is read as no listener.
+- **Known limits.**
+  - None of these programs has a timeout. Doctor waits for `lsof` for as long as `lsof` takes.
+  - `ps` runs for every unregistered listener, though only five are named, so doctor takes longer the more there are.
+  - A program name is cut at its first space: a program under `/Applications/Some App.app/` is shown as `Some`. `another orphans` shows the whole command line.
 - Names of resources and programs are printed as one line with control characters replaced by spaces.
 
 ## A damaged database
