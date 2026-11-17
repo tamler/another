@@ -172,6 +172,7 @@ Task guides, all listed on the [guides hub](site/guides/index.html) (website sou
 | [examples/](examples/README.md) | Runnable scripts on one machine: a two-agent review handoff, and a federation hub with two spokes |
 | [docs/VISION.md](docs/VISION.md) | Purpose, users, principles and non-goals |
 | [docs/V0.1.0-SCOPE.md](docs/V0.1.0-SCOPE.md) | What v0.1.0 must have, may have, freezes and cuts |
+| [docs/COMPETITORS.md](docs/COMPETITORS.md) | Zipline, Polyroom and KittyClaw against Another: capability table, gaps, and claims we can back |
 | [docs/SPEC.md](docs/SPEC.md) | Original research and product spec (historical) |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | Locked defaults and every design decision made while building |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute (clean-room rules, checks, MSRV) |
