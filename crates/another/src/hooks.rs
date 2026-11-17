@@ -1067,7 +1067,13 @@ fn keepalive_throttled(
     if !beat_due(another_home, agent, session_id, "beat") {
         return;
     }
-    if let Err(e) = store.keepalive(agent) {
+    // The beat is also a sign of this session for the queue's session binding.
+    let info = SessionInfo {
+        client: Some(client.as_str().to_string()),
+        session_id: session_id.map(str::to_string),
+        ..Default::default()
+    };
+    if let Err(e) = store.keepalive(agent, &info) {
         tracing::debug!(error = %e, "keepalive skipped");
     }
     crate::wake::stamp_session(store, agent, session_id, client.as_str(), dir, false);

@@ -1367,10 +1367,15 @@ fn keepalive_renews_only_aging_holds() {
     let main = fx.repos.main.clone();
     fx.acquire("alice", &main, &["src/**"]).unwrap();
     let renewed_events = |fx: &Fx| fx.kinds().iter().filter(|k| *k == "hold.renewed").count();
-    assert_eq!(fx.store.keepalive("alice").unwrap(), 0);
+    let beat = |fx: &Fx| {
+        fx.store
+            .keepalive("alice", &SessionInfo::default())
+            .unwrap()
+    };
+    assert_eq!(beat(&fx), 0);
     assert_eq!(renewed_events(&fx), 0, "nothing logged when nothing is due");
     fx.advance_secs(301);
-    assert_eq!(fx.store.keepalive("alice").unwrap(), 1);
+    assert_eq!(beat(&fx), 1);
     assert_eq!(renewed_events(&fx), 1);
     let hold = &fx
         .store
@@ -1382,7 +1387,7 @@ fn keepalive_renews_only_aging_holds() {
     assert_eq!(hold.expires_at, fmt_ts(T0 + 301_000 + 600_000));
     // A hold that already lapsed is left for the sweeper, not revived.
     fx.advance_secs(700);
-    assert_eq!(fx.store.keepalive("alice").unwrap(), 0);
+    assert_eq!(beat(&fx), 0);
 }
 
 #[test]

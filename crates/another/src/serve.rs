@@ -72,7 +72,8 @@ pub fn check_bind(addr: &str, opts: &HttpOptions) -> Result<SocketAddr> {
     )
 }
 
-/// Periodically expire holds and stale requests until cancelled.
+/// Periodically expire holds and stale requests, and release queue claims past the grace
+/// period, until cancelled.
 pub fn spawn_sweeper(store: Store, every: Duration, ct: CancellationToken) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(every);
@@ -80,8 +81,8 @@ pub fn spawn_sweeper(store: Store, every: Duration, ct: CancellationToken) {
             tokio::select! {
                 _ = ct.cancelled() => break,
                 _ = tick.tick() => {
-                    let store = store.clone();
-                    match tokio::task::spawn_blocking(move || store.sweep()).await {
+                    let sweeper = store.clone();
+                    match tokio::task::spawn_blocking(move || sweeper.sweep()).await {
                         Ok(Ok(r)) if r.expired_holds + r.stale_requests > 0 => tracing::info!(
                             expired_holds = r.expired_holds,
                             stale_requests = r.stale_requests,
@@ -90,6 +91,16 @@ pub fn spawn_sweeper(store: Store, every: Duration, ct: CancellationToken) {
                         Ok(Ok(_)) => {}
                         Ok(Err(e)) => tracing::warn!(error = %e, "sweep failed"),
                         Err(e) => tracing::warn!(error = %e, "sweep task failed"),
+                    }
+                    let sweeper = store.clone();
+                    match tokio::task::spawn_blocking(move || sweeper.queue_sweep()).await {
+                        Ok(Ok(r)) if !r.released_claims.is_empty() => tracing::info!(
+                            released_claims = r.released_claims.len(),
+                            "queue sweep"
+                        ),
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => tracing::warn!(error = %e, "queue sweep failed"),
+                        Err(e) => tracing::warn!(error = %e, "queue sweep task failed"),
                     }
                 }
             }

@@ -1698,3 +1698,218 @@ fn queue_commands_follow_the_upgrade_rules() {
         1
     );
 }
+
+// Results and the lapse rule (scope id M2) through the real binary: the hooks, the CLI and
+// MCP heartbeats, `another sweep` and the serve sweeper.
+
+impl Fx {
+    /// Run a hook of `client` as `agent`, with the session id the client would send.
+    fn hook(&self, event: &str, client: &str, session: Option<&str>, agent: &str) {
+        use std::io::Write;
+        let work = self.home.parent().unwrap().join("work");
+        std::fs::create_dir_all(work.join(".git")).unwrap();
+        let mut input = json!({ "cwd": work, "tool_name": "Bash", "tool_input": {} });
+        if let Some(session) = session {
+            input["session_id"] = json!(session);
+        }
+        let mut child = command(
+            &self.home,
+            &["hook", "run", event, "--client", client],
+            &[("ANOTHER_AGENT", agent)],
+        )
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.to_string().as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "a hook always exits 0");
+    }
+
+    fn db(&self) -> rusqlite::Connection {
+        rusqlite::Connection::open(self.home.join(another_core::DB_FILE)).unwrap()
+    }
+
+    /// The `queue_sessions` rows, as `agent name/session id`.
+    fn session_rows(&self) -> Vec<String> {
+        let db = self.db();
+        let mut stmt = db
+            .prepare(
+                "SELECT a.name || '/' || s.session_id FROM queue_sessions s
+                 JOIN agents a ON a.agent_id = s.agent_id ORDER BY 1",
+            )
+            .unwrap();
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    /// Make it `hours` later for `who`: its claims and its last sign of life move back.
+    fn hours_pass(&self, who: &str, hours: i64) {
+        let ms = hours * 3_600_000;
+        let id = self.store.agent(who).unwrap().agent_id;
+        let db = self.db();
+        db.execute(
+            "UPDATE queue_items SET claimed_at = claimed_at - ?2 WHERE claimer_id = ?1",
+            rusqlite::params![id, ms],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE agents SET last_seen_at = last_seen_at - ?2 WHERE agent_id = ?1",
+            rusqlite::params![id, ms],
+        )
+        .unwrap();
+    }
+}
+
+// T20, T21 and T36 through the hooks, the CLI and the MCP server.
+#[tokio::test]
+async fn only_the_claiming_sessions_end_hook_releases_through_the_binary() {
+    let fx = Fx::new();
+    let item = fx.ready("claimed by a hooked session");
+    fx.hook("session-start", "claude", Some("s1"), "ann");
+    assert_eq!(fx.session_rows(), ["ann/s1"]);
+    let (code, next) = fx.json(&["queue", "next", "--agent", "ann"], &[]);
+    assert_eq!(code, 0);
+    assert_eq!(next["claimed"]["label"], item.label.as_str());
+    assert_eq!(next["claimed"]["claim"]["session_bound"], true);
+    let claimed = |why: &str| {
+        assert_eq!(fx.item(&item.label).state, QueueState::Claimed, "{why}");
+        assert_eq!(fx.events("queue.released"), 0, "{why}");
+    };
+
+    // No end but the claiming session's own releases the claim.
+    let out = fx.run(&["heartbeat", "--agent", "ann", "--end"], &[]);
+    assert!(out.status.success());
+    claimed("another heartbeat --end");
+    let client = in_process(fx.store.clone()).await;
+    call_ok(&client, "heartbeat", json!({ "agent": "ann", "end": true })).await;
+    claimed("the MCP heartbeat with end");
+    fx.hook("session-end", "claude", None, "ann");
+    claimed("an end hook with no session id");
+    fx.hook("session-end", "claude", Some("s2"), "ann");
+    claimed("the end hook of another session");
+    fx.hook("session-end", "codex", Some("s1"), "ann");
+    claimed("the end hook of a client whose session ids are not relied on");
+
+    // A beat after a tool call is a sign of its own session: a second session's first
+    // beat is not held back by the first one's stamp, inside the same minute.
+    fx.hook("post-tool", "claude", Some("s1"), "ann");
+    fx.hook("post-tool", "claude", Some("s3"), "ann");
+    assert_eq!(fx.session_rows(), ["ann/s1", "ann/s3"]);
+    // A session id made of path parts is a row and a stamp inside the state directory.
+    fx.hook("post-tool", "claude", Some("../../escape/s4"), "ann");
+    assert_eq!(
+        fx.session_rows(),
+        ["ann/../../escape/s4", "ann/s1", "ann/s3"]
+    );
+    let state = fx.home.join("hooks").join("state");
+    let stamps = std::fs::read_dir(&state)
+        .unwrap()
+        .filter(|e| {
+            let path = e.as_ref().unwrap().path();
+            path.is_file() && path.extension().is_some_and(|x| x == "beat")
+        })
+        .count();
+    assert_eq!(stamps, 3, "one stamp for each session, all in {state:?}");
+    assert!(!fx.home.join("escape").exists());
+    assert!(!fx.home.parent().unwrap().join("escape").exists());
+
+    // Codex sends a session id too, but it is not on the list: no row, an unbound claim,
+    // and its end hook releases nothing.
+    let second = fx.ready("claimed under Codex hooks");
+    for event in ["session-start", "prompt", "post-tool"] {
+        fx.hook(event, "codex", Some("c1"), "bob");
+    }
+    assert!(fx.session_rows().iter().all(|r| !r.starts_with("bob/")));
+    let (_, next) = fx.json(&["queue", "next", "--agent", "bob"], &[]);
+    assert_eq!(next["claimed"]["label"], second.label.as_str());
+    assert_eq!(next["claimed"]["claim"]["session_bound"], false);
+    fx.hook("session-end", "codex", Some("c1"), "bob");
+    assert_eq!(fx.item(&second.label).state, QueueState::Claimed);
+    claimed("a Codex session of another agent ended");
+
+    // The end hook of the session that made the claim returns the item and says so.
+    fx.hook("session-end", "claude", Some("s1"), "ann");
+    let after = fx.item(&item.label);
+    assert_eq!(after.state, QueueState::Ready);
+    assert_eq!(fx.events("queue.released"), 1);
+    let history = after.history.unwrap();
+    let last = history.last().unwrap();
+    assert_eq!(last.kind, "queue.released");
+    assert_eq!(last.actor, "system");
+    assert_eq!(last.detail.as_ref().unwrap()["reason"], "session_end");
+    let (_, inbox) = fx.json(&["inbox", "--agent", "ann", "--unread"], &[]);
+    let subjects: Vec<&str> = inbox["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["subject"].as_str().unwrap())
+        .collect();
+    assert_eq!(subjects, [format!("Claim released: {}", item.label)]);
+    assert!(fx.store.queue_audit(None).unwrap().ok);
+}
+
+// T24 through `another sweep` and the sweeper of `another serve`.
+#[tokio::test]
+async fn sweep_and_the_serve_sweeper_release_after_the_grace_period() {
+    let fx = Fx::new();
+    let item = fx.ready("left behind");
+    let (_, next) = fx.json(&["queue", "next", "--agent", "ann"], &[]);
+    assert_eq!(next["claimed"]["label"], item.label.as_str());
+
+    // 23 hours of silence: `another sweep` releases nothing.
+    fx.hours_pass("ann", 23);
+    let (code, swept) = fx.json(&["sweep"], &[]);
+    assert_eq!(code, 0);
+    assert_eq!(swept["released_claims"], json!([]));
+    assert_eq!(swept["expired_holds"], 0);
+    assert_eq!(fx.item(&item.label).state, QueueState::Claimed);
+    // Past 24 hours it does, and says which.
+    fx.hours_pass("ann", 2);
+    let (code, swept) = fx.json(&["sweep"], &[]);
+    assert_eq!(code, 0);
+    assert_eq!(swept["released_claims"], json!([item.label]));
+    let (_, shown) = fx.json(&["queue", "show", &item.label], &[]);
+    assert_eq!(shown["state"], "ready");
+    let last = shown["history"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["kind"], "queue.released");
+    assert_eq!(last["detail"]["reason"], "grace");
+    let out = fx.run(&["sweep"], &[]);
+    assert!(!text(&out.stdout).contains("queue claim"), "nothing more");
+
+    // The sweeper every `another serve` runs does the same.
+    let (_, next) = fx.json(&["queue", "next", "--agent", "ann"], &[]);
+    assert_eq!(next["claimed"]["label"], item.label.as_str());
+    let stop = tokio_util::sync::CancellationToken::new();
+    another::serve::spawn_sweeper(
+        fx.store.clone(),
+        std::time::Duration::from_millis(20),
+        stop.clone(),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        fx.item(&item.label).state,
+        QueueState::Claimed,
+        "a fresh claim is left alone"
+    );
+    fx.hours_pass("ann", 25);
+    let mut released = false;
+    for _ in 0..500 {
+        if fx.item(&item.label).state == QueueState::Ready {
+            released = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    stop.cancel();
+    assert!(released, "the sweeper released the overdue claim");
+    assert_eq!(fx.events("queue.released"), 2);
+    assert!(fx.store.queue_audit(None).unwrap().ok);
+}

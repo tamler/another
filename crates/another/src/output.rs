@@ -986,10 +986,9 @@ pub fn queue_needs_owner(n: &QueueNeedsOwner) -> String {
                     queue_line(&q.item).trim_end(),
                     q.quiet_for_seconds / 60,
                     q.grace_ends_at,
-                    if q.unbound {
-                        ", not bound to a session"
-                    } else {
-                        ""
+                    match &q.session_last_seen_at {
+                        Some(seen) if !q.unbound => format!(", its session last seen {seen}"),
+                        _ => ", not bound to a session".to_string(),
                     }
                 )
             })

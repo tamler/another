@@ -417,7 +417,8 @@ pub enum Command {
     /// Install, remove or run client hook packs.
     #[command(subcommand)]
     Hook(HookCmd),
-    /// Expire lapsed holds and mark overdue requests stale now.
+    /// Expire lapsed holds, mark overdue requests stale and release queue claims past the
+    /// grace period now.
     Sweep,
     /// Show the most recent event-log records.
     Events {
@@ -2006,12 +2007,30 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             emit(json, &stats, output::trial_stats)
         }
         Command::Sweep => {
-            let r = store.sweep()?;
+            #[derive(Serialize)]
+            struct Swept {
+                #[serde(flatten)]
+                sweep: another_core::SweepReport,
+                #[serde(flatten)]
+                queue: another_core::QueueSweepReport,
+            }
+            let r = Swept {
+                sweep: store.sweep()?,
+                queue: store.queue_sweep()?,
+            };
             emit(json, &r, |r| {
-                format!(
+                let mut line = format!(
                     "expired {} hold(s), {} request(s) went stale",
-                    r.expired_holds, r.stale_requests
-                )
+                    r.sweep.expired_holds, r.sweep.stale_requests
+                );
+                if !r.queue.released_claims.is_empty() {
+                    line.push_str(&format!(
+                        ", released {} queue claim(s) after the grace period: {}",
+                        r.queue.released_claims.len(),
+                        r.queue.released_claims.join(", ")
+                    ));
+                }
+                line
             })
         }
         Command::Events { limit } => {
