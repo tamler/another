@@ -1774,7 +1774,12 @@ async fn only_the_claiming_sessions_end_hook_releases_through_the_binary() {
     let fx = Fx::new();
     let item = fx.ready("claimed by a hooked session");
     fx.hook("session-start", "claude", Some("s1"), "ann");
-    assert_eq!(fx.session_rows(), ["ann/s1"]);
+    assert_eq!(
+        fx.session_rows(),
+        ["ann/s1"],
+        "hook log: {:?}",
+        std::fs::read_to_string(fx.home.join("logs").join("hooks.log")).unwrap_or_default()
+    );
     let (code, next) = fx.json(&["queue", "next", "--agent", "ann"], &[]);
     assert_eq!(code, 0);
     assert_eq!(next["claimed"]["label"], item.label.as_str());
