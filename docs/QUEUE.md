@@ -51,6 +51,16 @@ If you find work nobody asked for, propose it and move on. A security or data-lo
 
 A reservation (`--for`) is a first offer, not a restriction: it ends when the reserved agent's claim is released for any reason. The agent that gave an item up, or had it taken back by an admitter, is skipped: `next` does not offer it that item. The skip ends at the first of three things: one hour passes since the release; another agent claims the item (so if that agent releases it in turn, the first agent may be offered it again); or an admitter sets or clears the reservation with `queue edit --for` or `--for-anyone`. The hour means a node with a single agent is not left with a ready item nobody can take; until it has passed, the item is listed for the owner under "Ready with nobody to take them".
 
+### How a session learns that something is ready
+
+With the hook pack installed ([HOOKS.md](HOOKS.md#queue-lines)), a session is told about the queue without a transport and without asking (D96):
+
+- **An item is ready.** At session start, and at a prompt when what `next` would give has changed since the session was last told, one line says that an item is ready and gives the command `another queue next --agent <you>`. It names no item. Take it only if working from the queue is your job in that session and you have no task in hand. The line is never printed after a tool call, so it does not reach a session in the middle of a task.
+- **Only a name with its own limit is told.** The line is for names the owner gave a seat with `another queue limit set <agent> 1 --owner`. A name on the default limit gets no line; `next` still serves it.
+- **`queue done` and `queue release` say what is next.** When you finish an item or give your own item back (plain, or with `--to`), and another item is ready for your name, the command prints one more line, last: `Another item is ready that <you> may take: another queue next --agent <you>`. With `--json` the line goes to standard error, so standard output is the item alone. It is not printed for an admitter's release (`--owner` or `--reason`), for a name on the default limit, or by the MCP tool `queue_update`, whose result is unchanged.
+- **A free queue worker asks.** A session that declined the line while busy is not told again until the head of the queue changes. A worker with nothing in hand runs `another queue next` itself, and so does any MCP caller, with `queue_next`.
+- **An item your session holds.** At each session start a session is told which items it claimed itself, with the commands to show, finish or give back each. It is told only of a claim bound to that very session. For an item your name holds that your session did not claim (another session's, or any claim by a Codex session, which is bound to no session), no hook says anything: `another queue next` does, when it refuses at the limit and names the held items.
+
 ### MCP tools
 
 | Tool | Arguments | Does |
@@ -97,6 +107,8 @@ The last line appears when the scope or the done condition was changed after adm
 ### Limits
 
 Each agent may hold a set number of claimed, unfinished items. The default is 1 and applies to every agent with no limit of its own. Only the owner changes a limit. Lowering a limit below what an agent holds releases nothing; the agent is refused new work until it is back under the limit.
+
+A limit set for a name, above 0, is also what turns on the lines that tell its sessions an item is ready: in the hook packs, and after `queue done` and `queue release` (D96). The default limit does not, because no owner chose it for that name and items carry no project. `another queue limit set codex@shop 1 --owner` seats a name without raising what it may hold.
 
 ### The delegate
 

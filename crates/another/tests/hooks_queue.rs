@@ -1519,6 +1519,24 @@ fn hook_cost() {
             "{event}: the 95th percentile {p95:?} is over the budget of {budget_ms} ms"
         );
     }
+
+    // A tool call whose once-a-minute beat is due lists the whole state directory, on main
+    // as here. Reported and not judged: that sweep is older than this item.
+    let beat = env.state_dir().join(format!(
+        "{}.beat",
+        another_core::session_file_key(&agent, "cost-1")
+    ));
+    let due: Vec<Duration> = (0..20)
+        .map(|_| {
+            std::fs::remove_file(&beat).expect("the session's beat stamp");
+            run("post-tool", &env.tool_event("cost-1"))
+        })
+        .collect();
+    println!(
+        "hook_cost post-tool with its beat due ({} state files left): p95 {:.1} ms [{bin}]",
+        std::fs::read_dir(env.state_dir()).unwrap().count(),
+        percentile_95(due).as_secs_f64() * 1000.0,
+    );
 }
 
 // T19
