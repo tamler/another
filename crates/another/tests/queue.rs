@@ -1568,6 +1568,8 @@ fn queue_commands_follow_the_upgrade_rules() {
             .unwrap()
     };
     let current = version(&fresh.join(another_core::DB_FILE));
+    // The queue is schema v11; later schemas follow it.
+    let before_queue = 10;
     // A home as the installed release build left it, before the queue existed.
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
@@ -1575,7 +1577,7 @@ fn queue_commands_follow_the_upgrade_rules() {
     {
         let c = rusqlite::Connection::open(&db).unwrap();
         c.pragma_update(None, "journal_mode", "WAL").unwrap();
-        another_core::apply_schema(&c, current - 1).unwrap();
+        another_core::apply_schema(&c, before_queue).unwrap();
         let queue_tables: i64 = c
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE name LIKE 'queue_%'",
@@ -1590,7 +1592,7 @@ fn queue_commands_follow_the_upgrade_rules() {
         &record,
         format!(
             r#"{{"created":{{"version":"0.1.0","build":"release","schema":{},"at":"2026-11-01T00:00:00.000Z"}}}}"#,
-            current - 1
+            before_queue
         ),
     )
     .unwrap();
@@ -1614,7 +1616,7 @@ fn queue_commands_follow_the_upgrade_rules() {
         for needle in [
             "this development build of another",
             "will not migrate the database",
-            &format!("v{} to v{current}", current - 1),
+            &format!("v{} to v{current}", before_queue),
             "--dev-migrate",
         ] {
             assert!(
@@ -1644,7 +1646,7 @@ fn queue_commands_follow_the_upgrade_rules() {
     assert_eq!(backups.len(), 1, "{backups:?}");
     assert_eq!(
         version(&backups[0]),
-        current - 1,
+        before_queue,
         "the backup is the home before the queue"
     );
     assert!(text(&std::fs::read(&record).unwrap()).contains("\"migrated\""));

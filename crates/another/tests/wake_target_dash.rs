@@ -104,14 +104,17 @@ fn herdrs_default_target_from_a_dash_name_is_refused() {
     assert_eq!(ok[0][3], "bob");
 }
 
-/// REVIEW-R1 of #206: the Herdr probe (`herdr agent get <target>`, positional) runs on stored
-/// targets in `wake prune` and the push waker without going through `wake()`. A target
-/// stored before the check must not reach it; an automatic one is pruned, a manual one kept.
+/// REVIEW-R1 of #206: `herdr agent get <target>` and `herdr agent prompt <target>` take the
+/// target positionally, and the transport is also called without going through `wake()`.
+/// A target stored before the check must not reach it; an automatic one is pruned, a manual
+/// one kept, and a session row cannot be made with one.
 /// The fake Herdr is a `/bin/sh` script, so this test is Unix only; the refusals above run
 /// everywhere.
 #[cfg(unix)]
 #[test]
 fn stored_dash_targets_never_reach_the_herdr_probe() {
+    use another::transport::herdr::HerdrTransport;
+    use another::transport::{State, Transport};
     use std::os::unix::fs::PermissionsExt;
 
     let dir = tempfile::tempdir().unwrap();
@@ -126,7 +129,7 @@ fn stored_dash_targets_never_reach_the_herdr_probe() {
     )
     .unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::env::set_var("HERDR_BIN_PATH", &fake);
+    let herdr = HerdrTransport::new(fake.to_string_lossy());
 
     let home = dir.path().join("home");
     let s = Store::open(&home).unwrap();
@@ -154,10 +157,14 @@ fn stored_dash_targets_never_reach_the_herdr_probe() {
         .unwrap();
     }
 
-    assert!(matches!(
-        another::wake::probe_herdr("--help"),
-        another::wake::Probe::Unknown(_)
-    ));
+    assert_eq!(herdr.status("--help", None).state, State::NoAnswer);
+    assert_eq!(
+        herdr.wake("--help", "hi", None).outcome,
+        WakeOutcome::Undelivered
+    );
+    let stamped = s.stamp_transport_session("bob", "s1", "herdr", "-x", "claude", "/work/app");
+    assert_eq!(stamped.unwrap_err().code(), "invalid");
+    assert!(s.transport_sessions().unwrap().is_empty());
     let rows = another::wake::prune(&s, false).unwrap();
     let bob = rows.iter().find(|r| r.agent == "bob").unwrap();
     assert!(bob.pruned, "{bob:?}");

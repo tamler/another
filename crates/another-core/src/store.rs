@@ -1099,6 +1099,37 @@ CREATE TABLE queue_settings (
     event_id TEXT NOT NULL
 );
 "#,
+    // One row per agent session running inside a transport (transport.rs). Node-local, and
+    // never built from events.
+    r#"
+CREATE TABLE transport_sessions (
+    agent_id          TEXT NOT NULL REFERENCES agents(agent_id),
+    session_id        TEXT NOT NULL,
+    transport         TEXT NOT NULL,
+    target            TEXT NOT NULL,
+    hook_client       TEXT,
+    hook_cwd          TEXT,
+    hook_seen_at      INTEGER,
+    state             TEXT,
+    detail            TEXT,
+    state_since       INTEGER,
+    observed_at       INTEGER,
+    matched           INTEGER NOT NULL DEFAULT 0,
+    seen_live_at      INTEGER,
+    last_alive_at     INTEGER,
+    first_gone_at     INTEGER,
+    gone_confirmed_at INTEGER,
+    gone_event_id     TEXT,
+    wake_stop         TEXT,
+    wake_stop_at      INTEGER,
+    undelivered_count INTEGER NOT NULL DEFAULT 0,
+    last_wake_outcome TEXT,
+    last_wake_at      INTEGER,
+    attention         TEXT,
+    attention_since   INTEGER,
+    PRIMARY KEY (agent_id, session_id)
+);
+"#,
 ];
 
 /// Switch to WAL. While several connections convert a new database at once, SQLite answers
@@ -1469,6 +1500,7 @@ const CATALOGS: &[&str] = &[
     "3263f7df9c4fd6613f7c466cbb01a84962fd4bd1635b3f87d96f2751b2d6f372",
     "5b76a246c4ba93c3edd4c1a7d03fe0f19f43aadceed5901dfa0ba6b439be9c54",
     "b07ccde4e870699aff968c4508b5944ac3cc5ae157acfb336bfdc3a16e5f6325",
+    "fce5179014aaff7d53c71882bfe3870e21d1ff697464193ebeb2c1512327a89a",
 ];
 
 /// The digest this build holds for schema `version`.
@@ -1895,7 +1927,8 @@ mod upgrade_tests {
         // Take the home back to exactly main's v8 schema, keeping every v8 row.
         let db = Connection::open(home.join(DB_FILE)).unwrap();
         db.execute_batch(
-            "DROP TABLE queue_history;
+            "DROP TABLE transport_sessions;
+             DROP TABLE queue_history;
              DROP TABLE queue_items;
              DROP TABLE queue_sessions;
              DROP TABLE queue_limits;

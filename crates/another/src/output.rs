@@ -481,7 +481,7 @@ pub fn sync_report(r: &crate::fed::SyncReport) -> String {
 
 pub fn wake_targets(ts: &[WakeTarget]) -> String {
     if ts.is_empty() {
-        return "no wake targets (hooks record Herdr, tmux and cmux panes automatically)"
+        return "no wake targets (hooks record tmux and cmux panes automatically; Herdr sessions are listed by `another transport status`)"
             .to_string();
     }
     ts.iter()
@@ -499,43 +499,68 @@ pub fn wake_targets(ts: &[WakeTarget]) -> String {
 
 pub fn wake_plans(ps: &[crate::wake::WakePlan]) -> String {
     ps.iter()
-        .map(|p| match (&p.skipped, p.sent) {
-            _ if p.error.is_some() => format!(
-                "failed {}: {}\n",
-                p.agent,
-                p.error.as_deref().unwrap_or_default()
-            ),
-            (_, true) => format!(
-                "woke {} via {} ({})\n",
-                p.agent,
+        .map(|p| {
+            let at = format!(
+                "via {} ({})",
                 p.via.map_or("-", |v| v.as_str()),
                 p.target.as_deref().unwrap_or("-")
-            ),
-            (Some(why), _) if why == "dry run" => p
-                .commands
-                .iter()
-                .map(|c| format!("would run: {}\n", c.join(" ")))
-                .collect(),
-            (Some(why), _) => format!("skipped {}: {why}\n", p.agent),
-            (None, false) => format!("skipped {}\n", p.agent),
+            );
+            let hint = p
+                .hint
+                .as_deref()
+                .map(|h| format!("  {h}\n"))
+                .unwrap_or_default();
+            let line = match (&p.skipped, p.outcome) {
+                _ if p.error.is_some() => format!(
+                    "failed {}: {}\n",
+                    p.agent,
+                    p.error.as_deref().unwrap_or_default()
+                ),
+                (_, Some(outcome)) => {
+                    // What happened, in the words of the outcome table, then the
+                    // transport's own answer.
+                    let verb = match outcome {
+                        another_core::WakeOutcome::Started => "woke",
+                        _ if p.failure => "failed",
+                        _ if p.sent => "sent a wake to",
+                        _ => "did not wake",
+                    };
+                    format!(
+                        "{verb} {} {at}: {} ({})\n",
+                        p.agent,
+                        outcome.meaning(),
+                        p.detail.as_deref().unwrap_or_default()
+                    )
+                }
+                (Some(why), _) if why == "dry run" => p
+                    .commands
+                    .iter()
+                    .map(|c| format!("would run: {}\n", c.join(" ")))
+                    .collect(),
+                (Some(why), _) => format!("skipped {}: {why}\n", p.agent),
+                (None, None) => format!("skipped {}\n", p.agent),
+            };
+            line + &hint
         })
         .collect()
 }
 
 pub fn prune_rows(rows: &[crate::wake::PruneRow], dry_run: bool) -> String {
     if rows.is_empty() {
-        return "no wake targets".to_string();
+        return "no wake targets or transport sessions".to_string();
     }
     let verb = if dry_run { "would drop" } else { "dropped" };
     rows.iter()
         .map(|r| {
             let what = if r.pruned { verb } else { "kept" };
+            let session = match r.session_id.as_deref() {
+                Some("") => "  session without an id".to_string(),
+                Some(id) => format!("  session {id}"),
+                None => String::new(),
+            };
             format!(
-                "{what:<10} {:<24} {:<6} {}  ({})\n",
-                r.agent,
-                r.via.as_str(),
-                r.target,
-                r.reason
+                "{what:<10} {:<24} {:<6} {}{session}  ({})\n",
+                r.agent, r.via, r.target, r.reason
             )
         })
         .collect()

@@ -439,6 +439,21 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
                 json!({ "message_ids": p.get("message_ids") }),
             )
         }
+        "transport.wake" => {
+            let text = match s("outcome").as_str() {
+                "started" => format!("woke {actor}"),
+                "not_started" => format!("woke {actor} but it did not start working"),
+                "unconfirmed" => format!("sent a wake to {actor}; not confirmed"),
+                "refused_blocked" => format!("did not wake {actor}: waiting on a person"),
+                "gone" => format!("did not wake {actor}: no such session"),
+                _ => format!("could not wake {actor}"),
+            };
+            (text, json!({ "message_ids": p.get("message_ids") }))
+        }
+        "transport.gone" => (
+            format!("{actor}'s session in {} is gone", s("transport")),
+            json!({ "session_id": s("session_id") }),
+        ),
         "hold.expired" => {
             let who = agent_address(conn, &s("agent_id"))?;
             (

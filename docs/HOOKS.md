@@ -4,11 +4,13 @@ Another is hooks-first (see [DECISIONS.md](DECISIONS.md)): agents learn about ne
 
 | Moment | What Another does | Output |
 |---|---|---|
-| Session start | Registers the agent if needed, records `session.started`, renews holds, records the terminal pane for wakes | Inbox + last-hour activity digest (≤ 1500 characters) |
-| Each prompt | Heartbeat (renews holds, marks the agent active) | One line, only for mail not announced before; otherwise nothing |
-| After each tool call (`post-tool`) | Checks for mail not announced yet; at most once a minute marks the agent active and renews holds past half their TTL | One line of context mid-task when there is new mail; otherwise nothing |
-| Before a file edit (`pre-edit`) | Takes a narrow hold on each file about to change, or stops the edit if another agent holds it | Nothing when the edit may go ahead; a denial naming the holder when it may not |
-| Session end | Records `session.ended`, releases the agent's holds, forgets the pane, marks it offline | Nothing |
+| Session start | Registers the agent if needed, records `session.started`, renews holds, and records where the session can be woken: inside Herdr its session row, inside tmux or cmux the pane | Inbox + last-hour activity digest (≤ 1500 characters) |
+| Each prompt | Heartbeat (renews holds, marks the agent active); inside Herdr, stamps the session's row | One line, only for mail not announced before; otherwise nothing |
+| After each tool call (`post-tool`) | Checks for mail not announced yet; at most once a minute per session marks the agent active, renews holds past half their TTL and, inside Herdr, stamps the session's row | One line of context mid-task when there is new mail; otherwise nothing |
+| Before a file edit (`pre-edit`) | Takes a narrow hold on each file about to change, or stops the edit if another agent holds it; inside Herdr, stamps the session's row at most once a minute. It renews no hold and does not mark the agent active: that is `post-tool`'s job, so an agent whose edit is refused does not keep its own holds alive by trying again | Nothing when the edit may go ahead; a denial naming the holder when it may not |
+| Session end | Records `session.ended`, releases the agent's holds, deletes that session's row (or forgets the tmux or cmux pane), marks the agent offline | Nothing |
+
+Inside Herdr (`$HERDR_PANE_ID`), every hook call of a session makes sure the session has its row in the transport layer, keyed by the agent and the session id the client sent, and records the client kind and the directory the hook ran in. The daemon uses that row to find the session in Herdr, to wake it when it is idle, and to notice when it is blocked, stuck or gone ([WAKE.md](WAKE.md)). Two sessions under one agent name are two rows.
 
 The two tool hooks run inside a task, so mail sent to a busy agent reaches it at its next tool call, without waiting for the next prompt, and two agents editing the same file find out before the second one writes.
 
@@ -86,7 +88,7 @@ Edits made through a shell command (`sed -i`, `echo >`, a script) are not seen b
 Another: 1 new message(s) for claude@shop (1 urgent): "Release src/api?" from codex@shop-review (opens request 01J...). Read them with fetch_inbox (or `another inbox --agent claude@shop --unread`).
 ```
 
-Each message is announced once, by whichever channel claims it first: a mid-task notice, a prompt notice, or a daemon wake (see [DAEMON.md](DAEMON.md)). The claim is a row per agent and message in the database, written in one transaction with the `push.notified` evidence, so hooks running in parallel and the daemon never announce the same message twice. A large burst is announced in full (up to 1000 messages per notice, the rest on the next call); the line lists three subjects. At most once a minute the hook also marks the agent active and renews its holds that are past half their TTL, so a long task without prompts keeps its holds and shows as live on the dashboard.
+Each message is announced once, by whichever channel claims it first: a mid-task notice, a prompt notice, or a daemon wake (see [DAEMON.md](DAEMON.md)). The claim is a row per agent and message in the database, written in one transaction with the `push.notified` evidence, so hooks running in parallel and the daemon never announce the same message twice. A large burst is announced in full (up to 1000 messages per notice, the rest on the next call); the line lists three subjects. At most once a minute per session the hook also marks the agent active and renews its holds that are past half their TTL, so a long task without prompts keeps its holds and shows as live on the dashboard. The minute is counted per agent and session id, so a busy session cannot use up the beat of another session under the same agent name; with no session id from the client it is counted per agent. A wake that did not start work gives its claim back, so the next of these hooks announces that mail.
 
 ## The edit guard
 

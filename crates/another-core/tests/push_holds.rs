@@ -1675,26 +1675,27 @@ fn stats_count_the_coordination_evidence() {
             Some("claude"),
         )
         .unwrap();
-    fx.store
-        .record_wake(
-            "alice",
-            WakeVia::Herdr,
-            "w1:p1",
-            "sent",
-            "agent was idle",
-            std::slice::from_ref(&answer_me.message_id),
-        )
-        .unwrap();
-    fx.store
-        .record_wake(
-            "alice",
-            WakeVia::Herdr,
-            "w1:p1",
-            "failed",
-            "herdr: boom",
-            &[],
-        )
-        .unwrap();
+    let daemon_wake = |outcome: WakeOutcome, detail: &str, message_ids: Vec<String>| {
+        fx.store
+            .record_transport_wake(&TransportWake {
+                agent: "alice".into(),
+                session_id: None,
+                transport: "herdr".into(),
+                target: "w1:p1".into(),
+                outcome,
+                detail: detail.into(),
+                kind: WakeKind::Mail,
+                message_ids,
+                trigger: "daemon".into(),
+            })
+            .unwrap();
+    };
+    daemon_wake(
+        WakeOutcome::Started,
+        "herdr: agent_prompted (working)",
+        vec![answer_me.message_id.clone()],
+    );
+    daemon_wake(WakeOutcome::Unknown, "herdr: boom", Vec::new());
     fx.store
         .claim_announcement(
             "alice",
@@ -1754,7 +1755,7 @@ fn stats_count_the_coordination_evidence() {
         ("shop-wt", "shop")
     );
     assert_eq!(s.wakes.len(), 2);
-    assert_eq!(s.wakes[1].outcome, "sent");
+    assert_eq!(s.wakes[1].outcome, "started");
     assert_eq!(s.wakes[1].messages, 1);
 
     // The window works: nothing happened after now.
@@ -1790,7 +1791,8 @@ fn stats_count_the_coordination_evidence() {
         text.contains(&"alice was told about 2 new message(s) mid-task"),
         "{text:?}"
     );
-    assert!(text.contains(&"woke alice in herdr w1:p1"), "{text:?}");
+    assert!(text.contains(&"woke alice"), "{text:?}");
+    assert!(text.contains(&"could not wake alice"), "{text:?}");
 }
 
 #[test]
