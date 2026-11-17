@@ -19,7 +19,7 @@ This writes a per-user LaunchAgent, `~/Library/LaunchAgents/one.toanother.anothe
 
 - loopback only (a non-loopback `--bind` is refused);
 - started at login and restarted whenever it exits, including after `launchctl kickstart -k`;
-- with `ANOTHER_HOME` and your current `PATH` recorded, so it uses the same database and finds `herdr`, `tmux` and `cmux` the way your shell does (launchd's own PATH has no `~/.local/bin` or Homebrew);
+- with `ANOTHER_HOME` and your current `PATH` recorded, so it uses the same database and finds `herdr` and the programs of your command transports (`tmux`, `cmux`) the way your shell does (launchd's own PATH has no `~/.local/bin` or Homebrew);
 - logging to `$ANOTHER_HOME/logs/serve.log`.
 
 ```bash
@@ -130,11 +130,11 @@ Two limits remain, and both need a transport that misbehaves. A background proce
 
 The wake line carries subjects and counts, never bodies. Herdr stays headless: Another only calls `herdr agent list`, `herdr agent get` and `herdr agent prompt`, never bare `herdr`, and never focuses a pane.
 
-The sweep and the wake pass run only on a loopback server without `--auth`, so a second server published for remote peers never wakes the same agent twice. `another serve --no-wake` turns off every transport call the daemon makes. The daemon wakes only sessions it can identify: a target set by hand, a bare Herdr agent name, and tmux and cmux panes are never woken automatically; `another wake --agent` still reaches them on demand ([WAKE.md](WAKE.md)).
+The sweep and the wake pass run only on a loopback server without `--auth`, so a second server published for remote peers never wakes the same agent twice. `another serve --no-wake` turns off every transport call the daemon makes. The daemon wakes only sessions it can identify: a target set by hand, a bare Herdr agent name, and a session in a command transport such as tmux or cmux are never woken automatically; `another wake --agent` still reaches them on demand ([WAKE.md](WAKE.md)). For a command transport that has a `list` command the sweep runs it too, so a vanished tmux pane is noticed. The daemon reads `transports.json` once per sweep and logs a refused file once each time the reason changes.
 
 ## Session rows and wake targets
 
-A hook that runs inside Herdr (`$HERDR_PANE_ID`) gives its session a row; the session-end hook deletes it. Session-start hooks inside tmux (`$TMUX_PANE`) or cmux (`$CMUX_SURFACE_ID`) record the pane as the agent's wake target instead. When multiplexers are nested, `TERM_PROGRAM` names the innermost one. To drop what sessions that never ended cleanly left behind:
+A hook that runs inside Herdr (`$HERDR_PANE_ID`), or inside a command transport (the variable its `capture_env` names, such as `$TMUX_PANE`), gives its session a row; the session-end hook deletes it. When multiplexers are nested, the transport whose name is `$TERM_PROGRAM` wins, else Herdr, else the first in the order `transports.json` lists them. A hook no longer stores a pane as the agent's wake target. To drop what sessions that never ended cleanly left behind:
 
 ```bash
 another wake prune --dry-run
@@ -144,7 +144,7 @@ another wake prune --dry-run
 another wake prune
 ```
 
-Pruning asks no transport. A session row goes when it was confirmed gone more than a day ago, or when its hooks have been quiet for a day and the transport did not show the session inside that day. A row that only holds the outcome of a wake by hand goes a day after that wake. A captured tmux or cmux target goes when its agent ended its session or has not been seen for a day. Targets set with `another wake set` are never pruned.
+Pruning asks no transport. A session row goes when it was confirmed gone more than a day ago, or when its hooks have been quiet for a day and the transport did not show the session inside that day. A row that only holds the outcome of a wake by hand goes a day after that wake. A tmux or cmux pane that an earlier build captured as a wake target goes when its agent ended its session or has not been seen for a day. Targets set with `another wake set` are never pruned.
 
 ## Counting what happened
 

@@ -85,7 +85,7 @@ pub enum Command {
         /// Seconds between sweeps that expire holds and stale requests.
         #[arg(long, default_value_t = 30)]
         sweep_secs: u64,
-        /// Make no transport call: no sweep of Herdr sessions and no wake of idle agents.
+        /// Make no transport call: no sweep of sessions and no wake of idle agents.
         /// (Both run only on a loopback server without --auth.)
         #[arg(long)]
         no_wake: bool,
@@ -343,7 +343,8 @@ pub enum Command {
         #[arg(long, default_value_t = 30)]
         every: u64,
     },
-    /// Wake agents that have mail waiting, through Herdr, tmux or cmux.
+    /// Wake agents that have mail waiting, through Herdr or a transport configured in
+    /// transports.json (tmux, cmux, ...).
     #[command(args_conflicts_with_subcommands = true)]
     Wake {
         #[command(subcommand)]
@@ -351,7 +352,7 @@ pub enum Command {
         #[command(flatten)]
         run: WakeRun,
     },
-    /// Agent sessions inside a transport (Herdr), as the daemon last saw them.
+    /// Agent sessions inside a transport, as the daemon last saw them.
     #[command(subcommand)]
     Transport(TransportCmd),
     /// Open the local dashboard in a browser (loopback only).
@@ -436,10 +437,12 @@ pub struct WakeRun {
     /// Another can identify, with mail no hook has announced yet.
     #[arg(long)]
     all: bool,
-    /// Adapter: tmux | cmux | herdr (default: the agent's stored target).
+    /// Transport: herdr, or a name configured in transports.json (default: the agent's
+    /// stored target).
     #[arg(long)]
     via: Option<String>,
-    /// tmux pane, cmux surface id (or `notify`), or Herdr agent name.
+    /// Where that transport delivers the line: a Herdr pane or agent name, a tmux pane,
+    /// a cmux surface id.
     #[arg(long)]
     target: Option<String>,
     /// Text to send (default: a one-line inbox summary).
@@ -448,18 +451,18 @@ pub struct WakeRun {
     /// Wake even when nothing is unread.
     #[arg(long)]
     force: bool,
-    /// Print the adapter commands without running them.
+    /// Print the transport's commands without running them.
     #[arg(long)]
     dry_run: bool,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum WakeCmd {
-    /// Store where to wake an agent (hooks capture tmux/cmux targets automatically).
+    /// Store where to wake an agent by hand (hooks record sessions by themselves).
     Set {
         #[command(flatten)]
         agent: AgentArg,
-        /// tmux | cmux | herdr
+        /// herdr, or a name configured in transports.json
         #[arg(long)]
         via: String,
         #[arg(long)]
@@ -2032,7 +2035,15 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             cmd: Some(WakeCmd::Set { agent, via, target }),
             ..
         } => {
-            let t = store.set_wake_target(&agent.agent, via.parse()?, &target, false)?;
+            let via = known_transport(&store, &via)?;
+            if crate::wake::is_old_cmux_notify(via.as_str(), &target) {
+                anyhow::bail!(
+                    "the cmux target `notify` no longer means a notification; define a \
+                     transport for it in transports.json (docs/WAKE.md has `cmux-notify`) \
+                     and use --via cmux-notify"
+                );
+            }
+            let t = store.set_wake_target(&agent.agent, &via, &target, false)?;
             emit(json, &t, |t| match t {
                 Some(t) => format!("wake {} via {} at {}", t.agent, t.via.as_str(), t.target),
                 None => String::new(),
@@ -2062,7 +2073,15 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             cmd: Some(WakeCmd::List),
             ..
         } => {
-            let ts = store.wake_targets()?;
+            let config = crate::transport::config_for(&store);
+            if let Some(refused) = config.refusal() {
+                eprintln!("another: {refused}");
+            }
+            let ts: Vec<output::WakeTargetRow> = store
+                .wake_targets()?
+                .into_iter()
+                .map(|target| output::WakeTargetRow::new(target, &config))
+                .collect();
             emit(json, &ts, |ts| output::wake_targets(ts))
         }
         Command::Wake {
@@ -2073,8 +2092,15 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             emit(json, &rows, |rows| output::prune_rows(rows, dry_run))
         }
         Command::Wake { cmd: None, run } => {
+            if let Some(refused) = crate::transport::config_for(&store).refusal() {
+                eprintln!("another: {refused}");
+            }
             let opts = crate::wake::WakeOptions {
-                via: run.via.as_deref().map(str::parse).transpose()?,
+                via: run
+                    .via
+                    .as_deref()
+                    .map(|via| known_transport(&store, via))
+                    .transpose()?,
                 target: run.target,
                 message: run.message,
                 force: run.force,
@@ -2082,6 +2108,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 cancel: None,
                 herdr: None,
                 wake_weak: None,
+                config: None,
             };
             let plans = if run.all {
                 crate::wake::wake_all(&store, &opts)?
@@ -2180,6 +2207,19 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
     };
     Ok(code)
+}
+
+/// A `--via` value: `herdr`, or a transport configured on this node. Anything else is
+/// refused with what to set, before anything is stored or run.
+fn known_transport(store: &Store, via: &str) -> anyhow::Result<another_core::WakeVia> {
+    let config = crate::transport::config_for(store);
+    if via != "rex" {
+        let name: another_core::WakeVia = via.parse()?;
+        if config.provides(via) {
+            return Ok(name);
+        }
+    }
+    anyhow::bail!("{}", config.why_missing(via))
 }
 
 fn daemon_command(cmd: &DaemonCmd, json: bool, another_home: PathBuf) -> anyhow::Result<ExitCode> {

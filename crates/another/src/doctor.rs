@@ -115,6 +115,7 @@ pub fn run(inputs: &Inputs) -> Report {
             "not checked until the database check passes",
         ),
     });
+    checks.push(transports(&inputs.another_home, store.as_ref()));
 
     Report {
         ok: checks.iter().all(|c| c.status != Level::Fail),
@@ -725,6 +726,94 @@ fn peers(store: &Store) -> Check {
         check("peers", Level::Warn, stale.join("; "))
             .fix("another sync, and check the hub URL with another peers")
     }
+}
+
+/// Whether `program`, as a command transport would start it, can be found: a path as it
+/// is, a bare name in the directories of `PATH`.
+fn on_path(program: &str) -> bool {
+    let found = |p: &Path| {
+        runnable(p)
+            || (cfg!(windows)
+                && ["exe", "cmd", "bat"]
+                    .iter()
+                    .any(|ext| p.with_extension(ext).is_file()))
+    };
+    if Path::new(program).components().count() > 1 {
+        return found(Path::new(program));
+    }
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| found(&dir.join(program))))
+}
+
+/// Command transports: whether `transports.json` was accepted, every stored wake target
+/// and session row whose transport nothing provides, an old cmux `notify` target, and
+/// whether each configured program can be found. Runs none of them.
+fn transports(home: &Path, store: Option<&Store>) -> Check {
+    let config = crate::transport::load_config(home);
+    let mut problems = Vec::new();
+    if let Some(refused) = config.refusal() {
+        problems.push(refused);
+    }
+    if let Some(store) = store {
+        for t in store.wake_targets().unwrap_or_default() {
+            let via = t.via.as_str();
+            if !config.provides(via) {
+                problems.push(format!(
+                    "the wake target of {} uses the transport {via:?}, which is not configured",
+                    t.agent
+                ));
+            } else if crate::wake::is_old_cmux_notify(via, &t.target) {
+                problems.push(format!(
+                    "the wake target of {} is the cmux target `notify`, which no longer means \
+                     a notification (define a transport such as cmux-notify and set it again)",
+                    t.agent
+                ));
+            }
+        }
+        let mut unprovided: Vec<String> = store
+            .transport_sessions()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| !config.provides(&r.transport))
+            .map(|r| r.transport)
+            .collect();
+        unprovided.sort();
+        unprovided.dedup();
+        for name in unprovided {
+            problems.push(format!(
+                "session rows use the transport {name:?}, which is not configured"
+            ));
+        }
+    }
+    for spec in &config.transports {
+        for program in spec.programs() {
+            if !on_path(program) {
+                problems.push(format!(
+                    "{}: the program {program:?} was not found",
+                    spec.name
+                ));
+            }
+        }
+    }
+    if !problems.is_empty() {
+        return check("transports", Level::Warn, problems.join("; ")).fix(format!(
+            "write or correct {} (docs/WAKE.md, \"Command transports\")",
+            home.join(crate::transport::command::CONFIG_FILE).display()
+        ));
+    }
+    if config.transports.is_empty() {
+        return check(
+            "transports",
+            Level::Info,
+            "herdr only (no transports.json, so no command transport)",
+        );
+    }
+    let names: Vec<&str> = config.transports.iter().map(|t| t.name.as_str()).collect();
+    check(
+        "transports",
+        Level::Ok,
+        format!("herdr and {} from transports.json", names.join(", ")),
+    )
 }
 
 /// Human output: one line per check, and an indented fix under anything not ok.

@@ -1089,7 +1089,7 @@ fn keepalive_throttled(
     if let Err(e) = store.keepalive(agent, &info) {
         tracing::debug!(error = %e, "keepalive skipped");
     }
-    crate::wake::stamp_session(store, agent, session_id, client.as_str(), dir, false);
+    crate::wake::stamp_session(store, agent, session_id, client.as_str(), dir);
 }
 
 /// `post-tool`: mention mail that arrived mid-task, in the client's context format.
@@ -1233,7 +1233,7 @@ fn pre_edit(
     // alive by trying again.
     let session_id = input.session_id.as_deref();
     if beat_due(&env.another_home, &agent, session_id, "edit") {
-        crate::wake::stamp_session(store, &agent, session_id, client.as_str(), dir, false);
+        crate::wake::stamp_session(store, &agent, session_id, client.as_str(), dir);
     }
     // Registered projects with their directories resolved, so a project registered under a
     // symlinked spelling (/tmp vs /private/tmp) is still recognised.
@@ -1366,7 +1366,7 @@ pub fn run(
     let text = match event {
         HookEvent::SessionStart => {
             store.session(&agent, SessionPhase::Start, info)?;
-            crate::wake::stamp_session(store, &agent, session_id, client.as_str(), &dir, true);
+            crate::wake::stamp_session(store, &agent, session_id, client.as_str(), &dir);
             let digest = session_digest(store, &agent, client)?;
             // New mail shown here should not be announced again on the next prompt.
             let _ = prompt_notice(store, &agent, "session_start", client);
@@ -1378,7 +1378,7 @@ pub fn run(
         }
         HookEvent::Prompt => {
             store.session(&agent, SessionPhase::Beat, info)?;
-            crate::wake::stamp_session(store, &agent, session_id, client.as_str(), &dir, false);
+            crate::wake::stamp_session(store, &agent, session_id, client.as_str(), &dir);
             if client == Client::Cursor {
                 // Cursor's prompt hook cannot add context; just let the prompt through.
                 json!({ "continue": true }).to_string()

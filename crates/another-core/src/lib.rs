@@ -96,4 +96,6 @@ pub use transport::{
     TransportState, TransportWake, Tri, WakeKind, WakeOutcome, GONE_CONFIRM_AFTER_MS,
     TRANSPORT_GONE_EVENT, TRANSPORT_WAKE_EVENT, UNDELIVERED_LIMIT,
 };
-pub use wake::{refuse_option_like_target, WakeTarget, WakeVia};
+pub use wake::{
+    refuse_option_like_target, valid_transport_name, validate_target, WakeTarget, WakeVia,
+};
