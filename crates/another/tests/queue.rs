@@ -1717,9 +1717,15 @@ impl Fx {
             &["hook", "run", event, "--client", client],
             &[("ANOTHER_AGENT", agent)],
         )
+        // A hook needs a home directory for the client configs; keep it inside the test.
+        .env("HOME", self.home.parent().unwrap())
+        .env_remove("GROK_HOOK_EVENT")
+        // Tests may run inside a multiplexer; keep its pane out of captured targets.
         .env_remove("HERDR_PANE_ID")
-        .env_remove("TMUX")
+        .env_remove("HERDR_BIN_PATH")
         .env_remove("TMUX_PANE")
+        .env_remove("CMUX_SURFACE_ID")
+        .env_remove("TERM_PROGRAM")
         .stdin(Stdio::piped())
         .spawn()
         .unwrap();
