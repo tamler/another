@@ -437,6 +437,83 @@ fn a_newer_schema_names_the_build_that_migrated_it_and_the_backup() {
     );
 }
 
+/// The backup doctor offers is a backup: not whatever file is newest in `backups`, and not
+/// one whose schema this build cannot open either.
+#[test]
+fn the_backup_hint_names_only_a_real_backup() {
+    let fx = Fx::new();
+    let current = older_home(&fx, None);
+    assert!(fx.cmd(&["--dev-migrate", "status"]).status.success());
+    let dir = fx.home.join("backups");
+    let real = std::fs::read_dir(&dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::write(dir.join("notes.txt"), "kept here by hand").unwrap();
+    std::fs::create_dir(dir.join("another-v1-20260101T000000Z.db")).unwrap();
+    std::fs::write(
+        dir.join(format!("another-v{}-20270101T000000Z.db", current + 5)),
+        "from a newer build",
+    )
+    .unwrap();
+
+    set_user_version(&fx.db(), current + 1);
+    let (_, r) = fx.doctor();
+    let fix = row(&r, "database")["fix"].as_str().unwrap().to_string();
+    assert!(fix.contains(&real.display().to_string()), "{fix}");
+    assert!(
+        !fix.contains("notes.txt") && !fix.contains("20270101"),
+        "{fix}"
+    );
+
+    // With no real backup there, doctor names none.
+    std::fs::remove_file(&real).unwrap();
+    let (_, r) = fx.doctor();
+    let fix = row(&r, "database")["fix"].as_str().unwrap().to_string();
+    assert!(fix.contains("restore a backup (docs/DOCTOR.md)"), "{fix}");
+    assert!(!fix.contains("backups/"), "{fix}");
+}
+
+/// An empty database file is created into, not migrated: doctor must not call it one this
+/// development build refuses, because a normal command does not refuse it.
+#[test]
+fn an_empty_database_is_not_called_unmigratable() {
+    let fx = Fx::new();
+    std::fs::create_dir_all(&fx.home).unwrap();
+    drop(rusqlite::Connection::open(fx.db()).unwrap());
+    std::fs::write(fx.db(), b"").unwrap();
+    let (code, r) = fx.doctor();
+    assert_eq!(code, Some(0), "{r}");
+    assert_eq!(status(&r, "database"), "warn", "{r}");
+    let detail = row(&r, "database")["detail"].as_str().unwrap().to_string();
+    assert!(detail.contains("empty database"), "{detail}");
+    assert!(!detail.contains("will not migrate"), "{detail}");
+    assert_eq!(row(&r, "database")["fix"], "another init");
+    assert!(fx.cmd(&["status"]).status.success());
+    assert!(user_version(&fx.db()) > 0);
+}
+
+/// With `--dev-migrate`, a normal command migrates the home, so doctor says so too.
+#[test]
+fn doctor_honours_dev_migrate() {
+    let fx = Fx::new();
+    older_home(&fx, None);
+    let (_, r) = fx.doctor();
+    assert_eq!(status(&r, "database"), "fail", "{r}");
+
+    let bind = closed_port();
+    let out = fx.cmd(&["--dev-migrate", "--json", "doctor", "--bind", &bind]);
+    let r: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{r}");
+    assert_eq!(status(&r, "database"), "warn", "{r}");
+    assert!(row(&r, "database")["fix"]
+        .as_str()
+        .unwrap()
+        .contains("another status"));
+}
+
 /// A negative schema version is not an older another schema: no build migrates it, so doctor
 /// must not advise a normal command (which refuses or fails on it). It fails and points at the
 /// home instead, and leaves the file as it was.

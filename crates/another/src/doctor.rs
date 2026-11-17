@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use another_core::{Error, Store};
+use another_core::{Blocked, Error, Store};
 use serde::Serialize;
 
 use crate::hooks::{self, Client, HookEnv};
@@ -287,22 +287,60 @@ fn database(home: &Path) -> (Check, Option<Store>) {
             check(
                 "database",
                 Level::Fail,
-                format!("schema v{v} does not match this build's v{v}: another build changed it"),
+                format!(
+                    "schema v{v} does not match this build's v{v}: a different build changed it{}",
+                    if inspected.differs.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (tables that differ: {})", inspected.differs.join(", "))
+                    }
+                ),
             )
             .fix(format!("use the build that wrote it, or {restore}")),
             None,
         );
     }
-    if v < want && inspected.development_build && !inspected.created_by_development_build {
+    // The store's own verdict on a pending migration, so doctor and a normal command agree
+    // (also under --dev-migrate, and for an empty database, which is created, not migrated).
+    match &inspected.blocked {
+        Some(Blocked::DevelopmentBuild) => {
+            return (
+                check(
+                    "database",
+                    Level::Fail,
+                    format!(
+                        "schema v{v}, and this development build (v{want}) did not create this home or a release build has used it since, so it will not migrate it"
+                    ),
+                )
+                .fix("use the installed another for this home; to migrate it with this build anyway, pass --dev-migrate (a backup is taken first)"),
+                None,
+            )
+        }
+        Some(Blocked::OtherBinary { recorded, this }) => {
+            return (
+                check(
+                    "database",
+                    Level::Fail,
+                    format!(
+                        "schema v{v}, and this binary ({this}) is not the one the home belongs to ({recorded}), so it will not migrate it to v{want}"
+                    ),
+                )
+                .fix(format!(
+                    "upgrade the binary at {recorded} in place; to migrate with this binary anyway, pass --dev-migrate (a backup is taken first)"
+                )),
+                None,
+            )
+        }
+        None => {}
+    }
+    if v == 0 {
         return (
             check(
                 "database",
-                Level::Fail,
-                format!(
-                    "schema v{v}, and this development build (v{want}) did not create this home, so it will not migrate it"
-                ),
+                Level::Warn,
+                format!("empty database (schema v0), this build creates schema v{want} in it"),
             )
-            .fix("use the installed another for this home; to migrate it with this build anyway, pass --dev-migrate (a backup is taken first)"),
+            .fix("another init"),
             None,
         );
     }

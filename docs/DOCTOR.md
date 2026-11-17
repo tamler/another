@@ -22,7 +22,7 @@ skip  peers     not checked until the database check passes
 |---|---|---|---|
 | `binary` | This binary's version and path, and the first `another` in the absolute entries of `PATH` | never | `PATH` finds a different `another`, or none |
 | `home` | `--home`, `$ANOTHER_HOME` or `~/.another` | it is missing or not a directory | on Unix, its mode is not `0700` |
-| `database` | `another.db`, opened read-only: the schema version and its tables against this build's, SQLite's `quick_check`, the local node, and `build.json` (which build created the home and which last migrated it) | the file is missing, not a database or damaged; the schema is newer than this build; the schema version is negative (not an another database, or edited by hand); the tables are not this build's for that version (another build changed them); the schema is older and this is a development build that did not create the home | the schema is older (a normal command backs it up, then migrates it); the database stayed locked for 2 s |
+| `database` | `another.db`, opened read-only: the schema version and its tables against this build's, SQLite's `quick_check`, the local node, and `build.json` (which build created the home and which last migrated it) | the file is missing, not a database or damaged; the schema is newer than this build; the schema version is negative (not an another database, or edited by hand); the tables are not this build's for that version (a different build changed them); the schema is older and this build will not migrate it (a development build on a home that is not a development home, or a binary at another path than the one the home belongs to) | the schema is older (a normal command backs it up, then migrates it); the database file is empty (a normal command creates the schema); the database stayed locked for 2 s |
 | `hooks` | Each client's hook config (Claude Code, Codex, Grok, Cursor), and the wrapper script each one runs | never | a config runs a wrapper that is missing or not executable, or that belongs to another home |
 | `server` | One `GET /health` on a loopback address: `--bind`, else the daemon's, else `127.0.0.1:7466` | never | something answers, but not with 200; or the server names another node than this home's (it serves another `ANOTHER_HOME`). Nothing answering is `info` |
 | `daemon` | The launchd service (macOS only) | never | it is installed but not loaded, or loaded but not answering. Serving a different home is `info` |
@@ -66,11 +66,14 @@ SQLite's `.recover` command (in the `sqlite3` shell) can often salvage the rows.
 
 A normal command brings an older database to its own schema. Three rules keep that safe.
 
-- **A backup first.** Before any migration, the database is copied to `backups/another-v<schema>-<UTC time>.db` in the home and the copy is checked. If the copy fails, nothing is migrated. Backups are kept until you delete them.
-- **Only a schema the build knows.** A build refuses a database whose schema is newer than its own, and one whose tables are not what it has for that version (another build changed them). It says so and writes nothing.
-- **A development build keeps to its own homes.** A build made with `cargo build`, `cargo run` or `cargo test` refuses to migrate a home that a development build did not create. Give it its own home with `ANOTHER_HOME=$(mktemp -d)`. `--dev-migrate` overrides this for one run. An installed build (`cargo install`, a release archive) migrates with no flag.
+- **A backup first.** Before any migration, the database is copied to `backups/another-v<schema>-<UTC time>.db` in the home and the copy is checked. If the copy fails, nothing is migrated. After a migration succeeds, the five newest backups are kept and older ones are deleted; other files you keep in `backups` are never touched. `backups` must be a directory: a symbolic link there is not followed, and the migration stops.
+- **Only a schema the build knows.** A build refuses a database whose schema is newer than its own, and one whose tables are not what it has for that version (a different build changed them; the message names the tables). It says so and leaves the database file as it was. Tool hooks and `another board` make the same check; they skip the catalog queries when `build.json` shows the tables were already checked and the schema has not changed since.
+- **A home belongs to one binary.** `build.json` records the path of the binary that created, adopted or last migrated the home, with symlinks resolved. An installed build at another path refuses to migrate the home and names both paths. Upgrading in place (`cargo install`, or a new file at the same path) keeps the path and migrates with no flag. A home from before this record has no path: the first installed build to run a normal command on it adopts it.
+- **A development build keeps to its own homes.** A build made with `cargo build`, `cargo run` or `cargo test` refuses to migrate a home unless only development builds have created and migrated it. Give it its own home with `ANOTHER_HOME=$(mktemp -d)`.
 
-`build.json` in the home records which build created the database and which last migrated it.
+`--dev-migrate` overrides the last two rules for one run; a backup is still taken first. `another --dev-migrate doctor` reports what a run with the flag would do.
+
+`build.json` in the home records which build created the database, which adopted it and which last migrated it, each with its binary's path.
 
 To restore a backup:
 
