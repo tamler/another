@@ -242,14 +242,67 @@ fn database(home: &Path) -> (Check, Option<Store>) {
         );
     }
     let (v, want) = (inspected.version, inspected.expected);
-    if v > want {
+    // No build writes a negative version, and none migrates one: this is not an another
+    // database, or it was edited by hand.
+    if v < 0 {
         return (
             check(
                 "database",
                 Level::Fail,
-                format!("schema v{v} is newer than this build (v{want})"),
+                format!("database schema version {v} is not valid"),
             )
-            .fix("upgrade another; an older build cannot use this database"),
+            .fix("check that --home or ANOTHER_HOME points at an another home"),
+            None,
+        );
+    }
+    let restore = match &inspected.latest_backup {
+        Some(backup) => format!(
+            "stop every another process and restore {} (docs/DOCTOR.md)",
+            backup.display()
+        ),
+        None => "stop every another process and restore a backup (docs/DOCTOR.md)".to_string(),
+    };
+    if v > want {
+        let by = match &inspected.origin.migrated {
+            Some(stamp) if stamp.schema == v => format!(
+                "; last migrated by a {} build of another {}",
+                stamp.build, stamp.version
+            ),
+            _ => String::new(),
+        };
+        return (
+            check(
+                "database",
+                Level::Fail,
+                format!("schema v{v} is newer than this build (v{want}){by}"),
+            )
+            .fix(format!(
+                "upgrade another; an older build cannot use this database. Or {restore}"
+            )),
+            None,
+        );
+    }
+    if !inspected.known {
+        return (
+            check(
+                "database",
+                Level::Fail,
+                format!("schema v{v} does not match this build's v{v}: another build changed it"),
+            )
+            .fix(format!("use the build that wrote it, or {restore}")),
+            None,
+        );
+    }
+    if v < want && inspected.development_build && !inspected.created_by_development_build {
+        return (
+            check(
+                "database",
+                Level::Fail,
+                format!(
+                    "schema v{v}, and this development build (v{want}) did not create this home, so it will not migrate it"
+                ),
+            )
+            .fix("use the installed another for this home; to migrate it with this build anyway, pass --dev-migrate (a backup is taken first)"),
             None,
         );
     }
@@ -260,7 +313,7 @@ fn database(home: &Path) -> (Check, Option<Store>) {
                 Level::Warn,
                 format!("schema v{v}, this build migrates it to v{want}"),
             )
-            .fix("another status (any normal command migrates it)"),
+            .fix("another status (any normal command backs it up, then migrates it)"),
             None,
         );
     }

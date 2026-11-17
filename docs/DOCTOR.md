@@ -7,7 +7,7 @@ $ another doctor
 ok    binary    another 0.1.0 at /Users/me/.local/bin/another (the one on PATH)
 ok    home      /Users/me/.another (0700)
 warn  database  schema v8, this build migrates it to v10
-                fix: another status (any normal command migrates it)
+                fix: another status (any normal command backs it up, then migrates it)
 ok    hooks     installed for claude, codex, grok, cursor
 ok    server    answering on 127.0.0.1:7466
 ok    daemon    one.toanother.another loaded, pid 969, healthy
@@ -22,7 +22,7 @@ skip  peers     not checked until the database check passes
 |---|---|---|---|
 | `binary` | This binary's version and path, and the first `another` in the absolute entries of `PATH` | never | `PATH` finds a different `another`, or none |
 | `home` | `--home`, `$ANOTHER_HOME` or `~/.another` | it is missing or not a directory | on Unix, its mode is not `0700` |
-| `database` | `another.db`, opened read-only: the schema version against this build's, SQLite's `quick_check`, and the local node | the file is missing, not a database or damaged; the schema is newer than this build | the schema is older (a normal command migrates it); the database stayed locked for 2 s |
+| `database` | `another.db`, opened read-only: the schema version and its tables against this build's, SQLite's `quick_check`, the local node, and `build.json` (which build created the home and which last migrated it) | the file is missing, not a database or damaged; the schema is newer than this build; the schema version is negative (not an another database, or edited by hand); the tables are not this build's for that version (another build changed them); the schema is older and this is a development build that did not create the home | the schema is older (a normal command backs it up, then migrates it); the database stayed locked for 2 s |
 | `hooks` | Each client's hook config (Claude Code, Codex, Grok, Cursor), and the wrapper script each one runs | never | a config runs a wrapper that is missing or not executable, or that belongs to another home |
 | `server` | One `GET /health` on a loopback address: `--bind`, else the daemon's, else `127.0.0.1:7466` | never | something answers, but not with 200; or the server names another node than this home's (it serves another `ANOTHER_HOME`). Nothing answering is `info` |
 | `daemon` | The launchd service (macOS only) | never | it is installed but not loaded, or loaded but not answering. Serving a different home is `info` |
@@ -60,4 +60,26 @@ If `database` fails with a `quick_check` complaint:
 - stop `another serve` and the daemon (`another daemon uninstall` on macOS);
 - copy `another.db` **together with** its `-wal` and `-shm` files somewhere safe before trying anything else. Committed data can sit in the `-wal` file, so a copy of `another.db` alone may be missing it.
 
-SQLite's `.recover` command (in the `sqlite3` shell) can often salvage the rows. Another has no backup or restore command yet.
+SQLite's `.recover` command (in the `sqlite3` shell) can often salvage the rows. If the damage followed an upgrade, restore the backup taken before it (next section).
+
+## Upgrades and backups
+
+A normal command brings an older database to its own schema. Three rules keep that safe.
+
+- **A backup first.** Before any migration, the database is copied to `backups/another-v<schema>-<UTC time>.db` in the home and the copy is checked. If the copy fails, nothing is migrated. Backups are kept until you delete them.
+- **Only a schema the build knows.** A build refuses a database whose schema is newer than its own, and one whose tables are not what it has for that version (another build changed them). It says so and writes nothing.
+- **A development build keeps to its own homes.** A build made with `cargo build`, `cargo run` or `cargo test` refuses to migrate a home that a development build did not create. Give it its own home with `ANOTHER_HOME=$(mktemp -d)`. `--dev-migrate` overrides this for one run. An installed build (`cargo install`, a release archive) migrates with no flag.
+
+`build.json` in the home records which build created the database and which last migrated it.
+
+To restore a backup:
+
+```sh
+another daemon uninstall          # and stop every other another process
+cd ~/.another
+cp backups/another-v10-20261117T031000Z.db another.db
+rm -f another.db-wal another.db-shm
+another doctor                    # with the build that matches that schema
+```
+
+Everything written after the backup is gone. There is no restore command.
