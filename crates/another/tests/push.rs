@@ -5,6 +5,8 @@
 
 #[path = "common/hosted_ci.rs"]
 mod hosted_ci;
+#[path = "common/transports.rs"]
+mod transports;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -899,37 +901,58 @@ fn herdr_sessions_get_a_row_at_start_and_lose_it_at_end() {
     // A Herdr session is a row, no longer an automatic wake target.
     assert_eq!(env.json(&["wake", "list"]).as_array().unwrap().len(), 0);
 
-    // tmux running inside a Herdr pane: tmux is the innermost terminal, and a tmux pane
-    // is still recorded as the agent's wake target.
-    env.start(
-        "codex",
-        &env.main,
-        &[
-            ("HERDR_PANE_ID", "w7:p3"),
-            ("TMUX_PANE", "%4"),
-            ("TERM_PROGRAM", "tmux"),
-        ],
-    );
-    let targets = env.json(&["wake", "list"]);
-    assert!(targets.as_array().unwrap().iter().any(|t| {
-        t["agent"] == "codex@shop" && t["via"] == "tmux" && t["target"] == "%4" && t["auto"] == true
-    }));
-    assert_eq!(sessions(&env).as_array().unwrap().len(), 1);
+    // tmux running inside a Herdr pane, with a tmux transport configured: tmux is the
+    // innermost terminal, so the session's row is a tmux row. No wake target is stored.
+    transports::write_example(&env.another_home);
+    let in_tmux = [
+        ("HERDR_PANE_ID", "w7:p3"),
+        ("TMUX_PANE", "%4"),
+        ("TERM_PROGRAM", "tmux"),
+    ];
+    env.start("codex", &env.main, &in_tmux);
+    assert_eq!(env.json(&["wake", "list"]).as_array().unwrap().len(), 0);
+    let rows = sessions(&env);
+    assert_eq!(rows.as_array().unwrap().len(), 2, "{rows}");
+    let codex = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["agent"] == "codex@shop")
+        .unwrap();
+    assert_eq!(codex["transport"], "tmux", "{rows}");
+    assert_eq!(codex["target"], "%4");
+    assert_eq!(codex["hook_made"], true);
 
     // The end of another session leaves the row alone; the end of this one deletes it.
     let other = json!({ "session_id": "claude-s2", "cwd": env.main });
     env.hook_timed("session-end", "claude", &other, &in_herdr);
-    assert_eq!(sessions(&env).as_array().unwrap().len(), 1);
+    assert_eq!(sessions(&env).as_array().unwrap().len(), 2);
     let end = json!({ "session_id": "claude-s1", "cwd": env.main });
     env.hook_timed("session-end", "claude", &end, &in_herdr);
+    assert_eq!(sessions(&env).as_array().unwrap().len(), 1);
+    let end = json!({ "session_id": "codex-s1", "cwd": env.main });
+    env.hook_timed("session-end", "codex", &end, &in_tmux);
     assert_eq!(sessions(&env).as_array().unwrap().len(), 0);
 }
 
 #[test]
 fn wake_prune_drops_automatic_targets_of_agents_that_left_and_asks_no_transport() {
     let env = Env::new();
-    env.start("claude", &env.main, &[("TMUX_PANE", "%1")]);
-    env.start("codex", &env.main, &[("TMUX_PANE", "%2")]);
+    env.start("claude", &env.main, &[]);
+    env.start("codex", &env.main, &[]);
+    // Panes captured by a build that had tmux built in: stored as it stored them.
+    let db = rusqlite::Connection::open(env.another_home.join("another.db")).unwrap();
+    for (agent, pane) in [("claude@shop", "%1"), ("codex@shop", "%2")] {
+        let stored = db
+            .execute(
+                "INSERT INTO wake_targets (agent_id, via, target, auto, updated_at)
+                 SELECT agent_id, 'tmux', ?1, 1, 0 FROM agents WHERE address = ?2",
+                rusqlite::params![pane, agent],
+            )
+            .unwrap();
+        assert_eq!(stored, 1, "{agent}");
+    }
+    drop(db);
     env.ok(&["agent", "register", "bob", "--program", "other"]);
     env.ok(&[
         "wake",
@@ -941,7 +964,8 @@ fn wake_prune_drops_automatic_targets_of_agents_that_left_and_asks_no_transport(
         "--target",
         "gone-pane",
     ]);
-    // claude's session ends in another terminal, so its capture is still stored.
+    // claude's session ends; with no tmux transport configured the hook cannot tell which
+    // pane it is in, so the capture is still stored and pruning drops it.
     let end = json!({ "session_id": "claude-s1", "cwd": env.main });
     env.hook_timed("session-end", "claude", &end, &[("TMUX_PANE", "%9")]);
 

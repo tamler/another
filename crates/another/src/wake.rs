@@ -7,8 +7,9 @@
 //! recorded failure, and stops further automatic wakes to that session.
 //!
 //! `another wake --agent` is a direct owner action; `another wake --all` is one wake pass
-//! from the command line. tmux and cmux targets are woken by hand only, through fixed
-//! commands that run as argv (no shell).
+//! from the command line. Sessions in a command transport (tmux, cmux, anything the owner
+//! configured in `transports.json`) are observed where the transport can list them, and
+//! woken by hand only.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -25,8 +26,9 @@ use another_core::{
 use anyhow::Result;
 use serde::Serialize;
 
+use crate::transport::command::COMMAND_CONFIRMS_GONE;
 use crate::transport::herdr::{HerdrTransport, HERDR_CONFIRMS_GONE, HERDR_WAKES_WEAK_MATCH};
-use crate::transport::{ListResult, State, Transport, WakeResult};
+use crate::transport::{Config, ListResult, State, Transport, WakeResult};
 
 /// Shown where a wake line may still sit in the agent's input box.
 pub const INPUT_BOX_HINT: &str =
@@ -107,6 +109,8 @@ pub struct WakeOptions {
     /// Whether `--all` wakes a weakly matched session (default:
     /// [`HERDR_WAKES_WEAK_MATCH`]). A wake by name is not affected.
     pub wake_weak: Option<bool>,
+    /// The command transports to use (default: the home's `transports.json`, read now).
+    pub config: Option<Config>,
 }
 
 impl WakeOptions {
@@ -116,6 +120,25 @@ impl WakeOptions {
             None => HerdrTransport::from_env(),
         }
     }
+
+    fn config(&self, store: &Store) -> Config {
+        match &self.config {
+            Some(config) => config.clone(),
+            None => crate::transport::config_for(store),
+        }
+    }
+
+    /// The transport `via` names, or why there is none.
+    fn transport(
+        &self,
+        via: &WakeVia,
+        config: &Config,
+    ) -> std::result::Result<Box<dyn Transport>, String> {
+        if via.as_str() == "herdr" {
+            return Ok(Box::new(self.herdr()));
+        }
+        crate::transport::transport(via.as_str(), config).map_err(|e| e.to_string())
+    }
 }
 
 /// Longest wake line, in characters.
@@ -123,48 +146,15 @@ const MAX_WAKE_CHARS: usize = 1000;
 /// Longest subject quoted in a default wake line, in characters.
 const MAX_WAKE_SUBJECT_CHARS: usize = 80;
 
-/// The commands for a wake by hand through tmux or cmux (and, for `--dry-run`, Herdr).
-///
-/// Every adapter types or shows `message` in another agent's terminal, and parts of it
-/// (subjects) were chosen by whoever sent the mail. The line is made safe here, for every
-/// caller: control characters (CR, LF, ESC, …) become spaces so nothing is pressed as a
-/// key, and for cmux, which unescapes backslash sequences such as `\n`, backslashes in
-/// the text become `/` so the only escape left is the one that submits the line.
-pub fn commands(via: WakeVia, target: &str, message: &str) -> Vec<Vec<String>> {
-    let safe = another_core::single_line(message, MAX_WAKE_CHARS);
-    let message = safe.as_str();
-    let cmux_text = safe.replace('\\', "/");
-    let s = |x: &str| x.to_string();
-    match via {
-        WakeVia::Tmux => vec![
-            vec![
-                s("tmux"),
-                s("send-keys"),
-                s("-t"),
-                s(target),
-                s("-l"),
-                s(message),
-            ],
-            vec![s("tmux"), s("send-keys"), s("-t"), s(target), s("Enter")],
-        ],
-        WakeVia::Cmux if target == "notify" => vec![vec![
-            s("cmux"),
-            s("notify"),
-            s("--title"),
-            s("Another"),
-            s("--body"),
-            cmux_text.clone(),
-        ]],
-        // `cmux send` unescapes `\n`, which submits the line.
-        WakeVia::Cmux => vec![vec![
-            s("cmux"),
-            s("send"),
-            s("--surface"),
-            s(target),
-            format!("{cmux_text}\\n"),
-        ]],
-        WakeVia::Herdr => HerdrTransport::from_env().wake_argv(target, message),
-    }
+/// Why a wake to the cmux target `notify` is refused: before command transports that
+/// target meant `cmux notify`; a `cmux` transport would now send to a surface of that name.
+const CMUX_NOTIFY: &str = "the cmux target `notify` no longer means a notification: define a \
+     transport for it in transports.json (docs/WAKE.md has `cmux-notify`) and set the \
+     agent's target again with `another wake set --via cmux-notify --target notify`";
+
+/// Whether `via` and `target` are the old `cmux notify` form.
+pub fn is_old_cmux_notify(via: &str, target: &str) -> bool {
+    via == "cmux" && target == "notify"
 }
 
 /// The wake line for an agent, built in one place: a one-line inbox summary, or `None`
@@ -247,7 +237,7 @@ fn key(row: &TransportSession) -> RowKey {
 fn pick_row<'a>(
     rows: &'a [TransportSession],
     agent: &str,
-    via: Option<WakeVia>,
+    via: Option<&str>,
     wake_weak: bool,
     now: i64,
     held: impl Fn(&TransportSession) -> Option<&'static str>,
@@ -263,14 +253,16 @@ fn pick_row<'a>(
         };
         let state = row.state.as_deref();
         working |= state == Some("working");
-        let skip = if let Some(via) = via.filter(|v| v.as_str() != row.transport) {
-            Some(format!(
-                "is a {} session, not {}",
-                row.transport,
-                via.as_str()
-            ))
+        let skip = if let Some(via) = via.filter(|v| *v != row.transport) {
+            Some(format!("is a {} session, not {via}", row.transport))
         } else if row.transport != "herdr" {
-            Some(format!("{} is not woken automatically", row.transport))
+            // A command transport's `status` reports no session id, no program and no
+            // directory, so nothing can say who is in the pane just before the wake.
+            Some(format!(
+                "is a {} session, which is not woken automatically (its status cannot \
+                 say who is in the pane); wake it with `another wake --agent`",
+                row.transport
+            ))
         } else if row.matched == 2 && !wake_weak {
             Some(WEAK_OFF.to_string())
         } else if row.stopped() {
@@ -293,7 +285,8 @@ fn pick_row<'a>(
     best.ok_or_else(|| {
         if why.is_empty() {
             (
-                "no session Another can identify (a hook inside Herdr records one)".to_string(),
+                "no session Another can identify (a hook inside a transport records one)"
+                    .to_string(),
                 false,
             )
         } else {
@@ -432,9 +425,10 @@ pub fn wake(store: &Store, agent: &str, opts: &WakeOptions) -> Result<WakePlan> 
     let mut plan = WakePlan::new(&address);
     plan.via = opts
         .via
-        .or(hand.as_ref().map(|t| t.via))
+        .clone()
+        .or(hand.as_ref().map(|t| t.via.clone()))
         .or(mine.iter().find_map(|r| row_via(r)))
-        .or(auto.as_ref().map(|t| t.via));
+        .or(auto.as_ref().map(|t| t.via.clone()));
     plan.message = opts.message.clone().or(auto_message);
     if plan.message.is_none() {
         if !opts.force {
@@ -445,9 +439,9 @@ pub fn wake(store: &Store, agent: &str, opts: &WakeOptions) -> Result<WakePlan> 
             "Another: check your inbox with the fetch_inbox tool (or `another inbox --agent {address}`)."
         ));
     }
-    let Some(via) = plan.via else {
+    let Some(via) = plan.via.clone() else {
         plan.skipped = Some(format!(
-            "no wake target for {address}; set one with `another wake set --agent {address} --via tmux --target <pane>`"
+            "no wake target for {address}; set one with `another wake set --agent {address} --via herdr --target <pane>`"
         ));
         return Ok(plan);
     };
@@ -456,7 +450,7 @@ pub fn wake(store: &Store, agent: &str, opts: &WakeOptions) -> Result<WakePlan> 
     let row = if opts.target.is_some() || hand.is_some() {
         None
     } else {
-        mine.iter().find(|r| row_via(r) == Some(via)).copied()
+        mine.iter().find(|r| r.transport == via.as_str()).copied()
     };
     plan.target = opts
         .target
@@ -464,7 +458,7 @@ pub fn wake(store: &Store, agent: &str, opts: &WakeOptions) -> Result<WakePlan> 
         .or_else(|| hand.as_ref().map(|t| t.target.clone()))
         .or_else(|| row.map(|r| r.target.clone()))
         .or_else(|| auto.as_ref().map(|t| t.target.clone()));
-    if plan.target.is_none() && via == WakeVia::Herdr {
+    if plan.target.is_none() && via.as_str() == "herdr" {
         // Herdr addresses agents by name; default to the Another agent's name.
         plan.target = Some(address.split('@').next().unwrap_or(&address).to_string());
     }
@@ -474,8 +468,21 @@ pub fn wake(store: &Store, agent: &str, opts: &WakeOptions) -> Result<WakePlan> 
     };
     plan.session_id = row.map(|r| r.session_id.clone());
     // A `--target` override, a target stored before this check, or Herdr's default of the
-    // agent's name (which may start with `-`) never reaches an adapter as an option.
+    // agent's name (which may start with `-`) never reaches a transport as an option.
     another_core::refuse_option_like_target(&target)?;
+    // A transport nothing provides (a tmux or cmux target from before command transports,
+    // with no `transports.json` yet) is refused with what to set.
+    let transport = match opts.transport(&via, &opts.config(store)) {
+        Ok(transport) => transport,
+        Err(why) => {
+            plan.error = Some(format!("not woken, nothing was typed: {why}"));
+            return Ok(plan);
+        }
+    };
+    if is_old_cmux_notify(via.as_str(), &target) {
+        plan.error = Some(format!("not woken, nothing was typed: {CMUX_NOTIFY}"));
+        return Ok(plan);
+    }
     // The plan's message is printed by `another wake --dry-run` and returned in JSON: keep
     // it to the same safe line the adapters type.
     plan.message = plan
@@ -483,20 +490,18 @@ pub fn wake(store: &Store, agent: &str, opts: &WakeOptions) -> Result<WakePlan> 
         .as_deref()
         .map(|m| another_core::single_line(m, MAX_WAKE_CHARS));
     let line = plan.message.clone().unwrap_or_default();
-    let herdr = opts.herdr();
-    plan.commands = match via {
-        WakeVia::Herdr => herdr.wake_argv(&target, &line),
-        _ => commands(via, &target, &line),
-    };
+    plan.commands = transport.wake_argv(&target, &line);
     if opts.dry_run {
         plan.skipped = Some("dry run".into());
         return Ok(plan);
     }
     let cancel = opts.cancel.as_deref();
-    if let Some(row) = row {
+    // A command transport's `status` reports no session id, no program and no directory,
+    // so it cannot identify a row; only Herdr's answer is held against the row.
+    if let Some(row) = row.filter(|_| via.as_str() == "herdr") {
         // The target came from a session row: type only into the pane that still shows
         // that session. Herdr itself refuses a blocked agent, so `idle` is not required.
-        let seen = herdr.status(&row.target, cancel);
+        let seen = transport.status(&row.target, cancel);
         if let Identity::No(reason) = identify(row, &seen, newest_at_target(row, &rows)) {
             let why = match seen.state {
                 State::Gone | State::NoAnswer => {
@@ -519,10 +524,7 @@ pub fn wake(store: &Store, agent: &str, opts: &WakeOptions) -> Result<WakePlan> 
             && r.target == target
             && r.wake_stop.is_some()
     });
-    let result = match via {
-        WakeVia::Herdr => herdr.wake(&target, &line, cancel),
-        _ => run_commands(via, &plan.commands, cancel),
-    };
+    let result = transport.wake(&target, &line, cancel);
     plan.finish(&result);
     if had_stop || result.outcome == WakeOutcome::NotStarted {
         plan.hint = Some(INPUT_BOX_HINT.to_string());
@@ -543,53 +545,6 @@ pub fn wake(store: &Store, agent: &str, opts: &WakeOptions) -> Result<WakePlan> 
     }
     Ok(plan)
 }
-
-/// Run the fixed tmux or cmux commands. These tools cannot say whether the agent started,
-/// so the best outcome is `unconfirmed`.
-fn run_commands(via: WakeVia, commands: &[Vec<String>], cancel: Option<&AtomicBool>) -> WakeResult {
-    for (i, argv) in commands.iter().enumerate() {
-        // Before the first command nothing was typed; after it something may have been.
-        let failed = if i == 0 {
-            WakeOutcome::Undelivered
-        } else {
-            WakeOutcome::Unknown
-        };
-        let mut cmd = Command::new(&argv[0]);
-        cmd.args(&argv[1..]);
-        match run_bounded(&mut cmd, PROMPT_TIMEOUT, cancel) {
-            Err(e) => {
-                return WakeResult::new(
-                    failed,
-                    format!("running {} (is it installed?): {e}", argv[0]),
-                )
-            }
-            Ok(Bounded::Done(ran)) if ran.status.success() => {}
-            Ok(Bounded::Done(ran)) => {
-                return WakeResult::new(
-                    failed,
-                    format!("{} exited with {}", argv.join(" "), ran.status),
-                )
-            }
-            Ok(Bounded::TimedOut) | Ok(Bounded::TooMuchOutput) => {
-                return WakeResult::new(
-                    WakeOutcome::Unknown,
-                    format!(
-                        "{} did not finish within {}s (or the daemon is stopping); it was stopped",
-                        argv[0],
-                        PROMPT_TIMEOUT.as_secs()
-                    ),
-                )
-            }
-        }
-    }
-    WakeResult::new(
-        WakeOutcome::Unconfirmed,
-        format!("{} cannot report whether the agent started", via.as_str()),
-    )
-}
-
-/// Longest a hand wake command (`tmux send-keys`, `cmux send`) may take.
-pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// After the adapter exits, how long to keep collecting what it already wrote. The pipe
 /// may stay open when the adapter left a background process holding it; that process is
@@ -800,14 +755,15 @@ fn wake_one_of_all(
     plan.message = Some(line.clone());
     let rows = store.transport_sessions()?;
     let wake_weak = opts.wake_weak.unwrap_or(HERDR_WAKES_WEAK_MATCH);
-    let row = match pick_row(&rows, agent, opts.via, wake_weak, store.now(), |_| None) {
+    let via = opts.via.as_ref().map(WakeVia::as_str);
+    let row = match pick_row(&rows, agent, via, wake_weak, store.now(), |_| None) {
         Ok(row) => row,
         Err((why, _)) => {
             plan.skipped = Some(why);
             return Ok(plan);
         }
     };
-    plan.via = Some(WakeVia::Herdr);
+    plan.via = Some(WakeVia::herdr());
     plan.target = Some(row.target.clone());
     plan.session_id = Some(row.session_id.clone());
     plan.commands = herdr.wake_argv(&row.target, &line);
@@ -839,63 +795,75 @@ fn wake_one_of_all(
     Ok(plan)
 }
 
-/// The terminal this process runs in. When multiplexers are nested, `TERM_PROGRAM` names
-/// the innermost one; otherwise Herdr wins, then tmux, then cmux.
-pub fn current_target() -> Option<(WakeVia, String)> {
-    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
-    let herdr = var("HERDR_PANE_ID").map(|p| (WakeVia::Herdr, p));
-    let tmux = var("TMUX_PANE").map(|p| (WakeVia::Tmux, p));
-    let cmux = var("CMUX_SURFACE_ID").map(|p| (WakeVia::Cmux, p));
-    match var("TERM_PROGRAM").as_deref() {
-        Some("tmux") if tmux.is_some() => tmux,
-        Some("herdr") if herdr.is_some() => herdr,
-        _ => herdr.or(tmux).or(cmux),
-    }
+/// The transport this process runs in, and its target there: (transport name, target).
+/// The candidates are Herdr when `HERDR_PANE_ID` is set, and each configured transport
+/// whose `capture_env` variable is set. One candidate wins outright. With several
+/// (multiplexers nested in each other), the one whose name is `$TERM_PROGRAM` wins, else
+/// Herdr, else the first in the order the config lists them.
+pub fn current_target(config: &Config) -> Option<(String, String)> {
+    target_in(config, |key| std::env::var(key).ok())
 }
 
-/// A local hook of a session ran: record where that session can be found. Inside Herdr
-/// the session gets (or keeps) its row, stamped with the client and directory the hook
-/// saw. Inside tmux or cmux, a session start records the pane as the agent's wake target.
+/// [`current_target`] over any environment.
+pub fn target_in(
+    config: &Config,
+    env: impl Fn(&str) -> Option<String>,
+) -> Option<(String, String)> {
+    let var = |key: &str| env(key).filter(|v| !v.trim().is_empty());
+    let mut candidates: Vec<(String, String)> = var("HERDR_PANE_ID")
+        .map(|pane| ("herdr".to_string(), pane))
+        .into_iter()
+        .collect();
+    for spec in &config.transports {
+        if let Some(target) = spec.capture_env.as_deref().and_then(var) {
+            candidates.push((spec.name.clone(), target));
+        }
+    }
+    let innermost = var("TERM_PROGRAM")
+        .and_then(|program| candidates.iter().position(|(name, _)| *name == program))
+        .unwrap_or(0);
+    candidates.into_iter().nth(innermost)
+}
+
+/// A local hook of a session ran: record where that session can be found. Inside Herdr or
+/// a configured transport the session gets (or keeps) its row, stamped with the client and
+/// directory the hook saw. A config that was refused leaves only Herdr, and the hook never
+/// fails because of it.
 pub fn stamp_session(
     store: &Store,
     agent: &str,
     session_id: Option<&str>,
     client: &str,
     dir: &Path,
-    start: bool,
 ) {
-    match current_target() {
-        Some((WakeVia::Herdr, pane)) => {
-            let cwd = another_core::resolve_dir(dir);
-            let stamped = store.stamp_transport_session(
-                agent,
-                session_id.unwrap_or_default(),
-                "herdr",
-                &pane,
-                client,
-                &cwd,
-            );
-            if let Err(e) = stamped {
-                tracing::debug!(error = %e, "session row not stamped");
-            }
-        }
-        Some((via, target)) if start => {
-            let _ = store.set_wake_target(agent, via, &target, true);
-        }
-        _ => {}
+    let Some((transport, target)) = current_target(&crate::transport::config_for(store)) else {
+        return;
+    };
+    let cwd = another_core::resolve_dir(dir);
+    let stamped = store.stamp_transport_session(
+        agent,
+        session_id.unwrap_or_default(),
+        &transport,
+        &target,
+        client,
+        &cwd,
+    );
+    if let Err(e) = stamped {
+        tracing::debug!(error = %e, "session row not stamped");
     }
 }
 
-/// At session end, delete that session's row, and forget a captured target that still
-/// names this terminal, so nothing is typed into the pane after the agent has left it.
+/// At session end, delete that session's row, and forget a target that an earlier build
+/// captured for this terminal, so nothing is typed into the pane after the agent has left
+/// it.
 pub fn release_session(store: &Store, agent: &str, session_id: Option<&str>) {
-    let here = current_target();
+    let here = current_target(&crate::transport::config_for(store));
     let place = here
         .as_ref()
         .map(|(via, target)| (via.as_str(), target.as_str()));
     let _ = store.end_transport_session(agent, session_id.unwrap_or_default(), place);
-    if let Some((via, target)) = &here {
-        let _ = store.clear_auto_wake_target(agent, Some((*via, target)));
+    if place.is_some() {
+        let _ = store.clear_auto_wake_target(agent, place);
     }
 }
 
@@ -954,7 +922,7 @@ pub fn prune(store: &Store, dry_run: bool) -> Result<Vec<PruneRow>> {
         };
         if stale.is_some() {
             if !dry_run {
-                store.clear_auto_wake_target(&t.agent, Some((t.via, &t.target)))?;
+                store.clear_auto_wake_target(&t.agent, Some((t.via.as_str(), &t.target)))?;
             }
             row.pruned = true;
         }
@@ -979,11 +947,15 @@ pub fn prune(store: &Store, dry_run: bool) -> Result<Vec<PruneRow>> {
 pub struct PushEvent {
     pub agent: String,
     pub target: String,
-    /// A wake outcome (`started`, `not_started`, ...), `skipped`, `working`, or `gone` for
-    /// a session the sweep confirmed gone.
+    /// A wake outcome (`started`, `not_started`, ...), `skipped`, `working`, `gone` for a
+    /// session the sweep confirmed gone, or [`CONFIG_REFUSED`] when `transports.json` was
+    /// refused (reported once per change of the reason).
     pub action: String,
     pub detail: String,
 }
+
+/// The [`PushEvent::action`] of a refused `transports.json`.
+pub const CONFIG_REFUSED: &str = "config_refused";
 
 /// The daemon side of the transport layer: the sweep and the wake pass. Every time is read
 /// from the store's clock. Which messages were announced is claimed in the database
@@ -1000,6 +972,10 @@ pub struct Waker {
     /// `None` confirms nothing: what this build ships with for Herdr
     /// ([`HERDR_CONFIRMS_GONE`]).
     pub confirm_after: Option<Duration>,
+    /// The same for sessions of a command transport, which can be confirmed only where its
+    /// `list` prints session ids. `None` confirms nothing: what this build ships with
+    /// ([`COMMAND_CONFIRMS_GONE`]).
+    pub confirm_command_after: Option<Duration>,
     /// Whether a weakly matched session (a pane that reports no session id) is woken.
     /// What this build ships with is [`HERDR_WAKES_WEAK_MATCH`].
     pub wake_weak: bool,
@@ -1015,6 +991,8 @@ pub struct Waker {
     /// Last decision per agent, so only changes are reported.
     last_action: HashMap<String, String>,
     last_sweep: Option<i64>,
+    /// The config refusal last reported, so it is reported once per change.
+    config_error: Option<String>,
 }
 
 impl Default for Waker {
@@ -1037,6 +1015,8 @@ impl Waker {
             recheck: Duration::from_secs(5),
             confirm_after: HERDR_CONFIRMS_GONE
                 .then(|| Duration::from_millis(another_core::GONE_CONFIRM_AFTER_MS as u64)),
+            confirm_command_after: COMMAND_CONFIRMS_GONE
+                .then(|| Duration::from_millis(another_core::GONE_CONFIRM_AFTER_MS as u64)),
             wake_weak: HERDR_WAKES_WEAK_MATCH,
             transports,
             seen: HashMap::new(),
@@ -1045,14 +1025,27 @@ impl Waker {
             unrecorded: HashSet::new(),
             last_action: HashMap::new(),
             last_sweep: None,
+            config_error: None,
         }
     }
 
+    /// One of the transports this waker was built over (Herdr).
     fn transport(&self, name: &str) -> Option<&dyn Transport> {
         self.transports
             .iter()
             .find(|t| t.name() == name)
             .map(|t| t.as_ref())
+    }
+
+    /// What `transport` lists now: a transport this waker was built over, else a command
+    /// transport of `config`. `None` when nothing provides that name.
+    fn ask_list(&self, name: &str, config: &Config) -> Option<ListResult> {
+        if let Some(transport) = self.transport(name) {
+            return Some(transport.list(Some(&self.cancel)));
+        }
+        let spec = config.get(name)?;
+        let transport = crate::transport::command::CommandTransport::new(spec.clone());
+        Some(transport.list(Some(&self.cancel)))
     }
 
     /// Whether the 30-second sweep is due by the store's clock.
@@ -1072,10 +1065,25 @@ impl Waker {
     }
 
     /// Ask each transport that has a hook-made session row what it can see, once, and
-    /// record the answer for every such row. Nothing else observes. Returns the sessions
-    /// confirmed gone.
+    /// record the answer for every such row. Nothing else observes. `transports.json` is
+    /// read here, once per sweep. Returns the sessions confirmed gone, and a refusal of
+    /// the config when it is new.
     pub fn sweep(&mut self, store: &Store) -> Result<Vec<PushEvent>> {
         self.last_sweep = Some(store.now());
+        let config = crate::transport::config_for(store);
+        let mut events = Vec::new();
+        let refusal = config.refusal();
+        if refusal != self.config_error {
+            if let Some(why) = &refusal {
+                events.push(PushEvent {
+                    agent: String::new(),
+                    target: crate::transport::command::CONFIG_FILE.to_string(),
+                    action: CONFIG_REFUSED.into(),
+                    detail: why.clone(),
+                });
+            }
+            self.config_error = refusal;
+        }
         let mut names: Vec<String> = store
             .transport_sessions()?
             .into_iter()
@@ -1084,16 +1092,22 @@ impl Waker {
             .collect();
         names.sort();
         names.dedup();
-        let confirm_after = self.confirm_after.map(|d| d.as_millis() as i64);
-        let mut events = Vec::new();
         for name in names {
             if self.cancel.load(Ordering::SeqCst) {
                 break;
             }
-            let Some(transport) = self.transport(&name) else {
+            let confirm_after = if self.transport(&name).is_some() {
+                self.confirm_after
+            } else {
+                self.confirm_command_after
+            };
+            let confirm_after = confirm_after.map(|d| d.as_millis() as i64);
+            // Rows of a transport nothing provides are left as they are: nothing can be
+            // asked about them. `another transport status` and `another doctor` say so.
+            let Some(listed) = self.ask_list(&name, &config) else {
                 continue;
             };
-            let confirmed = match transport.list(Some(&self.cancel)) {
+            let confirmed = match listed {
                 ListResult::Sessions(listed) => {
                     store.observe_transport_sessions(&name, Ok(&listed), confirm_after)?
                 }
@@ -1231,23 +1245,5 @@ impl Waker {
                 (result.outcome.as_str().into(), target, result.detail)
             }
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn adapter_commands() {
-        let t = commands(WakeVia::Tmux, "%3", "hi");
-        assert_eq!(t[0], ["tmux", "send-keys", "-t", "%3", "-l", "hi"]);
-        assert_eq!(t[1], ["tmux", "send-keys", "-t", "%3", "Enter"]);
-        let c = commands(WakeVia::Cmux, "surface-1", "hi");
-        assert_eq!(c[0], ["cmux", "send", "--surface", "surface-1", "hi\\n"]);
-        let n = commands(WakeVia::Cmux, "notify", "hi");
-        assert_eq!(n[0][1], "notify");
-        let h = commands(WakeVia::Herdr, "reviewer", "hi");
-        assert_eq!(&h[0][1..6], ["agent", "prompt", "reviewer", "hi", "--wait"]);
     }
 }

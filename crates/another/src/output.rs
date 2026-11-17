@@ -480,20 +480,59 @@ pub fn sync_report(r: &crate::fed::SyncReport) -> String {
     out
 }
 
-pub fn wake_targets(ts: &[WakeTarget]) -> String {
+/// One stored wake target as `another wake list` shows it.
+#[derive(Debug, Clone, Serialize)]
+pub struct WakeTargetRow {
+    #[serde(flatten)]
+    pub target: WakeTarget,
+    /// Whether a transport of that name exists now: `herdr`, or one in `transports.json`.
+    pub configured: bool,
+    /// What is wrong with the target, if anything, and what to set.
+    pub note: Option<String>,
+}
+
+impl WakeTargetRow {
+    pub fn new(target: WakeTarget, config: &crate::transport::Config) -> WakeTargetRow {
+        let via = target.via.as_str();
+        let configured = config.provides(via);
+        let note = if !configured {
+            Some(config.why_missing(via))
+        } else if crate::wake::is_old_cmux_notify(via, &target.target) {
+            Some(
+                "the target `notify` no longer means a notification: set it again with a \
+                 transport of its own (docs/WAKE.md has `cmux-notify`)"
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        WakeTargetRow {
+            target,
+            configured,
+            note,
+        }
+    }
+}
+
+pub fn wake_targets(ts: &[WakeTargetRow]) -> String {
     if ts.is_empty() {
-        return "no wake targets (hooks record tmux and cmux panes automatically; Herdr sessions are listed by `another transport status`)"
+        return "no wake targets set by hand (sessions that hooks recorded are listed by `another transport status`)"
             .to_string();
     }
     ts.iter()
-        .map(|t| {
-            format!(
+        .map(|row| {
+            let t = &row.target;
+            let mut line = format!(
                 "{:<24} {:<6} {}{}\n",
                 t.agent,
                 t.via.as_str(),
                 t.target,
                 if t.auto { "  (auto)" } else { "" }
-            )
+            );
+            if let Some(note) = &row.note {
+                let _ = writeln!(line, "  not usable: {note}");
+            }
+            line
         })
         .collect()
 }
@@ -503,7 +542,7 @@ pub fn wake_plans(ps: &[crate::wake::WakePlan]) -> String {
         .map(|p| {
             let at = format!(
                 "via {} ({})",
-                p.via.map_or("-", |v| v.as_str()),
+                p.via.as_ref().map_or("-", |v| v.as_str()),
                 p.target.as_deref().unwrap_or("-")
             );
             let hint = p

@@ -1,5 +1,6 @@
-//! `another wake` end to end, through the real binary, for every transport: tmux, cmux
-//! (`send` to a surface and `notify`) and Herdr. The fake adapters record each argument
+//! `another wake` end to end, through the real binary, for every transport: Herdr, and the
+//! command transports of the documented example (tmux, cmux `send` to a surface, and cmux
+//! `notify`), read from `transports.json`. The fake adapters record each argument
 //! byte for byte, so a control character that reached an adapter is seen exactly as it
 //! would have been typed. One test drives a real tmux server, so the line discipline of a
 //! real terminal is in the loop as well.
@@ -7,6 +8,9 @@
 //! Nothing here signals or force-stops a process: the fake adapters exit at once, and the
 //! real tmux server runs on a private socket and is shut down with `tmux kill-server`.
 #![cfg(unix)]
+
+#[path = "common/transports.rs"]
+mod transports;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -71,6 +75,7 @@ impl Env {
             bin,
             _dir: dir,
         };
+        transports::write_example(&env.home);
         env.json(&["agent", "register", "mallory", "--program", "other"]);
         env.json(&["agent", "register", "codex", "--program", "codex"]);
         env.json(&["agent", "register", "claude", "--program", "claude"]);
@@ -199,7 +204,7 @@ fn assert_transport_shape(via: &str, target: &str, calls: &[Vec<String>]) -> Str
             assert_eq!(calls[1], ["tmux", "send-keys", "-t", target, "Enter"]);
             calls[0][5].clone()
         }
-        ("cmux", "notify") => {
+        ("cmux-notify", _) => {
             assert_eq!(calls.len(), 1, "{calls:?}");
             assert_eq!(
                 calls[0][..5],
@@ -250,7 +255,7 @@ fn assert_transport_shape(via: &str, target: &str, calls: &[Vec<String>]) -> Str
 const TRANSPORTS: [(&str, &str); 4] = [
     ("tmux", "%3"),
     ("cmux", "surface:1"),
-    ("cmux", "notify"),
+    ("cmux-notify", "notify"),
     ("herdr", "codex"),
 ];
 
@@ -279,7 +284,7 @@ fn every_transport_types_a_hostile_message_as_one_clean_line() {
         assert_eq!(plan[0]["message"], expected.as_str(), "{via} {target}");
         let calls = env.calls()[before..].to_vec();
         let typed = assert_transport_shape(via, target, &calls);
-        let want = if via == "cmux" {
+        let want = if via.starts_with("cmux") {
             expected.replace('\\', "/")
         } else {
             expected.clone()

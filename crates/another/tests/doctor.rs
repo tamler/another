@@ -146,6 +146,7 @@ fn a_fresh_home_is_ok_and_doctor_changes_nothing() {
     assert_eq!(status(&r, "hooks"), "info");
     assert_eq!(status(&r, "server"), "info");
     assert_eq!(status(&r, "peers"), "info");
+    assert_eq!(status(&r, "transports"), "info");
     // Stable names, in order.
     let names: Vec<&str> = r["checks"]
         .as_array()
@@ -155,7 +156,16 @@ fn a_fresh_home_is_ok_and_doctor_changes_nothing() {
         .collect();
     assert_eq!(
         names,
-        ["binary", "home", "database", "hooks", "server", "daemon", "peers"]
+        [
+            "binary",
+            "home",
+            "database",
+            "hooks",
+            "server",
+            "daemon",
+            "peers",
+            "transports"
+        ]
     );
 
     // Read-only: the database file, its schema and its events are as they were, and
