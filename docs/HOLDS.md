@@ -39,6 +39,8 @@ Another works out the repository from files, without running git:
 - with no `origin`, the key is the repository's shared git directory, which every worktree of it points at;
 - a project registered at a subdirectory of a repository compares paths from the repository's top level, so a hold on `api/**` in a project at `src` overlaps `src/api/x.rs` in the top-level project.
 
+Nested directories are related the same way, with or without git. Suppose a shared notes folder outside git is one project and one of its subfolders is registered as another, which happens when sessions start in both. Holds in the two projects are compared as paths from the outer folder, so `sub/notes.md` held in the outer project stops an edit of `notes.md` in the inner one, and the other way round. Folders that only share a name prefix (`work/a` and `work/ab`) are not nested. A subfolder name with glob characters (`app/[id]`) is taken literally.
+
 The link is a node-local cache, refreshed whenever a project is used. Projects registered before this existed are linked the first time their holds are checked. `another holds --project X` lists holds in sibling checkouts too, since those are the ones that will conflict. Holds on other machines are still matched by project name and reported as warnings, never conflicts (D26).
 
 ## Symlinks
