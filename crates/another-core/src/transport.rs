@@ -1027,7 +1027,11 @@ mod tests {
 
     #[test]
     fn a_directory_that_does_not_exist_is_normalised_lexically() {
-        assert_eq!(resolve_dir(Path::new("/work/app/./src/..")), "/work/app");
+        // Compared through `Path`, so the separator of the platform does not matter.
+        assert_eq!(
+            Path::new(&resolve_dir(Path::new("/work/app/./src/.."))),
+            Path::new("/work/app")
+        );
     }
 
     #[test]
