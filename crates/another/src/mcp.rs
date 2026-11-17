@@ -680,6 +680,7 @@ impl AnotherMcp {
                         .map(|p| another_core::ReleasePath {
                             shown: p.clone(),
                             path: base.join(p),
+                            maybe_id: false,
                         })
                         .collect();
                     if !a.hold_ids.is_empty() {

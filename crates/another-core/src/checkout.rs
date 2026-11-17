@@ -15,7 +15,7 @@ use serde::Serialize;
 use crate::error::{Error, Result};
 use crate::holds::{
     folds_case, hold_covers, is_repo_wide, link_unlinked, literal_pattern, literal_prefix,
-    normalize_pattern, release_tx, sweep_tx,
+    normalize_pattern, release_tx, sweep_tx, Hold, HoldFilter,
 };
 use crate::identity::{find_project, resolve_agent, Project};
 use crate::mail::touch;
@@ -87,7 +87,22 @@ pub(crate) fn refuse_other_checkout(
     let base = resolve_existing(Path::new(&project.abs_path));
     let target = resolve_existing(&base.join(&dir));
     let Some(other) = checkout_of(&target) else {
-        return Ok(());
+        // Outside git. Inside the project's own directory, or in a registered directory,
+        // it is judged as before. A place a symlink leads to that is in no checkout at all
+        // is never held: the hold would apply to nothing.
+        if target.starts_with(&base)
+            || registered_checkout(tx, &local_projects(tx)?, &target)?.is_some()
+        {
+            return Ok(());
+        }
+        let place = if remote {
+            String::new()
+        } else {
+            format!(" ({})", target.to_string_lossy())
+        };
+        return Err(Error::Invalid(format!(
+            "{raw} points outside any checkout{place}; a hold taken here would apply to nothing"
+        )));
     };
     match link_of(tx, project)? {
         Some(own) if Path::new(&own.checkout) == other.as_path() => return Ok(()),
@@ -137,6 +152,22 @@ pub struct ReleasePath {
     pub shown: String,
     /// The same path made absolute (joined to the caller's base directory), not resolved.
     pub path: PathBuf,
+    /// The argument may be a mistyped hold id and not a path at all. When it releases
+    /// nothing, that is an error naming both readings, and nothing is released for any
+    /// argument, where a plain path would get a note.
+    pub maybe_id: bool,
+}
+
+/// A live hold in a listing, with whether it can block in the place the listing was asked
+/// from.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ListedHold {
+    #[serde(flatten)]
+    pub hold: Hold,
+    /// The hold was taken in another checkout than the one the listing was asked from, so
+    /// it does not block edits there (D92). Always false when the listing was asked from
+    /// outside any checkout.
+    pub other_checkout: bool,
 }
 
 /// What a release by path or by pattern did.
@@ -252,7 +283,62 @@ fn registered_checkout(
     Ok(outermost)
 }
 
+/// The literal directory part of a glob, decoded: its leading components that are plain
+/// names, an escaped name included, so `src/br[[]1[]]/**` gives `src/br[1]`. None when the
+/// glob starts with a wildcard.
+fn glob_dir(pattern: &str) -> Option<String> {
+    let dirs: Vec<String> = pattern.split('/').map_while(literal_pattern).collect();
+    (!dirs.is_empty()).then(|| dirs.join("/"))
+}
+
 impl Store {
+    /// [`Store::holds`], with each hold marked when it was taken in another checkout than
+    /// the one `here` lies in. A project's checkout is found as for a release by path: in
+    /// git from its link, outside git the outermost registered directory around it. With
+    /// no `here`, or one in no checkout, nothing is marked.
+    pub fn holds_seen_from(
+        &self,
+        filter: HoldFilter,
+        here: Option<&Path>,
+    ) -> Result<Vec<ListedHold>> {
+        let holds = self.holds(filter)?;
+        self.write(|tx| {
+            let projects = local_projects(tx)?;
+            let here = here.map(resolve_existing);
+            let in_git = here.as_deref().and_then(checkout_of);
+            let checkout = match (&in_git, &here) {
+                (Some(top), _) => Some(top.clone()),
+                (None, Some(here)) => registered_checkout(tx, &projects, here)?,
+                (None, None) => None,
+            };
+            let mut listed = Vec::new();
+            for hold in holds {
+                let project = projects.iter().find(|p| p.slug == hold.project);
+                let other_checkout = match (&checkout, project) {
+                    (Some(checkout), Some(project)) => match link_of(tx, project)? {
+                        Some(link) => {
+                            in_git.is_none() || Path::new(&link.checkout) != checkout.as_path()
+                        }
+                        None => {
+                            in_git.is_some()
+                                || !at_or_below(
+                                    &resolve_existing(Path::new(&project.abs_path)),
+                                    checkout,
+                                    folds_case(checkout),
+                                )
+                        }
+                    },
+                    _ => false,
+                };
+                listed.push(ListedHold {
+                    hold,
+                    other_checkout,
+                });
+            }
+            Ok(listed)
+        })
+    }
+
     /// Release the holds `agent` has on the given files and directories: "I am done with
     /// this file" (D92). Each path is resolved from the file, as the edit hook does it:
     ///
@@ -320,7 +406,17 @@ impl Store {
                     Some(top) => Some(top.clone()),
                     None => registered_checkout(tx, &projects, &target)?,
                 };
+                let not_an_id = || {
+                    Error::NotFound(format!(
+                        "no live hold {0}: it is not a hold id (26 characters) and no hold of \
+                         yours names the path {shown}; for a file of that name, give ./{0}",
+                        given.shown
+                    ))
+                };
                 let Some(checkout) = checkout else {
+                    if given.maybe_id {
+                        return Err(not_an_id());
+                    }
                     out.notes
                         .push(format!("{shown} is in no checkout; nothing is held there"));
                     continue;
@@ -345,10 +441,9 @@ impl Store {
                         Some(file) => Some(dir.join(file)),
                         // A glob names no file; a directory argument takes it with its
                         // literal directory part.
-                        None => literal_prefix(&hold.pattern)
-                            .rfind('/')
+                        None => glob_dir(&hold.pattern)
                             .filter(|_| is_dir)
-                            .map(|slash| dir.join(&hold.pattern[..slash])),
+                            .map(|inside| dir.join(inside)),
                     };
                     let released = named.as_ref().is_some_and(|at| {
                         same_path(at, &target, fold) || (is_dir && at_or_below(at, &target, fold))
@@ -368,6 +463,8 @@ impl Store {
                             out.released.push(id);
                         }
                     }
+                } else if given.maybe_id {
+                    return Err(not_an_id());
                 } else if let Some(hold) = wider {
                     out.notes.push(format!(
                         "{} is inside your hold {} [{}]; release that hold to free it",
@@ -447,6 +544,17 @@ mod tests {
             literal_dir("app/[[]id[]]/page.tsx"),
             ("app/[id]/page.tsx".into(), None)
         );
+    }
+
+    #[test]
+    fn literal_directory_of_a_glob_is_decoded() {
+        assert_eq!(glob_dir("src/api/**").as_deref(), Some("src/api"));
+        assert_eq!(glob_dir("src/a*.rs").as_deref(), Some("src"));
+        assert_eq!(glob_dir("src/br[[]1[]]/**").as_deref(), Some("src/br[1]"));
+        // A real character class is a wildcard, not a name.
+        assert_eq!(glob_dir("src/br[12]/**").as_deref(), Some("src"));
+        assert_eq!(glob_dir("**/*.rs"), None);
+        assert_eq!(glob_dir("*.txt"), None);
     }
 
     #[test]

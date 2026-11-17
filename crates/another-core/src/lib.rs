@@ -36,7 +36,7 @@ pub use board::{
     BOARD_EVENT_SCAN_CAP, DEFAULT_BOARD_LIMIT, DEFAULT_BOARD_WINDOW_MS, EDIT_HOOK_HOLD_REASON,
     MAX_BOARD_LIMIT,
 };
-pub use checkout::{PathRelease, ReleasePath};
+pub use checkout::{ListedHold, PathRelease, ReleasePath};
 pub use dashboard::{
     DashAccess, DashActivityItem, DashActivityPage, DashActivityQuery, DashAgent, DashBlocked,
     DashClash, DashCounts, DashEdit, DashHold, DashMessage, DashProject, DashRequest, DashThread,

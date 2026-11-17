@@ -431,6 +431,18 @@ async fn work_board_hides_a_holder_outside_the_globs() {
     let text = board.to_string();
     assert!(!text.contains("private-holder"), "{text}");
     assert!(!text.contains("work/shop/src/internal.rs"), "{text}");
+    // Nor is the holder's project named, as a project, in an address or in a hold key: it
+    // lies outside the token's globs. The slug is looked for as a whole value, since the
+    // board's own project path runs through that directory.
+    let slug = srv.store.project(top.to_str().unwrap()).unwrap().slug;
+    assert_eq!(holder.address, format!("private-holder@{slug}"));
+    for named in [
+        format!("\"{slug}\""),
+        format!("@{slug}"),
+        format!("\"{slug}:"),
+    ] {
+        assert!(!text.contains(&named), "{named} in {text}");
+    }
     client.cancel().await.unwrap();
     srv.ct.cancel();
 }

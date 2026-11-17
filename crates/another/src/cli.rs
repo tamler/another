@@ -1164,7 +1164,10 @@ fn is_hold_id(arg: &str) -> bool {
 /// - a hold id by its shape ([`is_hold_id`]);
 /// - a path when it names an existing file or directory, whatever characters it contains,
 ///   and whenever it has no wildcard. It is resolved from the file, as the edit hook does
-///   it, so it works from any directory and for a file in another checkout;
+///   it, so it works from any directory and for a file in another checkout. One that is
+///   letters and digits only and names nothing on disk may be a mistyped id: if no hold
+///   of the caller's names that path either, the command fails and releases nothing by
+///   path, where any other path with nothing held gets a note. `./NAME` is always a path;
 /// - otherwise a glob, which releases the caller's hold with exactly that pattern in the
 ///   project at or nearest above the base directory.
 ///
@@ -1189,11 +1192,13 @@ fn release_holds(
     let (mut ids, mut paths, mut globs) = (Vec::new(), Vec::new(), Vec::new());
     for target in targets {
         let full = base.join(&target);
+        let exists = std::fs::symlink_metadata(&full).is_ok();
         if is_hold_id(&target) {
             ids.push(target);
-        } else if std::fs::symlink_metadata(&full).is_ok() || !target.contains(['*', '?', '[', '{'])
-        {
+        } else if exists || !target.contains(['*', '?', '[', '{']) {
             paths.push(another_core::ReleasePath {
+                // Letters and digits only, and no such file: more likely a mistyped id.
+                maybe_id: !exists && target.bytes().all(|b| b.is_ascii_alphanumeric()),
                 shown: target,
                 path: full,
             });
@@ -1673,8 +1678,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             emit(json, &ids, |ids| format!("released {} hold(s)", ids.len()))
         }
         Command::Holds { project, agent } => {
-            let holds = store.holds(HoldFilter { project, agent })?;
-            emit(json, &holds, |h| output::holds(h))
+            let here = std::env::current_dir().ok();
+            let holds = store.holds_seen_from(HoldFilter { project, agent }, here.as_deref())?;
+            emit(json, &holds, |h| output::listed_holds(h))
         }
         Command::Heartbeat {
             agent,
