@@ -1,5 +1,6 @@
-//! Repository identity for projects, so holds taken in one worktree (or clone) of a
-//! repository are seen from the others.
+//! Where a project sits in git: the repository it belongs to (the same for every worktree
+//! and clone, used by the board to list sibling checkouts) and its checkout, the working
+//! directory holds block inside (D92).
 //!
 //! Everything is read from files (`.git`, `commondir`, `config`); no `git` process runs.
 //! The key is the `origin` remote reduced to `host/path` (no scheme, credentials, port or
@@ -20,6 +21,111 @@ pub struct RepoLink {
     pub key: String,
     /// The project directory relative to the repository's top level ("" at the top).
     pub prefix: String,
+    /// The working directory the project belongs to: the nearest directory at or above it
+    /// with a `.git` entry, as the filesystem resolves it ([`resolve_existing`]). A linked
+    /// worktree, a clone and a submodule each have their own; holds block only inside it.
+    pub checkout: String,
+}
+
+/// Symlinks followed while resolving one path before giving up (a loop).
+const MAX_SYMLINKS: usize = 40;
+
+/// `path` as the filesystem resolves it, the way `open` follows it:
+///
+/// - components are taken left to right and each symlink is followed before any later
+///   `..` is applied, so `link/../a` is "the parent of where `link` points, then `a`",
+///   not the lexical `a`;
+/// - a dangling symlink is read and followed to its (not yet existing) target;
+/// - once a component does not exist, the rest is applied lexically, since a missing
+///   directory cannot be a link;
+/// - the existing part is then canonicalized, which also restores on-disk letter case.
+///
+/// On a symlink loop (or a chain longer than the OS allows), `path` is used as given with
+/// its longest resolvable leading part canonicalized (it stops at the loop, even before a
+/// later `..`), so it still names the registered project.
+/// `path` should be absolute.
+pub fn resolve_existing(path: &Path) -> PathBuf {
+    let mut budget = MAX_SYMLINKS;
+    canonical_prefix(&follow_links(path, &mut budget).unwrap_or_else(|| path.to_path_buf()))
+}
+
+fn follow_links(path: &Path, budget: &mut usize) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    let mut missing = false;
+    for comp in path.components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir => out.push(comp.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // `out` is fully resolved (or a missing, so link-free, tail): its parent is
+                // the physical parent. Climbing out of a missing tail can land on an
+                // existing directory again, whose entries may be links.
+                out.pop();
+                missing = std::fs::symlink_metadata(&out).is_err();
+            }
+            Component::Normal(name) => {
+                let next = out.join(name);
+                if missing {
+                    out = next;
+                    continue;
+                }
+                match std::fs::symlink_metadata(&next) {
+                    Err(_) => {
+                        missing = true;
+                        out = next;
+                    }
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        *budget = budget.checked_sub(1)?;
+                        let target = std::fs::read_link(&next).ok()?;
+                        out = follow_links(&out.join(target), budget)?;
+                        missing = std::fs::symlink_metadata(&out).is_err();
+                    }
+                    Ok(_) => out = next,
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Canonicalize the longest leading run of `path`'s components that resolves, and keep the
+/// rest as written. For a link-free path that is its deepest existing ancestor; for the
+/// fallback path of a symlink loop, which may still hold `..`, it stops at the loop.
+fn canonical_prefix(path: &Path) -> PathBuf {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
+    }
+    let comps: Vec<Component> = path.components().collect();
+    let mut cur = PathBuf::new();
+    let mut real = None;
+    let mut kept = 0;
+    for (i, comp) in comps.iter().enumerate() {
+        cur.push(comp.as_os_str());
+        match std::fs::canonicalize(&cur) {
+            Ok(r) => {
+                real = Some(r);
+                kept = i + 1;
+            }
+            Err(_) => break,
+        }
+    }
+    let Some(mut out) = real else {
+        return path.to_path_buf();
+    };
+    for comp in &comps[kept..] {
+        out.push(comp.as_os_str());
+    }
+    out
+}
+
+/// The checkout of a physically resolved path (`resolve_existing`): the nearest directory
+/// at or above it that has a `.git` entry, a directory or the file a linked worktree or a
+/// submodule has. None when the path is not inside git.
+pub(crate) fn checkout_of(resolved: &Path) -> Option<PathBuf> {
+    resolved
+        .ancestors()
+        .find(|d| d.join(".git").exists())
+        .map(Path::to_path_buf)
 }
 
 /// Git metadata files we read are small; anything bigger is not what we expect.
@@ -36,13 +142,17 @@ fn read_small(path: &Path) -> Option<String> {
 /// Resolve `rel` against `base` lexically (no filesystem access).
 fn join_lexical(base: &Path, rel: &str) -> PathBuf {
     let rel = Path::new(rel);
-    let joined = if rel.is_absolute() {
-        rel.to_path_buf()
+    if rel.is_absolute() {
+        lexical(rel)
     } else {
-        base.join(rel)
-    };
+        lexical(&base.join(rel))
+    }
+}
+
+/// `path` with `.` and `..` applied as text (no filesystem access, no symlinks followed).
+pub(crate) fn lexical(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
-    for comp in joined.components() {
+    for comp in path.components() {
         match comp {
             Component::ParentDir => {
                 out.pop();
@@ -86,7 +196,14 @@ pub fn link_for(dir: &Path) -> Option<RepoLink> {
             let canonical = std::fs::canonicalize(&common).unwrap_or(common);
             format!("git:{}", canonical.to_string_lossy())
         });
-    Some(RepoLink { key, prefix })
+    // Resolved physically, so one checkout registered under two spellings (a symlinked
+    // parent, `/tmp` and `/private/tmp`) has one value.
+    let checkout = resolve_existing(top).to_string_lossy().into_owned();
+    Some(RepoLink {
+        key,
+        prefix,
+        checkout,
+    })
 }
 
 /// `url` of `[remote "origin"]` in a git config file.
@@ -187,10 +304,12 @@ pub fn normalize_remote(url: &str) -> Option<String> {
 
 /// Version of the key rules (`normalize_remote`, `link_for`), stored in front of every
 /// cached key. Bump it whenever those rules change: cached rows from an older version are
-/// then treated as never checked and recomputed on next use, so a stale key can never
-/// hide a sibling's hold. This needs no schema change, so it never blocks an installed
+/// then treated as never checked and recomputed on next use, so a stale row can never
+/// hide a hold in another project of the checkout. This needs no schema change, so it never blocks an installed
 /// binary from opening the database.
-pub(crate) const KEY_VERSION: &str = "v2:";
+///
+/// v3: the link also carries the project's checkout (D92).
+pub(crate) const KEY_VERSION: &str = "v3:";
 
 /// A key as stored in `project_repos` (empty stays empty: "not in a repository").
 pub(crate) fn stored_key(key: &str) -> String {
@@ -201,23 +320,29 @@ pub(crate) fn stored_key(key: &str) -> String {
     }
 }
 
-/// The cached link: `None` when never checked (or cached under older key rules),
-/// `Some(None)` when checked and not in a repo.
+/// The cached link: `None` when never checked (or cached under older key rules, or in a
+/// repository with no checkout stored yet), `Some(None)` when checked and not in a repo.
+///
+/// A key beside an empty checkout is a row from before the checkout column that somehow
+/// already carries the current key version. It counts as never checked, so filling the
+/// column never depends on the version having been raised.
 fn cached(conn: &Connection, project_id: &str) -> Result<Option<Option<RepoLink>>> {
-    let row: Option<(String, String)> = conn
+    let row: Option<(String, String, String)> = conn
         .query_row(
-            "SELECT repo_key, repo_prefix FROM project_repos WHERE project_id = ?1",
+            "SELECT repo_key, repo_prefix, checkout FROM project_repos WHERE project_id = ?1",
             [project_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
     Ok(match row {
         None => None,
-        Some((key, _)) if key.is_empty() => Some(None),
-        Some((key, prefix)) => key.strip_prefix(KEY_VERSION).map(|k| {
+        Some((key, _, _)) if key.is_empty() => Some(None),
+        Some((_, _, checkout)) if checkout.is_empty() => None,
+        Some((key, prefix, checkout)) => key.strip_prefix(KEY_VERSION).map(|k| {
             Some(RepoLink {
                 key: k.to_string(),
                 prefix,
+                checkout,
             })
         }),
     })
@@ -231,15 +356,16 @@ pub(crate) fn refresh_link(tx: &Tx<'_>, project: &Project) -> Result<Option<Repo
     }
     let fresh = link_for(Path::new(&project.abs_path));
     if cached(tx, &project.project_id)?.as_ref() != Some(&fresh) {
-        let (key, prefix) = fresh.as_ref().map_or((String::new(), ""), |l| {
-            (stored_key(&l.key), l.prefix.as_str())
+        let (key, prefix, checkout) = fresh.as_ref().map_or((String::new(), "", ""), |l| {
+            (stored_key(&l.key), l.prefix.as_str(), l.checkout.as_str())
         });
         tx.execute(
-            "INSERT INTO project_repos (project_id, repo_key, repo_prefix, checked_at)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO project_repos (project_id, repo_key, repo_prefix, checkout, checked_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(project_id) DO UPDATE SET repo_key = excluded.repo_key,
-               repo_prefix = excluded.repo_prefix, checked_at = excluded.checked_at",
-            params![project.project_id, key, prefix, tx.now],
+               repo_prefix = excluded.repo_prefix, checkout = excluded.checkout,
+               checked_at = excluded.checked_at",
+            params![project.project_id, key, prefix, checkout, tx.now],
         )?;
     }
     Ok(fresh)
@@ -345,9 +471,15 @@ mod tests {
         let a = link_for(&main).unwrap();
         let b = link_for(&wt).unwrap();
         assert_eq!(a.key, "example.com/me/shop");
-        assert_eq!(a, b);
+        assert_eq!(a.key, b.key);
         assert_eq!(b.prefix, "");
-        assert_eq!(link_for(&main.join("src")).unwrap().prefix, "src");
+        // One repository, two checkouts; a subdirectory belongs to the checkout above it.
+        assert_ne!(a.checkout, b.checkout);
+        assert_eq!(Path::new(&a.checkout), resolve_existing(&main));
+        assert_eq!(Path::new(&b.checkout), resolve_existing(&wt));
+        let sub = link_for(&main.join("src")).unwrap();
+        assert_eq!(sub.prefix, "src");
+        assert_eq!(sub.checkout, a.checkout);
 
         // No origin: the shared git dir is the key, still the same for both checkouts.
         write(&main.join(".git/config"), "[core]\n");

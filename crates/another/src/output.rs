@@ -186,7 +186,8 @@ pub fn holds(hs: &[Hold]) -> String {
 pub fn conflicts(cs: &[HoldConflict]) -> String {
     cs.iter()
         .map(|c| {
-            // The project matters: the holder may be in a sibling checkout of the repository.
+            // The project matters: the holder may be in another project of the checkout,
+            // one registered at a subdirectory of it.
             format!(
                 "conflict: {} is held by {} ({}:{}, {} until {})\n",
                 c.path,

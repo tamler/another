@@ -206,9 +206,11 @@ pub struct HoldPathsArgs {
     /// acquire (default) | check | renew | release | list.
     #[serde(default)]
     pub action: HoldAction,
-    /// Project absolute path or slug (required for acquire/check; filters list).
+    /// Project absolute path or slug (required for acquire/check and for release with
+    /// paths, where it is the directory relative paths start from; filters list).
     pub project: Option<String>,
-    /// Paths or globs relative to the project root (acquire/check).
+    /// Paths or globs relative to the project root (acquire/check). With release: the files
+    /// or directories you are done with; your holds on them are released.
     #[serde(default)]
     pub paths: Vec<String>,
     /// Renew/release only these holds (default: all of the agent's holds).
@@ -220,7 +222,7 @@ pub struct HoldPathsArgs {
     pub exclusive: Option<bool>,
     pub reason: Option<String>,
     /// Allow a pattern covering the whole project (`**`, the project root, `**/*.rs`).
-    /// Refused by default because it blocks every other agent in the repository.
+    /// Refused by default because it blocks every other agent in the checkout.
     #[serde(default)]
     pub repo_wide: bool,
 }
@@ -234,6 +236,9 @@ pub struct HoldPathsOut {
     pub renewed: Vec<Hold>,
     pub released: Vec<String>,
     pub holds: Vec<Hold>,
+    /// Release with paths: why a path released nothing (nothing of yours is held there, or
+    /// it lies inside a wider hold of yours).
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -608,7 +613,9 @@ impl AnotherMcp {
     #[tool(
         description = "Advisory path holds (leases on files/globs within a project). acquire is \
         all-or-nothing and reports conflicts; check reports conflicts without acquiring; renew, \
-        release and list manage your holds."
+        release and list manage your holds. A hold blocks other agents in the same working \
+        directory only; release with paths when you are done with a file so another agent can \
+        pick it up."
     )]
     async fn hold_paths(
         &self,
@@ -623,34 +630,65 @@ impl AnotherMcp {
             };
             let mut out = HoldPathsOut::default();
             match a.action {
+                // A remote caller's refusals name no directory outside its own request.
                 HoldAction::Acquire => {
-                    let report = s.acquire_holds(AcquireHolds {
-                        agent: a.agent.clone(),
-                        project: need_project()?,
-                        paths: a.paths.clone(),
-                        ttl_seconds: a.ttl_seconds,
-                        exclusive: a.exclusive.unwrap_or(true),
-                        reason: a.reason.clone(),
-                        repo_wide: a.repo_wide,
-                    })?;
+                    let report = s.acquire_holds_scoped(
+                        AcquireHolds {
+                            agent: a.agent.clone(),
+                            project: need_project()?,
+                            paths: a.paths.clone(),
+                            ttl_seconds: a.ttl_seconds,
+                            exclusive: a.exclusive.unwrap_or(true),
+                            reason: a.reason.clone(),
+                            repo_wide: a.repo_wide,
+                        },
+                        scope.as_ref(),
+                    )?;
                     out.granted = report.granted;
                     out.conflicts = report.conflicts;
                     out.warnings = report.warnings;
                 }
                 HoldAction::Check => {
-                    out.conflicts = s.check_holds(
+                    out.conflicts = s.check_holds_scoped(
                         &a.agent,
                         &need_project()?,
                         &a.paths,
                         a.exclusive.unwrap_or(true),
+                        scope.as_ref(),
                     )?;
                 }
                 // Remote callers: only holds inside the token's projects.
                 HoldAction::Renew => {
                     out.renewed = s.renew_holds_scoped(&a.agent, &a.hold_ids, scope.as_ref())?
                 }
-                HoldAction::Release => {
+                HoldAction::Release if a.paths.is_empty() => {
                     out.released = s.release_holds_scoped(&a.agent, &a.hold_ids, scope.as_ref())?
+                }
+                HoldAction::Release => {
+                    // The project is only where relative paths start; nothing is registered.
+                    // A path is used as a directory whether registered or not, a slug must
+                    // exist. A remote caller's project was checked against its token.
+                    let project = need_project()?;
+                    let base = if std::path::Path::new(&project).is_absolute() {
+                        std::path::PathBuf::from(&project)
+                    } else {
+                        std::path::PathBuf::from(s.project(&project)?.abs_path)
+                    };
+                    let paths: Vec<another_core::ReleasePath> = a
+                        .paths
+                        .iter()
+                        .map(|p| another_core::ReleasePath {
+                            shown: p.clone(),
+                            path: base.join(p),
+                        })
+                        .collect();
+                    if !a.hold_ids.is_empty() {
+                        out.released =
+                            s.release_holds_scoped(&a.agent, &a.hold_ids, scope.as_ref())?;
+                    }
+                    let done = s.release_paths(&a.agent, &paths, scope.as_ref())?;
+                    out.released.extend(done.released);
+                    out.notes = done.notes;
                 }
                 HoldAction::List => {
                     out.holds = s.holds(HoldFilter {
@@ -1056,7 +1094,7 @@ impl AnotherMcp {
 #[tool_handler(router = self.tool_router, name = "another", instructions = "Another coordinates agents on this node, including hosted chat apps, through messaging, holds and shared resources. \
 Call whats_new first and follow its next field; if nothing is waiting, stop. \
 Send mail with send_message, acknowledge messages you have handled, and claim_request before \
-working a request. hold_paths before editing files another agent might touch. Before starting \
+working a request. hold_paths before editing files another agent in the same directory might touch. Before starting \
 a server or job, call resource_find and borrow what is already running. Local agents take work \
 with queue_next, finish it with queue_update, and record work nobody asked for with \
 queue_propose instead of starting it. A hosted connection \

@@ -1130,6 +1130,15 @@ CREATE TABLE transport_sessions (
     PRIMARY KEY (agent_id, session_id)
 );
 "#,
+    // A hold blocks only inside the working directory it was taken in (D92). `checkout` is
+    // that directory for a project in git, '' outside git; like the rest of the row it is
+    // read from files on this machine and filled the first time the project is used. Waits
+    // recorded while holds still reached across checkouts lose their blocker list, so the
+    // next sweep or release rechecks every one of them under the new rule.
+    r#"
+ALTER TABLE project_repos ADD COLUMN checkout TEXT NOT NULL DEFAULT '';
+UPDATE hold_waits SET blockers = '[]';
+"#,
 ];
 
 /// Switch to WAL. While several connections convert a new database at once, SQLite answers
@@ -1501,6 +1510,7 @@ const CATALOGS: &[&str] = &[
     "5b76a246c4ba93c3edd4c1a7d03fe0f19f43aadceed5901dfa0ba6b439be9c54",
     "b07ccde4e870699aff968c4508b5944ac3cc5ae157acfb336bfdc3a16e5f6325",
     "fce5179014aaff7d53c71882bfe3870e21d1ff697464193ebeb2c1512327a89a",
+    "64dbec6f2d3fd1bbe217ca67bfa028fd5d918904278683eefa7032ed96e89c9e",
 ];
 
 /// The digest this build holds for schema `version`.
@@ -1927,7 +1937,8 @@ mod upgrade_tests {
         // Take the home back to exactly main's v8 schema, keeping every v8 row.
         let db = Connection::open(home.join(DB_FILE)).unwrap();
         db.execute_batch(
-            "DROP TABLE transport_sessions;
+            "ALTER TABLE project_repos DROP COLUMN checkout;
+             DROP TABLE transport_sessions;
              DROP TABLE queue_history;
              DROP TABLE queue_items;
              DROP TABLE queue_sessions;

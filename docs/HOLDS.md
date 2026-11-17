@@ -1,6 +1,6 @@
 # Path holds
 
-A hold says "I am changing these files". It is a lease on a path or glob inside a project, with a TTL (default 30 minutes, 1 minute to 4 hours). Holds do not lock files on disk. An exclusive hold conflicts with any overlapping hold of another agent; a shared hold conflicts only with exclusive ones.
+A hold says "I am changing these files". It is a lease on a path or glob inside a project, with a TTL (default 30 minutes, 1 minute to 4 hours). Holds do not lock files on disk. An exclusive hold conflicts with any overlapping hold of another agent in the same checkout; a shared hold conflicts only with exclusive ones. Agents in other worktrees or clones of the repository are never blocked by it (see [Holds and checkouts](#holds-and-checkouts)).
 
 ```bash
 another hold acquire --agent claude@shop src/api/routes.rs
@@ -24,22 +24,76 @@ A stopped edit automatically waits for the file. Do not keep retrying: repeat at
 
 To ask an owner to release a hold, use `another hold request-release --agent AGENT HOLD_ID` with an ID from `another holds` or a deny notice. The command reuses your outstanding request for that exact hold; it closes automatically when the hold is released or expires, including session end. A new hold is a new request. Unlinked free-text requests stay manual. This command is local CLI only; it does not add a remote release capability.
 
-## Holds across worktrees
+## Releasing a file when you are done
 
-Each checkout is its own project, but holds are checked across every local project in the same git repository. Two worktrees of one repository, or two clones of one origin, collide on the same files:
+A hold taken by the edit guard lasts while its session keeps working, so a file edited once stays held. When you are done with a file, say so, and another agent in the same checkout can pick it up at once:
 
-```text
-nothing acquired
-conflict: src/api/routes.rs is held by codex@shop-review (shop-review:src/api/**, exclusive until 2026-11-10T16:04:00.000Z)
+```bash
+another hold release --agent claude@shop src/api/routes.rs
 ```
 
-Another works out the repository from files, without running git:
+```text
+released 1 hold(s)
+```
 
-- the key is the `origin` remote with the scheme, user name, password or token, port and `.git` suffix removed, and the host lowercased, so `git@GitHub.com:team/shop.git` and `https://github.com/team/shop` match. The path keeps its case: a Git server may treat `Team/Shop` and `team/shop` as two repositories. Credentials are never stored;
-- with no `origin`, the key is the repository's shared git directory, which every worktree of it points at;
-- a project registered at a subdirectory of a repository compares paths from the repository's top level, so a hold on `api/**` in a project at `src` overlaps `src/api/x.rs` in the top-level project.
+The argument is a file or a directory, and it is resolved from the file, the way the edit guard resolves an edit: it works from any directory, through a symlink, with a relative or an absolute path, and for a file in another checkout that you edited by its absolute path. It releases your own holds on that file and nothing else. A directory releases your holds on the files below it and your glob holds whose literal directory is that directory or lies below it; a glob with no literal directory, such as `**/*.rs`, stays. No project is registered by it; `--project` only names the directory relative paths start from.
 
-The link is a node-local cache, refreshed whenever a project is used. Projects registered before this existed are linked the first time their holds are checked. `another holds --project X` lists holds in sibling checkouts too, since those are the ones that will conflict. Holds on other machines are still matched by project name and reported as warnings, never conflicts (D26).
+- An argument that names an existing file or directory is a path, whatever characters its name has.
+- An argument shaped like a hold id (26 characters) is a hold id, as before. A file whose whole name looks like one is given as `./NAME`.
+- Any other argument with a wildcard is a glob: it releases your hold with exactly that pattern in the project at the current directory or the nearest one above it.
+- With no argument every hold under your name is released, as before.
+
+When there is nothing to release, the command says why and exits with status 0:
+
+```text
+another: nothing of yours is held at /Users/j/app/src/a.rs (checkout /Users/j/app)
+```
+
+```text
+another: src/a.rs is inside your hold src/** [01M7MB3VTGJPCE70WC7RB0B4SK]; release that hold to free it
+```
+
+MCP callers use `hold_paths` with `action: "release"`, `paths` and `project` (the directory relative paths start from). A remote caller's path must lie inside a project its token covers.
+
+## Holds and checkouts
+
+A hold blocks only inside the checkout it was taken in. A checkout is one working directory:
+
+- for a file in git, the nearest directory above it that has a `.git` entry (a directory, or the file a linked worktree or submodule has);
+- for a file outside git, the registered project directory that contains it;
+- a file in neither is not held.
+
+A hold applies to a file exactly when the file's checkout is the hold's checkout and the hold's pattern, read from the top of that checkout, matches the file's path from there. Other checkouts are told nothing: the edit guard, `hold acquire` and `hold check` say nothing about holds elsewhere. `another holds` still lists every hold with its project, for anyone who looks.
+
+| Case | Result |
+|---|---|
+| The main checkout and a linked worktree, beside it or inside it (`.claude/worktrees/x`) | Two checkouts. No hold of one applies to a file of the other, also not `**` with `--repo-wide`. |
+| Two clones, on any branches, also the same branch | Two checkouts. |
+| A submodule or a nested repository | Its own checkout. An outer hold does not apply inside it. |
+| A project registered at a subdirectory of a checkout | The same checkout as the top-level project. Paths are compared from the checkout's top, so a hold on `api/**` in a project at `src` overlaps `src/api/x.rs` in the top-level project. |
+| A symlink in checkout A to a file in checkout B | The file is B's. A symlinked spelling of a whole checkout is the same checkout. |
+| A checkout that switches branches | Keeps its holds: the unit is the directory, not the branch. |
+| A checkout that is moved or renamed | A new project and a new agent name. Holds under the old path are not seen from the new one until they end. |
+| One directory reached through two mount points, or through a macOS firmlink spelling (`/System/Volumes/Data/Users/...`) | Two checkouts when the two spellings do not resolve to one path. This is a known limit. |
+| `git init` in a directory Another first saw outside git | Still treated as outside git. It matters only for a project registered at a subdirectory. |
+
+The checkout is found from files, without running git, and kept in a node-local cache that is filled the first time a project is used. Holds on other machines are still matched by project name and reported as warnings, never conflicts (D26).
+
+`another holds --project X` and the board also list holds in other checkouts of the same repository. They are other work on that repository and will not block you. Another tells one repository from another by its `origin` remote with the scheme, user name, password or token, port and `.git` suffix removed and the host lowercased, or, with no `origin`, by the shared git directory every worktree points at. Credentials are never stored.
+
+### A hold that points into another checkout
+
+A pattern whose directory lies in another checkout would protect nothing there, so it is refused, with the command that takes it in the right place:
+
+```bash
+cd ~/Projects && another hold acquire --agent claude@Projects 'test/another/src/**'
+```
+
+```text
+another: test/another/src/** is inside another checkout (/Users/jacob/Projects/test/another); a hold taken here would not apply to its files. Take it there: another hold acquire --agent claude@Projects --project /Users/jacob/Projects/test/another 'src/**'
+```
+
+The same goes for a pattern from the main checkout that names a worktree inside it, such as `.claude/worktrees/x/src/**`, and for `hold check`. The directory is the part of the pattern before its first wildcard; one that does not exist yet is judged at its nearest existing parent. A pattern that starts with a wildcard has no such directory and is granted: it covers the files of its own checkout only.
 
 ## Symlinks
 
@@ -66,14 +120,22 @@ Ignoring case only adds collisions: anything that collides under exact spelling 
 
 ## Whole-project holds
 
-A hold on the whole project blocks every other agent in the repository, so it is refused unless asked for explicitly:
+A hold on the whole project blocks every other agent in the checkout, so it is refused unless asked for explicitly:
 
 ```bash
 another hold acquire --agent claude@shop '**'
 ```
 
 ```text
-another: "**" would hold the whole project (**) and block every other agent in the repository; hold the files or directories you will change, such as src/api, or pass --repo-wide (MCP: repo_wide) if you really mean all of it
+another: "**" would hold the whole project (**) and block every other agent in the checkout; hold the files or directories you will change, such as src/api, or pass --repo-wide (MCP: repo_wide) if you really mean all of it
 ```
 
 "Whole project" means `**`, `.` or the project root, and any glob that starts with a wildcard and contains `**`, such as `**/*.rs`. Holds like that taken before this rule keep working. `another hold check` still accepts them, since checking takes nothing.
+
+A whole repository cannot be held from a directory above it. From `~/Projects`, `another hold acquire test/another` is refused like any pattern that points into another checkout, and the command it names carries `--repo-wide`:
+
+```text
+another: test/another is inside another checkout (/Users/jacob/Projects/test/another); a hold taken here would not apply to its files. Take it there: another hold acquire --agent claude@Projects --project /Users/jacob/Projects/test/another --repo-wide '**'
+```
+
+That hold then applies to that checkout only, not to its other worktrees or clones.

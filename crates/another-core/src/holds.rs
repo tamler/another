@@ -4,9 +4,12 @@
 //! overlapping hold of another agent; shared holds only conflict with exclusive ones.
 //! Holds lapse when their TTL passes without a heartbeat and are then expired by the sweeper.
 //!
-//! A hold belongs to a project, but conflicts are checked across every local project in the
-//! same git repository (see `repo.rs`), comparing repository-relative paths, so sibling
-//! worktrees and clones of one repository see each other's holds.
+//! A hold belongs to a project and blocks only inside that project's checkout: the working
+//! directory it was taken in (see `repo.rs`, D92). Projects registered at different
+//! directories of one checkout share it, compared by paths from its top; worktrees, clones
+//! and nested checkouts of one repository are separate and never see each other's holds.
+//! What follows from that for a pattern that points into another checkout, and release by
+//! path, is in `checkout.rs`.
 
 use std::path::Path;
 
@@ -114,7 +117,7 @@ pub struct AcquireHolds {
     pub exclusive: bool,
     pub reason: Option<String>,
     /// Allow a pattern that covers the whole project (`**`, the project root, `**/*.rs`).
-    /// Refused by default: such a hold blocks every other agent in the repository.
+    /// Refused by default: such a hold blocks every other agent in the checkout.
     pub repo_wide: bool,
 }
 
@@ -157,7 +160,7 @@ const HOLD_SELECT: &str =
      LEFT JOIN projects ap ON ap.project_id = a.project_id";
 
 /// [`HOLD_SELECT`] plus the hold's project id (column 10) and that project's position in its
-/// repository (column 11).
+/// checkout (column 11).
 const HOLD_SELECT_REPO: &str =
     "SELECT h.hold_id, p.slug, a.address, NULL, h.pattern, h.exclusive, h.reason,
        h.ttl_seconds, h.created_at, h.expires_at, h.project_id, coalesce(pr.repo_prefix, '')
@@ -262,7 +265,7 @@ fn compile(pattern: &str) -> Result<GlobMatcher> {
 
 /// Decode an entirely literal pattern, including globset's single-character escapes.
 /// Real character classes, wildcards and alternations still return None.
-fn literal_pattern(pattern: &str) -> Option<String> {
+pub(crate) fn literal_pattern(pattern: &str) -> Option<String> {
     let mut chars = pattern.chars();
     let mut out = String::new();
     while let Some(c) = chars.next() {
@@ -288,7 +291,7 @@ pub fn is_repo_wide(pattern: &str) -> bool {
 }
 
 /// An own hold `held` already covers the literal path `path`.
-fn hold_covers(held: &str, path: &str) -> bool {
+pub(crate) fn hold_covers(held: &str, path: &str) -> bool {
     let path = literal_pattern(path).unwrap_or_else(|| path.to_string());
     if held == path {
         return true;
@@ -300,7 +303,7 @@ fn hold_covers(held: &str, path: &str) -> bool {
 }
 
 /// The part of a pattern before its first glob metacharacter.
-fn literal_prefix(pattern: &str) -> &str {
+pub(crate) fn literal_prefix(pattern: &str) -> &str {
     match pattern.find(['*', '?', '[', '{']) {
         Some(i) => &pattern[..i],
         None => pattern,
@@ -352,7 +355,7 @@ fn overlap_on_volume(a: &str, b: &str, fold: bool) -> bool {
 /// in letter case as the same entry (APFS and NTFS by default, ext4 not). Found without
 /// writing: the last name of `dir` with letters is respelled in the other case, and the
 /// result counts only if it is the very same directory. Unknown counts as case-sensitive.
-fn folds_case(dir: &Path) -> bool {
+pub(crate) fn folds_case(dir: &Path) -> bool {
     let Ok(real) = std::fs::metadata(dir) else {
         return false;
     };
@@ -593,16 +596,18 @@ fn glob_touches_literal(glob: &str, literal: &str, path_may_be_dir: bool) -> boo
 }
 
 /// Link local projects that hold live holds but have no current repository link: never
-/// linked (registered before links existed), or linked under older key rules (see
-/// `repo::KEY_VERSION`). Their holds then count across the repository straight away.
-fn link_unlinked(tx: &Tx<'_>) -> Result<()> {
+/// linked (registered before links existed), linked under older key rules (see
+/// `repo::KEY_VERSION`), or linked before the checkout was stored. Their holds then count
+/// in their checkout straight away.
+pub(crate) fn link_unlinked(tx: &Tx<'_>) -> Result<()> {
     let mut stmt = tx.prepare(
         "SELECT DISTINCT p.project_id, p.node_id, p.abs_path, p.slug, p.created_at
          FROM holds h JOIN projects p ON p.project_id = h.project_id
          LEFT JOIN project_repos pr ON pr.project_id = p.project_id
          WHERE h.released_at IS NULL AND h.expires_at > ?1 AND p.node_id = ?2
            AND (pr.project_id IS NULL
-                OR (pr.repo_key != '' AND substr(pr.repo_key, 1, length(?3)) != ?3))",
+                OR (pr.repo_key != '' AND (substr(pr.repo_key, 1, length(?3)) != ?3
+                                           OR pr.checkout = '')))",
     )?;
     let projects = stmt
         .query_map(params![tx.now, tx.node_id, crate::repo::KEY_VERSION], |r| {
@@ -629,21 +634,21 @@ fn conflicts_for(
     exclusive: bool,
 ) -> Result<Vec<HoldConflict>> {
     link_unlinked(tx)?;
-    let (repo_key, my_prefix) = crate::repo::link_of(tx, project)?
-        .map_or((String::new(), String::new()), |l| {
-            (crate::repo::stored_key(&l.key), l.prefix)
-        });
-    // This project's holds, plus holds in any local project of the same repository.
+    let (checkout, my_prefix) = crate::repo::link_of(tx, project)?
+        .map_or((String::new(), String::new()), |l| (l.checkout, l.prefix));
+    // This project's holds, plus holds in any local project of the same checkout: one
+    // registered at another directory of it. Worktrees and clones of the repository are
+    // other checkouts and are never candidates (D92).
     let mut stmt = tx.prepare(&format!(
         "{HOLD_SELECT_REPO} WHERE h.released_at IS NULL AND h.expires_at > ?3
            AND h.agent_id != ?2
            AND (h.project_id = ?1 OR (?4 != '' AND h.project_id IN
-                (SELECT project_id FROM project_repos WHERE repo_key = ?4)))
+                (SELECT project_id FROM project_repos WHERE checkout = ?4)))
          ORDER BY h.created_at"
     ))?;
     let others = stmt
         .query_map(
-            params![project.project_id, agent_id, tx.now, repo_key],
+            params![project.project_id, agent_id, tx.now, checkout],
             |r| {
                 Ok((
                     hold_from_row(r)?,
@@ -664,7 +669,7 @@ fn conflicts_for(
             let overlap = if *held_project == project.project_id {
                 overlaps(pattern, &held.pattern)
             } else {
-                // Compare as paths from the repository's top level.
+                // Compare as paths from the top of the checkout.
                 overlaps(
                     &crate::repo::in_repo(&my_prefix, pattern),
                     &crate::repo::in_repo(held_prefix, &held.pattern),
@@ -954,7 +959,7 @@ pub(crate) fn attempt<T>(tx: &Tx<'_>, name: &str, f: impl FnOnce() -> Result<T>)
 }
 
 /// Deliver each free-file ping and remove its wait in the same transaction. Recheck all
-/// current blockers, including replacement holds and holds in sibling worktrees. Waiter and
+/// current blockers in the file's checkout, including replacement holds. Waiter and
 /// holder are addressed by the ids the wait row stores. A ping that cannot be delivered is
 /// recorded as `hold.notify_failed` and its wait is dropped anyway, so a release or a sweep
 /// never fails, and never fails again later, because of one notice.
@@ -1042,12 +1047,21 @@ fn ping_free_waiters_tx(tx: &Tx<'_>) -> Result<()> {
         // Naming the ended holds makes every ping distinct, so the push dedupe never
         // swallows a second ping for the same file within its five-minute window.
         let ended: Vec<String> = serde_json::from_str(&blockers).unwrap_or_default();
+        // A wait with no blocker on record has no ended hold to name: one emptied by the
+        // migration that scoped holds to a checkout, whose blocker was in another one.
+        let why = if ended.is_empty() {
+            "no conflicting hold remains in this checkout".to_string()
+        } else {
+            format!(
+                "no conflicting hold remains (hold {} ended)",
+                ended.join(", ")
+            )
+        };
         let notice = SendMessage {
             // A file name may contain a line break; subjects are one line (D75).
             subject: format!("Hold free: {}", crate::mail::single_line(&path, 280)),
             body: format!(
-                "Another automatically checked {project_key}:{path}: no conflicting hold remains (hold {} ended). The file is not reserved; check again before editing.",
-                ended.join(", ")
+                "Another automatically checked {project_key}:{path}: {why}. The file is not reserved; check again before editing."
             ),
             ..Default::default()
         };
@@ -1301,7 +1315,8 @@ impl Store {
             let title = crate::mail::single_line(&pattern, 280);
             let message = send_by_id_tx(tx, &me.id, &holder_id, &SendMessage {
                 subject: format!("Release {title}?"),
-                body: format!("Please release hold {hold_id} on {}:{pattern} when your edit is done. Another will close this request when that hold ends.", held.project),
+                // The id form of the command: it needs no quoting and no particular directory.
+                body: format!("{} is waiting for {}:{pattern}. If you are done with it, free it now: another hold release --agent {} {hold_id}. Another closes this request when the hold ends.", me.address, held.project, held.agent),
                 request: Some(NewRequest::default()), ..Default::default()
             }, true)?;
             let rid = message.request_id.as_ref().expect("request was created");
@@ -1319,6 +1334,17 @@ impl Store {
     /// Acquire holds on paths/globs. All-or-nothing: if any requested path conflicts with
     /// another agent's live hold, nothing is granted and the conflicts are reported.
     pub fn acquire_holds(&self, input: AcquireHolds) -> Result<HoldReport> {
+        self.acquire_holds_scoped(input, None)
+    }
+
+    /// [`Store::acquire_holds`] for a caller that may be remote (`scope`). A pattern that
+    /// points into another checkout is refused either way, since it would apply to nothing
+    /// (D92); a remote caller's refusal names no absolute path.
+    pub fn acquire_holds_scoped(
+        &self,
+        input: AcquireHolds,
+        scope: Option<&TokenScope>,
+    ) -> Result<HoldReport> {
         if input.paths.is_empty() {
             return Err(Error::Invalid("no paths given".into()));
         }
@@ -1333,10 +1359,18 @@ impl Store {
                 if is_repo_wide(&p) && !input.repo_wide {
                     return Err(Error::Invalid(format!(
                         "{raw:?} would hold the whole project ({p}) and block every other agent in \
-                         the repository; hold the files or directories you will change, such as \
+                         the checkout; hold the files or directories you will change, such as \
                          src/api, or pass --repo-wide (MCP: repo_wide) if you really mean all of it"
                     )));
                 }
+                crate::checkout::refuse_other_checkout(
+                    tx,
+                    &project,
+                    &me.address,
+                    raw,
+                    &p,
+                    scope.is_some(),
+                )?;
                 if !patterns.iter().any(|(_, q)| *q == p) {
                     patterns.push((raw.clone(), p));
                 }
@@ -1383,13 +1417,38 @@ impl Store {
         paths: &[String],
         exclusive: bool,
     ) -> Result<Vec<HoldConflict>> {
+        self.check_holds_scoped(agent, project, paths, exclusive, None)
+    }
+
+    /// [`Store::check_holds`] for a caller that may be remote (`scope`). A pattern that
+    /// points into another checkout is refused as for [`Store::acquire_holds_scoped`]:
+    /// "no conflicts" would be a wrong answer for files this project's holds never reach.
+    pub fn check_holds_scoped(
+        &self,
+        agent: &str,
+        project: &str,
+        paths: &[String],
+        exclusive: bool,
+        scope: Option<&TokenScope>,
+    ) -> Result<Vec<HoldConflict>> {
         self.write(|tx| {
             sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, agent)?;
             let project = find_project(tx, tx.node_id, project)?;
             let patterns = paths
                 .iter()
-                .map(|raw| Ok((raw.clone(), normalize_pattern(&project, raw)?)))
+                .map(|raw| {
+                    let p = normalize_pattern(&project, raw)?;
+                    crate::checkout::refuse_other_checkout(
+                        tx,
+                        &project,
+                        &me.address,
+                        raw,
+                        &p,
+                        scope.is_some(),
+                    )?;
+                    Ok((raw.clone(), p))
+                })
                 .collect::<Result<Vec<_>>>()?;
             conflicts_for(tx, &project, &me.id, &patterns, exclusive)
         })
@@ -1397,8 +1456,8 @@ impl Store {
 
     /// Make sure `agent` may edit `paths` (files in `project`) and hold them while it does.
     ///
-    /// If another agent holds an overlapping path (in this project or a sibling checkout of
-    /// the same repository), nothing is taken and the conflicts are returned. Otherwise each
+    /// If another agent holds an overlapping path (in this project or another project of
+    /// the same checkout), nothing is taken and the conflicts are returned. Otherwise each
     /// path already under a live exclusive hold of the agent's own is left alone (that hold
     /// is renewed once it is past half its TTL), and every other path gets a narrow exclusive
     /// hold of the default TTL. Writes nothing when every path is already covered.
@@ -1656,7 +1715,8 @@ impl Store {
     }
 
     /// Live holds, optionally filtered by project and/or agent. A project filter also lists
-    /// holds in sibling checkouts of the same repository, since those conflict too.
+    /// holds in sibling checkouts of the same repository, for anyone who looks: they are
+    /// other work on the repository and block nothing in this checkout (D92).
     pub fn holds(&self, filter: HoldFilter) -> Result<Vec<Hold>> {
         self.write(|tx| {
             sweep_tx(tx)?;

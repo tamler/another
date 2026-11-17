@@ -1,4 +1,4 @@
-//! Repository-wide holds across worktrees, the edit guard, keepalive, the unread cursor
+//! Holds across the projects of one checkout, the edit guard, keepalive, the unread cursor
 //! query, the quick hook open, and automatic wake target cleanup.
 
 use std::path::{Path, PathBuf};
@@ -14,11 +14,34 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
-/// A main checkout with an `origin`, a linked worktree of it, and an unrelated repository.
+/// Make `link` a second name for the directory `target`: a symlink, or on Windows a
+/// junction, which needs no privilege.
+fn link_dir(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    {
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "mklink /J: {made:?}");
+    }
+}
+
+/// A main checkout with an `origin`, a second project of that same checkout, a linked
+/// worktree of it, and an unrelated repository.
 struct Repos {
     _dir: tempfile::TempDir,
     home: PathBuf,
     main: PathBuf,
+    /// A second project in the main checkout: the same directory under another name, as a
+    /// project registered under a symlinked spelling is. Its holds and the main project's
+    /// block each other (D92: one checkout), with the same paths in both.
+    twin: PathBuf,
+    /// A linked worktree: another checkout of the same repository. Nothing blocks across.
     wt: PathBuf,
     other: PathBuf,
 }
@@ -37,6 +60,8 @@ impl Repos {
         let wt_git = main.join(".git/worktrees/shop-wt");
         write(&wt.join(".git"), &format!("gitdir: {}\n", wt_git.display()));
         write(&wt_git.join("commondir"), "../..\n");
+        let twin = root.join("shop-twin");
+        link_dir(&main, &twin);
         let other = root.join("blog");
         write(
             &other.join(".git/config"),
@@ -46,6 +71,7 @@ impl Repos {
             home: root.join("home"),
             _dir: dir,
             main,
+            twin,
             wt,
             other,
         }
@@ -126,43 +152,57 @@ impl Fx {
     }
 }
 
+/// A4 (D92). A project registered at a subdirectory of a checkout is in the same checkout
+/// as the top-level project: holds block across the two, in both directions, compared by
+/// paths from the checkout's top. A linked worktree of the repository is another checkout.
 #[test]
-fn sibling_worktrees_and_subprojects_share_holds() {
+fn a_subdirectory_project_and_its_checkout_are_one() {
     let fx = Fx::new();
     let r = &fx.repos;
+    let sub = r.main.join("src");
+    // Held through the top-level project, stopped through the project at `src`.
     let granted = fx.acquire("alice", &r.main, &["src/**"]).unwrap();
     assert_eq!(granted.granted.len(), 1);
-
-    // The worktree is a different project, but the same repository.
-    let clash = fx.acquire("bob", &r.wt, &["src/lib.rs"]).unwrap();
-    assert!(clash.granted.is_empty());
-    assert_eq!(clash.conflicts.len(), 1);
-    assert_eq!(clash.conflicts[0].held.agent, "alice");
-    assert_eq!(clash.conflicts[0].held.project, "shop");
-    assert_eq!(
-        fx.acquire("bob", &r.wt, &["docs/x.md"])
-            .unwrap()
-            .granted
-            .len(),
-        1
-    );
-
-    // A project registered at a subdirectory compares from the repository root.
-    let sub = r.main.join("src");
     let clash = fx.acquire("carol", &sub, &["lib.rs"]).unwrap();
     assert_eq!(
         clash.conflicts.len(),
         1,
         "src/lib.rs is under alice's src/**"
     );
+    assert_eq!(clash.conflicts[0].held.agent, "alice");
+    assert_eq!(clash.conflicts[0].held.project, "shop");
     assert!(fx.acquire("carol", &sub, &["../README.md"]).is_err());
+    let edit = |agent: &str, dir: &Path, file: &str| {
+        fx.store
+            .guard_edit(agent, &fx.project(dir), &[file.into()], "auto")
+            .unwrap()
+    };
+    assert_eq!(edit("carol", &sub, "api/x.rs").conflicts.len(), 1);
+    // And the reverse: held through the project at `src`, stopped through the top.
+    fx.store.release_holds("alice", &[]).unwrap();
+    assert_eq!(edit("carol", &sub, "api/x.rs").held.len(), 1);
+    let stopped = edit("bob", &r.main, "src/api/x.rs");
+    assert_eq!(stopped.conflicts.len(), 1);
+    assert_eq!(stopped.conflicts[0].held.agent, "carol");
+    assert_eq!(stopped.conflicts[0].held.project, "src");
+    assert!(edit("bob", &r.main, "src/api/y.rs").conflicts.is_empty());
 
-    // check_holds sees the sibling too; an unrelated repository does not.
+    // The worktree is another checkout of the same repository: nothing of the main
+    // checkout applies there, for `acquire`, `check` and the edit guard.
+    assert_eq!(
+        fx.acquire("bob", &r.wt, &["src/api/**", "docs/x.md"])
+            .unwrap()
+            .granted
+            .len(),
+        2
+    );
     let conflicts = fx
         .store
-        .check_holds("bob", &fx.project(&r.wt), &["src/main.rs".into()], true)
+        .check_holds("alice", &fx.project(&r.wt), &["src/api/y.rs".into()], true)
         .unwrap();
-    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts.len(), 1, "bob's hold, inside the worktree");
+    assert_eq!(conflicts[0].held.project, "shop-wt");
+    assert!(edit("alice", &r.main, "src/api/z.rs").conflicts.is_empty());
     assert_eq!(
         fx.acquire("bob", &r.other, &["src/lib.rs"])
             .unwrap()
@@ -171,7 +211,8 @@ fn sibling_worktrees_and_subprojects_share_holds() {
         1
     );
 
-    // Listing the worktree's holds includes the sibling's.
+    // Listing a project's holds still shows the other checkouts of its repository, for
+    // anyone who looks; an unrelated repository is left out.
     let listed = fx
         .store
         .holds(HoldFilter {
@@ -183,9 +224,93 @@ fn sibling_worktrees_and_subprojects_share_holds() {
         .iter()
         .map(|h| (h.project.as_str(), h.pattern.as_str()))
         .collect();
-    assert!(patterns.contains(&("shop", "src/**")), "{patterns:?}");
+    assert!(patterns.contains(&("src", "api/x.rs")), "{patterns:?}");
     assert!(patterns.contains(&("shop-wt", "docs/x.md")), "{patterns:?}");
     assert!(!patterns.iter().any(|(p, _)| *p == "blog"), "{patterns:?}");
+}
+
+/// A4, second half. One checkout registered under two spellings, or reached through a
+/// symlinked parent directory, is one checkout: the candidate set is found by the
+/// physically resolved top, not by the spelling a project was registered under.
+#[cfg(unix)]
+#[test]
+fn one_checkout_under_two_spellings_still_blocks() {
+    let fx = Fx::new();
+    let r = &fx.repos;
+    let root = r.root();
+    // A symlink to the checkout itself, and a symlinked parent directory.
+    let alias = root.join("shop-alias");
+    std::os::unix::fs::symlink(&r.main, &alias).unwrap();
+    let parent = root.join("linked-parent");
+    std::os::unix::fs::symlink(root, &parent).unwrap();
+    let through_parent = parent.join("shop");
+    let mut spellings = vec![alias, through_parent];
+    // The temporary directory itself usually has two spellings on macOS (`/var/...` and
+    // `/private/var/...`), as `/tmp/x` and `/private/tmp/x` do.
+    let real = std::fs::canonicalize(&r.main).unwrap();
+    if real != r.main {
+        spellings.push(real);
+    }
+    let edit = |agent: &str, dir: &Path, file: &str| {
+        fx.store
+            .guard_edit(agent, &fx.project(dir), &[file.into()], "auto")
+            .unwrap()
+    };
+    let main_project = fx.store.project(&fx.project(&r.main)).unwrap();
+    for (i, spelling) in spellings.iter().enumerate() {
+        let project = fx.store.project(&fx.project(spelling)).unwrap();
+        assert_ne!(
+            project.project_id, main_project.project_id,
+            "{spelling:?} is registered as its own project"
+        );
+        // Held under the main spelling, stopped under the other one, and the reverse.
+        let (a, b) = (format!("src/a{i}.rs"), format!("src/b{i}.rs"));
+        assert!(edit("alice", &r.main, &a).conflicts.is_empty());
+        let stopped = edit("bob", spelling, &a);
+        assert_eq!(stopped.conflicts.len(), 1, "{spelling:?}");
+        assert_eq!(stopped.conflicts[0].held.agent, "alice");
+        assert!(edit("bob", spelling, &b).conflicts.is_empty());
+        assert_eq!(
+            edit("alice", &r.main, &b).conflicts.len(),
+            1,
+            "{spelling:?}"
+        );
+    }
+}
+
+/// The checkout value relies on `std::fs::canonicalize` returning a directory's on-disk
+/// letter case (D56 claims it for files). Where the volume ignores case, a project
+/// registered under another spelling of its directory is in the same checkout.
+#[test]
+fn a_checkout_is_stored_in_its_on_disk_letter_case() {
+    let fx = Fx::new();
+    let root = fx.repos.root();
+    let real = root.join("CamelCase");
+    write(&real.join(".git/config"), "[core]\n");
+    let other = root.join("camelcase");
+    let on_disk = repo_link_for(&real).unwrap().checkout;
+    assert!(on_disk.ends_with("CamelCase"), "{on_disk}");
+    if std::fs::metadata(&other).is_err() {
+        // A volume that tells the two names apart: nothing more to check.
+        return;
+    }
+    assert_eq!(
+        std::fs::canonicalize(&other)
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy(),
+        "CamelCase",
+        "canonicalize restores the on-disk case of a directory"
+    );
+    assert_eq!(repo_link_for(&other).unwrap().checkout, on_disk);
+    let edit = |agent: &str, dir: &Path, file: &str| {
+        fx.store
+            .guard_edit(agent, &fx.project(dir), &[file.into()], "auto")
+            .unwrap()
+    };
+    assert!(edit("alice", &real, "src/a.rs").conflicts.is_empty());
+    assert_eq!(edit("bob", &other, "src/a.rs").conflicts.len(), 1);
 }
 
 #[test]
@@ -211,7 +336,9 @@ fn remotes_differing_only_in_path_case_are_different_repositories() {
     );
     let other = fx.acquire("bob", &lower, &["src/a.txt"]).unwrap();
     assert!(other.conflicts.is_empty(), "{:?}", other.conflicts);
-    // Same path case, different host case and scheme: still one repository.
+    // Same path case, different host case and scheme: still one repository. Clones never
+    // block each other (D92), so the repository shows in what a project's listing counts
+    // as its sibling checkouts.
     let same = fx.repos.root().join("same");
     write(
         &same.join(".git/config"),
@@ -220,10 +347,21 @@ fn remotes_differing_only_in_path_case_are_different_repositories() {
     assert_eq!(
         fx.acquire("carol", &same, &["src/a.txt"])
             .unwrap()
-            .conflicts
+            .granted
             .len(),
         1
     );
+    let siblings: Vec<String> = fx
+        .store
+        .holds(HoldFilter {
+            project: Some(fx.project(&same)),
+            agent: None,
+        })
+        .unwrap()
+        .into_iter()
+        .map(|h| h.project)
+        .collect();
+    assert_eq!(siblings, ["upper", "same"]);
 }
 
 #[test]
@@ -231,17 +369,17 @@ fn projects_from_before_repo_links_are_linked_on_demand() {
     let fx = Fx::new();
     let r = &fx.repos;
     fx.acquire("alice", &r.main, &["src/**"]).unwrap();
-    let wt = fx.project(&r.wt);
+    // A second project of the same checkout: one registered at a subdirectory.
+    let sub = fx.project(&r.main.join("src"));
     // Simulate a database whose projects predate the link cache.
     let db = rusqlite::Connection::open(r.home.join(DB_FILE)).unwrap();
     db.execute("DELETE FROM project_repos", []).unwrap();
-    drop(db);
     let report = fx
         .store
         .acquire_holds(AcquireHolds {
             agent: "bob".into(),
-            project: wt,
-            paths: vec!["src/a.rs".into()],
+            project: sub,
+            paths: vec!["a.rs".into()],
             ttl_seconds: None,
             exclusive: true,
             reason: None,
@@ -251,8 +389,18 @@ fn projects_from_before_repo_links_are_linked_on_demand() {
     assert_eq!(
         report.conflicts.len(),
         1,
-        "legacy hold in the main checkout still counts"
+        "legacy hold in the top-level project still counts"
     );
+    // Both projects were linked on the way, to the one checkout they share.
+    let checkouts: Vec<String> = db
+        .prepare("SELECT checkout FROM project_repos ORDER BY project_id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let top = resolve_existing(&r.main).to_string_lossy().into_owned();
+    assert_eq!(checkouts, [top.clone(), top]);
 }
 
 #[test]
@@ -337,7 +485,7 @@ fn manual_globs_under_literal_route_components_conflict_in_both_orders() {
         ),
     ] {
         let fx = Fx::new();
-        let wt = fx.project(&fx.repos.wt);
+        let twin = fx.project(&fx.repos.twin);
         assert_eq!(
             fx.acquire("alice", &fx.repos.main, &[pattern])
                 .unwrap()
@@ -347,7 +495,7 @@ fn manual_globs_under_literal_route_components_conflict_in_both_orders() {
         );
         assert_eq!(
             fx.store
-                .guard_edit("bob", &wt, &[path.into()], "auto")
+                .guard_edit("bob", &twin, &[path.into()], "auto")
                 .unwrap()
                 .conflicts
                 .len(),
@@ -357,7 +505,7 @@ fn manual_globs_under_literal_route_components_conflict_in_both_orders() {
         fx.store.release_holds("alice", &[]).unwrap();
         assert!(fx
             .store
-            .guard_edit("bob", &wt, &[path.into()], "auto")
+            .guard_edit("bob", &twin, &[path.into()], "auto")
             .unwrap()
             .conflicts
             .is_empty());
@@ -373,7 +521,7 @@ fn manual_globs_under_literal_route_components_conflict_in_both_orders() {
     // Must stay free: a different route directory, a different package subtree, and a
     // file the tail does not name.
     let fx = Fx::new();
-    let wt = fx.project(&fx.repos.wt);
+    let twin = fx.project(&fx.repos.twin);
     for pattern in [
         "packages/*/app/[id]/page.tsx",
         "app/{shop,blog}/[id]/page.tsx",
@@ -404,7 +552,7 @@ fn manual_globs_under_literal_route_components_conflict_in_both_orders() {
     ] {
         assert!(
             fx.store
-                .guard_edit("bob", &wt, &[path.into()], "auto")
+                .guard_edit("bob", &twin, &[path.into()], "auto")
                 .unwrap()
                 .conflicts
                 .is_empty(),
@@ -461,7 +609,7 @@ fn own_glob_holds_cover_brace_and_escaped_wildcard_files() {
 #[test]
 fn wildcard_only_globs_hold_one_level() {
     let fx = Fx::new();
-    let wt = fx.project(&fx.repos.wt);
+    let twin = fx.project(&fx.repos.twin);
     for pattern in ["*", "src/*"] {
         let granted = fx.acquire("alice", &fx.repos.main, &[pattern]).unwrap();
         assert_eq!(granted.granted.len(), 1, "{pattern}");
@@ -474,7 +622,7 @@ fn wildcard_only_globs_hold_one_level() {
     ] {
         let conflicts = fx
             .store
-            .guard_edit("bob", &wt, &[path.into()], "auto")
+            .guard_edit("bob", &twin, &[path.into()], "auto")
             .unwrap()
             .conflicts;
         assert_eq!(!conflicts.is_empty(), blocked, "{path}");
@@ -486,19 +634,19 @@ fn manual_bracket_directory_holds_conflict_with_literal_files_in_both_orders() {
     for pattern in ["app/[id]", "app/[id]/**"] {
         let fx = Fx::new();
         let main = fx.project(&fx.repos.main);
-        let wt = fx.project(&fx.repos.wt);
+        let twin = fx.project(&fx.repos.twin);
         // The directory need not exist for an explicit intent hold to protect it.
         let manual = fx.acquire("alice", &fx.repos.main, &[pattern]).unwrap();
         assert_eq!(manual.granted.len(), 1);
         let edit = fx
             .store
-            .guard_edit("bob", &wt, &["app/[id]/page.tsx".into()], "auto")
+            .guard_edit("bob", &twin, &["app/[id]/page.tsx".into()], "auto")
             .unwrap();
         assert_eq!(edit.conflicts.len(), 1, "manual first: {pattern}");
         fx.store.release_holds("alice", &[]).unwrap();
         assert!(fx
             .store
-            .guard_edit("bob", &wt, &["app/[id]/page.tsx".into()], "auto")
+            .guard_edit("bob", &twin, &["app/[id]/page.tsx".into()], "auto")
             .unwrap()
             .conflicts
             .is_empty());
@@ -795,12 +943,12 @@ fn identical_pushes_are_coalesced_without_losing_mail_or_wake_retries() {
 fn blocked_retries_are_deduplicated_and_ping_once_after_release() {
     let fx = Fx::new();
     let main = fx.project(&fx.repos.main);
-    let wt = fx.project(&fx.repos.wt);
+    let twin = fx.project(&fx.repos.twin);
     fx.acquire("alice", &fx.repos.main, &["src/a.rs"]).unwrap();
     for attempt in 0..20 {
         let blocked = fx
             .store
-            .guard_edit("bob", &wt, &["src/a.rs".into()], "auto")
+            .guard_edit("bob", &twin, &["src/a.rs".into()], "auto")
             .unwrap();
         assert_eq!(blocked.conflicts.len(), 1);
         assert_eq!(blocked.first_notice, attempt == 0);
@@ -810,7 +958,7 @@ fn blocked_retries_are_deduplicated_and_ping_once_after_release() {
         fx.advance_secs(advance);
         let blocked = fx
             .store
-            .guard_edit("bob", &wt, &["src/a.rs".into()], "auto")
+            .guard_edit("bob", &twin, &["src/a.rs".into()], "auto")
             .unwrap();
         assert!(!blocked.first_notice);
         assert_eq!(blocked.retry_after_seconds, expected);
@@ -839,7 +987,7 @@ fn blocked_retries_are_deduplicated_and_ping_once_after_release() {
 fn hold_free_ping_compares_literal_paths_after_restack() {
     let fx = Fx::new();
     let main = fx.project(&fx.repos.main);
-    let wt = fx.project(&fx.repos.wt);
+    let twin = fx.project(&fx.repos.twin);
     let path = "app/[id]/page.tsx";
     fx.store
         .guard_edit("alice", &main, &[path.into()], "auto")
@@ -849,7 +997,7 @@ fn hold_free_ping_compares_literal_paths_after_restack() {
         .unwrap();
     assert!(!fx
         .store
-        .guard_edit("bob", &wt, &[path.into()], "auto")
+        .guard_edit("bob", &twin, &[path.into()], "auto")
         .unwrap()
         .conflicts
         .is_empty());
@@ -873,7 +1021,7 @@ fn hold_free_ping_compares_literal_paths_after_restack() {
 fn hold_free_ping_waits_for_a_manual_alternation_naming_the_directory() {
     let fx = Fx::new();
     let main = fx.project(&fx.repos.main);
-    let wt = fx.project(&fx.repos.wt);
+    let twin = fx.project(&fx.repos.twin);
     let path = "src/a/b/page.tsx";
     for (name, pattern) in [("alice", path), ("carol", "src/{a/b,c}")] {
         fx.store
@@ -890,7 +1038,7 @@ fn hold_free_ping_waits_for_a_manual_alternation_naming_the_directory() {
     }
     let blocked = fx
         .store
-        .guard_edit("bob", &wt, &[path.into()], "auto")
+        .guard_edit("bob", &twin, &[path.into()], "auto")
         .unwrap();
     assert_eq!(blocked.conflicts.len(), 2, "{:?}", blocked.conflicts);
     fx.store.release_holds("alice", &[]).unwrap();
@@ -958,7 +1106,7 @@ fn ended_one_of_two_blockers_does_not_keep_unrelated_writes_slow() {
     for n in [400, 2000] {
         let fx = Fx::new();
         let main = fx.project(&fx.repos.main);
-        let wt = fx.project(&fx.repos.wt);
+        let twin = fx.project(&fx.repos.twin);
         let other = fx.project(&fx.repos.other);
         let time_unrelated = |label: &str| {
             (0..5)
@@ -992,7 +1140,7 @@ fn ended_one_of_two_blockers_does_not_keep_unrelated_writes_slow() {
         for i in 0..n {
             assert_eq!(
                 fx.store
-                    .guard_edit("bob", &wt, &[format!("src/f{i}.rs")], "auto")
+                    .guard_edit("bob", &twin, &[format!("src/f{i}.rs")], "auto")
                     .unwrap()
                     .conflicts
                     .len(),
@@ -1041,7 +1189,7 @@ fn ended_one_of_two_blockers_does_not_keep_unrelated_writes_slow() {
 fn still_blocked_recheck_tracks_replacement_without_resetting_announcements() {
     let fx = Fx::new();
     let main = fx.project(&fx.repos.main);
-    let wt = fx.project(&fx.repos.wt);
+    let twin = fx.project(&fx.repos.twin);
     let take = |agent: &str| {
         fx.store
             .acquire_holds(AcquireHolds {
@@ -1059,7 +1207,7 @@ fn still_blocked_recheck_tracks_replacement_without_resetting_announcements() {
     take("carol");
     let edit = || {
         fx.store
-            .guard_edit("bob", &wt, &["src/a.rs".into()], "auto")
+            .guard_edit("bob", &twin, &["src/a.rs".into()], "auto")
             .unwrap()
     };
     assert!(edit().first_notice);
@@ -1143,7 +1291,7 @@ fn still_blocked_recheck_tracks_replacement_without_resetting_announcements() {
 #[test]
 fn blocked_recheck_update_failure_does_not_fail_release_or_lose_the_wait() {
     let fx = Fx::new();
-    let wt = fx.project(&fx.repos.wt);
+    let twin = fx.project(&fx.repos.twin);
     let broad = fx
         .acquire("alice", &fx.repos.main, &["src/**"])
         .unwrap()
@@ -1158,7 +1306,7 @@ fn blocked_recheck_update_failure_does_not_fail_release_or_lose_the_wait() {
         .clone();
     assert_eq!(
         fx.store
-            .guard_edit("bob", &wt, &["src/a.rs".into()], "auto")
+            .guard_edit("bob", &twin, &["src/a.rs".into()], "auto")
             .unwrap()
             .conflicts
             .len(),
@@ -1277,7 +1425,7 @@ fn edit_guard_takes_narrow_holds_and_names_the_holder() {
     let fx = Fx::new();
     let r = &fx.repos;
     let main = fx.project(&r.main);
-    let wt = fx.project(&r.wt);
+    let twin = fx.project(&r.twin);
     let file = |p: &Path, rel: &str| Repos::path(&p.join(rel));
 
     let g = fx
@@ -1306,10 +1454,11 @@ fn edit_guard_takes_narrow_holds_and_names_the_holder() {
     assert!(again.held.is_empty());
     assert_eq!(fx.kinds().len(), before, "no events when already covered");
 
-    // Another agent in a sibling worktree is blocked, and told who holds it.
+    // Another agent, in a second project of the same checkout, is blocked, and told who
+    // holds it.
     let blocked = fx
         .store
-        .guard_edit("bob", &wt, &[file(&r.wt, "src/a.rs")], "editing (auto)")
+        .guard_edit("bob", &twin, &[file(&r.twin, "src/a.rs")], "editing (auto)")
         .unwrap();
     assert!(blocked.held.is_empty());
     assert_eq!(blocked.conflicts.len(), 1);
@@ -1321,7 +1470,7 @@ fn edit_guard_takes_narrow_holds_and_names_the_holder() {
     );
     let ok = fx
         .store
-        .guard_edit("bob", &wt, &["src/b.rs".into()], "editing (auto)")
+        .guard_edit("bob", &twin, &["src/b.rs".into()], "editing (auto)")
         .unwrap();
     assert_eq!(ok.held.len(), 1);
 
@@ -1636,7 +1785,7 @@ fn quick_open_never_creates_or_migrates() {
 fn stats_count_the_coordination_evidence() {
     let fx = Fx::new();
     let r = &fx.repos;
-    let (main, wt) = (fx.project(&r.main), fx.project(&r.wt));
+    let (main, twin) = (fx.project(&r.main), fx.project(&r.twin));
     let edit = |agent: &str, project: &str, path: &str| {
         fx.store
             .guard_edit(agent, project, &[path.to_string()], "editing (auto)")
@@ -1650,7 +1799,7 @@ fn stats_count_the_coordination_evidence() {
     fx.acquire("carol", &r.main, &["docs/**"]).unwrap();
     // Bob is stopped three times on two files: two notices and two distinct collisions.
     for path in ["src/a.rs", "src/a.rs", "src/b.rs"] {
-        assert!(!edit("bob", &wt, path).conflicts.is_empty());
+        assert!(!edit("bob", &twin, path).conflicts.is_empty());
     }
 
     // Mail: one pushed mid-task and then read, one pushed by a wake and answered, one
@@ -1757,7 +1906,7 @@ fn stats_count_the_coordination_evidence() {
     );
     assert_eq!(
         (b.project.as_str(), b.holder_project.as_str()),
-        ("shop-wt", "shop")
+        ("shop-twin", "shop")
     );
     assert_eq!(s.wakes.len(), 2);
     assert_eq!(s.wakes[1].outcome, "started");
@@ -1785,7 +1934,7 @@ fn stats_count_the_coordination_evidence() {
         .unwrap();
     let text: Vec<&str> = feed.items.iter().map(|i| i.summary.as_str()).collect();
     assert!(
-        text.contains(&"bob was stopped editing shop-wt:src/a.rs (held by alice)"),
+        text.contains(&"bob was stopped editing shop-twin:src/a.rs (held by alice)"),
         "{text:?}"
     );
     assert!(
@@ -1828,21 +1977,27 @@ fn automatic_wake_targets_clear_only_when_they_match() {
 #[test]
 fn repo_keys_cached_under_older_rules_are_recomputed() {
     // Review r2 N3: keys cached by an older normalizer (say, the v7 all-lowercase rule)
-    // must not survive an upgrade and hide a sibling's hold.
+    // must not survive an upgrade and hide a hold in another project of the checkout.
+    // Since D92 the row also carries the checkout, which is what conflicts are found by:
+    // a row under older rules is recomputed whatever checkout it names, so the proof runs
+    // through a project registered at a subdirectory of the checkout.
     let fx = Fx::new();
     let r = &fx.repos;
     fx.acquire("alice", &r.main, &["src/**"]).unwrap();
-    let wt = fx.project(&r.wt);
+    let sub = fx.project(&r.main.join("src"));
     let stale = |key: &str| {
         let db = rusqlite::Connection::open(r.home.join(DB_FILE)).unwrap();
-        db.execute("UPDATE project_repos SET repo_key = ?1", [key])
-            .unwrap();
+        db.execute(
+            "UPDATE project_repos SET repo_key = ?1, checkout = '/stale/elsewhere/' || project_id",
+            [key],
+        )
+        .unwrap();
     };
-    let acquire_in_wt = |agent: &str, path: &str| {
+    let acquire_in_sub = |agent: &str, path: &str| {
         fx.store
             .acquire_holds(AcquireHolds {
                 agent: agent.into(),
-                project: wt.clone(),
+                project: sub.clone(),
                 paths: vec![path.into()],
                 ttl_seconds: None,
                 exclusive: true,
@@ -1853,7 +2008,7 @@ fn repo_keys_cached_under_older_rules_are_recomputed() {
     };
     // Every row carries an unversioned key from older rules: both get recomputed.
     stale("example.com/me/shop");
-    assert_eq!(acquire_in_wt("bob", "src/a.rs").conflicts.len(), 1);
+    assert_eq!(acquire_in_sub("bob", "a.rs").conflicts.len(), 1);
     // Rows that disagree (one stale, one current) also end up compared under one rule.
     let db = rusqlite::Connection::open(r.home.join(DB_FILE)).unwrap();
     let main_id: String = db
@@ -1864,18 +2019,34 @@ fn repo_keys_cached_under_older_rules_are_recomputed() {
         )
         .unwrap();
     db.execute(
-        "UPDATE project_repos SET repo_key = 'example.com/ME/SHOP-old' WHERE project_id = ?1",
+        "UPDATE project_repos SET repo_key = 'example.com/ME/SHOP-old',
+           checkout = '/stale/elsewhere' WHERE project_id = ?1",
         [&main_id],
     )
     .unwrap();
-    drop(db);
-    assert_eq!(acquire_in_wt("carol", "src/b.rs").conflicts.len(), 1);
+    assert_eq!(acquire_in_sub("carol", "b.rs").conflicts.len(), 1);
     // The edit guard sees it too.
     let g = fx
         .store
-        .guard_edit("carol", &wt, &["src/c.rs".into()], "editing (auto)")
+        .guard_edit("carol", &sub, &["c.rs".into()], "editing (auto)")
         .unwrap();
     assert_eq!(g.conflicts.len(), 1);
+    // A row under the current rules with no checkout yet (the column was added to it by
+    // the migration) is recomputed as well: the fill never depends on the version alone.
+    db.execute(
+        "UPDATE project_repos SET checkout = '' WHERE project_id = ?1",
+        [&main_id],
+    )
+    .unwrap();
+    assert_eq!(acquire_in_sub("carol", "d.rs").conflicts.len(), 1);
+    let filled: String = db
+        .query_row(
+            "SELECT checkout FROM project_repos WHERE project_id = ?1",
+            [&main_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(filled, resolve_existing(&r.main).to_string_lossy());
 }
 
 fn register_as(fx: &Fx, name: &str, project: Option<&Path>) -> String {
@@ -1897,10 +2068,10 @@ fn register_as(fx: &Fx, name: &str, project: Option<&Path>) -> String {
 fn ambiguous_holder_name_still_denies_the_edit() {
     let fx = Fx::new();
     let main = fx.project(&fx.repos.main);
-    fx.project(&fx.repos.wt);
+    fx.project(&fx.repos.twin);
     register_as(&fx, "solo", None);
-    fx.acquire("solo", &fx.repos.wt, &["src/d.rs"]).unwrap();
-    register_as(&fx, "solo", Some(&fx.repos.wt));
+    fx.acquire("solo", &fx.repos.twin, &["src/d.rs"]).unwrap();
+    register_as(&fx, "solo", Some(&fx.repos.twin));
     for attempt in 0..2 {
         let guard = fx
             .store
@@ -1924,12 +2095,12 @@ fn ambiguous_waiter_does_not_break_release_sweep_or_other_agents() {
     for expiry in [false, true] {
         let fx = Fx::new();
         let main = fx.project(&fx.repos.main);
-        let wt = fx.project(&fx.repos.wt);
+        let twin = fx.project(&fx.repos.twin);
         let w = register_as(&fx, "w", None);
         fx.store
             .acquire_holds(AcquireHolds {
                 agent: "bob".into(),
-                project: wt.clone(),
+                project: twin.clone(),
                 paths: vec!["src/e.rs".into()],
                 ttl_seconds: Some(60),
                 exclusive: true,
@@ -1988,7 +2159,7 @@ fn ambiguous_requester_does_not_break_release() {
     fx.project(&fx.repos.main);
     let w = register_as(&fx, "w", None);
     let held = fx
-        .acquire("bob", &fx.repos.wt, &["src/g.rs"])
+        .acquire("bob", &fx.repos.twin, &["src/g.rs"])
         .unwrap()
         .granted
         .remove(0);
@@ -2022,12 +2193,12 @@ fn ambiguous_requester_does_not_break_release() {
 fn second_hold_free_ping_for_the_same_file_is_announced() {
     let fx = Fx::new();
     let main = fx.project(&fx.repos.main);
-    let wt = fx.project(&fx.repos.wt);
+    let twin = fx.project(&fx.repos.twin);
     for round in 0..2 {
         fx.acquire("alice", &fx.repos.main, &["src/b.rs"]).unwrap();
         let blocked = fx
             .store
-            .guard_edit("bob", &wt, &["src/b.rs".into()], "auto")
+            .guard_edit("bob", &twin, &["src/b.rs".into()], "auto")
             .unwrap();
         assert!(blocked.first_notice, "round {round}");
         fx.store.release_holds("alice", &[]).unwrap();
@@ -2085,13 +2256,13 @@ fn count(fx: &Fx, kind: &str) -> usize {
 fn wait_record_failure_does_not_renotice_on_retry() {
     let fx = Fx::new();
     let main = fx.project(&fx.repos.main);
-    let wt = fx.project(&fx.repos.wt);
+    let twin = fx.project(&fx.repos.twin);
     fx.acquire("alice", &fx.repos.main, &["src/a.rs"]).unwrap();
     inject_wait_failure(&fx, true);
 
     let first = fx
         .store
-        .guard_edit("bob", &wt, &["src/a.rs".into()], "auto")
+        .guard_edit("bob", &twin, &["src/a.rs".into()], "auto")
         .expect("a wait-record failure must still deny, not fail the guard");
     assert_eq!(first.conflicts.len(), 1);
     assert!(
@@ -2106,7 +2277,7 @@ fn wait_record_failure_does_not_renotice_on_retry() {
 
     let second = fx
         .store
-        .guard_edit("bob", &wt, &["src/a.rs".into()], "auto")
+        .guard_edit("bob", &twin, &["src/a.rs".into()], "auto")
         .expect("retries must still deny");
     assert_eq!(second.conflicts.len(), 1);
     assert!(
@@ -2147,10 +2318,10 @@ fn wait_record_failure_does_not_renotice_on_retry() {
 fn wait_record_failure_notices_new_paths_and_replacement_holds() {
     let fx = Fx::new();
     let main = fx.project(&fx.repos.main);
-    let wt = fx.project(&fx.repos.wt);
+    let twin = fx.project(&fx.repos.twin);
     let edit = |path: &str| {
         fx.store
-            .guard_edit("bob", &wt, &[path.into()], "auto")
+            .guard_edit("bob", &twin, &[path.into()], "auto")
             .unwrap()
     };
 
@@ -2227,7 +2398,7 @@ fn wait_record_failure_notices_new_paths_and_replacement_holds() {
     }
     for _ in 0..3 {
         fx.store
-            .guard_edit("alice", &wt, &["src/a.rs".into()], "auto")
+            .guard_edit("alice", &twin, &["src/a.rs".into()], "auto")
             .unwrap();
     }
     assert_eq!(count(&fx, "hold.blocked"), 8, "alice's own first notice");
@@ -2269,10 +2440,10 @@ fn wait_record_failure_notices_new_paths_and_replacement_holds() {
 #[test]
 fn wait_update_failure_does_not_renotice_unchanged_blockers() {
     let fx = Fx::new();
-    let wt = fx.project(&fx.repos.wt);
+    let twin = fx.project(&fx.repos.twin);
     let edit = |path: &str| {
         fx.store
-            .guard_edit("bob", &wt, &[path.into()], "auto")
+            .guard_edit("bob", &twin, &[path.into()], "auto")
             .unwrap()
     };
     fx.acquire("alice", &fx.repos.main, &["src/**"]).unwrap();

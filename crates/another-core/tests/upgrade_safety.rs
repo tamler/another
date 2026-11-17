@@ -1078,3 +1078,280 @@ fn a_mismatch_names_the_tables_that_differ() {
     let seen = Store::inspect(&home, std::time::Duration::from_secs(2)).unwrap();
     assert_eq!(seen.differs, ["agents", "extra"]);
 }
+
+fn write_file(path: &Path, text: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+fn row_counts(db: &Connection) -> Vec<(String, i64)> {
+    let names: Vec<String> = db
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+             ORDER BY name",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    names
+        .into_iter()
+        .map(|n| {
+            let count = db
+                .query_row(&format!("SELECT count(*) FROM \"{n}\""), [], |r| r.get(0))
+                .unwrap();
+            (n, count)
+        })
+        .collect()
+}
+
+/// A9 (D92, schema v13). A home from the build before holds were scoped to a checkout: a
+/// live hold in worktree A, a wait in worktree B recorded against it while holds still
+/// reached across worktrees, and a wait in A's own checkout against the same hold.
+#[test]
+fn upgrade_drops_cross_checkout_blocks() {
+    // The schema this migration made. Later migrations follow it.
+    const SCOPED: i64 = 13;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let main = root.join("shop");
+    write_file(
+        &main.join(".git/config"),
+        "[remote \"origin\"]\n\turl = git@example.com:me/shop.git\n",
+    );
+    let worktree = |name: &str| -> PathBuf {
+        let wt = root.join(name);
+        let wt_git = main.join(".git/worktrees").join(name);
+        write_file(&wt.join(".git"), &format!("gitdir: {}\n", wt_git.display()));
+        write_file(&wt_git.join("commondir"), "../..\n");
+        std::fs::create_dir_all(wt.join("src")).unwrap();
+        wt
+    };
+    let (a, b) = (worktree("wt-a"), worktree("wt-b"));
+    let home = root.join("home");
+    let db_path = home.join(DB_FILE);
+    let path = |p: &Path| p.to_string_lossy().into_owned();
+
+    let store = Store::open_as(&home, RELEASE).unwrap();
+    for (name, program) in [
+        ("alice", Program::Claude),
+        ("bob", Program::Codex),
+        ("carol", Program::Grok),
+    ] {
+        store
+            .register_agent(RegisterAgent {
+                name: name.into(),
+                program,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+    }
+    let [pa, pb, pa_src] = [a.clone(), b.clone(), a.join("src")]
+        .map(|dir| store.ensure_project("test", &path(&dir)).unwrap());
+    fn edit(store: &Store, agent: &str, project: &Project, file: &str) -> EditGuard {
+        store
+            .guard_edit(agent, &project.abs_path, &[file.into()], "auto")
+            .unwrap()
+    }
+    let held = edit(&store, "alice", &pa, "src/a.rs").held.remove(0);
+    // The wait in A's own checkout is a real one.
+    assert_eq!(edit(&store, "carol", &pa, "src/a.rs").conflicts.len(), 1);
+    // Mail, a request and a queue item, to find again after the upgrade.
+    store
+        .send_message(SendMessage {
+            from: "bob".into(),
+            to: vec!["alice".into()],
+            subject: "before the upgrade".into(),
+            body: "body".into(),
+            request: Some(NewRequest::default()),
+            ..Default::default()
+        })
+        .unwrap();
+    store
+        .queue_propose(
+            &QueueCaller::agent("bob"),
+            ProposeItem {
+                title: "before the upgrade".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    drop(store);
+
+    // Take the home back one schema: no checkout column, the older key rules, and the wait
+    // from worktree B that the build of that schema recorded against the hold in A.
+    let db = Connection::open(&db_path).unwrap();
+    db.execute_batch("ALTER TABLE project_repos DROP COLUMN checkout")
+        .unwrap();
+    db.pragma_update(None, "user_version", SCOPED - 1).unwrap();
+    let current_keys: i64 = db
+        .query_row(
+            "SELECT count(*) FROM project_repos WHERE repo_key LIKE 'v3:%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(current_keys, 3, "the three projects are linked");
+    // Worktree A's row as the older build wrote it. The other two keep the current key
+    // version: a row the version raise alone would never recompute.
+    db.execute(
+        "UPDATE project_repos SET repo_key = 'v2:' || substr(repo_key, 4) WHERE project_id = ?1",
+        [&pa.project_id],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO hold_waits (agent_id, project_id, path, blockers, holder_id, retry_at,
+           backoff_seconds)
+         SELECT (SELECT agent_id FROM agents WHERE name = 'bob'), ?1, path, blockers, holder_id,
+           retry_at, backoff_seconds FROM hold_waits",
+        [&pb.project_id],
+    )
+    .unwrap();
+    let hold_row = |db: &Connection| -> (String, String, i64, i64, Option<i64>) {
+        db.query_row(
+            "SELECT project_id, pattern, ttl_seconds, expires_at, released_at FROM holds
+             WHERE hold_id = ?1",
+            [&held.hold_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap()
+    };
+    let blockers = |db: &Connection| -> Vec<(String, String)> {
+        db.prepare(
+            "SELECT a.name, w.blockers FROM hold_waits w JOIN agents a USING (agent_id)
+             ORDER BY a.name",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+    };
+    let one = format!("[\"{}\"]", held.hold_id);
+    assert_eq!(
+        blockers(&db),
+        [("bob".into(), one.clone()), ("carol".into(), one.clone())]
+    );
+    let (hold_before, rows_before) = (hold_row(&db), row_counts(&db));
+    drop(db);
+
+    // The upgrade: a backup of the old schema first, then one additive step.
+    let store = Store::open_as(&home, RELEASE).unwrap();
+    let db = Connection::open(&db_path).unwrap();
+    assert_eq!(version(&db_path), current());
+    let saved = backups(&home);
+    assert_eq!(saved.len(), 1, "{saved:?}");
+    assert_eq!(version(&saved[0]), SCOPED - 1);
+    assert_eq!(
+        row_counts(&db),
+        rows_before,
+        "holds, mail, requests, queue items and waits: every row is still there"
+    );
+    assert_eq!(hold_row(&db), hold_before, "the hold is live and unchanged");
+    assert_eq!(hold_before.4, None);
+    // Every wait lost its blocker list, so the next sweep rechecks it under the new rule.
+    assert_eq!(
+        blockers(&db),
+        [("bob".into(), "[]".into()), ("carol".into(), "[]".into())]
+    );
+    let checkouts = |db: &Connection| -> Vec<(String, String)> {
+        db.prepare(
+            "SELECT p.slug, r.checkout FROM project_repos r JOIN projects p USING (project_id)
+             ORDER BY p.slug",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+    };
+    assert!(
+        checkouts(&db).iter().all(|(_, c)| c.is_empty()),
+        "nothing is computed by the migration itself"
+    );
+
+    // The first sweep: bob, in worktree B, is told the file is free without retrying, and
+    // his wait is gone. Carol's blocker is in her own checkout: her wait stays, with its
+    // blocker written back.
+    let unread = |agent: &str| {
+        store
+            .inbox(
+                agent,
+                InboxQuery {
+                    unread_only: true,
+                    urgent_only: false,
+                    limit: 10,
+                },
+            )
+            .unwrap()
+            .messages
+    };
+    let pings = |db: &Connection| -> i64 {
+        db.query_row(
+            "SELECT count(*) FROM messages WHERE subject LIKE 'Hold free:%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(pings(&db), 0, "opening the home sends nothing");
+    store.sweep().unwrap();
+    assert_eq!(pings(&db), 1);
+    let mail = unread("bob");
+    assert_eq!(mail.len(), 1, "{mail:?}");
+    assert_eq!(mail[0].message.subject, "Hold free: src/a.rs");
+    assert_eq!(
+        mail[0].message.body,
+        "Another automatically checked wt-b:src/a.rs: no conflicting hold remains in this \
+         checkout. The file is not reserved; check again before editing."
+    );
+    assert!(unread("carol").is_empty());
+    assert_eq!(blockers(&db), [("carol".into(), one)]);
+    store.sweep().unwrap();
+    assert_eq!(unread("bob").len(), 1, "one message, not one per sweep");
+    assert_eq!(hold_row(&db), hold_before);
+    // The new rule from the first command: bob edits in B, carol is still stopped in A.
+    assert!(edit(&store, "bob", &pb, "src/a.rs").conflicts.is_empty());
+    assert_eq!(edit(&store, "carol", &pa, "src/a.rs").conflicts.len(), 1);
+
+    // The checkout is filled on first use. Worktree A's row had the older key version; the
+    // row of the project at A's `src` already carries the current one with an empty
+    // checkout, and it still blocks through the top-level project, in both directions.
+    let a_real = path(&resolve_existing(&a));
+    let b_real = path(&resolve_existing(&b));
+    let filled = checkouts(&db);
+    assert!(
+        filled.contains(&("wt-a".into(), a_real.clone())),
+        "{filled:?}"
+    );
+    assert!(filled.contains(&("wt-b".into(), b_real)), "{filled:?}");
+    let src_row = |db: &Connection| -> (String, String) {
+        db.query_row(
+            "SELECT repo_key, checkout FROM project_repos WHERE project_id = ?1",
+            [&pa_src.project_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    };
+    let (key, checkout) = src_row(&db);
+    assert!(key.starts_with("v3:"), "{key}");
+    assert_eq!(checkout, "", "not used yet");
+    let stopped = edit(&store, "bob", &pa_src, "a.rs");
+    assert_eq!(stopped.conflicts.len(), 1, "src/a.rs is alice's, in wt-a");
+    assert_eq!(stopped.conflicts[0].held.hold_id, held.hold_id);
+    assert_eq!(src_row(&db), (key.clone(), a_real.clone()));
+    // The reverse: the holder sits in the project whose row has no checkout yet.
+    assert!(edit(&store, "bob", &pa_src, "lib.rs").conflicts.is_empty());
+    db.execute(
+        "UPDATE project_repos SET checkout = '' WHERE project_id = ?1",
+        [&pa_src.project_id],
+    )
+    .unwrap();
+    let stopped = edit(&store, "carol", &pa, "src/lib.rs");
+    assert_eq!(stopped.conflicts.len(), 1);
+    assert_eq!(stopped.conflicts[0].held.agent, "bob");
+    assert_eq!(src_row(&db), (key, a_real));
+}

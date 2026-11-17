@@ -1966,7 +1966,11 @@ fn migration_adds_only_queue_tables() {
         db.execute_batch(&format!("DROP TABLE {table}")).unwrap();
     }
     // The queue is schema v11. What later schemas added goes too, and comes back with them.
-    db.execute_batch("DROP TABLE transport_sessions").unwrap();
+    db.execute_batch(
+        "DROP TABLE transport_sessions;
+         ALTER TABLE project_repos DROP COLUMN checkout;",
+    )
+    .unwrap();
     db.pragma_update(None, "user_version", 10).unwrap();
     let before = table_counts(&db);
     assert!(before.iter().all(|(n, _)| !n.starts_with("queue_")));
