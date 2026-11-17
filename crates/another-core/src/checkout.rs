@@ -85,21 +85,34 @@ pub(crate) fn refuse_other_checkout(
         return Ok(());
     }
     let base = resolve_existing(Path::new(&project.abs_path));
-    let target = resolve_existing(&base.join(&dir));
-    // A file is held where its name lives, as the edit hook holds it: a pattern with no
-    // wildcard whose last name is a link to a file (or to nothing) stays in the directory
-    // the link is in, wherever it points. Only a link to a directory leads a hold away.
+    let mut target = resolve_existing(&base.join(&dir));
+    // A pattern with no wildcard whose last name is a link to a file (or to nothing). The
+    // edit hook holds such a file where its name lives, and also where it points when a
+    // hold can exist there.
     if rest.is_none() && !target.is_dir() {
         let written = base.join(&dir);
         if let (Some(parent), Some(name)) = (written.parent(), written.file_name()) {
             let named = resolve_existing(parent).join(name);
-            let around = checkout_of(&named);
-            let home = match link_of(tx, project)? {
-                Some(own) => around.as_deref() == Some(Path::new(&own.checkout)),
-                None => around.is_none() && named.starts_with(&base),
-            };
-            if home && named != target {
-                return Ok(());
+            if named != target {
+                let around = checkout_of(&named);
+                let home = match link_of(tx, project)? {
+                    Some(own) => around.as_deref() == Some(Path::new(&own.checkout)),
+                    None => around.is_none() && named.starts_with(&base),
+                };
+                if home {
+                    // It points to no checkout and no registered directory: the name is
+                    // all the hook holds, so the hold applies where the name lives. A
+                    // link to anywhere else is judged at the file it points to, as before.
+                    if checkout_of(&target).is_none()
+                        && registered_checkout(tx, &local_projects(tx)?, &target)?.is_none()
+                    {
+                        return Ok(());
+                    }
+                } else if around.is_some() {
+                    // The name itself lives in another checkout, reached through a
+                    // directory link: it is judged there, wherever the file link leads.
+                    target = named;
+                }
             }
         }
     }

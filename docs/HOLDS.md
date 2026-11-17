@@ -116,7 +116,12 @@ another: plainlink/sub/** points outside any checkout (/Users/jacob/plain/sub); 
 
 A remote caller gets the same message without the directory.
 
-Neither refusal applies to a file that is itself a symlink. A pattern with no wildcard is judged where its last name lives: `config.toml` in this checkout is held here, as the edit guard holds it, whether the link points outside git, at a file that does not exist yet, or into another checkout. `hold check` reports a conflict on it as for any file. Only a link to a directory leads a hold away.
+A file that is itself a symlink is judged by where it points. The edit guard holds such a file where its name lives, and also at the file it points to when a hold can exist there.
+
+- The link points to a place in no checkout and no registered directory, or to a file that does not exist yet: only the name is held, so `config.toml` in this checkout is held here, and `hold check` reports a conflict on it as for any file.
+- The link points into another checkout: refused as "inside another checkout", with the command that takes the hold on the target there. The same goes for a file below a directory link into another checkout, whatever that file links to.
+
+Two known limits remain. A file link into another checkout is refused although the edit guard does hold the link's name in this checkout. A link into a registered directory outside git is granted, and `hold check` reports no conflict, although the edit guard also holds the target there and can stop the edit for a hold in that directory.
 
 ## Symlinks
 

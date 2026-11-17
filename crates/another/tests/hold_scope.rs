@@ -1263,27 +1263,49 @@ fn a_hold_that_points_outside_every_checkout_is_refused() {
     assert_eq!(env.holds().len(), 1);
 }
 
-/// Review of the follow-ups, P2-1 and P3-3. A file that is itself a symlink is held where
-/// its name lives, as the edit hook holds it, wherever the link points: outside git, at
-/// nothing, or into another checkout. Only a directory link leads a hold away.
+/// Review of the follow-ups, R1 P2-1 and R2 N1, N2. For a file that is itself a symlink,
+/// what `hold check` and `hold acquire` say must agree with what the edit hook does. The
+/// hook holds the link where its name lives and also the file it points to, when that file
+/// is somewhere a hold can exist.
+///
+/// - The link points to no checkout and no registered directory (also a dangling link):
+///   only the name is held, so the hold is granted where the name lives.
+/// - The link points into another checkout: refused as before, with the command that
+///   takes the hold there. A known limit: the hook does hold the name here as well.
+/// - The link points into a registered directory outside git: granted and reported clear,
+///   as on main. A second known limit: the hook also holds the file there and can deny.
 #[test]
-fn a_file_link_is_held_where_its_name_lives() {
+fn check_and_the_edit_hook_agree_on_file_links() {
     let env = Env::new();
     let app = env.repo("work/app");
     let other = env.repo("work/other");
+    let wt = env.worktree(&app, &env.root.join("work/app-wt"));
+    let notes = env.root.join("notes");
     let outside = env.root.join("outside");
     write(&outside.join("config.toml"), "");
-    write(&other.join("shared.toml"), "");
+    write(&other.join("src/held.rs"), "");
+    write(&wt.join("README"), "");
+    write(&notes.join("todo.md"), "");
+    env.ok(&["project", "ensure", &s(&notes)]);
+    std::os::unix::fs::symlink(outside.join("config.toml"), other.join("src/olnk.toml")).unwrap();
     for (name, target) in [
         ("config.toml", outside.join("config.toml")),
         ("newcfg.toml", env.root.join("gone/cfg.toml")),
-        ("shared.toml", other.join("shared.toml")),
+        ("held.rs", other.join("src/held.rs")),
+        ("wtreadme", wt.join("README")),
+        ("todo.md", notes.join("todo.md")),
         ("otherdir", other.join("src")),
     ] {
         std::os::unix::fs::symlink(target, app.join(name)).unwrap();
     }
     env.start("claude", &app);
     env.start("codex", &app);
+    // Someone holds each file a link points to, in the place that file lives.
+    env.start("grok", &other);
+    assert_eq!(env.edit("grok", &other, "src/held.rs"), "");
+    env.start("grok", &wt);
+    assert_eq!(env.edit("grok", &wt, "README"), "");
+    assert_eq!(env.edit("grok", &other, &s(&notes.join("todo.md"))), "");
     let hold = |verb: &str, agent: &str, pattern: &str| -> Output {
         env.run_in(
             &app,
@@ -1298,14 +1320,69 @@ fn a_file_link_is_held_where_its_name_lives() {
             ],
         )
     };
-    for name in ["config.toml", "newcfg.toml", "shared.toml"] {
-        let granted = hold("acquire", "claude@app", name);
+    // What claude is told about each link before it edits, and what the hook then does.
+    let mut table = Vec::new();
+    for name in [
+        "config.toml",
+        "newcfg.toml",
+        "held.rs",
+        "wtreadme",
+        "todo.md",
+    ] {
+        let checked = hold("check", "claude@app", name);
+        let said = match checked.status.code() {
+            Some(0) => "clear".to_string(),
+            Some(3) => "conflict".to_string(),
+            _ => String::from_utf8_lossy(&checked.stderr).trim().to_string(),
+        };
+        let acquired = hold("acquire", "claude@app", name).status.code();
+        let hook = if env.edit("claude", &app, name).is_empty() {
+            "allow"
+        } else {
+            "deny"
+        };
+        // The rule this test is for: never "no conflicts" before an edit the hook stops.
+        // The link into a registered directory outside git breaks it, as it does on main:
+        // a known limit carried from there and pinned below, not the wanted behaviour.
         assert!(
-            granted.status.success(),
-            "{name}: {}",
-            String::from_utf8_lossy(&granted.stderr)
+            name == "todo.md" || !(said == "clear" && hook == "deny"),
+            "{name}: hold check said no conflicts and the hook stopped the edit"
         );
-        // `hold check` answers with the conflict, and the hook stops the other agent.
+        table.push((name, said, acquired, hook));
+    }
+    let refused = |name: &str, there: &Path, inside: &str| {
+        format!(
+            "another: {name} is inside another checkout ({0}); a hold taken here would not \
+             apply to its files. Take it there: another hold acquire --agent claude@app \
+             --project {0} '{inside}'",
+            s(there)
+        )
+    };
+    assert_eq!(
+        table,
+        [
+            ("config.toml", "clear".to_string(), Some(0), "allow"),
+            ("newcfg.toml", "clear".to_string(), Some(0), "allow"),
+            (
+                "held.rs",
+                refused("held.rs", &other, "src/held.rs"),
+                Some(1),
+                "deny"
+            ),
+            (
+                "wtreadme",
+                refused("wtreadme", &wt, "README"),
+                Some(1),
+                "deny"
+            ),
+            // The known limit: granted and reported clear, though the hook also holds the
+            // file in `notes` and stops the edit for the hold there.
+            ("todo.md", "clear".to_string(), Some(0), "deny"),
+        ]
+    );
+    // Where claude now holds the name, the second agent in the checkout is told so by
+    // `hold check` and stopped by the hook.
+    for name in ["config.toml", "newcfg.toml"] {
         let checked = hold("check", "codex@app", name);
         assert_eq!(checked.status.code(), Some(3), "{name}");
         assert!(
@@ -1320,27 +1397,18 @@ fn a_file_link_is_held_where_its_name_lives() {
             "{reason}"
         );
     }
-    // Claude's three holds are in this checkout. (The hook also filed codex's stopped edit
-    // of `shared.toml` under the link's target in the other checkout, as it does on main.)
-    let own = |env: &Env| -> Vec<Value> {
-        let mut held = env.holds();
-        held.retain(|h| h["agent"] == "claude@app");
-        held
-    };
-    let held = own(&env);
-    assert_eq!(held.len(), 3, "{held:?}");
-    assert!(held.iter().all(|h| h["project"] == "app"), "{held:?}");
-    // A directory link into another checkout is still refused, with or without a wildcard.
-    for pattern in ["otherdir", "otherdir/**"] {
-        let refused = hold("acquire", "claude@app", pattern);
-        assert_eq!(refused.status.code(), Some(1), "{pattern}");
-        assert!(
-            String::from_utf8_lossy(&refused.stderr).starts_with(&format!(
-                "another: {pattern} is inside another checkout ({})",
-                s(&other)
-            )),
-            "{refused:?}"
+    // A directory link into another checkout is refused, with or without a wildcard. So is
+    // a file below it that is itself a link out of git: its name lives in that checkout.
+    for (pattern, inside) in [
+        ("otherdir", "src"),
+        ("otherdir/**", "src/**"),
+        ("otherdir/olnk.toml", "src/olnk.toml"),
+    ] {
+        let out = hold("acquire", "claude@app", pattern);
+        assert_eq!(out.status.code(), Some(1), "{pattern}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr).trim(),
+            refused(pattern, &other, inside)
         );
     }
-    assert_eq!(own(&env).len(), 3);
 }
