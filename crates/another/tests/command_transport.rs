@@ -2024,8 +2024,8 @@ fn a_wake_by_hand_refuses_a_gone_or_quiet_command_target_until_the_pane_is_named
         assert!(why.contains(want), "{want:?} is not in {why:?}");
         assert!(!why.contains("--force"), "{why}");
         for command in [
-            format!("another wake --agent {agent} --via tmux --target %"),
-            format!("another wake set --agent {agent} --via tmux --target %"),
+            format!("another wake --agent={agent} --via tmux --target=%"),
+            format!("another wake set --agent={agent} --via tmux --target=%"),
         ] {
             assert!(why.contains(&command), "{command:?} is not in {why:?}");
         }
@@ -2273,11 +2273,13 @@ fn a_wake_by_hand_types_nothing_into_a_pane_another_agent_may_hold() {
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let bin = Bin::at(&root, &root.join("home"));
-    for name in ["sender", "eve", "ann", "bea", "cy", "dave", "fay"] {
+    for name in [
+        "sender", "eve", "ann", "bea", "cy", "dave", "fay", "gil", "hal",
+    ] {
         bin.json(&["agent", "register", name, "--program", "codex"]);
     }
     transports::write_example(&bin.home);
-    for to in ["eve", "bea", "cy", "dave", "fay"] {
+    for to in ["eve", "bea", "cy", "dave", "fay", "gil", "hal"] {
         bin.json(&["send", "--from", "sender", "--to", to, "--subject", "Hi"]);
     }
     let db = || rusqlite::Connection::open(bin.home.join(DB_FILE)).unwrap();
@@ -2336,8 +2338,8 @@ fn a_wake_by_hand_types_nothing_into_a_pane_another_agent_may_hold() {
     observed("s-eve", "unknown", "the pane hosts another session", 0);
     observed("s-ann", "working", "tmux: working", 0);
     let commands = [
-        "another wake --agent eve --via tmux --target %5",
-        "another wake set --agent eve --via tmux --target %5",
+        "another wake --agent=eve --via tmux --target=%5",
+        "another wake set --agent=eve --via tmux --target=%5",
     ];
     every_way(&bin, "eve", &commands);
     // The same row with eve's hook the newer one: `unknown` alone refuses.
@@ -2357,8 +2359,8 @@ fn a_wake_by_hand_types_nothing_into_a_pane_another_agent_may_hold() {
         "bea",
         &[
             "a hook of fay ran in that pane later",
-            "another wake --agent bea --via tmux --target %6",
-            "another wake set --agent bea --via tmux --target %6",
+            "another wake --agent=bea --via tmux --target=%6",
+            "another wake set --agent=bea --via tmux --target=%6",
         ],
     );
     // fay, whose hooks ran there last, is woken.
@@ -2400,6 +2402,20 @@ fn a_wake_by_hand_types_nothing_into_a_pane_another_agent_may_hold() {
         assert_eq!(sends(&bin).len(), 2 + round * 2);
         observed("s-cy", "present", "tmux: present", 0);
     }
+    // Two agents whose last hooks ran in the same pane in the same millisecond: neither is
+    // known to be the later one, so both are refused.
+    bin.hook_as("gil", "session-start", "s-gil", &[("TMUX_PANE", "%7")]);
+    bin.hook_as("hal", "session-start", "s-hal", &[("TMUX_PANE", "%7")]);
+    let tied = db()
+        .execute(
+            "UPDATE transport_sessions SET hook_seen_at = ?1
+             WHERE session_id IN ('s-gil', 's-hal')",
+            [real_now()],
+        )
+        .unwrap();
+    assert_eq!(tied, 2);
+    refused(&bin, &["wake", "--agent", "gil"], &["a hook of hal ran"]);
+    refused(&bin, &["wake", "--agent", "hal"], &["a hook of gil ran"]);
     let typed = sends(&bin).len();
 
     // A pane an earlier build captured for dave: typed into while nobody else's hooks ran
@@ -2421,7 +2437,7 @@ fn a_wake_by_hand_types_nothing_into_a_pane_another_agent_may_hold() {
         "dave",
         &[
             "a hook of ann ran in that pane later",
-            "another wake --agent dave --via tmux --target %9",
+            "another wake --agent=dave --via tmux --target=%9",
         ],
     );
 
@@ -2436,6 +2452,175 @@ fn a_wake_by_hand_types_nothing_into_a_pane_another_agent_may_hold() {
     assert_eq!(plan[0]["outcome"], "unconfirmed", "{plan}");
     assert_eq!(sends(&bin).last().unwrap()[3], "%6");
     assert_eq!(sends(&bin).len(), typed + 6);
+}
+
+/// The two commands a refusal prints run as printed, pasted into a shell, also for an
+/// agent whose name starts with `-` and a pane whose id starts with `=` (which zsh would
+/// expand if it were not quoted).
+#[test]
+fn the_commands_a_refusal_prints_run_as_printed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let bin = Bin::at(&root, &root.join("home"));
+    bin.json(&["agent", "register", "--program", "codex", "--", "-lead"]);
+    for name in ["sender", "zed"] {
+        bin.json(&["agent", "register", name, "--program", "codex"]);
+    }
+    transports::write_example(&bin.home);
+    bin.json(&["send", "--from", "sender", "--to=-lead", "--subject", "Hi"]);
+    bin.hook_as("-lead", "session-start", "s-lead", &[("TMUX_PANE", "=ls")]);
+    bin.hook_as("zed", "session-start", "s-zed", &[("TMUX_PANE", "=ls")]);
+    let moved = rusqlite::Connection::open(bin.home.join(DB_FILE))
+        .unwrap()
+        .execute(
+            "UPDATE transport_sessions SET hook_seen_at = hook_seen_at - 60000
+             WHERE session_id = 's-lead'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(moved, 1);
+
+    let out = bin.run(&["wake", "--agent=-lead"]);
+    assert!(!out.status.success());
+    let said = String::from_utf8(out.stdout).unwrap();
+    let printed: Vec<&str> = said.split('`').skip(1).step_by(2).collect();
+    assert_eq!(
+        printed,
+        [
+            "another wake --agent=-lead --via tmux --target='=ls'",
+            "another wake set --agent=-lead --via tmux --target='=ls'",
+        ],
+        "{said}"
+    );
+    assert!(bin.calls().is_empty(), "{:?}", bin.calls());
+
+    // Pasted into a shell, with the built binary as `another` on the test's PATH.
+    std::os::unix::fs::symlink(
+        env!("CARGO_BIN_EXE_another"),
+        root.join("bin").join("another"),
+    )
+    .unwrap();
+    let paste = |line: &str| {
+        let binary = bin.cmd(&[]);
+        let mut shell = Command::new("/bin/sh");
+        shell.args(["-c", line]).env_clear().stdin(Stdio::null());
+        shell.current_dir(root.join("cwd"));
+        shell.envs(binary.get_envs().filter_map(|(k, v)| Some((k, v?))));
+        let out = shell.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{line}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    paste(printed[0]);
+    let typed = bin.calls();
+    assert_eq!(typed.len(), 2, "{typed:?}");
+    assert_eq!(typed[0][..4], ["tmux", "send-keys", "-t", "=ls"]);
+    paste(printed[1]);
+    let stored = bin.json(&["wake", "list"]);
+    assert_eq!(stored[0]["agent"], "-lead", "{stored}");
+    assert_eq!(stored[0]["target"], "=ls", "{stored}");
+    // With the target stored by hand, the plain wake types.
+    let plan = bin.json(&["wake", "--agent=-lead"]);
+    assert_eq!(plan[0]["outcome"], "unconfirmed", "{plan}");
+    assert_eq!(bin.calls().len(), 4);
+}
+
+/// The guard is for command transports only. A Herdr target in each state the guard
+/// refuses is handled as before it existed: Herdr is asked who is in the pane, or for a
+/// captured pane the line is sent, and no refusal of the guard is printed.
+#[test]
+fn the_guard_leaves_herdr_wakes_as_they_were() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let bin = Bin::at(&root, &root.join("home"));
+    for name in [
+        "sender", "gone", "quiet", "unsure", "first", "second", "old",
+    ] {
+        bin.json(&["agent", "register", name, "--program", "codex"]);
+    }
+    for to in ["gone", "quiet", "unsure", "first", "old"] {
+        bin.json(&["send", "--from", "sender", "--to", to, "--subject", "Hi"]);
+    }
+    for (agent, pane) in [
+        ("gone", "w1:p1"),
+        ("quiet", "w1:p2"),
+        ("unsure", "w1:p3"),
+        ("first", "w1:p4"),
+        ("second", "w1:p4"),
+    ] {
+        let session = format!("s-{agent}");
+        bin.hook_as(agent, "session-start", &session, &[("HERDR_PANE_ID", pane)]);
+    }
+    let db = rusqlite::Connection::open(bin.home.join(DB_FILE)).unwrap();
+    let now = real_now();
+    for (sql, changed) in [
+        // Last seen gone, with no hook since.
+        (
+            "UPDATE transport_sessions SET state = 'gone', state_since = ?1, observed_at = ?1
+             WHERE session_id = 's-gone'",
+            1,
+        ),
+        // No hook for over a day.
+        (
+            "UPDATE transport_sessions SET hook_seen_at = ?1 - 90000000
+             WHERE session_id = 's-quiet'",
+            1,
+        ),
+        // `unknown`, not matched.
+        (
+            "UPDATE transport_sessions SET state = 'unknown', state_since = ?1,
+               observed_at = ?1, matched = 0 WHERE session_id = 's-unsure'",
+            1,
+        ),
+        // Another agent's hook ran in the same pane later.
+        (
+            "UPDATE transport_sessions SET hook_seen_at = ?1 - 60000
+             WHERE session_id = 's-first'",
+            1,
+        ),
+        // A captured Herdr pane whose agent ended its session.
+        (
+            "INSERT INTO wake_targets (agent_id, via, target, auto, updated_at)
+             SELECT agent_id, 'herdr', 'w1:p9', 1, ?1 FROM agents WHERE address = 'old'",
+            1,
+        ),
+        (
+            "UPDATE agents SET status = 'offline', last_seen_at = ?1 WHERE address = 'old'",
+            1,
+        ),
+    ] {
+        assert_eq!(db.execute(sql, [now]).unwrap(), changed, "{sql}");
+    }
+    drop(db);
+
+    for (agent, pane, asks) in [
+        ("gone", "w1:p1", "get"),
+        ("quiet", "w1:p2", "get"),
+        ("unsure", "w1:p3", "get"),
+        ("first", "w1:p4", "get"),
+        ("old", "w1:p9", "prompt"),
+    ] {
+        let before = bin.calls().len();
+        let out = bin.run(&["wake", "--agent", agent]);
+        let said = [out.stdout, out.stderr].concat();
+        let said = String::from_utf8(said).unwrap();
+        assert!(!said.contains("may not hold this agent"), "{agent}: {said}");
+        assert!(!said.contains("cannot say who is in it"), "{agent}: {said}");
+        let calls = bin.calls()[before..].to_vec();
+        assert_eq!(
+            calls.first().map(|c| &c[..3]),
+            Some(&["herdr".to_string(), "agent".into(), asks.into()][..]),
+            "{agent}: Herdr was not asked first: {calls:?} {said}"
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|c| c[0] == "herdr" && c.contains(&pane.to_string())),
+            "{agent}: {calls:?}"
+        );
+    }
 }
 
 /// A `transports.json` that is not a regular file is refused without being opened, so a

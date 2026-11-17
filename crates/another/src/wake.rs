@@ -502,8 +502,9 @@ pub fn wake(store: &Store, agent: &str, opts: &WakeOptions) -> Result<WakePlan> 
     // before a dry run reports.
     if via.as_str() != "herdr" && opts.target.is_none() && hand.is_none() {
         if let Some(why) = pane_in_doubt(store, &rows, row, &address, via.as_str(), &target) {
+            // With `=`, so a name that starts with `-` is still read as the value.
             let name = format!(
-                "--agent {} --via {} --target {}",
+                "--agent={} --via {} --target={}",
                 shell_word(&address),
                 via.as_str(),
                 shell_word(&target)
@@ -984,9 +985,10 @@ fn pane_in_doubt(
 }
 
 /// `text` as one word of a shell command: as it is when it holds only characters no shell
-/// reads specially, else in single quotes.
+/// reads specially, else in single quotes. `=` is not plain: zsh expands a word that
+/// starts with it.
 fn shell_word(text: &str) -> String {
-    let plain = |c: char| c.is_ascii_alphanumeric() || "%:@._/+=-".contains(c);
+    let plain = |c: char| c.is_ascii_alphanumeric() || "%:@._/+-".contains(c);
     if !text.is_empty() && text.chars().all(plain) {
         text.to_string()
     } else {
