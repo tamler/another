@@ -214,9 +214,26 @@ pub(crate) fn normalize_pattern(project: &Project, raw: &str) -> Result<String> 
     Ok(pattern)
 }
 
+/// The longest path or glob a hold accepts, in bytes: the usual `PATH_MAX`. Far longer
+/// patterns overflow globset's regex limits, and it panics on those instead of erring.
+pub const MAX_HOLD_PATH_BYTES: usize = 4096;
+
+/// The longest glob `compile` hands to globset. It is above `MAX_HOLD_PATH_BYTES` so an
+/// accepted path joined to a repository prefix, or with its metacharacters escaped, still
+/// compiles, and far below where globset panics (500,000 bytes did). It also bounds
+/// patterns that never passed `normalize_path`: a peer's holds (FINDINGS-180).
+const MAX_GLOB_BYTES: usize = 4 * MAX_HOLD_PATH_BYTES;
+
 /// Normalize a path without interpreting filename characters as glob syntax.
 fn normalize_path(project: &Project, raw: &str) -> Result<String> {
     let raw = raw.trim();
+    // Before anything else, and without echoing it: the path may be megabytes long.
+    if raw.len() > MAX_HOLD_PATH_BYTES {
+        return Err(Error::Invalid(format!(
+            "a held path is longer than {MAX_HOLD_PATH_BYTES} bytes ({} bytes)",
+            raw.len()
+        )));
+    }
     #[cfg(windows)]
     let (raw, root_path) = (raw.replace('\\', "/"), project.abs_path.replace('\\', "/"));
     #[cfg(windows)]
@@ -253,6 +270,13 @@ fn normalize_path(project: &Project, raw: &str) -> Result<String> {
 }
 
 fn compile(pattern: &str) -> Result<GlobMatcher> {
+    // Callers treat an error conservatively (`matches`: overlapping).
+    if pattern.len() > MAX_GLOB_BYTES {
+        return Err(Error::Invalid(format!(
+            "a hold pattern is longer than {MAX_GLOB_BYTES} bytes ({} bytes)",
+            pattern.len()
+        )));
+    }
     let glob: Glob = GlobBuilder::new(pattern)
         .literal_separator(true)
         .build()
@@ -316,7 +340,8 @@ fn covers(dir: &str, path: &str) -> bool {
 /// covers everything below it, so holding `src` overlaps `src/main.rs`. False positives
 /// are acceptable for advisory holds; false negatives are not.
 pub fn patterns_overlap(a: &str, b: &str) -> bool {
-    if a == b || a == "**" || b == "**" {
+    // Too long to have passed `normalize_path`, even with a prefix: a peer's, unchecked.
+    if a == b || a == "**" || b == "**" || a.len() > MAX_GLOB_BYTES || b.len() > MAX_GLOB_BYTES {
         return true;
     }
     // Older auto holds stored filenames without escapes. Keep their exact spelling
@@ -530,6 +555,11 @@ fn first_alternation(pattern: &str) -> Option<(&str, Vec<String>, &str)> {
 /// component, such as `{**,x}` many times over, gets near this.
 const WALK_BUDGET: usize = 20_000;
 
+/// How deep one component walk may recurse. Each level is a glob or path component (or a
+/// spelled-out alternation); a realistic pattern needs a few dozen. A chain of thousands of
+/// `**/` overflowed a 2 MiB thread stack, which aborts the process instead of unwinding.
+const MAX_WALK_DEPTH: usize = 512;
+
 /// Glob components against the components of a literal path. An alternation in the first
 /// component is spelled out one alternative at a time, each respliced into components, so
 /// `{a/b,c}` continues as `a`, `b` or as `c` and no chain of alternations is ever expanded
@@ -544,18 +574,22 @@ fn components_touch(
     path: &[&str],
     path_may_be_dir: bool,
     budget: &mut usize,
+    depth: usize,
 ) -> bool {
-    if *budget == 0 {
+    // Running out of steps, or recursing deeper than any real pattern needs (a stack
+    // overflow aborts the process), counts as an overlap.
+    if *budget == 0 || depth > MAX_WALK_DEPTH {
         return true;
     }
     *budget -= 1;
+    let next = depth + 1;
     if let Some((g, rest)) = glob.split_first() {
         if let Some((head, alternatives, tail)) = first_alternation(g) {
             return alternatives.iter().any(|alt| {
                 let spliced = format!("{head}{alt}{tail}");
                 let mut pieces = pattern_components(&spliced);
                 pieces.extend_from_slice(rest);
-                components_touch(&pieces, path, path_may_be_dir, budget)
+                components_touch(&pieces, path, path_may_be_dir, budget, next)
             });
         }
     }
@@ -565,15 +599,15 @@ fn components_touch(
         (Some(_), None) => path_may_be_dir,
         (Some((&"**", rest)), Some((_, deeper))) => {
             rest.is_empty()
-                || components_touch(rest, path, path_may_be_dir, budget)
-                || components_touch(glob, deeper, path_may_be_dir, budget)
+                || components_touch(rest, path, path_may_be_dir, budget, next)
+                || components_touch(glob, deeper, path_may_be_dir, budget, next)
         }
         (Some((g, rest)), Some((p, deeper))) => {
             component_touches(g, p)
                 && if rest.is_empty() {
                     deeper.is_empty() || names_entries(g)
                 } else {
-                    components_touch(rest, deeper, path_may_be_dir, budget)
+                    components_touch(rest, deeper, path_may_be_dir, budget, next)
                 }
         }
     }
@@ -589,6 +623,7 @@ fn glob_touches_literal(glob: &str, literal: &str, path_may_be_dir: bool) -> boo
         &lit,
         path_may_be_dir,
         &mut budget,
+        0,
     ) || matches(glob, literal)
 }
 
@@ -2128,9 +2163,9 @@ mod tests {
     #[test]
     fn exhausted_walk_budget_counts_as_overlap() {
         let mut none = 0;
-        assert!(components_touch(&["a"], &["b"], false, &mut none));
+        assert!(components_touch(&["a"], &["b"], false, &mut none, 0));
         let mut plenty = WALK_BUDGET;
-        assert!(!components_touch(&["a"], &["b"], false, &mut plenty));
+        assert!(!components_touch(&["a"], &["b"], false, &mut plenty, 0));
         assert_eq!(plenty, WALK_BUDGET - 1);
         let branching = "{**,x}/".repeat(40) + "end";
         let deep = "a/".repeat(60) + "tail";
