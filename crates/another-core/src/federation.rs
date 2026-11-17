@@ -628,6 +628,16 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
         "resource.registered" => {
             agent("owner_id")?;
             project()?;
+            // A local registration types these as u16 / u32; refuse what no build sends.
+            for (field, max) in [("port", u64::from(u16::MAX)), ("pid", u64::from(u32::MAX))] {
+                if let Some(v) = p.get(field).filter(|v| !v.is_null()) {
+                    if v.as_u64().is_none_or(|n| n > max) {
+                        return Err(Error::Invalid(format!(
+                            "resource {field} {v} is not a valid {field}"
+                        )));
+                    }
+                }
+            }
             resource()
         }
         "resource.adopted" => {

@@ -121,7 +121,16 @@ fn an_out_of_range_peer_port_or_pid_is_shown_as_absent_and_a_valid_one_is_kept()
     let hub = Node::new(dir.path(), "hub");
     let spoke = Node::new(dir.path(), "spoke");
     pair(&hub, &spoke);
-    push_registered(&hub, &spoke, 1, json!(70000), json!(-1));
+    // The import now refuses such values, so the bad row is what a hub stored before it
+    // did: written directly, as an older build's import left it.
+    push_registered(&hub, &spoke, 1, json!(1), json!(1));
+    Connection::open(&hub.db)
+        .unwrap()
+        .execute(
+            "UPDATE resources SET port = 70000, pid = -1 WHERE resource_id = 'adv250-res-1'",
+            [],
+        )
+        .unwrap();
     push_registered(&hub, &spoke, 2, json!(5173), json!(4242));
     let listed = hub
         .store
@@ -140,4 +149,48 @@ fn an_out_of_range_peer_port_or_pid_is_shown_as_absent_and_a_valid_one_is_kept()
     assert_eq!((bad.port, bad.pid), (None, None));
     let good = by_id("adv250-res-2");
     assert_eq!((good.port, good.pid), (Some(5173), Some(4242)));
+}
+
+/// The import refuses what no build sends: a port outside u16 or a pid outside u32, as an
+/// integer of the wrong range, a negative one or not a number at all. A missing or null value
+/// is still accepted (a resource need not have either).
+#[test]
+fn a_peer_event_with_an_out_of_range_port_or_pid_is_refused_and_not_stored() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = Node::new(dir.path(), "hub");
+    let spoke = Node::new(dir.path(), "spoke");
+    pair(&hub, &spoke);
+    let stored = |n: u64| -> bool {
+        Connection::open(&hub.db)
+            .unwrap()
+            .query_row(
+                "SELECT 1 FROM resources WHERE resource_id = ?1",
+                [format!("adv250-res-{n}")],
+                |_| Ok(()),
+            )
+            .is_ok()
+    };
+    for (n, port, pid) in [
+        (1, json!(65536), json!(null)),
+        (2, json!(-1), json!(null)),
+        (3, json!("80"), json!(null)),
+        (4, json!(5173), json!(4_294_967_296u64)),
+        (5, json!(5173), json!(-1)),
+    ] {
+        let report = push_registered(&hub, &spoke, n, port.clone(), pid.clone());
+        assert_eq!(
+            report.rejected.len(),
+            1,
+            "case {n} ({port}, {pid}): {report:?}"
+        );
+        assert!(!stored(n), "case {n} was stored");
+    }
+    for (n, port, pid) in [
+        (6, json!(65535), json!(4_294_967_295u64)),
+        (7, json!(null), json!(null)),
+    ] {
+        let report = push_registered(&hub, &spoke, n, port.clone(), pid.clone());
+        assert!(report.rejected.is_empty(), "case {n}: {report:?}");
+        assert!(stored(n), "case {n} was not stored");
+    }
 }
