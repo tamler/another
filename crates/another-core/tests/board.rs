@@ -259,6 +259,17 @@ fn project_filter_includes_sibling_checkouts_only() {
     fx.edit("alice@shop", &fx.main, "src/a.rs");
     fx.edit("bob@shop-twin", &fx.twin, "src/b.rs");
     fx.edit("carol@blog", &fx.blog, "post.md");
+    // A linked worktree: another checkout of the same repository. Its holds block nothing
+    // in `shop` (D92: alice edits the same file there), and it is still listed with it.
+    let wt = fx.main.parent().unwrap().join("shop-wt");
+    let wt_git = fx.main.join(".git/worktrees/shop-wt");
+    write(&wt.join(".git"), &format!("gitdir: {}\n", wt_git.display()));
+    write(&wt_git.join("commondir"), "../..\n");
+    fx.store.ensure_project("test", &path(&wt)).unwrap();
+    assert!(fx
+        .edit("bob@shop-twin", &wt, "src/a.rs")
+        .conflicts
+        .is_empty());
     fx.send("carol@blog", "bob@shop-twin", "Blog to shop", None);
     fx.send(
         "carol@blog",
@@ -271,7 +282,7 @@ fn project_filter_includes_sibling_checkouts_only() {
     assert_eq!(b.project.as_deref(), Some(path(&fx.main).as_str()));
     let mut slugs: Vec<&str> = b.projects.iter().map(|p| p.project.as_str()).collect();
     slugs.sort_unstable();
-    assert_eq!(slugs, ["shop", "shop-twin"]);
+    assert_eq!(slugs, ["shop", "shop-twin", "shop-wt"]);
     let mut agents: Vec<&str> = b.agents.iter().map(|a| a.address.as_str()).collect();
     agents.sort_unstable();
     assert_eq!(agents, ["alice@shop", "bob@shop-twin"]);
