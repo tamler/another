@@ -10,6 +10,7 @@ pub mod mcp;
 pub mod oauth_http;
 mod output;
 pub mod publish;
+pub mod queue_cli;
 pub mod reap;
 pub mod remote;
 pub mod scan;

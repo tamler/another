@@ -10,9 +10,9 @@ Another is a background messaging system that helps coding agents work on the sa
 
 It also works across machines today, through a self-hosted federation hub or authenticated remote peers. The hub can read mail it relays; remote peers cannot reap processes. See [federation](docs/FEDERATION.md) and [remote access](docs/REMOTE.md).
 
-Claude Code and Codex cannot see each other without something shared. They can edit the same files, start the same fix twice, or launch duplicate model servers. Another combines path holds, messages and requests, activity, and a registry for ports and model servers. Its mailbox is a way to address agents and exchange messages. It does not launch agents or enforce a resource limit. A shared work queue, where agents claim work the owner has admitted, is the core of the v0.1.0 scope and is not on `main` yet.
+Claude Code and Codex cannot see each other without something shared. They can edit the same files, start the same fix twice, or launch duplicate model servers. Another combines path holds, messages and requests, activity, and a registry for ports and model servers. Its mailbox is a way to address agents and exchange messages. It does not launch agents or enforce a resource limit. A work queue for one node, where agents take work the owner has admitted, is on `main` ([docs/QUEUE.md](docs/QUEUE.md)); releasing a claim automatically when its session ends is still to come.
 
-**Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** The original build milestones (see [Status](#status)) are on `main`; no release is published yet. The v0.1.0 queue is not built yet. Work now follows the [v0.1.0 scope](docs/V0.1.0-SCOPE.md), the single-node queue release. Hosted connectors (OAuth for ChatGPT, Claude, and other MCP clients) and the loopback dashboard are in this tree and frozen. See [docs/REMOTE.md](docs/REMOTE.md) and [docs/DASHBOARD.md](docs/DASHBOARD.md).
+**Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** The original build milestones (see [Status](#status)) are on `main`; no release is published yet. The v0.1.0 work queue for one node is built ([docs/QUEUE.md](docs/QUEUE.md)); releasing claims automatically and the rest of the scope are not. Work now follows the [v0.1.0 scope](docs/V0.1.0-SCOPE.md), the single-node queue release. Hosted connectors (OAuth for ChatGPT, Claude, and other MCP clients) and the loopback dashboard are in this tree and frozen. See [docs/REMOTE.md](docs/REMOTE.md) and [docs/DASHBOARD.md](docs/DASHBOARD.md).
 
 ## Why
 
@@ -150,6 +150,7 @@ Or, while `another serve` is running, open <http://127.0.0.1:7466/ui>. The page 
 | - | Local dashboard: agents, holds, mail, requests, resources, timeline, peers | ✅ [docs/DASHBOARD.md](docs/DASHBOARD.md) |
 | - | Push and enforced holds: mid-task notices, edit guard, holds across worktrees, launchd daemon, Herdr wakes, `another stats` | ✅ tamler/another#103, #104, #105 ([docs/HOOKS.md](docs/HOOKS.md), [docs/HOLDS.md](docs/HOLDS.md), [docs/DAEMON.md](docs/DAEMON.md)) |
 | - | Read-only work board: holds, recent and stopped edits, what is waiting on whom, per project (`another board`, `work_board`) | ✅ [docs/BOARD.md](docs/BOARD.md) |
+| M1 | Work queue for one node: propose, admit (owner or delegate, recorded), atomic `next` with per-agent limits, results, handoff, the owner list and the audit (`another queue`, `queue_*` tools) | Built: [docs/QUEUE.md](docs/QUEUE.md). M1's done condition also needs the three-day fleet run, which has not happened yet |
 | - | Upgrade safety (the code half of v0.1.0 scope M3): a checked backup before any migration, unknown schemas refused, development builds keep to their own homes, `another doctor` reports a build and database mismatch | ✅ tamler/another#260 ([docs/DOCTOR.md](docs/DOCTOR.md#upgrades-and-backups)) |
 
 **Now: v0.1.0.** The milestones above are what is on `main`. What happens next is set by [docs/VISION.md](docs/VISION.md) and [docs/V0.1.0-SCOPE.md](docs/V0.1.0-SCOPE.md), approved on 17 Nov 2026: a work queue with admission, a durable record of claims and results, upgrade safety, path holds, and a transport adapter interface for waking agents. v0.1.0 is the single-node queue release, with a target tag date of 1 Dec 2026. Cross-node queue claims follow in v0.2.0. Hosted connectors (OAuth), bearer-token peers, reaping, the dashboard, Windows support and external commands are frozen: they stay in the tree and get only security and data-loss fixes.
@@ -171,6 +172,7 @@ Task guides, all listed on the [guides hub](site/guides/index.html) (website sou
 | [docs/WAKE.md](docs/WAKE.md) | `another wake` adapters (tmux, cmux, Herdr) and the Herdr plugin |
 | [docs/DASHBOARD.md](docs/DASHBOARD.md) | Local web dashboard (`another dashboard`, `GET /ui`) |
 | [docs/BOARD.md](docs/BOARD.md) | `another board`: who holds what, recent and stopped edits, pending handoffs, per project; writes nothing |
+| [docs/QUEUE.md](docs/QUEUE.md) | The work queue: proposing, admitting, `next`, limits, results, the owner list, the audit, and what the authority checks do not protect against |
 | [docs/PLUGINS.md](docs/PLUGINS.md) | External commands: `another <name>` runs `another-<name>` from `PATH`; the rules and the trust model |
 | [examples/](examples/README.md) | Runnable scripts on one machine: a two-agent review handoff, and a federation hub with two spokes |
 | [docs/VISION.md](docs/VISION.md) | Purpose, users, principles and non-goals |
@@ -187,6 +189,7 @@ Task guides, all listed on the [guides hub](site/guides/index.html) (website sou
 | Identity | `ensure_project`, `register_agent`, `heartbeat` (`start` / `end` record sessions) |
 | Mail | `send_message` (with `reply_to`, `create_request`), `fetch_inbox`, `threads`, `acknowledge` |
 | Requests | `claim_request` (`claim` / `release` / `complete` / `cancel`) |
+| Work queue | `queue_propose`, `queue_next` (returns `{claimed, refused}`), `queue_update` (`note` / `release` / `handoff` / `done`), `queue_list`. Local callers only; no tool admits, rejects or edits an item ([docs/QUEUE.md](docs/QUEUE.md)) |
 | Path holds | `hold_paths` (`acquire` / `check` / `renew` / `release` / `list`) |
 | Awareness | `whats_new` (one-call catch-up: unread subjects, open requests, recent activity), `activity_feed`, `activity_summarize` (summaries and ids, never message bodies), `work_board` (read-only: holds, recent and stopped edits, pending handoffs per project) |
 | Resources | `resource_find`, `resource_register`, `resource_borrow`, `resource_release`, `resource_heartbeat`, `orphans_list`, `resource_reap` (plan and request only) |
@@ -206,6 +209,7 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 | Agents | `another agent register <name> --program claude\|codex\|grok\|cursor\|grok_bot\|other [--project PATH]`, `another agent list` |
 | Mail | `another send`, `another inbox`, `another reply <message-id>`, `another ack <message-id>`, `another threads`, `another thread <id>` (there is no `another mail` command) |
 | Requests | `another requests`, `another request claim\|release\|complete\|cancel <id>` (recorded walkthrough: [docs/REQUESTS.md](docs/REQUESTS.md)) |
+| Work queue | `another queue propose\|list\|show\|next\|note\|release\|done` for agents; `another queue admit\|reject\|edit` for the owner (`--owner`, at a terminal) or a delegate (key in `$ANOTHER_ADMIT_KEY`); `another queue limit set\|default\|list`, `another queue delegate add\|remove\|list`, `another queue grace [<duration>]`, `another queue list --needs-owner`, `another queue audit` (`next` exits with status 3 when the agent is at its limit; [docs/QUEUE.md](docs/QUEUE.md)) |
 | Holds | `another hold acquire\|check\|renew\|release`, `another holds` (conflicts exit with status 3; `--repo-wide` for a whole-project hold) |
 | Sessions and feed | `another heartbeat [--start\|--end [--keep]]`, `another activity [--since 1h] [--kinds mail,request] [--summary]`, `another stats [--since 48h]`, `another board [--project P] [--since 24h]` (read-only; [docs/BOARD.md](docs/BOARD.md)) |
 | Hooks | `another hook install\|uninstall --client <c>\|all [--dry-run]`, `another hook status` |

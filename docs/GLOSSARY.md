@@ -18,6 +18,25 @@ Short definitions of the words Another uses, with the places that explain each o
 - **Owner**: the agent that claimed a request. Only the owner can release or complete a claimed request; only the creator can cancel it.
 - **Due time**: an optional deadline set in seconds with `--due`. Past it, an open or claimed request becomes `stale` on its own and anyone may claim it, including from its owner. A request without a due time never goes stale by itself; only a human confirming Expire in the local dashboard can mark it stale (D42).
 
+## Work queue
+
+- **Queue item**: a piece of agreed work on one node, shown as `Q12`. It is `proposed`, `ready`, `claimed` or `done`. It is not a request: a request is a direct ask between agents and is never admitted. [QUEUE.md](QUEUE.md).
+- **Propose**: file an item with `another queue propose` or the `queue_propose` tool. Any local agent may. A proposed item cannot be taken.
+- **Admit**, **admitter**: move a proposed item to `ready`, giving it a scope id and a done condition and recording who admitted it and when. The admitter is the owner, or a delegate.
+- **The owner (of the queue)**: the person the node belongs to, acting with `--owner` at a terminal and a typed yes. Not the same word as the owner of a request.
+- **Delegate**: an agent the owner named to admit, reject, edit and release `work` items, acting with its key in `ANOTHER_ADMIT_KEY`. **Self-admitted** marks an item a delegate admitted after proposing it itself.
+- **Scope id**: the id of the scope item the work belongs to, such as `M1`. The admitter checks it against the scope document; Another does not.
+- **Done condition**: what must be true for an item to be finished, set by the time it is admitted.
+- **Fast lane**: items of kind `security` or `data-loss`. Only the owner decides them, and they are first in the owner list.
+- **`next`**: `another queue next` or the `queue_next` tool. It hands one ready item to one agent, and is the only way an item becomes claimed.
+- **Limit**, **seat**: how many claimed, unfinished items one agent name may hold, set by the owner; 1 by default. A limit of 0 is no seat.
+- **Reservation**, **skip**: an item reserved with `--for` is offered to that agent first; the agent that gave an item up is skipped. Both end as [QUEUE.md](QUEUE.md) describes.
+- **Handoff**: the claimer gives its item to a named agent with `another queue release --to`. The item returns to `ready`, reserved for that agent.
+- **Result**: the short summary and one pointer (pull request, commit or file) stored on an item by `another queue done`.
+- **Owner list**: `another queue list --needs-owner`: decisions waiting, quiet claims, ready items nobody can take, failed notices and self-admitted items.
+- **Grace period**: the owner-set length of silence after which a claim may be released automatically (24 hours by default). The setting exists; automatic release is scope item M2.
+- **Queue audit**: `another queue audit`, a read-only check of the queue's events against themselves and the tables for duplicated, lost, unadmitted or over-limit claims.
+
 ## Coordination
 
 - **Path hold**: an expiring claim on project-relative files or globs, with a TTL. "I am changing these files." An exclusive hold conflicts with any overlapping hold of another agent; a shared hold conflicts only with exclusive ones. Conflicts are checked across every checkout of the same repository on this machine (D48). [HOLDS.md](HOLDS.md).

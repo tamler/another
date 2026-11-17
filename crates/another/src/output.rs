@@ -4,7 +4,8 @@ use std::fmt::Write;
 
 use another_core::{
     ActivityFeed, Agent, AuditEntry, Event, HeartbeatReport, Hold, HoldConflict, HoldReport, Inbox,
-    LeaseOutcome, Message, NodeInfo, Peer, Project, Request, Resource, Thread, ThreadSummary,
+    LeaseOutcome, Message, NodeInfo, Peer, Project, QueueAudit, QueueDelegate, QueueGrace,
+    QueueItem, QueueLimits, QueueNeedsOwner, QueueNext, Request, Resource, Thread, ThreadSummary,
     Token, WakeTarget,
 };
 use serde::Serialize;
@@ -806,5 +807,236 @@ pub fn daemon_status(s: &crate::daemon::DaemonStatus) -> String {
         s.bind.as_deref().unwrap_or("-"),
         yes(s.healthy),
         s.log
+    )
+}
+
+/// One line per queue item: number, state, priority, kind, scope, title, then who holds it
+/// or who it waits for, and its result when it is done.
+pub fn queue_items(items: &[QueueItem]) -> String {
+    if items.is_empty() {
+        return "no items".to_string();
+    }
+    items.iter().map(queue_line).collect()
+}
+
+fn queue_line(i: &QueueItem) -> String {
+    let mut out = format!(
+        "{:<5} {:<8} {:<6} {:<9} {:<6} {}",
+        i.label,
+        i.state.as_str(),
+        i.priority.as_str(),
+        i.kind.flag(),
+        i.scope.as_deref().unwrap_or("-"),
+        i.title
+    );
+    if let Some(c) = &i.claim {
+        let _ = write!(out, "  (claimed by {})", c.agent);
+    }
+    if let Some(a) = &i.for_agent {
+        let _ = write!(out, "  (for {a})");
+    }
+    if i.admitted.as_ref().is_some_and(|a| a.self_admitted) {
+        out.push_str("  (self-admitted)");
+    }
+    if let Some(r) = &i.result {
+        let _ = write!(out, "  -> {}", r.outcome);
+        if let Some(summary) = &r.summary {
+            let _ = write!(out, ": {}", summary.replace('\n', " "));
+        }
+        if let (Some(kind), Some(pointer)) = (&r.pointer_kind, &r.pointer) {
+            let _ = write!(out, " ({kind} {pointer})");
+        }
+    }
+    out.push('\n');
+    out
+}
+
+fn indented(out: &mut String, text: &str) {
+    for line in text.lines() {
+        let _ = writeln!(out, "  {line}");
+    }
+}
+
+/// Every field of one item, its approval line and its history.
+pub fn queue_item(i: &QueueItem) -> String {
+    let mut out = format!("{}  {}\n", i.label, i.title);
+    let _ = writeln!(out, "state          {}", i.state.as_str());
+    let _ = writeln!(out, "kind           {}", i.kind.flag());
+    let _ = writeln!(out, "priority       {}", i.priority.as_str());
+    let _ = writeln!(out, "scope          {}", i.scope.as_deref().unwrap_or("-"));
+    let _ = writeln!(out, "proposed by    {} at {}", i.proposed_by, i.proposed_at);
+    if let Some(a) = &i.for_agent {
+        let _ = writeln!(out, "reserved for   {a}");
+    }
+    if let Some(a) = &i.skip_agent {
+        let _ = writeln!(out, "not offered to {a}");
+    }
+    if let Some(c) = &i.claim {
+        let bound = if c.session_bound {
+            "bound to its session"
+        } else {
+            "not bound to a session"
+        };
+        let _ = writeln!(out, "claimed by     {} at {} ({bound})", c.agent, c.at);
+    }
+    let _ = writeln!(out, "id             {}", i.item_id);
+    if let Some(line) = i.approval_line() {
+        let _ = writeln!(out, "{line}");
+    }
+    out.push_str("done when\n");
+    indented(&mut out, i.done_condition.as_deref().unwrap_or("(not set)"));
+    if !i.body.trim().is_empty() {
+        out.push_str("body\n");
+        indented(&mut out, &i.body);
+    }
+    if let Some(r) = &i.result {
+        let _ = writeln!(out, "result         {} by {} at {}", r.outcome, r.by, r.at);
+        if let Some(summary) = &r.summary {
+            indented(&mut out, summary);
+        }
+        if let (Some(kind), Some(pointer)) = (&r.pointer_kind, &r.pointer) {
+            let _ = writeln!(out, "  {kind}: {pointer}");
+        }
+    }
+    if let Some(history) = &i.history {
+        out.push_str("history\n");
+        for h in history {
+            let _ = writeln!(
+                out,
+                "  {}  {:<16} {}",
+                h.at,
+                h.kind.trim_start_matches("queue."),
+                h.actor
+            );
+            if let Some(note) = &h.note {
+                for line in note.lines() {
+                    let _ = writeln!(out, "      {line}");
+                }
+            }
+        }
+    }
+    out
+}
+
+/// What `queue next` says: the item and how to finish or give it back, that nothing is
+/// ready, or why the agent was refused.
+pub fn queue_next(n: &QueueNext) -> String {
+    if let Some(r) = &n.refused {
+        return r.message.clone();
+    }
+    match &n.claimed {
+        Some(i) => format!(
+            "{}\nYou hold {label}. When its done condition is met:\n  another queue done {label} --summary TEXT (--pr N_OR_URL | --commit SHA | --file PATH)\nTo give it back:\n  another queue release {label} [--note TEXT] [--to AGENT]",
+            queue_item(i).trim_end(),
+            label = i.label
+        ),
+        None => "Nothing is ready. Wait; do not start work that is not in the queue.".to_string(),
+    }
+}
+
+/// The owner list: what waits for the owner, section by section.
+pub fn queue_needs_owner(n: &QueueNeedsOwner) -> String {
+    let mut out = String::new();
+    let mut section = |title: &str, lines: Vec<String>| {
+        let _ = writeln!(out, "{title} ({})", lines.len());
+        for line in lines {
+            let _ = writeln!(out, "  {}", line.trim_end());
+        }
+    };
+    section(
+        "Decide now: security and data-loss proposals",
+        n.decide_now.iter().map(queue_line).collect(),
+    );
+    section(
+        "Awaiting a decision",
+        n.awaiting.iter().map(queue_line).collect(),
+    );
+    section(
+        "Quiet claims",
+        n.quiet_claims
+            .iter()
+            .map(|q| {
+                format!(
+                    "{}  quiet for {} min, grace ends {}{}",
+                    queue_line(&q.item).trim_end(),
+                    q.quiet_for_seconds / 60,
+                    q.grace_ends_at,
+                    if q.unbound {
+                        ", not bound to a session"
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .collect(),
+    );
+    section(
+        "Ready with nobody to take them",
+        n.nobody_can_take.iter().map(queue_line).collect(),
+    );
+    section(
+        "Failed notices, last 24 hours",
+        n.failed_notices
+            .iter()
+            .map(|f| format!("{}  to {} at {}", f.item, f.to, f.at))
+            .collect(),
+    );
+    section(
+        "Self-admitted, last 7 days",
+        n.self_admitted.recent.iter().map(queue_line).collect(),
+    );
+    let _ = writeln!(
+        out,
+        "{} self-admitted item(s) in all: another queue list --self-admitted",
+        n.self_admitted.total
+    );
+    out
+}
+
+pub fn queue_audit(a: &QueueAudit) -> String {
+    let releases = if a.releases.is_empty() {
+        "0".to_string()
+    } else {
+        a.releases
+            .iter()
+            .map(|(reason, n)| format!("{n} {reason}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut out = format!(
+        "{} item(s), {} claim(s) by {} agent(s), releases: {releases}, {} completion(s)\n",
+        a.items, a.claims, a.claimers, a.completions
+    );
+    if a.ok {
+        out.push_str("no findings\n");
+    }
+    for f in &a.findings {
+        let _ = writeln!(out, "{:<9} {:<6} {}  {}", f.kind, f.item, f.at, f.detail);
+    }
+    out
+}
+
+pub fn queue_limits(l: &QueueLimits) -> String {
+    let mut out = format!("default  {}\n", l.default_limit);
+    for a in &l.agents {
+        let _ = writeln!(out, "{:<24} {}", a.agent, a.limit);
+    }
+    out
+}
+
+pub fn queue_delegates(ds: &[QueueDelegate]) -> String {
+    if ds.is_empty() {
+        return "no delegates".to_string();
+    }
+    ds.iter()
+        .map(|d| format!("{:<24} since {}\n", d.agent, d.added_at))
+        .collect()
+}
+
+pub fn queue_grace(g: &QueueGrace) -> String {
+    format!(
+        "grace period: {} seconds ({} hours)",
+        g.grace_seconds,
+        g.grace_seconds / 3600
     )
 }
