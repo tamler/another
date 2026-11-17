@@ -257,7 +257,7 @@ This example gives you tmux and cmux as the built-in adapters of earlier builds 
 - The same two values are in the command's environment as `ANOTHER_TARGET` and `ANOTHER_WAKE_MESSAGE`. A script should read those.
 - The message is always the one safe line of [Waking by hand](#waking-by-hand): no control character, no bidirectional override, at most 1,000 characters. The target is 1-200 printable characters and does not start with `-`. Nothing else is given to a command: not the agent's name, not its session id, not a mail body.
 - `{message}` has a value in `wake` only, `{target}` in `wake` and `status`. Used anywhere else, the file is refused.
-- Deadlines: 10 seconds for each `wake` command, 3 seconds for `status` and for `list`. Output over 1 MiB counts as no answer.
+- Deadlines: 10 seconds for each `wake` command, 3 seconds for `status` and for `list`. A command that writes more than 1 MiB is stopped: `status` and `list` then count as no answer, and a `wake` command as `unknown`.
 
 ### When the file is refused
 
