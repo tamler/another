@@ -10,7 +10,7 @@ Another is a background messaging system that helps coding agents work on the sa
 
 It also works across machines today, through a self-hosted federation hub or authenticated remote peers. The hub can read mail it relays; remote peers cannot reap processes. See [federation](docs/FEDERATION.md) and [remote access](docs/REMOTE.md).
 
-Claude Code and Codex cannot see each other without something shared. They can edit the same files, start the same fix twice, or launch duplicate model servers. Another combines path holds, messages and requests, activity, and a registry for ports and model servers. Its mailbox is a way to address agents and exchange messages. It does not launch agents, assign their work, or enforce a resource limit.
+Claude Code and Codex cannot see each other without something shared. They can edit the same files, start the same fix twice, or launch duplicate model servers. Another combines path holds, messages and requests, activity, and a registry for ports and model servers. Its mailbox is a way to address agents and exchange messages. It does not launch agents or enforce a resource limit. A shared work queue, where agents claim work the owner has admitted, is the core of the v0.1.0 scope and is not on `main` yet.
 
 **Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** Milestones 1-6 complete. Hosted connectors (OAuth for ChatGPT, Claude, and other MCP clients) and the loopback dashboard are in this tree. See [docs/REMOTE.md](docs/REMOTE.md) and [docs/DASHBOARD.md](docs/DASHBOARD.md).
 
@@ -149,7 +149,9 @@ Or, while `another serve` is running, open <http://127.0.0.1:7466/ui>. The page 
 | - | Push and enforced holds: mid-task notices, edit guard, holds across worktrees, launchd daemon, Herdr wakes, `another stats` | ✅ tamler/another#103, #104, #105 ([docs/HOOKS.md](docs/HOOKS.md), [docs/HOLDS.md](docs/HOLDS.md), [docs/DAEMON.md](docs/DAEMON.md)) |
 | - | Read-only work board: holds, recent and stopped edits, what is waiting on whom, per project (`another board`, `work_board`) | ✅ [docs/BOARD.md](docs/BOARD.md) |
 
-Current brief: [AGENTS.md](AGENTS.md). Milestone 7 is the connectors work. Bearer tokens from milestone 4 still work. Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88, copy lint.
+**Now: v0.1.0.** The milestones above are what is on `main`. What happens next is set by [docs/VISION.md](docs/VISION.md) and [docs/V0.1.0-SCOPE.md](docs/V0.1.0-SCOPE.md), approved on 17 Nov 2026: a work queue with admission, a durable record of claims and results, upgrade safety, path holds, and a transport adapter interface for waking agents. v0.1.0 is the single-node queue release, with a target tag date of 1 Dec 2026. Cross-node queue claims follow in v0.2.0. Hosted connectors (OAuth), bearer-token peers, reaping, the dashboard, Windows support and external commands are frozen: they stay in the tree and get only security and data-loss fixes.
+
+Current brief: [AGENTS.md](AGENTS.md). Every change merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88, copy lint.
 
 ## Guides
 
@@ -168,7 +170,9 @@ Task guides, all listed on the [guides hub](site/guides/index.html) (website sou
 | [docs/BOARD.md](docs/BOARD.md) | `another board`: who holds what, recent and stopped edits, pending handoffs, per project; writes nothing |
 | [docs/PLUGINS.md](docs/PLUGINS.md) | External commands: `another <name>` runs `another-<name>` from `PATH`; the rules and the trust model |
 | [examples/](examples/README.md) | Runnable scripts on one machine: a two-agent review handoff, and a federation hub with two spokes |
-| [docs/SPEC.md](docs/SPEC.md) | Research and product spec |
+| [docs/VISION.md](docs/VISION.md) | Purpose, users, principles and non-goals |
+| [docs/V0.1.0-SCOPE.md](docs/V0.1.0-SCOPE.md) | What v0.1.0 must have, may have, freezes and cuts |
+| [docs/SPEC.md](docs/SPEC.md) | Original research and product spec (historical) |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | Locked defaults and every design decision made while building |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute (clean-room rules, checks, MSRV) |
 

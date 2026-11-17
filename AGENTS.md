@@ -1,31 +1,38 @@
-# AGENTS.md: build brief (Milestone 7: hosted connectors)
+# AGENTS.md: build brief (v0.1.0)
 
-**Read this before writing code.** Product vision lives in [docs/SPEC.md](docs/SPEC.md); locked defaults and every milestone decision in [docs/DECISIONS.md](docs/DECISIONS.md); contributor rules in [CONTRIBUTING.md](CONTRIBUTING.md). This file is the scope for the current coding milestone.
+**Read this before writing code.** What Another is for lives in [docs/VISION.md](docs/VISION.md). What v0.1.0 includes lives in [docs/V0.1.0-SCOPE.md](docs/V0.1.0-SCOPE.md). Locked defaults and every decision are in [docs/DECISIONS.md](docs/DECISIONS.md); contributor rules in [CONTRIBUTING.md](CONTRIBUTING.md). [docs/SPEC.md](docs/SPEC.md) is the original research and is historical.
 
 ## Status
 
-Milestone 7: **complete** (tamler/another#99; definition of done below). Milestone 6 is complete. Earlier: M1 local core (tamler/another#1), M2 mail checking + activity feed (tamler/another#2), M3 resource registry (tamler/another#3), M4 authenticated remote peer (tamler/another#4), M5 federation (tamler/another#5). Keep the [README.md](README.md) status current in every PR.
+Milestones 1 to 7 are complete and on `main`: local core (tamler/another#1), mail checking and the activity feed (#2), the resource registry (#3), the authenticated remote peer (#4), federation (#5), wake adapters and release builds (M6), and hosted connectors (#99). Their briefs are in this file's git history and their decisions are D1 to D81.
 
-## Milestone 7, in scope
+The current work is **v0.1.0, the single-node queue release**, approved by the project owner on 17 Nov 2026. Target tag date: 1 Dec 2026.
 
-Hosted apps (ChatGPT custom connectors, Claude.ai and Claude Desktop connectors, and any MCP client that signs in with OAuth) join the same node as local agents. No paid relay and no telemetry. Bearer tokens from milestone 4 keep working.
+## v0.1.0, in scope
 
-1. **OAuth 2.1 on `another serve --auth --public-url`.** Protected-resource and authorization-server metadata, S256 PKCE, RFC 8707 `resource`, RFC 9207 `iss`. Client ID Metadata Documents and dynamic registration. Public clients only. A grant exists only after `another oauth approve` on the machine that holds the database. Each grant is one agent within project globs. Access tokens last one hour. Refresh tokens rotate, and reuse revokes the grant. The authorization code and the one-time redirect token are stored only as SHA-256 hashes. The code is minted in the server on the first poll and returned once.
-2. **`another remote up`.** Prints the URL to paste. Named-tunnel recipe uses a placeholder hostname. Quick tunnel is optional and ephemeral.
-3. **ChatGPT desktop local path.** Settings, MCP servers: stdio `another serve --stdio`, or Streamable HTTP to `http://127.0.0.1:7466/mcp`. No tunnel. Documented in [docs/REMOTE.md](docs/REMOTE.md). Web plugins and developer-mode custom connectors stay remote (public HTTPS or Secure MCP Tunnel).
-4. **`whats_new`.** One call for a chat app: unread subjects, open requests, recent activity, no message bodies.
-5. **Client metadata fetch.** Resolve the URL's real port, refuse non-public addresses, then connect only to that pinned address with the original Host and SNI. Cache is capped. Body read stops at 64 KiB.
+The scope page is the source of truth; this is the short form. Every item has an id there.
 
-### Definition of done (Milestone 7)
+- **M1** Queue with admission: proposed, ready, claimed, done; atomic `next`.
+- **M2** Durable record of claims, handoffs and results; a claim is released only on a confirmed session end or after a long grace period.
+- **M3** Upgrade safety: backup before migrate, refuse unknown schemas, doctor flags a build and database mismatch.
+- **M4** Path holds: existing behaviour, admitted fixes only.
+- **M5** Transport adapter interface (`wake`, `status`, `list`), the Herdr adapter and a generic command adapter.
+- **M6** Hook packs for Claude Code and Codex show the inbox and the queue at each turn.
+- **M7** One place that lists what needs the owner; the read-only stale scan in `another doctor`.
+- **M8** Daemon on macOS and Linux.
+- **M9** Today's hub and spoke between the owner's Mac and VPS, with hub backups.
+- **M10** A release people can install.
 
-- [x] OAuth flow, scope enforcement, revocation, refresh reuse, Host and Origin checks, and OAuth rate limits covered by tests
-- [x] Authorization code plaintext is not stored; only the hash, issued once
-- [x] CIMD fetch pins the validated address and uses the URL port; tests cover the pin, the port, the body cap, and the cache cap
-- [x] Bearer tokens still work
-- [x] `whats_new` and `another remote up`
-- [x] README status and this brief name milestone 7
-- [x] docs/REMOTE.md explains ChatGPT desktop (local), ChatGPT web, and Claude
-- [x] CI green on the PR (test, clippy `-D warnings`, fmt, MSRV 1.88, copy lint)
+Nice to have (N1 to N5), frozen and cut lists are on the scope page. Frozen code stays in the tree and gets only admitted security and data-loss fixes.
+
+## How work is done (mandatory)
+
+- **No pull request without a ready queue item.** Every queue item and every pull request names one scope id. Work that names none is not agreed work.
+- **Anyone can propose; only the owner, or the architect the owner delegates to, admits.** If you find a problem, record it as a proposed item and move on. Do not open a pull request for it. Security and data-loss findings go to the owner.
+- **Independent review only.** Nobody reviews or merges their own work. No force pushes. No admin bypass.
+- **A development build never runs against the live `~/.another`.** Use `ANOTHER_HOME=$(mktemp -d)` or `--home <tmp>`. Only the installed binary touches the live home.
+- **Schema and decision numbers are assigned at merge time** by the architect. Do not reserve them.
+- CI green on every pull request: test, clippy `-D warnings`, fmt, MSRV 1.88, copy lint.
 
 ## Clean-room rules (mandatory)
 
@@ -35,32 +42,12 @@ Hosted apps (ChatGPT custom connectors, Claude.ai and Claude Desktop connectors,
 
 ## Locked defaults
 
-Apache-2.0; agent names unique per project; hooks-first (wake adapters are optional extras); free and open source always; loopback-only without auth; never reap without human approval; never remote reap; MSRV 1.88.
-
-## Milestone 6 — in scope
-
-1. **`another wake`** — nudge idle agents with unread mail through optional adapters: `tmux` (send-keys), `cmux` (`send --surface` or `notify`), `herdr` (`agent prompt`). Stored per-agent targets (`another wake set|clear|list`), auto-captured by session hooks from `$TMUX_PANE` / `$CMUX_SURFACE_ID` (never replacing manual targets); `--all`, `--dry-run`, `--force`, `--message`. Argv only, no shell; skip when nothing is waiting.
-2. **Herdr plugin (optional)** — [integrations/herdr](integrations/herdr): `herdr-plugin.toml` with wake + summary actions and a live activity pane; POSIX `sh` helper.
-3. **Release builds** — `.github/workflows/release.yml`: macOS arm64 + x86_64, Linux static musl x86_64 + arm64; smoke tests; SHA-256 sums; GitHub Release on `v*` tags; build-only on PRs touching the workflow.
-4. **Docs** — clean README quickstart, [CONTRIBUTING.md](CONTRIBUTING.md), [docs/WAKE.md](docs/WAKE.md).
-
-### Definition of done (Milestone 6)
-
-- [x] `another wake` with tmux / cmux / Herdr adapters, stored + auto-captured targets, tests with fake adapter binaries
-- [x] Optional Herdr plugin (manifest + helper), validated in tests
-- [x] Release workflow for macOS (arm64, x86_64) and Linux, verified by a PR build
-- [x] README quickstart + CONTRIBUTING.md + docs/WAKE.md
-- [x] CI green: test + clippy (`-D warnings`) + fmt + MSRV 1.88
-- [x] README status updated
+Apache-2.0; agent names unique per project; hooks are the fallback everywhere and wake through the adapter interface is core (D84); free and open source always; loopback-only without auth; never reap without human approval; never remote reap; MSRV 1.88.
 
 ## Explicitly OUT of scope
 
-- TUI, auto-reap policies, pre-commit hold guard, mesh federation, end-to-end mail encryption (future work; see SPEC "Later")
-
-A loopback dashboard shipped after this milestone. It is not part of the M6 brief above. See [docs/DASHBOARD.md](docs/DASHBOARD.md) and decisions D39-D44.
-
-Push delivery and enforced holds (mid-task notices, the edit guard, holds across worktrees, the launchd daemon, Herdr wakes, `another stats`) came after that, also outside the milestone briefs. See [docs/HOOKS.md](docs/HOOKS.md), [docs/HOLDS.md](docs/HOLDS.md), [docs/DAEMON.md](docs/DAEMON.md) and decisions D45-D53.
+See the non-goals in [docs/VISION.md](docs/VISION.md) and the cut list in [docs/V0.1.0-SCOPE.md](docs/V0.1.0-SCOPE.md). In short: teams and hosted multi-user setups, a plugin platform, mesh federation, an adapter per multiplexer, auto-reap, end-to-end mail encryption and a TUI.
 
 ## Keep the README status current
 
-Whenever you complete a definition-of-done item or open a PR that changes milestone progress, update the **Status** section in [README.md](README.md) in the same PR.
+When a scope item's done condition is met on `main`, update the **Status** section in [README.md](README.md) in the same pull request.

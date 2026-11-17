@@ -1,6 +1,6 @@
 # Another: vision
 
-Status: draft for owner review, 17 Nov 2026. Once approved, this page and [V0.1.0-SCOPE.md](V0.1.0-SCOPE.md) outrank ROADMAP.md, SPEC.md and the milestone brief in AGENTS.md wherever they disagree.
+Status: approved by the project owner, 17 Nov 2026. This page and [V0.1.0-SCOPE.md](V0.1.0-SCOPE.md) outrank SPEC.md and earlier milestone briefs wherever they disagree. The decisions they change are recorded as D83 to D85 in [DECISIONS.md](DECISIONS.md).
 
 ## Purpose
 
