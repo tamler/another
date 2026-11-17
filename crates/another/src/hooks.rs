@@ -1434,6 +1434,17 @@ pub fn log_hook_error(another_home: &Path, event: HookEvent, client: Client, err
     }
 }
 
+/// [`log_hook_error`] for a home this build refuses, unless the current log already holds
+/// that reason: the refusal lasts until a person acts, and one line says all there is.
+fn log_refusal_once(another_home: &Path, event: HookEvent, client: Client, reason: &str) {
+    let reason = reason.replace('\n', " ");
+    let logged = std::fs::read_to_string(another_home.join("logs").join("hooks.log"))
+        .is_ok_and(|log| log.contains(&reason));
+    if !logged {
+        log_hook_error(another_home, event, client, &reason);
+    }
+}
+
 /// Entry point used by the CLI: never fails, so hooks always fail open.
 pub fn run_fail_open(
     store: Result<Store>,
@@ -1449,10 +1460,15 @@ pub fn run_fail_open(
         Err(e) => {
             let error = format!("{e:#}");
             tracing::warn!(error = %error, "another hook failed; continuing");
-            // Tool hooks run silently inside a task; leave a trace for whoever wonders
-            // why an edit was not held or a notice did not arrive.
-            if event.is_tool_event() {
-                if let Some(home) = another_home {
+            if let Some(home) = another_home {
+                if let Some(reason) = Store::refusal(home) {
+                    // This build refuses the home (docs/DOCTOR.md, "Upgrades and backups"):
+                    // every hook fails the same way until a person acts, so the reason they
+                    // need is logged once, whichever hook met it first.
+                    log_refusal_once(home, event, client, &reason);
+                } else if event.is_tool_event() {
+                    // Tool hooks run silently inside a task; leave a trace for whoever
+                    // wonders why an edit was not held or a notice did not arrive.
                     log_hook_error(home, event, client, &error);
                 }
             }

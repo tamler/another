@@ -1547,3 +1547,152 @@ fn a_delegate_key_is_refused_for_every_owner_only_action() {
         )
         .unwrap();
 }
+
+/// The queue's migration under the upgrade rules (D87, D88). This test binary is a
+/// development build: on a home a release build made, one schema behind, every queue
+/// command refuses with the reason and the fix and writes nothing; told to migrate, it
+/// takes a backup first, and the queue then works through normal, quick and read-only opens.
+#[test]
+fn queue_commands_follow_the_upgrade_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let fresh = dir.path().join("fresh");
+    assert!(command(&fresh, &["init"], &[])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let version = |db: &Path| -> i64 {
+        rusqlite::Connection::open(db)
+            .unwrap()
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap()
+    };
+    let current = version(&fresh.join(another_core::DB_FILE));
+    // A home as the installed release build left it, before the queue existed.
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let db = home.join(another_core::DB_FILE);
+    {
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.pragma_update(None, "journal_mode", "WAL").unwrap();
+        another_core::apply_schema(&c, current - 1).unwrap();
+        let queue_tables: i64 = c
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name LIKE 'queue_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(queue_tables, 0, "the schema before this one has no queue");
+    }
+    let record = home.join(another_core::ORIGIN_FILE);
+    std::fs::write(
+        &record,
+        format!(
+            r#"{{"created":{{"version":"0.1.0","build":"release","schema":{},"at":"2026-11-01T00:00:00.000Z"}}}}"#,
+            current - 1
+        ),
+    )
+    .unwrap();
+    let before = (std::fs::read(&db).unwrap(), std::fs::read(&record).unwrap());
+
+    for args in [
+        vec!["queue", "list"],
+        vec!["queue", "list", "--needs-owner"],
+        vec!["queue", "show", "Q1"],
+        vec!["queue", "next", "--agent", "ann"],
+        vec!["queue", "propose", "--title", "t", "--agent", "ann"],
+        vec!["queue", "audit"],
+        vec!["queue", "grace"],
+        vec!["queue", "admit", "Q1", "--owner"],
+    ] {
+        let out = command(&home, &args, &[]).output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let said = text(&out.stderr);
+        // Every command, owner actions included, says why the home is refused and how to
+        // proceed: the home is opened before anything else.
+        for needle in [
+            "this development build of another",
+            "will not migrate the database",
+            &format!("v{} to v{current}", current - 1),
+            "--dev-migrate",
+        ] {
+            assert!(
+                said.contains(needle),
+                "{args:?}: {needle:?} missing from {said}"
+            );
+        }
+    }
+    assert_eq!(
+        (std::fs::read(&db).unwrap(), std::fs::read(&record).unwrap()),
+        before,
+        "a refused queue command wrote nothing"
+    );
+    assert!(!home.join(another_core::BACKUP_DIR).exists());
+
+    // Told to migrate: a backup of the old schema first, then the queue works.
+    let out = command(&home, &["--dev-migrate", "--json", "queue", "list"], &[])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout).trim(), "[]");
+    assert_eq!(version(&db), current);
+    let backups: Vec<PathBuf> = std::fs::read_dir(home.join(another_core::BACKUP_DIR))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(backups.len(), 1, "{backups:?}");
+    assert_eq!(
+        version(&backups[0]),
+        current - 1,
+        "the backup is the home before the queue"
+    );
+    assert!(text(&std::fs::read(&record).unwrap()).contains("\"migrated\""));
+
+    let run = |args: &[&str]| {
+        let out = command(&home, args, &[]).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", text(&out.stderr));
+        text(&out.stdout)
+    };
+    run(&["agent", "register", "ann", "--program", "claude"]);
+    let made: Value = serde_json::from_str(&run(&[
+        "--json",
+        "queue",
+        "propose",
+        "--title",
+        "after the upgrade",
+        "--agent",
+        "ann",
+    ]))
+    .unwrap();
+    assert_eq!(made["label"], "Q1");
+    assert!(run(&["queue", "list", "--state", "proposed"]).contains("after the upgrade"));
+    assert!(run(&["queue", "audit"]).contains("no findings"));
+    // The reads that open the database without migrating or writing still work with the
+    // queue tables in the schema, and the queue reads work through such opens.
+    run(&["board"]);
+    for store in [
+        Store::open_quick(&home, std::time::Duration::from_secs(5)).unwrap(),
+        Store::open_read_only(&home, std::time::Duration::from_secs(5)).unwrap(),
+    ] {
+        assert_eq!(store.queue_item("Q1").unwrap().title, "after the upgrade");
+        assert_eq!(
+            store
+                .queue_list(QueueFilter {
+                    state: Some(QueueState::Proposed),
+                    ..Default::default()
+                })
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(store.queue_needs_owner().unwrap().awaiting.len(), 1);
+        assert!(store.queue_audit(None).unwrap().ok);
+    }
+    assert_eq!(
+        std::fs::read_dir(home.join(another_core::BACKUP_DIR))
+            .unwrap()
+            .count(),
+        1
+    );
+}

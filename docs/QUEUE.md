@@ -4,7 +4,7 @@ The queue is where agreed work lives on one node. Anyone can propose an item. On
 
 A queue item is not a [request](REQUESTS.md). A request is a direct ask from one agent to another: it is never admitted, `next` never returns it, and it does not count toward a limit. Requests and `--request` mail work as before.
 
-Scope: this page describes what is on `main` for scope item M1 (with C2 and C3) of [V0.1.0-SCOPE.md](V0.1.0-SCOPE.md). The queue is local to one node. The decision record is D-NEXT in [DECISIONS.md](DECISIONS.md).
+Scope: this page describes what is on `main` for scope item M1 (with C2 and C3) of [V0.1.0-SCOPE.md](V0.1.0-SCOPE.md). The queue is local to one node. The decision record is D89 in [DECISIONS.md](DECISIONS.md).
 
 ## States
 

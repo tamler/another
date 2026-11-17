@@ -59,6 +59,12 @@ jobs:
         if: runner.os != 'Windows'
         run: scripts/e2e-install.sh upgrade "$RUNNER_TEMP/old/bin/another" "$RUNNER_TEMP/new/bin/another"
 
+      # `cargo install --path` built this checkout in the workspace's own target directory,
+      # so the same release binary is still there, where a branch build would be run from.
+      - name: A build run from its build directory refuses, the installed copy migrates
+        if: runner.os != 'Windows'
+        run: scripts/e2e-install.sh build-directory "$RUNNER_TEMP/old/bin/another" "$GITHUB_WORKSPACE/target/release/another" "$RUNNER_TEMP/new/bin/another"
+
       - name: Uninstall
         run: |
           cargo uninstall --root "$RUNNER_TEMP/new" another
