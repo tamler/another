@@ -132,6 +132,20 @@ pub struct StatusRow {
     for_ms: Option<i64>,
     #[serde(skip)]
     wake_ago_ms: Option<i64>,
+    /// The stop still holds: no hook of the session ran after it
+    /// ([`another_core::TransportSession::stopped`]). For `another needs`.
+    #[serde(skip)]
+    pub(crate) stop_holds: bool,
+    /// The times `another needs` compares, in milliseconds.
+    #[serde(skip)]
+    pub(crate) hook_seen_ms: Option<i64>,
+    #[serde(skip)]
+    pub(crate) observed_ms: Option<i64>,
+    #[serde(skip)]
+    pub(crate) state_since_ms: Option<i64>,
+    /// A trusted listing has matched the session by its id since the last untrusted one.
+    #[serde(skip)]
+    pub(crate) seen_live: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -189,6 +203,11 @@ pub fn status_report(store: &Store, attention_only: bool) -> Result<StatusReport
                 stale: r.hook_made() && r.observed_at.is_none_or(|at| now - at > STALE_AFTER_MS),
                 for_ms: r.state_since.map(|at| now - at),
                 wake_ago_ms: r.last_wake_at.map(|at| now - at),
+                stop_holds: r.stopped(),
+                hook_seen_ms: r.hook_seen_at,
+                observed_ms: r.observed_at,
+                state_since_ms: r.state_since,
+                seen_live: r.seen_live_at.is_some(),
                 state_since: ts(r.state_since),
                 hook_seen_at: ts(r.hook_seen_at),
                 observed_at: ts(r.observed_at),
@@ -221,7 +240,7 @@ pub fn status_report(store: &Store, attention_only: bool) -> Result<StatusReport
 }
 
 /// A span as the owner reads it: `45s`, `12m`, `3h`, `2d`.
-fn span(ms: i64) -> String {
+pub(crate) fn span(ms: i64) -> String {
     let secs = ms.max(0) / 1000;
     match secs {
         0..=59 => format!("{secs}s"),

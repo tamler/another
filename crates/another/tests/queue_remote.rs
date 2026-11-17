@@ -486,3 +486,91 @@ async fn remote_callers_cannot_act_on_or_read_queue_text() {
     client.cancel().await.unwrap();
     ct.cancel();
 }
+
+/// The owner list (`another needs`) is a local command only: no MCP tool and no route
+/// returns it, on the authenticated server or on the loopback one.
+#[tokio::test]
+async fn needs_is_not_reachable_remotely() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let work_glob = dir
+        .path()
+        .join("work/*")
+        .to_string_lossy()
+        .replace('\\', "/");
+    store
+        .register_agent(RegisterAgent {
+            name: "grok-bot".into(),
+            program: Program::GrokBot,
+            project: None,
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    // Something the list would show, so an answer would not be empty.
+    store
+        .queue_propose(
+            &QueueCaller::Owner,
+            ProposeItem {
+                title: format!("{MARK}-title waiting on the owner"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let ct = CancellationToken::new();
+    let remote = serve(
+        store.clone(),
+        HttpOptions {
+            auth: true,
+            dashboard: DashboardMode::Redacted,
+            ..Default::default()
+        },
+        &ct,
+    )
+    .await;
+    let local = serve(
+        store.clone(),
+        HttpOptions {
+            dashboard: DashboardMode::Local,
+            ..Default::default()
+        },
+        &ct,
+    )
+    .await;
+    let token = store
+        .create_token("grok-bot", std::slice::from_ref(&work_glob), None, None)
+        .unwrap();
+
+    for (base, secret) in [(&remote, token.secret.as_str()), (&local, "")] {
+        let client = connect(base, secret).await;
+        let tools: Vec<String> = client
+            .list_all_tools()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        assert!(tools.len() > 10, "{tools:?}");
+        assert!(
+            !tools.iter().any(|name| name.contains("needs")),
+            "{tools:?}"
+        );
+        client.cancel().await.unwrap();
+    }
+
+    let http = reqwest::Client::new();
+    for (base, bearer) in [(&remote, Some(&token.secret)), (&local, None)] {
+        for route in ["/needs", "/api/needs", "/api/dash/needs"] {
+            let mut req = http.get(format!("{base}{route}"));
+            if let Some(secret) = bearer {
+                req = req.bearer_auth(secret);
+            }
+            let res = req.send().await.unwrap();
+            let status = res.status();
+            let body = res.text().await.unwrap();
+            assert_eq!(status.as_u16(), 404, "{base}{route}: {body}");
+            assert!(!body.contains(MARK), "{base}{route}: {body}");
+        }
+    }
+    ct.cancel();
+}

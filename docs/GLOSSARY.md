@@ -33,7 +33,8 @@ Short definitions of the words Another uses, with the places that explain each o
 - **Reservation**, **skip**: an item reserved with `--for` is offered to that agent first; the agent that gave an item up is skipped. Both end as [QUEUE.md](QUEUE.md) describes.
 - **Handoff**: the claimer gives its item to a named agent with `another queue release --to`. The item returns to `ready`, reserved for that agent.
 - **Result**: the short summary and one pointer (pull request, commit or file) stored on an item by `another queue done`.
-- **Owner list**: `another queue list --needs-owner`: decisions waiting, quiet claims, ready items nobody can take, failed notices and self-admitted items.
+- **Owner list**: `another needs`: what will not move without the owner, each row with its next step. Decisions waiting, sessions that are blocked, stuck or unreachable, quiet claims and ready items nobody can take. `another queue list --needs-owner` is the queue's part of it. [NEEDS.md](NEEDS.md).
+- **Quiet claim**: a claimed item listed for the owner because its claimer's name has been quiet for an hour, because its own session has, or because it is bound to no session and is a grace period old.
 - **Grace period**: the owner-set length of silence after which a claim may be released automatically (24 hours by default). The setting exists; automatic release is scope item M2.
 - **Queue audit**: `another queue audit`, a read-only check of the queue's events against themselves and the tables for duplicated, lost, unadmitted or over-limit claims.
 

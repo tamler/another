@@ -120,7 +120,9 @@ another transport status
 another transport status --attention
 ```
 
-One line per session: agent, session id (shortened), transport and pane, the shown state and for how long, the last wake and its age, and why the session needs you, if it does. It reads what the daemon recorded and calls no transport. For example:
+`another needs` lists the sessions that need you beside the queue's decisions, each with its next step ([NEEDS.md](NEEDS.md)). A `stuck` session leaves that list as soon as one of its hooks has run; here it stays until the next check.
+
+`another transport status` prints one line per session: agent, session id (shortened), transport and pane, the shown state and for how long, the last wake and its age, and why the session needs you, if it does. It reads what the daemon recorded and calls no transport. For example:
 
 ```text
 codex@shop 7f3a..  herdr w1:p3  stuck 12m  last wake: delivered, did not start 12m ago  needs attention: stuck
@@ -203,7 +205,7 @@ another wake clear --agent codex@shop
 
 Another stores at most one hand-set target per agent. It is used by `another wake --agent` only: it is never checked by the daemon and never woken automatically. `--via` takes `herdr` or the name of a configured command transport. `another wake list` shows each stored target and marks one whose transport is not configured. `another wake clear` forgets the target and deletes the agent's session rows, which also lifts a stop.
 
-A target is 1-200 printable characters and must not start with `-`. Printable means no control character and none that cannot be seen or that changes the order text is shown in: zero-width characters, directional marks, bidirectional embeddings, overrides and isolates, the byte order mark, and the line and paragraph separators. The rule holds wherever a target comes from: `another wake set`, a hook's capture, a transport's list, and `--target` for a command transport. The leading `-` matters because a target is passed on a command line, and Herdr takes it as a positional argument, so a leading `-` would be read as an option. A wake also refuses a target that starts with `-` when it comes from `--target`, from a target stored before this rule, or from Herdr's default of the agent's name.
+A target is 1-200 printable characters and must not start with `-`. Printable means no control character and none that cannot be seen or that changes the order text is shown in: zero-width characters, directional marks, bidirectional embeddings, overrides and isolates, the byte order mark, the Arabic letter mark, and the line and paragraph separators. The rule holds wherever a target comes from: `another wake set`, a hook's capture, a transport's list, and `--target` for a command transport. The leading `-` matters because a target is passed on a command line, and Herdr takes it as a positional argument, so a leading `-` would be read as an option. A wake also refuses a target that starts with `-` when it comes from `--target`, from a target stored before this rule, or from Herdr's default of the agent's name.
 
 `another wake prune` (and the daemon, every 10 minutes) drops what has aged out, without asking any transport: a session confirmed gone more than a day ago; a session whose hooks have been quiet for a day, unless the transport still matched it inside that day; a row left by a wake by hand, a day after that wake; and a pane that an earlier build captured from tmux or cmux, once its agent ended its session or has not been seen for a day. Targets you set are never pruned.
 
