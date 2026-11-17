@@ -4,7 +4,7 @@
 
 ## Status
 
-Milestones 1 to 7 are complete and on `main`: local core (tamler/another#1), mail checking and the activity feed (#2), the resource registry (#3), the authenticated remote peer (#4), federation (#5), wake adapters and release builds (M6), and hosted connectors (#99). Their briefs are in this file's git history and their decisions are D1 to D81.
+The seven original build milestones are complete and on `main` (they are not the scope ids M1 to M10 below): local core (tamler/another#1), mail checking and the activity feed (#2), the resource registry (#3), the authenticated remote peer (#4), federation (#5), wake adapters and release builds (M6), and hosted connectors (#99). Their briefs are in this file's git history and their decisions are D1 to D81.
 
 The current work is **v0.1.0, the single-node queue release**, approved by the project owner on 17 Nov 2026. Target tag date: 1 Dec 2026.
 

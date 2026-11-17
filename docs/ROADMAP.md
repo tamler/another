@@ -4,7 +4,7 @@ This page used to hold a ranked draft of candidates that was never approved. It 
 
 - What Another is for, and what it will not do: [VISION.md](VISION.md).
 - What v0.1.0 must have, may have, freezes and cuts, and what follows in v0.2.0: [V0.1.0-SCOPE.md](V0.1.0-SCOPE.md).
-- The decisions behind them: D83 to D85 in [DECISIONS.md](DECISIONS.md).
+- The decisions behind them: D83 to D86 in [DECISIONS.md](DECISIONS.md).
 
 Where the old draft's candidates went:
 
