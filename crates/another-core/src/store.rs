@@ -107,13 +107,15 @@ impl Build {
 const DEVELOPMENT: &str = "development";
 
 /// Whether the executable at `path` sits in a Cargo build directory, told by what is there
-/// and not by what the directory is called: Cargo keeps a `.fingerprint` directory beside
+/// and not by what the directory is called: Cargo keeps its lock file `.cargo-lock` beside
 /// the binaries of every profile, under any target directory name, and nothing that
 /// installs a binary puts one next to it. A binary still there was built and not
-/// installed: somebody's working copy, not the user's install.
+/// installed: somebody's working copy, not the user's install. The lock file is the one
+/// thing every Cargo layout has there: Cargo 1.88 and 1.96 also keep `.fingerprint` and
+/// `deps` beside the binary, Cargo 1.100 keeps neither.
 fn in_cargo_build_directory(path: &Path) -> bool {
     path.parent()
-        .is_some_and(|dir| dir.join(".fingerprint").is_dir())
+        .is_some_and(|dir| dir.join(".cargo-lock").is_file())
 }
 
 /// How many backups a successful migration leaves in [`BACKUP_DIR`], the one it just took

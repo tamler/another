@@ -187,7 +187,7 @@ build_directory() {
   old=$(exe "$1")
   built=$(exe "$2")
   new=$(exe "$3")
-  [ -d "$(dirname "$built")/.fingerprint" ] || fail "$built is not in a Cargo build directory; it holds:
+  [ -f "$(dirname "$built")/.cargo-lock" ] || fail "$built is not in a Cargo build directory; it holds:
 $(ls -a "$(dirname "$built")" 2>&1)"
   step "home written by the old build"
   seed "$old"

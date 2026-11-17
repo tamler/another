@@ -379,13 +379,13 @@ fn installed_home(dir: &Path) -> PathBuf {
 }
 
 /// A binary at `root/relative`. With `built`, its directory is a Cargo build directory as
-/// `cargo build` leaves one: Cargo's `.fingerprint` directory sits beside the binary.
+/// `cargo build` leaves one: Cargo's lock file `.cargo-lock` sits beside the binary.
 fn binary_at(root: &Path, relative: &str, built: bool) -> PathBuf {
     let binary = root.join(relative);
     let dir = binary.parent().unwrap();
     std::fs::create_dir_all(dir).unwrap();
     if built {
-        std::fs::create_dir(dir.join(".fingerprint")).unwrap();
+        std::fs::write(dir.join(".cargo-lock"), "").unwrap();
     }
     std::fs::write(&binary, "a binary").unwrap();
     binary
