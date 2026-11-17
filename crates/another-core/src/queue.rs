@@ -416,6 +416,50 @@ pub struct QueueNext {
     pub refused: Option<QueueRefusal>,
 }
 
+/// An item an agent's name holds, for [`QueueOffer`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldClaim {
+    /// The item's `Q` number.
+    pub label: String,
+    /// The session the claim is bound to, if any.
+    pub session: Option<String>,
+}
+
+/// What `next` would do for an agent now, read without writing ([`Store::queue_offer`]).
+/// The hook packs and `queue done` and `queue release` build their queue lines from it.
+#[derive(Debug, Clone)]
+pub struct QueueOffer {
+    /// The agent's address as the store resolves it.
+    pub agent: String,
+    /// The owner gave this name a seat: its own limit, above 0. A name on the default
+    /// limit is not seated.
+    pub seated: bool,
+    /// The limit as `next` computes it: the name's own, else the default.
+    pub limit: i64,
+    /// The name's claimed items, oldest claim first.
+    pub held: Vec<HeldClaim>,
+    /// The ready mark of the item `next` would hand over now: `<item id>:<t>`, where `t`
+    /// is when the item last came back to ready, or 0. `None` where `next` would refuse
+    /// or find nothing. It identifies one offer and is never shown.
+    pub ready: Option<String>,
+}
+
+impl QueueOffer {
+    /// The ready mark, only for a seated name. Every caller that tells an agent that an
+    /// item is ready goes through this, so a name on the default limit is told nothing.
+    pub fn announce(&self) -> Option<&str> {
+        self.ready.as_deref().filter(|_| self.seated)
+    }
+}
+
+/// What a session keeps of a ready mark it was told about: the first 16 hex characters of
+/// its SHA-256.
+pub fn queue_stamp(mark: &str) -> String {
+    let mut hex = crate::crypto::sha256_hex(mark.as_bytes());
+    hex.truncate(16);
+    hex
+}
+
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct QueueLimit {
     pub agent: String,
@@ -1031,13 +1075,16 @@ fn skip_holds(conn: &Connection, row: &ItemRow, now: i64) -> Result<bool> {
     if row.skip_agent.is_none() {
         return Ok(false);
     }
-    let given_up: Option<i64> = conn.query_row(
-        "SELECT max(at) FROM queue_history
-         WHERE item_id = ?1 AND kind IN ('queue.released', 'queue.handoff')",
-        [&row.item_id],
-        |r| r.get(0),
-    )?;
+    let given_up = given_up_at(conn, &row.item_id)?;
     Ok(given_up.is_none_or(|at| now.saturating_sub(at) < SKIP_MS))
+}
+
+const GIVEN_UP_SQL: &str = "SELECT max(at) FROM queue_history
+     WHERE item_id = ?1 AND kind IN ('queue.released', 'queue.handoff')";
+
+/// When the item last came back to ready: its latest release or handoff.
+fn given_up_at(conn: &Connection, item_id: &str) -> Result<Option<i64>> {
+    Ok(conn.query_row(GIVEN_UP_SQL, [item_id], |r| r.get(0))?)
 }
 
 fn setting(conn: &Connection, key: &str, default: i64) -> Result<i64> {
@@ -1059,18 +1106,92 @@ fn grace_seconds(conn: &Connection) -> Result<i64> {
     setting(conn, "grace_seconds", DEFAULT_QUEUE_GRACE_SECONDS)
 }
 
+const OWN_LIMIT_SQL: &str = "SELECT max_claimed FROM queue_limits WHERE agent_id = ?1";
+const HELD_SQL: &str = "SELECT seq, claim_session FROM queue_items
+     WHERE claimer_id = ?1 AND state = 'claimed' ORDER BY claimed_at, seq";
+
+/// Where an agent stands with the queue before the ready rows are looked at. `next` and
+/// the offer both read it here, so they cannot disagree on a seat or a limit.
+struct Standing {
+    /// The limit the owner set for this name, if any.
+    own_limit: Option<i64>,
+    /// The name's own limit, else the default.
+    limit: i64,
+    /// The name's claimed items, oldest claim first: `seq` and the bound session.
+    held: Vec<(i64, Option<String>)>,
+}
+
+impl Standing {
+    /// Whether `next` would look for a ready row at all.
+    fn has_room(&self) -> bool {
+        self.limit > 0 && (self.held.len() as i64) < self.limit
+    }
+
+    fn labels(&self) -> Vec<String> {
+        self.held.iter().map(|(seq, _)| label(*seq)).collect()
+    }
+}
+
+/// The limit the owner set for this name, if any.
+fn own_limit(conn: &Connection, agent_id: &str) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(OWN_LIMIT_SQL, [agent_id], |r| r.get(0))
+        .optional()?)
+}
+
 fn limit_of(conn: &Connection, agent_id: &str) -> Result<i64> {
-    let own: Option<i64> = conn
-        .query_row(
-            "SELECT max_claimed FROM queue_limits WHERE agent_id = ?1",
-            [agent_id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    match own {
+    match own_limit(conn, agent_id)? {
         Some(n) => Ok(n),
         None => default_limit(conn),
     }
+}
+
+fn standing(conn: &Connection, agent_id: &str) -> Result<Standing> {
+    let own_limit = own_limit(conn, agent_id)?;
+    let limit = match own_limit {
+        Some(n) => n,
+        None => default_limit(conn)?,
+    };
+    let mut stmt = conn.prepare(HELD_SQL)?;
+    let held = stmt
+        .query_map([agent_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(Standing {
+        own_limit,
+        limit,
+        held,
+    })
+}
+
+fn ready_sql() -> String {
+    format!(
+        "SELECT {ITEM_COLUMNS} FROM queue_items
+         WHERE state = 'ready' AND node_id = ?1
+           AND (for_agent IS NULL OR for_agent = ?2)
+           AND (skip_agent IS NULL OR skip_agent != ?2
+                OR (SELECT max(h.at) FROM queue_history h
+                    WHERE h.item_id = queue_items.item_id
+                      AND h.kind IN ('queue.released', 'queue.handoff')) <= ?3)
+         ORDER BY priority, admitted_at, seq LIMIT 1"
+    )
+}
+
+/// The ready item `next` hands this agent: the only copy of that selection. It honours
+/// reservations, the one-hour skip and this node only, in the order priority, admission
+/// time, sequence.
+fn first_ready(
+    conn: &Connection,
+    node_id: &str,
+    agent_id: &str,
+    now: i64,
+) -> Result<Option<ItemRow>> {
+    Ok(conn
+        .query_row(
+            &ready_sql(),
+            params![node_id, agent_id, now - SKIP_MS],
+            row_from,
+        )
+        .optional()?)
 }
 
 fn set_setting_tx(tx: &Tx<'_>, key: &str, value: i64, event_id: &str) -> Result<()> {
@@ -1876,21 +1997,15 @@ impl Store {
             touch(tx, &me.id)?;
             // After the caller's own sign of life, and never against the caller's claims.
             queue_sweep_tx(tx, Some(&me.id))?;
-            let limit = limit_of(tx, &me.id)?;
-            let mut stmt = tx.prepare(
-                "SELECT seq FROM queue_items WHERE claimer_id = ?1 AND state = 'claimed'
-                 ORDER BY claimed_at, seq",
-            )?;
-            let held = stmt
-                .query_map([&me.id], |r| r.get::<_, i64>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let standing = standing(tx, &me.id)?;
+            let (limit, held) = (standing.limit, standing.labels());
             let refuse = |reason: &str, message: String| {
                 Ok(QueueNext {
                     claimed: None,
                     refused: Some(QueueRefusal {
                         reason: reason.to_string(),
                         limit,
-                        held: held.iter().map(|seq| label(*seq)).collect(),
+                        held: held.clone(),
                         message,
                     }),
                 })
@@ -1904,12 +2019,8 @@ impl Store {
                     ),
                 );
             }
-            if held.len() as i64 >= limit {
-                let items = held
-                    .iter()
-                    .map(|seq| label(*seq))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+            if !standing.has_room() {
+                let items = held.join(", ");
                 return refuse(
                     "at_limit",
                     format!(
@@ -1918,23 +2029,7 @@ impl Store {
                     ),
                 );
             }
-            let next = tx
-                .query_row(
-                    &format!(
-                        "SELECT {ITEM_COLUMNS} FROM queue_items
-                         WHERE state = 'ready' AND node_id = ?1
-                           AND (for_agent IS NULL OR for_agent = ?2)
-                           AND (skip_agent IS NULL OR skip_agent != ?2
-                                OR (SELECT max(h.at) FROM queue_history h
-                                    WHERE h.item_id = queue_items.item_id
-                                      AND h.kind IN ('queue.released', 'queue.handoff')) <= ?3)
-                         ORDER BY priority, admitted_at, seq LIMIT 1"
-                    ),
-                    params![tx.node_id, me.id, tx.now - SKIP_MS],
-                    row_from,
-                )
-                .optional()?;
-            let Some(row) = next else {
+            let Some(row) = first_ready(tx, tx.node_id, &me.id, tx.now)? else {
                 return Ok(QueueNext {
                     claimed: None,
                     refused: None,
@@ -1970,6 +2065,44 @@ impl Store {
             Ok(QueueNext {
                 claimed: Some(item_now(tx, tx.node_id, &row.item_id)?),
                 refused: None,
+            })
+        })
+    }
+
+    /// What [`Store::queue_next`] would do for the agent now, without doing it. It only
+    /// reads: no sign of life, no sweep, no event. So where a claim of another agent is
+    /// past the grace period, `next` would release it first and may hand over an item
+    /// this read does not see; the read never offers an item `next` would not give.
+    pub fn queue_offer(&self, agent: &str) -> Result<QueueOffer> {
+        let now = self.now();
+        let node_id = self.node_id();
+        self.read(|conn| {
+            let me = resolve_agent(conn, node_id, agent)?;
+            let standing = standing(conn, &me.id)?;
+            let ready = if standing.has_room() {
+                match first_ready(conn, node_id, &me.id, now)? {
+                    Some(row) => {
+                        let back = given_up_at(conn, &row.item_id)?.unwrap_or(0);
+                        Some(format!("{}:{back}", row.item_id))
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            Ok(QueueOffer {
+                agent: me.address,
+                seated: standing.own_limit.is_some_and(|n| n > 0),
+                limit: standing.limit,
+                held: standing
+                    .held
+                    .into_iter()
+                    .map(|(seq, session)| HeldClaim {
+                        label: label(seq),
+                        session,
+                    })
+                    .collect(),
+                ready,
             })
         })
     }
@@ -3002,5 +3135,53 @@ mod tests {
         assert_eq!(store.queue_item("Q1").unwrap().state, QueueState::Claimed);
         let swept = store.write(|tx| queue_sweep_tx(tx, None)).unwrap();
         assert_eq!(swept.released_claims, ["Q1"]);
+    }
+
+    /// Q10 T18. The statements [`Store::queue_offer`] adds to a session start and a prompt
+    /// run on indexes: none scans `queue_items` or `queue_history`, and none reads
+    /// `queue_sessions`.
+    #[test]
+    fn queue_read_uses_its_indexes() {
+        let (clock, _) = crate::store::Clock::manual(1_800_000_000_000);
+        let store = Store::open_in_memory(clock).unwrap();
+        let ready = ready_sql();
+        let statements = [OWN_LIMIT_SQL, HELD_SQL, ready.as_str(), GIVEN_UP_SQL];
+        // The four statements above are every queue statement of the read.
+        let source = include_str!("queue.rs");
+        let from = source.find("pub fn queue_offer").unwrap();
+        let body = &source[from..from + source[from..].find("\n    }\n").unwrap()];
+        for call in ["standing", "first_ready", "given_up_at"] {
+            assert!(body.contains(call), "queue_offer no longer calls {call}");
+        }
+        for word in ["query_row", "prepare", "execute", "queue_sessions"] {
+            assert!(!body.contains(word), "queue_offer has SQL of its own: {word}");
+        }
+        store
+            .read(|conn| {
+                for sql in statements {
+                    assert!(!sql.contains("queue_sessions"), "{sql}");
+                    let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+                    let params: Vec<&str> = vec!["x"; stmt.parameter_count()];
+                    let plan = stmt
+                        .query_map(rusqlite::params_from_iter(params), |r| {
+                            r.get::<_, String>(3)
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    assert!(!plan.is_empty(), "{sql}");
+                    for step in &plan {
+                        assert!(
+                            !step.starts_with("SCAN"),
+                            "a full scan in {sql:?}: {plan:?}"
+                        );
+                        assert!(!step.contains("queue_sessions"), "{plan:?}");
+                    }
+                    assert!(
+                        plan.iter().any(|s| s.contains("USING")),
+                        "no index in {sql:?}: {plan:?}"
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
     }
 }
