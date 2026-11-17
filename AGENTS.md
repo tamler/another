@@ -18,7 +18,7 @@ The scope page is the source of truth; this is the short form. Every item has an
 - **M4** Path holds: existing behaviour, admitted fixes only.
 - **M5** Transport adapter interface (`wake`, `status`, `list`), the Herdr adapter and a generic command adapter.
 - **M6** Hook packs for Claude Code and Codex show the inbox and the queue at each turn.
-- **M7** One place that lists what needs the owner; the read-only stale scan in `another doctor`.
+- **M7** One place that lists what needs the owner; the read-only scan for lapsed resources and unregistered listeners in `another doctor`.
 - **M8** Daemon on macOS and Linux.
 - **M9** Today's hub and spoke between the owner's Mac and VPS, with hub backups.
 - **M10** A release people can install.
