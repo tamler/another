@@ -448,10 +448,12 @@ pub struct WakeRun {
     /// Text to send (default: a one-line inbox summary).
     #[arg(long)]
     message: Option<String>,
-    /// Wake even when nothing is unread.
+    /// Wake even when nothing is unread. It does not override a wake that is refused
+    /// because the pane may not hold the agent: name the pane with --target for that.
     #[arg(long)]
     force: bool,
-    /// Print the transport's commands without running them.
+    /// Print the transport's commands without running them. A wake that would be refused
+    /// without asking the transport is reported as refused.
     #[arg(long)]
     dry_run: bool,
 }

@@ -1084,12 +1084,12 @@ fn tmux_rows_are_shown_but_never_matched() {
     assert!(plan.outcome.is_none() && !plan.sent, "{plan:?}");
     assert!(plan.error.as_deref().unwrap().contains("gone"), "{plan:?}");
     assert_eq!(fx.tmux_calls().len(), before);
-    // Forced: nothing sent, a failed wake, and Enter is not pressed.
-    let forced = WakeOptions {
-        force: true,
+    // With the pane named: nothing sent, a failed wake, and Enter is not pressed.
+    let named = WakeOptions {
+        target: Some("%1".into()),
         ..Default::default()
     };
-    let plan = wake(&fx.store, &worker, &forced).unwrap();
+    let plan = wake(&fx.store, &worker, &named).unwrap();
     assert_eq!(plan.outcome, Some(WakeOutcome::Undelivered), "{plan:?}");
     assert!(plan.failure);
     assert!(
@@ -1999,10 +1999,11 @@ fn a_captured_pane_is_forgotten_at_session_end_with_no_config() {
 /// A wake by hand to a command transport cannot check who is in the pane. So when the
 /// target is a session row or a pane an earlier build captured, it is refused, with
 /// nothing typed, if the row was last seen gone or the session or agent has shown no sign
-/// of life within the limit pruning uses. `--force` overrides. A target set by hand is
-/// the owner's word and is not subject to this.
+/// of life within the limit pruning uses. `--force` does not override: only naming the
+/// pane does, with `--target` or `another wake set`, and the refusal gives both. A hook of
+/// the session after it was seen gone lifts that refusal.
 #[test]
-fn a_wake_by_hand_refuses_a_gone_or_quiet_command_target_unless_forced() {
+fn a_wake_by_hand_refuses_a_gone_or_quiet_command_target_until_the_pane_is_named() {
     let fx = Fx::new();
     fx.write_tmux_example();
     for pane in ["%1", "%2", "%5", "%6"] {
@@ -2021,13 +2022,28 @@ fn a_wake_by_hand_refuses_a_gone_or_quiet_command_target_unless_forced() {
         let why = plan.error.unwrap();
         assert!(why.contains("nothing was typed"), "{why}");
         assert!(why.contains(want), "{want:?} is not in {why:?}");
-        assert!(why.contains("--force"), "{why}");
+        assert!(!why.contains("--force"), "{why}");
+        for command in [
+            format!("another wake --agent {agent} --via tmux --target %"),
+            format!("another wake set --agent {agent} --via tmux --target %"),
+        ] {
+            assert!(why.contains(&command), "{command:?} is not in {why:?}");
+        }
         assert_eq!(sends(fx), before, "something was typed");
     };
-    let forced = |fx: &Fx, agent: &str| {
+    // `--force` alone is refused like the plain wake; with the pane named, it is typed.
+    let forced = |fx: &Fx, agent: &str, pane: &str| {
         let before = sends(fx);
         let options = WakeOptions {
             force: true,
+            ..Default::default()
+        };
+        let plan = wake(&fx.store, agent, &options).unwrap();
+        assert!(plan.outcome.is_none() && !plan.sent, "{plan:?}");
+        assert!(plan.error.unwrap().contains("nothing was typed"));
+        assert_eq!(sends(fx), before, "--force typed into a guarded pane");
+        let options = WakeOptions {
+            target: Some(pane.into()),
             ..Default::default()
         };
         let plan = wake(&fx.store, agent, &options).unwrap();
@@ -2053,8 +2069,31 @@ fn a_wake_by_hand_refuses_a_gone_or_quiet_command_target_unless_forced() {
     waker.sweep(&fx.store).unwrap();
     assert_eq!(fx.row(&worker, "s1").state.as_deref(), Some("gone"));
     fx.pane("%1", true);
+    // The row went gone in the instant of its last hook: no hook has run since.
+    let row = fx.row(&worker, "s1");
+    assert_eq!(row.hook_seen_at, row.state_since, "{row:?}");
     refused(&fx, &worker, "gone");
-    forced(&fx, &worker);
+    forced(&fx, &worker, "%1");
+    // A dry run says the same as the wake would, and lists no command.
+    let dry = WakeOptions {
+        dry_run: true,
+        ..Default::default()
+    };
+    let plan = wake(&fx.store, &worker, &dry).unwrap();
+    assert!(plan.error.as_deref().unwrap().contains("gone"), "{plan:?}");
+    assert_eq!(plan.skipped, None, "{plan:?}");
+    assert!(plan.commands.is_empty(), "{plan:?}");
+    // A hook of that session after it was seen gone is a sign of life from it: the row
+    // still reads gone, and the wake is typed.
+    fx.advance(60);
+    fx.stamp(&worker, "s1", "tmux", "%1");
+    let row = fx.row(&worker, "s1");
+    assert_eq!(row.state.as_deref(), Some("gone"), "{row:?}");
+    assert!(row.hook_seen_at > row.state_since, "{row:?}");
+    typed(&fx, &worker);
+    let plan = wake(&fx.store, &worker, &dry).unwrap();
+    assert_eq!(plan.skipped.as_deref(), Some("dry run"), "{plan:?}");
+    assert_eq!((plan.error, plan.commands.len()), (None, 2));
 
     // A session row whose hooks have been quiet for longer than a day.
     let quiet = fx.agent("quiet");
@@ -2064,7 +2103,7 @@ fn a_wake_by_hand_refuses_a_gone_or_quiet_command_target_unless_forced() {
     typed(&fx, &quiet);
     fx.advance(2 * 3600);
     refused(&fx, &quiet, "no hook of that session for over a day");
-    forced(&fx, &quiet);
+    forced(&fx, &quiet, "%2");
     // Its next hook makes it wakeable again.
     fx.stamp(&quiet, "s2", "tmux", "%2");
     typed(&fx, &quiet);
@@ -2090,7 +2129,7 @@ fn a_wake_by_hand_refuses_a_gone_or_quiet_command_target_unless_forced() {
     typed(&fx, &old);
     seen("offline", now);
     refused(&fx, &old, "ended its session");
-    forced(&fx, &old);
+    forced(&fx, &old, "%5");
     seen("active", now - 25 * 3_600_000);
     refused(&fx, &old, "not seen for over a day");
     let pruned = another::wake::prune(&fx.store, true).unwrap();
@@ -2122,6 +2161,281 @@ fn a_wake_by_hand_refuses_a_gone_or_quiet_command_target_unless_forced() {
     };
     let plan = wake(&fx.store, &old, &to_target).unwrap();
     assert_eq!(plan.outcome, Some(WakeOutcome::Unconfirmed), "{plan:?}");
+}
+
+/// A row that reads `unknown` is refused only when the listing did not match it by
+/// session id. Rows are written by real sweeps over a fake `list`.
+#[test]
+fn a_wake_by_hand_refuses_an_unknown_row_the_listing_did_not_match() {
+    let fx = Fx::new();
+    let tool = fx.tool();
+    transports::write(
+        &fx.home,
+        &json!({"version": 1, "transports": {"ids": {
+            "wake": [[tool, "one", "{target}", "{message}"]],
+            "list": {"argv": [tool, "list"]}
+        }}})
+        .to_string(),
+    );
+    assert_eq!(load_config(&fx.home).error, None);
+    let typed_into = |fx: &Fx| -> Vec<String> {
+        fx.calls()
+            .into_iter()
+            .filter(|c| c.args[0] == "one")
+            .map(|c| c.target)
+            .collect()
+    };
+    let mut waker = Waker::with_transports(Vec::new());
+    let mut listed = |fx: &Fx, lines: &str| {
+        fx.control("list-out", Some(lines));
+        fx.sweeps(&mut waker, 1, 30);
+    };
+    let refused = |fx: &Fx, agent: &str| {
+        let before = typed_into(fx);
+        let plan = wake(&fx.store, agent, &WakeOptions::default()).unwrap();
+        assert!(plan.outcome.is_none() && !plan.sent, "{plan:?}");
+        let why = plan.error.unwrap();
+        assert!(
+            why.contains("the last check could not tell whose session is in it"),
+            "{why}"
+        );
+        assert_eq!(typed_into(fx), before, "something was typed");
+    };
+
+    // The listing shows another session id at the row's pane: the reviewer's row.
+    let eve = fx.agent("eve");
+    fx.mail(&eve, "Hello");
+    fx.stamp(&eve, "s1", "ids", "t1");
+    listed(&fx, "t1\tworking\tsomeone-else\n");
+    let row = fx.row(&eve, "s1");
+    assert_eq!(
+        (row.state.as_deref(), row.matched),
+        (Some("unknown"), 0),
+        "{row:?}"
+    );
+    refused(&fx, &eve);
+    // A hook of the session does not lift it: the hook's environment names the pane the
+    // session started in, not the one it is in now.
+    fx.advance(60);
+    fx.stamp(&eve, "s1", "ids", "t1");
+    refused(&fx, &eve);
+
+    // The listing gives this session's own id at the pane with the state word `unknown`:
+    // the transport says the pane is this session's, so the wake is typed.
+    listed(&fx, "t1\tunknown\ts1\n");
+    let row = fx.row(&eve, "s1");
+    assert_eq!(
+        (row.state.as_deref(), row.matched),
+        (Some("unknown"), 1),
+        "{row:?}"
+    );
+    let plan = wake(&fx.store, &eve, &WakeOptions::default()).unwrap();
+    assert_eq!(plan.outcome, Some(WakeOutcome::Unconfirmed), "{plan:?}");
+    assert_eq!(typed_into(&fx), ["t1"]);
+
+    // A session with no id of its own, on a transport that lists ids: nothing says the
+    // pane is this agent's. A known limit: refused, also when the agent is alone there.
+    let noid = fx.agent("noid");
+    fx.mail(&noid, "Hello");
+    fx.stamp(&noid, "", "ids", "t2");
+    listed(&fx, "t1\tidle\ts1\nt2\tidle\tzzz\n");
+    let row = fx.row(&noid, "");
+    assert_eq!(
+        (row.state.as_deref(), row.matched),
+        (Some("unknown"), 0),
+        "{row:?}"
+    );
+    refused(&fx, &noid);
+    // So is a pane listed with the state word `unknown` and no session id.
+    let word = fx.agent("word");
+    fx.mail(&word, "Hello");
+    fx.stamp(&word, "s3", "ids", "t3");
+    listed(&fx, "t1\tidle\ts1\nt3\tunknown\n");
+    refused(&fx, &word);
+    // Naming the pane types into it.
+    let named = WakeOptions {
+        target: Some("t2".into()),
+        ..Default::default()
+    };
+    let plan = wake(&fx.store, &noid, &named).unwrap();
+    assert_eq!(plan.outcome, Some(WakeOutcome::Unconfirmed), "{plan:?}");
+    assert_eq!(typed_into(&fx), ["t1", "t2"]);
+}
+
+/// The reviewer's reproduction (review R2 of Q11, finding P1-A), through the real binary
+/// with a fake tmux that only records its arguments. A wake by hand to a command transport
+/// types nothing into a pane that Another's own rows say is not, or may not be, this
+/// agent's: its row reads `unknown`, or another agent's hooks ran there later. `--force`
+/// does not override, and a dry run reports the refusal. An agent alone in its pane is
+/// woken.
+#[test]
+fn a_wake_by_hand_types_nothing_into_a_pane_another_agent_may_hold() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let bin = Bin::at(&root, &root.join("home"));
+    for name in ["sender", "eve", "ann", "bea", "cy", "dave", "fay"] {
+        bin.json(&["agent", "register", name, "--program", "codex"]);
+    }
+    transports::write_example(&bin.home);
+    for to in ["eve", "bea", "cy", "dave", "fay"] {
+        bin.json(&["send", "--from", "sender", "--to", to, "--subject", "Hi"]);
+    }
+    let db = || rusqlite::Connection::open(bin.home.join(DB_FILE)).unwrap();
+    // What a sweep writes for a session, set here as the reviewer set it. `hooks_ago` moves
+    // the session's last hook into the past.
+    let observed = |session: &str, state: &str, detail: &str, hooks_ago: i64| {
+        let now = real_now();
+        let changed = db()
+            .execute(
+                "UPDATE transport_sessions SET state = ?2, detail = ?3, state_since = ?4,
+                   observed_at = ?4, matched = 0, hook_seen_at = hook_seen_at - ?5
+                 WHERE session_id = ?1",
+                rusqlite::params![session, state, detail, now, hooks_ago],
+            )
+            .unwrap();
+        assert_eq!(changed, 1, "{session}");
+    };
+    let sends = |bin: &Bin| -> Vec<Vec<String>> {
+        bin.calls()
+            .into_iter()
+            .filter(|c| c.get(1).is_some_and(|arg| arg == "send-keys"))
+            .collect()
+    };
+    // The wake fails, types nothing, and says why on stdout.
+    let refused = |bin: &Bin, args: &[&str], wants: &[&str]| {
+        let before = sends(bin);
+        let out = bin.run(args);
+        let said = String::from_utf8(out.stdout).unwrap();
+        assert!(!out.status.success(), "{args:?} succeeded: {said}");
+        assert!(said.contains("nothing was typed"), "{args:?}: {said}");
+        for want in wants {
+            assert!(said.contains(want), "{args:?}: {want:?} is not in {said:?}");
+        }
+        assert!(!said.contains("would run"), "{args:?}: {said}");
+        assert!(!said.contains("--force"), "{args:?}: {said}");
+        assert_eq!(sends(bin), before, "{args:?} typed something");
+        said
+    };
+    let every_way = |bin: &Bin, agent: &str, wants: &[&str]| {
+        refused(bin, &["wake", "--agent", agent], wants);
+        refused(bin, &["wake", "--agent", agent, "--force"], wants);
+        refused(bin, &["wake", "--agent", agent, "--dry-run"], wants);
+        let message = ["wake", "--agent", agent, "--force", "--message", "x"];
+        refused(bin, &message, wants);
+        let plan = bin.run(&["--json", "wake", "--agent", agent, "--dry-run"]);
+        assert!(!plan.status.success());
+        let plan: Value = serde_json::from_slice(&plan.stdout).unwrap();
+        assert_eq!(plan[0]["commands"], json!([]), "{plan}");
+        assert_eq!(plan[0]["skipped"], Value::Null, "{plan}");
+        assert!(plan[0]["error"].is_string(), "{plan}");
+    };
+
+    // The reviewer's case: eve's row reads `unknown` in %5, and ann is working in %5.
+    bin.hook_as("eve", "session-start", "s-eve", &[("TMUX_PANE", "%5")]);
+    bin.hook_as("ann", "session-start", "s-ann", &[("TMUX_PANE", "%5")]);
+    observed("s-eve", "unknown", "the pane hosts another session", 0);
+    observed("s-ann", "working", "tmux: working", 0);
+    let commands = [
+        "another wake --agent eve --via tmux --target %5",
+        "another wake set --agent eve --via tmux --target %5",
+    ];
+    every_way(&bin, "eve", &commands);
+    // The same row with eve's hook the newer one: `unknown` alone refuses.
+    observed("s-ann", "working", "tmux: working", 3_600_000);
+    let said = refused(&bin, &["wake", "--agent", "eve"], &commands);
+    assert!(said.contains("could not tell whose session"), "{said}");
+    assert!(!said.contains("a hook of"), "{said}");
+
+    // The documented tmux example lists pane ids only, so rows read `present`: bea's hooks
+    // ran in %6 two hours ago, and fay's ran there since.
+    bin.hook_as("bea", "session-start", "s-bea", &[("TMUX_PANE", "%6")]);
+    bin.hook_as("fay", "session-start", "s-fay", &[("TMUX_PANE", "%6")]);
+    observed("s-bea", "present", "tmux: present", 7_200_000);
+    observed("s-fay", "present", "tmux: present", 0);
+    every_way(
+        &bin,
+        "bea",
+        &[
+            "a hook of fay ran in that pane later",
+            "another wake --agent bea --via tmux --target %6",
+            "another wake set --agent bea --via tmux --target %6",
+        ],
+    );
+    // fay, whose hooks ran there last, is woken.
+    let plan = bin.json(&["wake", "--agent", "fay"]);
+    assert_eq!(plan[0]["outcome"], "unconfirmed", "{plan}");
+    assert_eq!(sends(&bin).last().unwrap()[3], "%6");
+    // The other agent's name is printed as one safe line.
+    let renamed = db()
+        .execute(
+            "UPDATE agents SET name = ?1, address = ?1 WHERE address = 'fay'",
+            ["f\u{1b}]0;x\u{7}a\u{202e}y\nz"],
+        )
+        .unwrap();
+    assert_eq!(renamed, 1);
+    for args in [
+        &["wake", "--agent", "bea"][..],
+        &["--json", "wake", "--agent", "bea"],
+    ] {
+        let out = bin.run(args);
+        let all = [out.stdout, out.stderr].concat();
+        let all = String::from_utf8(all).unwrap();
+        assert!(all.contains("nothing was typed"), "{all}");
+        assert!(
+            !all.chars()
+                .any(|c| c == '\u{1b}' || c == '\u{7}' || c == '\u{202e}'),
+            "{all:?}"
+        );
+        assert!(!all.contains("\nz"), "{all:?}");
+    }
+    assert_eq!(sends(&bin).len(), 2, "{:?}", sends(&bin));
+
+    // An agent alone in its pane is woken: before the first check, and once it reads
+    // `present`.
+    bin.hook_as("cy", "session-start", "s-cy", &[("TMUX_PANE", "%8")]);
+    for round in 1..=2 {
+        let plan = bin.json(&["wake", "--agent", "cy"]);
+        assert_eq!(plan[0]["outcome"], "unconfirmed", "{plan}");
+        assert_eq!(plan[0]["target"], "%8", "{plan}");
+        assert_eq!(sends(&bin).len(), 2 + round * 2);
+        observed("s-cy", "present", "tmux: present", 0);
+    }
+    let typed = sends(&bin).len();
+
+    // A pane an earlier build captured for dave: typed into while nobody else's hooks ran
+    // there, refused once another agent has a session in it.
+    let stored = db()
+        .execute(
+            "INSERT INTO wake_targets (agent_id, via, target, auto, updated_at)
+             SELECT agent_id, 'tmux', '%9', 1, 0 FROM agents WHERE address = 'dave'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(stored, 1);
+    let plan = bin.json(&["wake", "--agent", "dave"]);
+    assert_eq!(plan[0]["outcome"], "unconfirmed", "{plan}");
+    assert_eq!(sends(&bin).len(), typed + 2);
+    bin.hook_as("ann", "session-start", "s-ann2", &[("TMUX_PANE", "%9")]);
+    every_way(
+        &bin,
+        "dave",
+        &[
+            "a hook of ann ran in that pane later",
+            "another wake --agent dave --via tmux --target %9",
+        ],
+    );
+
+    // Naming the pane is the override: `--target` types, and so does a target set by hand.
+    let plan = bin.json(&["wake", "--agent", "eve", "--via", "tmux", "--target", "%5"]);
+    assert_eq!(plan[0]["outcome"], "unconfirmed", "{plan}");
+    assert_eq!(sends(&bin).last().unwrap()[3], "%5");
+    bin.json(&[
+        "wake", "set", "--agent", "bea", "--via", "tmux", "--target", "%6",
+    ]);
+    let plan = bin.json(&["wake", "--agent", "bea"]);
+    assert_eq!(plan[0]["outcome"], "unconfirmed", "{plan}");
+    assert_eq!(sends(&bin).last().unwrap()[3], "%6");
+    assert_eq!(sends(&bin).len(), typed + 6);
 }
 
 /// A `transports.json` that is not a regular file is refused without being opened, so a
