@@ -23,7 +23,7 @@ another needs --limit 50      # rows shown per kind (1 to 200, default 10)
 
 ## It only reads
 
-The command opens the home the way `another doctor` does. It creates no home, migrates no database, runs no sweep, writes no event, takes no hold, sends no mail, wakes nobody, calls no transport and runs no program. It reads the database, `build.json` and `transports.json`. Like any reader of the database it may leave an empty `-wal` or `-shm` file beside it.
+The command opens the home the way `another doctor` does. It creates no home, migrates no database, runs no sweep, writes no event, takes no hold, sends no mail, wakes nobody, calls no transport and runs no program. It reads the database, `build.json` and `transports.json`. Like any reader of the database, it makes SQLite's two side files beside it when they are not there: `another.db-wal`, which stays empty (0 bytes), and `another.db-shm`, the 32 KB index every reader shares. On a home another process has open, the `-shm` file's bytes can change. No data is written: the database file and the contents of the `-wal` file are the same before and after.
 
 It is local only. No MCP tool, HTTP route or dashboard panel returns the list, so a federation peer, the hub, a bearer token and an OAuth grant see exactly what they saw before.
 
@@ -34,7 +34,7 @@ The printed commands are not an authority check. They still need `--owner` at a 
 | Exit | When | Standard output |
 |---|---|---|
 | 0 | The list was read, with rows or without | The list. `--brief` with nothing waiting prints nothing |
-| 1 | It could not be read: no database, a schema this build would refuse or would have to migrate (after an upgrade, until a normal command has run), or the database stayed locked for 2 seconds | Nothing. The reason and `run another doctor` go to standard error. With `--brief`, standard output gets exactly `needs: cannot read, run another doctor`, with or without `--json` |
+| 1 | It could not be read: no database, a schema this build would refuse or would have to migrate (after an upgrade, until a normal command has run), or the database stayed locked for 2 seconds | Nothing. The reason and `run another doctor` go to standard error. With `--brief`, standard output gets exactly `needs: cannot read, run another doctor`, with or without `--json`. Unlike other commands, `--json` prints no error object here |
 | 2 | A bad command line, including `--limit` out of range | |
 
 Rows never change the exit code. A script tests `--brief` for empty output and exit 0. A list that cannot be read is never an empty output, so a blank prompt always means nothing is waiting.
@@ -63,7 +63,7 @@ Agents (3)
 Claims (2)
   Q4 M4  Hold fixes  claimed by codex@api, quiet for 95 min, not bound to a session, grace ends 2026-11-18T12:51:00.971Z
     next: another queue show Q4
-          another wake --agent codex@api --force --message "Q4 is claimed under your name and has been quiet. Continue it, or run: another queue release Q4"
+          another wake --agent codex@api --message "Q4 is claimed under your name and has been quiet. Continue it, or run: another queue release Q4"
           another queue release Q4 --reason "<why>" --owner
   Q7 M9  Hub backup restore  ready, reserved for claude@vps, which cannot take it now
     next: another queue edit Q7 --for-anyone --owner
@@ -128,7 +128,7 @@ Each row is one session, not one agent name. It is taken from the reason the dae
 |---|---|---|---|
 | `blocked` | The agent waits on a person at a dialog | The transport sees another state | Answer the dialog in the pane the row names |
 | `stuck` | The last wake did not start work | The session is seen working or blocked, or one of its hooks runs | In that pane, clear the input box, then send the agent any prompt |
-| `unreachable`, `gone` | The transport has not listed the session for 60 seconds, and the session holds a bound claim or its agent has mail no channel has announced | The claim is released or finished, the mail is announced, the session is listed again, or its row is deleted | `another queue show` for each bound claim, then the release or the wait (below). With mail only: `another inbox --agent` |
+| `unreachable`, `gone` | The transport has not listed the session for 60 seconds, and the session holds a bound claim or its agent has mail no channel has announced | The claim is released or finished, the mail is announced, the session is listed again, or its row is deleted | `another queue show` for each bound claim, then the release or the wait (below). With mail only: `another inbox --agent`, on one row per agent; further gone sessions of that agent that hold no claim are counted in the closing line |
 | `unreachable`, `unknown` | The transport sees a session it cannot identify for 10 minutes | It is seen in another state, or pruned after a day without hooks | Look at the pane: it may hold another session |
 | `unreachable`, `undelivered` | Three wakes in a row could not be delivered | A wake is delivered | `another doctor`, `another transport status` |
 | `transport_silent` | A transport has not answered for 10 minutes. One row per transport, however many sessions | The transport answers | `another doctor`; for Herdr also `herdr agent list` |
@@ -158,8 +158,12 @@ What a row shows of the queue:
 Next steps:
 
 - Always `another queue show`.
-- For `name_quiet`, when no session of the name is working or blocked now: a wake with `--force --message`, then `another queue release <Q> --reason "<why>" --owner`. The whole name is silent, so no working sibling can be hit.
-- For the other two reasons, and for `name_quiet` while a session of the name is working: no wake and no release. The step is to ask the agent which session holds the item.
+- For `name_quiet`, a wake with `--message`, then `another queue release <Q> --reason "<why>" --owner`, but only when what is stored licenses them: the name has no session row at all, or every session row of the name was checked in the last 5 minutes and none is working or blocked. A row last checked longer ago licenses nothing, whatever state it shows: with checks stopped, a session seen idle two hours ago may be inside one long tool call.
+- For the other two reasons, and for `name_quiet` in every other case: no wake and no release. The step is to ask the agent which session holds the item.
+
+The wake line carries no `--force`. With `--message` the wake is sent whether or not mail is unread, and `--force` would only switch off the check that refuses to type into a pane which may hold another agent by now. If the wake answers that nothing was typed, look at the pane; do not add the flag.
+
+With a command transport that cannot list its sessions, the rows of a name are never checked, so a quiet claim under such a name always gets the ask step.
 
 **Why no release is printed while the name is active.** A working sibling under the same name may hold the item, and nothing stored says which session made an unbound claim. Releasing it would take work from a running agent. If you have looked and know the session is gone, the command is `another queue release <Q> --reason "<why>" --owner`; it is safe once no session of that name is working on the item.
 
@@ -183,7 +187,7 @@ These are shown under the list, never counted and never in `--brief`, because no
 
 | Line | What it is |
 |---|---|
-| `<n> sessions gone with nothing waiting` | Sessions the transport no longer lists that hold no bound claim and have no unannounced mail: closed panes. They are pruned after a day |
+| `<n> sessions gone with nothing waiting` | Sessions the transport no longer lists that hold no bound claim and have no unannounced mail, or whose agent's mail is already a row: closed panes. They are pruned after a day |
 | `<n> notices could not be sent in the last 24 hours` | Queue notices that failed, with up to five named |
 | `<n> self-admitted in the last 7 days` | Items a delegate admitted for itself, by number, with the total. This is how a self-admitted item appears in the owner list for seven days ([QUEUE.md](QUEUE.md)) |
 
@@ -255,7 +259,7 @@ Shown: agent addresses; item numbers, kinds, scope ids and titles (cut at 60 cha
 
 Never shown: mail subjects and bodies; item bodies, done conditions, notes, reasons and result text; the detail a transport reported; the directory a hook ran in; delegate keys and tokens.
 
-Every value an agent or a peer wrote is cleaned before it is printed, in the text form and in the JSON: control characters, zero-width and invisible characters and the characters that change the direction of text become spaces. The checks at write time are not relied on, since any local process can write the database. An address inside a printed command is put in single quotes when it holds anything a shell reads.
+Every value an agent or a peer wrote is cleaned before it is printed, in the text form and in the JSON: control characters, zero-width and invisible characters and the characters that change the direction of text become spaces. That holds for every stored value, the stored reason of a session row and the stored outcome of a wake included, and for a reason this build does not know. The checks at write time are not relied on, since any local process can write the database. An address inside a printed command is put in single quotes when it holds anything a shell reads.
 
 ## Left out
 

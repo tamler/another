@@ -88,7 +88,7 @@ pub fn config_for(store: &Store) -> Config {
 
 /// A hook-made row not observed for this long is marked, and with no observation at all in
 /// this long the report asks whether the daemon is running.
-const STALE_AFTER_MS: i64 = 5 * 60_000;
+pub(crate) const STALE_AFTER_MS: i64 = 5 * 60_000;
 
 /// One session row as `another transport status` shows it.
 #[derive(Debug, Clone, Serialize)]

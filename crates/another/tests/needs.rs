@@ -601,7 +601,7 @@ fn every_printed_command_parses() {
     ));
     fx.attention("cy", "mail0003", "w4:p2", "gone", "gone", 20);
     fx.mail("ann", "cy", "hello", "body");
-    fx.attention("eve", "undl0004", "w4:p3", "idle", "undelivered", 5);
+    fx.attention("dee", "undl0004", "w4:p3", "idle", "undelivered", 5);
     // Checks have stopped for every live session; the gone one with the claim, whose
     // hooks ended long ago, was checked just now.
     fx.exec(&format!(
@@ -641,7 +641,7 @@ fn every_printed_command_parses() {
     }
     for prefix in [
         "another queue release Q6 --reason \"session gone\" --owner",
-        "another wake --agent eve --force --message ",
+        "another wake --agent eve --message ",
         "another send --from <your agent> --to bob --subject ",
         "another queue edit Q5 --for-anyone --agent <delegate>",
     ] {
@@ -1209,6 +1209,16 @@ fn gone_sessions_with_nothing_waiting_are_one_closing_line() {
     assert_eq!(row["agent"], "cy");
     assert_eq!(strs(&row["next"]), ["another inbox --agent cy"]);
     assert_eq!(fx.brief(), "needs you: 1 (1 unreachable)\n");
+
+    // Two more gone sessions of that agent: the mail is still one row and one inbox step.
+    fx.attention("cy", "dddd4444", "w1:p4", "gone", "gone", 20);
+    fx.attention("cy", "eeee5555", "w1:p5", "gone", "gone", 10);
+    let v = fx.json();
+    assert_eq!(v["total"], 1, "{v:#}");
+    assert_eq!(v["closing"]["gone_idle"], 4);
+    assert_eq!(one(&v, "unreachable")["key"], "unreachable:cy:cccc3333");
+    assert_eq!(fx.text().matches("another inbox --agent cy").count(), 1);
+    assert_eq!(fx.brief(), "needs you: 1 (1 unreachable)\n");
 }
 
 #[test]
@@ -1290,7 +1300,7 @@ fn quiet_claim_commands_follow_the_evidence() {
     let q = item.label.as_str();
     let show = format!("another queue show {q}");
     let wake = format!(
-        "another wake --agent cy --force --message \"{q} is claimed under your name and has been quiet. Continue it, or run: another queue release {q}\""
+        "another wake --agent cy --message \"{q} is claimed under your name and has been quiet. Continue it, or run: another queue release {q}\""
     );
     let v = fx.json();
     assert_eq!(v["total"], 1, "{v:#}");
@@ -1354,6 +1364,37 @@ fn quiet_claim_commands_follow_the_evidence() {
         assert!(!steps.contains("wake --agent"), "{steps}");
         assert!(!steps.contains("queue release"), "{steps}");
     }
+
+    // An observation licenses a wake and a release only while it is fresh. A session of
+    // the name seen idle and checked just now: both are printed.
+    let full = |fx: &Fx| strs(&one(&fx.json(), "quiet_claim")["next"]).len() == 3;
+    fx.set_session("cy", "work1111", "state = 'idle'");
+    assert!(full(&fx));
+    // Checks stopped: the row was last seen idle two hours ago, and the session may be
+    // inside one long tool call. Only the ask step is printed.
+    let two_hours_ago = now_ms() - 120 * MIN;
+    fx.set_session(
+        "cy",
+        "work1111",
+        &format!("observed_at = {two_hours_ago}, state_since = {two_hours_ago}"),
+    );
+    let row = one(&fx.json(), "quiet_claim");
+    assert_eq!(strs(&row["next"]), [show.clone(), ask.clone()]);
+    assert_eq!(strs(&row["next_delegate"]), [show.clone(), ask.clone()]);
+    // One stale row of the name is enough, beside a fresh idle one.
+    fx.attention("cy", "idle2222", "w1:p2", "idle", "", 1);
+    fx.set_session("cy", "idle2222", "attention = NULL, attention_since = NULL");
+    fx.quiet("cy", 95);
+    assert_eq!(
+        strs(&one(&fx.json(), "quiet_claim")["next"]),
+        [show.clone(), ask]
+    );
+    // A row that was never checked says nothing either.
+    fx.exec("DELETE FROM transport_sessions");
+    assert!(full(&fx));
+    fx.session("cy", "new03333", "tmux", "%3");
+    fx.quiet("cy", 95);
+    assert_eq!(strs(&one(&fx.json(), "quiet_claim")["next"]).len(), 2);
 
     // Reason 2: the name is active and the claim's own session has been quiet.
     let fx = Fx::new();
@@ -1427,6 +1468,138 @@ fn quiet_claim_commands_follow_the_evidence() {
     assert_eq!(row["item_kind"], "security");
     assert_eq!(row["next_delegate"], json!([]));
     assert_eq!(strs(&row["next"]).len(), 3);
+}
+
+#[test]
+fn no_output_holds_force() {
+    let fx = Fx::new();
+    fx.everything();
+    // Beside one row of every kind: a quiet claim of each reason and a gone session
+    // with a claim to release.
+    fx.store
+        .queue_set_limit(&QueueCaller::Owner, "bob", 3)
+        .unwrap();
+    let held = fx.ready("Held by a gone session");
+    assert_eq!(fx.claim("bob").label, held.label);
+    fx.bind(&held.label, "bob", "dead0001");
+    fx.attention("bob", "dead0001", "w4:p1", "gone", "gone", 20);
+    let stale = fx.ready("Its session is quiet");
+    assert_eq!(fx.claim("bob").label, stale.label);
+    fx.bind(&stale.label, "bob", "slow0002");
+    fx.exec(&format!(
+        "UPDATE queue_sessions SET seen_at = {} WHERE session_id = 'slow0002'",
+        now_ms() - 120 * MIN
+    ));
+    let old = fx.ready("Unbound for over a day");
+    assert_eq!(fx.claim("cy").label, old.label);
+    fx.exec(&format!(
+        "UPDATE queue_items SET claimed_at = {} WHERE seq = {}",
+        now_ms() - 25 * 60 * MIN,
+        old.seq
+    ));
+
+    let v = fx.json_with(&["--limit", "200"]);
+    let reasons: Vec<&str> = rows_of(&v, "quiet_claim")
+        .iter()
+        .map(|r| r["reason"].as_str().unwrap().to_string())
+        .map(|r| match r.as_str() {
+            "name_quiet" => "name_quiet",
+            "session_quiet" => "session_quiet",
+            _ => "old_unbound",
+        })
+        .collect();
+    for reason in ["name_quiet", "session_quiet", "old_unbound"] {
+        assert!(reasons.contains(&reason), "{reason} in {reasons:?}");
+    }
+    assert!(v
+        .to_string()
+        .contains("another wake --agent eve --message "));
+    for out in [
+        fx.needs(&["--limit", "200"]),
+        fx.text(),
+        fx.brief(),
+        v.to_string(),
+        fx.needs(&["--json", "--brief"]),
+    ] {
+        assert!(!out.contains("--force"), "{out}");
+    }
+}
+
+/// The reviewer's case: the claimer's session is gone and another agent now works in
+/// its pane. Pasting the wake line the list prints must type nothing there.
+#[cfg(unix)]
+#[test]
+fn the_printed_wake_types_nothing_into_another_agents_pane() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fx::new();
+    let root = fx.home.parent().unwrap().to_path_buf();
+    let log = root.join("typed.log");
+    let script = root.join("fake-pane-tool");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let program = script.to_string_lossy().into_owned();
+    // A transport that can type and can say nothing about who is in a pane.
+    transports::write(
+        &fx.home,
+        &json!({ "version": 1, "transports": { "fake": {
+            "wake": [[program, "send", "{target}", "{message}"]]
+        }}})
+        .to_string(),
+    );
+    let item = fx.ready("Hold fixes");
+    assert_eq!(fx.claim("eve").label, item.label);
+    let now = now_ms();
+    let gone_at = now - 120 * MIN;
+    fx.session("eve", "s-eve001", "fake", "%5");
+    fx.set_session(
+        "eve",
+        "s-eve001",
+        &format!(
+            "state = 'gone', state_since = {gone_at}, observed_at = {now}, hook_seen_at = {gone_at},
+             attention = 'gone', attention_since = {gone_at}"
+        ),
+    );
+    fx.session("ann", "s-ann001", "fake", "%5");
+    fx.set_session(
+        "ann",
+        "s-ann001",
+        &format!("state = 'working', state_since = {now}, observed_at = {now}, matched = 1"),
+    );
+    fx.quiet("eve", 120);
+
+    let row = one(&fx.json(), "quiet_claim");
+    let next = strs(&row["next"]);
+    let wake = next
+        .iter()
+        .find(|step| step.starts_with("another wake --agent eve --message "))
+        .unwrap_or_else(|| panic!("a wake step in {next:?}"));
+    assert!(!wake.contains("--force"), "{wake}");
+
+    let argv = words(wake);
+    let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+    let out = fx.run(&args);
+    let said = format!("{}{}", text(&out.stdout), text(&out.stderr));
+    assert!(said.contains("nothing was typed"), "{said}");
+    assert!(
+        !log.exists(),
+        "the pane tool was run: {}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
+
+    // The same line with the flag the list no longer prints does type into the pane,
+    // which is what this test guards against.
+    let mut forced = args.clone();
+    forced.push("--force");
+    fx.run(&forced);
+    let typed = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(typed.contains("send %5 "), "{typed:?}");
 }
 
 #[test]
@@ -1915,7 +2088,24 @@ fn nothing_unsafe_or_secret_is_printed() {
         "blocked",
         3,
     );
+    // A stored reason no build knows, and a stored stop, each with an escape sequence
+    // that sets the terminal title, a bell, a bidirectional override and a line break.
+    let hostile = "evil\u{1b}]0;TITLE\u{7}\u{202e}attn\nSECONDLINE\r$(touch PWNED)";
+    fx.attention("dee", "unkn0001", "w1:p2", "idle", "placeholder", 20);
+    fx.attention("eve", "stuk0002", "w1:p3", "idle", "stuck", 20);
     let db = fx.db();
+    db.execute(
+        "UPDATE transport_sessions SET attention = ?1 WHERE session_id = 'unkn0001'",
+        [hostile],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE transport_sessions SET wake_stop = ?1, wake_stop_at = ?2,
+           last_wake_outcome = ?1, last_wake_at = ?2
+         WHERE session_id = 'stuk0002'",
+        rusqlite::params![hostile, now_ms() + MIN],
+    )
+    .unwrap();
     db.execute(
         "UPDATE queue_items SET title = ?1, scope = ?2 WHERE seq = ?3",
         rusqlite::params![dirty("TITLE"), dirty("SC"), item.seq],
@@ -1976,6 +2166,54 @@ fn nothing_unsafe_or_secret_is_printed() {
     assert!(human.contains(" sess..  "), "{human:?}");
     let v: Value = serde_json::from_str(&machine).unwrap();
     assert_eq!(one(&v, "blocked")["session"], "sess-wit");
+
+    // The stored reason and the stored stop are shown, cleaned, on one line each.
+    let rows = v["rows"].as_array().unwrap();
+    let reason_of = |session: &str| {
+        rows.iter()
+            .find(|r| r["session"] == session)
+            .unwrap_or_else(|| panic!("{session} in {v:#}"))["reason"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    for session in ["unkn0001", "stuk0002"] {
+        let reason = reason_of(session);
+        assert!(
+            reason.starts_with("evil ]0;TITLE") && reason.contains("SECONDLINE"),
+            "{reason:?}"
+        );
+    }
+    assert!(human.contains("  evil ]0;TITLE"), "{human:?}");
+    assert!(!human.contains("\nSECONDLINE"), "{human:?}");
+    // No decoded JSON value, at any depth, holds a control or direction-changing
+    // character: a reader that prints one value prints nothing unsafe.
+    fn strings(v: &Value, out: &mut Vec<String>) {
+        match v {
+            Value::String(s) => out.push(s.clone()),
+            Value::Array(a) => a.iter().for_each(|x| strings(x, out)),
+            Value::Object(o) => o.iter().for_each(|(k, x)| {
+                out.push(k.clone());
+                strings(x, out);
+            }),
+            _ => {}
+        }
+    }
+    let mut decoded = Vec::new();
+    strings(&v, &mut decoded);
+    strings(&fx.json_with(&["--brief"]), &mut decoded);
+    assert!(decoded.len() > 100);
+    for value in &decoded {
+        assert!(
+            !value
+                .chars()
+                .any(|c| c.is_control() || unsafe_chars.contains(&c)),
+            "{value:?}"
+        );
+    }
+    for out in [&human, &brief] {
+        assert!(!out.chars().any(|c| c.is_control() && c != '\n'), "{out:?}");
+    }
     // Nothing an agent wrote reaches the one-line form.
     assert!(
         brief.starts_with("needs you: ") && !brief.contains("TITLE") && !brief.contains("bob"),

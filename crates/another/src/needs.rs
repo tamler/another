@@ -293,6 +293,18 @@ fn word(text: &str) -> String {
     }
 }
 
+/// Free text as one argument of a printed command, quoted once as a whole: in double
+/// quotes when it holds nothing a shell reads inside them, in single quotes otherwise.
+/// A value is never quoted by [`word`] and then put inside another pair of quotes.
+fn phrase(text: &str) -> String {
+    let text = clean(text);
+    if text.chars().any(|c| "\"$`\\!".contains(c)) {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    } else {
+        format!("\"{text}\"")
+    }
+}
+
 /// An owner's step as a delegate runs it, with its key in `ANOTHER_ADMIT_KEY`.
 fn as_delegate(step: &str) -> String {
     match step.strip_suffix(" --owner") {
@@ -357,13 +369,18 @@ fn proposal_row(kind: Kind, item: &QueueItem, now: i64) -> Row {
 /// nothing is woken and nothing is released.
 fn ask_step(agent: &str, label: &str) -> String {
     format!(
-        "ask {} whether a session is working on {label}: another send --from <your agent> --to {} --subject \"Who holds {label}?\"",
+        "ask {} whether a session is working on {}: another send --from <your agent> --to {} --subject {}",
         clean(agent),
-        word(agent)
+        clean(label),
+        word(agent),
+        phrase(&format!("Who holds {label}?"))
     )
 }
 
-fn quiet_claim_row(q: &QuietClaim, last_sign: Option<i64>, name_is_working: bool, now: i64) -> Row {
+/// `may_act`: what is stored licenses a wake and a release for a quiet name. It does
+/// when the name has no session row, or when every row of the name was checked in the
+/// last 5 minutes and none of them is working or blocked.
+fn quiet_claim_row(q: &QuietClaim, last_sign: Option<i64>, may_act: bool, now: i64) -> Row {
     let item = &q.item;
     let claimer = item.claim.as_ref().map_or("", |c| c.agent.as_str());
     let claimed_at = item.claim.as_ref().and_then(|c| parse_ts(&c.at));
@@ -374,17 +391,22 @@ fn quiet_claim_row(q: &QuietClaim, last_sign: Option<i64>, name_is_working: bool
     };
     let label = word(&item.label);
     let mut next = vec![format!("another queue show {label}")];
-    if q.reason == "name_quiet" && !name_is_working {
-        // The whole name is silent, so no live sibling can be hit.
+    if q.reason == "name_quiet" && may_act {
+        // No `--force`: with a message the wake goes out anyway, and the flag would only
+        // switch off the check that refuses a pane which may hold someone else by now.
         next.push(format!(
-            "another wake --agent {} --force --message \"{label} is claimed under your name and has been quiet. Continue it, or run: another queue release {label}\"",
-            word(claimer)
+            "another wake --agent {} --message {}",
+            word(claimer),
+            phrase(&format!(
+                "{0} is claimed under your name and has been quiet. Continue it, or run: another queue release {0}",
+                item.label
+            ))
         ));
         next.push(format!(
             "another queue release {label} --reason \"<why>\" --owner"
         ));
     } else {
-        next.push(ask_step(claimer, &label));
+        next.push(ask_step(claimer, &item.label));
     }
     let words = format!(
         "claimed by {}, {}",
@@ -396,7 +418,7 @@ fn quiet_claim_row(q: &QuietClaim, last_sign: Option<i64>, name_is_working: bool
         .since(since, now)
         .steps(next, item.kind == QueueKind::Work);
     row.agent = Some(clean(claimer));
-    row.reason = Some(q.reason.clone());
+    row.reason = Some(clean(&q.reason));
     row
 }
 
@@ -448,6 +470,9 @@ fn no_taker_row(item: &QueueItem, any_seat: bool, default_limit: i64) -> Row {
 
 /// A row about one session: `kind  agent sess..  transport target  [reason ]age`.
 fn session_row(kind: Kind, reason: &str, r: &StatusRow, claims: &[QueueClaimed], now: i64) -> Row {
+    // The reason is a stored string (the attention column, or the wake stop), and no
+    // constraint limits what it holds: it is cleaned like every other stored value.
+    let reason = clean(reason);
     let agent = clean(&r.agent);
     let transport = clean(&r.transport);
     let target = clean(&r.target);
@@ -507,7 +532,7 @@ fn session_row(kind: Kind, reason: &str, r: &StatusRow, claims: &[QueueClaimed],
     row.session = Some(head);
     row.transport = Some(transport);
     row.target = Some(target);
-    row.reason = Some(reason.to_string());
+    row.reason = Some(reason);
     row.claims = bound;
     row.name_claims = unbound;
     row.as_of = r.observed_at.clone();
@@ -599,8 +624,11 @@ pub fn report(store: &Store, limit: u32) -> anyhow::Result<Report> {
             "gone" => {
                 let row = session_row(Kind::Unreachable, reason, r, &claims, now);
                 if row.claims.is_empty() {
+                    // Mail waits on the agent, not on one session: the first gone session
+                    // of the agent carries the inbox step, and the others are closing-line
+                    // sessions, so one mailbox is one row.
                     let mail = match has_mail.get(&r.agent) {
-                        Some(mail) => *mail,
+                        Some(_) => false,
                         None => {
                             let mail = store.unannounced(&r.agent, "", 1)?.count > 0;
                             has_mail.insert(r.agent.clone(), mail);
@@ -704,11 +732,19 @@ pub fn report(store: &Store, limit: u32) -> anyhow::Result<Report> {
             .find(|a| Some(a.address.as_str()) == claimer)
             .and_then(|a| a.last_seen_at.as_deref())
             .and_then(parse_ts);
-        let working = status.sessions.iter().any(|r| {
-            Some(r.agent.as_str()) == claimer
-                && matches!(r.observed_state.as_deref(), Some("working" | "blocked"))
-        });
-        rows.push(quiet_claim_row(q, last_sign, working, now));
+        // An observation older than 5 minutes licenses nothing: the session may be inside
+        // one long tool call. So every row of the name must have been checked just now
+        // and be neither working nor blocked. A name with no row at all is only silent.
+        let may_act = status
+            .sessions
+            .iter()
+            .filter(|r| Some(r.agent.as_str()) == claimer)
+            .all(|r| {
+                r.observed_ms
+                    .is_some_and(|at| now - at <= crate::transport::STALE_AFTER_MS)
+                    && !matches!(r.observed_state.as_deref(), Some("working" | "blocked"))
+            });
+        rows.push(quiet_claim_row(q, last_sign, may_act, now));
     }
     // A seat, as the queue counts it: an agent of this node whose limit is above 0.
     let any_seat = agents.iter().any(|a| {
@@ -931,6 +967,26 @@ mod tests {
         assert_eq!(word(""), "''");
         // What cannot be seen is gone before the quoting.
         assert_eq!(word("a\u{202e}b\u{1b}"), "'a b '");
+    }
+
+    #[test]
+    fn free_text_in_a_command_is_quoted_once_as_a_whole() {
+        assert_eq!(phrase("Who holds Q12?"), "\"Who holds Q12?\"");
+        // What a shell reads inside double quotes moves the whole argument into single
+        // quotes; nothing is ever quoted inside another pair of quotes.
+        assert_eq!(phrase("Who holds $(touch x)?"), "'Who holds $(touch x)?'");
+        assert_eq!(phrase("a `id` b"), "'a `id` b'");
+        assert_eq!(phrase("say \"hi\""), "'say \"hi\"'");
+        assert_eq!(phrase("it's $HOME"), "'it'\\''s $HOME'");
+        assert_eq!(phrase("back\\slash"), "'back\\slash'");
+        assert_eq!(phrase("a\u{1b}b"), "\"a b\"");
+        // An item id that needs quoting, in both steps that put it inside free text.
+        let ask = ask_step("cy", "Q1$(touch x)");
+        assert!(
+            ask.ends_with("--to cy --subject 'Who holds Q1$(touch x)?'"),
+            "{ask}"
+        );
+        assert!(!ask.contains('"'), "{ask}");
     }
 
     #[test]
