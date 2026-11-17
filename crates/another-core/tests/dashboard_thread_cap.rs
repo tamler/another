@@ -79,3 +79,41 @@ fn a_thread_of_exactly_forty_is_shown_whole() {
     assert_eq!(t.messages.len(), 40);
     assert_eq!(t.messages[0].message_id, ids[0]);
 }
+
+/// The dashboard lists at most the 40 most recently active threads.
+#[test]
+fn at_most_the_forty_most_recent_threads_are_listed() {
+    let (clock, handle) = Clock::manual(T0);
+    let s = Store::open_in_memory(clock).unwrap();
+    for name in ["alice", "bob"] {
+        s.register_agent(RegisterAgent {
+            name: name.into(),
+            program: Program::Claude,
+            project: None,
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    }
+    let mut roots = Vec::new();
+    for n in 0..41 {
+        handle.fetch_add(1000, Ordering::SeqCst);
+        let m = s
+            .send_message(SendMessage {
+                from: "alice".into(),
+                to: vec!["bob".into()],
+                subject: format!("topic {n}"),
+                body: "b".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        roots.push(m.message_id);
+    }
+    let threads = s.dashboard_snapshot(DashboardView::LOCAL).unwrap().threads;
+    assert_eq!(threads.len(), 40);
+    assert_eq!(threads[0].thread_id, roots[40], "the most recent first");
+    assert!(
+        threads.iter().all(|t| t.thread_id != roots[0]),
+        "the oldest thread is left out"
+    );
+}
