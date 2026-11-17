@@ -1679,10 +1679,16 @@ fn no_printed_step_types_into_another_agents_pane() {
         }
     }
 
-    // The control: the wake the list used to print for this claim does run the tool, in
-    // the pane where ann is working.
+    // The wake the list used to print for this claim is now refused by the wake itself
+    // (D95): eve's row reads `unknown`, and ann is working in the pane.
     fx.set_session("eve", "s-eve001", "state = 'unknown'");
-    fx.run(&["wake", "--agent", "eve", "--message", "Q1 has been quiet"]);
+    let message = ["--message", "Q1 has been quiet"];
+    let out = fx.run(&[&["wake", "--agent", "eve"][..], &message].concat());
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    assert!(!log.exists(), "the refused wake ran the pane tool");
+    // The control: the pane tool does run when a wake types, here with the pane named.
+    let named = ["wake", "--agent", "eve", "--via", "fake", "--target", "%5"];
+    fx.run(&[&named[..], &message].concat());
     let typed = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(typed.contains("send %5 Q1 has been quiet"), "{typed:?}");
 }

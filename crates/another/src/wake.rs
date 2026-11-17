@@ -495,41 +495,35 @@ pub fn wake(store: &Store, agent: &str, opts: &WakeOptions) -> Result<WakePlan> 
         .as_deref()
         .map(|m| another_core::single_line(m, MAX_WAKE_CHARS));
     let line = plan.message.clone().unwrap_or_default();
+    // A command transport cannot say who is in a pane, so a pane Another recorded is typed
+    // into only while nothing Another knows says it may hold a shell or another agent. A
+    // target the owner names, with `--target` or `another wake set`, is the owner's word,
+    // and the only override. The check reads the database and runs no command, so it comes
+    // before a dry run reports.
+    if via.as_str() != "herdr" && opts.target.is_none() && hand.is_none() {
+        if let Some(why) = pane_in_doubt(store, &rows, row, &address, via.as_str(), &target) {
+            // With `=`, so a name that starts with `-` is still read as the value.
+            let name = format!(
+                "--agent={} --via {} --target={}",
+                shell_word(&address),
+                via.as_str(),
+                shell_word(&target)
+            );
+            plan.error = Some(format!(
+                "not woken, nothing was typed: {target} may not hold this agent ({why}), and \
+                 {} cannot say who is in it. Only naming the pane types into it: \
+                 `another wake {name}`, or `another wake set {name}` to store it",
+                via.as_str()
+            ));
+            return Ok(plan);
+        }
+    }
     plan.commands = transport.wake_argv(&target, &line);
     if opts.dry_run {
         plan.skipped = Some("dry run".into());
         return Ok(plan);
     }
     let cancel = opts.cancel.as_deref();
-    // A command transport cannot say who is in a pane. What Another can still tell is
-    // whether the session that recorded the pane is likely to be in it: not when its row
-    // was last seen gone, when its hooks have been quiet for as long as pruning allows,
-    // or when the agent of a pane an earlier build captured has left. The pane may hold a
-    // shell again, or another agent. A target the owner gave is the owner's word.
-    if via.as_str() != "herdr" && !opts.force && opts.target.is_none() && hand.is_none() {
-        let quiet = match row {
-            Some(row) if row.state.as_deref() == Some("gone") => {
-                Some("its session was last seen gone".to_string())
-            }
-            Some(row)
-                if row
-                    .hook_seen_at
-                    .is_none_or(|at| store.now() - at > STALE_AFTER_MS) =>
-            {
-                Some("no hook of that session for over a day".to_string())
-            }
-            Some(_) => None,
-            None => agent_left(store, &address).map(str::to_string),
-        };
-        if let Some(why) = quiet {
-            plan.error = Some(format!(
-                "not woken, nothing was typed: {target} may no longer hold this agent ({why}), \
-                 and {} cannot say who is in it; pass --force to type into it anyway",
-                via.as_str()
-            ));
-            return Ok(plan);
-        }
-    }
     // A command transport's `status` reports no session id, no program and no directory,
     // so it cannot identify a row; only Herdr's answer is held against the row.
     if let Some(row) = row.filter(|_| via.as_str() == "herdr") {
@@ -931,6 +925,74 @@ fn agent_left(store: &Store, agent: &str) -> Option<&'static str> {
         Some("agent not seen for over a day")
     } else {
         None
+    }
+}
+
+/// Why a pane recorded for `agent` on a command transport may not hold it now, if anything
+/// Another knows says so. `row` is the session row the target came from; `None` means a
+/// pane an earlier build captured. In order:
+/// - the row was last seen gone, and no hook of that session has run since;
+/// - no hook of that session ran for as long as pruning allows, or the agent of a captured
+///   pane has left ([`agent_left`]);
+/// - the row reads `unknown` and the listing did not match it by session id;
+/// - a hook of another agent ran at the same transport and target, after this session's
+///   last hook, or at any time for a captured pane (no build that records sessions
+///   captures panes, so the capture is the older of the two).
+fn pane_in_doubt(
+    store: &Store,
+    rows: &[TransportSession],
+    row: Option<&TransportSession>,
+    agent: &str,
+    via: &str,
+    target: &str,
+) -> Option<String> {
+    let own = match row {
+        Some(row)
+            if row.state.as_deref() == Some("gone")
+                && row
+                    .state_since
+                    .is_none_or(|since| row.hook_seen_at <= Some(since)) =>
+        {
+            Some("its session was last seen gone")
+        }
+        Some(row)
+            if row
+                .hook_seen_at
+                .is_none_or(|at| store.now() - at > STALE_AFTER_MS) =>
+        {
+            Some("no hook of that session for over a day")
+        }
+        Some(row) if row.state.as_deref() == Some("unknown") && row.matched == 0 => {
+            Some("the last check could not tell whose session is in it")
+        }
+        Some(_) => None,
+        None => agent_left(store, agent),
+    };
+    if let Some(why) = own {
+        return Some(why.to_string());
+    }
+    let mine = row.and_then(|r| r.hook_seen_at);
+    rows.iter()
+        .filter(|o| o.agent != agent && o.transport == via && o.target == target)
+        .filter(|o| o.hook_seen_at.is_some_and(|at| Some(at) >= mine))
+        .max_by_key(|o| o.hook_seen_at)
+        .map(|o| {
+            format!(
+                "a hook of {} ran in that pane later",
+                another_core::single_line(&o.agent, 80)
+            )
+        })
+}
+
+/// `text` as one word of a shell command: as it is when it holds only characters no shell
+/// reads specially, else in single quotes. `=` is not plain: zsh expands a word that
+/// starts with it.
+fn shell_word(text: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "%:@._/+-".contains(c);
+    if !text.is_empty() && text.chars().all(plain) {
+        text.to_string()
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
     }
 }
 
