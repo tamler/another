@@ -1,6 +1,8 @@
 # Open pull request triage
 
-Status: draft for owner review, 17 Nov 2026. Nothing has been closed, merged or changed. This lists the 101 pull requests open on 17 Nov 2026 (main at `5df47a98`) against [V0.1.0-SCOPE.md](V0.1.0-SCOPE.md). It was made from each pull request's title, description, file list and base branch; the code was not re-reviewed, and no CI state was checked.
+Status: independently reviewed and acted on, 17 Nov 2026. This lists the 101 pull requests open on 17 Nov 2026 (main at `5df47a98`) against [V0.1.0-SCOPE.md](V0.1.0-SCOPE.md). The first draft was made from titles, descriptions, file lists and base branches. A separate reviewer then checked every row against the diffs and CI (verdict: pass with changes); the changes are applied below and listed under "Review". The owner delegated acting on the reviewed list to the architect, who posted each verdict on its pull request and closed the Close rows. No branch was deleted.
+
+CI was passing on every Keep and Owner row at review time, and stale on every one: each head was 10 to 142 commits behind main. Every kept pull request is rebased and re-run before review.
 
 ## How to read it
 
@@ -19,9 +21,9 @@ Three rules produced most of the answers:
 
 | Verdict | Count |
 |---|---|
-| Keep | 15 |
-| Fold | 24 |
-| Close | 52 |
+| Keep | 12 |
+| Fold | 32 |
+| Close | 47 |
 | Owner decision | 10 |
 
 ## Owner decisions (security and data loss)
@@ -29,34 +31,31 @@ Three rules produced most of the answers:
 | PR | Title | Recommendation | Reason |
 |---|---|---|---|
 | #248 | A peer's node list may not rename other nodes or take names | Keep, M9 | A paired node can redirect mail meant for another node. This is on the hub path v0.1.0 runs. |
-| #253 | An out-of-range peer port or pid no longer breaks every listing | Keep, M9 | One bad synced row breaks `resources`, the dashboard and doctor's scan on the hub. A bug in one's own node can cause it. |
+| #253 | An out-of-range peer port or pid no longer breaks every listing | Keep, M9 | One bad synced row breaks `resources`, the dashboard and doctor's scan on the hub. A bug in one's own node can cause it. Half the fix is in the frozen resource code, admitted as a fix. |
 | #197 | Refuse weak Ed25519 keys and verify signatures strictly | Keep, M9 | Signature checking is what the hub's authority rests on; small and contained. |
 | #178 | Refuse control characters in hold reasons, agent and resource text | Keep, M6 | Stored text reaches the digest every agent reads at each turn; a forged line there is an instruction to an agent. |
 | #245 | The session digest shows stored text as one safe line | Keep, M6 | Same class as #178, at the digest itself. Merge after #178 and drop the overlap. |
-| #176 | Human output never passes terminal control characters | Keep, M4 and M6 | Output side of #178. Conflicts with main and uses a reserved decision number; rebase and renumber. |
-| #222 | Keep credentials out of Debug output | Close | Secrets leak only if a debug line is logged, on frozen surfaces (OAuth, tokens) the owner does not run. Record as a proposed item. |
+| #176 | Human output never passes terminal control characters | Keep, M4 and M6 | Output side of #178. Conflicts with main and uses a reserved decision number; rebase and renumber. About half of it is in frozen OAuth code, admitted as a fix. |
+| #222 | Keep credentials out of Debug output | Open: waiting on the owner | The architect recommended Close. The reviewer disagrees in part: the diff also hides the pairing secret in `Invite` and `PairRequest` debug output, which is on the hub path (M9), so that part should fold into the peer batch and only the OAuth and token part close. Low severity: nothing on main prints either type. |
 | #198 | IPv6 forms that embed IPv4 get the IPv4 rules in the metadata fetch guard | Close | Hosted OAuth is frozen and not run. Record as a proposed item that must be fixed before OAuth is unfrozen. |
 | #233 | OAuth audit rows record the socket address | Close | Same: frozen OAuth, and it conflicts with main. Record as proposed. |
-| #246 | Hold a peer's mail body to the local 256 KiB limit | Fold, M9 | Low risk between machines one person owns. Fold with #247 into one "a peer's events obey the local rules" change if the owner admits it. |
+| #246 | Hold a peer's mail body to the local 256 KiB limit | Fold, M9 | Low risk between machines one person owns. Fold with #247, #254, #250 and #244 into one "a peer's events obey the local rules" change. It must follow D75: a peer's over-long subject is cut and stored, not refused, so no mail is dropped. |
 
 ## Keep
 
 | PR | Title | Scope | Reason |
 |---|---|---|---|
-| #165 | Resolve a local caller's project paths like the CLI does | M4 | Through MCP, one directory became two projects and a hold check missed a live hold. Ready for review and mergeable. |
-| #179 | Nested projects outside git see each other's holds | M4 | Two agents could both get an exclusive hold on one file. |
+| #165 | Resolve a local caller's project paths like the CLI does | M4 | Through MCP, one directory became two projects and a hold check missed a live hold. It changes D60 ("MCP stays lexical") for local callers, so it must add a decision entry saying so. |
+| #179 | Nested projects outside git see each other's holds | M4 | Two agents could both get an exclusive hold on one file. It adds a new matching rule, which M4 normally excludes; the architect admits it as a collision fix. The review must check the cost of the wider conflict query. |
 | #180 | Refuse a held path over 4096 bytes | M4 | A long path panics the hold check. |
 | #240 | Resolve a relative gitdir from the `.git` file's real location | M4 | A worktree reached through a symlink did not share holds with its main checkout. Stacked on #237; merge them as one. |
 | #237 | Tests for relative gitdir files from worktrees and submodules | M4 | The fixture #240 needs. Goes in with #240. |
-| #149 | A waiter's session end ends its waits | M4 | Stops a "hold free" ping going to an agent that has gone. Its background review failed; needs a fresh independent review. |
+| #149 | A waiter's session end ends its waits | M4 | Stops a "hold free" ping going to an agent that has gone. Its background review failed; needs a fresh independent review. It also changes Grok hook output (N1) and carries a reserved decision number to renumber. |
 | #214 | Push records stay on their node | M9 | Sync correctness on the hub path. |
-| #217 | An older build refuses a newer database and leaves it untouched | M3 | Exactly the M3 done condition. |
 | #239 | Doctor fails on a negative schema version | M3 | Doctor gave advice that could not work. |
-| #163 | Hook status reports drift | M6 | Notices a hook wrapper that points at an old binary or home, part of what broke on 17 Nov. |
-| #168 | 50-agent races for holds, edit-guard holds and request claims | M1, M4 | The harness the M1 done condition ("fifty agents racing for `next`") needs. |
+| #163 | Hook status reports drift | M3 | Notices a hook wrapper that points at an old binary or home, part of what broke on 17 Nov. It overlaps doctor's hooks check on main; the review must settle which of the two reports drift. |
 | #150 | Release readiness: NOTICE, archive checks, static musl, tag version | M10 | Direct M10 work. |
-| #147 | Opt-in Cursor edit guard | N3 | Nice to have. Parked until the must-haves are on track. |
-| #159 | Advisory pre-commit hold guard | N4 | Nice to have, but 2,400 lines and conflicting, against a scope that says "small". Parked; it must shrink before review. |
+| #147 | Opt-in Cursor edit guard | N3 | Nice to have. Parked until the must-haves are on track. Carries a reserved decision number to renumber. |
 | #171 | Check client hooks live: results for Claude Code, Codex and Grok | M6 | Evidence for the M6 done condition. Docs only. |
 
 ## Fold
@@ -87,6 +86,14 @@ Three rules produced most of the answers:
 | #170 | Help on every argument, JSON usage errors, completions | M10 | Only the help text gaps, in the M10 docs pass. Completions and the rest are not in scope. Conflicts with main. |
 | #230 | Pin feed lines, the summary cursor and `whats_new` limits | M6 | The digest reads the feed; keep the feed-line tests with the M6 hook work. |
 | #199 | Agent names and address resolution | M5 | `list()` matches transport agents to registered names; keep the resolution tests with it. |
+| #217 | An older build refuses a newer database and leaves it untouched | M3 | Test only. The refusal is already on main and tested; this adds one more case. It goes into the upgrade safety work, which must also cover the 17 Nov case that this test does not. |
+| #168 | 50-agent races for holds, edit-guard holds and request claims | M1, M4 | Test only. It races today's holds and request claims; there is no `next` on main yet. The queue work reuses the harness for the "fifty agents racing for `next`" condition. |
+| #159 | Advisory pre-commit hold guard | N4 | It only warns and never refuses a commit, while N4 asks for a guard that refuses. It is also 2,400 lines, conflicts with main and carries a reserved decision number. N4 gets a short new spec; the staged-path check here is reused. |
+| #254 | Cap a resource's endpoint and purpose | M9 | The check runs where the hub takes in a peer's event, the same place as #253. Goes into the peer batch with #246. |
+| #250 | A peer's `resource.registered` follows the local name rule | M9 | Same place and class as #247. Peer batch. |
+| #244 | Cap resource metadata at 64 KiB | M9 | Stops a peer storing or relaying oversized metadata through the hub. Peer batch. |
+| #202 | A token changes only requests it created, received or owns | M1 | The M1 done condition names the remote path; this pins it. Request test batch. |
+| #183 | CLI: agent show, hold renew, node name, request cancel, audit | M1, M4 | Only the hold-renew and request-cancel tests, into the hold and request test batches. The rest is dropped. |
 
 ## Close
 
@@ -97,9 +104,6 @@ Three rules produced most of the answers:
 | #192 | Key rotation primitives | Cut: revoke and pair again is enough. |
 | #164 | `another log export` | Cut. |
 | #161 | Resource list, borrow, return and `borrow --wait` | Resource registry is frozen: no new features. Conflicts with main. |
-| #254 | Cap a resource's endpoint and purpose | Frozen resource registry; low risk. Finding stays as a proposed item. |
-| #250 | A peer's `resource.registered` follows the local name rule | Frozen resource registry; low risk. |
-| #244 | Cap resource metadata at 64 KiB | Frozen resource registry; low risk. |
 | #225 | `reachable` cuts the endpoint authority correctly | Frozen: borrowing another node's resource. |
 | #182 | `derive_port` handles a URL query and bare IPv6 | Frozen: orphan listing. |
 | #189 | `another sweep` text also counts expired resource leases | Cosmetic, on a frozen surface. |
@@ -120,7 +124,6 @@ Three rules produced most of the answers:
 | #191 | Remote: `another remote up` with a fake cloudflared | Frozen; test only. |
 | #187 | Remote: a connection acts only as its token's agent | Bearer-token peers are frozen; test only. |
 | #186 | Tokens: remote reply access by thread membership | Bearer-token peers are frozen; test only. |
-| #202 | Requests: a token changes only requests it created, received or owns | Bearer-token peers are frozen; test only. |
 | #241 | Resources: non-object metadata and bad reap grace are refused | Frozen; test only. |
 | #227 | MCP: resource tools map exclusive, ttl and stopped onto the store | Frozen; test only. |
 | #215 | CLI: resource heartbeat renews only the caller's leases | Frozen; test only. |
@@ -134,7 +137,6 @@ Three rules produced most of the answers:
 | #228 | CLI: `--expires` units and bad durations | Coverage with no item behind it. |
 | #209 | CLI: activity summary, kinds and since | Coverage with no item behind it. |
 | #196 | CLI: human output for agents, mail, threads, events, tokens, audit, peers, wake | Coverage with no item behind it. |
-| #183 | CLI: agent show, hold renew, node name, request cancel, audit | Coverage with no item behind it. |
 | #188 | Wake: prune for tmux and cmux targets | The dedicated tmux and cmux adapters are being replaced (M5). |
 | #111 | Close linked release requests and dedupe pushes | Already on main through #137 (checked on 16 Nov in the earlier close list). |
 | #106 | CLI project paths resolve like the edit hook | Already on main as D60 (same check). |
@@ -145,10 +147,39 @@ Three rules produced most of the answers:
 | #74 | Reconcile bug 12 status and changelog entries | Its target files are not on main. |
 | #62 | Coverage pass 3 | Built on an unmerged line; its test files do not match main. Coverage with no item behind it. |
 
-## What happens after review
+## Review
 
-1. The owner marks any row to change, and decides the ten owner rows.
-2. The architect posts the verdict and reason as a comment on each pull request, then closes the Close rows. Branches are not deleted.
-3. Keep rows become ready queue items. Each still needs an independent review and green CI.
-4. Fold rows are closed once the batch pull request that carries their content is open.
-5. A finding behind a closed fix is written down as a proposed queue item, so it is not lost and not built until admitted.
+An independent reviewer (a separate Claude agent that did not write this list) checked every row against the diffs and CI on 17 Nov 2026. Verdict: pass with changes. Nothing was built or run for the review, and CI job logs were not opened.
+
+What it confirmed:
+
+- The list is complete: 101 rows for 101 open pull requests, apart from this one.
+- All nine "already on main" or "superseded" claims hold.
+- All 21 "frozen; test only" rows contain no product code.
+- The closed fixes #225, #182, #189, #207 and #232 are not data-loss, security or crash fixes on a surface v0.1.0 runs.
+- Every folded piece exists where the row says.
+- Nine of the ten owner recommendations.
+
+What changed because of it:
+
+| PR | Before | After | Why |
+|---|---|---|---|
+| #254, #250, #244 | Close | Fold, M9 | Each check is in the hub's intake of a peer's event, not only in the frozen registry. |
+| #159 | Keep, N4 | Fold, N4 | It warns and never refuses a commit; N4 asks for a guard that refuses. |
+| #168 | Keep | Fold, M1 and M4 | Test only, and there is no `next` on main for it to race. |
+| #217 | Keep | Fold, M3 | Test only; the refusal is already on main, and it does not cover the 17 Nov case. |
+| #202 | Close | Fold, M1 | It tests the remote claim path the M1 done condition names. |
+| #183 | Close | Fold, M1 and M4 | Part of it is the same content #181 and #201 are folded for. |
+| #163 | Keep, M6 | Keep, M3 | Closer to upgrade safety; overlaps doctor's hooks check. |
+| #165, #179, #149, #147, #176, #253 | Keep | Keep, with a condition | Each reason above now states what the reviewer found: a decision to amend, a new matching rule, a reserved number, or frozen code touched. |
+| #222 | Owner: Close | Open, with the owner | The reviewer wants the pairing-secret part folded into M9. |
+| #246 | Owner: Fold | Fold, with a rule | The batch must cut and store an over-long peer subject (D75), not refuse the message. |
+
+## What happened after review
+
+1. The architect posted the verdict and reason as a comment on each pull request.
+2. The Close rows, and the two owner rows the reviewer agreed to close (#198, #233), were closed. Branches were not deleted.
+3. Keep rows became queue items. Each is rebased, re-run in CI, and independently reviewed before merge.
+4. Fold rows stay open until the batch or scope item that carries their content has a pull request, then they are closed with a pointer to it.
+5. #222 stays open until the owner decides.
+6. A finding behind a closed fix is written down as a proposed queue item, so it is not lost and not built until admitted.
