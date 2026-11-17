@@ -1062,3 +1062,30 @@ fn lease_renewal_release_and_expiry_cannot_touch_another_nodes_lease() {
     fed.forge("resource.lease_expired", json!({ "lease_id": lease }));
     assert_eq!(state(), before, "expired by another node");
 }
+
+/// The subject has a local limit too (300 characters, since Milestone 1). The hub stored a
+/// peer's subject truncated in `messages`, but the signed event, kept in the event log and
+/// relayed onward, carried it whole; the event is now refused (FINDINGS-246-w9W, test by
+/// claude@another-docs-residual-20261116).
+#[test]
+fn a_peers_message_subject_is_capped_like_a_local_one() {
+    let fed = Fed::new();
+    let alice = fed.hub.agent("alice");
+    let sender = fed.mallory.agent("m");
+    push(&fed.hub, &fed.mallory);
+    let report = fed.forge(
+        "message.sent",
+        json!({ "message_id": "mallory-long-subject", "sender_id": sender,
+                "subject": "s".repeat(1024 * 1024), "body": "b", "importance": "normal",
+                "recipients": [{ "agent_id": alice, "node_id": fed.hub.id(), "role": "to" }],
+                "recipient_nodes": [fed.hub.id()] }),
+    );
+    let logged: Option<i64> = fed.hub_one(
+        "SELECT coalesce(max(length(payload)), 0) FROM events WHERE kind = 'message.sent' AND node_id = ?1",
+        &fed.mallory.id(),
+    );
+    assert!(
+        logged.unwrap_or(0) < 64 * 1024,
+        "the hub logged a {logged:?}-byte message.sent for relay ({report:?})"
+    );
+}

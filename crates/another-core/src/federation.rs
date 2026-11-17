@@ -626,6 +626,19 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
                 Some(Value::String(body)) => crate::mail::check_body(body)?,
                 Some(_) => return Err(Error::Invalid("message body must be text".into())),
             }
+            // The subject's local limit too: the projection truncates it, but the signed
+            // event, which is logged and relayed, would keep it whole.
+            match p.get("subject") {
+                None | Some(Value::Null) => {}
+                Some(Value::String(subject))
+                    if subject.chars().count() <= crate::mail::MAX_SUBJECT_CHARS => {}
+                Some(_) => {
+                    return Err(Error::Invalid(format!(
+                        "subject must be text of at most {} characters",
+                        crate::mail::MAX_SUBJECT_CHARS
+                    )))
+                }
+            }
             owned("message", "messages", "message_id", "message_id")
         }
         "hold.acquired" | "hold.updated" => {
