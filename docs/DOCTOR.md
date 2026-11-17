@@ -12,6 +12,7 @@ ok    hooks     installed for claude, codex, grok, cursor
 ok    server    answering on 127.0.0.1:7466
 ok    daemon    one.toanother.another loaded, pid 969, healthy
 skip  peers     not checked until the database check passes
+info  transports herdr only (no transports.json, so no command transport)
 ```
 
 `--json` prints `{"ok": bool, "checks": [{"name", "status", "detail", "fix"}]}`. `--bind HOST:PORT` checks a server on another loopback port.
@@ -27,6 +28,7 @@ skip  peers     not checked until the database check passes
 | `server` | One `GET /health` on a loopback address: `--bind`, else the daemon's, else `127.0.0.1:7466` | never | something answers, but not with 200; or the server names another node than this home's (it serves another `ANOTHER_HOME`). Nothing answering is `info` |
 | `daemon` | The launchd service (macOS only) | never | it is installed but not loaded, or loaded but not answering. Serving a different home is `info` |
 | `peers` | Paired nodes: role, revocation and last sync | never | the hub has not synced for 24 hours, or a spoke for 7 days |
+| `transports` | `transports.json` in the home ([WAKE.md](WAKE.md#command-transports)), the stored wake targets and the session rows | never | the file was refused (the reason is given); a wake target or a session row names a transport that is not configured; a wake target is the old cmux target `notify`; a program a command transport would start is not found on `PATH`. No file is `info` |
 
 Statuses are `ok`, `info` (optional and not set up), `warn`, `fail` and `skip` (does not apply here). The exit status is 1 only when a check is `fail`, so a script can gate on it; warnings exit 0.
 
@@ -42,7 +44,8 @@ Statuses are `ok`, `info` (optional and not set up), `warn`, `fail` and `skip` (
   - A host name or any other address given with `--bind` is skipped, not looked up or dialled.
   - It never contacts a federation peer, a tunnel or any remote host.
 - **It runs no fix.** Each `fix:` is a command for you to run.
-- **Not checked:** tokens and OAuth grants, tunnels, Herdr, tmux and cmux, and the resource scanner's permissions.
+- **It runs no transport.** The `transports` row reads the config and looks for each program on `PATH`; it starts none of them, so it does not show that a command works.
+- **Not checked:** tokens and OAuth grants, tunnels, Herdr, whether a configured tmux or cmux command works, and the resource scanner's permissions.
 
 ## How long it takes
 

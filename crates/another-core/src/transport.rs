@@ -656,8 +656,10 @@ impl Store {
         cwd: &str,
     ) -> Result<()> {
         crate::wake::validate_target(target)?;
-        if transport.is_empty() {
-            return Err(Error::Invalid("transport name must not be empty".into()));
+        if !crate::wake::valid_transport_name(transport) {
+            return Err(Error::Invalid(format!(
+                "{transport:?} cannot name a transport"
+            )));
         }
         self.write(|tx| {
             let me = resolve_agent(tx, tx.node_id, agent)?;

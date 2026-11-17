@@ -15,6 +15,8 @@
 
 #[path = "common/hosted_ci.rs"]
 mod hosted_ci;
+#[path = "common/transports.rs"]
+mod transports;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -2029,7 +2031,7 @@ fn a_hand_set_target_is_inert() {
     let fx = Fx::new();
     let worker = fx.agent("worker", Program::Claude);
     fx.store
-        .set_wake_target(&worker, WakeVia::Herdr, "w1:p1", false)
+        .set_wake_target(&worker, &WakeVia::herdr(), "w1:p1", false)
         .unwrap();
     fx.pane("w1:p1", "idle", "claude", "/work/app", Some("s1"));
     fx.mail(&worker, "Hello");
@@ -2089,7 +2091,7 @@ fn a_hand_set_target_is_inert() {
     let worker = fx.agent("worker", Program::Claude);
     fx.claude(&worker, "s1", "w1:p1", "idle");
     fx.store
-        .set_wake_target(&worker, WakeVia::Herdr, "w1:p1", false)
+        .set_wake_target(&worker, &WakeVia::herdr(), "w1:p1", false)
         .unwrap();
     fx.control("stall", true);
     let options = WakeOptions {
@@ -2334,6 +2336,7 @@ fn wake_all_runs_one_wake_pass() {
         );
     }
     // A target set by hand, a bare agent and a tmux target: none is woken by `--all` now.
+    transports::write_example(&fx.home);
     fx.agent("byhand", Program::Claude);
     fx.json(&[
         "wake", "set", "--agent", "byhand", "--via", "tmux", "--target", "%3",
@@ -2529,7 +2532,8 @@ fn dry_run_prints_argv_and_runs_nothing() {
     assert!(fx.wakes().is_empty());
     assert_eq!(fx.unannounced("claude@shop"), 1, "no claim was taken");
 
-    // tmux and cmux keep their fixed commands until the command adapter replaces them.
+    // A command transport prints its configured commands, filled in, and runs nothing.
+    transports::write_example(&fx.home);
     let plan = fx.json(&[
         "wake",
         "--agent",
@@ -2679,7 +2683,7 @@ fn prune_makes_no_transport_call() {
     // A stuck session Herdr still lists.
     fx.claude(&stuck, "s3", "w1:p3", "idle");
     fx.store
-        .set_wake_target(&byhand, WakeVia::Herdr, "gone-pane", false)
+        .set_wake_target(&byhand, &WakeVia::herdr(), "gone-pane", false)
         .unwrap();
     let mut waker = fx.waker();
     waker.sweep(&fx.store).unwrap();
@@ -3020,11 +3024,11 @@ fn status_and_skip_reasons_name_the_right_thing() {
     let captured = fx.agent("captured", Program::Claude);
     let given = fx.agent("given", Program::Claude);
     fx.store
-        .set_wake_target(&by_hand, WakeVia::Herdr, "w1:p1", false)
+        .set_wake_target(&by_hand, &WakeVia::herdr(), "w1:p1", false)
         .unwrap();
     // An automatic Herdr capture, as a build before the transport interface left it.
     fx.store
-        .set_wake_target(&captured, WakeVia::Herdr, "w1:p2", true)
+        .set_wake_target(&captured, &WakeVia::herdr(), "w1:p2", true)
         .unwrap();
     for pane in ["w1:p1", "w1:p2", "w1:p3"] {
         fx.pane(pane, "idle", "claude", "/work/app", None);
@@ -3036,7 +3040,7 @@ fn status_and_skip_reasons_name_the_right_thing() {
     another::wake::wake(&fx.store, &by_hand, &force).unwrap();
     another::wake::wake(&fx.store, &captured, &force).unwrap();
     let to_target = WakeOptions {
-        via: Some(WakeVia::Herdr),
+        via: Some(WakeVia::herdr()),
         target: Some("w1:p3".into()),
         ..force.clone()
     };
@@ -3084,7 +3088,7 @@ fn status_and_skip_reasons_name_the_right_thing() {
     // `--all --via tmux`: the Herdr session is not what was asked for, and the reason says
     // that, not that Herdr is never woken.
     let via_tmux = WakeOptions {
-        via: Some(WakeVia::Tmux),
+        via: Some(transports::via("tmux")),
         ..fx.options()
     };
     let plans = another::wake::wake_all(&fx.store, &via_tmux).unwrap();

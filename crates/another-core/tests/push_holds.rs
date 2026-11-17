@@ -1953,18 +1953,18 @@ fn stats_count_the_coordination_evidence() {
 fn automatic_wake_targets_clear_only_when_they_match() {
     let fx = Fx::new();
     fx.store
-        .set_wake_target("alice", WakeVia::Herdr, "w1:p1", true)
+        .set_wake_target("alice", &WakeVia::herdr(), "w1:p1", true)
         .unwrap();
     assert!(!fx
         .store
-        .clear_auto_wake_target("alice", Some((WakeVia::Herdr, "w9:p9")))
+        .clear_auto_wake_target("alice", Some(("herdr", "w9:p9")))
         .unwrap());
     assert!(fx
         .store
-        .clear_auto_wake_target("alice", Some((WakeVia::Herdr, "w1:p1")))
+        .clear_auto_wake_target("alice", Some(("herdr", "w1:p1")))
         .unwrap());
     fx.store
-        .set_wake_target("bob", WakeVia::Herdr, "reviewer", false)
+        .set_wake_target("bob", &WakeVia::herdr(), "reviewer", false)
         .unwrap();
     assert!(!fx.store.clear_auto_wake_target("bob", None).unwrap());
     assert_eq!(

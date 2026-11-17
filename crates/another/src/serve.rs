@@ -146,6 +146,10 @@ pub fn spawn_waker(store: Store, every: Duration, ct: CancellationToken) {
                             match out {
                                 Ok(events) => {
                                     for e in events {
+                                        if e.action == crate::wake::CONFIG_REFUSED {
+                                            tracing::warn!(detail = %e.detail, "transports config refused");
+                                            continue;
+                                        }
                                         tracing::info!(
                                             agent = %e.agent,
                                             target = %e.target,

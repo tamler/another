@@ -13,7 +13,10 @@ use serde::Serialize;
 
 pub use another_core::{Observation, Session, TransportState as State, Tri, WakeOutcome};
 
+pub mod command;
 pub mod herdr;
+
+pub use command::{load_config, Config};
 
 /// How one wake call ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,12 +65,24 @@ pub trait Transport: Send + Sync {
     fn wake_argv(&self, target: &str, line: &str) -> Vec<Vec<String>>;
 }
 
-/// The transport of that name. `rex` is reserved; command transports come later.
-pub fn transport(name: &str) -> Result<Box<dyn Transport>> {
-    match name {
-        "herdr" => Ok(Box::new(herdr::HerdrTransport::from_env())),
-        "rex" => bail!("the rex transport is not in this build"),
-        other => bail!("unknown transport {other:?}; this build has herdr"),
+/// The transport of that name: `herdr`, or a command transport of `config`. `rex` is
+/// reserved and not in this build.
+pub fn transport(name: &str, config: &Config) -> Result<Box<dyn Transport>> {
+    if name == "herdr" {
+        return Ok(Box::new(herdr::HerdrTransport::from_env()));
+    }
+    match config.get(name) {
+        Some(spec) => Ok(Box::new(command::CommandTransport::new(spec.clone()))),
+        None => bail!("{}", config.why_missing(name)),
+    }
+}
+
+/// The transports config of the home `store` was opened in, read now. A store with no
+/// home (in memory) has none.
+pub fn config_for(store: &Store) -> Config {
+    match store.db_path().and_then(|db| db.parent()) {
+        Some(home) => load_config(home),
+        None => Config::default(),
     }
 }
 
@@ -89,6 +104,8 @@ pub struct StatusRow {
     pub observed_state: Option<String>,
     pub detail: Option<String>,
     pub state_since: Option<String>,
+    /// Whether a transport of that name exists now: `herdr`, or one in `transports.json`.
+    pub transport_configured: bool,
     /// `session_id`, `weak` or `none`: how the last check recognised the session.
     pub matched: &'static str,
     /// A hook of the session made the row (false: a wake by hand did, to hold its outcome).
@@ -122,6 +139,9 @@ pub struct StatusReport {
     pub now: String,
     /// Set when sessions or wake targets exist and nothing was checked in the last 5 minutes.
     pub warning: Option<String>,
+    /// Set when `transports.json` was refused: no command transport exists until it is
+    /// fixed.
+    pub config_error: Option<String>,
     pub attention_only: bool,
     pub sessions: Vec<StatusRow>,
 }
@@ -129,6 +149,7 @@ pub struct StatusReport {
 /// `another transport status`: read the session rows. Calls no transport.
 pub fn status_report(store: &Store, attention_only: bool) -> Result<StatusReport> {
     let now = store.now();
+    let config = config_for(store);
     let rows = store.transport_sessions()?;
     let observed_lately = rows
         .iter()
@@ -163,6 +184,7 @@ pub fn status_report(store: &Store, attention_only: bool) -> Result<StatusReport
                     _ => "none",
                 },
                 hook_made: r.hook_made(),
+                transport_configured: config.provides(&r.transport),
                 origin: origin(&r),
                 stale: r.hook_made() && r.observed_at.is_none_or(|at| now - at > STALE_AFTER_MS),
                 for_ms: r.state_since.map(|at| now - at),
@@ -192,6 +214,7 @@ pub fn status_report(store: &Store, attention_only: bool) -> Result<StatusReport
         warning: (anything && !observed_lately).then(|| {
             "no transport check in the last 5 minutes; is the daemon running?".to_string()
         }),
+        config_error: config.refusal(),
         attention_only,
         sessions,
     })
@@ -215,11 +238,15 @@ pub fn render_status(report: &StatusReport) -> String {
         out.push_str(warning);
         out.push('\n');
     }
+    if let Some(error) = &report.config_error {
+        out.push_str(error);
+        out.push('\n');
+    }
     if report.sessions.is_empty() {
         out.push_str(if report.attention_only {
             "no session needs attention"
         } else {
-            "no transport sessions (a hook inside Herdr records one)"
+            "no transport sessions (a hook inside Herdr or a configured transport records one)"
         });
         return out;
     }
@@ -243,6 +270,9 @@ pub fn render_status(report: &StatusReport) -> String {
         }
         if r.matched == "weak" {
             line.push_str("  weak match");
+        }
+        if !r.transport_configured {
+            line.push_str("  transport not configured");
         }
         if !r.hook_made {
             line.push_str(match r.origin {
