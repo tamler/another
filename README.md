@@ -25,7 +25,7 @@ This is the failure I kept hitting:
 
 What they get instead:
 
-- **Path holds, taken at the edit.** With the hook pack, each file an agent edits gets an expiring hold, and a Claude Code, Codex or Grok CLI edit to a file another agent holds is stopped with the holder's name, across worktrees and clones of the same repo. `another hold check` exits 3 on overlap and grants nothing. Edits made from a shell command get past the hook, and Cursor has no edit guard, so use another checkout when you need a real boundary.
+- **Path holds, taken at the edit.** With the hook pack, each file an agent edits gets an expiring hold, and a Claude Code, Codex or Grok CLI edit to a file another agent holds is stopped with the holder's name. A hold blocks only inside its own checkout, so agents in separate worktrees or clones never stop each other, and `another hold release <path>` frees a file as soon as its holder is done with it. `another hold check` exits 3 on overlap and grants nothing. Edits made from a shell command get past the hook, and Cursor has no edit guard, so use another checkout when you need a real boundary.
 - **Mail and requests.** `another send --request` opens work for an agent to claim. Claiming assigns an owner. An ack records receipt. If the request goes stale, someone else can take it.
 - **An activity feed**, so a session can ask who is doing what before it starts a duplicate.
 - **A resource registry**, so an agent borrows a running server instead of launching a duplicate. `another reap` needs a human `--confirm` on that machine. Remote peers cannot reap.
@@ -148,7 +148,7 @@ Or, while `another serve` is running, open <http://127.0.0.1:7466/ui>. The page 
 | 6 | Polish: `another wake` (tmux, cmux, Herdr), Herdr plugin, release builds, quickstart, CONTRIBUTING | ✅ complete |
 | 7 | Hosted connectors: OAuth 2.1 on the authenticated server, local approval, `another remote up`, `whats_new`, ChatGPT desktop local MCP | ✅ tamler/another#99 |
 | - | Local dashboard: agents, holds, mail, requests, resources, timeline, peers | ✅ [docs/DASHBOARD.md](docs/DASHBOARD.md) |
-| - | Push and enforced holds: mid-task notices, edit guard, holds across worktrees, launchd daemon, Herdr wakes, `another stats` | ✅ tamler/another#103, #104, #105 ([docs/HOOKS.md](docs/HOOKS.md), [docs/HOLDS.md](docs/HOLDS.md), [docs/DAEMON.md](docs/DAEMON.md)) |
+| - | Push and enforced holds: mid-task notices, edit guard, holds scoped to a checkout, launchd daemon, Herdr wakes, `another stats` | ✅ tamler/another#103, #104, #105 ([docs/HOOKS.md](docs/HOOKS.md), [docs/HOLDS.md](docs/HOLDS.md), [docs/DAEMON.md](docs/DAEMON.md)) |
 | - | Read-only work board: holds, recent and stopped edits, what is waiting on whom, per project (`another board`, `work_board`) | ✅ [docs/BOARD.md](docs/BOARD.md) |
 | M1 | Work queue for one node: propose, admit (owner or delegate, recorded), atomic `next` with per-agent limits, results, handoff, the owner list and the audit (`another queue`, `queue_*` tools) | Built: [docs/QUEUE.md](docs/QUEUE.md). M1's done condition also needs the three-day fleet run, which has not happened yet |
 | M2 | Results and the lapse rule: claims, handoffs and results are events and a result is stored on its item; a claim returns to ready, with its history and a message to the agent that held it, at the end hook of the session that made it or after the grace period (24 hours by default) with no sign of life | Built: [docs/QUEUE.md](docs/QUEUE.md#when-a-claim-is-released-automatically). Only Claude Code claims are bound to a session; release on the transport's confirmed-gone signal is still to come |
@@ -166,7 +166,7 @@ Task guides, all listed on the [guides hub](site/guides/index.html) (website sou
 | Doc | What it covers |
 |---|---|
 | [docs/HOOKS.md](docs/HOOKS.md) | Hook packs for each client; trust steps; the digest; mid-task notices; the edit guard; failing open |
-| [docs/HOLDS.md](docs/HOLDS.md) | Path holds, holds across worktrees of one repository, whole-project holds |
+| [docs/HOLDS.md](docs/HOLDS.md) | Path holds, releasing a file by path, holds and checkouts, whole-project holds |
 | [docs/DAEMON.md](docs/DAEMON.md) | The background daemon (launchd, systemd user unit, Task Scheduler), waking idle Herdr agents, `another stats` |
 | [docs/RESOURCES.md](docs/RESOURCES.md) | Resource registry, orphans, human-approved reaping |
 | [docs/REMOTE.md](docs/REMOTE.md) | Remote peers: bearer tokens, OAuth for ChatGPT and Claude, tunnels, audit log |
@@ -227,7 +227,7 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 
 - **Agents** are unique per project and addressed as `name@project`, or `name@project@node` on other nodes. A bare `name` works when it is unambiguous; once a second project registers the same name it stops resolving, and [docs/ADDRESSING.md](docs/ADDRESSING.md) shows the error and the fix.
 - **Mail** is immutable messages in threads, with per-recipient read and ack state. **Requests** go `open → claimed → done`; claiming assigns an owner. They become `stale` past their due time and anyone may take them over. An ack records receipt, not completion: [docs/REQUESTS.md](docs/REQUESTS.md) walks through a worker that acks, claims, and crashes.
-- **Path holds** are expiring leases on project-relative globs. Exclusive holds conflict with overlapping holds, including holds in other checkouts of the same repository on this machine. The edit hook enforces them for client file edits; across machines, a clash is a warning, never a lock.
+- **Path holds** are expiring leases on project-relative globs. Exclusive holds conflict with overlapping holds inside the same checkout (working directory); other worktrees and clones of the repository are separate and never block each other. The edit hook enforces them for client file edits; across machines, a clash is a warning, never a lock.
 - **Resources** are model and dev servers, ports, GPUs, containers and jobs, held by owner and borrower leases with TTLs. Orphans are listed, and only a human can reap them (`another reap … --confirm`); reaping is never remote.
 - **Event log**: every change is appended to a signed, chained, append-only log, and the query tables are projections of it. That log is what federation syncs.
 - [docs/GLOSSARY.md](docs/GLOSSARY.md) defines every term and sets the easily confused pairs side by side: an ack versus request ownership, a path hold versus a resource lease, and what expiry means for each.

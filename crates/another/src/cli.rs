@@ -816,7 +816,7 @@ pub enum HoldCmd {
         #[arg(long)]
         reason: Option<String>,
         /// Allow a pattern that covers the whole project (`**`, `.`, `**/*.rs`).
-        /// Refused without this flag because it blocks every other agent in the repository.
+        /// Refused without this flag because it blocks every other agent in the checkout.
         #[arg(long)]
         repo_wide: bool,
     },
@@ -837,11 +837,19 @@ pub enum HoldCmd {
         agent: AgentArg,
         hold_ids: Vec<String>,
     },
-    /// Release your holds (all, or the given ids).
+    /// Release your holds: all of them, the given hold ids, or the ones on the given files
+    /// and directories ("I am done with this file", so another agent can pick it up).
     Release {
         #[command(flatten)]
         agent: AgentArg,
-        hold_ids: Vec<String>,
+        /// Base directory for relative paths: a project path or slug (default: the current
+        /// directory). Nothing is registered.
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        /// Hold ids, files or directories. A file whose whole name looks like a hold id is
+        /// given as `./NAME`.
+        #[arg(value_name = "ID_OR_PATH")]
+        targets: Vec<String>,
     },
 }
 
@@ -1137,6 +1145,96 @@ fn resolve_hold_paths(store: &Store, project: &str, paths: Vec<String>) -> Vec<S
             },
         })
         .collect()
+}
+
+/// Whether a `hold release` argument is shaped like a hold id: the 26 characters of a ULID
+/// (`store::new_id`), in the alphabet and case ids are printed in.
+fn is_hold_id(arg: &str) -> bool {
+    arg.len() == 26
+        && arg
+            .bytes()
+            .all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b))
+}
+
+/// `another hold release`: every hold of the agent's, or the ones its arguments name.
+/// Returns the released ids and what to tell the caller about paths that released nothing.
+///
+/// An argument is a hold id, a path or a glob:
+///
+/// - a hold id by its shape ([`is_hold_id`]);
+/// - a path when it names an existing file or directory, whatever characters it contains,
+///   and whenever it has no wildcard. It is resolved from the file, as the edit hook does
+///   it, so it works from any directory and for a file in another checkout;
+/// - otherwise a glob, which releases the caller's hold with exactly that pattern in the
+///   project at or nearest above the base directory.
+///
+/// `--project` only sets the directory relative arguments are joined to. Nothing here
+/// registers a project: this is a different path from [`project_key`].
+fn release_holds(
+    store: &Store,
+    agent: &str,
+    project: Option<String>,
+    targets: Vec<String>,
+) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+    if targets.is_empty() {
+        return Ok((store.release_holds(agent, &[])?, Vec::new()));
+    }
+    let looks_like_path = |p: &str| p.contains('/') || p.contains('\\') || p == "." || p == "..";
+    let base = match project {
+        None => std::env::current_dir()?,
+        Some(p) if looks_like_path(&p) => PathBuf::from(abs(Path::new(&p))?),
+        // A slug must exist; a path is used as a directory whether registered or not.
+        Some(slug) => PathBuf::from(store.project(&slug)?.abs_path),
+    };
+    let (mut ids, mut paths, mut globs) = (Vec::new(), Vec::new(), Vec::new());
+    for target in targets {
+        let full = base.join(&target);
+        if is_hold_id(&target) {
+            ids.push(target);
+        } else if std::fs::symlink_metadata(&full).is_ok() || !target.contains(['*', '?', '[', '{'])
+        {
+            paths.push(another_core::ReleasePath {
+                shown: target,
+                path: full,
+            });
+        } else {
+            globs.push(target);
+        }
+    }
+    // Settled before anything is released, so a refused glob releases nothing.
+    let glob_project = if globs.is_empty() {
+        None
+    } else {
+        let here = hooks::resolve_existing(&base);
+        let nearest = store
+            .projects()?
+            .into_iter()
+            .map(|p| (hooks::resolve_existing(Path::new(&p.abs_path)), p))
+            .filter(|(real, _)| here.starts_with(real))
+            .max_by_key(|(real, _)| real.components().count());
+        match nearest {
+            Some((_, p)) => Some(p.abs_path),
+            None => anyhow::bail!("no project here; give a file, a directory or a hold id"),
+        }
+    };
+    let mut released = Vec::new();
+    let mut notes = Vec::new();
+    if !ids.is_empty() {
+        released.extend(store.release_holds(agent, &ids)?);
+    }
+    if !paths.is_empty() {
+        let done = store.release_paths(agent, &paths, None)?;
+        released.extend(done.released);
+        notes.extend(done.notes);
+    }
+    if let Some(project) = glob_project {
+        for glob in &globs {
+            let done = store.release_pattern(agent, &project, glob)?;
+            released.extend(done.released);
+            notes.extend(done.notes);
+        }
+    }
+    Ok((released, notes))
 }
 
 pub(crate) fn emit<T: Serialize>(
@@ -1562,8 +1660,16 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let holds = store.renew_holds(&agent.agent, &hold_ids)?;
             emit(json, &holds, |h| output::holds(h))
         }
-        Command::Hold(HoldCmd::Release { agent, hold_ids }) => {
-            let ids = store.release_holds(&agent.agent, &hold_ids)?;
+        Command::Hold(HoldCmd::Release {
+            agent,
+            project,
+            targets,
+        }) => {
+            let (ids, notes) = release_holds(&store, &agent.agent, project, targets)?;
+            // On stderr, so `--json` output stays the list of released ids.
+            for note in &notes {
+                eprintln!("another: {note}");
+            }
             emit(json, &ids, |ids| format!("released {} hold(s)", ids.len()))
         }
         Command::Holds { project, agent } => {

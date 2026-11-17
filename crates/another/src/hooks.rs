@@ -13,7 +13,7 @@
 //! lock timeout, and both fail open: an error never blocks the agent.
 
 use std::io::{IsTerminal, Read};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use another_core::{
@@ -838,8 +838,15 @@ fn hook_agent(store: &Store, client: Client, root: &Path) -> Result<String> {
     Ok(address)
 }
 
-/// Inbox + activity digest for session start, capped at [`MAX_DIGEST_CHARS`].
-pub fn session_digest(store: &Store, agent: &str) -> Result<String> {
+/// Whether Another installs an edit guard for this client (see [`Client::specs`]).
+fn has_edit_hook(client: Client) -> bool {
+    client.specs().iter().any(|s| s.event == HookEvent::PreEdit)
+}
+
+/// Inbox + activity digest for session start, capped at [`MAX_DIGEST_CHARS`]. For a client
+/// with an edit guard the second line says that edited files are held and how to free one,
+/// placed there so the cap never cuts it.
+pub fn session_digest(store: &Store, agent: &str, client: Client) -> Result<String> {
     let inbox = store.inbox(
         agent,
         InboxQuery {
@@ -856,6 +863,12 @@ pub fn session_digest(store: &Store, agent: &str) -> Result<String> {
         inbox.awaiting_ack,
         inbox.requests.len()
     );
+    if has_edit_hook(client) {
+        out.push_str(&format!(
+            "\nFiles you edit here are held for you while this session works on them. Done with one? Free it for others: another hold release --agent {} <path>",
+            inbox.agent
+        ));
+    }
     for item in &inbox.messages {
         let m = &item.message;
         let tag = match m.importance {
@@ -1110,96 +1123,9 @@ fn post_tool(
     })
 }
 
-/// Symlinks followed while resolving one path before giving up (a loop).
-const MAX_SYMLINKS: usize = 40;
-
-/// `path` as the filesystem resolves it, the way `open` follows it:
-///
-/// - components are taken left to right and each symlink is followed before any later
-///   `..` is applied, so `link/../a` is "the parent of where `link` points, then `a`",
-///   not the lexical `a`;
-/// - a dangling symlink is read and followed to its (not yet existing) target;
-/// - once a component does not exist, the rest is applied lexically, since a missing
-///   directory cannot be a link;
-/// - the existing part is then canonicalized, which also restores on-disk letter case.
-///
-/// On a symlink loop (or a chain longer than the OS allows), `path` is used as given with
-/// its longest resolvable leading part canonicalized (it stops at the loop, even before a
-/// later `..`), so it still names the registered project.
-/// `path` should be absolute.
-pub fn resolve_existing(path: &Path) -> PathBuf {
-    let mut budget = MAX_SYMLINKS;
-    canonical_prefix(&follow_links(path, &mut budget).unwrap_or_else(|| path.to_path_buf()))
-}
-
-fn follow_links(path: &Path, budget: &mut usize) -> Option<PathBuf> {
-    let mut out = PathBuf::new();
-    let mut missing = false;
-    for comp in path.components() {
-        match comp {
-            Component::Prefix(_) | Component::RootDir => out.push(comp.as_os_str()),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                // `out` is fully resolved (or a missing, so link-free, tail): its parent is
-                // the physical parent. Climbing out of a missing tail can land on an
-                // existing directory again, whose entries may be links.
-                out.pop();
-                missing = std::fs::symlink_metadata(&out).is_err();
-            }
-            Component::Normal(name) => {
-                let next = out.join(name);
-                if missing {
-                    out = next;
-                    continue;
-                }
-                match std::fs::symlink_metadata(&next) {
-                    Err(_) => {
-                        missing = true;
-                        out = next;
-                    }
-                    Ok(meta) if meta.file_type().is_symlink() => {
-                        *budget = budget.checked_sub(1)?;
-                        let target = std::fs::read_link(&next).ok()?;
-                        out = follow_links(&out.join(target), budget)?;
-                        missing = std::fs::symlink_metadata(&out).is_err();
-                    }
-                    Ok(_) => out = next,
-                }
-            }
-        }
-    }
-    Some(out)
-}
-
-/// Canonicalize the longest leading run of `path`'s components that resolves, and keep the
-/// rest as written. For a link-free path that is its deepest existing ancestor; for the
-/// fallback path of a symlink loop, which may still hold `..`, it stops at the loop.
-fn canonical_prefix(path: &Path) -> PathBuf {
-    if let Ok(real) = std::fs::canonicalize(path) {
-        return real;
-    }
-    let comps: Vec<Component> = path.components().collect();
-    let mut cur = PathBuf::new();
-    let mut real = None;
-    let mut kept = 0;
-    for (i, comp) in comps.iter().enumerate() {
-        cur.push(comp.as_os_str());
-        match std::fs::canonicalize(&cur) {
-            Ok(r) => {
-                real = Some(r);
-                kept = i + 1;
-            }
-            Err(_) => break,
-        }
-    }
-    let Some(mut out) = real else {
-        return path.to_path_buf();
-    };
-    for comp in &comps[kept..] {
-        out.push(comp.as_os_str());
-    }
-    out
-}
+/// `path` as the filesystem resolves it (symlinks first, then `..`, on-disk letter case).
+/// It lives in the core because a project's checkout is resolved the same way.
+pub use another_core::resolve_existing;
 
 /// What an edit of `file` can touch: the file reached through every symlink (a dangling
 /// link included), and, when the file is itself a symlink (an operation may replace the
@@ -1232,9 +1158,10 @@ const NO_PING_NOTICE: &str =
     "Another could not record your wait for this file, so no inbox ping will come.";
 
 /// The text shown when an edit is stopped the first time. `wait_recorded` says whether a
-/// durable wait exists for it: only then may the text promise an inbox ping. When the
+/// durable wait exists for it: only then may the text promise an inbox message. When the
 /// wait could not be recorded, the agent is told to check again itself after
-/// `retry_after` seconds instead.
+/// `retry_after` seconds instead. It ends by teaching the blocked agent to free its own
+/// files by path, since the holder it is waiting for learns the same way.
 pub fn deny_message(
     agent: &str,
     conflicts: &[HoldConflict],
@@ -1257,7 +1184,7 @@ pub fn deny_message(
                 .map(|r| format!(", \"{r}\""))
                 .unwrap_or_default();
             format!(
-                "{} is held by {} ({kind} hold on {}:{}{reason}, until {})",
+                "{} is held by {} in this checkout ({kind} hold on {}:{}{reason}, until {} unless renewed)",
                 c.path, h.agent, h.project, h.pattern, h.expires_at
             )
         })
@@ -1266,16 +1193,17 @@ pub fn deny_message(
     if conflicts.len() > 3 {
         out.push_str(&format!("; and {} more", conflicts.len() - 3));
     }
-    out.push_str(". Worktrees of the same repository still conflict at merge");
     if wait_recorded {
-        out.push_str(". You'll be pinged in your Another inbox when the file is free. Do not retry this edit while waiting");
+        out.push_str(
+            ". Work on other files; one message reaches your Another inbox when it is free.",
+        );
     } else {
         out.push_str(&format!(
-            ". {NO_PING_NOTICE} Retry this edit after {retry_after} seconds"
+            ". {NO_PING_NOTICE} Check again after {retry_after} seconds."
         ));
     }
     out.push_str(&format!(
-        ". Leave it alone until the hold is released. Ask the holder with `another hold request-release --agent {agent} {}`, or work on other files.",
+        " To ask for it now: another hold request-release --agent {agent} {}. When you finish with a file yourself, free it: another hold release --agent {agent} <path>",
         first.held.hold_id
     ));
     truncate(out, 1000)
@@ -1439,7 +1367,7 @@ pub fn run(
         HookEvent::SessionStart => {
             store.session(&agent, SessionPhase::Start, info)?;
             crate::wake::stamp_session(store, &agent, session_id, client.as_str(), &dir, true);
-            let digest = session_digest(store, &agent)?;
+            let digest = session_digest(store, &agent, client)?;
             // New mail shown here should not be announced again on the next prompt.
             let _ = prompt_notice(store, &agent, "session_start", client);
             if client == Client::Cursor {
@@ -1642,20 +1570,52 @@ mod tests {
             path: "src/a.rs".into(),
             held: held.clone(),
         };
-        let msg = deny_message("claude@shop-wt", std::slice::from_ref(&conflict), true, 30);
-        assert!(msg.starts_with("Another stopped this edit: src/a.rs is held by codex@shop"));
-        assert!(msg.contains("exclusive hold on shop:src/**, \"refactor api\""));
-        assert!(msg.contains("until 2026-11-10T10:30:00.000Z"));
-        assert!(msg.contains("You'll be pinged in your Another inbox"));
-        assert!(msg.contains("another hold request-release --agent claude@shop-wt h1"));
+        let msg = deny_message("claude@shop", std::slice::from_ref(&conflict), true, 30);
+        assert_eq!(
+            msg,
+            "Another stopped this edit: src/a.rs is held by codex@shop in this checkout \
+             (exclusive hold on shop:src/**, \"refactor api\", until 2026-11-10T10:30:00.000Z \
+             unless renewed). Work on other files; one message reaches your Another inbox \
+             when it is free. To ask for it now: another hold request-release --agent \
+             claude@shop h1. When you finish with a file yourself, free it: another hold \
+             release --agent claude@shop <path>"
+        );
+        assert!(!msg.to_lowercase().contains("worktree"), "{msg}");
         assert!(!msg.contains('\u{2014}') && !msg.contains('\u{2013}'));
-        // No wait on record: no ping is promised, and the fallback is spelled out.
-        let msg = deny_message("claude@shop-wt", &[conflict], false, 30);
-        assert!(msg.starts_with("Another stopped this edit: src/a.rs is held by codex@shop"));
-        assert!(!msg.contains("pinged"), "{msg}");
-        assert!(msg.contains("no inbox ping will come. Retry this edit after 30 seconds"));
-        assert!(msg.contains("another hold request-release --agent claude@shop-wt h1"));
-        assert!(!msg.contains('\u{2014}') && !msg.contains('\u{2013}'));
+        // No wait on record: no inbox message is promised, and the fallback is spelled out.
+        let msg = deny_message("claude@shop", std::slice::from_ref(&conflict), false, 30);
+        assert_eq!(
+            msg,
+            "Another stopped this edit: src/a.rs is held by codex@shop in this checkout \
+             (exclusive hold on shop:src/**, \"refactor api\", until 2026-11-10T10:30:00.000Z \
+             unless renewed). Another could not record your wait for this file, so no inbox \
+             ping will come. Check again after 30 seconds. To ask for it now: another hold \
+             request-release --agent claude@shop h1. When you finish with a file yourself, \
+             free it: another hold release --agent claude@shop <path>"
+        );
+        // Several blockers: three clauses, then a count; the first hold is the one to ask for.
+        let many: Vec<HoldConflict> = (1..=5)
+            .map(|n| HoldConflict {
+                path: format!("src/{n}.rs"),
+                held: another_core::Hold {
+                    hold_id: format!("h{n}"),
+                    ..held.clone()
+                },
+            })
+            .collect();
+        let msg = deny_message("claude@shop", &many, true, 30);
+        assert!(
+            msg.contains("unless renewed); src/2.rs is held by"),
+            "{msg}"
+        );
+        assert!(msg.contains("src/3.rs is held by"), "{msg}");
+        assert!(!msg.contains("src/4.rs"), "{msg}");
+        assert!(msg.contains("; and 2 more. Work on other files;"), "{msg}");
+        assert!(
+            msg.contains("request-release --agent claude@shop h1."),
+            "{msg}"
+        );
+        // A very long path is cut, and the text still says what to do next.
         let msg = deny_message(
             "claude@shop",
             &[HoldConflict {
@@ -1665,7 +1625,9 @@ mod tests {
             true,
             30,
         );
-        assert!(msg.contains("Worktrees of the same repository still conflict at merge"));
+        assert!(msg.chars().count() <= 1000);
+        assert!(msg.contains("To ask for it now: another hold request-release"));
+        assert!(msg.ends_with("free it: another hold release --agent claude@shop <path>"));
     }
 
     #[test]

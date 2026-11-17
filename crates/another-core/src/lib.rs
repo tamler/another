@@ -7,6 +7,7 @@
 
 mod activity;
 mod board;
+mod checkout;
 pub mod crypto;
 mod dashboard;
 mod error;
@@ -35,6 +36,7 @@ pub use board::{
     BOARD_EVENT_SCAN_CAP, DEFAULT_BOARD_LIMIT, DEFAULT_BOARD_WINDOW_MS, EDIT_HOOK_HOLD_REASON,
     MAX_BOARD_LIMIT,
 };
+pub use checkout::{PathRelease, ReleasePath};
 pub use dashboard::{
     DashAccess, DashActivityItem, DashActivityPage, DashActivityQuery, DashAgent, DashBlocked,
     DashClash, DashCounts, DashEdit, DashHold, DashMessage, DashProject, DashRequest, DashThread,
@@ -71,7 +73,7 @@ pub use queue::{
     DEFAULT_QUEUE_LIMIT, MAX_QUEUE_GRACE_SECONDS, MAX_QUEUE_LIMIT, MIN_QUEUE_GRACE_SECONDS,
     QUEUE_SESSION_CLIENTS,
 };
-pub use repo::{link_for as repo_link_for, normalize_remote, RepoLink};
+pub use repo::{link_for as repo_link_for, normalize_remote, resolve_existing, RepoLink};
 pub use requests::{Request, RequestAction, RequestFilter, RequestStatus, RequestUpdate};
 pub use resources::{
     derive_port, Lease, LeaseMode, LeaseOutcome, RegisterResource, Resource, ResourceFilter,

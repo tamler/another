@@ -97,7 +97,7 @@ Each message is announced once, by whichever channel claims it first: a mid-task
 - if another agent holds an overlapping path, nothing is taken and the edit is denied with a message like this one:
 
 ```text
-Another stopped this edit: src/api/routes.rs is held by codex@shop-review (exclusive hold on shop-review:src/api/**, "router refactor", until 2026-11-10T16:04:00.000Z). Worktrees of the same repository still conflict at merge. You'll be pinged in your Another inbox when the file is free. Do not retry this edit while waiting. Leave it alone until the hold is released. Ask the holder with `another hold request-release --agent claude@shop HOLD_ID`, or work on other files.
+Another stopped this edit: src/api/routes.rs is held by claude@shop in this checkout (exclusive hold on shop:src/api/**, "router refactor", until 2026-11-10T16:04:00.000Z unless renewed). Work on other files; one message reaches your Another inbox when it is free. To ask for it now: another hold request-release --agent codex@shop 01M7MB3VTGJPCE70WC7RB0B4SK. When you finish with a file yourself, free it: another hold release --agent codex@shop <path>
 ```
 
 - if the agent already holds the file (or a directory or glob covering it) exclusively, nothing is written, unless that hold is past half its TTL, which renews it;
@@ -105,7 +105,7 @@ Another stopped this edit: src/api/routes.rs is held by codex@shop-review (exclu
 
 The guard never takes a directory or glob hold. File targets are literal names, including new files and names such as `app/[id]/page.tsx` or `src/*.rs`. Glob characters are escaped in stored auto holds, so they do not match unrelated files. Directory hints in a tool envelope are skipped; for a patch, file headers take precedence over generic path fields. Directory and glob holds need an explicit `hold acquire` or `hold_paths` call. A directory hold blocks unrelated files below it too, so prefer file paths.
 
-Holds are checked across every checkout of the same repository on this machine: sibling worktrees and separate clones of one origin see each other's holds (see [HOLDS.md](HOLDS.md)). A session's holds, including the ones the guard took, are released at session end.
+A hold blocks only inside the checkout it was taken in: the working directory with the `.git` entry. Sibling worktrees and separate clones of one repository never block each other and are told nothing about each other (see [HOLDS.md](HOLDS.md#holds-and-checkouts)). A session's holds, including the ones the guard took, are released at session end. An agent that is done with a file before then frees it with `another hold release --agent AGENT <path>`; the session-start digest and the denial above both say so.
 
 The guard never prints "allow": that would skip the client's own permission prompts. It only ever adds a denial.
 
@@ -113,9 +113,9 @@ The guard never prints "allow": that would skip the client's own permission prom
 
 The first block registers a durable wait for that agent, project and file. Repeated attempts against the same holds get a short denial with a backoff: 30 seconds initially, doubling after each elapsed window to at most 300 seconds. The hook does not sleep or retry for you. Work on other files and wait for the ping. A changed set of blocking holds gets a fresh notice.
 
-Release, session end and the next sweep after expiry recheck all current holds, including sibling worktrees and replacement holds. When none conflict, Another sends one `Hold free: <file>` inbox message and clears the wait in the same transaction. The wait survives restarts. The ordinary post-tool/prompt hooks or daemon deliver its notice. Without a daemon, expiry pings wait for the next `another sweep` or command that sweeps. The ping is automatic mail attributed to the original holder and does not change their presence. It says the file is not reserved: check again before editing. It names the hold that ended, so a second ping for the same file within five minutes is not treated as a duplicate push. Waiter and holder are addressed by their ids, never by a name that may have become ambiguous since; a ping that cannot be delivered is recorded as a `hold.notify_failed` event, its wait is dropped, and the release or sweep that triggered it still succeeds.
+Release, session end and the next sweep after expiry recheck all current holds in the file's checkout, including replacement holds. When none conflict, Another sends one `Hold free: <file>` inbox message and clears the wait in the same transaction. The wait survives restarts. The ordinary post-tool/prompt hooks or daemon deliver its notice. Without a daemon, expiry pings wait for the next `another sweep` or command that sweeps. The ping is automatic mail attributed to the original holder and does not change their presence. It says the file is not reserved: check again before editing. It names the hold that ended, so a second ping for the same file within five minutes is not treated as a duplicate push. Waiter and holder are addressed by their ids, never by a name that may have become ambiguous since; a ping that cannot be delivered is recorded as a `hold.notify_failed` event, its wait is dropped, and the release or sweep that triggered it still succeeds.
 
-If the wait itself cannot be recorded, the edit is still stopped, but the notice does not promise a ping. It says that Another could not record the wait and that no inbox ping will come, and tells the agent to retry after 30 seconds, ask the holder, or work on other files. Each such failure is a `hold.wait_failed` event naming the file and the blocking hold ids. Retrying the same file against the same holds is a short denial with the same "no ping" note; a different file, a replacement hold, or a conflict after an earlier wait ended gets a fresh first notice.
+If the wait itself cannot be recorded, the edit is still stopped, but the notice does not promise a ping. It says that Another could not record the wait and that no inbox ping will come, and tells the agent to check again after 30 seconds or ask the holder. Each such failure is a `hold.wait_failed` event naming the file and the blocking hold ids. Retrying the same file against the same holds is a short denial with the same "no ping" note; a different file, a replacement hold, or a conflict after an earlier wait ended gets a fresh first notice.
 
 `another stats` records one `hold.blocked` event per unchanged set of blocking holds while a wait is active, or while the same wait keeps failing to record. Historical events still include retries recorded by older builds, so counts across the upgrade are not directly comparable.
 
@@ -173,6 +173,7 @@ Example session-start digest:
 
 ```text
 Another: claude@shop has 2 unread (1 urgent), 1 awaiting ack, 1 open request(s).
+Files you edit here are held for you while this session works on them. Done with one? Free it for others: another hold release --agent claude@shop <path>
 - [urgent] from codex@shop: "Rebase please" (message 01J...)
 - from grok@shop: "Docs updated" (message 01J...)
 - request 01J... "Fix flaky test" from codex@shop (open)
@@ -181,7 +182,7 @@ Last hour: 7 event(s) since 2026-10-28T08:00:00.000Z; active agents: codex@shop;
 The Another MCP tools fetch_inbox, acknowledge and claim_request (or `another inbox --agent claude@shop`) show details.
 ```
 
-Message bodies are never included in digests or the activity feed.
+The second line is there for clients with an edit guard (Claude Code, Codex, Grok), so the 1500 character cap never cuts it. Message bodies are never included in digests or the activity feed.
 
 ## Contract (for other clients)
 
