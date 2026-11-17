@@ -12,7 +12,7 @@ The current work is **v0.1.0, the single-node queue release**, approved by the p
 
 The scope page is the source of truth; this is the short form. Every item has an id there.
 
-- **M1** Queue with admission: proposed, ready, claimed, done; atomic `next`.
+- **M1** Queue with admission: proposed, ready, claimed, done; each admitted item records who admitted it and when; atomic `next`, which refuses an agent at its owner-set limit of claimed, unfinished items.
 - **M2** Durable record of claims, handoffs and results; a claim is released only on a confirmed session end or after a long grace period.
 - **M3** Upgrade safety: backup before migrate, refuse unknown schemas, doctor flags a build and database mismatch.
 - **M4** Path holds: existing behaviour, admitted fixes only.
