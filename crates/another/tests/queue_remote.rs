@@ -479,7 +479,7 @@ async fn remote_callers_cannot_act_on_or_read_queue_text() {
         "{lines:?}"
     );
     assert!(
-        lines.contains(&format!("arch released {label}: owner").as_str()),
+        lines.contains(&format!("arch released {label}: delegate").as_str()),
         "{lines:?}"
     );
 

@@ -10,7 +10,8 @@ use std::process::ExitCode;
 
 use another_core::{
     AdmitItem, DoneItem, EditItem, Error, PointerKind, ProposeItem, QueueCaller, QueueFilter,
-    QueueItem, QueueKind, QueuePriority, QueueState, ReleaseItem, Since, Store,
+    QueueGrace, QueueItem, QueueKind, QueueLimits, QueuePriority, QueueState, ReleaseItem, Since,
+    Store,
 };
 use clap::{Args, Subcommand};
 
@@ -307,10 +308,21 @@ fn owner_terminal() -> anyhow::Result<()> {
     Err(Error::Forbidden("owner actions need an interactive terminal".into()).into())
 }
 
+/// `text` as it is safe to print at the prompt: line by line, with every escape, control
+/// or text-direction character turned into a space, so nothing in a flag or an item can
+/// redraw what the owner is asked to approve.
+fn safe_lines(text: &str) -> String {
+    text.trim_end()
+        .split('\n')
+        .map(|line| another_core::single_line(line, usize::MAX))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Print what is about to happen and proceed only on a typed `yes` or `y`.
 fn owner_confirm(what: &str) -> anyhow::Result<()> {
     let mut err = std::io::stderr();
-    writeln!(err, "{}", what.trim_end())?;
+    writeln!(err, "{}", safe_lines(what))?;
     write!(err, "Type yes to confirm: ")?;
     err.flush()?;
     let mut answer = String::new();
@@ -330,9 +342,12 @@ fn as_owner(what: impl FnOnce() -> anyhow::Result<String>) -> anyhow::Result<Que
 }
 
 /// An owner-only command: refused without `--owner`, whatever key or name is presented.
+/// `valid` is the check of the command's own values; a value out of range is refused
+/// before the owner is asked anything.
 fn owner_only(
     owner: bool,
     action: &str,
+    valid: another_core::Result<()>,
     what: impl FnOnce() -> String,
 ) -> anyhow::Result<QueueCaller> {
     if !owner {
@@ -341,25 +356,37 @@ fn owner_only(
         ))
         .into());
     }
+    valid?;
     as_owner(|| Ok(what()))
 }
 
-/// The caller of a command an admitter may run: the owner, or an agent with the key it
-/// presents, if any.
+/// The caller of a command an admitter may run on an item: the owner, or an agent with the
+/// key it presents, if any. For the owner, `shown` reads the item and returns what to print
+/// with the item's revision; the revision comes back so the write applies only to the item
+/// as the owner saw it.
 fn admitter(
     who: QueueWho,
-    what: impl FnOnce() -> anyhow::Result<String>,
-) -> anyhow::Result<QueueCaller> {
+    shown: impl FnOnce() -> anyhow::Result<(String, String)>,
+) -> anyhow::Result<(QueueCaller, Option<String>)> {
     if who.owner {
-        return as_owner(what);
+        let mut revision = None;
+        let caller = as_owner(|| {
+            let (text, at) = shown()?;
+            revision = Some(at);
+            Ok(text)
+        })?;
+        return Ok((caller, revision));
     }
     let agent = who.agent.ok_or_else(|| {
         usage("no agent: pass --agent, set ANOTHER_AGENT, or act as the owner with --owner".into())
     })?;
-    Ok(QueueCaller::Agent {
-        agent,
-        admit_key: std::env::var(ADMIT_KEY_VAR).ok().filter(|k| !k.is_empty()),
-    })
+    Ok((
+        QueueCaller::Agent {
+            agent,
+            admit_key: std::env::var(ADMIT_KEY_VAR).ok().filter(|k| !k.is_empty()),
+        },
+        None,
+    ))
 }
 
 /// The agent of a command only an agent runs.
@@ -417,31 +444,35 @@ pub fn run(store: &Store, cmd: QueueCmd, json: bool) -> anyhow::Result<ExitCode>
             done_when,
             kind,
         } => {
-            let body = body_arg(body)?;
-            let caller = admitter(who, || {
-                Ok(format!(
-                    "Propose an item as the owner:\n  title           {title}\n  kind            {}",
-                    QueueKind::from(kind).flag()
-                ))
-            })?;
-            // A proposal needs no key: the agent proposes as itself.
-            let caller = match caller {
-                QueueCaller::Agent { agent, .. } => QueueCaller::Agent {
-                    agent,
-                    admit_key: None,
-                },
-                owner => owner,
+            let input = ProposeItem {
+                title,
+                body: body_arg(body)?,
+                scope,
+                done_when,
+                kind: kind.into(),
             };
-            let item = store.queue_propose(
-                &caller,
-                ProposeItem {
-                    title,
-                    body,
-                    scope,
-                    done_when,
-                    kind: kind.into(),
-                },
-            )?;
+            input.validate()?;
+            // A proposal needs no key: an agent proposes as itself.
+            let caller = if who.owner {
+                as_owner(|| {
+                    Ok(format!(
+                        "Propose an item as the owner:\n  title           {}\n  kind            {}",
+                        input.title,
+                        input.kind.flag()
+                    ))
+                })?
+            } else {
+                QueueCaller::Agent {
+                    agent: who.agent.ok_or_else(|| {
+                        usage(
+                            "no agent: pass --agent, set ANOTHER_AGENT, or act as the owner with --owner"
+                                .into(),
+                        )
+                    })?,
+                    admit_key: None,
+                }
+            };
+            let item = store.queue_propose(&caller, input)?;
             emit(json, &item, output::queue_item)
         }
         QueueCmd::List {
@@ -487,46 +518,49 @@ pub fn run(store: &Store, cmd: QueueCmd, json: bool) -> anyhow::Result<ExitCode>
             priority,
             for_agent,
         } => {
-            let caller = admitter(who, || {
+            let input = AdmitItem {
+                scope,
+                done_when,
+                priority: priority.map(Into::into),
+                for_agent,
+            };
+            input.validate()?;
+            let (caller, revision) = admitter(who, || {
                 // What the owner approves is the item as the flags leave it.
-                let mut shown = store.queue_item(&item)?;
-                if scope.is_some() {
-                    shown.scope = scope.clone();
+                let (mut shown, revision) = store.queue_item_shown(&item)?;
+                if input.scope.is_some() {
+                    shown.scope = input.scope.clone();
                 }
-                if done_when.is_some() {
-                    shown.done_condition = done_when.clone();
+                if input.done_when.is_some() {
+                    shown.done_condition = input.done_when.clone();
                 }
-                let priority: Option<QueuePriority> = priority.map(Into::into);
-                Ok(describe(
+                let text = describe(
                     "Admit",
                     &shown,
                     &[
-                        ("priority", priority.map(|p| p.as_str().to_string())),
-                        ("for", for_agent.clone()),
+                        ("priority", input.priority.map(|p| p.as_str().to_string())),
+                        ("for", input.for_agent.clone()),
                     ],
-                ))
+                );
+                Ok((text, revision))
             })?;
-            let admitted = store.queue_admit(
-                &caller,
-                &item,
-                AdmitItem {
-                    scope,
-                    done_when,
-                    priority: priority.map(Into::into),
-                    for_agent,
-                },
-            )?;
+            let admitted = match revision {
+                Some(revision) => store.queue_admit_shown(&caller, &item, input, &revision)?,
+                None => store.queue_admit(&caller, &item, input)?,
+            };
             emit(json, &admitted, output::queue_item)
         }
         QueueCmd::Reject { item, who, reason } => {
-            let caller = admitter(who, || {
-                Ok(describe(
-                    "Reject",
-                    &store.queue_item(&item)?,
-                    &[("reason", Some(reason.clone()))],
-                ))
+            QueueItem::validate_reason(&reason)?;
+            let (caller, revision) = admitter(who, || {
+                let (shown, revision) = store.queue_item_shown(&item)?;
+                let text = describe("Reject", &shown, &[("reason", Some(reason.clone()))]);
+                Ok((text, revision))
             })?;
-            let rejected = store.queue_reject(&caller, &item, &reason)?;
+            let rejected = match revision {
+                Some(revision) => store.queue_reject_shown(&caller, &item, &reason, &revision)?,
+                None => store.queue_reject(&caller, &item, &reason)?,
+            };
             emit(json, &rejected, output::queue_item)
         }
         QueueCmd::Edit {
@@ -539,34 +573,38 @@ pub fn run(store: &Store, cmd: QueueCmd, json: bool) -> anyhow::Result<ExitCode>
             for_anyone,
             kind,
         } => {
-            let priority: Option<QueuePriority> = priority.map(Into::into);
-            let kind: Option<QueueKind> = kind.map(Into::into);
-            let caller = admitter(who, || {
-                Ok(describe(
+            let input = EditItem {
+                scope,
+                done_when,
+                priority: priority.map(Into::into),
+                for_agent,
+                for_anyone,
+                kind: kind.map(Into::into),
+            };
+            input.validate()?;
+            let (caller, revision) = admitter(who, || {
+                let (shown, revision) = store.queue_item_shown(&item)?;
+                let text = describe(
                     "Edit",
-                    &store.queue_item(&item)?,
+                    &shown,
                     &[
-                        ("new scope", scope.clone()),
-                        ("new done cond.", done_when.clone()),
-                        ("new priority", priority.map(|p| p.as_str().to_string())),
-                        ("new kind", kind.map(|k| k.flag().to_string())),
-                        ("for", for_agent.clone()),
-                        ("for", for_anyone.then(|| "anyone".to_string())),
+                        ("new scope", input.scope.clone()),
+                        ("new done cond.", input.done_when.clone()),
+                        (
+                            "new priority",
+                            input.priority.map(|p| p.as_str().to_string()),
+                        ),
+                        ("new kind", input.kind.map(|k| k.flag().to_string())),
+                        ("for", input.for_agent.clone()),
+                        ("for", input.for_anyone.then(|| "anyone".to_string())),
                     ],
-                ))
+                );
+                Ok((text, revision))
             })?;
-            let edited = store.queue_edit(
-                &caller,
-                &item,
-                EditItem {
-                    scope,
-                    done_when,
-                    priority,
-                    for_agent,
-                    for_anyone,
-                    kind,
-                },
-            )?;
+            let edited = match revision {
+                Some(revision) => store.queue_edit_shown(&caller, &item, input, &revision)?,
+                None => store.queue_edit(&caller, &item, input)?,
+            };
             emit(json, &edited, output::queue_item)
         }
         QueueCmd::Next { who } => {
@@ -592,14 +630,17 @@ pub fn run(store: &Store, cmd: QueueCmd, json: bool) -> anyhow::Result<ExitCode>
             to,
             reason,
         } => {
-            let caller = admitter(who, || {
-                Ok(describe(
-                    "Release",
-                    &store.queue_item(&item)?,
-                    &[("reason", reason.clone())],
-                ))
+            let input = ReleaseItem { note, to, reason };
+            input.validate()?;
+            let (caller, revision) = admitter(who, || {
+                let (shown, revision) = store.queue_item_shown(&item)?;
+                let text = describe("Release", &shown, &[("reason", input.reason.clone())]);
+                Ok((text, revision))
             })?;
-            let released = store.queue_release(&caller, &item, ReleaseItem { note, to, reason })?;
+            let released = match revision {
+                Some(revision) => store.queue_release_shown(&caller, &item, input, &revision)?,
+                None => store.queue_release(&caller, &item, input)?,
+            };
             emit(json, &released, output::queue_item)
         }
         QueueCmd::Done {
@@ -633,14 +674,16 @@ pub fn run(store: &Store, cmd: QueueCmd, json: bool) -> anyhow::Result<ExitCode>
             limit,
             owner,
         }) => {
-            let caller = owner_only(owner, "setting a limit", || {
+            let valid = QueueLimits::validate(limit);
+            let caller = owner_only(owner, "setting a limit", valid, || {
                 format!("Set the queue limit of {agent} to {limit} as the owner.")
             })?;
             let limits = store.queue_set_limit(&caller, &agent, limit)?;
             emit(json, &limits, output::queue_limits)
         }
         QueueCmd::Limit(QueueLimitCmd::Default { limit, owner }) => {
-            let caller = owner_only(owner, "setting the default limit", || {
+            let valid = QueueLimits::validate(limit);
+            let caller = owner_only(owner, "setting the default limit", valid, || {
                 format!("Set the default queue limit to {limit} as the owner.")
             })?;
             let limits = store.queue_set_default_limit(&caller, limit)?;
@@ -651,7 +694,7 @@ pub fn run(store: &Store, cmd: QueueCmd, json: bool) -> anyhow::Result<ExitCode>
             emit(json, &limits, output::queue_limits)
         }
         QueueCmd::Delegate(QueueDelegateCmd::Add { agent, owner }) => {
-            let caller = owner_only(owner, "naming a delegate", || {
+            let caller = owner_only(owner, "naming a delegate", Ok(()), || {
                 format!(
                     "Name {agent} a queue delegate as the owner. It will admit, reject, edit and release work items with a key that is printed once."
                 )
@@ -665,7 +708,7 @@ pub fn run(store: &Store, cmd: QueueCmd, json: bool) -> anyhow::Result<ExitCode>
             })
         }
         QueueCmd::Delegate(QueueDelegateCmd::Remove { agent, owner }) => {
-            let caller = owner_only(owner, "removing a delegate", || {
+            let caller = owner_only(owner, "removing a delegate", Ok(()), || {
                 format!("Remove {agent} as a queue delegate, as the owner. Its key stops working.")
             })?;
             let left = store.queue_delegate_remove(&caller, &agent)?;
@@ -691,10 +734,15 @@ pub fn run(store: &Store, cmd: QueueCmd, json: bool) -> anyhow::Result<ExitCode>
             duration: Some(duration),
             owner,
         } => {
-            let caller = owner_only(owner, "changing the grace period", || {
+            let seconds = parse_secs(&duration).map_err(|e| Error::Invalid(format!("{e:#}")));
+            let valid = seconds.as_ref().map_or_else(
+                |e| Err(Error::Invalid(e.to_string())),
+                |s| QueueGrace::validate(*s),
+            );
+            let caller = owner_only(owner, "changing the grace period", valid, || {
                 format!("Set the queue grace period to {duration} as the owner.")
             })?;
-            let seconds = parse_secs(&duration).map_err(|e| Error::Invalid(format!("{e:#}")))?;
+            let seconds = seconds?;
             let grace = store.queue_set_grace(&caller, seconds)?;
             emit(json, &grace, output::queue_grace)
         }

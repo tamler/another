@@ -223,7 +223,15 @@ async fn call_err(client: &Client, tool: &str, args: Value) -> String {
 /// terminal showed. `script` is the standard tool for this on macOS and Linux.
 #[cfg(unix)]
 fn in_terminal(home: &Path, args: &[&str], typed: &str) -> String {
+    in_terminal_then(home, args, typed, || {})
+}
+
+/// [`in_terminal`], running `at_prompt` while the prompt is on the screen, before any key
+/// is pressed.
+#[cfg(unix)]
+fn in_terminal_then(home: &Path, args: &[&str], typed: &str, at_prompt: impl FnOnce()) -> String {
     use std::io::Write;
+    let mut at_prompt = Some(at_prompt);
     let exe = env!("CARGO_BIN_EXE_another");
     let mut cmd = Command::new("script");
     if cfg!(target_os = "linux") {
@@ -257,6 +265,9 @@ fn in_terminal(home: &Path, args: &[&str], typed: &str) -> String {
     while let Ok(1) = std::io::Read::read(&mut screen, &mut byte) {
         shown.push(byte[0]);
         if shown.ends_with(b"Type yes to confirm: ") {
+            if let Some(act) = at_prompt.take() {
+                act();
+            }
             if let Some(keys) = keyboard.as_mut() {
                 keys.write_all(typed.as_bytes()).unwrap();
                 keys.flush().unwrap();
@@ -266,6 +277,125 @@ fn in_terminal(home: &Path, args: &[&str], typed: &str) -> String {
     drop(keyboard);
     let out = child.wait_with_output().unwrap();
     format!("{}{}", text(&shown), text(&out.stderr))
+}
+
+/// Review R1, P2-1: the owner's yes applies only to the item as the prompt showed it. An
+/// edit that lands while the prompt is open makes the write fail, for every owner action
+/// on an item.
+#[cfg(unix)]
+#[test]
+fn the_owners_yes_applies_only_to_what_was_shown() {
+    let fx = Fx::new();
+    let key = fx.delegate_key();
+    let arch = QueueCaller::Agent {
+        agent: "arch".into(),
+        admit_key: Some(key),
+    };
+    let item = fx.propose("ann", "shown to the owner", QueueKind::Work);
+    let q = item.label.as_str();
+    let edit_now = |done_when: &str| {
+        fx.store
+            .queue_edit(
+                &arch,
+                q,
+                EditItem {
+                    done_when: Some(done_when.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    };
+    let refused = format!("{q} changed while you were deciding");
+
+    // Admit: a delegate edits the done condition while the prompt is open.
+    let shown = in_terminal_then(&fx.home, &["queue", "admit", q, "--owner"], "yes\n", || {
+        edit_now("something the owner never saw")
+    });
+    assert!(shown.contains("the tests pass"), "{shown}");
+    assert!(!shown.contains("never saw"), "{shown}");
+    assert!(shown.contains(&refused), "{shown}");
+    let now = fx.item(q);
+    assert_eq!(now.state, QueueState::Proposed, "{shown}");
+    assert!(now.admitted.is_none());
+    assert_eq!(fx.events("queue.admitted"), 0);
+    // A note is a change too: the owner has not read it.
+    let shown = in_terminal_then(&fx.home, &["queue", "admit", q, "--owner"], "yes\n", || {
+        fx.store
+            .queue_note("bob", q, "wait, this is wrong")
+            .unwrap();
+    });
+    assert!(shown.contains(&refused), "{shown}");
+    assert_eq!(fx.item(q).state, QueueState::Proposed);
+
+    // Reject and edit are guarded the same way.
+    let shown = in_terminal_then(
+        &fx.home,
+        &["queue", "reject", q, "--reason", "no", "--owner"],
+        "yes\n",
+        || edit_now("changed before the reject"),
+    );
+    assert!(shown.contains(&refused), "{shown}");
+    assert_eq!(fx.item(q).state, QueueState::Proposed);
+    let shown = in_terminal_then(
+        &fx.home,
+        &["queue", "edit", q, "--priority", "high", "--owner"],
+        "yes\n",
+        || edit_now("changed before the edit"),
+    );
+    assert!(shown.contains(&refused), "{shown}");
+    assert_eq!(fx.item(q).priority, QueuePriority::Normal);
+
+    // With nothing changed in between, the yes admits what was shown.
+    let shown = in_terminal(&fx.home, &["queue", "admit", q, "--owner"], "yes\n");
+    assert!(shown.contains("changed before the edit"), "{shown}");
+    let now = fx.item(q);
+    assert_eq!(now.state, QueueState::Ready, "{shown}");
+    assert_eq!(
+        now.done_condition.as_deref(),
+        Some("changed before the edit")
+    );
+
+    // Release: the claim the owner was shown is given back and taken by someone else.
+    fx.store.queue_next("bob").unwrap().claimed.unwrap();
+    let shown = in_terminal_then(
+        &fx.home,
+        &["queue", "release", q, "--reason", "back", "--owner"],
+        "yes\n",
+        || {
+            fx.store
+                .queue_release(&QueueCaller::agent("bob"), q, ReleaseItem::default())
+                .unwrap();
+            fx.store.queue_next("cy").unwrap().claimed.unwrap();
+        },
+    );
+    assert!(shown.contains("claimed by      bob"), "{shown}");
+    assert!(shown.contains(&refused), "{shown}");
+    assert_eq!(fx.item(q).claim.unwrap().agent, "cy", "cy keeps its claim");
+
+    // The command's own values are checked before the owner is asked anything, and what
+    // is printed at the prompt carries no escape sequence.
+    for args in [
+        vec!["queue", "grace", "1h", "--owner"],
+        vec!["queue", "grace", "soon", "--owner"],
+        vec!["queue", "limit", "set", "bob", "99", "--owner"],
+        vec!["queue", "limit", "default", "21", "--owner"],
+        vec![
+            "queue",
+            "reject",
+            q,
+            "--reason",
+            "x\u{1b}[2K\rAdmit",
+            "--owner",
+        ],
+        vec!["queue", "edit", q, "--scope", "not a scope id", "--owner"],
+        vec!["queue", "propose", "--title", "bad\u{1b}[2J", "--owner"],
+    ] {
+        let shown = in_terminal(&fx.home, &args, "yes\n");
+        assert!(!shown.contains("Type yes to confirm"), "{args:?}: {shown}");
+        assert!(!shown.contains('\u{1b}'), "{args:?}: {shown:?}");
+    }
+    assert_eq!(fx.store.queue_grace().unwrap().grace_seconds, 86_400);
+    assert_eq!(fx.store.queue_limits().unwrap().default_limit, 1);
 }
 
 // T2

@@ -2358,7 +2358,7 @@ fn an_admin_release_tells_the_agent() {
         fmt_ts(T0 + 1000).as_str(),
         "an admitter released it",
         "kept in the item's history",
-        "It will not be offered to you again unless an admitter reserves it for you.",
+        "It will not be offered to you again for the next hour unless an admitter reserves it for you.",
         "(Automatic notice from Another.)",
     ] {
         assert!(
@@ -2688,7 +2688,11 @@ fn no_item_text_reaches_the_activity_feed() {
     assert_eq!(line("queue.admitted"), "arch admitted Q1 (M1)");
     assert_eq!(line("queue.claimed"), "ann claimed Q1 (M1)");
     assert_eq!(line("queue.completed"), "cy completed Q1 (M1)");
-    assert_eq!(line("queue.released"), "arch released Q1 (M1): owner");
+    assert_eq!(
+        line("queue.released"),
+        "arch released Q1 (M1): delegate",
+        "the authority that acted, not the reason code `owner`"
+    );
     assert_eq!(line("queue.future"), "seed: queue.future");
     // The summary of a window and the catch-up digest carry no marker either.
     let summary = fx.store.activity_summary(Some(Since::Time(0))).unwrap();
@@ -2706,4 +2710,218 @@ fn no_item_text_reaches_the_activity_feed() {
         "whats_new shows no queue event"
     );
     assert!("queue".parse::<ActivityKind>().is_ok());
+}
+
+/// Review R1, P2-1: a write that carries the revision a caller was shown is refused once
+/// the item has changed, and goes through when it has not.
+#[test]
+fn a_shown_write_is_refused_once_the_item_has_changed() {
+    let fx = Fx::new();
+    let arch = fx.delegate();
+    let item = fx.propose("ann", "shown");
+    let q = item.label.as_str();
+    let edit = |text: &str| EditItem {
+        done_when: Some(text.into()),
+        ..Default::default()
+    };
+    let (seen, revision) = fx.store.queue_item_shown(q).unwrap();
+    assert_eq!(seen.done_condition.as_deref(), Some("the tests pass"));
+    fx.store
+        .queue_edit(&arch, q, edit("not what was shown"))
+        .unwrap();
+    let before = fx.snapshot();
+    let stale = |r: Result<QueueItem>| {
+        let err = r.unwrap_err();
+        assert_eq!(err.code(), "conflict");
+        assert!(
+            err.to_string()
+                .contains(&format!("{q} changed while you were deciding")),
+            "{err}"
+        );
+    };
+    stale(
+        fx.store
+            .queue_admit_shown(&owner(), q, AdmitItem::default(), &revision),
+    );
+    stale(fx.store.queue_reject_shown(&owner(), q, "no", &revision));
+    stale(
+        fx.store
+            .queue_edit_shown(&owner(), q, edit("again"), &revision),
+    );
+    assert_eq!(fx.snapshot(), before, "a refused write changes nothing");
+    // An edit that changes nothing leaves the revision alone; a note moves it.
+    let (_, revision) = fx.store.queue_item_shown(q).unwrap();
+    fx.store
+        .queue_edit(&arch, q, edit("not what was shown"))
+        .unwrap();
+    assert_eq!(fx.store.queue_item_shown(q).unwrap().1, revision);
+    fx.store.queue_note("bob", q, "read this first").unwrap();
+    stale(
+        fx.store
+            .queue_admit_shown(&owner(), q, AdmitItem::default(), &revision),
+    );
+    // Unchanged since it was shown: the write goes through.
+    let (_, revision) = fx.store.queue_item_shown(q).unwrap();
+    let admitted = fx
+        .store
+        .queue_admit_shown(&owner(), q, AdmitItem::default(), &revision)
+        .unwrap();
+    assert_eq!(admitted.state, QueueState::Ready);
+    // Release: the claim that was shown is gone by the time of the yes.
+    fx.claim("ann");
+    let (_, revision) = fx.store.queue_item_shown(q).unwrap();
+    fx.store
+        .queue_release(&agent("ann"), q, ReleaseItem::default())
+        .unwrap();
+    fx.claim("bob");
+    let back = ReleaseItem {
+        reason: Some("back".into()),
+        ..Default::default()
+    };
+    stale(
+        fx.store
+            .queue_release_shown(&owner(), q, back.clone(), &revision),
+    );
+    assert_eq!(fx.item(q).claim.unwrap().agent, "bob");
+    let (_, revision) = fx.store.queue_item_shown(q).unwrap();
+    fx.store
+        .queue_release_shown(&owner(), q, back, &revision)
+        .unwrap();
+    // The owner's own release reads as the owner's in the feed.
+    let feed = fx
+        .store
+        .activity(ActivityQuery {
+            since: Some(Since::Time(0)),
+            limit: 500,
+            kinds: vec![ActivityKind::Queue],
+        })
+        .unwrap();
+    assert_eq!(
+        feed.items.last().unwrap().summary,
+        format!("owner released {q} (M1): owner")
+    );
+}
+
+/// Review R1, P3-6 and P3-3: one-line text refuses the Unicode line and paragraph
+/// separators, and a carriage return is refused with a message that names it.
+#[test]
+fn one_line_text_refuses_line_separators_and_carriage_returns_are_named() {
+    let fx = Fx::new();
+    let propose = |title: &str, body: &str, scope: &str| {
+        fx.store.queue_propose(
+            &agent("ann"),
+            ProposeItem {
+                title: title.into(),
+                body: body.into(),
+                scope: Some(scope.into()),
+                ..Default::default()
+            },
+        )
+    };
+    for separator in ['\u{2028}', '\u{2029}'] {
+        let forged = format!("a{separator}Q99  forged");
+        let err = propose(&forged, "", "M1").unwrap_err();
+        assert_eq!(err.code(), "invalid", "{separator:?} in a title");
+        assert!(err.to_string().contains("one line"), "{err}");
+        assert_eq!(code(propose("t", "", &forged)), "invalid", "in a scope id");
+    }
+    let item = propose("t", "", "M1").unwrap();
+    fx.store
+        .queue_admit(
+            &owner(),
+            &item.label,
+            AdmitItem {
+                done_when: Some("done".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    fx.claim("ann");
+    let pointer = DoneItem {
+        summary: "ok".into(),
+        pointer_kind: PointerKind::File,
+        pointer: "docs/a\u{2028}b.md".into(),
+    };
+    assert_eq!(
+        code(fx.store.queue_done("ann", &item.label, pointer)),
+        "invalid"
+    );
+
+    let err = propose("crlf", "line1\r\nline2\r\n", "M1").unwrap_err();
+    assert_eq!(err.code(), "invalid");
+    assert!(err.to_string().contains("carriage return"), "{err}");
+    assert!(
+        !err.to_string().contains("line breaks and tabs are allowed"),
+        "{err}"
+    );
+    // Another control character still gets the general message.
+    let err = propose("esc", "a\u{1b}b", "M1").unwrap_err();
+    assert!(
+        err.to_string().contains("line breaks and tabs are allowed"),
+        "{err}"
+    );
+}
+
+/// The architect's amendment to the skip rule: the agent that gave an item up is skipped
+/// for one hour, not for ever, so a node with one agent can take its item back.
+#[test]
+fn a_skip_ends_one_hour_after_the_release() {
+    let fx = Fx::new();
+    // One agent with a seat.
+    for other in ["bob", "cy", "arch"] {
+        fx.store.queue_set_limit(&owner(), other, 0).unwrap();
+    }
+    let item = fx.ready("the only item");
+    assert_eq!(fx.claim("ann").label, item.label);
+    let released = fx
+        .store
+        .queue_release(&agent("ann"), &item.label, ReleaseItem::default())
+        .unwrap();
+    assert_eq!(released.skip_agent.as_deref(), Some("ann"));
+    let offered = |fx: &Fx| fx.store.queue_next("ann").unwrap().claimed.map(|i| i.label);
+    assert_eq!(offered(&fx), None, "skipped straight after the release");
+    assert_eq!(
+        labels(&fx.store.queue_needs_owner().unwrap().nobody_can_take),
+        [item.label.as_str()],
+        "and listed for the owner meanwhile"
+    );
+    fx.advance(HOUR - 1);
+    assert_eq!(offered(&fx), None, "still skipped just under an hour on");
+    fx.advance(1);
+    assert!(
+        fx.store
+            .queue_needs_owner()
+            .unwrap()
+            .nobody_can_take
+            .is_empty(),
+        "after an hour the agent can take it again"
+    );
+    assert_eq!(offered(&fx), Some(item.label.clone()));
+    assert_eq!(
+        fx.item(&item.label).skip_agent,
+        None,
+        "a claim clears the skip"
+    );
+
+    // The hour runs from the latest release, and an admin release is the same.
+    fx.store
+        .queue_release(
+            &owner(),
+            &item.label,
+            ReleaseItem {
+                reason: Some("not now".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    fx.advance(HOUR - 1);
+    assert_eq!(offered(&fx), None);
+    fx.advance(1);
+    assert_eq!(offered(&fx), Some(item.label.clone()));
+    // Within the hour another agent is still offered it at once.
+    fx.store.queue_set_limit(&owner(), "bob", 1).unwrap();
+    fx.store
+        .queue_release(&agent("ann"), &item.label, ReleaseItem::default())
+        .unwrap();
+    assert_eq!(fx.claim("bob").label, item.label);
 }

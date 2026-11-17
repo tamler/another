@@ -1482,7 +1482,7 @@ mod upgrade_tests {
         assert_eq!(catalog(&db), catalog_at(8), "the fixture is a true v8 home");
         drop(db);
 
-        // A normal open upgrades it, and the result matches a fresh v10 home.
+        // A normal open upgrades it, and the result matches a fresh home at the latest schema.
         let store = Store::open(&home).unwrap();
         let db = Connection::open(home.join(DB_FILE)).unwrap();
         assert_eq!(version(&db), MIGRATIONS.len() as i64);

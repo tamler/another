@@ -579,8 +579,11 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
                 "queue.claimed" => format!("{actor} claimed {item}"),
                 "queue.noted" => format!("{actor} added a note to {item}"),
                 "queue.released" => {
+                    // The reason code `owner` covers any admitter; the line says which
+                    // authority acted, so a delegate's release does not read as the owner's.
                     let reason = match s("reason").as_str() {
                         "agent" => "agent",
+                        "owner" if s("authority") == "delegate" => "delegate",
                         "owner" => "owner",
                         "session_end" => "session_end",
                         "grace" => "grace",

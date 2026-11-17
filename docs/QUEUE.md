@@ -49,7 +49,7 @@ If you find work nobody asked for, propose it and move on. A security or data-lo
 
 `queue done` takes a summary (up to 500 characters) and exactly one pointer: `--pr` (a number, with or without `#`, or an `https` URL), `--commit` (7 to 64 hex characters) or `--file` (a path; it is not checked on disk, because it may be in another checkout). Only the claimer can finish or give back its item.
 
-A reservation (`--for`) is a first offer, not a restriction: it ends when the reserved agent's claim is released for any reason. The agent that gives an item up is not offered it again until an admitter changes the reservation.
+A reservation (`--for`) is a first offer, not a restriction: it ends when the reserved agent's claim is released for any reason. The agent that gave an item up, or had it taken back by an admitter, is skipped: `next` does not offer it that item. The skip ends at the first of three things: one hour passes since the release; another agent claims the item (so if that agent releases it in turn, the first agent may be offered it again); or an admitter sets or clears the reservation with `queue edit --for` or `--for-anyone`. The hour means a node with a single agent is not left with a ready item nobody can take; until it has passed, the item is listed for the owner under "Ready with nobody to take them".
 
 ### MCP tools
 
@@ -65,6 +65,8 @@ No MCP tool admits, rejects, edits, sets a limit, names a delegate or changes th
 ## For the owner
 
 An owner action is a command run with `--owner`. It needs a terminal on standard input and standard error, prints what is about to happen, and proceeds only when you type `yes` or `y`. No flag, variable or config skips that. Without a terminal it fails: `owner actions need an interactive terminal`.
+
+Your yes applies only to what you were shown. The command's own values are checked before you are asked, and what is printed has escape and control characters replaced by spaces. If the item changes while the prompt is open (an edit, a note, a claim), the command fails with `conflict` and changes nothing: look at the item again and run it again.
 
 ```text
 another queue list --needs-owner                     # what is waiting on you
@@ -128,7 +130,7 @@ While an item is `proposed`, any admitter may raise it from `work` to a fast-lan
 
 ### When an admitter releases a claim
 
-The former claimer is mailed: subject `Claim released: Q12`, with the time, the reason as fixed words, and that the claim and notes are kept in the item's history. The notice comes from the delegate that released the claim; when the owner did it, it comes from the former claimer's own address, because the system has no agent. A handoff mails the named agent: `Handoff: Q12`. No free text goes into these mails: not the reason, not a note, not the title. If a notice cannot be sent, the release stands and the failure is recorded and shown in the owner list.
+The former claimer is mailed: subject `Claim released: Q12`, with the time, the reason as fixed words, that the claim and notes are kept in the item's history, and that the item will not be offered to that agent again for the next hour unless an admitter reserves it for it. The notice comes from the delegate that released the claim; when the owner did it, it comes from the former claimer's own address, because the system has no agent. A handoff mails the named agent: `Handoff: Q12`. No free text goes into these mails: not the reason, not a note, not the title. If a notice cannot be sent, the release stands and the failure is recorded and shown in the owner list.
 
 ### The grace period
 
@@ -149,7 +151,7 @@ It prints counts of items, claims, releases by reason, completions and distinct 
 
 Queue events are never sent to federation peers. Remote callers cannot call the queue tools.
 
-The activity feed (`another activity --kinds queue`, the `activity_feed` and `activity_summarize` tools, `GET /activity` and the dashboard's activity list) does show queue events, to local and remote readers alike. A line names the actor, the verb, the item's number, its scope id and a reason code, for example `codex@shop claimed Q12 (M1)`. It never shows the title, the body, the done condition, notes, reasons, result text or error text. So a remote caller with a valid token can learn that items exist, their numbers, scope ids, kinds, who holds them and when; it cannot read their text or act on them. `whats_new` shows no queue events.
+The activity feed (`another activity --kinds queue`, the `activity_feed` and `activity_summarize` tools, `GET /activity` and the dashboard's activity list) does show queue events, to local and remote readers alike. A line names the actor, the verb, the item's number, its scope id and a reason code, for example `codex@shop claimed Q12 (M1)`. A release by an admitter ends in `owner` or `delegate`, whichever acted. It never shows the title, the body, the done condition, notes, reasons, result text or error text. So a remote caller with a valid token can learn that items exist, their numbers, scope ids, kinds, who holds them and when; it cannot read their text or act on them. `whats_new` shows no queue events.
 
 All local agents can read every item, including security and data-loss items.
 
@@ -170,13 +172,13 @@ Whether an agent's shell has a terminal depends on the client. Checked on 17 Nov
 |---|---|---|
 | (none) | 0 | Success, including `next` with nothing ready |
 | usage | 2 | `done` without exactly one pointer; `--to` with `--reason`; `--owner` on `next`, `done`, `note` or `audit`; an unknown state, kind or priority |
-| `conflict` | 3 | The item is not in the state the command needs (the message names its state and claimer); `next` refused |
+| `conflict` | 3 | The item is not in the state the command needs (the message names its state and claimer); the item changed while the owner's prompt was open; `next` refused |
 | `not_found` | 1 | Unknown item, agent or delegate |
 | `invalid` | 1 | Text that breaks the rules below; admit with no scope or done condition; a bad pointer; a limit outside 0 to 20; a grace period outside 2 hours to 30 days; `--for` or `--to` naming the caller, an agent on another node, or an agent with limit 0 |
 | `forbidden` | 1 | Not an admitter; a missing or wrong delegate key; a delegate key on an owner-only action; `--owner` without a terminal or a typed yes; `done` or `release` by an agent that is not the claimer; a kind change the caller may not make; any remote caller |
 | `db` | 1 | The write lock was not obtained in time. Nothing changed; run the command again |
 
-Text rules: the title is one line of 1 to 200 characters. The body is up to 10,000 bytes. The done condition is 1 to 1,000 characters, a note 1 to 2,000, a reason or a result summary 1 to 500. Escape and other control characters and bidirectional overrides are refused everywhere; line breaks and tabs are allowed in the body, the done condition, notes, reasons and the summary.
+Text rules: the title is one line of 1 to 200 characters. The body is up to 10,000 bytes. The done condition is 1 to 1,000 characters, a note 1 to 2,000, a reason or a result summary 1 to 500. Escape and other control characters and bidirectional overrides are refused everywhere; line breaks (a line feed; a carriage return is refused, so convert CRLF line endings first) and tabs are allowed in the body, the done condition, notes, reasons and the summary. One-line text (the title, the scope id, a result pointer) also refuses the Unicode line and paragraph separators.
 
 ## Item JSON
 

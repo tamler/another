@@ -32,6 +32,8 @@ pub const MAX_QUEUE_GRACE_SECONDS: i64 = 30 * 86_400;
 
 /// A claim, or a reserved agent, is quiet after this long with no sign of life.
 const QUIET_MS: i64 = 3_600_000;
+/// How long the agent that gave an item up is not offered it again.
+const SKIP_MS: i64 = 3_600_000;
 const FAILED_NOTICE_WINDOW_MS: i64 = 24 * 3_600_000;
 const SELF_ADMITTED_RECENT_MS: i64 = 7 * 24 * 3_600_000;
 
@@ -746,9 +748,19 @@ fn item_now(conn: &Connection, node_id: &str, item_id: &str) -> Result<QueueItem
 }
 
 fn no_unsafe(what: &str, text: &str, multi_line: bool) -> Result<()> {
-    let bad = |c: char| is_unsafe_text_char(c) && !(multi_line && (c == '\n' || c == '\t'));
+    // The Unicode line and paragraph separators end a line for some readers, so one-line
+    // text refuses them as it refuses a line feed.
+    let bad = |c: char| {
+        (is_unsafe_text_char(c) && !(multi_line && (c == '\n' || c == '\t')))
+            || (!multi_line && matches!(c, '\u{2028}' | '\u{2029}'))
+    };
     if !text.chars().any(bad) {
         return Ok(());
+    }
+    if multi_line && text.contains('\r') {
+        return Err(Error::Invalid(format!(
+            "{what} contains a carriage return: end lines with a line feed only (convert CRLF line endings first)"
+        )));
     }
     Err(Error::Invalid(if multi_line {
         format!("{what} must be plain text: line breaks and tabs are allowed, escape and other control characters are not")
@@ -823,6 +835,148 @@ fn check_pointer(kind: PointerKind, pointer: &str) -> Result<()> {
             format!("--file takes a path of 1 to {MAX_POINTER_CHARS} characters on one line")
         }
     }))
+}
+
+impl ProposeItem {
+    /// Check the texts against the queue's rules, before anything is read or written.
+    pub fn validate(&self) -> Result<()> {
+        check_text("the title", &self.title, MAX_TITLE_CHARS, false)?;
+        no_unsafe("the body", &self.body, true)?;
+        if self.body.len() > MAX_BODY_BYTES {
+            return Err(Error::Invalid(format!(
+                "the body is larger than {MAX_BODY_BYTES} bytes"
+            )));
+        }
+        check_scope_and_done(self.scope.as_deref(), self.done_when.as_deref())
+    }
+}
+
+impl AdmitItem {
+    /// Check the texts against the queue's rules, before anything is read or written.
+    pub fn validate(&self) -> Result<()> {
+        check_scope_and_done(self.scope.as_deref(), self.done_when.as_deref())
+    }
+}
+
+impl EditItem {
+    /// Check the texts, and that the edit asks for one change at least.
+    pub fn validate(&self) -> Result<()> {
+        check_scope_and_done(self.scope.as_deref(), self.done_when.as_deref())?;
+        if self.for_agent.is_some() && self.for_anyone {
+            return Err(Error::Invalid(
+                "pass --for AGENT or --for-anyone, not both".into(),
+            ));
+        }
+        let nothing = self.scope.is_none()
+            && self.done_when.is_none()
+            && self.priority.is_none()
+            && self.for_agent.is_none()
+            && !self.for_anyone
+            && self.kind.is_none();
+        if nothing {
+            return Err(Error::Invalid(
+                "nothing to change: pass --scope, --done-when, --priority, --for, --for-anyone or --kind".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ReleaseItem {
+    /// Check the note and the reason, and that `to` and `reason` are not both given.
+    pub fn validate(&self) -> Result<()> {
+        if let Some(note) = &self.note {
+            check_text("the note", note, MAX_NOTE_CHARS, true)?;
+        }
+        if let Some(reason) = &self.reason {
+            QueueItem::validate_reason(reason)?;
+        }
+        if self.to.is_some() && self.reason.is_some() {
+            return Err(Error::Invalid(
+                "pass --to (the claimer hands the item on) or --reason (an admitter releases it), not both".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl QueueItem {
+    /// Check an admitter's reason for rejecting an item or releasing a claim.
+    pub fn validate_reason(reason: &str) -> Result<()> {
+        check_text("the reason", reason, MAX_REASON_CHARS, true)
+    }
+}
+
+impl QueueLimits {
+    /// Check a limit: 0 to 20.
+    pub fn validate(limit: i64) -> Result<()> {
+        check_limit(limit)
+    }
+}
+
+impl QueueGrace {
+    /// Check a grace period in seconds: 2 hours to 30 days.
+    pub fn validate(seconds: i64) -> Result<()> {
+        if (MIN_QUEUE_GRACE_SECONDS..=MAX_QUEUE_GRACE_SECONDS).contains(&seconds) {
+            Ok(())
+        } else {
+            Err(Error::Invalid(
+                "the grace period must be between 2 hours and 30 days".into(),
+            ))
+        }
+    }
+}
+
+fn check_scope_and_done(scope: Option<&str>, done_when: Option<&str>) -> Result<()> {
+    if let Some(scope) = scope {
+        check_scope(scope)?;
+    }
+    if let Some(done_when) = done_when {
+        check_done_condition(done_when)?;
+    }
+    Ok(())
+}
+
+/// What changes whenever an item does: the id of its last history row. Every transition,
+/// note and edit that changes anything writes one.
+fn revision_of(conn: &Connection, item_id: &str) -> Result<String> {
+    Ok(conn
+        .query_row(
+            "SELECT event_id FROM queue_history WHERE item_id = ?1 ORDER BY rowid DESC LIMIT 1",
+            [item_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or_default())
+}
+
+/// Refuse a write whose caller decided on an earlier state of the item than the one it
+/// would change. `shown` is the revision the caller was shown, if it was shown one.
+fn unchanged_since(conn: &Connection, row: &ItemRow, shown: Option<&str>) -> Result<()> {
+    match shown {
+        Some(revision) if revision_of(conn, &row.item_id)? != revision => {
+            Err(Error::Conflict(format!(
+                "{label} changed while you were deciding; nothing was done. Look again with another queue show {label}, then run the command again",
+                label = row.label()
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Whether the item's skip still holds: it ends one hour after the release or handoff that
+/// set it, so a node with one agent is not left with a ready item nobody can take.
+fn skip_holds(conn: &Connection, row: &ItemRow, now: i64) -> Result<bool> {
+    if row.skip_agent.is_none() {
+        return Ok(false);
+    }
+    let given_up: Option<i64> = conn.query_row(
+        "SELECT max(at) FROM queue_history
+         WHERE item_id = ?1 AND kind IN ('queue.released', 'queue.handoff')",
+        [&row.item_id],
+        |r| r.get(0),
+    )?;
+    Ok(given_up.is_none_or(|at| now.saturating_sub(at) < SKIP_MS))
 }
 
 fn setting(conn: &Connection, key: &str, default: i64) -> Result<i64> {
@@ -1096,19 +1250,7 @@ fn unclaim_tx(
 impl Store {
     /// Propose an item. Any local agent may, and so may the owner. Nothing is mailed.
     pub fn queue_propose(&self, caller: &QueueCaller, input: ProposeItem) -> Result<QueueItem> {
-        check_text("the title", &input.title, MAX_TITLE_CHARS, false)?;
-        no_unsafe("the body", &input.body, true)?;
-        if input.body.len() > MAX_BODY_BYTES {
-            return Err(Error::Invalid(format!(
-                "the body is larger than {MAX_BODY_BYTES} bytes"
-            )));
-        }
-        if let Some(scope) = &input.scope {
-            check_scope(scope)?;
-        }
-        if let Some(done_when) = &input.done_when {
-            check_done_condition(done_when)?;
-        }
+        input.validate()?;
         self.write(|tx| {
             let proposer = match caller {
                 QueueCaller::Owner => None,
@@ -1166,15 +1308,33 @@ impl Store {
         item: &str,
         input: AdmitItem,
     ) -> Result<QueueItem> {
-        if let Some(scope) = &input.scope {
-            check_scope(scope)?;
-        }
-        if let Some(done_when) = &input.done_when {
-            check_done_condition(done_when)?;
-        }
+        self.admit(caller, item, input, None)
+    }
+
+    /// [`Store::queue_admit`] for a caller that was shown the item first: refused with
+    /// `conflict` unless the item is still at `revision` (see [`Store::queue_item_shown`]).
+    pub fn queue_admit_shown(
+        &self,
+        caller: &QueueCaller,
+        item: &str,
+        input: AdmitItem,
+        revision: &str,
+    ) -> Result<QueueItem> {
+        self.admit(caller, item, input, Some(revision))
+    }
+
+    fn admit(
+        &self,
+        caller: &QueueCaller,
+        item: &str,
+        input: AdmitItem,
+        shown: Option<&str>,
+    ) -> Result<QueueItem> {
+        input.validate()?;
         self.write(|tx| {
             let authority = admitter(tx, tx.node_id, caller)?;
             let row = find_item(tx, tx.node_id, item)?;
+            unchanged_since(tx, &row, shown)?;
             authority.may_decide(row.kind)?;
             if row.state != QueueState::Proposed {
                 return Err(wrong_state(tx, &row, "only a proposed item is admitted")?);
@@ -1263,10 +1423,32 @@ impl Store {
         item: &str,
         reason: &str,
     ) -> Result<QueueItem> {
-        check_text("the reason", reason, MAX_REASON_CHARS, true)?;
+        self.reject(caller, item, reason, None)
+    }
+
+    /// [`Store::queue_reject`] for a caller that was shown the item first.
+    pub fn queue_reject_shown(
+        &self,
+        caller: &QueueCaller,
+        item: &str,
+        reason: &str,
+        revision: &str,
+    ) -> Result<QueueItem> {
+        self.reject(caller, item, reason, Some(revision))
+    }
+
+    fn reject(
+        &self,
+        caller: &QueueCaller,
+        item: &str,
+        reason: &str,
+        shown: Option<&str>,
+    ) -> Result<QueueItem> {
+        QueueItem::validate_reason(reason)?;
         self.write(|tx| {
             let authority = admitter(tx, tx.node_id, caller)?;
             let row = find_item(tx, tx.node_id, item)?;
+            unchanged_since(tx, &row, shown)?;
             authority.may_decide(row.kind)?;
             if !matches!(row.state, QueueState::Proposed | QueueState::Ready) {
                 return Err(wrong_state(
@@ -1311,31 +1493,32 @@ impl Store {
         item: &str,
         input: EditItem,
     ) -> Result<QueueItem> {
-        if let Some(scope) = &input.scope {
-            check_scope(scope)?;
-        }
-        if let Some(done_when) = &input.done_when {
-            check_done_condition(done_when)?;
-        }
-        if input.for_agent.is_some() && input.for_anyone {
-            return Err(Error::Invalid(
-                "pass --for AGENT or --for-anyone, not both".into(),
-            ));
-        }
-        let nothing = input.scope.is_none()
-            && input.done_when.is_none()
-            && input.priority.is_none()
-            && input.for_agent.is_none()
-            && !input.for_anyone
-            && input.kind.is_none();
-        if nothing {
-            return Err(Error::Invalid(
-                "nothing to change: pass --scope, --done-when, --priority, --for, --for-anyone or --kind".into(),
-            ));
-        }
+        self.edit(caller, item, input, None)
+    }
+
+    /// [`Store::queue_edit`] for a caller that was shown the item first.
+    pub fn queue_edit_shown(
+        &self,
+        caller: &QueueCaller,
+        item: &str,
+        input: EditItem,
+        revision: &str,
+    ) -> Result<QueueItem> {
+        self.edit(caller, item, input, Some(revision))
+    }
+
+    fn edit(
+        &self,
+        caller: &QueueCaller,
+        item: &str,
+        input: EditItem,
+        shown: Option<&str>,
+    ) -> Result<QueueItem> {
+        input.validate()?;
         self.write(|tx| {
             let authority = admitter(tx, tx.node_id, caller)?;
             let row = find_item(tx, tx.node_id, item)?;
+            unchanged_since(tx, &row, shown)?;
             authority.may_decide(row.kind)?;
             if !matches!(row.state, QueueState::Proposed | QueueState::Ready) {
                 return Err(wrong_state(
@@ -1489,10 +1672,13 @@ impl Store {
                         "SELECT {ITEM_COLUMNS} FROM queue_items
                          WHERE state = 'ready' AND node_id = ?1
                            AND (for_agent IS NULL OR for_agent = ?2)
-                           AND (skip_agent IS NULL OR skip_agent != ?2)
+                           AND (skip_agent IS NULL OR skip_agent != ?2
+                                OR (SELECT max(h.at) FROM queue_history h
+                                    WHERE h.item_id = queue_items.item_id
+                                      AND h.kind IN ('queue.released', 'queue.handoff')) <= ?3)
                          ORDER BY priority, admitted_at, seq LIMIT 1"
                     ),
-                    params![tx.node_id, me.id],
+                    params![tx.node_id, me.id, tx.now - SKIP_MS],
                     row_from,
                 )
                 .optional()?;
@@ -1510,8 +1696,8 @@ impl Store {
                 params![row.item_id, me.id, tx.now, session],
             )?;
             if changed != 1 {
-                return Err(Error::Invalid(format!(
-                    "internal error: claiming {} changed {changed} rows; nothing was claimed",
+                return Err(Error::Conflict(format!(
+                    "claiming {} changed {changed} rows, not one; nothing was claimed. Run the command again",
                     row.label()
                 )));
             }
@@ -1572,19 +1758,31 @@ impl Store {
         item: &str,
         input: ReleaseItem,
     ) -> Result<QueueItem> {
-        if let Some(note) = &input.note {
-            check_text("the note", note, MAX_NOTE_CHARS, true)?;
-        }
-        if let Some(reason) = &input.reason {
-            check_text("the reason", reason, MAX_REASON_CHARS, true)?;
-        }
-        if input.to.is_some() && input.reason.is_some() {
-            return Err(Error::Invalid(
-                "pass --to (the claimer hands the item on) or --reason (an admitter releases it), not both".into(),
-            ));
-        }
+        self.release(caller, item, input, None)
+    }
+
+    /// [`Store::queue_release`] for a caller that was shown the item first.
+    pub fn queue_release_shown(
+        &self,
+        caller: &QueueCaller,
+        item: &str,
+        input: ReleaseItem,
+        revision: &str,
+    ) -> Result<QueueItem> {
+        self.release(caller, item, input, Some(revision))
+    }
+
+    fn release(
+        &self,
+        caller: &QueueCaller,
+        item: &str,
+        input: ReleaseItem,
+        shown: Option<&str>,
+    ) -> Result<QueueItem> {
+        input.validate()?;
         self.write(|tx| {
             let row = find_item(tx, tx.node_id, item)?;
+            unchanged_since(tx, &row, shown)?;
             let claimer = match caller {
                 QueueCaller::Agent { agent, .. } => {
                     let me = resolve_agent(tx, tx.node_id, agent)?;
@@ -1864,11 +2062,7 @@ impl Store {
     /// Change the grace period (2 hours to 30 days). The owner's alone.
     pub fn queue_set_grace(&self, caller: &QueueCaller, seconds: i64) -> Result<QueueGrace> {
         owner_only(caller, "changing the grace period")?;
-        if !(MIN_QUEUE_GRACE_SECONDS..=MAX_QUEUE_GRACE_SECONDS).contains(&seconds) {
-            return Err(Error::Invalid(
-                "the grace period must be between 2 hours and 30 days".into(),
-            ));
-        }
+        QueueGrace::validate(seconds)?;
         self.write(|tx| {
             let from = grace_seconds(tx)?;
             let event_id = tx.emit(
@@ -1880,6 +2074,18 @@ impl Store {
             Ok(QueueGrace {
                 grace_seconds: seconds,
             })
+        })
+    }
+
+    /// One item as a person is about to be shown it, with its revision. A write that
+    /// carries the revision (`queue_admit_shown` and the others) is refused if the item has
+    /// changed since. The revision is read first, so a change that lands during this read
+    /// makes the later write fail, never pass. Read only.
+    pub fn queue_item_shown(&self, item: &str) -> Result<(QueueItem, String)> {
+        self.read(|conn| {
+            let item_id = find_item(conn, self.node_id(), item)?.item_id;
+            let revision = revision_of(conn, &item_id)?;
+            Ok((item_now(conn, self.node_id(), &item_id)?, revision))
         })
     }
 
@@ -1999,7 +2205,10 @@ impl Store {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let mut nobody_can_take = Vec::new();
             for row in ready {
-                let skip = row.skip_agent.as_deref();
+                let skip = match skip_holds(conn, &row, now)? {
+                    true => row.skip_agent.as_deref(),
+                    false => None,
+                };
                 let stuck = match row.for_agent.as_deref() {
                     Some(reserved) => !seated.iter().any(|(id, seen)| {
                         id == reserved
@@ -2137,7 +2346,7 @@ fn admin_release_tx(
         "owner",
         format!("Claim released: {}", row.label()),
         format!(
-            "Your claim on {} was released at {}: an admitter released it. The claim and its notes are kept in the item's history. It will not be offered to you again unless an admitter reserves it for you. {AUTOMATIC}",
+            "Your claim on {} was released at {}: an admitter released it. The claim and its notes are kept in the item's history. It will not be offered to you again for the next hour unless an admitter reserves it for you. {AUTOMATIC}",
             row.label(),
             fmt_ts(tx.now)
         ),
