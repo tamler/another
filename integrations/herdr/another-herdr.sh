@@ -11,9 +11,8 @@ fi
 
 case "${1:-}" in
   wake)
-    # Wake every agent that has a stored wake target (herdr, tmux or cmux) and something
-    # waiting. Point an agent at its Herdr agent with:
-    #   another wake set --agent NAME --via herdr --target HERDR_AGENT
+    # One wake pass: prompt the idle Herdr session of every agent that has mail no hook has
+    # announced yet. Sessions are found through the rows their hooks make inside Herdr.
     exec another wake --all
     ;;
   summary)

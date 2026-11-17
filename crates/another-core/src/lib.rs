@@ -23,6 +23,7 @@ mod stats;
 mod store;
 mod time;
 mod tokens;
+mod transport;
 mod wake;
 
 pub use activity::{
@@ -86,4 +87,10 @@ pub use store::{
 pub use store::{apply_schema, Build};
 pub use time::{fmt_ts, parse_ts};
 pub use tokens::{AuditEntry, AuditRecord, NewToken, Token, TokenScope};
+pub use transport::{
+    attention_reason, identify, newest_at_target, resolve_dir, session_file_key, shown_state,
+    ConfirmedGone, Identity, Observation, PrunedSession, Session, TransportSession, TransportState,
+    TransportWake, Tri, WakeKind, WakeOutcome, GONE_CONFIRM_AFTER_MS, TRANSPORT_GONE_EVENT,
+    TRANSPORT_WAKE_EVENT, UNDELIVERED_LIMIT,
+};
 pub use wake::{refuse_option_like_target, WakeTarget, WakeVia};

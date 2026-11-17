@@ -18,11 +18,9 @@ use crate::identity::resolve_agent;
 use crate::mail::{load_message, Message};
 use crate::store::Store;
 use crate::time::fmt_ts;
-use crate::wake::WakeVia;
 
 /// Kinds this module writes.
 pub const NOTICE_EVENT: &str = "push.notified";
-pub const WAKE_EVENT: &str = "push.woke";
 pub const BLOCKED_EVENT: &str = "hold.blocked";
 
 /// How many recent items `stats` lists next to the counts.
@@ -49,7 +47,8 @@ pub struct WakeRecord {
     pub agent: String,
     pub via: String,
     pub target: String,
-    /// `sent` or `failed`.
+    /// A `transport.wake` outcome (`started`, `not_started`, ...); `sent` or `failed` on
+    /// events written before the transport interface.
     pub outcome: String,
     pub messages: u32,
 }
@@ -103,6 +102,21 @@ fn notice_fingerprint(mut message: Message) -> Result<String> {
         "reply_to": message.reply_to, "thread": thread, "request": message.request_id.is_some(),
     }))?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+/// Give back the claims on `message_ids`, inside the caller's transaction.
+pub(crate) fn release_announcement_tx(
+    tx: &crate::store::Tx<'_>,
+    agent_id: &str,
+    message_ids: &[String],
+) -> Result<()> {
+    for id in message_ids {
+        tx.execute(
+            "DELETE FROM announcements WHERE agent_id = ?1 AND (message_id = ?2 OR duplicate_of = ?2)",
+            params![agent_id, id],
+        )?;
+    }
+    Ok(())
 }
 
 impl Store {
@@ -189,42 +203,7 @@ impl Store {
     pub fn release_announcement(&self, agent: &str, message_ids: &[String]) -> Result<()> {
         self.write(|tx| {
             let me = resolve_agent(tx, tx.node_id, agent)?;
-            for id in message_ids {
-                tx.execute(
-                    "DELETE FROM announcements WHERE agent_id = ?1 AND (message_id = ?2 OR duplicate_of = ?2)",
-                    params![me.id, id],
-                )?;
-            }
-            Ok(())
-        })
-    }
-
-    /// Record a wake the daemon attempted for `agent`: `outcome` is `sent` or `failed`.
-    pub fn record_wake(
-        &self,
-        agent: &str,
-        via: WakeVia,
-        target: &str,
-        outcome: &str,
-        detail: &str,
-        message_ids: &[String],
-    ) -> Result<()> {
-        self.write(|tx| {
-            let me = resolve_agent(tx, tx.node_id, agent)?;
-            tx.emit(
-                &me.address,
-                WAKE_EVENT,
-                json!({
-                    "agent_id": me.id,
-                    "agent": me.address,
-                    "via": via.as_str(),
-                    "target": target,
-                    "outcome": outcome,
-                    "detail": detail,
-                    "message_ids": ids(message_ids),
-                }),
-            )?;
-            Ok(())
+            release_announcement_tx(tx, &me.id, message_ids)
         })
     }
 
@@ -245,7 +224,7 @@ impl Store {
                 "SELECT ts, actor, kind, payload FROM events
                  WHERE node_id = ?1 AND seq > ?2 AND ts >= ?3
                    AND kind IN ('hold.blocked', 'hold.acquired', 'hold.updated',
-                                'push.notified', 'push.woke', 'request.created',
+                                'push.notified', 'push.woke', 'transport.wake', 'request.created',
                                 'request.claimed', 'request.completed')
                  ORDER BY seq DESC",
             )?;
@@ -344,6 +323,31 @@ impl Store {
                                 at: fmt_ts(ts),
                                 agent: actor.clone(),
                                 via: s("via"),
+                                target: s("target"),
+                                outcome: s("outcome"),
+                                messages: messages.len() as u32,
+                            });
+                        }
+                    }
+                    // Only the daemon wrote `push.woke`, so only its wakes are counted:
+                    // `started` where `sent` counted, a failure as a failed wake, and the
+                    // other outcomes as neither.
+                    "transport.wake" if s("trigger") == "daemon" => {
+                        let messages = message_ids();
+                        if s("outcome") == "started" {
+                            out.wakes_sent += 1;
+                            let agent_id = s("agent_id");
+                            for m in &messages {
+                                pushed.push((agent_id.clone(), m.clone(), ts));
+                            }
+                        } else if p.get("failure").and_then(Value::as_bool) == Some(true) {
+                            out.wakes_failed += 1;
+                        }
+                        if out.wakes.len() < MAX_ITEMS {
+                            out.wakes.push(WakeRecord {
+                                at: fmt_ts(ts),
+                                agent: actor.clone(),
+                                via: s("transport"),
                                 target: s("target"),
                                 outcome: s("outcome"),
                                 messages: messages.len() as u32,

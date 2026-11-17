@@ -85,11 +85,11 @@ pub enum Command {
         /// Seconds between sweeps that expire holds and stale requests.
         #[arg(long, default_value_t = 30)]
         sweep_secs: u64,
-        /// Do not wake idle Herdr agents when new mail arrives.
-        /// (Push delivery runs only on a loopback server without --auth.)
+        /// Make no transport call: no sweep of Herdr sessions and no wake of idle agents.
+        /// (Both run only on a loopback server without --auth.)
         #[arg(long)]
         no_wake: bool,
-        /// Seconds between checks for new mail to push to idle Herdr agents.
+        /// Seconds between checks for new mail to wake idle Herdr agents for.
         #[arg(long, default_value_t = 2)]
         wake_secs: u64,
         /// Append log records to this file instead of stderr (the Windows daemon uses this;
@@ -343,7 +343,7 @@ pub enum Command {
         #[arg(long, default_value_t = 30)]
         every: u64,
     },
-    /// Nudge agents with unread mail through tmux, cmux or Herdr (optional adapters).
+    /// Wake agents that have mail waiting, through Herdr, tmux or cmux.
     #[command(args_conflicts_with_subcommands = true)]
     Wake {
         #[command(subcommand)]
@@ -351,6 +351,9 @@ pub enum Command {
         #[command(flatten)]
         run: WakeRun,
     },
+    /// Agent sessions inside a transport (Herdr), as the daemon last saw them.
+    #[command(subcommand)]
+    Transport(TransportCmd),
     /// Open the local dashboard in a browser (loopback only).
     ///
     /// Useful when agents talk to Another over stdio and `another serve` is not running.
@@ -428,7 +431,8 @@ pub struct WakeRun {
     /// Agent to wake (default: $ANOTHER_AGENT); or use --all.
     #[arg(long, short = 'a', env = "ANOTHER_AGENT", conflicts_with = "all")]
     agent: Option<String>,
-    /// Wake every agent with a stored target that has unread mail or open requests.
+    /// One wake pass for every agent, by the daemon's rules: an idle Herdr session that
+    /// Another can identify, with mail no hook has announced yet.
     #[arg(long)]
     all: bool,
     /// Adapter: tmux | cmux | herdr (default: the agent's stored target).
@@ -460,19 +464,32 @@ pub enum WakeCmd {
         #[arg(long)]
         target: String,
     },
-    /// Forget an agent's wake target.
+    /// Forget an agent's wake target and its session rows (which also lifts a stop set
+    /// by a wake that did not start work).
     Clear {
         #[command(flatten)]
         agent: AgentArg,
     },
     /// List stored wake targets.
     List,
-    /// Drop automatically captured targets whose pane is gone or whose agent has left
-    /// (session ended, or not seen for a day). Targets set by hand are kept.
+    /// Drop automatically captured targets whose agent has left (session ended, or not
+    /// seen for a day) and session rows that have aged out. Asks no transport. Targets
+    /// set by hand are kept.
     Prune {
         /// Show what would be dropped without dropping it.
         #[arg(long)]
         dry_run: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TransportCmd {
+    /// One line per agent session: where it runs, its state, its last wake, and whether
+    /// it needs you. Reads what the daemon recorded; calls no transport.
+    Status {
+        /// Only sessions that need attention: blocked, stuck, gone, or not reachable.
+        #[arg(long)]
+        attention: bool,
     },
 }
 
@@ -1883,14 +1900,21 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             cmd: Some(WakeCmd::Clear { agent }),
             ..
         } => {
-            let cleared = store.clear_wake_target(&agent.agent)?;
-            emit(json, &serde_json::json!({ "cleared": cleared }), |_| {
+            let target = store.clear_wake_target(&agent.agent)?;
+            let sessions = store.clear_transport_sessions(&agent.agent)?;
+            let cleared = target || sessions > 0;
+            let report = serde_json::json!({ "cleared": cleared, "sessions": sessions });
+            emit(json, &report, |_| {
                 if cleared {
                     "cleared".into()
                 } else {
                     "no wake target was set".into()
                 }
             })
+        }
+        Command::Transport(TransportCmd::Status { attention }) => {
+            let report = crate::transport::status_report(&store, attention)?;
+            emit(json, &report, crate::transport::render_status)
         }
         Command::Wake {
             cmd: Some(WakeCmd::List),
@@ -1914,6 +1938,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 force: run.force,
                 dry_run: run.dry_run,
                 cancel: None,
+                herdr: None,
             };
             let plans = if run.all {
                 crate::wake::wake_all(&store, &opts)?
@@ -1925,8 +1950,12 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             };
             let code = emit(json, &plans, |p| output::wake_plans(p));
             // `--all` reports a failed wake per agent and carries on; the exit status
-            // still says that something failed.
-            let failed: Vec<_> = plans.iter().filter(|p| p.error.is_some()).collect();
+            // still says that something failed: a failed wake, or one that could not be
+            // attempted.
+            let failed: Vec<_> = plans
+                .iter()
+                .filter(|p| p.failure || p.error.is_some())
+                .collect();
             if failed.is_empty() {
                 code
             } else {
@@ -1934,7 +1963,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     eprintln!(
                         "another: wake failed for {}: {}",
                         p.agent,
-                        p.error.as_deref().unwrap_or_default()
+                        p.error
+                            .as_deref()
+                            .or(p.detail.as_deref())
+                            .unwrap_or_default()
                     );
                 }
                 ExitCode::FAILURE

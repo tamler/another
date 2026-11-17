@@ -52,7 +52,7 @@ pub struct WakeTarget {
     pub updated_at: String,
 }
 
-fn validate_target(target: &str) -> Result<()> {
+pub(crate) fn validate_target(target: &str) -> Result<()> {
     if target.trim().is_empty()
         || target.chars().count() > 200
         || target.chars().any(char::is_control)

@@ -28,8 +28,14 @@ impl Env {
             std::fs::write(
                 &script,
                 format!(
-                    "#!/bin/sh\nprintf '%s' \"{tool}\" >> '{log}'\nfor a in \"$@\"; do printf ' [%s]' \"$a\" >> '{log}'; done\necho >> '{log}'\n",
-                    log = log.display()
+                    "#!/bin/sh\nprintf '%s' \"{tool}\" >> '{log}'\nfor a in \"$@\"; do printf ' [%s]' \"$a\" >> '{log}'; done\necho >> '{log}'\n{answer}",
+                    log = log.display(),
+                    // Herdr answers a prompt on stdout; tmux and cmux print nothing.
+                    answer = if tool == "herdr" {
+                        "printf '{\"id\":\"cli:agent:prompt\",\"result\":{\"agent\":{\"agent_status\":\"working\"},\"type\":\"agent_prompted\"}}\\n'\n"
+                    } else {
+                        ""
+                    }
                 ),
             )
             .unwrap();
@@ -223,11 +229,18 @@ fn adapters_and_targets() {
     assert!(hook.wait().unwrap().success());
     assert_eq!(env.json(&["wake", "list"])[0]["target"], "work:1.0");
 
-    // --all wakes agents with targets and something waiting (alice has neither).
+    // --all lists agents with a target (alice has none), and leaves a target set by hand
+    // to a wake by name.
+    let before = env.calls().len();
     let all = env.json(&["wake", "--all"]);
     assert_eq!(all.as_array().unwrap().len(), 1);
     assert_eq!(all[0]["agent"], "bob");
-    assert_eq!(all[0]["sent"], true);
+    assert_eq!(all[0]["sent"], false);
+    assert!(all[0]["skipped"]
+        .as_str()
+        .unwrap()
+        .contains("no session Another can identify"));
+    assert_eq!(env.calls().len(), before, "nothing was typed");
 
     // Missing target is reported, not guessed (except Herdr).
     let none = env.json(&["wake", "--agent", "alice", "--force"]);

@@ -39,8 +39,9 @@ pub struct HttpOptions {
     /// Address actually bound, so the dashboard can accept that exact `Host`.
     /// `127.0.0.1`, `localhost`, and `[::1]` are always allowed as well.
     pub dashboard_bound: Option<SocketAddr>,
-    /// Run the push waker this often (wake idle Herdr agents with unannounced mail).
-    /// `None` turns it off; only the local loopback daemon should run one.
+    /// Run the waker this often (sweep the transports, wake idle sessions with unannounced
+    /// mail). `None` turns off every transport call; only the local loopback daemon should
+    /// run one.
     pub push_every: Option<Duration>,
 }
 
@@ -96,12 +97,12 @@ pub fn spawn_sweeper(store: Store, every: Duration, ct: CancellationToken) {
     });
 }
 
-/// How often the waker also drops wake targets that can no longer be reached.
+/// How often the waker also drops wake targets and session rows that have aged out.
 const PRUNE_EVERY: Duration = Duration::from_secs(600);
 
-/// Run the push waker (see [`crate::wake::Waker`]) and periodic target pruning until
-/// cancelled. Each pass runs on the blocking pool, since it touches SQLite and may start
-/// a `herdr` process.
+/// Run the waker (see [`crate::wake::Waker`]): the transport sweep when it is due, the
+/// wake pass, and periodic pruning, on one task until cancelled. Each pass runs on the
+/// blocking pool, since it touches SQLite and may start a transport process.
 pub fn spawn_waker(store: Store, every: Duration, ct: CancellationToken) {
     let first = crate::wake::Waker::new();
     // On shutdown, tell a pass in progress to stop its adapter commands now; the blocking
@@ -124,7 +125,7 @@ pub fn spawn_waker(store: Store, every: Duration, ct: CancellationToken) {
                     let Some(mut w) = waker.take() else { break };
                     let store = store.clone();
                     match tokio::task::spawn_blocking(move || {
-                        let out = w.tick(&store);
+                        let out = w.run(&store);
                         (w, out)
                     })
                     .await
@@ -157,7 +158,7 @@ pub fn spawn_waker(store: Store, every: Duration, ct: CancellationToken) {
                     match tokio::task::spawn_blocking(move || crate::wake::prune(&store, false)).await {
                         Ok(Ok(rows)) => {
                             for r in rows.iter().filter(|r| r.pruned) {
-                                tracing::info!(agent = %r.agent, target = %r.target, reason = %r.reason, "wake target pruned");
+                                tracing::info!(agent = %r.agent, target = %r.target, session = r.session_id.as_deref().unwrap_or(""), reason = %r.reason, "pruned");
                             }
                         }
                         Ok(Err(e)) => tracing::warn!(error = %format!("{e:#}"), "prune failed"),

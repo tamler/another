@@ -53,7 +53,10 @@ Short definitions of the words Another uses, with the places that explain each o
 - **Activity feed**: who did what: sessions, mail subjects, requests, holds and resources. `another activity`.
 - **Event log**: the signed, append-only record behind everything. Query tables are projections of it, and it is what federation syncs. [SPEC.md](SPEC.md).
 - **Sweep**: the pass that records expired holds, marks overdue requests stale and expires lapsed leases. `another sweep` runs it once; `another serve` runs it every 30 seconds; `another requests` and `another inbox` run it before they list.
-- **Wake**: an optional nudge typed into an idle agent's terminal through tmux, cmux or Herdr. [WAKE.md](WAKE.md), [DAEMON.md](DAEMON.md).
+- **Transport**: a tool that runs agent sessions, reached through one interface with three operations: `wake`, `status` and `list`. This build has the Herdr transport. [WAKE.md](WAKE.md).
+- **Wake**: one line delivered into an idle agent's session through a transport, with an answer on whether it was delivered and whether the agent started working. The daemon wakes idle Herdr sessions that have unannounced mail; `another wake` does it on demand, also for tmux and cmux panes. Hooks are the fallback everywhere. [WAKE.md](WAKE.md), [DAEMON.md](DAEMON.md).
+- **Session row**: what Another knows about one agent session inside a transport: where it runs, its state, its last wake, and whether it needs the owner. `another transport status`. [WAKE.md](WAKE.md).
+- **Stuck**: shown for a session whose last wake was delivered but did not start work. It is not typed into again until it is seen working, one of its hooks runs, or the owner clears it. [WAKE.md](WAKE.md).
 
 ## Other machines
 

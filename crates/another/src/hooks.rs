@@ -1005,39 +1005,81 @@ fn known_agent(store: &Store, client: Client, root: &Path) -> Result<Option<Stri
     }
 }
 
-/// Seconds between mid-task keepalives for one agent.
+/// Seconds between mid-task keepalives for one session.
 const KEEPALIVE_EVERY: Duration = Duration::from_secs(60);
+/// A throttle stamp older than this belongs to a session that is over.
+const STAMP_KEPT: Duration = Duration::from_secs(24 * 3600);
 
-/// Presence and hold renewal while a task runs, at most once a minute per agent, best
-/// effort: a busy database just skips this round.
-fn keepalive_throttled(store: &Store, another_home: &Path, agent: &str) {
-    let stamp = state_path(another_home, agent, "beat");
-    let fresh = std::fs::metadata(&stamp)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .is_some_and(|age| age < KEEPALIVE_EVERY);
-    if fresh {
+/// The throttle stamp of one session of an agent. The session id is part of the name (its
+/// SHA-256 when long, and encoded like the agent, never used as a path as given), so a busy
+/// session cannot starve the beats of another session under the same name. With no session
+/// id the stamp is per agent.
+fn beat_path(another_home: &Path, agent: &str, session_id: Option<&str>) -> PathBuf {
+    match session_id.filter(|id| !id.is_empty()) {
+        // No agent address holds a line break, so the two parts cannot run together.
+        Some(id) => state_path(
+            another_home,
+            &format!("{agent}\n{}", another_core::session_file_key(id)),
+            "beat",
+        ),
+        None => state_path(another_home, agent, "beat"),
+    }
+}
+
+/// Presence, hold renewal and the session's transport stamp while a task runs, at most once
+/// a minute per session, best effort: a busy database just skips this round.
+fn keepalive_throttled(
+    store: &Store,
+    another_home: &Path,
+    agent: &str,
+    session_id: Option<&str>,
+    client: Client,
+    dir: &Path,
+) {
+    let stamp = beat_path(another_home, agent, session_id);
+    let age = |path: &Path| {
+        std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+    };
+    if age(&stamp).is_some_and(|age| age < KEEPALIVE_EVERY) {
         return;
     }
     // Stamp first so parallel tool calls do not all write.
-    if let Some(dir) = stamp.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    if let Some(state) = stamp.parent() {
+        let _ = std::fs::create_dir_all(state);
+        // Stamps of sessions that ended long ago would otherwise pile up.
+        for entry in std::fs::read_dir(state).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "beat")
+                && age(&path).is_some_and(|age| age > STAMP_KEPT)
+            {
+                let _ = std::fs::remove_file(path);
+            }
+        }
     }
     let _ = std::fs::write(&stamp, b"");
     if let Err(e) = store.keepalive(agent) {
         tracing::debug!(error = %e, "keepalive skipped");
     }
+    crate::wake::stamp_session(store, agent, session_id, client.as_str(), dir, false);
 }
 
 /// `post-tool`: mention mail that arrived mid-task, in the client's context format.
 /// Prints nothing when nothing is new or the agent is not registered yet.
-fn post_tool(store: &Store, env: &HookEnv, client: Client, dir: &Path) -> Result<String> {
+fn post_tool(
+    store: &Store,
+    env: &HookEnv,
+    client: Client,
+    dir: &Path,
+    session_id: Option<&str>,
+) -> Result<String> {
     let root = project_root(dir);
     let Some(agent) = known_agent(store, client, &root)? else {
         return Ok(String::new());
     };
-    keepalive_throttled(store, &env.another_home, &agent);
+    keepalive_throttled(store, &env.another_home, &agent, session_id, client, dir);
     // The claim and its `push.notified` evidence are one transaction: a notice is shown
     // only if it was recorded, and only by the one caller that won it.
     let Some(notice) = prompt_notice(store, &agent, "post_tool", client)? else {
@@ -1229,7 +1271,13 @@ pub fn deny_message(
 /// `pre-edit`: hold each file about to be edited, or stop the edit when another agent
 /// holds it. Prints a deny only for a real conflict; nothing otherwise (printing "allow"
 /// would skip the client's own permission prompts).
-fn pre_edit(store: &Store, client: Client, dir: &Path, input: &HookInput) -> Result<String> {
+fn pre_edit(
+    store: &Store,
+    env: &HookEnv,
+    client: Client,
+    dir: &Path,
+    input: &HookInput,
+) -> Result<String> {
     let paths = input.edit_paths();
     if paths.is_empty() {
         return Ok(String::new());
@@ -1239,6 +1287,8 @@ fn pre_edit(store: &Store, client: Client, dir: &Path, input: &HookInput) -> Res
         Some(a) => a,
         None => hook_agent(store, client, &root)?,
     };
+    let session_id = input.session_id.as_deref();
+    keepalive_throttled(store, &env.another_home, &agent, session_id, client, dir);
     // Registered projects with their directories resolved, so a project registered under a
     // symlinked spelling (/tmp vs /private/tmp) is still recognised.
     let projects: Vec<(String, PathBuf)> = store
@@ -1352,12 +1402,16 @@ pub fn run(
         None => std::env::current_dir()?,
     };
     match event {
-        HookEvent::PostTool => return post_tool(store, env, client, &dir),
-        HookEvent::PreEdit => return pre_edit(store, client, &dir, &input),
+        HookEvent::PostTool => {
+            return post_tool(store, env, client, &dir, input.session_id.as_deref())
+        }
+        HookEvent::PreEdit => return pre_edit(store, env, client, &dir, &input),
         _ => {}
     }
     let root = project_root(&dir);
     let agent = hook_agent(store, client, &root)?;
+    let session_id = input.session_id.clone();
+    let session_id = session_id.as_deref();
     let info = SessionInfo {
         client: Some(client.as_str().to_string()),
         session_id: input.session_id,
@@ -1366,7 +1420,7 @@ pub fn run(
     let text = match event {
         HookEvent::SessionStart => {
             store.session(&agent, SessionPhase::Start, info)?;
-            crate::wake::capture_target(store, &agent);
+            crate::wake::stamp_session(store, &agent, session_id, client.as_str(), &dir, true);
             let digest = session_digest(store, &agent)?;
             // New mail shown here should not be announced again on the next prompt.
             let _ = prompt_notice(store, &agent, "session_start", client);
@@ -1378,6 +1432,7 @@ pub fn run(
         }
         HookEvent::Prompt => {
             store.session(&agent, SessionPhase::Beat, info)?;
+            crate::wake::stamp_session(store, &agent, session_id, client.as_str(), &dir, false);
             if client == Client::Cursor {
                 // Cursor's prompt hook cannot add context; just let the prompt through.
                 json!({ "continue": true }).to_string()
@@ -1389,7 +1444,7 @@ pub fn run(
         }
         HookEvent::SessionEnd => {
             store.session(&agent, SessionPhase::End, info)?;
-            crate::wake::release_target(store, &agent);
+            crate::wake::release_session(store, &agent, session_id);
             String::new()
         }
         HookEvent::PostTool | HookEvent::PreEdit => unreachable!("handled above"),

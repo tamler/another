@@ -1,6 +1,6 @@
 //! Mid-task push and enforced holds, through the real binary: the post-tool and pre-edit
-//! hooks, failing open when the database is missing or locked, Herdr target capture,
-//! `wake prune`, and the daemon's waker against a fake `herdr`.
+//! hooks, failing open when the database is missing or locked, the session row a hook
+//! makes inside Herdr, `wake prune`, and the daemon's waker against a fake `herdr`.
 #![cfg(unix)]
 
 #[path = "common/hosted_ci.rs"]
@@ -31,28 +31,51 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
+/// Answers in Herdr's shapes: a success as JSON on stdout with exit 0, an error as JSON on
+/// stderr with exit 1. A pane file holds a status and a program; the session id reported
+/// for it is `<program>-s1`, the id [`Env::start`] gives its sessions.
 const FAKE_HERDR: &str = r#"#!/bin/sh
 dir='@DIR@'
 printf '%s\n' "$*" >> "$dir/calls.log"
+# Test control: `hang` never answers.
+if [ -f "$dir/hang" ]; then exec sleep 30; fi
+agent() {
+  read st prog < "$dir/panes/$1"
+  printf '{"agent":"%s","agent_session":{"agent":"%s","kind":"id","source":"herdr:%s","value":"%s-s1"},"agent_status":"%s","cwd":"/work","pane_id":"%s"}' \
+    "$prog" "$prog" "$prog" "$prog" "$st" "$1"
+}
 case "$1 $2" in
+  "agent list")
+    printf '{"id":"cli:agent:list","result":{"agents":['
+    sep=''
+    for f in "$dir"/panes/*; do
+      [ -f "$f" ] || continue
+      printf '%s' "$sep"
+      agent "$(basename "$f")"
+      sep=','
+    done
+    printf '],"type":"agent_list"}}\n'
+    exit 0 ;;
   "agent get")
-    # Test controls: `hang` never answers; `slow` holds the answer until it is removed.
-    if [ -f "$dir/hang" ]; then exec sleep 30; fi
+    # Test control: `slow` holds the answer until it is removed.
     while [ -f "$dir/slow" ]; do sleep 0.05; done
     if [ -f "$dir/panes/$3" ]; then
-      read st prog < "$dir/panes/$3"
-      printf '{"result":{"agent":{"agent":"%s","agent_status":"%s","pane_id":"%s"}}}\n' "$prog" "$st" "$3"
+      printf '{"id":"cli:agent:get","result":{"agent":'
+      agent "$3"
+      printf ',"type":"agent_info"}}\n'
       exit 0
     fi
-    printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$3"
+    printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"},"id":"cli:agent:get"}\n' "$3" >&2
     exit 1 ;;
   "agent prompt")
     # Test control: `fail-prompt` makes the prompt fail as a closed pane would.
     if [ -f "$dir/fail-prompt" ]; then
-      printf '{"error":{"code":"pane_closed","message":"pane %s closed"}}\n' "$3"
+      printf '{"error":{"code":"pane_closed","message":"pane %s closed"},"id":"cli:agent:prompt"}\n' "$3" >&2
       exit 1
     fi
-    printf '{"result":{"type":"ok"}}\n'
+    printf '{"id":"cli:agent:prompt","result":{"agent":'
+    agent "$3"
+    printf ',"type":"agent_prompted"}}\n'
     exit 0 ;;
 esac
 exit 2
@@ -873,17 +896,23 @@ impl Env {
 }
 
 #[test]
-fn herdr_panes_are_captured_at_start_and_released_at_end() {
+fn herdr_sessions_get_a_row_at_start_and_lose_it_at_end() {
     let env = Env::new();
     let in_herdr = [("HERDR_PANE_ID", "w7:p2"), ("TERM_PROGRAM", "herdr")];
     env.start("claude", &env.main, &in_herdr);
-    let targets = env.json(&["wake", "list"]);
-    assert_eq!(targets[0]["agent"], "claude@shop");
-    assert_eq!(targets[0]["via"], "herdr");
-    assert_eq!(targets[0]["target"], "w7:p2");
-    assert_eq!(targets[0]["auto"], true);
+    let sessions = |env: &Env| env.json(&["transport", "status"])["sessions"].clone();
+    let rows = sessions(&env);
+    assert_eq!(rows.as_array().unwrap().len(), 1, "{rows}");
+    assert_eq!(rows[0]["agent"], "claude@shop");
+    assert_eq!(rows[0]["session_id"], "claude-s1");
+    assert_eq!(rows[0]["transport"], "herdr");
+    assert_eq!(rows[0]["target"], "w7:p2");
+    assert_eq!(rows[0]["hook_made"], true);
+    // A Herdr session is a row, no longer an automatic wake target.
+    assert_eq!(env.json(&["wake", "list"]).as_array().unwrap().len(), 0);
 
-    // tmux running inside a Herdr pane: tmux is the innermost terminal.
+    // tmux running inside a Herdr pane: tmux is the innermost terminal, and a tmux pane
+    // is still recorded as the agent's wake target.
     env.start(
         "codex",
         &env.wt,
@@ -894,27 +923,28 @@ fn herdr_panes_are_captured_at_start_and_released_at_end() {
         ],
     );
     let targets = env.json(&["wake", "list"]);
-    assert!(targets
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|t| t["agent"] == "codex@shop-review" && t["via"] == "tmux" && t["target"] == "%4"));
+    assert!(targets.as_array().unwrap().iter().any(|t| {
+        t["agent"] == "codex@shop-review"
+            && t["via"] == "tmux"
+            && t["target"] == "%4"
+            && t["auto"] == true
+    }));
+    assert_eq!(sessions(&env).as_array().unwrap().len(), 1);
 
-    // A session ending in another pane leaves the capture alone; ending in this one clears it.
+    // The end of another session leaves the row alone; the end of this one deletes it.
+    let other = json!({ "session_id": "claude-s2", "cwd": env.main });
+    env.hook_timed("session-end", "claude", &other, &in_herdr);
+    assert_eq!(sessions(&env).as_array().unwrap().len(), 1);
     let end = json!({ "session_id": "claude-s1", "cwd": env.main });
-    env.hook_timed("session-end", "claude", &end, &[("HERDR_PANE_ID", "w9:p9")]);
-    assert_eq!(env.json(&["wake", "list"]).as_array().unwrap().len(), 2);
     env.hook_timed("session-end", "claude", &end, &in_herdr);
-    let targets = env.json(&["wake", "list"]);
-    assert!(!targets.to_string().contains("claude@shop"), "{targets}");
+    assert_eq!(sessions(&env).as_array().unwrap().len(), 0);
 }
 
 #[test]
-fn wake_prune_drops_dead_automatic_targets_only() {
-    hosted_ci::require_hosted_runner();
+fn wake_prune_drops_automatic_targets_of_agents_that_left_and_asks_no_transport() {
     let env = Env::new();
-    env.start("claude", &env.main, &[("HERDR_PANE_ID", "w1:p1")]);
-    env.start("codex", &env.wt, &[("HERDR_PANE_ID", "w1:p2")]);
+    env.start("claude", &env.main, &[("TMUX_PANE", "%1")]);
+    env.start("codex", &env.wt, &[("TMUX_PANE", "%2")]);
     env.ok(&["agent", "register", "bob", "--program", "other"]);
     env.ok(&[
         "wake",
@@ -926,7 +956,9 @@ fn wake_prune_drops_dead_automatic_targets_only() {
         "--target",
         "gone-pane",
     ]);
-    env.set_pane("w1:p2", Some("idle codex"));
+    // claude's session ends in another terminal, so its capture is still stored.
+    let end = json!({ "session_id": "claude-s1", "cwd": env.main });
+    env.hook_timed("session-end", "claude", &end, &[("TMUX_PANE", "%9")]);
 
     let dry = env.json(&["wake", "prune", "--dry-run"]);
     let row = |agent: &str| {
@@ -938,10 +970,7 @@ fn wake_prune_drops_dead_automatic_targets_only() {
             .clone()
     };
     assert_eq!(row("claude@shop")["pruned"], true);
-    assert!(row("claude@shop")["reason"]
-        .as_str()
-        .unwrap()
-        .contains("gone"));
+    assert_eq!(row("claude@shop")["reason"], "agent ended its session");
     assert_eq!(row("codex@shop-review")["pruned"], false);
     assert_eq!(row("bob")["pruned"], false, "targets set by hand stay");
     assert_eq!(env.json(&["wake", "list"]).as_array().unwrap().len(), 3);
@@ -955,11 +984,8 @@ fn wake_prune_drops_dead_automatic_targets_only() {
         .map(|t| t["agent"].as_str().unwrap().to_string())
         .collect();
     assert_eq!(left, ["bob", "codex@shop-review"]);
-    // Probes only ever ask; nothing is focused or typed.
-    assert!(env
-        .herdr_calls()
-        .iter()
-        .all(|c| c.starts_with("agent get ")));
+    // Pruning asks no transport: nothing is probed, focused or typed.
+    assert!(env.herdr_calls().is_empty(), "{:?}", env.herdr_calls());
 }
 
 /// `another serve` running in the background with push on; stopped with SIGTERM.
@@ -1046,13 +1072,13 @@ fn daemon_wakes_idle_herdr_agents_and_leaves_working_ones_to_hooks() {
     env.set_pane("w7:p2", Some("working claude"));
     let daemon = Daemon::start(&env);
 
-    // Working: the daemon looks, but leaves delivery to the post-tool hook.
+    // Working: the daemon's sweep sees it, and delivery is left to the post-tool hook.
     env.send("codex@shop-review", "claude@shop", "Rebase please", false);
     assert!(wait_for(Duration::from_secs(15), || env
         .herdr_calls()
         .iter()
-        .any(|c| c == "agent get w7:p2")));
-    std::thread::sleep(Duration::from_secs(2));
+        .any(|c| c == "agent list")));
+    std::thread::sleep(Duration::from_secs(4));
     assert!(
         !env.herdr_calls()
             .iter()
@@ -1061,10 +1087,11 @@ fn daemon_wakes_idle_herdr_agents_and_leaves_working_ones_to_hooks() {
         env.herdr_calls()
     );
 
-    // Idle: one prompt with the inbox summary (subjects, never bodies).
+    // Idle, as the next sweep (every 30 seconds) finds it: one prompt with the inbox
+    // summary (subjects, never bodies).
     env.set_pane("w7:p2", Some("idle claude"));
     assert!(
-        wait_for(Duration::from_secs(20), || env
+        wait_for(Duration::from_secs(50), || env
             .herdr_calls()
             .iter()
             .any(|c| c.starts_with("agent prompt w7:p2 "))),
@@ -1095,11 +1122,10 @@ fn daemon_wakes_idle_herdr_agents_and_leaves_working_ones_to_hooks() {
     assert_eq!(prompts, 1);
 
     // Herdr is only ever called with a subcommand.
-    assert!(env
-        .herdr_calls()
-        .iter()
-        .all(|c| c.starts_with("agent get ") || c.starts_with("agent prompt ")));
-    daemon.wait_log("action=woke", Duration::from_secs(5));
+    assert!(env.herdr_calls().iter().all(|c| c == "agent list"
+        || c.starts_with("agent get ")
+        || c.starts_with("agent prompt ")));
+    daemon.wait_log("action=started", Duration::from_secs(5));
     let status = daemon.stop();
     assert!(status.success(), "clean exit on SIGTERM: {status:?}");
 
@@ -1110,7 +1136,7 @@ fn daemon_wakes_idle_herdr_agents_and_leaves_working_ones_to_hooks() {
     assert_eq!(stats["messages_pushed"], 1);
     assert_eq!(stats["wakes"][0]["agent"], "claude@shop");
     assert_eq!(stats["wakes"][0]["target"], "w7:p2");
-    assert_eq!(stats["wakes"][0]["outcome"], "sent");
+    assert_eq!(stats["wakes"][0]["outcome"], "started");
 }
 
 // ---------------------------------------------------------------------------
@@ -1283,7 +1309,8 @@ fn a_failed_daemon_wake_leaves_the_mail_to_the_hooks() {
         env.herdr_calls(),
         daemon.text()
     );
-    daemon.wait_log("action=failed", Duration::from_secs(10));
+    // An error code Another does not know: the line may have been typed, so `unknown`.
+    daemon.wait_log("action=unknown", Duration::from_secs(10));
 
     let notice = env.hook("post-tool", "claude", &tool(&env.main, "Bash", json!({})));
     assert!(
@@ -1331,10 +1358,11 @@ fn a_hung_adapter_does_not_block_sigterm() {
     std::fs::write(env.herdr_dir.join("hang"), "").unwrap();
     let daemon = Daemon::start(&env);
     env.send("codex@shop-review", "claude@shop", "Anyone there?", false);
+    // The daemon's first sweep is now waiting on a Herdr that never answers.
     assert!(wait_for(Duration::from_secs(15), || env
         .herdr_calls()
         .iter()
-        .any(|c| c == "agent get w7:p2")));
+        .any(|c| c == "agent list")));
     std::thread::sleep(Duration::from_millis(300));
     let started = Instant::now();
     let status = daemon.stop();
@@ -1351,7 +1379,7 @@ fn adapter_commands_are_bounded() {
     let mut cmd = Command::new("sleep");
     cmd.arg("30");
     let out = another::wake::run_bounded(&mut cmd, Duration::from_millis(300), None).unwrap();
-    assert!(out.is_none(), "timed out");
+    assert!(matches!(out, another::wake::Bounded::TimedOut), "timed out");
     assert!(started.elapsed() < Duration::from_secs(3));
     let flag = std::sync::atomic::AtomicBool::new(true);
     let mut cmd = Command::new("sleep");
@@ -1360,19 +1388,35 @@ fn adapter_commands_are_bounded() {
     assert!(
         another::wake::run_bounded(&mut cmd, Duration::from_secs(30), Some(&flag))
             .unwrap()
+            .done()
             .is_none()
     );
     assert!(
         started.elapsed() < Duration::from_secs(3),
         "cancel stops it"
     );
+    // Both streams are captured, each on its own.
     let mut cmd = Command::new("sh");
-    cmd.args(["-c", "echo hi"]);
-    let (status, stdout) = another::wake::run_bounded(&mut cmd, Duration::from_secs(5), None)
+    cmd.args(["-c", "echo hi; echo oops >&2; exit 1"]);
+    let ran = another::wake::run_bounded(&mut cmd, Duration::from_secs(5), None)
         .unwrap()
+        .done()
         .unwrap();
-    assert!(status.success());
-    assert_eq!(stdout, b"hi\n");
+    assert_eq!(ran.status.code(), Some(1));
+    assert_eq!(ran.stdout, b"hi\n");
+    assert_eq!(ran.stderr, b"oops\n");
+    // More than 1 MiB of output, on either stream, ends the call.
+    for stream in ["", " >&2"] {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", &format!("yes 0123456789abcdef{stream}")]);
+        let started = Instant::now();
+        let out = another::wake::run_bounded(&mut cmd, Duration::from_secs(20), None).unwrap();
+        assert!(
+            matches!(out, another::wake::Bounded::TooMuchOutput),
+            "{stream:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1541,11 +1585,12 @@ fn a_descendant_holding_stdout_does_not_outlast_the_deadline() {
     let mut cmd = Command::new("sh");
     cmd.args(["-c", "sleep 20 & echo '{\"result\":{}}'"]);
     let started = Instant::now();
-    let (status, stdout) = another::wake::run_bounded(&mut cmd, Duration::from_secs(3), None)
+    let ran = another::wake::run_bounded(&mut cmd, Duration::from_secs(3), None)
         .unwrap()
+        .done()
         .expect("the adapter itself exited");
-    assert!(status.success());
-    assert_eq!(stdout, b"{\"result\":{}}\n");
+    assert!(ran.status.success());
+    assert_eq!(ran.stdout, b"{\"result\":{}}\n");
     assert!(
         started.elapsed() < Duration::from_secs(2),
         "returned after {:?}",
@@ -1560,7 +1605,7 @@ fn a_descendant_holding_stdout_does_not_outlast_the_deadline() {
     ]);
     let started = Instant::now();
     let out = another::wake::run_bounded(&mut cmd, Duration::from_millis(300), None).unwrap();
-    assert!(out.is_none());
+    assert!(out.done().is_none());
     assert!(started.elapsed() < Duration::from_secs(2));
     std::thread::sleep(Duration::from_secs(3));
     assert!(

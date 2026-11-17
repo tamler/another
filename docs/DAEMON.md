@@ -3,10 +3,11 @@
 `another serve` is the local daemon. Besides serving MCP and the dashboard on loopback, it does the work nobody else is around to do:
 
 - sweeps expired holds and overdue requests every 30 seconds;
-- wakes idle Herdr agents when mail arrives that no hook has announced yet ("push", below);
-- every 10 minutes, drops captured wake targets that can no longer be reached.
+- asks each transport in use (Herdr) what it can see every 30 seconds, and records it per agent session ("The sweep", below);
+- wakes an idle agent session when mail arrives that no hook has announced yet ("Waking idle agents", below);
+- every 10 minutes, drops session rows and captured wake targets that have aged out.
 
-Hooks work without it. Without the daemon, holds still expire when the next command looks at them, and mail still reaches a session at its next tool call or prompt; an idle agent just is not woken.
+Waking through a transport is a core part of Another, and hooks are the fallback everywhere (D84). Hooks work without the daemon: holds still expire when the next command looks at them, and mail still reaches a session at its next tool call or prompt. Without the daemon an idle agent is not woken, no session is checked, and `another transport status` says so.
 
 ## Run it in the background (macOS)
 
@@ -96,31 +97,44 @@ Skipping this is unsafe when a release changes how repository keys are cached (t
 
 On any other system, or a Linux without systemd, run `another serve --bind 127.0.0.1:7466` under the service manager you have, with `ANOTHER_HOME` set and a restart policy.
 
-## Push: waking idle agents
+## The sweep
+
+Every 30 seconds, for each transport that has at least one session row made by a hook, the daemon runs the transport's `list` once (`herdr agent list`) and records the answer for every such row: its state, whether the transport recognised the session (by its session id, or by the weak match for a pane that reports none), and the pane it is in now. Nothing else observes a session. So with no mail waiting, the daemon still starts one `list` process per transport in use every 30 seconds. With no session row it starts none.
+
+From what the sweep records come the session's shown state, the reasons under `another transport status --attention` (a `blocked` agent at once, a `gone` session after 60 seconds, `unknown` or `no_answer` after 10 minutes), the end of a stop when the agent is seen `working` or `blocked`, and the time each session was last seen alive. [WAKE.md](WAKE.md) has the rules, the session rows, and the confirmed-gone signal, which this build keeps switched off for Herdr.
+
+The sweep writes no event in steady state, whatever the agents do.
+
+## Waking idle agents
 
 Mail reaches a working agent through its `post-tool` hook at the next tool call ([HOOKS.md](HOOKS.md)). An agent sitting at its prompt makes no tool calls, so the daemon wakes it instead:
 
-1. Every 2 seconds (`--wake-secs`), for each agent with a Herdr wake target, it checks for unread mail newer than what was already announced. With nothing new, it starts no process at all.
+1. Every 2 seconds (`--wake-secs`) it looks, for each agent with a session row, for unread mail that no channel has announced yet. A pass with nothing new starts no process.
 2. New mail waits 2 seconds to settle, so a burst of messages becomes one wake.
-3. It asks Herdr about the pane with `herdr agent get <pane>`:
-   - `idle` or `done`: it runs `herdr agent prompt <pane> "<inbox summary>"` and marks the mail announced;
-   - `working`: it leaves the mail to the `post-tool` hook and looks again in 5 seconds;
-   - `blocked` (waiting on a person) or unknown: it does not interrupt;
-   - no such pane, or no agent in it: an automatically captured target is dropped.
-4. It claims the mail only after Herdr has answered, so a hook that announced it meanwhile wins and no prompt is sent. A wake that cannot be delivered gives the claim back.
-5. After a wake it leaves that agent alone for 60 seconds.
+3. It picks the agent's session to wake: the `idle` one (Herdr's `idle` or `done`) whose hooks ran last, even while a sibling session of the same agent is working. Sessions that are stopped after a wake that did not start work, were woken less than 60 seconds ago, or are in any other state are left out. If no session remains and one is `working`, the mail is left to that session's `post-tool` hook and the daemon looks again in 5 seconds. A session that vanished or cannot be asked is the sweep's business alone.
+4. It asks Herdr about that pane now with `herdr agent get <pane>`, and goes on only if the answer is `idle` and identifies the session. Any other answer is written nowhere, and that session is not asked again for 30 seconds.
+5. It claims the mail only after Herdr has answered, so a hook that announced it meanwhile wins and no prompt is sent.
+6. It runs `herdr agent prompt` and records the outcome as a `transport.wake` event and on the session row, in one transaction with the claim.
 
-Every adapter command has a deadline: 3 seconds for `herdr agent get` (and the tmux probe), 10 seconds for a prompt. Each command runs in its own process group. A command that runs past its deadline, or is still running when the daemon is told to stop, gets SIGTERM for its whole group (so a process it started stops too), then a hard stop half a second later. Once a command has exited, its output is collected for at most a quarter of a second more, so a background process it left holding the output cannot stall the daemon either. A stuck adapter can neither hold up the other agents nor a clean shutdown.
+A wake has seven possible outcomes ([WAKE.md](WAKE.md#what-a-wake-can-end-as)). `started` and `unconfirmed` keep the claim. Every other outcome gives the claim back, so the hooks announce the mail at the agent's next turn. A wake that was delivered but did not start work (`not_started`), or whose answer could not be read (`unknown`), is a recorded failure and **stops** that session: a line that was or may have been typed is never typed again by the daemon. A session that could not be reached at all (`undelivered`) is tried once a minute, and after three in a row once per 10 minutes.
 
-Two limits remain, and both need an adapter that misbehaves. A background process that outlives its command and keeps the output open is no longer waited for, but until it exits it still costs the daemon one small thread and one file descriptor. A process that moves itself into a new session (`setsid`) leaves the command's group, so a timeout does not stop it. Catching that would mean tracking every process an adapter starts.
+The gap after a wake is 60 seconds per session, not per agent name: after a claim was given back, another idle session of the same agent may be woken for the same mail inside that minute, so one message is typed at most once per session.
 
-The summary carries subjects and counts, never bodies. Herdr stays headless: Another only calls `herdr agent get` and `herdr agent prompt`, never bare `herdr`, and never focuses a pane.
+The identity check and the prompt are two Herdr calls. A pane that changes hands in the milliseconds between them is typed into.
 
-Push runs only on a loopback server without `--auth`, so a second server published for remote peers never wakes the same agent twice. Turn it off with `another serve --no-wake`. tmux and cmux targets are not woken automatically, because neither can say whether the agent is busy; `another wake` still reaches them on demand ([WAKE.md](WAKE.md)).
+If the daemon stops between typing and recording, or the record cannot be written, the claim stays taken and nothing is retyped; that mail is announced by no channel and stays unread in the inbox.
 
-## Wake targets
+Every transport command has a deadline: 3 seconds for `herdr agent get` and `herdr agent list`, 12 seconds for a prompt (Herdr itself is given 8 seconds). Each command runs in its own process group, and its stdout and stderr are captured, 1 MiB in total; more than that ends the call. A command that runs past its deadline, or is still running when the daemon is told to stop, gets SIGTERM for its whole group (so a process it started stops too), then a hard stop half a second later. Once a command has exited, its output is collected for at most a quarter of a second more, so a background process it left holding the output cannot stall the daemon either. A wake pass stops between agents when a sweep is due, so failing wakes cannot starve the sweep. A stuck transport can neither hold up the other agents nor a clean shutdown.
 
-Session-start hooks record the pane an agent runs in: `$HERDR_PANE_ID` in Herdr, `$TMUX_PANE` in tmux, `$CMUX_SURFACE_ID` in cmux. When multiplexers are nested, `TERM_PROGRAM` names the innermost one. The session-end hook forgets the capture if it still points at that pane. To drop captures left behind by sessions that never ended cleanly:
+Two limits remain, and both need a transport that misbehaves. A background process that outlives its command and keeps the output open is no longer waited for, but until it exits it still costs the daemon two small threads and two file descriptors. A process that moves itself into a new session (`setsid`) leaves the command's group, so a timeout does not stop it. Catching that would mean tracking every process a transport starts.
+
+The wake line carries subjects and counts, never bodies. Herdr stays headless: Another only calls `herdr agent list`, `herdr agent get` and `herdr agent prompt`, never bare `herdr`, and never focuses a pane.
+
+The sweep and the wake pass run only on a loopback server without `--auth`, so a second server published for remote peers never wakes the same agent twice. `another serve --no-wake` turns off every transport call the daemon makes. The daemon wakes only sessions it can identify: a target set by hand, a bare Herdr agent name, and tmux and cmux panes are never woken automatically; `another wake --agent` still reaches them on demand ([WAKE.md](WAKE.md)).
+
+## Session rows and wake targets
+
+A hook that runs inside Herdr (`$HERDR_PANE_ID`) gives its session a row; the session-end hook deletes it. Session-start hooks inside tmux (`$TMUX_PANE`) or cmux (`$CMUX_SURFACE_ID`) record the pane as the agent's wake target instead. When multiplexers are nested, `TERM_PROGRAM` names the innermost one. To drop what sessions that never ended cleanly left behind:
 
 ```bash
 another wake prune --dry-run
@@ -130,7 +144,7 @@ another wake prune --dry-run
 another wake prune
 ```
 
-An automatic target goes when its adapter says the pane is gone (Herdr and tmux are asked; cmux is not), or when its agent ended its session or has not been seen for a day. Targets set with `another wake set` are never pruned.
+Pruning asks no transport. A session row goes when it was confirmed gone more than a day ago, or when its hooks have been quiet for a day and the transport did not show the session inside that day. A row that only holds the outcome of a wake by hand goes a day after that wake. A captured tmux or cmux target goes when its agent ended its session or has not been seen for a day. Targets set with `another wake set` are never pruned.
 
 ## Counting what happened
 
@@ -149,7 +163,7 @@ another --json stats --since 48h
 | Edits stopped by a hold, and distinct collisions (agent, holder, path) | `hold.blocked` events, written by the edit guard with both identities, the paths and the projects |
 | Holds taken by the edit hook | `hold.acquired` events marked `auto` |
 | Mid-task notices, notices at a prompt | `push.notified` events, with the message ids announced |
-| Herdr wakes sent and failed | `push.woke` events, with the agent, pane, outcome and message ids |
+| Herdr wakes sent and failed | `transport.wake` events written by the daemon, with the agent, session, pane, outcome and message ids. Outcome `started` counts as sent; `not_started`, `undelivered` and `unknown` count as failed; the other outcomes count as neither. Wakes by hand and by `another wake --all` are not counted. `push.woke` events from earlier builds still count. |
 | Messages pushed, and how many were then read, acknowledged or answered | Pushed message ids, checked against later reads, acknowledgements and replies by the same agent |
 | Requests created, claimed and completed | `request.*` events |
 
