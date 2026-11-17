@@ -2,11 +2,11 @@
 //! append-only event log that every mutation writes to first.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
-use serde::Serialize;
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::{Error, Result};
@@ -14,6 +14,101 @@ use crate::time::{fmt_ts, now_ms};
 
 /// File name of the node database inside the Another home directory.
 pub const DB_FILE: &str = "another.db";
+
+/// File in the home that records which build created the database and which last migrated it.
+pub const ORIGIN_FILE: &str = "build.json";
+
+/// Directory in the home that holds the copy of the database taken before each migration.
+pub const BACKUP_DIR: &str = "backups";
+
+static ALLOW_DEV_MIGRATE: AtomicBool = AtomicBool::new(false);
+
+/// Let this process, when it is a development build, migrate a home that a development build
+/// did not create. The CLI calls this for `--dev-migrate`.
+pub fn allow_dev_migrate() {
+    ALLOW_DEV_MIGRATE.store(true, Ordering::SeqCst);
+}
+
+/// The build that is opening a home, as far as upgrade safety cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Build {
+    /// Compiled with debug assertions: `cargo build`, `cargo run` and `cargo test`. The
+    /// release profile (`cargo install`, the release archives) is not a development build.
+    pub development: bool,
+    /// The explicit permission to migrate a home a development build did not create.
+    pub allow_dev_migrate: bool,
+}
+
+impl Build {
+    /// This binary.
+    pub fn current() -> Build {
+        Build {
+            development: cfg!(debug_assertions),
+            allow_dev_migrate: ALLOW_DEV_MIGRATE.load(Ordering::SeqCst),
+        }
+    }
+
+    fn stamp(self, schema: i64, now: i64) -> BuildStamp {
+        BuildStamp {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            build: if self.development {
+                DEVELOPMENT.to_string()
+            } else {
+                "release".to_string()
+            },
+            schema,
+            at: fmt_ts(now),
+        }
+    }
+}
+
+const DEVELOPMENT: &str = "development";
+
+/// One build's mark in [`ORIGIN_FILE`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildStamp {
+    /// The build's package version.
+    pub version: String,
+    /// `release` or `development`.
+    pub build: String,
+    /// The schema version the build left the database at.
+    pub schema: i64,
+    pub at: String,
+}
+
+/// The contents of [`ORIGIN_FILE`]: which build created the database and which last migrated
+/// it. A home from before the file existed has neither.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HomeOrigin {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<BuildStamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migrated: Option<BuildStamp>,
+}
+
+impl HomeOrigin {
+    /// What `home` records. A missing or unreadable file reads as no record, which is the
+    /// careful answer: a development build then refuses to migrate the home.
+    fn read(home: &Path) -> HomeOrigin {
+        std::fs::read(home.join(ORIGIN_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    fn write(&self, home: &Path) -> Result<()> {
+        let path = home.join(ORIGIN_FILE);
+        let staged = home.join(format!("{ORIGIN_FILE}.{}.tmp", std::process::id()));
+        std::fs::write(&staged, serde_json::to_vec_pretty(self)?)?;
+        Ok(std::fs::rename(&staged, &path)?)
+    }
+
+    fn created_by_development_build(&self) -> bool {
+        self.created
+            .as_ref()
+            .is_some_and(|stamp| stamp.build == DEVELOPMENT)
+    }
+}
 
 /// Source of "now" for the store. Tests use a manual clock to exercise TTLs.
 #[derive(Clone)]
@@ -98,6 +193,17 @@ pub struct DbInspection {
     pub expected: i64,
     /// `ok`, or SQLite's first `quick_check` complaint.
     pub quick_check: String,
+    /// The tables and indexes are the ones this build has for `version`. False for a negative
+    /// version and for a schema another build changed; not judged for a newer version.
+    pub known: bool,
+    /// This binary is a development build.
+    pub development_build: bool,
+    /// The home records that a development build created it.
+    pub created_by_development_build: bool,
+    /// Which build created the database and which last migrated it.
+    pub origin: HomeOrigin,
+    /// The most recent backup in the home's backup directory.
+    pub latest_backup: Option<PathBuf>,
 }
 
 impl Store {
@@ -107,6 +213,16 @@ impl Store {
     }
 
     pub fn open_with_clock(home: &Path, clock: Clock) -> Result<Store> {
+        Self::open_on_disk(home, clock, Build::current())
+    }
+
+    /// [`Store::open`] as `build`, so the upgrade rules of a release build and of a
+    /// development build can both be exercised from one binary.
+    pub fn open_as(home: &Path, build: Build) -> Result<Store> {
+        Self::open_on_disk(home, Clock::System, build)
+    }
+
+    fn open_on_disk(home: &Path, clock: Clock, build: Build) -> Result<Store> {
         std::fs::create_dir_all(home)?;
         #[cfg(unix)]
         {
@@ -117,7 +233,7 @@ impl Store {
         let conn = Connection::open(&path)?;
         use_wal(&conn)?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        Self::init(conn, clock, Some(path))
+        Self::init(conn, clock, Some(path), build)
     }
 
     /// Look at the database in `home` for `another doctor`: its schema version against this
@@ -125,7 +241,6 @@ impl Store {
     /// created, migrated or written. SQLite may still add the empty `-shm` / `-wal` files any
     /// reader of a WAL database makes. `NotFound` when there is no database file.
     pub fn inspect(home: &Path, busy: std::time::Duration) -> Result<DbInspection> {
-        use rusqlite::OpenFlags;
         let path = home.join(DB_FILE);
         if !path.is_file() {
             return Err(Error::NotFound(format!(
@@ -142,10 +257,18 @@ impl Store {
         conn.busy_timeout(busy)?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         let quick_check: String = conn.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
+        let expected = MIGRATIONS.len() as i64;
+        let known = version > expected || known_schema(&conn, version)?;
+        let origin = HomeOrigin::read(home);
         Ok(DbInspection {
             version,
-            expected: MIGRATIONS.len() as i64,
+            expected,
             quick_check,
+            known,
+            development_build: Build::current().development,
+            created_by_development_build: origin.created_by_development_build(),
+            origin,
+            latest_backup: latest_backup(home),
         })
     }
 
@@ -166,7 +289,6 @@ impl Store {
     }
 
     fn open_existing(home: &Path, busy: std::time::Duration, read_only: bool) -> Result<Store> {
-        use rusqlite::OpenFlags;
         let path = home.join(DB_FILE);
         let mode = if read_only {
             OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -213,13 +335,18 @@ impl Store {
 
     /// An in-memory store (tests and experiments).
     pub fn open_in_memory(clock: Clock) -> Result<Store> {
-        Self::init(Connection::open_in_memory()?, clock, None)
+        Self::init(Connection::open_in_memory()?, clock, None, Build::current())
     }
 
-    fn init(mut conn: Connection, clock: Clock, path: Option<PathBuf>) -> Result<Store> {
+    fn init(
+        mut conn: Connection,
+        clock: Clock,
+        path: Option<PathBuf>,
+        build: Build,
+    ) -> Result<Store> {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        migrate(&mut conn)?;
+        migrate(&mut conn, path.as_deref(), build, clock.now())?;
         let (node_id, key) = ensure_local_node(&mut conn, clock.now())?;
         Ok(Store {
             inner: Arc::new(Inner {
@@ -726,28 +853,220 @@ fn use_wal(conn: &Connection) -> Result<()> {
 /// quick open say the same thing, so the CLI and the hook log give the same fix.
 fn newer_schema(version: i64) -> Error {
     Error::Invalid(format!(
-        "database schema v{version} is newer than this another build supports (v{}); upgrade another",
+        "database schema v{version} is newer than this another build supports (v{}); upgrade another, or stop every another process and restore the backup taken before the migration (docs/DOCTOR.md)",
         MIGRATIONS.len()
     ))
 }
 
-fn migrate(conn: &mut Connection) -> Result<()> {
-    // Read the version inside each write transaction: another process may have applied a
-    // step while this one waited for the lock (several sessions opening a new home at once).
-    loop {
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        let current = usize::try_from(current).unwrap_or(0);
-        if current > MIGRATIONS.len() {
-            return Err(newer_schema(current as i64));
-        }
-        let Some(sql) = MIGRATIONS.get(current) else {
-            return Ok(());
-        };
-        tx.execute_batch(sql)?;
-        tx.pragma_update(None, "user_version", (current + 1) as i64)?;
-        tx.commit()?;
+/// Bring the database to this build's schema, or refuse and write nothing. All pending steps
+/// run in one write transaction, so the backup taken at its start is exactly the database the
+/// migration replaced, and a failure leaves the old schema whole.
+fn migrate(conn: &mut Connection, db: Option<&Path>, build: Build, now: i64) -> Result<()> {
+    let latest = MIGRATIONS.len() as i64;
+    // Read the version inside the write transaction: another process may have migrated
+    // while this one waited for the lock (several sessions opening a new home at once).
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if current > latest {
+        return Err(newer_schema(current));
     }
+    if current < 0 {
+        return Err(Error::Invalid(format!(
+            "database schema version {current} is not valid: this is not an another database, or it was edited by hand; check that --home or ANOTHER_HOME points at an another home"
+        )));
+    }
+    if current == latest {
+        // Every normal open of a current database comes through here, so the catalog is
+        // read after the write lock is given back.
+        drop(tx);
+        return refuse_unknown(conn, current);
+    }
+    refuse_unknown(&tx, current)?;
+    // An in-memory database has no home: nothing to protect and nowhere to record it.
+    let home = db.and_then(Path::parent);
+    let mut origin = HomeOrigin::default();
+    if let (Some(db), Some(home), true) = (db, home, current > 0) {
+        origin = HomeOrigin::read(home);
+        if build.development && !build.allow_dev_migrate && !origin.created_by_development_build() {
+            return Err(Error::Invalid(format!(
+                "this development build of another will not migrate the database in {} from schema v{current} to v{latest}: a development build did not create this home; use the installed another for it, or give this build its own home with ANOTHER_HOME=$(mktemp -d); to migrate it anyway, pass --dev-migrate (a backup is taken first)",
+                home.display()
+            )));
+        }
+        backup(db, home, current, now).map_err(|e| {
+            Error::Invalid(format!(
+                "the backup before migrating failed, so the database was not migrated: {e}"
+            ))
+        })?;
+    }
+    for sql in &MIGRATIONS[current as usize..] {
+        tx.execute_batch(sql)?;
+    }
+    tx.pragma_update(None, "user_version", latest)?;
+    if let Some(home) = home {
+        let stamp = Some(build.stamp(latest, now));
+        if current == 0 {
+            origin = HomeOrigin {
+                created: stamp,
+                migrated: None,
+            };
+        } else {
+            origin.migrated = stamp;
+        }
+        origin.write(home)?;
+    }
+    Ok(tx.commit()?)
+}
+
+/// Copy the database, as last committed, to a new file under the home's backup directory and
+/// check the copy. The caller holds the write lock, so no writer can slip in between the
+/// copy and the migration; the copy is made through a second, read-only connection.
+fn backup(db: &Path, home: &Path, version: i64, now: i64) -> Result<PathBuf> {
+    let dir = home.join(BACKUP_DIR);
+    std::fs::create_dir_all(&dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let taken = chrono::DateTime::from_timestamp_millis(now).map_or_else(
+        || now.to_string(),
+        |t| t.format("%Y%m%dT%H%M%SZ").to_string(),
+    );
+    let mut path = dir.join(format!("another-v{version}-{taken}.db"));
+    let mut n = 1;
+    while path.exists() {
+        n += 1;
+        path = dir.join(format!("another-v{version}-{taken}-{n}.db"));
+    }
+    let target = path
+        .to_str()
+        .ok_or_else(|| Error::Invalid(format!("{} is not valid UTF-8", path.display())))?;
+    let read_only = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_URI
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    Connection::open_with_flags(db, read_only)?.execute("VACUUM INTO ?1", [target])?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    let copy = Connection::open_with_flags(&path, read_only)?;
+    let check: String = copy.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
+    let saved: i64 = copy.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if check != "ok" || saved != version {
+        return Err(Error::Invalid(format!(
+            "{} did not verify (quick_check {check}, schema v{saved})",
+            path.display()
+        )));
+    }
+    Ok(path)
+}
+
+/// The newest file in the home's backup directory, by modification time.
+fn latest_backup(home: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(home.join(BACKUP_DIR))
+        .ok()?
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            let modified = path.metadata().ok()?.modified().ok()?;
+            path.is_file().then_some((modified, path))
+        })
+        .max()
+        .map(|(_, path)| path)
+}
+
+/// Apply the first `version` migrations to an empty database and set its schema version.
+/// Tests use it to build a home as an earlier build left it.
+#[doc(hidden)]
+pub fn apply_schema(conn: &Connection, version: i64) -> Result<()> {
+    let steps = usize::try_from(version)
+        .ok()
+        .and_then(|n| MIGRATIONS.get(..n))
+        .ok_or_else(|| Error::Invalid(format!("this build has no schema v{version}")))?;
+    for sql in steps {
+        conn.execute_batch(sql)?;
+    }
+    Ok(conn.pragma_update(None, "user_version", version)?)
+}
+
+/// SHA-256 of the [`catalog`] at each schema version, from v0 (an empty database) to the
+/// latest. Frozen: a released schema never changes shape, and a new migration appends its
+/// line (the test `every_schema_version_has_its_frozen_catalog` prints the value).
+const CATALOGS: &[&str] = &[
+    "6a3cf5192354f71615ac51034b3e97c20eda99643fcaf5bbe6d41ad59bd12167",
+    "ee4747a82f67486ffea3cf9f95ddbd95978894050fa2173b5ea2f558fb2bf578",
+    "9c82ddd60688bde41664cf1a41191f25ecf82b2c4deb90e7f6ca83aac00389a7",
+    "973ab85a0a7a52baf3f116374f6753c72d64ac98f7ee7888ea635eb78c335a8e",
+    "86cbd3f6824e4617935e0697036d4432d7db79c3e09d22d313981d0e9a0e0e27",
+    "476f0ae405cbe84094cb81bafc4302d3cbfcec10945d010851489255dc9895c5",
+    "58c89ec89e9df0a9b008eb299fc65b191cc2974b675f3e9acb1eb96f4ff82e08",
+    "7ab9be753f330b0a7042318ef9897363c049edc6a6644dd22d1183977b57265e",
+    "f85d51188f29f23863c5e90224d308abd1150bb9ed019245681e7d6900614a73",
+    "3263f7df9c4fd6613f7c466cbb01a84962fd4bd1635b3f87d96f2751b2d6f372",
+    "5b76a246c4ba93c3edd4c1a7d03fe0f19f43aadceed5901dfa0ba6b439be9c54",
+];
+
+/// Whether the database's tables and indexes are the ones this build has for `version`.
+fn known_schema(conn: &Connection, version: i64) -> Result<bool> {
+    let known = usize::try_from(version).ok().and_then(|v| CATALOGS.get(v));
+    match known {
+        Some(digest) => Ok(*digest == catalog_digest(conn)?),
+        None => Ok(false),
+    }
+}
+
+fn refuse_unknown(conn: &Connection, version: i64) -> Result<()> {
+    if known_schema(conn, version)? {
+        return Ok(());
+    }
+    Err(Error::Invalid(format!(
+        "database schema v{version} does not match what this another build has for v{version}: another build changed it, and this build will not use it; run another doctor, then use the build that wrote it or stop every another process and restore a backup (docs/DOCTOR.md)"
+    )))
+}
+
+/// The shape of the schema, one query each: every table's columns, its indexes (those of
+/// `UNIQUE` and primary keys included) with their columns, and its foreign keys. These read
+/// the pragmas, not the stored SQL text, which differs between SQLite versions for the same
+/// schema. Triggers and views are not part of it: no migration creates one.
+const SHAPE: &[&str] = &[
+    r#"SELECT m.name, c.cid, c.name, c.type, c."notnull", c.dflt_value, c.pk
+       FROM sqlite_master m JOIN pragma_table_info(m.name) c
+       WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%' ORDER BY m.name, c.cid"#,
+    r#"SELECT m.name, l.name, l."unique", l.origin, l.partial, i.seqno, i.name
+       FROM sqlite_master m JOIN pragma_index_list(m.name) l JOIN pragma_index_info(l.name) i
+       WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%' ORDER BY m.name, l.name, i.seqno"#,
+    r#"SELECT m.name, f.id, f.seq, f."table", f."from", f."to", f.on_update, f.on_delete
+       FROM sqlite_master m JOIN pragma_foreign_key_list(m.name) f
+       WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%' ORDER BY m.name, f.id, f.seq"#,
+];
+
+/// SHA-256 over the rows of [`SHAPE`], so two databases built by different paths compare
+/// equal exactly when their schemas have the same shape.
+fn catalog_digest(conn: &Connection) -> Result<String> {
+    use rusqlite::types::ValueRef;
+    let mut text = String::new();
+    for sql in SHAPE {
+        let mut stmt = conn.prepare(sql)?;
+        let columns = stmt.column_count();
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            for i in 0..columns {
+                match row.get_ref(i)? {
+                    ValueRef::Null => text.push('-'),
+                    ValueRef::Integer(n) => text.push_str(&n.to_string()),
+                    ValueRef::Real(n) => text.push_str(&n.to_string()),
+                    ValueRef::Text(t) | ValueRef::Blob(t) => {
+                        text.push_str(&format!("{:?}", String::from_utf8_lossy(t)))
+                    }
+                }
+                text.push(',');
+            }
+            text.push('\n');
+        }
+        text.push('\n');
+    }
+    Ok(crate::crypto::sha256_hex(text.as_bytes()))
 }
 
 fn ensure_local_node(
@@ -919,10 +1238,25 @@ mod upgrade_tests {
     /// The catalog of a database built by applying the first `n` migrations directly.
     fn catalog_at(n: usize) -> Vec<String> {
         let conn = Connection::open_in_memory().unwrap();
-        for sql in &MIGRATIONS[..n] {
-            conn.execute_batch(sql).unwrap();
-        }
+        apply_schema(&conn, n as i64).unwrap();
         catalog(&conn)
+    }
+
+    /// The frozen schema catalog: one digest per schema version. A change to the shape of a
+    /// released schema fails here, as does a migration added without its line.
+    #[test]
+    fn every_schema_version_has_its_frozen_catalog() {
+        let now: Vec<String> = (0..=MIGRATIONS.len())
+            .map(|n| {
+                let conn = Connection::open_in_memory().unwrap();
+                apply_schema(&conn, n as i64).unwrap();
+                catalog_digest(&conn).unwrap()
+            })
+            .collect();
+        assert_eq!(
+            CATALOGS, now,
+            "CATALOGS must list these digests, v0 first; only ever append to it"
+        );
     }
 
     #[test]
@@ -1058,6 +1392,25 @@ mod upgrade_tests {
         let db = Connection::open(home.join(DB_FILE)).unwrap();
         assert_eq!(version(&db), MIGRATIONS.len() as i64);
         assert_eq!(catalog(&db), catalog_at(MIGRATIONS.len()));
+
+        // The backup taken before the upgrade is the v8 home, hold and all.
+        let saved = latest_backup(&home).expect("a backup before the migration");
+        let saved = Connection::open(saved).unwrap();
+        assert_eq!(version(&saved), 8);
+        assert_eq!(catalog(&saved), catalog_at(8));
+        let held: i64 = saved
+            .query_row(
+                "SELECT count(*) FROM holds WHERE hold_id = ?1",
+                [&hold.hold_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            held, 1,
+            "the backup holds the data the migration started from"
+        );
+        drop(saved);
+
         let (fingerprint, duplicate): (Option<String>, Option<String>) = db
             .query_row(
                 "SELECT fingerprint, duplicate_of FROM announcements WHERE message_id = ?1",

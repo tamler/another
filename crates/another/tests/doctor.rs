@@ -167,7 +167,10 @@ fn a_fresh_home_is_ok_and_doctor_changes_nothing() {
     for entry in std::fs::read_dir(&fx.home).unwrap() {
         let name = entry.unwrap().file_name().to_string_lossy().into_owned();
         assert!(
-            name.starts_with("another.db") || name == "hooks" || name == "logs",
+            name.starts_with("another.db")
+                || name == "build.json"
+                || name == "hooks"
+                || name == "logs",
             "unexpected {name} in the home"
         );
     }
@@ -285,13 +288,34 @@ fn a_named_bind_is_skipped_not_resolved() {
     assert_eq!(status(&r, "server"), "skip", "{r}");
 }
 
+/// A home as an earlier build left it, one schema behind. `created_by` is the build its
+/// record names; `None` is a home from before the record existed.
+fn older_home(fx: &Fx, created_by: Option<&str>) -> i64 {
+    fx.init();
+    let current = user_version(&fx.db());
+    std::fs::remove_dir_all(&fx.home).unwrap();
+    std::fs::create_dir_all(&fx.home).unwrap();
+    let c = rusqlite::Connection::open(fx.db()).unwrap();
+    c.pragma_update(None, "journal_mode", "WAL").unwrap();
+    another_core::apply_schema(&c, current - 1).unwrap();
+    if let Some(build) = created_by {
+        std::fs::write(
+            fx.home.join("build.json"),
+            format!(
+                r#"{{"created":{{"version":"0.1.0","build":"{build}","schema":{},"at":"2026-11-01T00:00:00.000Z"}}}}"#,
+                current - 1
+            ),
+        )
+        .unwrap();
+    }
+    current
+}
+
 #[test]
 fn an_older_schema_warns_and_a_newer_one_fails_without_touching_the_file() {
     let fx = Fx::new();
-    fx.init();
-    let current = user_version(&fx.db());
+    let current = older_home(&fx, Some("development"));
 
-    set_user_version(&fx.db(), current - 1);
     let before = sha(&fx.db());
     let (code, r) = fx.doctor();
     assert_eq!(code, Some(0), "{r}");
@@ -309,6 +333,135 @@ fn an_older_schema_warns_and_a_newer_one_fails_without_touching_the_file() {
     assert_eq!(code, Some(1), "{r}");
     assert_eq!(status(&r, "database"), "fail");
     assert_eq!(user_version(&fx.db()), current + 1);
+}
+
+/// The build and the database do not match: this test binary is a development build, and the
+/// home is one it did not create (the 17 Nov 2026 failure). Doctor fails, says why, and does
+/// not offer the migration a normal command would refuse.
+#[test]
+fn a_development_build_on_a_home_it_did_not_create_fails_with_the_way_out() {
+    for created_by in [None, Some("release")] {
+        let fx = Fx::new();
+        let current = older_home(&fx, created_by);
+        let before = sha(&fx.db());
+        let (code, r) = fx.doctor();
+        assert_eq!(code, Some(1), "{r}");
+        assert_eq!(status(&r, "database"), "fail", "{r}");
+        let detail = row(&r, "database")["detail"].as_str().unwrap().to_string();
+        let fix = row(&r, "database")["fix"].as_str().unwrap().to_string();
+        assert!(
+            detail.contains(&format!("schema v{}", current - 1))
+                && detail.contains("development build")
+                && detail.contains("did not create"),
+            "{detail}"
+        );
+        assert!(
+            fix.contains("installed another") && fix.contains("--dev-migrate"),
+            "{fix}"
+        );
+        assert_eq!(status(&r, "peers"), "skip");
+        assert_eq!(sha(&fx.db()), before, "doctor changed the database");
+        assert!(!fx.home.join("backups").exists(), "doctor took a backup");
+    }
+}
+
+/// A database whose version this build knows but whose tables another build changed.
+#[test]
+fn a_schema_another_build_changed_fails() {
+    let fx = Fx::new();
+    fx.init();
+    let current = user_version(&fx.db());
+    rusqlite::Connection::open(fx.db())
+        .unwrap()
+        .execute_batch("ALTER TABLE agents ADD COLUMN stray TEXT")
+        .unwrap();
+    let before = sha(&fx.db());
+    let (code, r) = fx.doctor();
+    assert_eq!(code, Some(1), "{r}");
+    assert_eq!(status(&r, "database"), "fail", "{r}");
+    let detail = row(&r, "database")["detail"].as_str().unwrap().to_string();
+    assert!(
+        detail.contains(&format!(
+            "schema v{current} does not match this build's v{current}"
+        )),
+        "{detail}"
+    );
+    assert!(row(&r, "database")["fix"]
+        .as_str()
+        .unwrap()
+        .contains("restore"));
+    assert_eq!(sha(&fx.db()), before, "doctor changed the database");
+}
+
+/// A database a newer build migrated: doctor names the build that did it and the backup
+/// that undoes it.
+#[test]
+fn a_newer_schema_names_the_build_that_migrated_it_and_the_backup() {
+    let fx = Fx::new();
+    let current = older_home(&fx, None);
+    let out = fx.cmd(&["--dev-migrate", "status"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(user_version(&fx.db()), current);
+    let backup = std::fs::read_dir(fx.home.join("backups"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+
+    // Seen from the installed build, one schema behind the build that migrated the home:
+    // the database and its record both name the newer schema.
+    set_user_version(&fx.db(), current + 1);
+    let record = fx.home.join("build.json");
+    let mut origin: Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    assert_eq!(origin["migrated"]["schema"], current);
+    origin["migrated"]["schema"] = (current + 1).into();
+    std::fs::write(&record, origin.to_string()).unwrap();
+    let (code, r) = fx.doctor();
+    assert_eq!(code, Some(1), "{r}");
+    assert_eq!(status(&r, "database"), "fail", "{r}");
+    let detail = row(&r, "database")["detail"].as_str().unwrap().to_string();
+    let fix = row(&r, "database")["fix"].as_str().unwrap().to_string();
+    assert!(
+        detail.contains("is newer than this build")
+            && detail.contains("last migrated by a development build of another"),
+        "{detail}"
+    );
+    assert!(
+        fix.contains("upgrade another") && fix.contains(&backup.display().to_string()),
+        "{fix}"
+    );
+}
+
+/// A negative schema version is not an older another schema: no build migrates it, so doctor
+/// must not advise a normal command (which refuses or fails on it). It fails and points at the
+/// home instead, and leaves the file as it was.
+#[test]
+fn a_negative_schema_version_fails_and_is_not_offered_a_migration() {
+    let fx = Fx::new();
+    fx.init();
+    // `user_version` is a signed 32-bit value: test past -1 down to its minimum.
+    for v in [-1, -2, i64::from(i32::MIN)] {
+        set_user_version(&fx.db(), v);
+        let before = sha(&fx.db());
+        let (code, r) = fx.doctor();
+        assert_eq!(code, Some(1), "{v}: {r}");
+        assert_eq!(status(&r, "database"), "fail", "{v}: {r}");
+        let detail = row(&r, "database")["detail"].as_str().unwrap().to_string();
+        let fix = row(&r, "database")["fix"].as_str().unwrap().to_string();
+        assert!(detail.contains(&format!("{v} is not valid")), "{detail}");
+        assert!(
+            !detail.contains("migrates") && !fix.contains("migrates"),
+            "{v}: {r}"
+        );
+        assert!(fix.contains("--home or ANOTHER_HOME"), "{fix}");
+        assert_eq!(sha(&fx.db()), before, "doctor changed the database");
+        assert_eq!(user_version(&fx.db()), v);
+    }
 }
 
 #[test]

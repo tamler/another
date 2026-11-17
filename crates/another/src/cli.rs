@@ -30,6 +30,9 @@ pub struct Cli {
     /// Print machine-readable JSON.
     #[arg(long, global = true)]
     pub json: bool,
+    /// Let a development build migrate a home it did not create. A backup is taken first.
+    #[arg(long, global = true)]
+    pub dev_migrate: bool,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -864,6 +867,9 @@ pub fn main() -> ExitCode {
         log_file,
     );
     let json = cli.json;
+    if cli.dev_migrate {
+        another_core::allow_dev_migrate();
+    }
     match run(cli) {
         Ok(code) => code,
         Err(err) => {
