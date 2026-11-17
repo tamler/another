@@ -49,7 +49,8 @@ fn a_development_binary_refuses_an_older_home_until_told_to_migrate_it() {
     assert_eq!(out.status.code(), Some(1));
     let text = String::from_utf8_lossy(&out.stderr);
     assert!(
-        text.contains("this development build of another will not migrate the database")
+        text.contains("this development build of another")
+            && text.contains("will not migrate the database")
             && text.contains(&format!("v{} to v{current}", current - 1))
             && text.contains("--dev-migrate"),
         "{text}"
@@ -84,6 +85,43 @@ fn a_development_binary_refuses_an_older_home_until_told_to_migrate_it() {
 
     // The flag was for that run only; the home is current now, so nothing needs it.
     assert!(another(&home, &["status"]).status.success());
+}
+
+/// While a home is refused, hooks still fail open and stay quiet, as hooks must. The reason
+/// a person has to act on goes to `logs/hooks.log`, in the store's own words, once.
+#[test]
+fn a_refused_home_keeps_hooks_quiet_and_logs_the_true_reason_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (home, _) = older_home(dir.path());
+    let db = home.join("another.db");
+    let before = std::fs::read(&db).unwrap();
+    let user = dir.path().join("user");
+    std::fs::create_dir_all(&user).unwrap();
+
+    for event in ["session-start", "prompt", "pre-edit", "post-tool", "prompt"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_another"))
+            .args(["hook", "run", event, "--client", "claude"])
+            .env("ANOTHER_HOME", &home)
+            .env("HOME", &user)
+            .env("USERPROFILE", &user)
+            .env_remove("ANOTHER_AGENT")
+            .env_remove("ANOTHER_LOG")
+            .stdin(Stdio::null())
+            .output()
+            .expect("run another");
+        assert_eq!(out.status.code(), Some(0), "{event}");
+        assert!(out.stdout.is_empty(), "{event}: hooks stay quiet");
+    }
+
+    let log = std::fs::read_to_string(home.join("logs/hooks.log")).unwrap();
+    let reasons: Vec<&str> = log
+        .lines()
+        .filter(|line| line.contains("will not migrate the database"))
+        .collect();
+    assert_eq!(reasons.len(), 1, "{log}");
+    assert!(reasons[0].contains("--dev-migrate"), "{log}");
+    assert!(!log.contains("a normal open migrates it"), "{log}");
+    assert_eq!(std::fs::read(&db).unwrap(), before, "a hook wrote");
 }
 
 #[test]

@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use another_core::{Blocked, Error, Store};
+use another_core::{Error, Store};
 use serde::Serialize;
 
 use crate::hooks::{self, Client, HookEnv};
@@ -265,8 +265,14 @@ fn database(home: &Path) -> (Check, Option<Store>) {
     if v > want {
         let by = match &inspected.origin.migrated {
             Some(stamp) if stamp.schema == v => format!(
-                "; last migrated by a {} build of another {}",
-                stamp.build, stamp.version
+                "; last migrated by a {} build of another {}{}",
+                stamp.build,
+                stamp.version,
+                stamp
+                    .binary
+                    .as_ref()
+                    .map(|path| format!(" at {path}"))
+                    .unwrap_or_default()
             ),
             _ => String::new(),
         };
@@ -302,36 +308,18 @@ fn database(home: &Path) -> (Check, Option<Store>) {
     }
     // The store's own verdict on a pending migration, so doctor and a normal command agree
     // (also under --dev-migrate, and for an empty database, which is created, not migrated).
-    match &inspected.blocked {
-        Some(Blocked::DevelopmentBuild) => {
-            return (
-                check(
-                    "database",
-                    Level::Fail,
-                    format!(
-                        "schema v{v}, and this development build (v{want}) did not create this home or a release build has used it since, so it will not migrate it"
-                    ),
-                )
-                .fix("use the installed another for this home; to migrate it with this build anyway, pass --dev-migrate (a backup is taken first)"),
-                None,
+    if inspected.blocked {
+        return (
+            check(
+                "database",
+                Level::Fail,
+                format!(
+                    "schema v{v}, and this development build (v{want}) did not create this home or a release build has used it since, so it will not migrate it"
+                ),
             )
-        }
-        Some(Blocked::OtherBinary { recorded, this }) => {
-            return (
-                check(
-                    "database",
-                    Level::Fail,
-                    format!(
-                        "schema v{v}, and this binary ({this}) is not the one the home belongs to ({recorded}), so it will not migrate it to v{want}"
-                    ),
-                )
-                .fix(format!(
-                    "upgrade the binary at {recorded} in place; to migrate with this binary anyway, pass --dev-migrate (a backup is taken first)"
-                )),
-                None,
-            )
-        }
-        None => {}
+            .fix("use the installed another for this home; to migrate it with this build anyway, pass --dev-migrate (a backup is taken first)"),
+            None,
+        );
     }
     if v == 0 {
         return (
