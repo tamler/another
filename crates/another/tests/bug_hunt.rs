@@ -653,6 +653,33 @@ async fn mcp_release_with_paths() {
         assert!(!said.contains("another hold acquire"), "{said}");
         assert!(!said.contains("sandbox"), "{said}");
     }
+    // The same for a pattern that a link leads out of every checkout: where it leads is
+    // not said.
+    #[cfg(unix)]
+    {
+        std::fs::create_dir_all(srv._dir.path().join("loose/data")).unwrap();
+        std::os::unix::fs::symlink(
+            srv._dir.path().join("loose"),
+            std::path::Path::new(&inside).join("out"),
+        )
+        .unwrap();
+        let refused = call(
+            &client,
+            "hold_paths",
+            json!({ "action": "acquire", "project": inside, "paths": ["out/data/**"] }),
+        )
+        .await;
+        assert_eq!(refused.is_error, Some(true), "{refused:?}");
+        let said = text(&refused);
+        assert!(
+            said.contains(
+                "out/data/** points outside any checkout; a hold taken here would apply to \
+                 nothing"
+            ),
+            "{said}"
+        );
+        assert!(!said.contains("loose"), "{said}");
+    }
     assert_eq!(live_holds(&srv.store).len(), 1);
     srv.ct.cancel();
 }

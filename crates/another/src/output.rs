@@ -4,9 +4,9 @@ use std::fmt::Write;
 
 use another_core::{
     ActivityFeed, Agent, AuditEntry, Event, HeartbeatReport, Hold, HoldConflict, HoldReport, Inbox,
-    LeaseOutcome, Message, NodeInfo, Peer, Project, QueueAudit, QueueDelegate, QueueGrace,
-    QueueItem, QueueLimits, QueueNeedsOwner, QueueNext, Request, Resource, Thread, ThreadSummary,
-    Token, WakeTarget,
+    LeaseOutcome, ListedHold, Message, NodeInfo, Peer, Project, QueueAudit, QueueDelegate,
+    QueueGrace, QueueItem, QueueLimits, QueueNeedsOwner, QueueNext, Request, Resource, Thread,
+    ThreadSummary, Token, WakeTarget,
 };
 use serde::Serialize;
 
@@ -163,24 +163,47 @@ pub fn requests(rs: &[Request]) -> String {
         .collect()
 }
 
+fn hold_row(h: &Hold) -> String {
+    format!(
+        "{:<9} {:<16} {}:{}  until {}{}  [{}]",
+        if h.exclusive { "exclusive" } else { "shared" },
+        h.agent,
+        h.project,
+        h.pattern,
+        h.expires_at,
+        h.reason
+            .as_deref()
+            .map(|r| format!("  ({r})"))
+            .unwrap_or_default(),
+        h.hold_id
+    )
+}
+
 pub fn holds(hs: &[Hold]) -> String {
-    hs.iter()
+    hs.iter().map(|h| hold_row(h) + "\n").collect()
+}
+
+/// `another holds`: the rows of [`holds`], with the holds of other checkouts marked and one
+/// line saying what the mark means when any row carries it.
+pub fn listed_holds(hs: &[ListedHold]) -> String {
+    let mut out: String = hs
+        .iter()
         .map(|h| {
-            format!(
-                "{:<9} {:<16} {}:{}  until {}{}  [{}]\n",
-                if h.exclusive { "exclusive" } else { "shared" },
-                h.agent,
-                h.project,
-                h.pattern,
-                h.expires_at,
-                h.reason
-                    .as_deref()
-                    .map(|r| format!("  ({r})"))
-                    .unwrap_or_default(),
-                h.hold_id
-            )
+            let mark = if h.other_checkout {
+                "  other checkout"
+            } else {
+                ""
+            };
+            format!("{}{mark}\n", hold_row(&h.hold))
         })
-        .collect()
+        .collect();
+    if hs.iter().any(|h| h.other_checkout) {
+        out.push_str(
+            "other checkout: taken in a different working directory from this one; it does \
+             not block edits here\n",
+        );
+    }
+    out
 }
 
 pub fn conflicts(cs: &[HoldConflict]) -> String {

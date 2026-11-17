@@ -36,14 +36,19 @@ another hold release --agent claude@shop src/api/routes.rs
 released 1 hold(s)
 ```
 
-The argument is a file or a directory, and it is resolved from the file, the way the edit guard resolves an edit: it works from any directory, through a symlink, with a relative or an absolute path, and for a file in another checkout that you edited by its absolute path. It releases your own holds on that file and nothing else. A directory releases your holds on the files below it and your glob holds whose literal directory is that directory or lies below it; a glob with no literal directory, such as `**/*.rs`, stays. No project is registered by it; `--project` only names the directory relative paths start from.
+The argument is a file or a directory, and it is resolved from the file, the way the edit guard resolves an edit: it works from any directory, through a symlink, with a relative or an absolute path, and for a file in another checkout that you edited by its absolute path. It releases your own holds on that file and nothing else. A directory releases your holds on the files below it and your glob holds whose literal directory is that directory or lies below it, also when the hold spells that directory with escaped brackets (`src/br[[]1[]]/**` for the directory `src/br[1]`); a glob with no literal directory, such as `**/*.rs`, stays. No project is registered by it; `--project` only names the directory relative paths start from.
 
 - An argument that names an existing file or directory is a path, whatever characters its name has.
-- An argument shaped like a hold id (26 characters) is a hold id, as before. A file whose whole name looks like one is given as `./NAME`.
+- An argument shaped like a hold id (26 characters, in upper case as `another holds` prints them) is a hold id, as before. A file whose whole name looks like one is given as `./NAME`.
+- An argument made of letters and digits only that names no existing file or directory may be a mistyped hold id. It is still tried as a path, so a hold of yours on a file of that name that is not created yet is released. If no hold of yours names that path, covers it (it lies inside a wider hold of yours) or lies below it (a glob such as `build/**` for the name `build`), the command fails with status 1, releases nothing by path and names both readings. `./NAME` always means a path and never fails this way. Hold ids in the same command are released first; when a later argument then fails, the error ends with what is already released, for example `; 1 hold(s) already released: 01M7MB3VTGJPCE70WC7RB0B4SK`.
 - Any other argument with a wildcard is a glob: it releases your hold with exactly that pattern in the project at the current directory or the nearest one above it.
 - With no argument every hold under your name is released, as before.
 
-When there is nothing to release, the command says why and exits with status 0:
+```text
+another: no live hold 01NOSUCHHOLD: it is not a hold id (26 characters) and no hold of yours names the path /Users/j/app/01NOSUCHHOLD; for a file of that name, give ./01NOSUCHHOLD
+```
+
+When a path has nothing to release, the command says why and exits with status 0:
 
 ```text
 another: nothing of yours is held at /Users/j/app/src/a.rs (checkout /Users/j/app)
@@ -53,7 +58,7 @@ another: nothing of yours is held at /Users/j/app/src/a.rs (checkout /Users/j/ap
 another: src/a.rs is inside your hold src/** [01M7MB3VTGJPCE70WC7RB0B4SK]; release that hold to free it
 ```
 
-MCP callers use `hold_paths` with `action: "release"`, `paths` and `project` (the directory relative paths start from). A remote caller's path must lie inside a project its token covers.
+MCP callers use `hold_paths` with `action: "release"`, `paths` and `project` (the directory relative paths start from). A remote caller's path must lie inside a project its token covers. For a symlink inside such a project, the answers to a remote caller differ with where the link leads (into a checkout, into another checkout or into none), so it can learn that much about the target; no path outside its projects is shown, and a remote caller cannot create the link.
 
 ## Holds and checkouts
 
@@ -63,7 +68,15 @@ A hold blocks only inside the checkout it was taken in. A checkout is one workin
 - for a file outside git, the registered project directory that contains it;
 - a file in neither is not held.
 
-A hold applies to a file exactly when the file's checkout is the hold's checkout and the hold's pattern, read from the top of that checkout, matches the file's path from there. Other checkouts are told nothing: the edit guard, `hold acquire` and `hold check` say nothing about holds elsewhere. `another holds` still lists every hold with its project, for anyone who looks.
+A hold applies to a file exactly when the file's checkout is the hold's checkout and the hold's pattern, read from the top of that checkout, matches the file's path from there. Other checkouts are told nothing: the edit guard, `hold acquire` and `hold check` say nothing about holds elsewhere. `another holds` still lists every hold with its project, for anyone who looks, and marks the ones that were taken in another checkout than the one the command is run in:
+
+```text
+exclusive codex@w1         w1:src/a.rs  until 2026-11-17T13:00:30.288Z  (editing (taken by the edit hook))  [01M7MQSGWGDZMF8TB8BGYKW8QZ]
+exclusive claude@another   another:src/a.rs  until 2026-11-17T13:00:30.299Z  (editing (taken by the edit hook))  [01M7MQSGWXSVM817P6JEDM8N8W]  other checkout
+other checkout: taken in a different working directory from this one; it does not block edits here
+```
+
+A marked hold is not a reason to leave a file alone in your own checkout. With `--json` each hold carries the boolean `other_checkout`. The mark is judged from the current directory, also with `--project`. Run outside any checkout, the command marks nothing, prints no such line, and gives `other_checkout` as false throughout.
 
 | Case | Result |
 |---|---|
@@ -94,6 +107,21 @@ another: test/another/src/** is inside another checkout (/Users/jacob/Projects/t
 ```
 
 The same goes for a pattern from the main checkout that names a worktree inside it, such as `.claude/worktrees/x/src/**`, and for `hold check`. The directory is the part of the pattern before its first wildcard; one that does not exist yet is judged at its nearest existing parent. A pattern that starts with a wildcard has no such directory and is granted: it covers the files of its own checkout only.
+
+A pattern whose directory leads, through a symlinked directory, out of the project to a place that is in no checkout (not in git and not under a registered directory) is refused the same way, because the edit guard holds nothing there:
+
+```text
+another: plainlink/sub/** points outside any checkout (/Users/jacob/plain/sub); a hold taken here would apply to nothing
+```
+
+A remote caller gets the same message without the directory.
+
+A file that is itself a symlink is judged by where it points. The edit guard holds such a file where its name lives, and also at the file it points to when a hold can exist there.
+
+- The link points to a place in no checkout and no registered directory, or to a file that does not exist yet: only the name is held, so `config.toml` in this checkout is held here, and `hold check` reports a conflict on it as for any file.
+- The link points into another checkout: refused as "inside another checkout", with the command that takes the hold on the target there. The same goes for a file below a directory link into another checkout, whatever that file links to.
+
+Two known limits remain. A file link into another checkout is refused although the edit guard does hold the link's name in this checkout. A link into a registered directory outside git is granted, and `hold check` reports no conflict, although the edit guard also holds the target there and can stop the edit for a hold in that directory.
 
 ## Symlinks
 

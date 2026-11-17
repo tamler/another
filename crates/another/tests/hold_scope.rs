@@ -874,3 +874,541 @@ fn texts() {
         )
     );
 }
+
+/// Review of D92, P3-1. An argument that can only be a mistyped hold id is an error, not a
+/// path with nothing held: a caller that reads the exit status alone must not take a live
+/// hold for a released one.
+#[test]
+fn a_mistyped_hold_id_is_an_error_and_not_a_path_with_nothing_held() {
+    let env = Env::new();
+    let app = env.repo("work/app");
+    env.start("claude", &app);
+    assert_eq!(env.edit("claude", &app, "src/a.rs"), "");
+    let id = env.holds()[0]["hold_id"].as_str().unwrap().to_string();
+    let me = ["hold", "release", "--agent", "claude@app"];
+    let refusal = |wrong: &str| -> String {
+        format!(
+            "another: no live hold {wrong}: it is not a hold id (26 characters) and no hold of \
+             yours names the path {}; for a file of that name, give ./{wrong}\n",
+            s(&app.join(wrong))
+        )
+    };
+    // Too short, a real id in lower case, and a real id one character short.
+    for wrong in ["01NOSUCHHOLD", &id.to_lowercase(), &id[..25]] {
+        let (code, stderr) = env.fails_in(&app, &[&me[..], &[wrong]].concat());
+        assert_eq!(code, 1, "{stderr}");
+        assert!(stderr.starts_with(&refusal(wrong)), "{stderr}");
+        assert!(stderr.contains("another holds"), "{stderr}");
+        assert_eq!(env.holds().len(), 1, "{wrong} released nothing");
+    }
+    let out = env.run_in(
+        &app,
+        &[&["--json"][..], &me[..], &["01NOSUCHHOLD"]].concat(),
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "not_found", "{error}");
+    // Beside a path that is held, it refuses the whole command: nothing is released.
+    let (code, _) = env.fails_in(&app, &[&me[..], &["src/a.rs", "01NOSUCHHOLD"]].concat());
+    assert_eq!(code, 1);
+    assert_eq!(env.holds().len(), 1);
+
+    // Read as a path, as before, with exit status 0:
+    let nothing = |dir: &Path, arg: &str, full: &Path| {
+        let out = env.run_in(dir, &[&me[..], &[arg]].concat());
+        assert_eq!(out.status.code(), Some(0), "{arg}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "released 0 hold(s)\n");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!(
+                "another: nothing of yours is held at {} (checkout {})\n",
+                s(full),
+                s(&app)
+            ),
+            "{arg}"
+        );
+    };
+    // a file that exists, whatever its name;
+    write(&app.join("Makefile"), "");
+    nothing(&app, "Makefile", &app.join("Makefile"));
+    // `./NAME`, which always means a path;
+    nothing(&app, "./01NOSUCHHOLD", &app.join("01NOSUCHHOLD"));
+    // a name no hold id can have (ids are letters and digits only), also when no such file
+    // exists yet;
+    nothing(&app, "not-yet.rs", &app.join("not-yet.rs"));
+    // and a name with a directory in front.
+    nothing(&app, "src/NOSUCHFILE", &app.join("src/NOSUCHFILE"));
+    // A bare name that does name a hold, on a file not created yet, releases it.
+    assert_eq!(env.edit("claude", &app, "NEWFILE"), "");
+    assert_eq!(
+        env.ok_in(&app, &[&me[..], &["NEWFILE"]].concat()),
+        "released 1 hold(s)\n"
+    );
+    assert_eq!(env.holds().len(), 1);
+
+    // A name inside a wider hold of the caller's keeps its note and exit status 0: the
+    // hold that covers it is the truer answer.
+    for pattern in ["src/**", "build/**"] {
+        env.ok_in(
+            &app,
+            &[
+                "hold",
+                "acquire",
+                "--agent",
+                "claude@app",
+                "--project",
+                &s(&app),
+                pattern,
+            ],
+        );
+    }
+    let glob_id = |pattern: &str| -> String {
+        let held = env.holds();
+        let hold = held.iter().find(|h| h["pattern"] == pattern).unwrap();
+        hold["hold_id"].as_str().unwrap().to_string()
+    };
+    let out = env.run_in(&app.join("src"), &[&me[..], &["newfile"]].concat());
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!(
+            "another: newfile is inside your hold src/** [{}]; release that hold to free it\n",
+            glob_id("src/**")
+        )
+    );
+    // `build` does not exist; `build/**` is held, so the name is not a mistyped id.
+    assert!(!app.join("build").exists());
+    nothing(&app, "build", &app.join("build"));
+    assert_eq!(env.holds().len(), 3);
+
+    // A valid id beside a mistyped one: the id is released before the other argument is
+    // refused, so the error says so.
+    let id = glob_id("build/**");
+    let (code, stderr) = env.fails_in(&app, &[&me[..], &[&id, "01NOSUCHHOLD"]].concat());
+    assert_eq!(code, 1);
+    assert!(
+        stderr.starts_with(&format!(
+            "{}; 1 hold(s) already released: {id}\n",
+            refusal("01NOSUCHHOLD").trim_end()
+        )),
+        "{stderr}"
+    );
+    assert_eq!(env.holds().len(), 2);
+    let out = env.run_in(
+        &app,
+        &[
+            &["--json"][..],
+            &me[..],
+            &[&glob_id("src/**"), "01NOSUCHHOLD"],
+        ]
+        .concat(),
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "not_found", "{error}");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("; 1 hold(s) already released: "),
+        "{error}"
+    );
+    assert_eq!(env.holds().len(), 1);
+}
+
+/// Review of D92, P3-2. `another holds` lists every hold, also those of other checkouts,
+/// which do not block here. They are marked, so an agent told to check the listing before
+/// it edits does not skip a file that is free in its own checkout.
+#[test]
+fn holds_marks_the_ones_taken_in_another_checkout() {
+    let env = Env::new();
+    let main = env.repo("work/another");
+    let wt = env.worktree(&main, &main.join(".claude/worktrees/w1"));
+    let notes = env.root.join("notes");
+    std::fs::create_dir_all(&notes).unwrap();
+    env.ok(&["project", "ensure", &s(&notes)]);
+    env.start("claude", &main);
+    env.start("codex", &wt);
+    assert_eq!(env.edit("claude", &main, "src/a.rs"), "");
+    assert_eq!(env.edit("codex", &wt, "src/a.rs"), "");
+    assert_eq!(env.edit("claude", &main, &s(&notes.join("todo.md"))), "");
+    // A second project of the main checkout, registered at a subdirectory of it.
+    env.ok(&["project", "ensure", &s(&main.join("src"))]);
+    env.ok(&[
+        "hold",
+        "acquire",
+        "--agent",
+        "claude@another",
+        "--project",
+        &s(&main.join("src")),
+        "api/**",
+    ]);
+
+    // The projects whose holds are marked when the listing is asked for in `dir`.
+    let marked = |dir: &Path, rest: &[&str]| -> Vec<String> {
+        let args = [&["--json", "holds"][..], rest].concat();
+        let listed: Value = serde_json::from_str(&env.ok_in(dir, &args)).unwrap();
+        let mut out: Vec<String> = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|h| h["other_checkout"].as_bool().unwrap())
+            .map(|h| h["project"].as_str().unwrap().to_string())
+            .collect();
+        out.sort();
+        out
+    };
+    assert_eq!(marked(&wt, &[]), ["another", "notes", "src"]);
+    assert_eq!(marked(&wt.join("src"), &[]), ["another", "notes", "src"]);
+    assert_eq!(marked(&main, &[]), ["notes", "w1"]);
+    assert_eq!(marked(&main.join("src"), &[]), ["notes", "w1"]);
+    assert_eq!(marked(&notes, &[]), ["another", "src", "w1"]);
+    // Outside any checkout there is no "here" to compare with: nothing is marked.
+    assert!(marked(&env.root, &[]).is_empty());
+    // A project filter lists the repository's other checkouts too; they are marked.
+    assert_eq!(marked(&wt, &["--project", &s(&wt)]), ["another", "src"]);
+    assert_eq!(marked(&main, &["--project", &s(&main)]), ["w1"]);
+
+    // The fields from before are all there, unchanged, beside the new one.
+    let listed = env.json(&["holds"]);
+    assert_eq!(listed.as_array().unwrap().len(), 4);
+    for hold in listed.as_array().unwrap() {
+        let mut keys: Vec<&str> = hold
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "agent",
+                "created_at",
+                "exclusive",
+                "expires_at",
+                "hold_id",
+                "other_checkout",
+                "pattern",
+                "project",
+                "reason",
+                "ttl_seconds",
+            ]
+        );
+    }
+
+    // Text: a marker at the end of the row, and one line saying what it means.
+    let legend = "other checkout: taken in a different working directory from this one; it does \
+                  not block edits here";
+    let text = env.ok_in(&wt, &["holds"]);
+    let rows: Vec<&str> = text.lines().collect();
+    assert_eq!(rows.len(), 5, "{text}");
+    assert_eq!(rows[4], legend);
+    for row in &rows[..4] {
+        assert_eq!(
+            row.ends_with("]  other checkout"),
+            !row.contains(" w1:src/a.rs "),
+            "{row}"
+        );
+        assert_eq!(row.ends_with(']'), row.contains(" w1:src/a.rs "), "{row}");
+    }
+    // No such row, no legend: the worktree's own holds only, and anywhere outside a checkout.
+    let own = env.ok_in(&wt, &["holds", "--agent", "codex@w1"]);
+    assert_eq!(own.lines().count(), 1, "{own}");
+    assert!(!own.contains("other checkout"), "{own}");
+    let outside = env.ok_in(&env.root, &["holds"]);
+    assert_eq!(outside.lines().count(), 4, "{outside}");
+    assert!(!outside.contains("other checkout"), "{outside}");
+}
+
+/// Review of D92, P3-5. A4 at the hook level: a hold filed under one project of a checkout
+/// stops an edit the hook files under another project of the same checkout.
+#[test]
+fn two_projects_of_one_checkout_block_each_other_through_the_hook() {
+    let env = Env::new();
+    let shop = env.repo("work/shop");
+    env.start("claude", &shop);
+    env.start("codex", &shop);
+    // Filed under the top-level project: no project is registered below it yet.
+    assert_eq!(env.edit("claude", &shop, "src/a.rs"), "");
+    env.ok(&[
+        "hold",
+        "acquire",
+        "--agent",
+        "claude@shop",
+        "--project",
+        &s(&shop),
+        "src/api/**",
+    ]);
+    assert!(env.holds().iter().all(|h| h["project"] == "shop"));
+    // Now a project is registered at `src`, so the hook files edits below it there. Codex
+    // works in it through a symlinked spelling of the directory above the checkout, which
+    // the hook takes for a project of its own (`shop-2`) and names the agent after.
+    env.ok(&["project", "ensure", &s(&shop.join("src"))]);
+    let link = env.root.join("link");
+    std::os::unix::fs::symlink(env.root.join("work"), &link).unwrap();
+    let src = link.join("shop/src");
+    assert_eq!(env.edit("codex", &src, "free.rs"), "");
+    let held = env.holds();
+    let own = held
+        .iter()
+        .find(|h| h["agent"] == "codex@shop-2")
+        .unwrap_or_else(|| panic!("{held:?}"));
+    assert_eq!(
+        (&own["project"], &own["pattern"]),
+        (&json!("src"), &json!("free.rs"))
+    );
+    // The automatic hold and the deliberate one, both in the top-level project, stop it.
+    let reason = denial(&env.edit("codex", &src, "a.rs"));
+    assert!(
+        reason.contains(
+            "a.rs is held by claude@shop in this checkout (exclusive hold on shop:src/a.rs,"
+        ),
+        "{reason}"
+    );
+    let reason = denial(&env.edit("codex", &src, "api/routes.rs"));
+    assert!(
+        reason.contains(
+            "api/routes.rs is held by claude@shop in this checkout (exclusive hold on \
+             shop:src/api/**,"
+        ),
+        "{reason}"
+    );
+    assert_eq!(env.events("hold.blocked").len(), 2);
+    // The other way round: the hold the hook filed under `src` stops a claim on that file
+    // made through the top-level project.
+    let (code, _) = env.fails_in(
+        &shop,
+        &[
+            "hold",
+            "acquire",
+            "--agent",
+            "claude@shop",
+            "--project",
+            &s(&shop),
+            "src/free.rs",
+        ],
+    );
+    assert_eq!(code, 3, "a conflict");
+}
+
+/// Review of D92, P3-7. Releasing a directory takes the glob holds whose literal directory
+/// lies in it, also when that directory's name is written with escaped brackets.
+#[test]
+fn a_directory_releases_a_glob_whose_literal_part_has_an_escaped_bracket() {
+    let env = Env::new();
+    let app = env.repo("work/app");
+    env.start("claude", &app);
+    std::fs::create_dir_all(app.join("src/br[1]")).unwrap();
+    env.ok(&[
+        "hold",
+        "acquire",
+        "--agent",
+        "claude@app",
+        "--project",
+        &s(&app),
+        "src/br[[]1[]]/**",
+        "src/br[[]1[]]/deep/*.rs",
+        "src/other/**",
+    ]);
+    assert_eq!(
+        env.ok_in(
+            &app,
+            &["hold", "release", "--agent", "claude@app", "src/br[1]"]
+        ),
+        "released 2 hold(s)\n"
+    );
+    let left = env.holds();
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!(left[0]["pattern"], "src/other/**");
+}
+
+/// Review of D92, P3-3. A pattern whose literal directory leads, through a symlink, to a
+/// place in no checkout would apply to nothing, so it is refused like one that points into
+/// another checkout.
+#[test]
+fn a_hold_that_points_outside_every_checkout_is_refused() {
+    let env = Env::new();
+    let app = env.repo("work/app");
+    let plain = env.root.join("plain");
+    std::fs::create_dir_all(plain.join("sub")).unwrap();
+    std::os::unix::fs::symlink(&plain, app.join("plainlink")).unwrap();
+    env.start("claude", &app);
+    let here = ["--agent", "claude@app", "--project", &s(&app)];
+    for (verb, pattern, at) in [
+        ("acquire", "plainlink/sub/**", plain.join("sub")),
+        ("check", "plainlink/sub/**", plain.join("sub")),
+        ("acquire", "plainlink/sub/a.rs", plain.join("sub/a.rs")),
+        // The directory link itself, named without a wildcard.
+        ("acquire", "plainlink", plain.clone()),
+    ] {
+        let (code, stderr) =
+            env.fails_in(&app, &[&["hold", verb][..], &here[..], &[pattern]].concat());
+        assert_eq!(code, 1, "{stderr}");
+        assert_eq!(
+            stderr,
+            format!(
+                "another: {pattern} points outside any checkout ({}); a hold taken here would \
+                 apply to nothing\n",
+                s(&at)
+            )
+        );
+        assert!(env.holds().is_empty(), "nothing is stored");
+    }
+    // A directory of the checkout itself that does not exist yet is still granted.
+    env.ok_in(
+        &app,
+        &[&["hold", "acquire"][..], &here[..], &["src/new/**"]].concat(),
+    );
+    assert_eq!(env.holds().len(), 1);
+}
+
+/// Review of the follow-ups, R1 P2-1 and R2 N1, N2. For a file that is itself a symlink,
+/// what `hold check` and `hold acquire` say must agree with what the edit hook does. The
+/// hook holds the link where its name lives and also the file it points to, when that file
+/// is somewhere a hold can exist.
+///
+/// - The link points to no checkout and no registered directory (also a dangling link):
+///   only the name is held, so the hold is granted where the name lives.
+/// - The link points into another checkout: refused as before, with the command that
+///   takes the hold there. A known limit: the hook does hold the name here as well.
+/// - The link points into a registered directory outside git: granted and reported clear,
+///   as on main. A second known limit: the hook also holds the file there and can deny.
+#[test]
+fn check_and_the_edit_hook_agree_on_file_links() {
+    let env = Env::new();
+    let app = env.repo("work/app");
+    let other = env.repo("work/other");
+    let wt = env.worktree(&app, &env.root.join("work/app-wt"));
+    let notes = env.root.join("notes");
+    let outside = env.root.join("outside");
+    write(&outside.join("config.toml"), "");
+    write(&other.join("src/held.rs"), "");
+    write(&wt.join("README"), "");
+    write(&notes.join("todo.md"), "");
+    env.ok(&["project", "ensure", &s(&notes)]);
+    std::os::unix::fs::symlink(outside.join("config.toml"), other.join("src/olnk.toml")).unwrap();
+    for (name, target) in [
+        ("config.toml", outside.join("config.toml")),
+        ("newcfg.toml", env.root.join("gone/cfg.toml")),
+        ("held.rs", other.join("src/held.rs")),
+        ("wtreadme", wt.join("README")),
+        ("todo.md", notes.join("todo.md")),
+        ("otherdir", other.join("src")),
+    ] {
+        std::os::unix::fs::symlink(target, app.join(name)).unwrap();
+    }
+    env.start("claude", &app);
+    env.start("codex", &app);
+    // Someone holds each file a link points to, in the place that file lives.
+    env.start("grok", &other);
+    assert_eq!(env.edit("grok", &other, "src/held.rs"), "");
+    env.start("grok", &wt);
+    assert_eq!(env.edit("grok", &wt, "README"), "");
+    assert_eq!(env.edit("grok", &other, &s(&notes.join("todo.md"))), "");
+    let hold = |verb: &str, agent: &str, pattern: &str| -> Output {
+        env.run_in(
+            &app,
+            &[
+                "hold",
+                verb,
+                "--agent",
+                agent,
+                "--project",
+                &s(&app),
+                pattern,
+            ],
+        )
+    };
+    // What claude is told about each link before it edits, and what the hook then does.
+    let mut table = Vec::new();
+    for name in [
+        "config.toml",
+        "newcfg.toml",
+        "held.rs",
+        "wtreadme",
+        "todo.md",
+    ] {
+        let checked = hold("check", "claude@app", name);
+        let said = match checked.status.code() {
+            Some(0) => "clear".to_string(),
+            Some(3) => "conflict".to_string(),
+            _ => String::from_utf8_lossy(&checked.stderr).trim().to_string(),
+        };
+        let acquired = hold("acquire", "claude@app", name).status.code();
+        let hook = if env.edit("claude", &app, name).is_empty() {
+            "allow"
+        } else {
+            "deny"
+        };
+        // The rule this test is for: never "no conflicts" before an edit the hook stops.
+        // The link into a registered directory outside git breaks it, as it does on main:
+        // a known limit carried from there and pinned below, not the wanted behaviour.
+        assert!(
+            name == "todo.md" || !(said == "clear" && hook == "deny"),
+            "{name}: hold check said no conflicts and the hook stopped the edit"
+        );
+        table.push((name, said, acquired, hook));
+    }
+    let refused = |name: &str, there: &Path, inside: &str| {
+        format!(
+            "another: {name} is inside another checkout ({0}); a hold taken here would not \
+             apply to its files. Take it there: another hold acquire --agent claude@app \
+             --project {0} '{inside}'",
+            s(there)
+        )
+    };
+    assert_eq!(
+        table,
+        [
+            ("config.toml", "clear".to_string(), Some(0), "allow"),
+            ("newcfg.toml", "clear".to_string(), Some(0), "allow"),
+            (
+                "held.rs",
+                refused("held.rs", &other, "src/held.rs"),
+                Some(1),
+                "deny"
+            ),
+            (
+                "wtreadme",
+                refused("wtreadme", &wt, "README"),
+                Some(1),
+                "deny"
+            ),
+            // The known limit: granted and reported clear, though the hook also holds the
+            // file in `notes` and stops the edit for the hold there.
+            ("todo.md", "clear".to_string(), Some(0), "deny"),
+        ]
+    );
+    // Where claude now holds the name, the second agent in the checkout is told so by
+    // `hold check` and stopped by the hook.
+    for name in ["config.toml", "newcfg.toml"] {
+        let checked = hold("check", "codex@app", name);
+        assert_eq!(checked.status.code(), Some(3), "{name}");
+        assert!(
+            String::from_utf8_lossy(&checked.stdout).contains(&format!(
+                "conflict: {name} is held by claude@app (app:{name},"
+            )),
+            "{name}: {checked:?}"
+        );
+        let reason = denial(&env.edit("codex", &app, name));
+        assert!(
+            reason.contains(&format!("{name} is held by claude@app in this checkout")),
+            "{reason}"
+        );
+    }
+    // A directory link into another checkout is refused, with or without a wildcard. So is
+    // a file below it that is itself a link out of git: its name lives in that checkout.
+    for (pattern, inside) in [
+        ("otherdir", "src"),
+        ("otherdir/**", "src/**"),
+        ("otherdir/olnk.toml", "src/olnk.toml"),
+    ] {
+        let out = hold("acquire", "claude@app", pattern);
+        assert_eq!(out.status.code(), Some(1), "{pattern}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr).trim(),
+            refused(pattern, &other, inside)
+        );
+    }
+}
