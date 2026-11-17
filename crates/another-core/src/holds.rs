@@ -1585,11 +1585,13 @@ impl Store {
     /// A light heartbeat for hooks that run between tool calls: marks the agent active and
     /// renews only its own live holds that are past half their TTL. No sweep and no session
     /// event; a `hold.renewed` event is written only when something was renewed.
-    /// Returns how many holds were renewed.
-    pub fn keepalive(&self, agent: &str) -> Result<usize> {
+    /// `info` is the hook's client and session id: the beat is also a sign of that session
+    /// for the queue's session binding. Returns how many holds were renewed.
+    pub fn keepalive(&self, agent: &str, info: &SessionInfo) -> Result<usize> {
         self.write(|tx| {
             let me = resolve_agent(tx, tx.node_id, agent)?;
             touch(tx, &me.id)?;
+            crate::queue::session_seen_tx(tx, &me.id, info)?;
             let mut stmt = tx.prepare(
                 "SELECT hold_id, ttl_seconds FROM holds
                  WHERE agent_id = ?1 AND released_at IS NULL AND expires_at > ?2
@@ -1731,11 +1733,16 @@ impl Store {
             let (renewed, released, status) = if phase == SessionPhase::End {
                 let ids: Vec<String> = owned.into_iter().map(|(id, _)| id).collect();
                 release_tx(tx, &me.address, &ids, "session_end")?;
-                tx.emit(&me.address, "session.ended", session_payload())?;
+                let ended = tx.emit(&me.address, "session.ended", session_payload())?;
                 tx.execute(
                     "UPDATE agents SET status = 'offline', last_seen_at = ?2 WHERE agent_id = ?1",
                     params![me.id, tx.now],
                 )?;
+                // Only the end hook of the session that made a claim releases it: a remote
+                // caller's end, or one that names no session, releases holds and no claim.
+                if scope.is_none() {
+                    crate::queue::session_ended_tx(tx, &me.id, &info, &ended)?;
+                }
                 (Vec::new(), ids, "offline")
             } else {
                 if phase == SessionPhase::Start {
@@ -1743,9 +1750,14 @@ impl Store {
                 }
                 renew_tx(tx, &me.address, &owned)?;
                 touch(tx, &me.id)?;
+                if scope.is_none() {
+                    crate::queue::session_seen_tx(tx, &me.id, &info)?;
+                }
                 let ids: Vec<String> = owned.into_iter().map(|(id, _)| id).collect();
                 (holds_by_id(tx, &ids)?, Vec::new(), "active")
             };
+            // After this agent's own sign of life, and never against its own claims.
+            crate::queue::queue_sweep_tx(tx, Some(&me.id))?;
             let (unread, urgent_unread): (u32, u32) = tx.query_row(
                 "SELECT count(*), count(*) FILTER (WHERE m.importance IN ('high', 'urgent'))
                  FROM deliveries d JOIN messages m ON m.message_id = d.message_id

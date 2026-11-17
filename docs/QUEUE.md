@@ -4,7 +4,7 @@ The queue is where agreed work lives on one node. Anyone can propose an item. On
 
 A queue item is not a [request](REQUESTS.md). A request is a direct ask from one agent to another: it is never admitted, `next` never returns it, and it does not count toward a limit. Requests and `--request` mail work as before.
 
-Scope: this page describes what is on `main` for scope item M1 (with C2 and C3) of [V0.1.0-SCOPE.md](V0.1.0-SCOPE.md). The queue is local to one node. The decision record is D89 in [DECISIONS.md](DECISIONS.md).
+Scope: this page describes what is on `main` for scope items M1 (with C2 and C3) and M2 of [V0.1.0-SCOPE.md](V0.1.0-SCOPE.md). The queue is local to one node. The decision records are D89 and D91 in [DECISIONS.md](DECISIONS.md).
 
 ## States
 
@@ -15,7 +15,7 @@ Scope: this page describes what is on `main` for scope item M1 (with C2 and C3) 
 | `claimed` | One agent holds it | `queue next`, and nothing else |
 | `done` | Finished with a result (`completed`), or turned down (`rejected`). Final | `queue done` by the claimer; `queue reject` by an admitter |
 
-A claimed item goes back to `ready` when the claimer gives it back (`queue release`), hands it to another agent (`queue release --to`), or an admitter takes it back (`queue release --reason`). It keeps its approval, its admission time and its priority, so a returned item sorts ahead of newer ones. Its history is never deleted.
+A claimed item goes back to `ready` when the claimer gives it back (`queue release`), hands it to another agent (`queue release --to`), or an admitter takes it back (`queue release --reason`). It also goes back without anyone asking in two cases, described under [When a claim is released automatically](#when-a-claim-is-released-automatically): the session that claimed it ended, or nothing was heard from the claimer for the grace period. It keeps its approval, its admission time and its priority, so a returned item sorts ahead of newer ones. Its history is never deleted.
 
 A claimed item cannot be rejected or edited: release it first. A proposal filed by mistake is rejected by an admitter and, if still wanted, proposed again. There are no due times, no takeover of a quiet claim by another agent, no claim by id, no dependencies and no groups. An item that is blocked stays `proposed`.
 
@@ -123,7 +123,7 @@ While an item is `proposed`, any admitter may raise it from `work` to a fast-lan
 
 1. **Decide now:** proposed security and data-loss items, oldest first.
 2. **Awaiting a decision:** other proposed items, oldest first.
-3. **Quiet claims:** claimed items with no sign of life from the claimer's name for an hour or more, with how long and when the grace period would end. Listing releases nothing.
+3. **Quiet claims:** claimed items with no sign of life from the claimer's name for an hour or more, with how long and when the grace period would end. Also listed: every claim that is not bound to a session, marked so, because no session's end will release it; and a claim whose own session has not been seen for an hour even though another session keeps the name active, with the time that session was last seen. Listing releases nothing.
 4. **Ready with nobody to take them:** ready items that no agent with a seat can be offered, and ready items reserved for an agent not seen for an hour.
 5. **Failed notices:** notices that could not be mailed in the last 24 hours.
 6. **Self-admitted:** items a delegate admitted for itself in the last 7 days, and the total.
@@ -132,9 +132,33 @@ While an item is `proposed`, any admitter may raise it from `work` to a fast-lan
 
 The former claimer is mailed: subject `Claim released: Q12`, with the time, the reason as fixed words, that the claim and notes are kept in the item's history, and that the item will not be offered to that agent again for the next hour unless an admitter reserves it for it. The notice comes from the delegate that released the claim; when the owner did it, it comes from the former claimer's own address, because the system has no agent. A handoff mails the named agent: `Handoff: Q12`. No free text goes into these mails: not the reason, not a note, not the title. If a notice cannot be sent, the release stands and the failure is recorded and shown in the owner list.
 
-### The grace period
+### When a claim is released automatically
 
-`another queue grace` shows the grace period (24 hours by default); `another queue grace <duration> --owner` sets it, from 2 hours to 30 days. In this build the setting is stored and shown, and nothing releases a claim on a timer or at a session's end: a claim returns to `ready` only when the claimer or an admitter releases it. Automatic release is scope item M2.
+A claim returns to `ready` without the claimer or an admitter asking in exactly two cases. Nothing else releases it: not a missed heartbeat, an expired hold, an `offline` status, `another heartbeat --end`, a failed wake, or the end of some other session.
+
+**1. The session that made the claim ended.** When the session-end hook of that session runs, every item it claimed goes back to `ready`. This needs the claim to be bound to a session, which works as follows.
+
+- Another keeps one row for each session a hook reports: the agent, the session id the client sent, and when a hook of that session last ran (session start, each prompt, and after a tool call at most once a minute). Only Claude Code sessions get a row, because Claude Code is the one client recorded as sending its session id on all four hooks ([HOOKS.md](HOOKS.md#session-ids-and-the-queue)).
+- At `queue next`, the claim is bound to a session only when the claimer's name has exactly one session that has not ended and was seen within the grace period. With none, or with two or more, the claim is bound to no session. `queue show` and the JSON say which (`claim.session_bound`).
+- An end with no session id (`another heartbeat --end`, the MCP `heartbeat` with `end`), an end from a remote caller, and the end of any other session release holds as before and no claim.
+- A resumed session that sends the same id again is open again. A session row not seen for 30 days is deleted; a claim bound to a deleted row is treated as unbound.
+
+**2. The grace period passed with no sign of life.** A claim is released when the later of its claim time and the last time anything was heard from the claimer's name is at least the grace period ago. `another queue grace` shows the grace period (24 hours by default); `another queue grace <duration> --owner` sets it, from 2 hours to 30 days, so an hour of silence never costs a claim. A sign of life is any hook (session start, a prompt, after a tool call at most once a minute per session), sending mail, a request or heartbeat command, and every queue command that acts as the agent. Reading does not count.
+
+Either way the former claimer is mailed: subject `Claim released: Q12`, with the time, the reason as fixed words, that the claim and notes are kept in the item's history, and `If you are still working on it, run another queue next and check that Q12 comes back; another agent may take it first.` The mail comes from the former claimer's own address, because the system has no agent, and carries no free text. No skip is set, and a reservation for the former claimer ends, so another agent can take the item and the agent that comes back can too. In the item's history and the event the actor is `system` and the reason is `session_end` or `grace`.
+
+The check for the grace period runs in three places: every 30 seconds in a running `another serve` (the daemon, or a stdio MCP server); in `another sweep`; and inside another agent's session-start, prompt or session-end hook, heartbeat or `queue next`. It never releases a claim of the agent whose own call runs it. With no server running, an overdue claim is released the next time some other agent's hook, heartbeat or `next` runs, or by `another sweep`. Reads such as `another inbox` and `queue list` release nothing.
+
+Limits, all of which follow from binding by name and are avoided by giving each session its own `ANOTHER_AGENT`:
+
+- A pane killed with no end hook keeps its claim until the grace period passes or an admitter releases it. While another session under the same name is active, that claim does not lapse at all; the owner list shows it.
+- A caller with no session row of its own (no hooks behind it, a local MCP client, a Codex session) that claims under a name with exactly one fresh Claude Code session is bound to that session, and that session's end releases the claim.
+- A session that goes a whole grace period without a hook (one very long tool call) stops counting. If exactly one other session under the name is fresh, its next claim is bound to that one.
+- After a crash with no end hook, a session restarted under the same name is refused at its limit and told the name holds the item. It can finish or release it; the claim stays bound to the dead session.
+- A hook's agent name follows its working directory unless `ANOTHER_AGENT` is set. A claimer that moves to another project's checkout beats under another name, and its claim's name falls silent.
+- A session that is silent for the whole grace period (at a permission prompt, or at a rate limit) is released while it still exists.
+- The grace period counts time the machine was asleep or off. A machine closed for longer than the grace period releases its claims at the first check after it wakes.
+- Claude Code's hook documentation lists `clear` and `resume` among the reasons for its session-end hook, so `/clear`, or switching to another conversation with `/resume`, is expected to release the claims of the session it leaves; this has not been checked against a live session. If it happens, the notice says so: run `another queue next` to take the item again.
 
 ### The audit
 

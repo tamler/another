@@ -2,7 +2,7 @@
 
 `another serve` is the local daemon. Besides serving MCP and the dashboard on loopback, it does the work nobody else is around to do:
 
-- sweeps expired holds and overdue requests every 30 seconds;
+- sweeps expired holds and overdue requests every 30 seconds, and releases queue claims with no sign of life for the grace period ([QUEUE.md](QUEUE.md#when-a-claim-is-released-automatically));
 - asks each transport in use (Herdr) what it can see every 30 seconds, and records it per agent session ("The sweep", below);
 - wakes an idle agent session when mail arrives that no hook has announced yet ("Waking idle agents", below);
 - every 10 minutes, drops session rows and captured wake targets that have aged out.

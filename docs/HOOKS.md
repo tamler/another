@@ -8,7 +8,7 @@ Another is hooks-first (see [DECISIONS.md](DECISIONS.md)): agents learn about ne
 | Each prompt | Heartbeat (renews holds, marks the agent active); inside Herdr, stamps the session's row | One line, only for mail not announced before; otherwise nothing |
 | After each tool call (`post-tool`) | Checks for mail not announced yet; at most once a minute per session marks the agent active, renews holds past half their TTL and, inside Herdr, stamps the session's row | One line of context mid-task when there is new mail; otherwise nothing |
 | Before a file edit (`pre-edit`) | Takes a narrow hold on each file about to change, or stops the edit if another agent holds it; inside Herdr, stamps the session's row at most once a minute. It renews no hold and does not mark the agent active: that is `post-tool`'s job, so an agent whose edit is refused does not keep its own holds alive by trying again | Nothing when the edit may go ahead; a denial naming the holder when it may not |
-| Session end | Records `session.ended`, releases the agent's holds, deletes that session's row (or forgets the tmux or cmux pane), marks the agent offline | Nothing |
+| Session end | Records `session.ended`, releases the agent's holds, returns the queue items that session claimed (see "Session ids and the queue" below), deletes that session's row (or forgets the tmux or cmux pane), marks the agent offline | Nothing |
 
 Inside Herdr (`$HERDR_PANE_ID`), every hook call of a session makes sure the session has its row in the transport layer, keyed by the agent and the session id the client sent, and records the client kind and the directory the hook ran in. The daemon uses that row to find the session in Herdr, to wake it when it is idle, and to notice when it is blocked, stuck or gone ([WAKE.md](WAKE.md)). Two sessions under one agent name are two rows.
 
@@ -145,6 +145,27 @@ Grok also executes hooks from Claude Code and Cursor config files. To keep one G
 ## Identity
 
 By default a hook acts as `<client>@<project>`, where the project is the nearest directory containing `.git` above the client's working directory (or that directory itself). The agent is registered on first use with the matching program. To use a different identity, set `ANOTHER_AGENT` (for example `ANOTHER_AGENT=reviewer@shop`) in the environment the client runs hooks with; that agent must already be registered.
+
+## Session ids and the queue
+
+A queue claim can be bound to the session that made it, so that the end of that session returns the item ([QUEUE.md](QUEUE.md#when-a-claim-is-released-automatically)). That only works for a client that sends the same session id on session start, each prompt, after each tool call and at session end. Another keeps a queue session row only for clients on a fixed list (`QUEUE_SESSION_CLIENTS`); today the list is Claude Code alone. For every other client the session id still goes into `session.started`, `session.ended` and the transport layer's rows, but its claims are bound to no session and return only after the grace period or when an admitter releases them.
+
+What the list rests on, recorded on 17 Nov 2026:
+
+| Client | Session start | Prompt | After a tool call | Session end | Resumed conversation reuses its id | Clearing fires a session end |
+|---|---|---|---|---|---|---|
+| Claude Code | Yes, seen live (v2.1.326) | Documented, not seen live | Documented, not seen live | Yes, seen live; a restarted session had a new id | Not established | Documented (`clear` is a listed reason), not seen live |
+| Codex | Documented, not seen live | Documented, not seen live | Documented, not seen live | Documented, not seen live | Not established | Not established |
+| Grok, Cursor | Not checked | Not checked | Not checked | Not checked | Not checked | Not checked |
+
+"Documented" means the client's hook documentation lists `session_id` among the fields every hook receives ([Claude Code](https://code.claude.com/docs/en/hooks), [Codex](https://learn.chatgpt.com/docs/hooks)). "Seen live" means a real session's hook wrote that id into a test home. Neither client's documentation says whether a resumed conversation keeps its id.
+
+What the code does where a fact is not established:
+
+- **Codex is not on the list** until its four hooks have been seen live, so a Codex claim is unbound. The cost is a slower release (the grace period), never a wrong one.
+- **A resumed conversation.** If it reuses its id, its row is opened again and it keeps counting as the same session. If it gets a new id, it is a new row; the old row stays open until it has not been seen for the grace period, and while both count the name has two sessions and a new claim is bound to neither.
+- **A prompt or tool hook that carried no id** would leave the session's row to go stale after the grace period. A claim already bound to it is still released by its end hook; a later claim is unbound.
+- **A session end that never arrives** (a killed pane) releases nothing; the grace period or an admitter does.
 
 ## The digest
 

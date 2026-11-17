@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::error::{Error, Result};
+use crate::holds::SessionInfo;
 use crate::identity::{resolve_agent, resolve_any, AgentRef};
 use crate::mail::{is_unsafe_text_char, touch, SendMessage};
 use crate::store::{new_id, Store, Tx};
@@ -45,6 +46,15 @@ const MAX_NOTE_CHARS: usize = 2000;
 const MAX_REASON_CHARS: usize = 500;
 const MAX_SUMMARY_CHARS: usize = 500;
 const MAX_POINTER_CHARS: usize = 500;
+
+/// The clients whose hooks are relied on to send the same session id at session start, at
+/// each prompt, after each tool call and at session end. Only their sessions get a
+/// `queue_sessions` row, so only their claims are ever bound to a session; a claim made
+/// under any other client is unbound and returns only by the grace period or an admitter.
+/// Filled from the builder check recorded in docs/HOOKS.md.
+pub const QUEUE_SESSION_CLIENTS: [&str; 1] = ["claude"];
+/// A session row not seen for this long is deleted by the queue sweep.
+const SESSION_ROW_KEPT_MS: i64 = 30 * 86_400_000;
 
 const AUTOMATIC: &str = "(Automatic notice from Another.)";
 const FAST_LANE_IS_THE_OWNERS: &str =
@@ -439,11 +449,22 @@ pub struct QueueGrace {
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct QuietClaim {
     pub item: QueueItem,
+    /// How long since the last sign of life from the claimer's name.
     pub quiet_for_seconds: i64,
     pub grace_ends_at: String,
-    /// The claim is tied to no session.
+    /// The claim is tied to no session: no session's end releases it.
     pub unbound: bool,
+    /// When the session the claim is bound to was last seen by a hook.
     pub session_last_seen_at: Option<String>,
+}
+
+/// What one run of the queue sweep did.
+#[derive(Debug, Clone, Default, Serialize, schemars::JsonSchema)]
+pub struct QueueSweepReport {
+    /// The items whose claim lapsed after the grace period, as `Q` numbers.
+    pub released_claims: Vec<String>,
+    /// Session rows deleted because no hook had reported them for 30 days.
+    pub forgotten_sessions: u32,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -1247,7 +1268,193 @@ fn unclaim_tx(
     Ok(())
 }
 
+/// The session id a hook call carries, when its client is one whose ids are relied on.
+fn hook_session(info: &SessionInfo) -> Option<&str> {
+    let client = info.client.as_deref()?;
+    if !QUEUE_SESSION_CLIENTS.contains(&client) {
+        return None;
+    }
+    info.session_id.as_deref().filter(|id| !id.is_empty())
+}
+
+/// A local hook of a session reported in: make or refresh the session's row. A row that
+/// had ended is open again, since a resumed session may reuse its id.
+pub(crate) fn session_seen_tx(tx: &Tx<'_>, agent_id: &str, info: &SessionInfo) -> Result<()> {
+    let Some(session) = hook_session(info) else {
+        return Ok(());
+    };
+    tx.execute(
+        "INSERT INTO queue_sessions (agent_id, session_id, started_at, seen_at, ended_at)
+         VALUES (?1, ?2, ?3, ?3, NULL)
+         ON CONFLICT(agent_id, session_id) DO UPDATE SET seen_at = ?3, ended_at = NULL",
+        params![agent_id, session, tx.now],
+    )?;
+    Ok(())
+}
+
+/// The end hook of a session ran: close its row and return every item claimed by that
+/// session to `ready`. `ended_event` is the `session.ended` event. An end that names no
+/// session, or a session with no row, releases nothing.
+pub(crate) fn session_ended_tx(
+    tx: &Tx<'_>,
+    agent_id: &str,
+    info: &SessionInfo,
+    ended_event: &str,
+) -> Result<()> {
+    let Some(session) = hook_session(info) else {
+        return Ok(());
+    };
+    let closed = tx.execute(
+        "UPDATE queue_sessions SET ended_at = ?3 WHERE agent_id = ?1 AND session_id = ?2",
+        params![agent_id, session, tx.now],
+    )?;
+    if closed == 0 {
+        return Ok(());
+    }
+    let mut stmt = tx.prepare(&format!(
+        "SELECT {ITEM_COLUMNS} FROM queue_items
+         WHERE claimer_id = ?1 AND state = 'claimed' AND claim_session = ?2 AND node_id = ?3
+         ORDER BY claimed_at, seq"
+    ))?;
+    let rows = stmt
+        .query_map(params![agent_id, session, tx.node_id], row_from)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for row in rows {
+        lapse_tx(
+            tx,
+            &row,
+            "session_end",
+            "the session that claimed it ended",
+            json!({ "session_id": session, "event_id": ended_event }),
+        )?;
+    }
+    Ok(())
+}
+
+/// Return a claim to `ready` without the claimer or an admitter asking, and mail the
+/// former claimer. A lapse sets no skip, and ends a reservation for the former claimer, so
+/// another agent can take the item and the agent that comes back can too.
+fn lapse_tx(tx: &Tx<'_>, row: &ItemRow, reason: &str, words: &str, evidence: Value) -> Result<()> {
+    let (Some(former), Some(claimed_at)) = (row.claimer_id.as_deref(), row.claimed_at) else {
+        return Ok(());
+    };
+    let cleared = row.for_agent.as_deref().filter(|f| *f == former);
+    let for_agent = match cleared {
+        Some(_) => None,
+        None => row.for_agent.as_deref(),
+    };
+    unclaim_tx(tx, row, for_agent, None)?;
+    // The system has no agent: the notice comes from the former claimer's own address.
+    let notice = notify_tx(
+        tx,
+        row,
+        former,
+        former,
+        reason,
+        format!("Claim released: {}", row.label()),
+        format!(
+            "Your claim on {label} was released at {}: {words}. The claim and its notes are kept in the item's history. If you are still working on it, run another queue next and check that {label} comes back; another agent may take it first. {AUTOMATIC}",
+            fmt_ts(tx.now),
+            label = row.label()
+        ),
+    )?;
+    record_tx(
+        tx,
+        row,
+        "system",
+        "queue.released",
+        json!({
+            "reason": reason,
+            "previous_claimer_id": former,
+            "claimed_at": claimed_at,
+            "note": null,
+            "evidence": evidence,
+            "for_agent_cleared": cleared,
+            "notice_message_id": notice,
+        }),
+        None,
+        Some(json!({
+            "reason": reason,
+            "evidence": evidence,
+            "for_agent_cleared": cleared,
+        })),
+    )?;
+    Ok(())
+}
+
+/// The queue sweep: release every claim with no sign of life for the grace period, and
+/// delete session rows no hook has reported for 30 days. It never releases a claim held by
+/// `calling_agent`, the agent whose own call runs it. The last sign of life of a claim is
+/// the later of its claim time and the claimer's `last_seen_at`.
+///
+/// Not part of [`crate::holds::sweep_tx`], which also runs at the start of reads, before
+/// any sign of life of the reader.
+pub(crate) fn queue_sweep_tx(tx: &Tx<'_>, calling_agent: Option<&str>) -> Result<QueueSweepReport> {
+    let grace = grace_seconds(tx)?;
+    let grace_ms = grace.saturating_mul(1000);
+    let mut stmt = tx.prepare(&format!(
+        "SELECT {ITEM_COLUMNS} FROM queue_items
+         WHERE state = 'claimed' AND claimer_id IS NOT NULL AND node_id = ?1
+           AND (?2 IS NULL OR claimer_id != ?2)
+         ORDER BY claimed_at, seq"
+    ))?;
+    let claimed = stmt
+        .query_map(params![tx.node_id, calling_agent], row_from)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut released_claims = Vec::new();
+    for row in claimed {
+        let (Some(claimer), Some(claimed_at)) = (&row.claimer_id, row.claimed_at) else {
+            continue;
+        };
+        let last_sign = claimed_at.max(last_seen(tx, claimer)?.unwrap_or(0));
+        if tx.now.saturating_sub(last_sign) < grace_ms {
+            continue;
+        }
+        lapse_tx(
+            tx,
+            &row,
+            "grace",
+            "nothing was heard from you for the grace period",
+            json!({ "last_sign_of_life": last_sign, "grace_seconds": grace }),
+        )?;
+        released_claims.push(row.label());
+    }
+    let forgotten_sessions = tx.execute(
+        "DELETE FROM queue_sessions WHERE seen_at <= ?1",
+        [tx.now - SESSION_ROW_KEPT_MS],
+    )? as u32;
+    Ok(QueueSweepReport {
+        released_claims,
+        forgotten_sessions,
+    })
+}
+
+/// The session a new claim by this agent is bound to: the one session of the name that is
+/// fresh (not ended, and seen within the grace period). With none, or with two or more,
+/// the claim is bound to no session. A row not seen for the grace period cannot tell a
+/// dead session from a silent one, so it does not count.
+fn fresh_session(conn: &Connection, agent_id: &str, now: i64) -> Result<Option<String>> {
+    let grace_ms = grace_seconds(conn)?.saturating_mul(1000);
+    let mut stmt = conn.prepare(
+        "SELECT session_id FROM queue_sessions
+         WHERE agent_id = ?1 AND ended_at IS NULL AND seen_at > ?2 LIMIT 2",
+    )?;
+    let mut fresh = stmt
+        .query_map(params![agent_id, now - grace_ms], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(match fresh.len() {
+        1 => fresh.pop(),
+        _ => None,
+    })
+}
+
 impl Store {
+    /// Run the queue sweep with no calling agent: see [`queue_sweep_tx`]. The serve
+    /// sweeper and `another sweep` call it beside [`Store::sweep`].
+    pub fn queue_sweep(&self) -> Result<QueueSweepReport> {
+        self.write(|tx| queue_sweep_tx(tx, None))
+    }
+
     /// Propose an item. Any local agent may, and so may the owner. Nothing is mailed.
     pub fn queue_propose(&self, caller: &QueueCaller, input: ProposeItem) -> Result<QueueItem> {
         input.validate()?;
@@ -1624,6 +1831,8 @@ impl Store {
         self.write(|tx| {
             let me = resolve_agent(tx, tx.node_id, agent)?;
             touch(tx, &me.id)?;
+            // After the caller's own sign of life, and never against the caller's claims.
+            queue_sweep_tx(tx, Some(&me.id))?;
             let limit = limit_of(tx, &me.id)?;
             let mut stmt = tx.prepare(
                 "SELECT seq FROM queue_items WHERE claimer_id = ?1 AND state = 'claimed'
@@ -1688,7 +1897,7 @@ impl Store {
                     refused: None,
                 });
             };
-            let session: Option<String> = None;
+            let session = fresh_session(tx, &me.id, tx.now)?;
             let changed = tx.execute(
                 "UPDATE queue_items SET state = 'claimed', claimer_id = ?2, claimed_at = ?3,
                    claim_session = ?4, skip_agent = NULL, updated_at = ?3
@@ -2170,14 +2379,29 @@ impl Store {
                     continue;
                 };
                 let last_sign = claimed_at.max(last_seen(conn, claimer)?.unwrap_or(0));
-                if now.saturating_sub(last_sign) < QUIET_MS {
+                // A bound claim whose session row is gone is treated as unbound.
+                let session_seen: Option<i64> = match &row.claim_session {
+                    Some(session) => conn
+                        .query_row(
+                            "SELECT seen_at FROM queue_sessions
+                             WHERE agent_id = ?1 AND session_id = ?2",
+                            params![claimer, session],
+                            |r| r.get(0),
+                        )
+                        .optional()?,
+                    None => None,
+                };
+                let quiet = |since: i64| now.saturating_sub(since) >= QUIET_MS;
+                // Listed: a quiet name, a claim no session's end will release, and a claim
+                // whose own session is quiet even though the name is active.
+                if !quiet(last_sign) && session_seen.is_some_and(|seen| !quiet(seen)) {
                     continue;
                 }
                 quiet_claims.push(QuietClaim {
                     quiet_for_seconds: now.saturating_sub(last_sign) / 1000,
                     grace_ends_at: fmt_ts(last_sign.saturating_add(grace_ms)),
-                    unbound: row.claim_session.is_none(),
-                    session_last_seen_at: None,
+                    unbound: session_seen.is_none(),
+                    session_last_seen_at: session_seen.map(fmt_ts),
                     item: to_item(conn, row, false)?,
                 });
             }
@@ -2652,4 +2876,56 @@ fn audit(conn: &Connection, node_id: &str, since: Option<i64>) -> Result<QueueAu
         completions,
         claimers: claimers.len() as u32,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+    use crate::Program;
+
+    /// The queue sweep never releases a claim of the agent whose call runs it, even when
+    /// that claim is overdue. Every caller touches the agent first, so only a sweep run
+    /// here without that touch shows the rule on its own.
+    #[test]
+    fn the_queue_sweep_skips_the_calling_agents_claims() {
+        let (clock, now) = crate::store::Clock::manual(1_800_000_000_000);
+        let store = Store::open_in_memory(clock).unwrap();
+        for name in ["ann", "bob"] {
+            store
+                .register_agent(crate::RegisterAgent {
+                    name: name.into(),
+                    program: Program::Claude,
+                    project: None,
+                    model: None,
+                    description: None,
+                })
+                .unwrap();
+        }
+        for (title, who) in [("first", "ann"), ("second", "bob")] {
+            let item = store
+                .queue_propose(
+                    &QueueCaller::Owner,
+                    ProposeItem {
+                        title: title.into(),
+                        scope: Some("M2".into()),
+                        done_when: Some("done".into()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            store
+                .queue_admit(&QueueCaller::Owner, &item.label, AdmitItem::default())
+                .unwrap();
+            assert!(store.queue_next(who).unwrap().claimed.is_some());
+        }
+        now.fetch_add(25 * 3_600_000, Ordering::SeqCst);
+        let ann = store.agent("ann").unwrap().agent_id;
+        let swept = store.write(|tx| queue_sweep_tx(tx, Some(&ann))).unwrap();
+        assert_eq!(swept.released_claims, ["Q2"], "bob's claim only");
+        assert_eq!(store.queue_item("Q1").unwrap().state, QueueState::Claimed);
+        let swept = store.write(|tx| queue_sweep_tx(tx, None)).unwrap();
+        assert_eq!(swept.released_claims, ["Q1"]);
+    }
 }

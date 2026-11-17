@@ -2927,3 +2927,961 @@ fn a_skip_ends_one_hour_after_the_release() {
         .unwrap();
     assert_eq!(fx.claim("bob").label, item.label);
 }
+
+// Results and the lapse rule (scope id M2): session binding, release on the session-end
+// hook, release after the grace period, the queue sweep and the lapse notices.
+
+const MINUTE: i64 = 60_000;
+const LAPSE_SENTENCE: &str =
+    "If you are still working on it, run another queue next and check that";
+
+/// What a hook of `client` passes for its session.
+fn hook(client: &str, session: &str) -> SessionInfo {
+    SessionInfo {
+        client: Some(client.into()),
+        session_id: Some(session.into()),
+        ..Default::default()
+    }
+}
+
+/// One `queue_sessions` row: started, seen, ended.
+type SessionTimes = (i64, i64, Option<i64>);
+
+impl Fx {
+    /// A Claude Code hook of session `session` of `who`.
+    fn hooked(&self, who: &str, phase: SessionPhase, session: &str) {
+        self.store
+            .session(who, phase, hook("claude", session))
+            .unwrap();
+    }
+
+    fn start(&self, who: &str, session: &str) {
+        self.hooked(who, SessionPhase::Start, session);
+    }
+
+    fn prompt(&self, who: &str, session: &str) {
+        self.hooked(who, SessionPhase::Beat, session);
+    }
+
+    fn end(&self, who: &str, session: &str) {
+        self.hooked(who, SessionPhase::End, session);
+    }
+
+    fn session_row(&self, who: &str, session: &str) -> Option<SessionTimes> {
+        use rusqlite::OptionalExtension;
+        self.db()
+            .query_row(
+                "SELECT started_at, seen_at, ended_at FROM queue_sessions
+                 WHERE agent_id = ?1 AND session_id = ?2",
+                [self.agent_id(who).as_str(), session],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    fn session_rows(&self) -> i64 {
+        self.db()
+            .query_row("SELECT count(*) FROM queue_sessions", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// The session the item's claim is bound to, as the row has it.
+    fn claim_session(&self, item: &str) -> Option<String> {
+        let seq: i64 = item.trim_start_matches('Q').parse().unwrap();
+        self.db()
+            .query_row(
+                "SELECT claim_session FROM queue_items WHERE seq = ?1",
+                [seq],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn released(&self) -> Vec<Event> {
+        self.events("queue.released")
+    }
+}
+
+/// The reads that run `Store::sweep` first, as another agent's session would make them.
+fn read_everything(fx: &Fx, who: &str) {
+    fx.store
+        .inbox(
+            who,
+            InboxQuery {
+                unread_only: false,
+                urgent_only: false,
+                limit: 50,
+            },
+        )
+        .unwrap();
+    fx.store.activity(ActivityQuery::default()).unwrap();
+    fx.store
+        .dashboard_snapshot(DashboardView {
+            bodies: false,
+            actions: false,
+        })
+        .unwrap();
+    fx.store.sweep().unwrap();
+    fx.store.queue_needs_owner().unwrap();
+    fx.store.queue_list(QueueFilter::default()).unwrap();
+}
+
+// T20
+#[test]
+fn the_session_end_hook_releases_that_sessions_claims() {
+    let fx = Fx::new();
+    let item = fx.ready("NOTITLE killed mid-item");
+    fx.start("ann", "s1");
+    let claimed = fx.claim("ann");
+    assert!(claimed.claim.unwrap().session_bound);
+    assert_eq!(fx.claim_session(&item.label).as_deref(), Some("s1"));
+    assert_eq!(fx.events("queue.claimed")[0].payload["session"], "s1");
+    fx.store
+        .queue_note("ann", &item.label, "half way, branch q1")
+        .unwrap();
+    fx.store
+        .queue_note("bob", &item.label, "the schema moved")
+        .unwrap();
+    fx.advance(5 * MINUTE);
+
+    // The session is killed and its end hook runs.
+    fx.end("ann", "s1");
+    let after = fx.item(&item.label);
+    assert_eq!(after.state, QueueState::Ready);
+    assert!(after.claim.is_none());
+    assert_eq!(after.skip_agent, None, "a lapse sets no skip");
+    assert!(after.admitted.is_some(), "the approval is kept");
+    assert_eq!(fx.claim_session(&item.label), None);
+    let (_, _, ended) = fx.session_row("ann", "s1").unwrap();
+    assert_eq!(ended, Some(T0 + 5 * MINUTE));
+
+    let released = fx.released();
+    assert_eq!(released.len(), 1);
+    let event = &released[0];
+    assert_eq!(event.actor, "system");
+    assert_eq!(event.payload["reason"], "session_end");
+    assert_eq!(
+        event.payload["previous_claimer_id"],
+        fx.agent_id("ann").as_str()
+    );
+    assert_eq!(event.payload["claimed_at"].as_i64(), Some(T0));
+    assert_eq!(event.payload["note"], Value::Null);
+    assert_eq!(event.payload["for_agent_cleared"], Value::Null);
+    let ended_event = fx.events("session.ended").pop().unwrap();
+    assert_eq!(
+        event.payload["evidence"],
+        json!({ "session_id": "s1", "event_id": ended_event.event_id })
+    );
+
+    // The former claimer is told.
+    let unread = fx.unread("ann");
+    assert_eq!(unread.len(), 1, "one notice");
+    let mail = &unread[0].message;
+    assert_eq!(mail.subject, format!("Claim released: {}", item.label));
+    assert_eq!(mail.importance, Importance::Normal);
+    assert!(!mail.ack_required);
+    assert_eq!(mail.thread_id, mail.message_id, "a new thread");
+    assert_eq!(event.payload["notice_message_id"], mail.message_id.as_str());
+    assert!(!mail.body.contains("NOTITLE") && !mail.body.contains("half way"));
+
+    // Another agent takes it and sees the earlier claim, both notes and the release.
+    let taken = fx.claim("bob");
+    assert_eq!(taken.label, item.label);
+    let history = taken.history.unwrap();
+    let kinds: Vec<&str> = history.iter().map(|h| h.kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        [
+            "queue.proposed",
+            "queue.admitted",
+            "queue.claimed",
+            "queue.noted",
+            "queue.noted",
+            "queue.released",
+            "queue.claimed"
+        ]
+    );
+    assert_eq!(history[2].actor, "ann");
+    assert_eq!(history[3].note.as_deref(), Some("half way, branch q1"));
+    assert_eq!(history[4].note.as_deref(), Some("the schema moved"));
+    assert_eq!(history[5].actor, "system");
+    assert_eq!(history[5].detail.as_ref().unwrap()["reason"], "session_end");
+    assert!(fx.store.queue_audit(None).unwrap().ok);
+    assert_eq!(
+        fx.store.queue_audit(None).unwrap().releases["session_end"],
+        1
+    );
+}
+
+// T39
+#[test]
+fn a_lapsed_reserved_item_can_be_taken_by_another_agent() {
+    for (reason, back_to_ann) in [
+        ("session_end", false),
+        ("session_end", true),
+        ("grace", false),
+        ("grace", true),
+    ] {
+        let fx = Fx::new();
+        let item = fx.propose("bob", "reserved for ann");
+        let item = fx
+            .store
+            .queue_admit(
+                &owner(),
+                &item.label,
+                AdmitItem {
+                    for_agent: Some("ann".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(item.for_agent.as_deref(), Some("ann"));
+        assert!(
+            fx.store.queue_next("bob").unwrap().claimed.is_none(),
+            "reserved: not offered to bob"
+        );
+        fx.start("ann", "s1");
+        assert_eq!(fx.claim("ann").label, item.label);
+        if reason == "session_end" {
+            fx.end("ann", "s1");
+        } else {
+            fx.advance(DAY);
+            fx.store.queue_sweep().unwrap();
+        }
+        let after = fx.item(&item.label);
+        assert_eq!(after.state, QueueState::Ready, "{reason}");
+        assert_eq!(after.for_agent, None, "{reason}: the reservation ended");
+        assert_eq!(after.skip_agent, None, "{reason}");
+        let event = fx.released().pop().unwrap();
+        assert_eq!(event.payload["reason"], reason);
+        assert_eq!(
+            event.payload["for_agent_cleared"],
+            fx.agent_id("ann").as_str()
+        );
+        let history = after.history.unwrap();
+        assert_eq!(
+            history.last().unwrap().detail.as_ref().unwrap()["for_agent_cleared"],
+            fx.agent_id("ann").as_str()
+        );
+        let taker = if back_to_ann { "ann" } else { "bob" };
+        assert_eq!(fx.claim(taker).label, item.label, "{reason}: {taker}");
+        assert!(fx.store.queue_audit(None).unwrap().ok);
+    }
+}
+
+fn scope_of(fx: &Fx, who: &str) -> TokenScope {
+    TokenScope {
+        token_id: "tok".into(),
+        agent_id: fx.agent_id(who),
+        agent: who.into(),
+        project_globs: vec!["*".into()],
+    }
+}
+
+// T21
+#[test]
+fn only_the_claiming_sessions_end_releases() {
+    // A sibling session's end, and an end that names no session or comes from a remote
+    // caller, release nothing.
+    let fx = Fx::new();
+    let item = fx.ready("bound to s1");
+    fx.start("ann", "s1");
+    assert_eq!(fx.claim("ann").label, item.label);
+    assert_eq!(fx.claim_session(&item.label).as_deref(), Some("s1"));
+    let still_claimed = |why: &str| {
+        let now = fx.item(&item.label);
+        assert_eq!(now.state, QueueState::Claimed, "{why}");
+        assert_eq!(now.claim.unwrap().agent, "ann", "{why}");
+        assert!(fx.released().is_empty(), "{why}");
+    };
+    fx.start("ann", "s2");
+    fx.end("ann", "s2");
+    still_claimed("a sibling session ended");
+    // `another heartbeat --end` and the MCP `heartbeat` with `end` both call this.
+    fx.store.heartbeat("ann", true).unwrap();
+    still_claimed("an end with no session id");
+    fx.store
+        .session(
+            "ann",
+            SessionPhase::End,
+            SessionInfo {
+                client: Some("claude".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    still_claimed("a hook end with no session id");
+    fx.store
+        .session_scoped(
+            "ann",
+            SessionPhase::End,
+            hook("claude", "s1"),
+            Some(&scope_of(&fx, "ann")),
+        )
+        .unwrap();
+    still_claimed("a remote caller's end, even with the session id");
+    fx.end("bob", "s1");
+    still_claimed("another agent's session with the same id");
+    fx.store
+        .session("ann", SessionPhase::End, hook("codex", "s1"))
+        .unwrap();
+    still_claimed("a client whose session ids are not relied on");
+    assert!(fx.unread("ann").is_empty());
+    fx.end("ann", "s1");
+    assert_eq!(fx.item(&item.label).state, QueueState::Ready);
+
+    // Two sessions open under one name: the claim is bound to neither, and neither end
+    // releases it.
+    let fx = Fx::new();
+    let item = fx.ready("two sessions open");
+    fx.start("ann", "s1");
+    fx.start("ann", "s2");
+    let claimed = fx.claim("ann");
+    assert!(!claimed.claim.unwrap().session_bound);
+    fx.end("ann", "s1");
+    assert_eq!(fx.item(&item.label).state, QueueState::Claimed);
+    fx.end("ann", "s2");
+    assert_eq!(fx.item(&item.label).state, QueueState::Claimed);
+    assert!(fx.released().is_empty());
+
+    // An end, then a start with a new id (as after a clear): only the old id's claims go.
+    let fx = Fx::new();
+    fx.store.queue_set_limit(&owner(), "ann", 2).unwrap();
+    let first = fx.ready("claimed by the old session");
+    fx.start("ann", "old");
+    assert_eq!(fx.claim("ann").label, first.label);
+    fx.end("ann", "old");
+    assert_eq!(fx.item(&first.label).state, QueueState::Ready);
+    fx.start("ann", "new");
+    assert_eq!(fx.claim("ann").label, first.label);
+    assert_eq!(fx.claim_session(&first.label).as_deref(), Some("new"));
+    let second = fx.ready("claimed by the new session");
+    assert_eq!(fx.claim("ann").label, second.label);
+    // The old session's end hook arriving again releases nothing of the new session's.
+    fx.end("ann", "old");
+    assert_eq!(fx.item(&first.label).state, QueueState::Claimed);
+    assert_eq!(fx.item(&second.label).state, QueueState::Claimed);
+    assert_eq!(fx.released().len(), 1);
+    fx.end("ann", "new");
+    assert_eq!(fx.item(&first.label).state, QueueState::Ready);
+    assert_eq!(fx.item(&second.label).state, QueueState::Ready);
+    assert_eq!(fx.released().len(), 3);
+    assert_eq!(fx.unread("ann").len(), 3, "one notice for each release");
+    assert!(fx.store.queue_audit(None).unwrap().ok);
+}
+
+// T36
+#[test]
+fn binding_is_never_a_guess() {
+    // A reused id opens its row again and keeps when it started.
+    let fx = Fx::new();
+    fx.start("ann", "s1");
+    assert_eq!(fx.session_row("ann", "s1"), Some((T0, T0, None)));
+    fx.advance(MINUTE);
+    fx.end("ann", "s1");
+    assert_eq!(
+        fx.session_row("ann", "s1"),
+        Some((T0, T0, Some(T0 + MINUTE)))
+    );
+    fx.advance(MINUTE);
+    fx.start("ann", "s1");
+    assert_eq!(
+        fx.session_row("ann", "s1"),
+        Some((T0, T0 + 2 * MINUTE, None)),
+        "a resumed session that reuses its id is open again"
+    );
+    // A beat after a tool call is a sign of that session, and so is a prompt.
+    fx.advance(MINUTE);
+    fx.store.keepalive("ann", &hook("claude", "s1")).unwrap();
+    assert_eq!(fx.session_row("ann", "s1").unwrap().1, T0 + 3 * MINUTE);
+    fx.advance(MINUTE);
+    fx.prompt("ann", "s1");
+    assert_eq!(fx.session_row("ann", "s1").unwrap().1, T0 + 4 * MINUTE);
+    let item = fx.ready("one fresh session");
+    assert_eq!(fx.claim("ann").label, item.label);
+    assert_eq!(fx.claim_session(&item.label).as_deref(), Some("s1"));
+
+    // With a sibling at its prompt every hour, a session that only beats after tools
+    // stays fresh for longer than the grace period, so the name is never taken for one
+    // session and the claim is bound to neither.
+    let fx = Fx::new();
+    fx.start("ann", "tools");
+    fx.start("ann", "prompts");
+    for _ in 0..30 {
+        fx.advance(HOUR);
+        fx.store.keepalive("ann", &hook("claude", "tools")).unwrap();
+        fx.prompt("ann", "prompts");
+    }
+    let item = fx.ready("two fresh sessions");
+    let claimed = fx.claim("ann");
+    assert_eq!(claimed.label, item.label);
+    assert!(!claimed.claim.unwrap().session_bound);
+    assert_eq!(fx.claim_session(&item.label), None);
+    assert_eq!(
+        fx.events("queue.claimed")[0].payload["session"],
+        Value::Null
+    );
+
+    // A client whose session ids are not relied on at all four hook events writes no row,
+    // and neither does a call with no session id or a remote caller.
+    let fx = Fx::new();
+    for client in ["codex", "grok", "cursor", "Claude", ""] {
+        fx.store
+            .session("ann", SessionPhase::Start, hook(client, "x1"))
+            .unwrap();
+        fx.store
+            .session("ann", SessionPhase::Beat, hook(client, "x1"))
+            .unwrap();
+        fx.store.keepalive("ann", &hook(client, "x1")).unwrap();
+    }
+    fx.store
+        .session(
+            "ann",
+            SessionPhase::Start,
+            SessionInfo {
+                session_id: Some("x1".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    fx.store
+        .session("ann", SessionPhase::Start, hook("claude", ""))
+        .unwrap();
+    fx.store.heartbeat("ann", false).unwrap();
+    fx.store.keepalive("ann", &SessionInfo::default()).unwrap();
+    fx.store
+        .session_scoped(
+            "ann",
+            SessionPhase::Start,
+            hook("claude", "x1"),
+            Some(&scope_of(&fx, "ann")),
+        )
+        .unwrap();
+    assert_eq!(fx.session_rows(), 0);
+    let item = fx.ready("no session row");
+    assert!(!fx.claim("ann").claim.unwrap().session_bound);
+    fx.store
+        .session("ann", SessionPhase::End, hook("codex", "x1"))
+        .unwrap();
+    assert_eq!(fx.item(&item.label).state, QueueState::Claimed);
+    // The session id still goes into the session events as it came.
+    assert_eq!(fx.events("session.started")[0].payload["session_id"], "x1");
+    assert_eq!(fx.events("session.started")[0].payload["client"], "codex");
+
+    // The limit of binding by name, pinned: a caller with no session row of its own that
+    // claims under a name with exactly one fresh session is bound to that session, and
+    // that session's end releases the claim.
+    let fx = Fx::new();
+    fx.start("ann", "hooked");
+    let item = fx.ready("claimed by a caller with no hooks");
+    let by_mcp = fx.store.queue_next("ann").unwrap().claimed.unwrap();
+    assert!(by_mcp.claim.unwrap().session_bound);
+    assert_eq!(fx.claim_session(&item.label).as_deref(), Some("hooked"));
+    fx.end("ann", "hooked");
+    assert_eq!(fx.item(&item.label).state, QueueState::Ready);
+
+    // Rows not seen for 30 days are deleted by the queue sweep; a newer one stays.
+    let fx = Fx::new();
+    fx.start("ann", "old");
+    fx.start("bob", "ended");
+    fx.end("bob", "ended");
+    fx.advance(30 * DAY - 1);
+    fx.start("cy", "new");
+    fx.store.queue_sweep().unwrap();
+    assert_eq!(fx.session_rows(), 3, "not yet 30 days");
+    fx.advance(1);
+    let swept = fx.store.queue_sweep().unwrap();
+    assert_eq!(swept.forgotten_sessions, 2);
+    assert_eq!(fx.session_rows(), 1);
+    assert!(fx.session_row("cy", "new").is_some());
+}
+
+// T38
+#[test]
+fn a_stale_session_row_is_ignored_for_binding() {
+    let fx = Fx::new();
+    fx.store.queue_set_limit(&owner(), "ann", 2).unwrap();
+    let first = fx.ready("claimed before the crash");
+    fx.start("ann", "dead");
+    assert_eq!(fx.claim("ann").label, first.label);
+    // The session crashes: no end hook. A grace period of silence follows, with no sweep.
+    fx.advance(DAY);
+    // The session restarted under the same name is the only fresh row.
+    fx.start("ann", "restarted");
+    assert_eq!(fx.session_row("ann", "dead"), Some((T0, T0, None)));
+    let second = fx.ready("claimed after the restart");
+    assert_eq!(fx.claim("ann").label, second.label);
+    assert_eq!(
+        fx.claim_session(&second.label).as_deref(),
+        Some("restarted"),
+        "a stale row does not make the name ambiguous"
+    );
+    // The dead session's claim still stands, bound to the dead session.
+    assert_eq!(fx.item(&first.label).state, QueueState::Claimed);
+    assert_eq!(fx.claim_session(&first.label).as_deref(), Some("dead"));
+    assert!(fx.released().is_empty());
+    // Only the new session's claim goes at its end.
+    fx.end("ann", "restarted");
+    assert_eq!(fx.item(&second.label).state, QueueState::Ready);
+    assert_eq!(fx.item(&first.label).state, QueueState::Claimed);
+
+    // One millisecond inside the grace period the old row is still fresh.
+    let fx = Fx::new();
+    fx.start("ann", "quiet");
+    fx.advance(DAY - 1);
+    fx.start("ann", "second");
+    let item = fx.ready("two fresh rows");
+    fx.claim("ann");
+    assert_eq!(fx.claim_session(&item.label), None);
+
+    // With no fresh row at all the claim is unbound.
+    let fx = Fx::new();
+    fx.start("cy", "long ago");
+    fx.advance(DAY);
+    let item = fx.ready("no fresh row");
+    let claimed = fx.claim("cy");
+    assert!(!claimed.claim.unwrap().session_bound);
+    assert_eq!(fx.claim_session(&item.label), None);
+    // An ended row is not fresh either.
+    let fx = Fx::new();
+    fx.start("cy", "over");
+    fx.end("cy", "over");
+    let item = fx.ready("only an ended row");
+    fx.claim("cy");
+    assert_eq!(fx.claim_session(&item.label), None);
+}
+
+/// Everything that runs between an agent's own signs of life: every sweep, the other
+/// agents' hooks, heartbeats and `next`, and the reads.
+fn everything_else_runs(fx: &Fx) {
+    fx.store.sweep().unwrap();
+    fx.store.queue_sweep().unwrap();
+    fx.prompt("bob", "bob-session");
+    fx.store.heartbeat("cy", false).unwrap();
+    fx.store.queue_next("bob").unwrap();
+    read_everything(fx, "bob");
+}
+
+// T22
+#[test]
+fn an_agent_silent_for_an_hour_keeps_its_claim() {
+    let fx = Fx::new();
+    let project = fx.dir.path().join("shop");
+    std::fs::create_dir_all(&project).unwrap();
+    let project = fx
+        .store
+        .ensure_project("shop", project.to_str().unwrap())
+        .unwrap()
+        .abs_path;
+    let item = fx.ready("a long think");
+    fx.start("ann", "s1");
+    assert_eq!(fx.claim("ann").label, item.label);
+    fx.store
+        .acquire_holds(AcquireHolds {
+            agent: "ann".into(),
+            project: project.clone(),
+            paths: vec!["src/**".into()],
+            ttl_seconds: Some(600),
+            exclusive: true,
+            reason: None,
+            repo_wide: false,
+        })
+        .unwrap();
+    let live_holds = || {
+        fx.store
+            .holds(HoldFilter {
+                project: Some(project.clone()),
+                agent: Some("ann".into()),
+            })
+            .unwrap()
+            .len()
+    };
+    assert_eq!(live_holds(), 1);
+    let stands = |why: &str| {
+        let now = fx.item(&item.label);
+        assert_eq!(now.state, QueueState::Claimed, "{why}");
+        assert_eq!(now.claim.unwrap().agent, "ann", "{why}");
+        assert!(fx.released().is_empty(), "{why}");
+        assert!(fx
+            .unread("ann")
+            .iter()
+            .all(|m| !m.message.subject.starts_with("Claim released")));
+    };
+
+    // Silent but alive for an hour: the hold has expired, the claim has not.
+    fx.advance(HOUR);
+    everything_else_runs(&fx);
+    assert_eq!(live_holds(), 0, "the hold expired");
+    stands("an hour of silence");
+    // Marked offline, a heartbeat missed, a wake that did not start work: none releases.
+    fx.db()
+        .execute(
+            "UPDATE agents SET status = 'offline' WHERE agent_id = ?1",
+            [fx.agent_id("ann")],
+        )
+        .unwrap();
+    seed_event(
+        &fx.db(),
+        &node_of(&fx),
+        T0 + HOUR,
+        "transport.wake",
+        json!({ "agent_id": fx.agent_id("ann"), "session_id": "s1", "outcome": "not_started" }),
+    );
+    everything_else_runs(&fx);
+    stands("offline, with a failed wake");
+
+    // One minute short of the grace period.
+    fx.advance(22 * HOUR + 59 * MINUTE);
+    everything_else_runs(&fx);
+    stands("23 hours 59 minutes of silence");
+    fx.advance(MINUTE - 1);
+    everything_else_runs(&fx);
+    stands("one millisecond short of the grace period");
+}
+
+// T23
+#[test]
+fn a_beat_moves_the_grace_deadline() {
+    let fx = Fx::new();
+    let item = fx.ready("a beat at hour 23");
+    fx.start("ann", "s1");
+    fx.claim("ann");
+    fx.advance(23 * HOUR);
+    fx.prompt("ann", "s1");
+    fx.advance(HOUR + MINUTE);
+    everything_else_runs(&fx);
+    assert_eq!(
+        fx.item(&item.label).state,
+        QueueState::Claimed,
+        "past hour 24, an hour after the beat"
+    );
+    // A beat after a tool call counts as well.
+    fx.advance(22 * HOUR);
+    fx.store.keepalive("ann", &hook("claude", "s1")).unwrap();
+    fx.advance(23 * HOUR + 59 * MINUTE);
+    everything_else_runs(&fx);
+    assert_eq!(fx.item(&item.label).state, QueueState::Claimed);
+    // The deadline is 24 hours after the last beat.
+    fx.advance(MINUTE);
+    fx.store.queue_sweep().unwrap();
+    assert_eq!(fx.item(&item.label).state, QueueState::Ready);
+    let event = fx.released().pop().unwrap();
+    assert_eq!(event.payload["reason"], "grace");
+    assert_eq!(
+        event.payload["evidence"]["last_sign_of_life"].as_i64(),
+        Some(T0 + 23 * HOUR + HOUR + MINUTE + 22 * HOUR)
+    );
+}
+
+// T24
+#[test]
+fn grace_releases_after_24_hours_of_silence() {
+    // Each of the three callers of the queue sweep releases an overdue claim.
+    for caller in ["sweep", "hook", "heartbeat", "next"] {
+        let fx = Fx::new();
+        let item = fx.ready("left behind");
+        // No session: a killed pane with no end hook, or a caller with no hooks.
+        assert_eq!(fx.claim("ann").label, item.label);
+        fx.store
+            .queue_note("ann", &item.label, "got this far")
+            .unwrap();
+        fx.advance(DAY - 1);
+        everything_else_runs(&fx);
+        assert_eq!(fx.item(&item.label).state, QueueState::Claimed, "{caller}");
+        fx.advance(1);
+        // The reads that run the hold sweep release nothing.
+        read_everything(&fx, "bob");
+        assert_eq!(fx.item(&item.label).state, QueueState::Claimed, "{caller}");
+        assert!(fx.released().is_empty(), "{caller}");
+        match caller {
+            "sweep" => {
+                let swept = fx.store.queue_sweep().unwrap();
+                assert_eq!(swept.released_claims, [item.label.as_str()]);
+            }
+            "hook" => fx.prompt("bob", "bob-session"),
+            "heartbeat" => {
+                fx.store.heartbeat("bob", false).unwrap();
+            }
+            _ => {
+                // Another agent's `next` releases the claim and is handed the item.
+                let taken = fx.claim("bob");
+                assert_eq!(taken.label, item.label);
+                let kinds: Vec<String> =
+                    taken.history.unwrap().into_iter().map(|h| h.kind).collect();
+                assert_eq!(
+                    kinds,
+                    [
+                        "queue.proposed",
+                        "queue.admitted",
+                        "queue.claimed",
+                        "queue.noted",
+                        "queue.released",
+                        "queue.claimed"
+                    ]
+                );
+            }
+        }
+        let released = fx.released();
+        assert_eq!(released.len(), 1, "{caller}");
+        let event = &released[0];
+        assert_eq!(event.actor, "system", "{caller}");
+        assert_eq!(event.payload["reason"], "grace", "{caller}");
+        assert_eq!(
+            event.payload["previous_claimer_id"],
+            fx.agent_id("ann").as_str()
+        );
+        assert_eq!(
+            event.payload["evidence"],
+            json!({ "last_sign_of_life": T0, "grace_seconds": 86_400 }),
+            "{caller}"
+        );
+        if caller != "next" {
+            let after = fx.item(&item.label);
+            assert_eq!(after.state, QueueState::Ready, "{caller}");
+            assert_eq!(after.skip_agent, None);
+        }
+        // A second sweep finds nothing more.
+        assert!(fx.store.queue_sweep().unwrap().released_claims.is_empty());
+        assert!(fx.store.queue_audit(None).unwrap().ok, "{caller}");
+        assert_eq!(fx.store.queue_audit(None).unwrap().releases["grace"], 1);
+    }
+
+    // The grace period is the owner's setting, bounded, and the sweep follows it.
+    let fx = Fx::new();
+    let arch = fx.delegate();
+    assert_eq!(
+        code(fx.store.queue_set_grace(&agent("ann"), 7200)),
+        "forbidden"
+    );
+    assert_eq!(code(fx.store.queue_set_grace(&arch, 7200)), "forbidden");
+    assert_eq!(code(fx.store.queue_set_grace(&owner(), 7199)), "invalid");
+    assert_eq!(
+        code(fx.store.queue_set_grace(&owner(), 30 * 86_400 + 1)),
+        "invalid"
+    );
+    fx.store.queue_set_grace(&owner(), 7200).unwrap();
+    let item = fx.ready("a two hour grace period");
+    fx.claim("ann");
+    fx.advance(2 * HOUR - 1);
+    fx.store.queue_sweep().unwrap();
+    assert_eq!(fx.item(&item.label).state, QueueState::Claimed);
+    fx.advance(1);
+    fx.store.queue_sweep().unwrap();
+    assert_eq!(fx.item(&item.label).state, QueueState::Ready);
+    assert_eq!(
+        fx.released()[0].payload["evidence"]["grace_seconds"].as_i64(),
+        Some(7200)
+    );
+}
+
+// T35
+#[test]
+fn an_agents_own_return_does_not_release_its_claim() {
+    for way in ["prompt", "start", "end", "next", "inbox", "heartbeat"] {
+        let fx = Fx::new();
+        let item = fx.ready("away for 25 hours");
+        fx.start("ann", "s1");
+        fx.claim("ann");
+        // 25 hours with no sweep at all, then the claimer comes back.
+        fx.advance(25 * HOUR);
+        match way {
+            "prompt" => fx.prompt("ann", "s1"),
+            "start" => fx.start("ann", "s2"),
+            // The end of another session of the name: the claim's own would release it.
+            "end" => fx.end("ann", "s2"),
+            "next" => {
+                let next = fx.store.queue_next("ann").unwrap();
+                assert_eq!(next.refused.unwrap().held, [item.label.as_str()]);
+            }
+            "heartbeat" => {
+                fx.store.heartbeat("ann", false).unwrap();
+            }
+            _ => read_everything(&fx, "ann"),
+        }
+        let now = fx.item(&item.label);
+        assert_eq!(now.state, QueueState::Claimed, "{way}");
+        assert_eq!(now.claim.unwrap().agent, "ann", "{way}");
+        assert!(fx.released().is_empty(), "{way}");
+        if way != "inbox" {
+            // The return is a sign of life: the next sweep keeps the claim too.
+            fx.store.queue_sweep().unwrap();
+            assert_eq!(fx.item(&item.label).state, QueueState::Claimed, "{way}");
+        }
+    }
+}
+
+// T25
+#[test]
+fn every_lapse_tells_the_agent() {
+    for reason in ["session_end", "grace"] {
+        let fx = Fx::new();
+        let item = fx.ready("NOTITLE in the notice");
+        fx.start("ann", "s1");
+        fx.claim("ann");
+        fx.store
+            .queue_note("ann", &item.label, "NONOTE in the notice")
+            .unwrap();
+        let (at, words) = if reason == "session_end" {
+            fx.advance(MINUTE);
+            fx.end("ann", "s1");
+            (T0 + MINUTE, "the session that claimed it ended")
+        } else {
+            fx.advance(DAY);
+            fx.store.queue_sweep().unwrap();
+            (T0 + DAY, "nothing was heard from you for the grace period")
+        };
+        let unread = fx.unread("ann");
+        assert_eq!(unread.len(), 1, "{reason}: one notice");
+        let mail = &unread[0].message;
+        assert_eq!(mail.subject, format!("Claim released: {}", item.label));
+        assert_eq!(mail.from, "ann", "the system has no agent");
+        assert_eq!(mail.importance, Importance::Normal);
+        assert!(!mail.ack_required);
+        assert_eq!(mail.thread_id, mail.message_id, "a new thread");
+        let comes_back = format!(
+            "{LAPSE_SENTENCE} {} comes back; another agent may take it first.",
+            item.label
+        );
+        for needle in [
+            fmt_ts(at).as_str(),
+            words,
+            "kept in the item's history",
+            comes_back.as_str(),
+            "(Automatic notice from Another.)",
+        ] {
+            assert!(
+                mail.body.contains(needle),
+                "{reason}: {needle:?} missing from {:?}",
+                mail.body
+            );
+        }
+        assert!(!mail.body.contains("NOTITLE") && !mail.body.contains("NONOTE"));
+        assert!(!mail.body.contains("s1"), "no session id in the mail");
+        assert!(
+            !mail.body.contains("for the next hour"),
+            "{reason}: a lapse sets no skip"
+        );
+        let event = fx.released().pop().unwrap();
+        assert_eq!(event.payload["notice_message_id"], mail.message_id.as_str());
+        assert!(fx.events("queue.notify_failed").is_empty());
+    }
+
+    // A notice that cannot be sent leaves the release standing.
+    for reason in ["session_end", "grace"] {
+        let fx = Fx::new();
+        let item = fx.ready("the mail is broken");
+        fx.start("cy", "s1");
+        fx.claim("cy");
+        break_mail(&fx.db(), "mail is broken");
+        if reason == "session_end" {
+            fx.end("cy", "s1");
+        } else {
+            fx.advance(DAY);
+            fx.store.queue_sweep().unwrap();
+        }
+        assert_eq!(fx.item(&item.label).state, QueueState::Ready, "{reason}");
+        assert!(fx.unread("cy").is_empty());
+        let failed = fx
+            .events("queue.notify_failed")
+            .pop()
+            .expect("the failure is recorded");
+        assert_eq!(failed.payload["item_id"], item.item_id.as_str());
+        assert_eq!(failed.payload["to"], fx.agent_id("cy").as_str());
+        assert_eq!(failed.payload["reason"], reason);
+        assert!(failed.payload["error"]
+            .as_str()
+            .unwrap()
+            .contains("mail is broken"));
+        let event = fx.released().pop().unwrap();
+        assert_eq!(event.payload["reason"], reason);
+        assert_eq!(event.payload["notice_message_id"], Value::Null);
+        if reason == "session_end" {
+            assert_eq!(
+                fx.events("session.ended").len(),
+                1,
+                "the session still ends"
+            );
+        }
+        let list = fx.store.queue_needs_owner().unwrap();
+        assert_eq!(list.failed_notices.len(), 1);
+        assert!(fx.store.queue_audit(None).unwrap().ok);
+    }
+}
+
+// T37
+#[test]
+fn the_owner_list_marks_unbound_and_stale_bound_claims() {
+    let fx = Fx::new();
+    // Bound to a session that goes quiet while a sibling keeps the name active.
+    let stale = fx.ready("bound, its session quiet");
+    fx.start("ann", "quiet");
+    assert_eq!(fx.claim("ann").label, stale.label);
+    // Bound to a session that stays active.
+    let live = fx.ready("bound, its session active");
+    fx.start("bob", "busy");
+    assert_eq!(fx.claim("bob").label, live.label);
+    // Unbound: no session behind the claim.
+    let unbound = fx.ready("unbound");
+    assert_eq!(fx.claim("cy").label, unbound.label);
+
+    let before = fx.snapshot();
+    let list = fx.store.queue_needs_owner().unwrap();
+    assert_eq!(fx.snapshot(), before, "the read writes nothing");
+    assert_eq!(
+        list.quiet_claims
+            .iter()
+            .map(|q| q.item.label.as_str())
+            .collect::<Vec<_>>(),
+        [unbound.label.as_str()],
+        "an unbound claim is listed from the start"
+    );
+    assert!(list.quiet_claims[0].unbound);
+    assert_eq!(list.quiet_claims[0].session_last_seen_at, None);
+
+    fx.advance(2 * HOUR);
+    fx.start("ann", "sibling");
+    fx.prompt("bob", "busy");
+    fx.store.heartbeat("cy", false).unwrap();
+    let list = fx.store.queue_needs_owner().unwrap();
+    let by_label = |label: &str| list.quiet_claims.iter().find(|q| q.item.label == label);
+    let q = by_label(&stale.label).expect("listed although a sibling keeps the name active");
+    assert!(!q.unbound);
+    assert_eq!(q.session_last_seen_at.as_deref(), Some(fmt_ts(T0).as_str()));
+    assert_eq!(q.quiet_for_seconds, 0, "the name itself is active");
+    assert_eq!(q.grace_ends_at, fmt_ts(T0 + 2 * HOUR + DAY));
+    assert!(
+        by_label(&live.label).is_none(),
+        "a bound claim with an active session is not listed"
+    );
+    let q = by_label(&unbound.label).unwrap();
+    assert!(q.unbound);
+    assert_eq!(list.quiet_claims.len(), 2);
+    // A bound claim is listed once its name has been quiet for an hour, with its session.
+    fx.advance(HOUR);
+    let list = fx.store.queue_needs_owner().unwrap();
+    let q = list
+        .quiet_claims
+        .iter()
+        .find(|q| q.item.label == live.label)
+        .unwrap();
+    assert!(!q.unbound);
+    assert_eq!(
+        q.session_last_seen_at.as_deref(),
+        Some(fmt_ts(T0 + 2 * HOUR).as_str())
+    );
+    assert_eq!(q.quiet_for_seconds, 3600);
+    // A bound claim whose session row is gone is treated as unbound.
+    fx.db()
+        .execute("DELETE FROM queue_sessions WHERE session_id = 'busy'", [])
+        .unwrap();
+    let list = fx.store.queue_needs_owner().unwrap();
+    let q = list
+        .quiet_claims
+        .iter()
+        .find(|q| q.item.label == live.label)
+        .unwrap();
+    assert!(q.unbound);
+    assert_eq!(q.session_last_seen_at, None);
+    assert!(fx.released().is_empty(), "listing releases nothing");
+}
