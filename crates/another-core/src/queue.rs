@@ -3154,7 +3154,10 @@ mod tests {
             assert!(body.contains(call), "queue_offer no longer calls {call}");
         }
         for word in ["query_row", "prepare", "execute", "queue_sessions"] {
-            assert!(!body.contains(word), "queue_offer has SQL of its own: {word}");
+            assert!(
+                !body.contains(word),
+                "queue_offer has SQL of its own: {word}"
+            );
         }
         store
             .read(|conn| {

@@ -70,9 +70,8 @@ pub use queue::{
     QueueClaimed, QueueDelegate, QueueEdited, QueueFilter, QueueGrace, QueueHistoryEntry,
     QueueItem, QueueKind, QueueLimit, QueueLimits, QueueNeedsOwner, QueueNext, QueueOffer,
     QueuePriority, QueueRefusal, QueueResult, QueueState, QueueSweepReport, QuietClaim,
-    ReleaseItem, SelfAdmitted, DEFAULT_QUEUE_GRACE_SECONDS,
-    DEFAULT_QUEUE_LIMIT, MAX_QUEUE_GRACE_SECONDS, MAX_QUEUE_LIMIT, MIN_QUEUE_GRACE_SECONDS,
-    QUEUE_SESSION_CLIENTS,
+    ReleaseItem, SelfAdmitted, DEFAULT_QUEUE_GRACE_SECONDS, DEFAULT_QUEUE_LIMIT,
+    MAX_QUEUE_GRACE_SECONDS, MAX_QUEUE_LIMIT, MIN_QUEUE_GRACE_SECONDS, QUEUE_SESSION_CLIENTS,
 };
 pub use repo::{link_for as repo_link_for, normalize_remote, resolve_existing, RepoLink};
 pub use requests::{Request, RequestAction, RequestFilter, RequestStatus, RequestUpdate};

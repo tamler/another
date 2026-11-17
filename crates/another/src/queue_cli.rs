@@ -433,6 +433,29 @@ fn describe(action: &str, item: &QueueItem, extra: &[(&str, Option<String>)]) ->
     out
 }
 
+/// After an agent finished or gave back its own item: one more line, last, when another
+/// item is ready that `next` would hand it. Only a name the owner gave a seat is told
+/// (`QueueOffer::announce`), as in the hook packs. The line goes to standard output, or
+/// with `--json` to standard error, so the JSON on standard output is the item alone. It
+/// only reads, and a failed read prints nothing and leaves the exit status as it was.
+fn say_what_is_next(store: &Store, agent: &str, json: bool) {
+    let Ok(offer) = store.queue_offer(agent) else {
+        return;
+    };
+    if offer.announce().is_none() {
+        return;
+    }
+    let Some(me) = crate::hooks::plain_address(&offer.agent) else {
+        return;
+    };
+    let line = format!("Another item is ready that {me} may take: another queue next --agent {me}");
+    if json {
+        eprintln!("{line}");
+    } else {
+        println!("{line}");
+    }
+}
+
 /// Run one `another queue` command.
 pub fn run(store: &Store, cmd: QueueCmd, json: bool) -> anyhow::Result<ExitCode> {
     let code = match cmd {
@@ -632,6 +655,10 @@ pub fn run(store: &Store, cmd: QueueCmd, json: bool) -> anyhow::Result<ExitCode>
         } => {
             let input = ReleaseItem { note, to, reason };
             input.validate()?;
+            // A claimer giving back its own item, plain or with --to: neither --owner nor
+            // --reason. A delegate's key does not change that.
+            let own_release = !who.owner && input.reason.is_none();
+            let claimer = who.agent.clone().filter(|_| own_release);
             let (caller, revision) = admitter(who, || {
                 let (shown, revision) = store.queue_item_shown(&item)?;
                 let text = describe("Release", &shown, &[("reason", input.reason.clone())]);
@@ -641,7 +668,11 @@ pub fn run(store: &Store, cmd: QueueCmd, json: bool) -> anyhow::Result<ExitCode>
                 Some(revision) => store.queue_release_shown(&caller, &item, input, &revision)?,
                 None => store.queue_release(&caller, &item, input)?,
             };
-            emit(json, &released, output::queue_item)
+            let printed = emit(json, &released, output::queue_item);
+            if let Some(agent) = claimer {
+                say_what_is_next(store, &agent, json);
+            }
+            printed
         }
         QueueCmd::Done {
             item,
@@ -667,7 +698,9 @@ pub fn run(store: &Store, cmd: QueueCmd, json: bool) -> anyhow::Result<ExitCode>
                     pointer,
                 },
             )?;
-            emit(json, &finished, output::queue_item)
+            let printed = emit(json, &finished, output::queue_item);
+            say_what_is_next(store, &agent, json);
+            printed
         }
         QueueCmd::Limit(QueueLimitCmd::Set {
             agent,
