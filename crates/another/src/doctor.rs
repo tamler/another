@@ -116,6 +116,7 @@ pub fn run(inputs: &Inputs) -> Report {
         ),
     });
     checks.push(transports(&inputs.another_home, store.as_ref()));
+    checks.extend(orphan_scan(store.as_ref()));
 
     Report {
         ok: checks.iter().all(|c| c.status != Level::Fail),
@@ -814,6 +815,148 @@ fn transports(home: &Path, store: Option<&Store>) -> Check {
         Level::Ok,
         format!("herdr and {} from transports.json", names.join(", ")),
     )
+}
+
+/// How many lapsed resources or listeners a row names. The count is of all of them.
+const NAMED: usize = 5;
+
+/// The orphan scan of `another orphans` (reap.rs, scan.rs), read without its sweep: this
+/// node's lapsed resources, and listening processes that nothing registered. It runs
+/// `lsof` or `ss`, and `ps`; it writes nothing and stops or signals nothing.
+fn orphan_scan(store: Option<&Store>) -> [Check; 2] {
+    let Some(store) = store else {
+        let skip = |name| {
+            check(
+                name,
+                Level::Skip,
+                "not checked until the database check passes",
+            )
+        };
+        return [skip("resources"), skip("listeners")];
+    };
+    match crate::reap::orphans_unswept(store) {
+        Ok(report) => [lapsed_resources(&report), unregistered_listeners(&report)],
+        Err(e) => [
+            check(
+                "resources",
+                Level::Warn,
+                format!(
+                    "could not list resources: {}",
+                    another_core::single_line(&e.to_string(), 200)
+                ),
+            ),
+            check(
+                "listeners",
+                Level::Skip,
+                "not scanned: the resources could not be listed",
+            ),
+        ],
+    }
+}
+
+/// `seconds` as one rounded-down figure: `40 s`, `12 min`, `3 h`, `9 d`.
+fn lasting(seconds: i64) -> String {
+    match seconds.max(0) {
+        s if s < 60 => format!("{s} s"),
+        s if s < 3600 => format!("{} min", s / 60),
+        s if s < 48 * 3600 => format!("{} h", s / 3600),
+        s => format!("{} d", s / 86_400),
+    }
+}
+
+/// The first `NAMED` of `items`, and how many were left out.
+fn named(items: Vec<String>) -> String {
+    let more = items.len().saturating_sub(NAMED);
+    let mut out = items.into_iter().take(NAMED).collect::<Vec<_>>().join(", ");
+    if more > 0 {
+        out.push_str(&format!(", and {more} more"));
+    }
+    out
+}
+
+/// This node's registered resources with no live lease (D9). Another node's are that
+/// node's to deal with (D25) and are not listed.
+fn lapsed_resources(report: &crate::reap::OrphanReport) -> Check {
+    let lapsed: Vec<String> = report
+        .orphans
+        .iter()
+        .filter_map(|o| Some((o.resource.as_ref().filter(|r| r.node.is_none())?, o)))
+        .map(|(r, o)| {
+            format!(
+                "{} {} ({})",
+                r.kind.as_str(),
+                another_core::single_line(&r.name, 60),
+                match o.age_seconds {
+                    Some(age) => format!("for {}", lasting(age)),
+                    None => "not recorded by a sweep yet".to_string(),
+                }
+            )
+        })
+        .collect();
+    if lapsed.is_empty() {
+        return check("resources", Level::Ok, "none lapsed");
+    }
+    check(
+        "resources",
+        Level::Warn,
+        format!("{} lapsed: {}", lapsed.len(), named(lapsed)),
+    )
+    .fix("another orphans")
+}
+
+/// Listening processes that no registered resource accounts for. Never a warning: one
+/// may be a server the owner wants running.
+fn unregistered_listeners(report: &crate::reap::OrphanReport) -> Check {
+    let Some(scan) = &report.scan else {
+        return check("listeners", Level::Skip, "not scanned");
+    };
+    if let Some(error) = &scan.error {
+        return check(
+            "listeners",
+            Level::Info,
+            format!(
+                "the listener scan did not run: lsof and ss were tried ({})",
+                another_core::single_line(error, 200)
+            ),
+        );
+    }
+    let found: Vec<String> = report
+        .orphans
+        .iter()
+        .filter(|o| o.resource.is_none())
+        .map(|o| {
+            // The program's name only. Its path and arguments are in `another orphans`.
+            let program = o
+                .command
+                .as_deref()
+                .and_then(|c| c.split_whitespace().next())
+                .and_then(|word| word.rsplit(['/', '\\']).next())
+                .unwrap_or("?");
+            format!(
+                "port {} {}",
+                o.port.map_or("?".into(), |p| p.to_string()),
+                another_core::single_line(program, 40)
+            )
+        })
+        .collect();
+    if found.is_empty() {
+        return check(
+            "listeners",
+            Level::Ok,
+            format!("none unregistered ({})", scan.scanner),
+        );
+    }
+    check(
+        "listeners",
+        Level::Info,
+        format!(
+            "{} unregistered ({}): {}",
+            found.len(),
+            scan.scanner,
+            named(found)
+        ),
+    )
+    .fix("another orphans")
 }
 
 /// Human output: one line per check, and an indented fix under anything not ok.

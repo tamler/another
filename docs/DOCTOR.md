@@ -13,6 +13,10 @@ ok    server    answering on 127.0.0.1:7466
 ok    daemon    one.toanother.another loaded, pid 969, healthy
 skip  peers     not checked until the database check passes
 info  transports herdr only (no transports.json, so no command transport)
+warn  resources 2 lapsed: long_job eval-run (for 3 h), model_server ollama@11434 (for 2 d)
+                fix: another orphans
+info  listeners 3 unregistered (lsof): port 5173 node, port 8000 python3, port 11434 ollama
+                fix: another orphans
 ```
 
 `--json` prints `{"ok": bool, "checks": [{"name", "status", "detail", "fix"}]}`. `--bind HOST:PORT` checks a server on another loopback port.
@@ -29,8 +33,12 @@ info  transports herdr only (no transports.json, so no command transport)
 | `daemon` | The launchd service (macOS only) | never | it is installed but not loaded, or loaded but not answering. Serving a different home is `info` |
 | `peers` | Paired nodes: role, revocation and last sync | never | the hub has not synced for 24 hours, or a spoke for 7 days |
 | `transports` | `transports.json` in the home ([WAKE.md](WAKE.md#command-transports)), the stored wake targets and the session rows | never | the file was refused (the reason is given); a wake target or a session row names a transport that is not configured; a wake target is the old cmux target `notify`; a program a command transport would start is not found on `PATH`. No file is `info` |
+| `resources` | This node's registered resources with no live lease ([RESOURCES.md](RESOURCES.md#orphans)), read without a sweep | never | any is lapsed: the count, and up to five by kind, name and how long |
+| `listeners` | Listening TCP sockets that no registered resource accounts for, found by the scan `another orphans` runs | never | never. Any found is `info`: the count, and up to five by port and program name. A scan that did not run is `info` too |
 
-Statuses are `ok`, `info` (optional and not set up), `warn`, `fail` and `skip` (does not apply here). The exit status is 1 only when a check is `fail`, so a script can gate on it; warnings exit 0.
+The last two rows are [the orphan scan](#the-orphan-scan).
+
+Statuses are `ok`, `info` (optional and not set up, or worth a look but not a problem), `warn`, `fail` and `skip` (does not apply here). The exit status is 1 only when a check is `fail`, so a script can gate on it; warnings exit 0.
 
 ## What it does not do
 
@@ -38,11 +46,13 @@ Statuses are `ok`, `info` (optional and not set up), `warn`, `fail` and `skip` (
   - It does not create the home or the database, and it does not migrate the database or write an event.
   - Every database read goes through read-only connections, which also cannot checkpoint the WAL into the main file.
   - It does not edit a hook config or touch the daemon; for the daemon it only reads launchd's record and the plist.
+  - It runs no sweep: no hold, request or lease is expired, and no resource is released, adopted or reaped.
+  - It stops and signals no process.
   - One exception: SQLite may leave the empty `another.db-shm` and `another.db-wal` files that any reader of the database creates.
 - **It contacts nothing but loopback.**
   - There is exactly one network call, `GET /health`, to a literal loopback address (`127.0.0.1:PORT` or `[::1]:PORT`), with no proxy and no redirect followed.
   - A host name or any other address given with `--bind` is skipped, not looked up or dialled.
-  - It never contacts a federation peer, a tunnel or any remote host.
+  - It never contacts a federation peer, a tunnel or any remote host. The `resources` row does not try to connect to another node's resource, which `another resources` does.
 - **It runs no fix.** Each `fix:` is a command for you to run.
 - **It runs no transport.** The `transports` row reads the config and looks for each program on `PATH`; it starts none of them, so it does not show that a command works.
 - **Not checked:** tokens and OAuth grants, tunnels, Herdr, whether a configured tmux or cmux command works, and the resource scanner's permissions.
@@ -54,8 +64,22 @@ Usually well under a second. It is not bounded overall:
 - **Not bounded.**
   - `quick_check` reads the whole database, so its time grows with the database's size.
   - On macOS the daemon row runs `id -u` and `launchctl print`, with no timeout of their own. A stuck `launchd` holds `doctor` up with it.
+  - The orphan scan runs `lsof` or `ss` once, and `ps` once for each listener it finds and each lapsed resource with a pid, with no timeout of their own.
 
 Press Ctrl-C to stop it; it has changed nothing.
+
+## The orphan scan
+
+The `resources` and `listeners` rows are the scan behind `another orphans` ([RESOURCES.md](RESOURCES.md#orphans)), run without the sweep that command starts with. They show what is left over; `another orphans` gives the full list, with ids, pids and command lines. Doctor names no command that stops or releases anything.
+
+- **`resources`** counts this node's registered resources with no live lease and names up to five, with how long each has been lapsed. A resource another node owns is not listed; it is dealt with on that node.
+  - Doctor reads what the last sweep recorded. This node's lease that ran out since then still counts as live until a sweep expires it, so its resource is not listed yet. `another serve` sweeps every 30 seconds, and `another sweep`, `another resources` and `another orphans` each sweep when run.
+  - A resource whose only leases were another node's and have run out is listed as `not recorded by a sweep yet` in place of a time.
+- **`listeners`** counts listening TCP sockets that match no registered resource by pid or port, and names up to five by port and program name. System services and Another itself are left out.
+  - It is `info`, never a warning, and never changes the exit status. A dev server you started by hand and never registered is counted here; that is expected.
+  - The row runs external programs: `lsof -nP -iTCP -sTCP:LISTEN`, or `ss -ltnp` when `lsof` is missing or fails, and `ps` for each listener's command. They are found on `PATH` and run with no timeout.
+  - When neither `lsof` nor `ss` can run, the row says the listener scan did not run and gives the reason. The `resources` row and the exit status are unaffected. Without `ps`, a listener is named as `lsof` or `ss` named it.
+- Names of resources and programs are printed as one line with control characters replaced by spaces.
 
 ## A damaged database
 

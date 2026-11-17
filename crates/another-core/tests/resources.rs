@@ -338,3 +338,35 @@ fn validates_input() {
     let missing = store.borrow_resource("alice", &ResourceRef::Id("nope".into()), None);
     assert_eq!(missing.unwrap_err().code(), "not_found");
 }
+
+/// `another doctor` reads resources without the sweep (docs/DOCTOR.md). This node's lease
+/// that ran out by the clock still counts in that read; `find_resources` expires it first,
+/// as it always did.
+#[test]
+fn resources_unswept_writes_nothing_and_find_resources_still_sweeps() {
+    let (store, clock) = setup();
+    let reg = ollama(&store, "alice", LeaseMode::Shared, 60).unwrap();
+    let id = reg.resource.resource_id;
+    clock.store(T0 + 61_000, Ordering::SeqCst);
+    let events = store.events(1000).unwrap().len();
+
+    let seen = store.resources_unswept(ResourceFilter::default()).unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].status, "live", "no sweep has expired the lease");
+    assert_eq!(seen[0].refcount, 1);
+    assert_eq!(store.lapsed_for_ms(&id).unwrap(), None);
+    assert_eq!(store.events(1000).unwrap().len(), events, "an event");
+
+    let swept = store.find_resources(ResourceFilter::default()).unwrap();
+    assert_eq!(swept[0].status, "lapsed");
+    assert!(swept[0].lapsed_since.is_some());
+    assert_eq!(store.lapsed_for_ms(&id).unwrap(), Some(1_000));
+    let kinds: Vec<String> = store
+        .events(1000)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.kind)
+        .collect();
+    assert_eq!(kinds.len(), events + 1, "{kinds:?}");
+    assert!(kinds.contains(&"resource.lease_expired".to_string()));
+}

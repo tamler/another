@@ -48,6 +48,8 @@ Two sources:
 
 Pass `--no-scan` to skip the process scan.
 
+`another doctor` runs the same scan without changing anything and shows the counts: [DOCTOR.md](DOCTOR.md#the-orphan-scan).
+
 ## Reaping (human only)
 
 ```bash

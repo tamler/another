@@ -755,6 +755,20 @@ impl Store {
     /// Find registered resources (live and lapsed by default), newest first.
     pub fn find_resources(&self, filter: ResourceFilter) -> Result<Vec<Resource>> {
         self.sweep()?;
+        self.list_resources(filter, true)
+    }
+
+    /// What [`Store::find_resources`] lists, for a caller that must change nothing and
+    /// contact nothing (`another doctor`): no sweep runs first, and no connection is tried
+    /// to another node's resource, so `reachable` stays `None`. This node's lease that ran
+    /// out by the clock still counts until a sweep expires it, so its resource reads as
+    /// `live` here; another node's counts only until its expiry, and a resource it leaves
+    /// with no lease reads as `lapsed` with no `lapsed_since` until a sweep records that.
+    pub fn resources_unswept(&self, filter: ResourceFilter) -> Result<Vec<Resource>> {
+        self.list_resources(filter, false)
+    }
+
+    fn list_resources(&self, filter: ResourceFilter, probe: bool) -> Result<Vec<Resource>> {
         let now = self.now();
         self.read(|conn| {
             let project_id = match &filter.project {
@@ -787,7 +801,7 @@ impl Store {
             rows.into_iter()
                 .map(|r| {
                     let mut res = hydrate(conn, r, now)?;
-                    if res.node.is_some() && res.status == "live" {
+                    if probe && res.node.is_some() && res.status == "live" {
                         res.reachable = Some(crate::federation::reachable(
                             res.endpoint.as_deref(),
                             res.port,

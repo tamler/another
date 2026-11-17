@@ -327,3 +327,55 @@ fn scan_finds_unregistered_listeners() {
     assert!(!ours(&json(home, &["orphans"])));
     drop(listener);
 }
+
+/// `another doctor` reads the same findings without the sweep. `another orphans` and
+/// `another reap` keep theirs: a lease that ran out by the clock is expired and recorded
+/// by the listing, and the reap plan counts the grace period from that record.
+#[test]
+fn orphans_and_reap_still_sweep_before_they_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    setup(home);
+    let reg = json(
+        home,
+        &[
+            "resource", "register", "long_job", "eval-run", "--agent", "alice",
+        ],
+    );
+    let id = reg["resource"]["resource_id"].as_str().unwrap().to_string();
+    let db = rusqlite::Connection::open(home.join("another.db")).unwrap();
+    db.execute(
+        "UPDATE resource_leases SET expires_at = 1000 WHERE resource_id = ?1",
+        [&id],
+    )
+    .unwrap();
+    let expired = |db: &rusqlite::Connection| -> i64 {
+        db.query_row(
+            "SELECT count(*) FROM events WHERE kind = 'resource.lease_expired'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(expired(&db), 0);
+
+    let orphans = json(home, &["orphans", "--no-scan"]);
+    assert_eq!(expired(&db), 1, "orphans did not sweep");
+    let list = orphans["orphans"].as_array().unwrap();
+    assert_eq!(list.len(), 1, "{orphans}");
+    assert_eq!(list[0]["source"], "lapsed_lease");
+    assert_eq!(list[0]["target"], id.as_str());
+    assert_eq!(list[0]["resource"]["status"], "lapsed");
+    assert!(list[0]["resource"]["lapsed_since"].is_string(), "{orphans}");
+    assert!(list[0]["age_seconds"].as_i64().unwrap() > 600, "{orphans}");
+
+    let plan = json(home, &["reap", &id]);
+    assert_eq!(plan["executed"], false);
+    assert!(plan["age_seconds"].as_i64().unwrap() > 600, "{plan}");
+    let blockers = plan["blockers"].as_array().unwrap();
+    assert_eq!(blockers.len(), 1, "{plan}");
+    assert!(blockers[0]
+        .as_str()
+        .unwrap()
+        .contains("no pid is registered"));
+}

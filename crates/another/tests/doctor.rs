@@ -164,7 +164,9 @@ fn a_fresh_home_is_ok_and_doctor_changes_nothing() {
             "server",
             "daemon",
             "peers",
-            "transports"
+            "transports",
+            "resources",
+            "listeners"
         ]
     );
 
@@ -758,6 +760,394 @@ fn adv158_a_server_for_another_node_is_not_ok() {
 }
 
 const OTHER: &str = "01OTHERNODE000000000000000";
+
+/// The lapsed resources and unregistered listeners rows (docs/DOCTOR.md, "The orphan
+/// scan"). The scan's programs are found on `PATH`, so a test that needs a fixed answer
+/// puts its own `lsof` first.
+#[cfg(unix)]
+mod orphan_scan {
+    use super::*;
+    use std::io::BufRead;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Child;
+
+    impl Fx {
+        fn ok(&self, args: &[&str]) -> Value {
+            let mut all = vec!["--json"];
+            all.extend_from_slice(args);
+            let out = self.cmd(&all);
+            assert!(
+                out.status.success(),
+                "another {args:?}: {}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            serde_json::from_slice(&out.stdout).unwrap()
+        }
+
+        /// A `long_job` resource with no port and no pid; returns its id.
+        fn job(&self, name: &str) -> String {
+            let reg = self.ok(&["resource", "register", "long_job", name, "--agent", "alice"]);
+            reg["resource"]["resource_id"].as_str().unwrap().to_string()
+        }
+
+        /// `doctor` with `PATH` set to `path`.
+        fn doctor_on_path(&self, path: &str, json: bool) -> Output {
+            let bind = closed_port();
+            let mut args = vec!["doctor", "--bind", &bind];
+            if json {
+                args.insert(0, "--json");
+            }
+            Command::new(env!("CARGO_BIN_EXE_another"))
+                .args(args)
+                .env("HOME", &self.user)
+                .env("ANOTHER_HOME", &self.home)
+                .env("PATH", path)
+                .env_remove("ANOTHER_AGENT")
+                .env_remove("ANOTHER_LOG")
+                .stdin(Stdio::null())
+                .output()
+                .expect("run another")
+        }
+
+        fn doctor_json_on_path(&self, path: &str) -> (Option<i32>, Value) {
+            let out = self.doctor_on_path(path, true);
+            let v = serde_json::from_slice(&out.stdout)
+                .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)));
+            (out.status.code(), v)
+        }
+
+        /// A directory holding an `lsof` that prints `fields`, and a `PATH` that finds it
+        /// before the system's programs (`ps` stays the real one).
+        fn fake_lsof(&self, fields: &str) -> String {
+            let bin = self.user.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let listing = bin.join("listing");
+            std::fs::write(&listing, fields).unwrap();
+            let lsof = bin.join("lsof");
+            std::fs::write(
+                &lsof,
+                format!("#!/bin/sh\nexec /bin/cat '{}'\n", listing.display()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&lsof, std::fs::Permissions::from_mode(0o755)).unwrap();
+            format!("{}:/usr/bin:/bin", bin.display())
+        }
+
+        fn with_agent() -> Fx {
+            let fx = Fx::new();
+            fx.init();
+            fx.ok(&["agent", "register", "alice", "--program", "claude"]);
+            fx
+        }
+    }
+
+    fn detail(report: &Value, name: &str) -> String {
+        row(report, name)["detail"].as_str().unwrap().to_string()
+    }
+
+    fn files(home: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(home)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// This test binary again, listening on a loopback port until its input closes.
+    fn listening_child() -> (Child, u16) {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "orphan_scan::listening_fixture", "--nocapture"])
+            .env("ANOTHER_DOCTOR_TEST_CHILD", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let out = std::io::BufReader::new(child.stdout.take().unwrap());
+        let port = out
+            .lines()
+            .map_while(Result::ok)
+            .find_map(|l| l.split("listening ").nth(1)?.trim().parse().ok())
+            .expect("the child's port");
+        (child, port)
+    }
+
+    /// Ends the child by closing its input, then waits for it. Its exit status says
+    /// nothing: its output pipe was closed once the port was read.
+    fn stop(mut child: Child) {
+        drop(child.stdin.take());
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn listening_fixture() {
+        if std::env::var_os("ANOTHER_DOCTOR_TEST_CHILD").is_none() {
+            return;
+        }
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        println!("listening {}", l.local_addr().unwrap().port());
+        std::io::copy(&mut std::io::stdin(), &mut std::io::sink()).unwrap();
+    }
+
+    /// The done condition of Q5: a home with a lapsed resource and an orphan listener.
+    /// Doctor lists both and the home is as it was, including two leases that ran out by
+    /// the clock and that no sweep has expired. The registry counts this node's own lease
+    /// until a sweep (`quiet-9` is not listed yet) and another node's only until its expiry
+    /// (`train-7` is lapsed, with no time recorded).
+    #[test]
+    fn doctor_lists_a_lapsed_resource_and_an_orphan_listener_and_changes_nothing() {
+        let fx = Fx::with_agent();
+        let released = fx.job("eval-run");
+        fx.ok(&["release", &released, "--agent", "alice"]);
+        let unswept = fx.job("train-7");
+        let quiet = fx.job("quiet-9");
+        fx.job("still-live");
+        let held = rusqlite::Connection::open(fx.db()).unwrap();
+        held.execute(
+            "INSERT INTO nodes (node_id, display_name, created_at) VALUES (?1, 'other-box', 1)",
+            [OTHER],
+        )
+        .unwrap();
+        held.execute(
+            "UPDATE resource_leases SET expires_at = 1000, node_id = ?2 WHERE resource_id = ?1",
+            [&unswept, OTHER],
+        )
+        .unwrap();
+        held.execute(
+            "UPDATE resource_leases SET expires_at = 1000 WHERE resource_id = ?1",
+            [&quiet],
+        )
+        .unwrap();
+        let (child, port) = listening_child();
+        let path = fx.fake_lsof(&format!(
+            "p{}\ncfixture\nLme\nn127.0.0.1:{port}\n",
+            child.id()
+        ));
+
+        let rows_before = dump(&held);
+        let files_before = files(&fx.home);
+        let (code, r) = fx.doctor_json_on_path(&path);
+        let text = fx.doctor_on_path(&path, false);
+        assert_eq!(dump(&held), rows_before, "doctor wrote to the database");
+        assert_eq!(files(&fx.home), files_before);
+        let open: i64 = held
+            .query_row(
+                "SELECT count(*) FROM resource_leases
+                 WHERE resource_id IN (?1, ?2) AND released_at IS NULL AND expires_at = 1000",
+                [&unswept, &quiet],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(open, 2, "the leases that ran out are still unswept");
+        assert!(child_running(&child), "doctor stopped the listener");
+        stop(child);
+
+        assert_eq!(code, Some(0), "{r}");
+        assert_eq!(r["ok"], true);
+        assert_eq!(status(&r, "resources"), "warn", "{r}");
+        let lapsed = detail(&r, "resources");
+        assert!(lapsed.starts_with("2 lapsed: "), "{lapsed}");
+        assert!(lapsed.contains("long_job eval-run (for "), "{lapsed}");
+        assert!(
+            lapsed.contains("long_job train-7 (not recorded by a sweep yet)"),
+            "{lapsed}"
+        );
+        assert!(!lapsed.contains("still-live"), "{lapsed}");
+        assert!(!lapsed.contains("quiet-9"), "{lapsed}");
+        assert_eq!(row(&r, "resources")["fix"], "another orphans");
+
+        assert_eq!(status(&r, "listeners"), "info", "{r}");
+        let listeners = detail(&r, "listeners");
+        assert!(listeners.starts_with("1 unregistered"), "{listeners}");
+        // The child's real program name, from `ps`: this test binary.
+        assert!(
+            listeners.contains(&format!("port {port} doctor-")),
+            "{listeners}"
+        );
+        assert!(!listeners.contains('/'), "{listeners}");
+        assert_eq!(row(&r, "listeners")["fix"], "another orphans");
+
+        assert_eq!(text.status.code(), Some(0));
+        let text = String::from_utf8_lossy(&text.stdout).into_owned();
+        assert!(text.contains("\nwarn  resources 2 lapsed: "), "{text}");
+        assert!(text.contains("\ninfo  listeners 1 unregistered"), "{text}");
+        assert_eq!(text.matches("fix: another orphans\n").count(), 2, "{text}");
+    }
+
+    fn child_running(child: &Child) -> bool {
+        another::scan::alive(child.id())
+    }
+
+    /// The same scan with the system's own `lsof` or `ss`: a listener this test holds is
+    /// counted. Which five are named depends on what else the machine runs.
+    #[test]
+    fn the_real_scanner_counts_a_listener_this_test_holds() {
+        let fx = Fx::with_agent();
+        let (child, port) = listening_child();
+        let (code, r) = fx.doctor();
+        stop(child);
+        assert_eq!(code, Some(0), "{r}");
+        assert_eq!(status(&r, "listeners"), "info", "{r}");
+        let listeners = detail(&r, "listeners");
+        if listeners.contains("did not run") {
+            eprintln!("no lsof or ss on this machine: {listeners}");
+            return;
+        }
+        let count: usize = listeners.split(' ').next().unwrap().parse().unwrap();
+        assert!(count >= 1, "{listeners}");
+        if count <= 5 {
+            assert!(listeners.contains(&format!("port {port} ")), "{listeners}");
+        }
+    }
+
+    #[test]
+    fn nothing_lapsed_and_no_listener_are_two_quiet_rows() {
+        let fx = Fx::with_agent();
+        fx.job("still-live");
+        let (code, r) = fx.doctor_json_on_path(&fx.fake_lsof(""));
+        assert_eq!(code, Some(0), "{r}");
+        assert_eq!(status(&r, "resources"), "ok", "{r}");
+        assert_eq!(detail(&r, "resources"), "none lapsed");
+        assert!(row(&r, "resources")["fix"].is_null());
+        assert_eq!(status(&r, "listeners"), "ok", "{r}");
+        assert_eq!(detail(&r, "listeners"), "none unregistered (lsof)");
+        assert!(row(&r, "listeners")["fix"].is_null());
+    }
+
+    /// A registered port is not an orphan, and Another's own listeners and system
+    /// services are left out, as in `another orphans`.
+    #[test]
+    fn registered_and_system_listeners_are_not_counted() {
+        let fx = Fx::with_agent();
+        fx.ok(&[
+            "resource",
+            "register",
+            "dev_server",
+            "vite@5173",
+            "--agent",
+            "alice",
+        ]);
+        let path = fx.fake_lsof(
+            "p4000000001\ncnode\nLme\nn*:5173\np4000000002\ncsshd\nLroot\nn*:22\n\
+             p4000000003\ncanother\nLme\nn127.0.0.1:7466\n",
+        );
+        let (_, r) = fx.doctor_json_on_path(&path);
+        assert_eq!(detail(&r, "listeners"), "none unregistered (lsof)", "{r}");
+    }
+
+    /// More than five of either: the count is the whole number, five are named.
+    #[test]
+    fn only_five_of_each_are_named() {
+        let fx = Fx::with_agent();
+        let mut fields = String::new();
+        for n in 1..=7 {
+            let id = fx.job(&format!("job-{n}"));
+            fx.ok(&["release", &id, "--agent", "alice"]);
+            fields.push_str(&format!("p400000000{n}\ncsrv{n}\nLme\nn*:900{n}\n"));
+        }
+        let (code, r) = fx.doctor_json_on_path(&fx.fake_lsof(&fields));
+        assert_eq!(code, Some(0), "{r}");
+        let lapsed = detail(&r, "resources");
+        assert!(lapsed.starts_with("7 lapsed: "), "{lapsed}");
+        assert_eq!(lapsed.matches("long_job job-").count(), 5, "{lapsed}");
+        assert!(lapsed.ends_with(", and 2 more"), "{lapsed}");
+        let listeners = detail(&r, "listeners");
+        assert!(listeners.starts_with("7 unregistered"), "{listeners}");
+        assert_eq!(listeners.matches("port 900").count(), 5, "{listeners}");
+        assert!(listeners.ends_with(", and 2 more"), "{listeners}");
+    }
+
+    /// Without `lsof`, `ss` and `ps`, doctor still runs, lists the lapsed resource, says
+    /// the listener scan did not run, and exits 0.
+    #[test]
+    fn a_missing_scanner_is_said_plainly_and_fails_nothing() {
+        let fx = Fx::with_agent();
+        let id = fx.job("eval-run");
+        fx.ok(&["release", &id, "--agent", "alice"]);
+        let empty = fx.user.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        let (code, r) = fx.doctor_json_on_path(&empty.to_string_lossy());
+        assert_eq!(code, Some(0), "{r}");
+        assert_eq!(r["ok"], true);
+        assert_eq!(status(&r, "resources"), "warn", "{r}");
+        assert!(detail(&r, "resources").contains("long_job eval-run"), "{r}");
+        assert_eq!(status(&r, "listeners"), "info", "{r}");
+        let listeners = detail(&r, "listeners");
+        assert!(
+            listeners.starts_with("the listener scan did not run: lsof and ss were tried"),
+            "{listeners}"
+        );
+    }
+
+    /// Names other agents wrote and command names other processes chose reach the terminal
+    /// as plain text on one line.
+    #[test]
+    fn hostile_names_are_printed_as_one_safe_line() {
+        let fx = Fx::with_agent();
+        let id = fx.job("placeholder");
+        fx.ok(&["release", &id, "--agent", "alice"]);
+        let hostile = "x\u{1b}[2J\r\nfail  database gone\u{202e}\u{7}";
+        rusqlite::Connection::open(fx.db())
+            .unwrap()
+            .execute(
+                "UPDATE resources SET name = ?1 WHERE resource_id = ?2",
+                [hostile, &id],
+            )
+            .unwrap();
+        // No such process, so `ps` has nothing and the name `lsof` gave is what is shown.
+        let path = fx.fake_lsof("p4000000001\ncev\u{1b}[31mil\u{9b}\u{2066}\tsrv\nLme\nn*:9001\n");
+        let (code, r) = fx.doctor_json_on_path(&path);
+        assert_eq!(code, Some(0), "{r}");
+        for name in ["resources", "listeners"] {
+            let shown = detail(&r, name);
+            assert!(
+                !shown.chars().any(another_core::is_unsafe_text_char),
+                "{name}: {shown:?}"
+            );
+        }
+        assert!(detail(&r, "resources").contains("fail  database gone"));
+        assert!(detail(&r, "listeners").contains("port 9001 ev [31mil"));
+
+        let text = fx.doctor_on_path(&path, false);
+        let text = String::from_utf8_lossy(&text.stdout).into_owned();
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        let rows = r["checks"].as_array().unwrap().len();
+        let fixes = text
+            .lines()
+            .filter(|l| l.trim_start().starts_with("fix: "))
+            .count();
+        assert_eq!(
+            text.lines().count(),
+            rows + fixes,
+            "an extra line: {text:?}"
+        );
+    }
+
+    /// A resource another node owns is that node's to deal with (D25): not listed here.
+    #[test]
+    fn another_nodes_lapsed_resource_is_not_listed() {
+        let fx = Fx::with_agent();
+        let id = fx.job("theirs");
+        fx.ok(&["release", &id, "--agent", "alice"]);
+        let c = rusqlite::Connection::open(fx.db()).unwrap();
+        c.execute(
+            "INSERT INTO nodes (node_id, display_name, created_at) VALUES (?1, 'other-box', 1)",
+            [OTHER],
+        )
+        .unwrap();
+        c.execute(
+            "UPDATE resources SET node_id = ?1 WHERE resource_id = ?2",
+            [OTHER, &id],
+        )
+        .unwrap();
+        drop(c);
+        let (_, r) = fx.doctor_json_on_path(&fx.fake_lsof(""));
+        assert_eq!(status(&r, "resources"), "ok", "{r}");
+        assert_eq!(detail(&r, "resources"), "none lapsed");
+    }
+}
 
 /// Answers one `GET /health` with 200 and `body` as JSON.
 fn health_json(body: &str) -> String {
