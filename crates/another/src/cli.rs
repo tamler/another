@@ -1166,8 +1166,9 @@ fn is_hold_id(arg: &str) -> bool {
 ///   and whenever it has no wildcard. It is resolved from the file, as the edit hook does
 ///   it, so it works from any directory and for a file in another checkout. One that is
 ///   letters and digits only and names nothing on disk may be a mistyped id: if no hold
-///   of the caller's names that path either, the command fails and releases nothing by
-///   path, where any other path with nothing held gets a note. `./NAME` is always a path;
+///   of the caller's names that path, covers it or lies below it, the command fails and
+///   releases nothing by path, where any other path with nothing held gets a note.
+///   `./NAME` is always a path;
 /// - otherwise a glob, which releases the caller's hold with exactly that pattern in the
 ///   project at or nearest above the base directory.
 ///
@@ -1222,19 +1223,47 @@ fn release_holds(
             None => anyhow::bail!("no project here; give a file, a directory or a hold id"),
         }
     };
-    let mut released = Vec::new();
+    let mut released: Vec<String> = Vec::new();
     let mut notes = Vec::new();
+    // Ids, paths and each glob are released in transactions of their own, so an argument
+    // can be refused after earlier ones took effect. The error then says what is already
+    // released, so the exit status does not read as "nothing happened".
+    let with_released = |released: &[String], e: another_core::Error| {
+        use another_core::Error as E;
+        if released.is_empty() {
+            return e;
+        }
+        let add = |m: String| {
+            format!(
+                "{m}; {} hold(s) already released: {}",
+                released.len(),
+                released.join(", ")
+            )
+        };
+        match e {
+            E::NotFound(m) => E::NotFound(add(m)),
+            E::Invalid(m) => E::Invalid(add(m)),
+            E::Conflict(m) => E::Conflict(add(m)),
+            E::Ambiguous(m) => E::Ambiguous(add(m)),
+            E::Forbidden(m) => E::Forbidden(add(m)),
+            other => other,
+        }
+    };
     if !ids.is_empty() {
         released.extend(store.release_holds(agent, &ids)?);
     }
     if !paths.is_empty() {
-        let done = store.release_paths(agent, &paths, None)?;
+        let done = store
+            .release_paths(agent, &paths, None)
+            .map_err(|e| with_released(&released, e))?;
         released.extend(done.released);
         notes.extend(done.notes);
     }
     if let Some(project) = glob_project {
         for glob in &globs {
-            let done = store.release_pattern(agent, &project, glob)?;
+            let done = store
+                .release_pattern(agent, &project, glob)
+                .map_err(|e| with_released(&released, e))?;
             released.extend(done.released);
             notes.extend(done.notes);
         }

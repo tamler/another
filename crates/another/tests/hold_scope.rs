@@ -945,6 +945,75 @@ fn a_mistyped_hold_id_is_an_error_and_not_a_path_with_nothing_held() {
         "released 1 hold(s)\n"
     );
     assert_eq!(env.holds().len(), 1);
+
+    // A name inside a wider hold of the caller's keeps its note and exit status 0: the
+    // hold that covers it is the truer answer.
+    for pattern in ["src/**", "build/**"] {
+        env.ok_in(
+            &app,
+            &[
+                "hold",
+                "acquire",
+                "--agent",
+                "claude@app",
+                "--project",
+                &s(&app),
+                pattern,
+            ],
+        );
+    }
+    let glob_id = |pattern: &str| -> String {
+        let held = env.holds();
+        let hold = held.iter().find(|h| h["pattern"] == pattern).unwrap();
+        hold["hold_id"].as_str().unwrap().to_string()
+    };
+    let out = env.run_in(&app.join("src"), &[&me[..], &["newfile"]].concat());
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!(
+            "another: newfile is inside your hold src/** [{}]; release that hold to free it\n",
+            glob_id("src/**")
+        )
+    );
+    // `build` does not exist; `build/**` is held, so the name is not a mistyped id.
+    assert!(!app.join("build").exists());
+    nothing(&app, "build", &app.join("build"));
+    assert_eq!(env.holds().len(), 3);
+
+    // A valid id beside a mistyped one: the id is released before the other argument is
+    // refused, so the error says so.
+    let id = glob_id("build/**");
+    let (code, stderr) = env.fails_in(&app, &[&me[..], &[&id, "01NOSUCHHOLD"]].concat());
+    assert_eq!(code, 1);
+    assert!(
+        stderr.starts_with(&format!(
+            "{}; 1 hold(s) already released: {id}\n",
+            refusal("01NOSUCHHOLD").trim_end()
+        )),
+        "{stderr}"
+    );
+    assert_eq!(env.holds().len(), 2);
+    let out = env.run_in(
+        &app,
+        &[
+            &["--json"][..],
+            &me[..],
+            &[&glob_id("src/**"), "01NOSUCHHOLD"],
+        ]
+        .concat(),
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "not_found", "{error}");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("; 1 hold(s) already released: "),
+        "{error}"
+    );
+    assert_eq!(env.holds().len(), 1);
 }
 
 /// Review of D92, P3-2. `another holds` lists every hold, also those of other checkouts,
@@ -1170,6 +1239,8 @@ fn a_hold_that_points_outside_every_checkout_is_refused() {
         ("acquire", "plainlink/sub/**", plain.join("sub")),
         ("check", "plainlink/sub/**", plain.join("sub")),
         ("acquire", "plainlink/sub/a.rs", plain.join("sub/a.rs")),
+        // The directory link itself, named without a wildcard.
+        ("acquire", "plainlink", plain.clone()),
     ] {
         let (code, stderr) =
             env.fails_in(&app, &[&["hold", verb][..], &here[..], &[pattern]].concat());
@@ -1190,4 +1261,86 @@ fn a_hold_that_points_outside_every_checkout_is_refused() {
         &[&["hold", "acquire"][..], &here[..], &["src/new/**"]].concat(),
     );
     assert_eq!(env.holds().len(), 1);
+}
+
+/// Review of the follow-ups, P2-1 and P3-3. A file that is itself a symlink is held where
+/// its name lives, as the edit hook holds it, wherever the link points: outside git, at
+/// nothing, or into another checkout. Only a directory link leads a hold away.
+#[test]
+fn a_file_link_is_held_where_its_name_lives() {
+    let env = Env::new();
+    let app = env.repo("work/app");
+    let other = env.repo("work/other");
+    let outside = env.root.join("outside");
+    write(&outside.join("config.toml"), "");
+    write(&other.join("shared.toml"), "");
+    for (name, target) in [
+        ("config.toml", outside.join("config.toml")),
+        ("newcfg.toml", env.root.join("gone/cfg.toml")),
+        ("shared.toml", other.join("shared.toml")),
+        ("otherdir", other.join("src")),
+    ] {
+        std::os::unix::fs::symlink(target, app.join(name)).unwrap();
+    }
+    env.start("claude", &app);
+    env.start("codex", &app);
+    let hold = |verb: &str, agent: &str, pattern: &str| -> Output {
+        env.run_in(
+            &app,
+            &[
+                "hold",
+                verb,
+                "--agent",
+                agent,
+                "--project",
+                &s(&app),
+                pattern,
+            ],
+        )
+    };
+    for name in ["config.toml", "newcfg.toml", "shared.toml"] {
+        let granted = hold("acquire", "claude@app", name);
+        assert!(
+            granted.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&granted.stderr)
+        );
+        // `hold check` answers with the conflict, and the hook stops the other agent.
+        let checked = hold("check", "codex@app", name);
+        assert_eq!(checked.status.code(), Some(3), "{name}");
+        assert!(
+            String::from_utf8_lossy(&checked.stdout).contains(&format!(
+                "conflict: {name} is held by claude@app (app:{name},"
+            )),
+            "{name}: {checked:?}"
+        );
+        let reason = denial(&env.edit("codex", &app, name));
+        assert!(
+            reason.contains(&format!("{name} is held by claude@app in this checkout")),
+            "{reason}"
+        );
+    }
+    // Claude's three holds are in this checkout. (The hook also filed codex's stopped edit
+    // of `shared.toml` under the link's target in the other checkout, as it does on main.)
+    let own = |env: &Env| -> Vec<Value> {
+        let mut held = env.holds();
+        held.retain(|h| h["agent"] == "claude@app");
+        held
+    };
+    let held = own(&env);
+    assert_eq!(held.len(), 3, "{held:?}");
+    assert!(held.iter().all(|h| h["project"] == "app"), "{held:?}");
+    // A directory link into another checkout is still refused, with or without a wildcard.
+    for pattern in ["otherdir", "otherdir/**"] {
+        let refused = hold("acquire", "claude@app", pattern);
+        assert_eq!(refused.status.code(), Some(1), "{pattern}");
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).starts_with(&format!(
+                "another: {pattern} is inside another checkout ({})",
+                s(&other)
+            )),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(own(&env).len(), 3);
 }

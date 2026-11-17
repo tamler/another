@@ -86,10 +86,27 @@ pub(crate) fn refuse_other_checkout(
     }
     let base = resolve_existing(Path::new(&project.abs_path));
     let target = resolve_existing(&base.join(&dir));
+    // A file is held where its name lives, as the edit hook holds it: a pattern with no
+    // wildcard whose last name is a link to a file (or to nothing) stays in the directory
+    // the link is in, wherever it points. Only a link to a directory leads a hold away.
+    if rest.is_none() && !target.is_dir() {
+        let written = base.join(&dir);
+        if let (Some(parent), Some(name)) = (written.parent(), written.file_name()) {
+            let named = resolve_existing(parent).join(name);
+            let around = checkout_of(&named);
+            let home = match link_of(tx, project)? {
+                Some(own) => around.as_deref() == Some(Path::new(&own.checkout)),
+                None => around.is_none() && named.starts_with(&base),
+            };
+            if home && named != target {
+                return Ok(());
+            }
+        }
+    }
     let Some(other) = checkout_of(&target) else {
         // Outside git. Inside the project's own directory, or in a registered directory,
-        // it is judged as before. A place a symlink leads to that is in no checkout at all
-        // is never held: the hold would apply to nothing.
+        // it is judged as before. A place a directory link leads to that is in no checkout
+        // at all is never held: the hold would apply to nothing.
         if target.starts_with(&base)
             || registered_checkout(tx, &local_projects(tx)?, &target)?.is_some()
         {
@@ -152,9 +169,10 @@ pub struct ReleasePath {
     pub shown: String,
     /// The same path made absolute (joined to the caller's base directory), not resolved.
     pub path: PathBuf,
-    /// The argument may be a mistyped hold id and not a path at all. When it releases
-    /// nothing, that is an error naming both readings, and nothing is released for any
-    /// argument, where a plain path would get a note.
+    /// The argument may be a mistyped hold id and not a path at all. When no hold of the
+    /// caller's names it, covers it or lies below it, that is an error naming both
+    /// readings, and nothing is released for any argument, where a plain path would get a
+    /// note.
     pub maybe_id: bool,
 }
 
@@ -425,6 +443,7 @@ impl Store {
                 let is_dir = target.is_dir();
                 let mut hit = Vec::new();
                 let mut wider: Option<&OwnHold> = None;
+                let mut below = false;
                 for hold in &own {
                     let dir = resolve_existing(Path::new(&hold.project.abs_path));
                     let member = match &in_git {
@@ -455,6 +474,12 @@ impl Store {
                         .is_ok_and(|rel| hold_covers(&hold.pattern, &slashed(rel)))
                     {
                         wider = Some(hold);
+                    } else if glob_dir(&hold.pattern)
+                        .is_some_and(|inside| at_or_below(&dir.join(inside), &target, fold))
+                    {
+                        // A glob of the caller's reaches into a directory of that name
+                        // that is not there (yet): the name is no mistyped id.
+                        below = true;
                     }
                 }
                 if !hit.is_empty() {
@@ -463,13 +488,13 @@ impl Store {
                             out.released.push(id);
                         }
                     }
-                } else if given.maybe_id {
-                    return Err(not_an_id());
                 } else if let Some(hold) = wider {
                     out.notes.push(format!(
                         "{} is inside your hold {} [{}]; release that hold to free it",
                         given.shown, hold.pattern, hold.id
                     ));
+                } else if given.maybe_id && !below {
+                    return Err(not_an_id());
                 } else if scope.is_some() {
                     out.notes
                         .push(format!("nothing of yours is held at {shown}"));

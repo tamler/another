@@ -40,7 +40,7 @@ The argument is a file or a directory, and it is resolved from the file, the way
 
 - An argument that names an existing file or directory is a path, whatever characters its name has.
 - An argument shaped like a hold id (26 characters, in upper case as `another holds` prints them) is a hold id, as before. A file whose whole name looks like one is given as `./NAME`.
-- An argument made of letters and digits only that names no existing file or directory may be a mistyped hold id. It is still tried as a path, so a hold of yours on a file of that name that is not created yet is released. If no hold of yours names that path, the command fails with status 1, releases nothing by path and names both readings. `./NAME` always means a path and never fails this way.
+- An argument made of letters and digits only that names no existing file or directory may be a mistyped hold id. It is still tried as a path, so a hold of yours on a file of that name that is not created yet is released. If no hold of yours names that path, covers it (it lies inside a wider hold of yours) or lies below it (a glob such as `build/**` for the name `build`), the command fails with status 1, releases nothing by path and names both readings. `./NAME` always means a path and never fails this way. Hold ids in the same command are released first; when a later argument then fails, the error ends with what is already released, for example `; 1 hold(s) already released: 01M7MB3VTGJPCE70WC7RB0B4SK`.
 - Any other argument with a wildcard is a glob: it releases your hold with exactly that pattern in the project at the current directory or the nearest one above it.
 - With no argument every hold under your name is released, as before.
 
@@ -108,13 +108,15 @@ another: test/another/src/** is inside another checkout (/Users/jacob/Projects/t
 
 The same goes for a pattern from the main checkout that names a worktree inside it, such as `.claude/worktrees/x/src/**`, and for `hold check`. The directory is the part of the pattern before its first wildcard; one that does not exist yet is judged at its nearest existing parent. A pattern that starts with a wildcard has no such directory and is granted: it covers the files of its own checkout only.
 
-A pattern whose directory leads, through a symlink, out of the project to a place that is in no checkout (not in git and not under a registered directory) is refused the same way, because nothing there is ever held:
+A pattern whose directory leads, through a symlinked directory, out of the project to a place that is in no checkout (not in git and not under a registered directory) is refused the same way, because the edit guard holds nothing there:
 
 ```text
 another: plainlink/sub/** points outside any checkout (/Users/jacob/plain/sub); a hold taken here would apply to nothing
 ```
 
 A remote caller gets the same message without the directory.
+
+Neither refusal applies to a file that is itself a symlink. A pattern with no wildcard is judged where its last name lives: `config.toml` in this checkout is held here, as the edit guard holds it, whether the link points outside git, at a file that does not exist yet, or into another checkout. `hold check` reports a conflict on it as for any file. Only a link to a directory leads a hold away.
 
 ## Symlinks
 
