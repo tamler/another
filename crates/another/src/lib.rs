@@ -7,6 +7,7 @@ pub mod doctor;
 pub mod fed;
 pub mod hooks;
 pub mod mcp;
+pub mod needs;
 pub mod oauth_http;
 mod output;
 pub mod publish;

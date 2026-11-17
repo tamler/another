@@ -204,6 +204,14 @@ pub fn single_line(text: &str, max_chars: usize) -> String {
     cut
 }
 
+/// [`single_line`] for text that is only shown: every character that cannot be seen or
+/// that changes the order text is shown in (the set a wake target refuses) becomes a space
+/// first. Used for everything `another needs` prints that an agent or a peer wrote.
+pub fn display_line(text: &str, max_chars: usize) -> String {
+    let visible = text.replace(crate::wake::is_invisible, " ");
+    single_line(&visible, max_chars)
+}
+
 /// The subject of a reply to a message with `original` as its subject: kept as is when it
 /// already starts with "re:" in any case, otherwise prefixed with "Re: ". The original may
 /// have been stored before D75, so it is made one safe line, with room left for the prefix.

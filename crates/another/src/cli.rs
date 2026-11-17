@@ -412,6 +412,21 @@ pub enum Command {
         #[arg(long, default_value_t = another_core::DEFAULT_BOARD_LIMIT)]
         limit: u32,
     },
+    /// What needs the owner, most urgent first, each with its next step: decisions that
+    /// wait, sessions that are blocked, stuck or unreachable, claims gone quiet and ready
+    /// items nobody can take. Read-only; exits 1 only when the list cannot be read.
+    Needs {
+        /// One line for a prompt or a status line: counts only, nothing when nothing waits.
+        #[arg(long)]
+        brief: bool,
+        /// Rows shown per kind (1 to 200). Counts are never cut.
+        #[arg(
+            long,
+            default_value_t = crate::needs::DEFAULT_LIMIT,
+            value_parser = clap::value_parser!(u32).range(1..=200)
+        )]
+        limit: u32,
+    },
     /// The work queue: propose items, admit them, take the next one, record its result.
     #[command(subcommand)]
     Queue(crate::queue_cli::QueueCmd),
@@ -1428,6 +1443,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     {
         return board_command(&another_home()?, json, project.as_deref(), since, *limit);
     }
+    if let Command::Needs { brief, limit } = &cli.command {
+        // Before any Store::open, which would create the home and migrate the database.
+        return Ok(crate::needs::run(&another_home()?, json, *brief, *limit));
+    }
     if let Command::Doctor { bind } = &cli.command {
         // Before any Store::open, which would create the home and migrate the database.
         let report = crate::doctor::run(&crate::doctor::Inputs {
@@ -1449,6 +1468,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         | Command::Hook(_)
         | Command::Daemon(_)
         | Command::Board { .. }
+        | Command::Needs { .. }
         | Command::Doctor { .. }
         | Command::Remote(_) => {
             unreachable!("handled above")

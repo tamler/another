@@ -5,8 +5,8 @@ use std::fmt::Write;
 use another_core::{
     ActivityFeed, Agent, AuditEntry, Event, HeartbeatReport, Hold, HoldConflict, HoldReport, Inbox,
     LeaseOutcome, ListedHold, Message, NodeInfo, Peer, Project, QueueAudit, QueueDelegate,
-    QueueGrace, QueueItem, QueueLimits, QueueNeedsOwner, QueueNext, Request, Resource, Thread,
-    ThreadSummary, Token, WakeTarget,
+    QueueGrace, QueueItem, QueueLimits, QueueNeedsOwner, QueueNext, QuietClaim, Request, Resource,
+    Thread, ThreadSummary, Token, WakeTarget,
 };
 use serde::Serialize;
 
@@ -1023,6 +1023,31 @@ pub fn queue_next(n: &QueueNext) -> String {
 }
 
 /// The owner list: what waits for the owner, section by section.
+/// Why a quiet claim is listed, in the words `another needs` and
+/// `another queue list --needs-owner` both print.
+pub fn quiet_claim_words(q: &QuietClaim) -> String {
+    let session = match &q.session_last_seen_at {
+        Some(seen) if !q.unbound => format!("its session last seen {seen}"),
+        _ => "not bound to a session".to_string(),
+    };
+    match q.reason.as_str() {
+        "session_quiet" => format!(
+            "name active, its session quiet for {} min, {session}, grace ends {}",
+            q.session_quiet_for_seconds.unwrap_or(0) / 60,
+            q.grace_ends_at
+        ),
+        "old_unbound" => format!(
+            "name active, claimed {} ago, {session}",
+            crate::transport::span(q.claimed_for_seconds.saturating_mul(1000))
+        ),
+        _ => format!(
+            "quiet for {} min, {session}, grace ends {}",
+            q.quiet_for_seconds / 60,
+            q.grace_ends_at
+        ),
+    }
+}
+
 pub fn queue_needs_owner(n: &QueueNeedsOwner) -> String {
     let mut out = String::new();
     let mut section = |title: &str, lines: Vec<String>| {
@@ -1045,14 +1070,9 @@ pub fn queue_needs_owner(n: &QueueNeedsOwner) -> String {
             .iter()
             .map(|q| {
                 format!(
-                    "{}  quiet for {} min, grace ends {}{}",
+                    "{}  {}",
                     queue_line(&q.item).trim_end(),
-                    q.quiet_for_seconds / 60,
-                    q.grace_ends_at,
-                    match &q.session_last_seen_at {
-                        Some(seen) if !q.unbound => format!(", its session last seen {seen}"),
-                        _ => ", not bound to a session".to_string(),
-                    }
+                    quiet_claim_words(q)
                 )
             })
             .collect(),
