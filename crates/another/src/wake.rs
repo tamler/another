@@ -19,13 +19,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use another_core::{
-    identify, newest_at_target, Identity, InboxQuery, Store, TransportSession, TransportWake, Tri,
-    WakeKind, WakeOutcome, WakeVia, UNDELIVERED_LIMIT,
+    identify, newest_at_target, Identity, InboxQuery, Reservation, Store, TransportSession,
+    TransportWake, Tri, WakeKind, WakeOutcome, WakeVia, UNDELIVERED_LIMIT,
 };
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::transport::herdr::{HerdrTransport, HERDR_CONFIRMS_GONE};
+use crate::transport::herdr::{HerdrTransport, HERDR_CONFIRMS_GONE, HERDR_WAKES_WEAK_MATCH};
 use crate::transport::{ListResult, State, Transport, WakeResult};
 
 /// Shown where a wake line may still sit in the agent's input box.
@@ -104,6 +104,9 @@ pub struct WakeOptions {
     pub cancel: Option<Arc<AtomicBool>>,
     /// The program to run as Herdr (default: `$HERDR_BIN_PATH`, else `herdr`).
     pub herdr: Option<String>,
+    /// Whether `--all` wakes a weakly matched session (default:
+    /// [`HERDR_WAKES_WEAK_MATCH`]). A wake by name is not affected.
+    pub wake_weak: Option<bool>,
 }
 
 impl WakeOptions {
@@ -245,6 +248,7 @@ fn pick_row<'a>(
     rows: &'a [TransportSession],
     agent: &str,
     via: Option<WakeVia>,
+    wake_weak: bool,
     now: i64,
     held: impl Fn(&TransportSession) -> Option<&'static str>,
 ) -> std::result::Result<&'a TransportSession, (String, bool)> {
@@ -259,8 +263,16 @@ fn pick_row<'a>(
         };
         let state = row.state.as_deref();
         working |= state == Some("working");
-        let skip = if row.transport != "herdr" || via.is_some_and(|v| v.as_str() != row.transport) {
+        let skip = if let Some(via) = via.filter(|v| v.as_str() != row.transport) {
+            Some(format!(
+                "is a {} session, not {}",
+                row.transport,
+                via.as_str()
+            ))
+        } else if row.transport != "herdr" {
             Some(format!("{} is not woken automatically", row.transport))
+        } else if row.matched == 2 && !wake_weak {
+            Some(WEAK_OFF.to_string())
         } else if row.stopped() {
             Some("stopped after a wake that did not start work".to_string())
         } else if row.last_wake_at.is_some_and(|at| now - at < gap) {
@@ -300,8 +312,12 @@ enum Step {
     Woke { result: WakeResult, recorded: bool },
 }
 
-/// Steps 2 to 4 of a wake pass for one row: check identity and state now, claim the
-/// announcements, wake, record.
+/// Why a weakly matched session is skipped while [`HERDR_WAKES_WEAK_MATCH`] is off.
+const WEAK_OFF: &str = "is matched weakly (the pane reports no session id), and automatic \
+     wakes for weak matches are switched off; wake it with `another wake --agent`";
+
+/// Steps 2 to 4 of a wake pass for one row: check identity and state now, reserve the row
+/// and claim the announcements, wake, record.
 #[allow(clippy::too_many_arguments)]
 fn wake_row(
     store: &Store,
@@ -310,6 +326,7 @@ fn wake_row(
     rows: &[TransportSession],
     line: &str,
     claim: Option<&[String]>,
+    wake_weak: bool,
     trigger: &str,
     cancel: Option<&AtomicBool>,
 ) -> Result<Step> {
@@ -323,21 +340,24 @@ fn wake_row(
             seen.detail
         )));
     }
-    if let Identity::No(reason) = identity {
-        return Ok(Step::Refused(refusal(row, reason)));
-    }
-    // Claim after the answer, not before: a hook that announced these while the transport
-    // was answering has already won them.
-    let claimed = match claim {
-        Some(ids) => {
-            let claimed = store.claim_announcement(&row.agent, ids, "wake", None)?;
-            if claimed.is_empty() {
-                return Ok(Step::AlreadyAnnounced);
-            }
-            claimed
+    let weak = match identity {
+        Identity::No(reason) => return Ok(Step::Refused(refusal(row, reason))),
+        Identity::Weak if !wake_weak => {
+            return Ok(Step::Refused(format!("{} {WEAK_OFF}", row.target)))
         }
-        None => Vec::new(),
+        Identity::Weak => true,
+        Identity::ById => false,
     };
+    // Reserve and claim after the answer, not before, and in one transaction that reads
+    // the row again: a hook that announced the mail while the transport was answering has
+    // already won it, and a pass that woke or stopped this row meanwhile is seen.
+    let gaps = (ROW_GAP_MS, UNDELIVERED_GAP_MS);
+    let claimed =
+        match store.reserve_transport_wake(&row.agent, &row.session_id, claim, weak, gaps)? {
+            Reservation::Reserved(claimed) => claimed,
+            Reservation::AlreadyAnnounced => return Ok(Step::AlreadyAnnounced),
+            Reservation::Refused(why) => return Ok(Step::Refused(format!("{} {why}", row.target))),
+        };
     let result = transport.wake(&row.target, line, cancel);
     let recorded = record(store, row, &result, claimed, trigger);
     Ok(Step::Woke { result, recorded })
@@ -779,7 +799,8 @@ fn wake_one_of_all(
     let line = another_core::single_line(&line, MAX_WAKE_CHARS);
     plan.message = Some(line.clone());
     let rows = store.transport_sessions()?;
-    let row = match pick_row(&rows, agent, opts.via, store.now(), |_| None) {
+    let wake_weak = opts.wake_weak.unwrap_or(HERDR_WAKES_WEAK_MATCH);
+    let row = match pick_row(&rows, agent, opts.via, wake_weak, store.now(), |_| None) {
         Ok(row) => row,
         Err((why, _)) => {
             plan.skipped = Some(why);
@@ -802,6 +823,7 @@ fn wake_one_of_all(
         &rows,
         &line,
         ids,
+        wake_weak,
         "all",
         opts.cancel.as_deref(),
     )? {
@@ -978,6 +1000,9 @@ pub struct Waker {
     /// `None` confirms nothing: what this build ships with for Herdr
     /// ([`HERDR_CONFIRMS_GONE`]).
     pub confirm_after: Option<Duration>,
+    /// Whether a weakly matched session (a pane that reports no session id) is woken.
+    /// What this build ships with is [`HERDR_WAKES_WEAK_MATCH`].
+    pub wake_weak: bool,
     transports: Vec<Box<dyn Transport>>,
     /// Newest unannounced message per agent, and when it was first seen.
     seen: HashMap<String, (String, i64)>,
@@ -1012,6 +1037,7 @@ impl Waker {
             recheck: Duration::from_secs(5),
             confirm_after: HERDR_CONFIRMS_GONE
                 .then(|| Duration::from_millis(another_core::GONE_CONFIRM_AFTER_MS as u64)),
+            wake_weak: HERDR_WAKES_WEAK_MATCH,
             transports,
             seen: HashMap::new(),
             next_check: HashMap::new(),
@@ -1158,7 +1184,7 @@ impl Waker {
                 None
             }
         };
-        let row = match pick_row(&rows, agent, None, now, held) {
+        let row = match pick_row(&rows, agent, None, self.wake_weak, now, held) {
             Ok(row) => row,
             Err((why, working)) => {
                 // A working sibling gets the mail from its post-tool hook.
@@ -1184,6 +1210,7 @@ impl Waker {
             &rows,
             &line,
             Some(&waiting.message_ids),
+            self.wake_weak,
             "daemon",
             Some(&self.cancel),
         )?;

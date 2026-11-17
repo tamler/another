@@ -141,60 +141,7 @@ impl Store {
         }
         self.write(|tx| {
             let me = resolve_agent(tx, tx.node_id, agent)?;
-            let mut claimed = Vec::new();
-            for id in message_ids {
-                let eligible = tx.query_row(
-                    "SELECT 1 FROM deliveries d WHERE d.agent_id = ?1 AND d.message_id = ?2
-                     AND d.read_at IS NULL AND NOT EXISTS (SELECT 1 FROM announcements a
-                         WHERE a.agent_id = d.agent_id AND a.message_id = d.message_id)",
-                    params![me.id, id], |_| Ok(()),
-                ).optional()?.is_some();
-                if !eligible { continue; }
-                let closed: bool = tx.query_row(
-                    "SELECT EXISTS (SELECT 1 FROM requests r JOIN request_holds rh ON rh.request_id = r.request_id
-                     WHERE r.message_id = ?1 AND r.status IN ('done', 'cancelled'))",
-                    [id], |r| r.get(0),
-                )?;
-                let fingerprint = if closed { None } else { Some(notice_fingerprint(load_message(tx, id)?)?) };
-                let duplicate: Option<String> = if let Some(key) = &fingerprint {
-                    tx.query_row(
-                        "SELECT a.message_id FROM announcements a WHERE a.agent_id = ?1 AND a.fingerprint = ?2
-                         AND a.duplicate_of IS NULL AND a.announced_at > ?3
-                         AND NOT EXISTS (SELECT 1 FROM requests r WHERE r.message_id = a.message_id
-                             AND r.status IN ('done', 'cancelled'))
-                         ORDER BY a.announced_at DESC LIMIT 1",
-                        params![me.id, key, tx.now - 300_000], |r| r.get(0),
-                    ).optional()?
-                } else { None };
-                if closed || duplicate.is_some() {
-                    tx.emit(&me.address, "push.suppressed", json!({
-                        "agent_id": me.id, "message_id": id, "duplicate_of": duplicate,
-                        "reason": if closed { "hold request closed" } else { "identical push within five minutes" },
-                    }))?;
-                }
-                let n = tx.execute(
-                    "INSERT OR IGNORE INTO announcements (agent_id, message_id, channel, announced_at, fingerprint, duplicate_of)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![me.id, id, channel, tx.now, fingerprint, duplicate],
-                )?;
-                if n > 0 && !closed && duplicate.is_none() {
-                    claimed.push(id.clone());
-                }
-            }
-            if !claimed.is_empty() && matches!(channel, "post_tool" | "prompt") {
-                tx.emit(
-                    &me.address,
-                    NOTICE_EVENT,
-                    json!({
-                        "agent_id": me.id,
-                        "agent": me.address,
-                        "channel": channel,
-                        "client": client,
-                        "message_ids": ids(&claimed),
-                    }),
-                )?;
-            }
-            Ok(claimed)
+            claim_announcement_tx(tx, &me, message_ids, channel, client)
         })
     }
 
@@ -206,7 +153,85 @@ impl Store {
             release_announcement_tx(tx, &me.id, message_ids)
         })
     }
+}
 
+/// [`Store::claim_announcement`], inside the caller's transaction.
+pub(crate) fn claim_announcement_tx(
+    tx: &crate::store::Tx<'_>,
+    me: &crate::identity::AgentRef,
+    message_ids: &[String],
+    channel: &str,
+    client: Option<&str>,
+) -> Result<Vec<String>> {
+    let mut claimed = Vec::new();
+    for id in message_ids {
+        let eligible = tx
+            .query_row(
+                "SELECT 1 FROM deliveries d WHERE d.agent_id = ?1 AND d.message_id = ?2
+                     AND d.read_at IS NULL AND NOT EXISTS (SELECT 1 FROM announcements a
+                         WHERE a.agent_id = d.agent_id AND a.message_id = d.message_id)",
+                params![me.id, id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !eligible {
+            continue;
+        }
+        let closed: bool = tx.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM requests r JOIN request_holds rh ON rh.request_id = r.request_id
+                     WHERE r.message_id = ?1 AND r.status IN ('done', 'cancelled'))",
+                    [id], |r| r.get(0),
+                )?;
+        let fingerprint = if closed {
+            None
+        } else {
+            Some(notice_fingerprint(load_message(tx, id)?)?)
+        };
+        let duplicate: Option<String> = if let Some(key) = &fingerprint {
+            tx.query_row(
+                        "SELECT a.message_id FROM announcements a WHERE a.agent_id = ?1 AND a.fingerprint = ?2
+                         AND a.duplicate_of IS NULL AND a.announced_at > ?3
+                         AND NOT EXISTS (SELECT 1 FROM requests r WHERE r.message_id = a.message_id
+                             AND r.status IN ('done', 'cancelled'))
+                         ORDER BY a.announced_at DESC LIMIT 1",
+                        params![me.id, key, tx.now - 300_000], |r| r.get(0),
+                    ).optional()?
+        } else {
+            None
+        };
+        if closed || duplicate.is_some() {
+            tx.emit(&me.address, "push.suppressed", json!({
+                        "agent_id": me.id, "message_id": id, "duplicate_of": duplicate,
+                        "reason": if closed { "hold request closed" } else { "identical push within five minutes" },
+                    }))?;
+        }
+        let n = tx.execute(
+                    "INSERT OR IGNORE INTO announcements (agent_id, message_id, channel, announced_at, fingerprint, duplicate_of)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![me.id, id, channel, tx.now, fingerprint, duplicate],
+                )?;
+        if n > 0 && !closed && duplicate.is_none() {
+            claimed.push(id.clone());
+        }
+    }
+    if !claimed.is_empty() && matches!(channel, "post_tool" | "prompt") {
+        tx.emit(
+            &me.address,
+            NOTICE_EVENT,
+            json!({
+                "agent_id": me.id,
+                "agent": me.address,
+                "channel": channel,
+                "client": client,
+                "message_ids": ids(&claimed),
+            }),
+        )?;
+    }
+    Ok(claimed)
+}
+
+impl Store {
     /// Count this node's coordination evidence since `since` (default: everything).
     pub fn trial_stats(&self, since: Option<Since>) -> Result<TrialStats> {
         self.read(|conn| {

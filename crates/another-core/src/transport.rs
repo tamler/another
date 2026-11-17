@@ -270,6 +270,17 @@ impl TransportSession {
     }
 }
 
+/// What [`Store::reserve_transport_wake`] decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reservation {
+    /// The row is reserved; these announcements were claimed for the wake.
+    Reserved(Vec<String>),
+    /// Another channel announced the mail first. Nothing is reserved.
+    AlreadyAnnounced,
+    /// The row may not be woken now; the text says why. Nothing is reserved or claimed.
+    Refused(&'static str),
+}
+
 /// A session confirmed gone: the signal the queue reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConfirmedGone {
@@ -349,14 +360,16 @@ pub fn resolve_dir(path: &Path) -> String {
     out.to_string_lossy().into_owned()
 }
 
-/// A session id as part of a file name: itself when short, else its SHA-256. The caller
-/// still encodes the result; it is never used as a path as given.
-pub fn session_file_key(session_id: &str) -> String {
-    if session_id.chars().count() <= 64 {
-        session_id.to_string()
-    } else {
-        format!("{:x}", Sha256::digest(session_id.as_bytes()))
-    }
+/// A file name for one session of an agent: the SHA-256 of both, so it is always 64 hex
+/// characters whatever the agent address and the session id hold. Neither is ever used as
+/// a path as given.
+pub fn session_file_key(agent: &str, session_id: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(agent.as_bytes());
+    // No agent address holds a line break, so the two parts cannot run together.
+    hash.update(b"\n");
+    hash.update(session_id.as_bytes());
+    format!("{:x}", hash.finalize())
 }
 
 /// How what a transport reports at a row's target relates to the row.
@@ -515,27 +528,36 @@ pub(crate) fn gone_confirmed(
     if session_id.is_empty() {
         return Ok(None);
     }
-    Ok(conn
+    // The sighting and the start of the window are read from the `transport.gone` event,
+    // not from the row: an untrusted listing clears them on every row, and a confirmation
+    // made before it still stands.
+    let found: Option<(i64, String, String, String, String)> = conn
         .query_row(
-            "SELECT gone_confirmed_at, first_gone_at, gone_event_id, transport, target, seen_live_at
-             FROM transport_sessions
-             WHERE agent_id = ?1 AND session_id = ?2 AND gone_confirmed_at IS NOT NULL
-               AND first_gone_at IS NOT NULL AND gone_event_id IS NOT NULL
-               AND seen_live_at IS NOT NULL
-               AND (hook_seen_at IS NULL OR hook_seen_at <= gone_confirmed_at)",
+            "SELECT s.gone_confirmed_at, s.gone_event_id, s.transport, s.target, e.payload
+             FROM transport_sessions s JOIN events e ON e.event_id = s.gone_event_id
+             WHERE s.agent_id = ?1 AND s.session_id = ?2 AND s.gone_confirmed_at IS NOT NULL
+               AND (s.hook_seen_at IS NULL OR s.hook_seen_at <= s.gone_confirmed_at)",
             params![agent_id, session_id],
-            |r| {
-                Ok(ConfirmedGone {
-                    confirmed_at: r.get(0)?,
-                    first_gone_at: r.get(1)?,
-                    event_id: r.get(2)?,
-                    transport: r.get(3)?,
-                    target: r.get(4)?,
-                    seen_live_at: r.get(5)?,
-                })
-            },
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
-        .optional()?)
+        .optional()?;
+    let Some((confirmed_at, event_id, transport, target, payload)) = found else {
+        return Ok(None);
+    };
+    let payload: serde_json::Value = serde_json::from_str(&payload)?;
+    let time = |key: &str| payload.get(key).and_then(serde_json::Value::as_i64);
+    let (Some(first_gone_at), Some(seen_live_at)) = (time("first_gone_at"), time("seen_live_at"))
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ConfirmedGone {
+        confirmed_at,
+        first_gone_at,
+        event_id,
+        transport,
+        target,
+        seen_live_at,
+    }))
 }
 
 /// When the session was last matched by session id with no stop set. Readable inside a
@@ -748,6 +770,18 @@ impl Store {
         listing: std::result::Result<&[Session], &str>,
         confirm_after: Option<i64>,
     ) -> Result<Vec<TransportSession>> {
+        // A pane id from a listing becomes a row's target, so it is held to the rule for
+        // every target. A listing that breaks it says nothing that can be used.
+        let listing = match listing {
+            Ok(listed)
+                if listed
+                    .iter()
+                    .any(|s| crate::wake::validate_target(&s.target).is_err()) =>
+            {
+                Err("the transport listed a pane id that cannot be a target")
+            }
+            other => other,
+        };
         self.write(|tx| {
             let mut rows = load(
                 tx,
@@ -768,7 +802,9 @@ impl Store {
                 })
             });
             if listing.is_ok() && !trusted {
-                for r in rows.iter_mut().filter(|r| r.gone_confirmed_at.is_none()) {
+                // Every row, a confirmed one included: none may anchor trust later on a
+                // sighting from before this listing.
+                for r in rows.iter_mut() {
                     r.seen_live_at = None;
                     r.first_gone_at = None;
                 }
@@ -793,6 +829,69 @@ impl Store {
                 save(tx, row)?;
             }
             Ok(confirmed)
+        })
+    }
+
+    /// Reserve one session row for an automatic wake and take the announcement claim, in
+    /// one transaction, just before the line is sent. The row is read again here, so a
+    /// stop or a wake that another pass recorded since the caller chose the row is seen:
+    /// two passes that overlap cannot both type into one pane. Reserving sets
+    /// `last_wake_at`, which starts the row's gap, so a pass that takes no claim is held
+    /// back as well.
+    ///
+    /// `gap_ms` is the gap after a wake and `slow_gap_ms` the one after
+    /// [`UNDELIVERED_LIMIT`] undelivered wakes in a row. With `weak`, the row must still
+    /// have the newest hook stamp at its target. `claim` is the unannounced mail to claim
+    /// (`None` claims nothing).
+    pub fn reserve_transport_wake(
+        &self,
+        agent: &str,
+        session_id: &str,
+        claim: Option<&[String]>,
+        weak: bool,
+        (gap_ms, slow_gap_ms): (i64, i64),
+    ) -> Result<Reservation> {
+        self.write(|tx| {
+            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let rows = load(tx, "s.hook_seen_at IS NOT NULL", &[])?;
+            let Some(row) = rows
+                .iter()
+                .find(|r| r.agent_id == me.id && r.session_id == session_id)
+            else {
+                return Ok(Reservation::Refused("its session row is gone"));
+            };
+            if row.stopped() {
+                return Ok(Reservation::Refused(
+                    "stopped after a wake that did not start work",
+                ));
+            }
+            let gap = if row.undelivered_count >= UNDELIVERED_LIMIT {
+                slow_gap_ms
+            } else {
+                gap_ms
+            };
+            if row.last_wake_at.is_some_and(|at| tx.now - at < gap) {
+                return Ok(Reservation::Refused("woken less than a gap ago"));
+            }
+            if weak && !newest_at_target(row, &rows) {
+                return Ok(Reservation::Refused(NEWER_SESSION));
+            }
+            let claimed = match claim {
+                Some(ids) => {
+                    let claimed = crate::stats::claim_announcement_tx(tx, &me, ids, "wake", None)?;
+                    if claimed.is_empty() {
+                        return Ok(Reservation::AlreadyAnnounced);
+                    }
+                    claimed
+                }
+                None => Vec::new(),
+            };
+            tx.execute(
+                "UPDATE transport_sessions SET last_wake_at = ?3
+                 WHERE agent_id = ?1 AND session_id = ?2",
+                params![me.id, session_id, tx.now],
+            )?;
+            Ok(Reservation::Reserved(claimed))
         })
     }
 
@@ -1035,11 +1134,24 @@ mod tests {
     }
 
     #[test]
-    fn a_long_session_id_becomes_its_digest_in_a_file_name() {
-        assert_eq!(session_file_key("abc"), "abc");
-        let long = "x".repeat(65);
-        let key = session_file_key(&long);
-        assert_eq!(key.len(), 64);
-        assert_ne!(key, long);
+    fn a_session_file_name_is_always_short_and_plain() {
+        let ids = [
+            "abc".to_string(),
+            "../../escape".to_string(),
+            "会".repeat(60),
+            "x".repeat(5000),
+        ];
+        let mut keys = Vec::new();
+        for id in &ids {
+            let key = session_file_key("claude@shop", id);
+            assert_eq!(key.len(), 64, "{id:?}");
+            assert!(key.bytes().all(|b| b.is_ascii_hexdigit()), "{key}");
+            keys.push(key);
+        }
+        // Another agent, and an agent and session whose joined text would read the same.
+        keys.push(session_file_key("claude@shop2", "abc"));
+        keys.push(session_file_key("claude@shopabc", ""));
+        let distinct: std::collections::HashSet<_> = keys.iter().collect();
+        assert_eq!(distinct.len(), keys.len());
     }
 }

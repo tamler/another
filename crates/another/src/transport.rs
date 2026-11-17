@@ -91,8 +91,12 @@ pub struct StatusRow {
     pub state_since: Option<String>,
     /// `session_id`, `weak` or `none`: how the last check recognised the session.
     pub matched: &'static str,
-    /// A hook of the session made the row (false: a wake to a target set by hand did).
+    /// A hook of the session made the row (false: a wake by hand did, to hold its outcome).
     pub hook_made: bool,
+    /// Where the row's target came from: `hook`; or, for a row a wake by hand made,
+    /// `hand_set` (a target stored with `another wake set`), `captured` (a pane a hook
+    /// recorded as the agent's wake target) or `given` (`--target`, or the agent's name).
+    pub origin: &'static str,
     pub hook_seen_at: Option<String>,
     pub observed_at: Option<String>,
     /// Not checked in the last 5 minutes.
@@ -129,7 +133,19 @@ pub fn status_report(store: &Store, attention_only: bool) -> Result<StatusReport
     let observed_lately = rows
         .iter()
         .any(|r| r.observed_at.is_some_and(|at| now - at <= STALE_AFTER_MS));
-    let anything = !rows.is_empty() || !store.wake_targets()?.is_empty();
+    let targets = store.wake_targets()?;
+    let anything = !rows.is_empty() || !targets.is_empty();
+    let origin = |r: &another_core::TransportSession| {
+        let stored = targets
+            .iter()
+            .find(|t| t.agent == r.agent && t.via.as_str() == r.transport && t.target == r.target);
+        match stored {
+            _ if r.hook_made() => "hook",
+            Some(t) if t.auto => "captured",
+            Some(_) => "hand_set",
+            None => "given",
+        }
+    };
     let ts = |at: Option<i64>| at.map(another_core::fmt_ts);
     let sessions = rows
         .into_iter()
@@ -147,6 +163,7 @@ pub fn status_report(store: &Store, attention_only: bool) -> Result<StatusReport
                     _ => "none",
                 },
                 hook_made: r.hook_made(),
+                origin: origin(&r),
                 stale: r.hook_made() && r.observed_at.is_none_or(|at| now - at > STALE_AFTER_MS),
                 for_ms: r.state_since.map(|at| now - at),
                 wake_ago_ms: r.last_wake_at.map(|at| now - at),
@@ -228,7 +245,11 @@ pub fn render_status(report: &StatusReport) -> String {
             line.push_str("  weak match");
         }
         if !r.hook_made {
-            line.push_str("  target set by hand");
+            line.push_str(match r.origin {
+                "hand_set" => "  target set by hand",
+                "captured" => "  captured pane, woken by hand",
+                _ => "  woken by hand",
+            });
         } else if r.stale {
             match &r.observed_at {
                 Some(at) => line.push_str(&format!("  not checked since {at}")),

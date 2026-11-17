@@ -1939,6 +1939,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 dry_run: run.dry_run,
                 cancel: None,
                 herdr: None,
+                wake_weak: None,
             };
             let plans = if run.all {
                 crate::wake::wake_all(&store, &opts)?

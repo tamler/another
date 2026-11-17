@@ -83,13 +83,17 @@ Another keeps one row per agent **session**, not per agent name: two sessions un
 
 One risk remains with a weak match: another agent of the same kind, started in the same directory in that same pane, is taken for this one and gets its wake line, mail subjects included. With default agent names that is the same Another agent. With `ANOTHER_AGENT` names it may not be.
 
+**Automatic wakes for weak matches are switched on in this build** (`HERDR_WAKES_WEAK_MATCH` in `crates/another/src/transport/herdr.rs`), as they were before this interface, when every idle Herdr pane was woken. They rest on Herdr reporting a Codex at an approval dialog as `blocked` and refusing the prompt, which has not been checked against a live Codex yet. If that check fails, the constant is switched off: the daemon and `another wake --all` then skip every weakly matched session and say why, and `another wake --agent` still reaches it.
+
+After an upgrade to this build, an idle session is not woken by the daemon until it has run one hook, because the hook is what makes its row.
+
 ## When the daemon wakes an agent
 
 The daemon ([DAEMON.md](DAEMON.md)) asks each transport in use what it can see every 30 seconds and records it per session. Every 2 seconds it looks for agents with mail that no hook has announced yet, and for each one:
 
 1. picks the agent's `idle` session whose hooks ran last, even while a sibling session is working. If every session is working, the mail is left to a post-tool hook;
 2. asks `status` for that pane, and goes on only if the answer is `idle` and identifies the session (by its session id, or by the weak match);
-3. claims the mail, so a hook that announced it meanwhile wins and nothing is typed;
+3. reserves the session and claims the mail in one step that reads the session's row again, so a hook that announced the mail meanwhile wins and nothing is typed, and two passes that overlap (two daemons on one home, or `another wake --all` beside the daemon) cannot both type into one pane;
 4. calls `wake`, and records the outcome.
 
 | Outcome | The mail | The session |
@@ -131,7 +135,7 @@ codex@shop 7f3a..  herdr w1:p3  stuck 12m  last wake: delivered, did not start 1
 | `unknown`, `no_answer` | That state for 10 minutes. |
 | `undelivered` | Three wakes in a row could not be delivered. |
 
-Other marks: `weak match`; `target set by hand` for a row that only holds the outcome of a wake by hand; `not checked since <time>` for a session the daemon has not looked at in 5 minutes. When nothing was checked in the last 5 minutes, the first line asks whether the daemon is running. `--json` gives every field.
+Other marks: `weak match`; for a row that only holds the outcome of a wake by hand, where its target came from (`target set by hand`, `captured pane, woken by hand`, or `woken by hand` for `--target` or the agent's name); `not checked since <time>` for a session the daemon has not looked at in 5 minutes. When nothing was checked in the last 5 minutes, the first line asks whether the daemon is running. `--json` gives every field.
 
 Herdr has no state that means "at a rate-limit menu". An idle-looking session at a menu with mail waiting ends `not_started` and is shown as `stuck`.
 

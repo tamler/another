@@ -19,6 +19,14 @@ use crate::wake::{run_bounded, Bounded};
 /// observation, attention and last-alive work either way.
 pub const HERDR_CONFIRMS_GONE: bool = false;
 
+/// Whether the daemon and `another wake --all` wake a weakly matched session: a pane that
+/// reports no session id (Codex in Herdr today) and is recognised by its pane, client kind
+/// and directory. On, as before this interface, when every idle Herdr pane was woken; the
+/// pane is now checked again just before the prompt. To be switched off if the check of
+/// Codex in Herdr (builder check B7) shows that Herdr does not refuse a Codex at a dialog.
+/// A wake by name (`another wake --agent`) does not depend on it.
+pub const HERDR_WAKES_WEAK_MATCH: bool = true;
+
 /// Another's own deadline for `agent prompt`; Herdr is given `--timeout 8000`.
 pub const WAKE_DEADLINE: Duration = Duration::from_secs(12);
 /// Deadline for `agent get` and `agent list`.

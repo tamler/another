@@ -1010,20 +1010,48 @@ const KEEPALIVE_EVERY: Duration = Duration::from_secs(60);
 /// A throttle stamp older than this belongs to a session that is over.
 const STAMP_KEPT: Duration = Duration::from_secs(24 * 3600);
 
-/// The throttle stamp of one session of an agent. The session id is part of the name (its
-/// SHA-256 when long, and encoded like the agent, never used as a path as given), so a busy
-/// session cannot starve the beats of another session under the same name. With no session
-/// id the stamp is per agent.
-fn beat_path(another_home: &Path, agent: &str, session_id: Option<&str>) -> PathBuf {
+/// The throttle stamp of one session of an agent, for one kind of beat (`beat` for the
+/// post-tool keepalive, `edit` for the pre-edit stamp). With a session id the name is a
+/// hash of the agent and the id: always short, never the id as given, and a busy session
+/// cannot starve the beats of another session under the same name. With no session id the
+/// stamp is per agent.
+fn beat_path(another_home: &Path, agent: &str, session_id: Option<&str>, kind: &str) -> PathBuf {
     match session_id.filter(|id| !id.is_empty()) {
-        // No agent address holds a line break, so the two parts cannot run together.
-        Some(id) => state_path(
-            another_home,
-            &format!("{agent}\n{}", another_core::session_file_key(id)),
-            "beat",
-        ),
-        None => state_path(another_home, agent, "beat"),
+        Some(id) => another_home.join("hooks").join("state").join(format!(
+            "{}.{kind}",
+            another_core::session_file_key(agent, id)
+        )),
+        None => state_path(another_home, agent, kind),
     }
+}
+
+/// Whether this session's once-a-minute beat of `kind` is due. When it is, the stamp is
+/// written first, so parallel tool calls do not all go on to write.
+fn beat_due(another_home: &Path, agent: &str, session_id: Option<&str>, kind: &str) -> bool {
+    let stamp = beat_path(another_home, agent, session_id, kind);
+    let age = |path: &Path| {
+        std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+    };
+    if age(&stamp).is_some_and(|age| age < KEEPALIVE_EVERY) {
+        return false;
+    }
+    if let Some(state) = stamp.parent() {
+        let _ = std::fs::create_dir_all(state);
+        // Stamps of sessions that ended long ago would otherwise pile up.
+        for entry in std::fs::read_dir(state).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "beat" || e == "edit")
+                && age(&path).is_some_and(|age| age > STAMP_KEPT)
+            {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    let _ = std::fs::write(&stamp, b"");
+    true
 }
 
 /// Presence, hold renewal and the session's transport stamp while a task runs, at most once
@@ -1036,30 +1064,9 @@ fn keepalive_throttled(
     client: Client,
     dir: &Path,
 ) {
-    let stamp = beat_path(another_home, agent, session_id);
-    let age = |path: &Path| {
-        std::fs::metadata(path)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-    };
-    if age(&stamp).is_some_and(|age| age < KEEPALIVE_EVERY) {
+    if !beat_due(another_home, agent, session_id, "beat") {
         return;
     }
-    // Stamp first so parallel tool calls do not all write.
-    if let Some(state) = stamp.parent() {
-        let _ = std::fs::create_dir_all(state);
-        // Stamps of sessions that ended long ago would otherwise pile up.
-        for entry in std::fs::read_dir(state).into_iter().flatten().flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "beat")
-                && age(&path).is_some_and(|age| age > STAMP_KEPT)
-            {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-    }
-    let _ = std::fs::write(&stamp, b"");
     if let Err(e) = store.keepalive(agent) {
         tracing::debug!(error = %e, "keepalive skipped");
     }
@@ -1287,8 +1294,13 @@ fn pre_edit(
         Some(a) => a,
         None => hook_agent(store, client, &root)?,
     };
+    // The session's transport stamp only, on its own once-a-minute beat. No presence and
+    // no hold renewal here: an agent whose edit is refused must not keep its own holds
+    // alive by trying again.
     let session_id = input.session_id.as_deref();
-    keepalive_throttled(store, &env.another_home, &agent, session_id, client, dir);
+    if beat_due(&env.another_home, &agent, session_id, "edit") {
+        crate::wake::stamp_session(store, &agent, session_id, client.as_str(), dir, false);
+    }
     // Registered projects with their directories resolved, so a project registered under a
     // symlinked spelling (/tmp vs /private/tmp) is still recognised.
     let projects: Vec<(String, PathBuf)> = store
