@@ -994,3 +994,28 @@ fn lease_renewal_release_and_expiry_cannot_touch_another_nodes_lease() {
     fed.forge("resource.lease_expired", json!({ "lease_id": lease }));
     assert_eq!(state(), before, "expired by another node");
 }
+
+/// adv: a peer's `endpoint` and `purpose` are stored at any size, like a local one.
+#[test]
+fn adv_a_peers_resource_endpoint_and_purpose_are_size_limited() {
+    let fed = Fed::new();
+    let owner = fed.mallory.agent("m");
+    push(&fed.hub, &fed.mallory);
+    let big = "x".repeat(1024 * 1024);
+    let mut kept = Vec::new();
+    for (n, field) in ["endpoint", "purpose"].into_iter().enumerate() {
+        let rid = format!("mallory-text-{n}");
+        let mut payload = json!({ "resource_id": rid, "kind": "port", "name": format!("tcp:{n}"),
+                                  "lease_id": format!("lease-{rid}"), "owner_id": owner });
+        payload[field] = json!(big);
+        fed.forge("resource.registered", payload);
+        let sql = format!("SELECT length({field}) FROM resources WHERE resource_id = ?1");
+        if let Some(len) = fed.hub_one::<i64>(&sql, &rid) {
+            kept.push(format!("{field}: {len} bytes"));
+        }
+    }
+    assert!(
+        kept.is_empty(),
+        "the hub stored oversized peer text: {kept:?}"
+    );
+}

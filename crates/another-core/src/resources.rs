@@ -17,6 +17,10 @@ use crate::time::{fmt_opt, fmt_ts};
 pub const DEFAULT_LEASE_TTL_SECONDS: i64 = 30 * 60;
 pub const MIN_LEASE_TTL_SECONDS: i64 = 60;
 pub const MAX_LEASE_TTL_SECONDS: i64 = 24 * 60 * 60;
+/// Longest resource endpoint accepted, in bytes: room for any real URL.
+pub const MAX_RESOURCE_ENDPOINT_BYTES: usize = 2 * 1024;
+/// Longest resource purpose accepted, in bytes: one line of prose.
+pub const MAX_RESOURCE_PURPOSE_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -213,6 +217,22 @@ fn validate_name(name: &str) -> Result<()> {
         return Err(Error::Invalid(
             "resource name must be 1-200 printable characters".into(),
         ));
+    }
+    Ok(())
+}
+
+/// A resource's endpoint and purpose are stored, written into `resource.registered` and
+/// synced to peers, so both stay small. Shared by a local registration and a peer's event.
+pub(crate) fn check_text_sizes(endpoint: Option<&str>, purpose: Option<&str>) -> Result<()> {
+    for (field, value, max) in [
+        ("endpoint", endpoint, MAX_RESOURCE_ENDPOINT_BYTES),
+        ("purpose", purpose, MAX_RESOURCE_PURPOSE_BYTES),
+    ] {
+        if let Some(len) = value.map(str::len).filter(|len| *len > max) {
+            return Err(Error::Invalid(format!(
+                "resource {field} is {len} bytes; the limit is {max}"
+            )));
+        }
     }
     Ok(())
 }
@@ -643,6 +663,7 @@ impl Store {
     /// leases (borrow it instead), and adopts it when it has lapsed.
     pub fn register_resource(&self, input: RegisterResource) -> Result<LeaseOutcome> {
         validate_name(&input.name)?;
+        check_text_sizes(input.endpoint.as_deref(), input.purpose.as_deref())?;
         let ttl = clamp_ttl(input.ttl_seconds)?;
         let metadata = input
             .metadata

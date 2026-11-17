@@ -628,6 +628,12 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
         "resource.registered" => {
             agent("owner_id")?;
             project()?;
+            // The local size limits: a peer without them (an older build or a forged event)
+            // cannot store an oversized endpoint or purpose here.
+            crate::resources::check_text_sizes(
+                p.get("endpoint").and_then(Value::as_str),
+                p.get("purpose").and_then(Value::as_str),
+            )?;
             resource()
         }
         "resource.adopted" => {
