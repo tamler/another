@@ -964,10 +964,16 @@ fn wake_prune_drops_automatic_targets_of_agents_that_left_and_asks_no_transport(
         "--target",
         "gone-pane",
     ]);
-    // claude's session ends; with no tmux transport configured the hook cannot tell which
-    // pane it is in, so the capture is still stored and pruning drops it.
-    let end = json!({ "session_id": "claude-s1", "cwd": env.main });
-    env.hook_timed("session-end", "claude", &end, &[("TMUX_PANE", "%9")]);
+    // claude went offline with no session-end hook (the hook would have forgotten the
+    // pane itself), so the capture is still stored and pruning drops it.
+    let offline = rusqlite::Connection::open(env.another_home.join("another.db"))
+        .unwrap()
+        .execute(
+            "UPDATE agents SET status = 'offline' WHERE address = 'claude@shop'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(offline, 1);
 
     let dry = env.json(&["wake", "prune", "--dry-run"]);
     let row = |agent: &str| {

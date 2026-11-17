@@ -79,6 +79,38 @@ fn a_target_that_starts_with_a_dash_is_not_stored() {
         .unwrap();
 }
 
+/// Review R1 of Q9, finding 4: "printable" also rules out what cannot be seen or changes
+/// the order text is shown in. Such a target is not stored, makes no session row, and a
+/// wake through a command transport refuses it as `--target`.
+#[test]
+fn a_target_with_an_invisible_or_bidirectional_character_is_refused() {
+    let (_dir, s) = store(&["bob"]);
+    let hidden = [
+        '\u{200B}', '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}',
+        '\u{202C}', '\u{202D}', '\u{202E}', '\u{2060}', '\u{2061}', '\u{2066}', '\u{2067}',
+        '\u{2068}', '\u{2069}', '\u{FEFF}', '\u{2028}', '\u{2029}',
+    ];
+    for c in hidden {
+        for bad in [format!("p{c}x"), format!("{c}p"), format!("p{c}")] {
+            for via in every_transport() {
+                let err = s.set_wake_target("bob", &via, &bad, false).unwrap_err();
+                assert_eq!(err.code(), "invalid", "{bad:?}");
+            }
+            let stamped = s.stamp_transport_session("bob", "s1", "tmux", &bad, "claude", "/w");
+            assert_eq!(stamped.unwrap_err().code(), "invalid", "{bad:?}");
+            for name in ["tmux", "cmux"] {
+                let err = plan(&s, "bob", via(name), Some(&bad)).unwrap_err();
+                assert_eq!(err, "invalid", "{name} {bad:?}");
+            }
+        }
+    }
+    assert!(s.wake_targets().unwrap().is_empty());
+    assert!(s.transport_sessions().unwrap().is_empty());
+    // Ordinary text outside ASCII is still a target.
+    s.set_wake_target("bob", &via("tmux"), "fen\u{ea}tre:1.0", false)
+        .unwrap();
+}
+
 #[test]
 fn the_200_limit_counts_characters_not_bytes() {
     let (_dir, s) = store(&["bob"]);

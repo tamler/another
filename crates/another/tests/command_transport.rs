@@ -322,6 +322,14 @@ impl Fx {
     }
 }
 
+/// Characters a target may not hold beyond controls: zero-width and other invisible
+/// format characters, bidirectional marks, overrides and isolates, and the line and
+/// paragraph separators.
+const INVISIBLE: [char; 12] = [
+    '\u{200B}', '\u{200D}', '\u{200F}', '\u{202A}', '\u{202E}', '\u{2060}', '\u{2066}', '\u{2069}',
+    '\u{FEFF}', '\u{2028}', '\u{2029}', '\u{200E}',
+];
+
 fn config(value: Value) -> Config {
     let config = Config::from_json(&value.to_string());
     assert_eq!(config.error, None);
@@ -413,6 +421,12 @@ fn command_wake_runs_argv_without_a_shell() {
     let long = "p".repeat(201);
     for bad in ["-t", "--help", "a\nb", "a\x1bb", "", "  ", long.as_str()] {
         let result = t.wake(bad, "hi", None);
+        assert_eq!(result.outcome, WakeOutcome::Undelivered, "{bad:?}");
+    }
+    // Nor a character that cannot be seen or that reorders what is shown.
+    for hidden in INVISIBLE {
+        let bad = format!("p{hidden}x");
+        let result = t.wake(&bad, "hi", None);
         assert_eq!(result.outcome, WakeOutcome::Undelivered, "{bad:?}");
     }
     assert!(fx.calls().is_empty(), "{:?}", fx.calls());
@@ -532,6 +546,10 @@ fn command_config_load_checks() {
             "shell code",
         ),
         (
+            with(json!({"wake": [["scripts/wake.sh", "{target}"]]})),
+            "absolute path",
+        ),
+        (
             with(json!({"wake": [["bash", "-lc", "tool {target}"]]})),
             "shell code",
         ),
@@ -589,6 +607,12 @@ fn command_config_load_checks() {
     transports::write(&fx.home, &good);
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert_eq!(load_config(&fx.home).error, None);
+    // Larger than 1 MiB: refused, whatever it says.
+    let padded = format!("{good}{}", " ".repeat(1024 * 1024));
+    transports::write(&fx.home, &padded);
+    let error = load_config(&fx.home).error.unwrap();
+    assert!(error.contains("larger than 1 MiB"), "{error}");
+    assert!(wake(&fx.store, &worker, &to_t).unwrap().error.is_some());
     // Not a regular file.
     std::fs::remove_file(&path).unwrap();
     std::fs::create_dir(&path).unwrap();
@@ -1053,8 +1077,19 @@ fn tmux_rows_are_shown_but_never_matched() {
         fx.row(&other, "s2").last_wake_outcome.as_deref(),
         Some("unconfirmed")
     );
-    // To the vanished pane: nothing sent, a failed wake, and Enter is not pressed.
+    // To the vanished pane: the row was last seen gone, so the wake is refused and
+    // nothing runs.
+    let before = fx.tmux_calls().len();
     let plan = wake(&fx.store, &worker, &WakeOptions::default()).unwrap();
+    assert!(plan.outcome.is_none() && !plan.sent, "{plan:?}");
+    assert!(plan.error.as_deref().unwrap().contains("gone"), "{plan:?}");
+    assert_eq!(fx.tmux_calls().len(), before);
+    // Forced: nothing sent, a failed wake, and Enter is not pressed.
+    let forced = WakeOptions {
+        force: true,
+        ..Default::default()
+    };
+    let plan = wake(&fx.store, &worker, &forced).unwrap();
     assert_eq!(plan.outcome, Some(WakeOutcome::Undelivered), "{plan:?}");
     assert!(plan.failure);
     assert!(
@@ -1283,6 +1318,20 @@ fn capture_uses_capture_env_and_term_program() {
     bin.hook("session-start", "s7", &[tmux]);
     assert_eq!(place("s6"), "herdr w1:p1");
     assert!(!rows(&bin).iter().any(|r| r["session_id"] == "s7"));
+    // A captured value with a character that cannot be seen is not a target: no row, and
+    // the hook does not fail.
+    transports::write_example(&bin.home);
+    for (n, hidden) in INVISIBLE.iter().enumerate() {
+        let session = format!("hidden-{n}");
+        let pane = format!("p{hidden}evil");
+        bin.hook("session-start", &session, &[("TMUX_PANE", &pane)]);
+        assert!(
+            !rows(&bin)
+                .iter()
+                .any(|r| r["session_id"] == session.as_str()),
+            "{pane:?} became a target"
+        );
+    }
     assert!(
         bin.calls().is_empty(),
         "a hook ran a transport: {:?}",
@@ -1379,8 +1428,13 @@ impl Bin {
 
     /// Run one hook of bob's session `session` with `env` set.
     fn hook(&self, event: &str, session: &str, env: &[(&str, &str)]) {
+        self.hook_as("bob", event, session, env);
+    }
+
+    /// Run one hook of `agent`'s session `session` with `env` set.
+    fn hook_as(&self, agent: &str, event: &str, session: &str, env: &[(&str, &str)]) {
         let mut cmd = self.cmd(&["hook", "run", event, "--client", "codex"]);
-        cmd.env("ANOTHER_AGENT", "bob")
+        cmd.env("ANOTHER_AGENT", agent)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -1848,6 +1902,289 @@ fn another_never_writes_the_transports_config() {
         std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o600
     );
+}
+
+/// The reviewer's reproduction (review R1 of Q9, finding 1). A pane an earlier build
+/// captured is forgotten when its agent's session ends, also with no `transports.json`:
+/// forgetting runs no command and needs no config. So a config added later finds nothing
+/// to type into. A target set by hand is kept, and a Herdr capture behaves as before.
+#[test]
+fn a_captured_pane_is_forgotten_at_session_end_with_no_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let bin = Bin::old_home(&root);
+    let db = rusqlite::Connection::open(bin.home.join(DB_FILE)).unwrap();
+    db.execute(
+        "INSERT INTO wake_targets (agent_id, via, target, auto, updated_at)
+         SELECT agent_id, 'herdr', 'w1:p1', 1, 0 FROM agents WHERE address = 'alice'",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    bin.json(&[
+        "send",
+        "--from",
+        "alice",
+        "--to",
+        "dave",
+        "--subject",
+        "x \"$(touch /tmp/never)\"",
+    ]);
+    let stored = |bin: &Bin| -> Vec<String> {
+        bin.json(&["wake", "list"])
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                format!(
+                    "{} {} {}",
+                    t["agent"].as_str().unwrap(),
+                    t["via"].as_str().unwrap(),
+                    t["target"].as_str().unwrap()
+                )
+            })
+            .collect()
+    };
+    assert_eq!(stored(&bin).len(), 4);
+
+    // dave's session starts and ends inside tmux, with no config.
+    let in_tmux = [("TMUX_PANE", "%7")];
+    bin.hook_as("dave", "session-start", "d1", &in_tmux);
+    assert!(stored(&bin).contains(&"dave tmux %7".to_string()));
+    bin.hook_as("dave", "session-end", "d1", &in_tmux);
+    assert!(
+        !stored(&bin).iter().any(|t| t.starts_with("dave ")),
+        "the captured pane outlived its session: {:?}",
+        stored(&bin)
+    );
+    // bob's target was set by hand: his session's end keeps it.
+    bin.hook_as("bob", "session-start", "b1", &[("TMUX_PANE", "%3")]);
+    bin.hook_as("bob", "session-end", "b1", &[("TMUX_PANE", "%3")]);
+    assert!(stored(&bin).contains(&"bob tmux %3".to_string()));
+    // A Herdr capture is forgotten only by a session that ends in that pane, as before.
+    bin.hook_as(
+        "alice",
+        "session-start",
+        "a1",
+        &[("HERDR_PANE_ID", "w9:p9")],
+    );
+    bin.hook_as("alice", "session-end", "a1", &[("HERDR_PANE_ID", "w9:p9")]);
+    assert!(stored(&bin).contains(&"alice herdr w1:p1".to_string()));
+    bin.hook_as(
+        "alice",
+        "session-start",
+        "a2",
+        &[("HERDR_PANE_ID", "w1:p1")],
+    );
+    bin.hook_as("alice", "session-end", "a2", &[("HERDR_PANE_ID", "w1:p1")]);
+    assert!(!stored(&bin).iter().any(|t| t.starts_with("alice ")));
+
+    // The owner now writes the config and wakes dave: nothing is typed anywhere.
+    transports::write_example(&bin.home);
+    let plan = bin.json(&["wake", "--agent", "dave"]);
+    assert_eq!(plan[0]["sent"], false, "{plan}");
+    assert_eq!(plan[0]["outcome"], Value::Null, "{plan}");
+    assert!(
+        plan[0]["skipped"]
+            .as_str()
+            .unwrap()
+            .contains("no wake target"),
+        "{plan}"
+    );
+    let forced = bin.json(&["wake", "--agent", "dave", "--force"]);
+    assert_eq!(forced[0]["sent"], false, "{forced}");
+    assert!(bin.calls().is_empty(), "{:?}", bin.calls());
+}
+
+/// A wake by hand to a command transport cannot check who is in the pane. So when the
+/// target is a session row or a pane an earlier build captured, it is refused, with
+/// nothing typed, if the row was last seen gone or the session or agent has shown no sign
+/// of life within the limit pruning uses. `--force` overrides. A target set by hand is
+/// the owner's word and is not subject to this.
+#[test]
+fn a_wake_by_hand_refuses_a_gone_or_quiet_command_target_unless_forced() {
+    let fx = Fx::new();
+    fx.write_tmux_example();
+    for pane in ["%1", "%2", "%5", "%6"] {
+        fx.pane(pane, true);
+    }
+    let sends = |fx: &Fx| {
+        fx.tmux_calls()
+            .iter()
+            .filter(|c| c.contains("[send-keys]"))
+            .count()
+    };
+    let refused = |fx: &Fx, agent: &str, want: &str| {
+        let before = sends(fx);
+        let plan = wake(&fx.store, agent, &WakeOptions::default()).unwrap();
+        assert!(plan.outcome.is_none() && !plan.sent, "{plan:?}");
+        let why = plan.error.unwrap();
+        assert!(why.contains("nothing was typed"), "{why}");
+        assert!(why.contains(want), "{want:?} is not in {why:?}");
+        assert!(why.contains("--force"), "{why}");
+        assert_eq!(sends(fx), before, "something was typed");
+    };
+    let forced = |fx: &Fx, agent: &str| {
+        let before = sends(fx);
+        let options = WakeOptions {
+            force: true,
+            ..Default::default()
+        };
+        let plan = wake(&fx.store, agent, &options).unwrap();
+        assert_eq!(plan.outcome, Some(WakeOutcome::Unconfirmed), "{plan:?}");
+        assert_eq!(sends(fx), before + 2);
+    };
+    let typed = |fx: &Fx, agent: &str| {
+        let before = sends(fx);
+        let plan = wake(&fx.store, agent, &WakeOptions::default()).unwrap();
+        assert_eq!(plan.outcome, Some(WakeOutcome::Unconfirmed), "{plan:?}");
+        assert_eq!(sends(fx), before + 2);
+    };
+    let db = || rusqlite::Connection::open(fx.home.join(DB_FILE)).unwrap();
+
+    // A session row last seen gone. The pane id is in use again (tmux reuses ids), which
+    // is exactly when typing would reach someone else.
+    let worker = fx.agent("worker");
+    fx.mail(&worker, "Hello");
+    fx.stamp(&worker, "s1", "tmux", "%1");
+    typed(&fx, &worker);
+    fx.pane("%1", false);
+    let mut waker = Waker::with_transports(Vec::new());
+    waker.sweep(&fx.store).unwrap();
+    assert_eq!(fx.row(&worker, "s1").state.as_deref(), Some("gone"));
+    fx.pane("%1", true);
+    refused(&fx, &worker, "gone");
+    forced(&fx, &worker);
+
+    // A session row whose hooks have been quiet for longer than a day.
+    let quiet = fx.agent("quiet");
+    fx.mail(&quiet, "Hello");
+    fx.stamp(&quiet, "s2", "tmux", "%2");
+    fx.advance(23 * 3600);
+    typed(&fx, &quiet);
+    fx.advance(2 * 3600);
+    refused(&fx, &quiet, "no hook of that session for over a day");
+    forced(&fx, &quiet);
+    // Its next hook makes it wakeable again.
+    fx.stamp(&quiet, "s2", "tmux", "%2");
+    typed(&fx, &quiet);
+
+    // A pane an earlier build captured: refused once its agent ended its session or has
+    // not been seen for a day, which is when pruning drops it.
+    let old = fx.agent("old");
+    fx.mail(&old, "Hello");
+    fx.store
+        .set_wake_target(&old, &via("tmux"), "%5", true)
+        .unwrap();
+    let seen = |status: &str, at: i64| {
+        let changed = db()
+            .execute(
+                "UPDATE agents SET status = ?1, last_seen_at = ?2 WHERE name = 'old'",
+                rusqlite::params![status, at],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+    };
+    let now = fx.clock.load(Ordering::SeqCst);
+    seen("active", now);
+    typed(&fx, &old);
+    seen("offline", now);
+    refused(&fx, &old, "ended its session");
+    forced(&fx, &old);
+    seen("active", now - 25 * 3_600_000);
+    refused(&fx, &old, "not seen for over a day");
+    let pruned = another::wake::prune(&fx.store, true).unwrap();
+    let row = pruned.iter().find(|r| r.agent == old).unwrap();
+    assert!(
+        row.pruned,
+        "a wake refuses what pruning would drop: {row:?}"
+    );
+    assert_eq!(row.reason, "agent not seen for over a day");
+
+    // A target the owner set with `another wake set`: woken as asked, whatever the agent's
+    // state.
+    let hand = fx.agent("hand");
+    fx.mail(&hand, "Hello");
+    fx.store
+        .set_wake_target(&hand, &via("tmux"), "%6", false)
+        .unwrap();
+    db().execute(
+        "UPDATE agents SET status = 'offline', last_seen_at = 0 WHERE name = 'hand'",
+        [],
+    )
+    .unwrap();
+    typed(&fx, &hand);
+    // So is `--target`.
+    let to_target = WakeOptions {
+        via: Some(via("tmux")),
+        target: Some("%6".into()),
+        ..Default::default()
+    };
+    let plan = wake(&fx.store, &old, &to_target).unwrap();
+    assert_eq!(plan.outcome, Some(WakeOutcome::Unconfirmed), "{plan:?}");
+}
+
+/// A `transports.json` that is not a regular file is refused without being opened, so a
+/// FIFO or a device there cannot hang a hook or any command.
+#[test]
+fn a_config_that_is_not_a_regular_file_is_refused_without_reading_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let bin = Bin::at(&root, &root.join("home"));
+    bin.json(&["agent", "register", "bob", "--program", "codex"]);
+    let path = bin.home.join("transports.json");
+    // Loading on another thread: a load that blocks fails the test instead of hanging it.
+    let load = |home: &Path| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let home = home.to_path_buf();
+        std::thread::spawn(move || {
+            let _ = tx.send(load_config(&home));
+        });
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("load_config blocked on a file that is not regular")
+    };
+
+    // A FIFO with no writer: opening it for reading would block for ever.
+    let made = Command::new("mkfifo").arg(&path).status().unwrap();
+    assert!(made.success());
+    let config = load(&bin.home);
+    assert!(config.transports.is_empty());
+    let error = config.error.unwrap();
+    assert!(error.contains("not a regular file"), "{error}");
+    // Hooks, and the commands that print the reason, return.
+    bin.hook("session-start", "s1", &[("TMUX_PANE", "%1")]);
+    bin.hook("prompt", "s1", &[("HERDR_PANE_ID", "w1:p1")]);
+    let status = bin.json(&["transport", "status"]);
+    assert!(
+        status["config_error"]
+            .as_str()
+            .unwrap()
+            .contains("not a regular file"),
+        "{status}"
+    );
+    let (_, report) = bin.doctor();
+    assert_eq!(check(&report, "transports")["status"], "warn", "{report}");
+    std::fs::remove_file(&path).unwrap();
+
+    // A device, reached through a symbolic link.
+    std::os::unix::fs::symlink("/dev/null", &path).unwrap();
+    let error = load(&bin.home).error.unwrap();
+    assert!(error.contains("not a regular file"), "{error}");
+    std::fs::remove_file(&path).unwrap();
+    // A directory.
+    std::fs::create_dir(&path).unwrap();
+    let error = load(&bin.home).error.unwrap();
+    assert!(error.contains("not a regular file"), "{error}");
+    std::fs::remove_dir(&path).unwrap();
+    // A link to a regular file is read, and a link to nothing is no config.
+    transports::write(&root, &transports::example());
+    std::os::unix::fs::symlink(root.join("transports.json"), &path).unwrap();
+    let linked = load(&bin.home);
+    assert_eq!(linked.error, None);
+    assert_eq!(linked.transports.len(), 3);
+    std::fs::remove_file(root.join("transports.json")).unwrap();
+    let dangling = load(&bin.home);
+    assert!(dangling.error.is_none() && dangling.transports.is_empty());
 }
 
 /// A command that never returns is stopped at its deadline: a wake command is `unknown`

@@ -59,14 +59,35 @@ pub struct WakeTarget {
     pub updated_at: String,
 }
 
+/// A character that is not a control and still cannot be seen, or changes the order in
+/// which text is shown: zero-width characters and directional marks (U+200B to U+200F),
+/// bidirectional embeddings and overrides (U+202A to U+202E), the word joiner, invisible
+/// operators and bidirectional isolates (U+2060 to U+2069), the byte order mark, and the
+/// line and paragraph separators.
+fn is_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2069}'
+            | '\u{FEFF}'
+            | '\u{2028}'
+            | '\u{2029}'
+    )
+}
+
 /// The rule for every target: 1 to 200 printable characters, not starting with `-`.
+/// Printable means no control character and no invisible or direction-changing one: a
+/// target is shown to the owner and passed on a command line as it is.
 pub fn validate_target(target: &str) -> Result<()> {
     if target.trim().is_empty()
         || target.chars().count() > 200
-        || target.chars().any(char::is_control)
+        || target.chars().any(|c| c.is_control() || is_invisible(c))
     {
         return Err(Error::Invalid(
-            "wake target must be 1-200 printable characters".into(),
+            "wake target must be 1-200 printable characters, with no control, invisible or \
+             bidirectional formatting character"
+                .into(),
         ));
     }
     refuse_option_like_target(target)

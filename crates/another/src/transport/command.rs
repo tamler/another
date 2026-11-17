@@ -194,10 +194,34 @@ pub fn load_config(another_home: &Path) -> Config {
     }
 }
 
-/// The file's text, `None` when there is no file. The checks and the read use one open
-/// handle, so the file that was checked is the file that is read.
+/// Open for reading without ever waiting: a FIFO with no writer opens at once.
+#[cfg(unix)]
+fn open_without_waiting(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_without_waiting(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
+/// The file's text, `None` when there is no file. Anything but a regular file (a FIFO, a
+/// device, a directory) is refused before it is opened, so a hook can never wait on it;
+/// the open itself does not wait either, in case the file is swapped in between. The
+/// owner and size checks and the read then use one open handle, so the file that was
+/// checked is the file that is read.
 fn read_checked(path: &Path) -> Result<Option<String>, String> {
-    let file = match std::fs::File::open(path) {
+    match std::fs::metadata(path) {
+        Ok(meta) if !meta.is_file() => return Err("is not a regular file".into()),
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot be read: {e}")),
+    }
+    let file = match open_without_waiting(path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("cannot be read: {e}")),
@@ -440,6 +464,17 @@ fn argv(value: &Value, what: &str, allowed: &[&str]) -> Result<Vec<String>, Stri
     if has_placeholder(&command[0]) {
         return Err(format!(
             "a `{what}` command has a placeholder in its program name ({:?})",
+            command[0]
+        ));
+    }
+    // A relative path would be looked up from whatever directory Another is run in, and
+    // agents work in checkouts whose content other people chose.
+    let program = Path::new(&command[0]);
+    let has_separator = command[0].contains('/') || command[0].contains(std::path::MAIN_SEPARATOR);
+    if has_separator && !program.is_absolute() {
+        return Err(format!(
+            "a `{what}` command names its program by a relative path ({:?}); give an \
+             absolute path or a bare name that is looked up on PATH",
             command[0]
         ));
     }
@@ -1056,6 +1091,16 @@ mod tests {
                 "placeholder in its program name",
             ),
             (one(r#""wake":[["sh","-c","{message}"]]"#), "shell code"),
+            (
+                one(r#""wake":[["scripts/wake.sh","{target}"]]"#),
+                "absolute path",
+            ),
+            (one(r#""wake":[["./tool"]]"#), "absolute path"),
+            (one(r#""wake":[["../bin/tool"]]"#), "absolute path"),
+            (
+                one(&format!(r#"{wake},"list":{{"argv":["bin/ls"]}}"#)),
+                "absolute path",
+            ),
             (
                 one(r#""wake":[["bash","-lc","echo {target}"]]"#),
                 "shell code",

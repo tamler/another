@@ -470,6 +470,11 @@ pub fn wake(store: &Store, agent: &str, opts: &WakeOptions) -> Result<WakePlan> 
     // A `--target` override, a target stored before this check, or Herdr's default of the
     // agent's name (which may start with `-`) never reaches a transport as an option.
     another_core::refuse_option_like_target(&target)?;
+    // For a command transport the whole rule for a target is applied here, to a
+    // `--target` too: no control, invisible or direction-changing character.
+    if via.as_str() != "herdr" {
+        another_core::validate_target(&target)?;
+    }
     // A transport nothing provides (a tmux or cmux target from before command transports,
     // with no `transports.json` yet) is refused with what to set.
     let transport = match opts.transport(&via, &opts.config(store)) {
@@ -496,6 +501,35 @@ pub fn wake(store: &Store, agent: &str, opts: &WakeOptions) -> Result<WakePlan> 
         return Ok(plan);
     }
     let cancel = opts.cancel.as_deref();
+    // A command transport cannot say who is in a pane. What Another can still tell is
+    // whether the session that recorded the pane is likely to be in it: not when its row
+    // was last seen gone, when its hooks have been quiet for as long as pruning allows,
+    // or when the agent of a pane an earlier build captured has left. The pane may hold a
+    // shell again, or another agent. A target the owner gave is the owner's word.
+    if via.as_str() != "herdr" && !opts.force && opts.target.is_none() && hand.is_none() {
+        let quiet = match row {
+            Some(row) if row.state.as_deref() == Some("gone") => {
+                Some("its session was last seen gone".to_string())
+            }
+            Some(row)
+                if row
+                    .hook_seen_at
+                    .is_none_or(|at| store.now() - at > STALE_AFTER_MS) =>
+            {
+                Some("no hook of that session for over a day".to_string())
+            }
+            Some(_) => None,
+            None => agent_left(store, &address).map(str::to_string),
+        };
+        if let Some(why) = quiet {
+            plan.error = Some(format!(
+                "not woken, nothing was typed: {target} may no longer hold this agent ({why}), \
+                 and {} cannot say who is in it; pass --force to type into it anyway",
+                via.as_str()
+            ));
+            return Ok(plan);
+        }
+    }
     // A command transport's `status` reports no session id, no program and no directory,
     // so it cannot identify a row; only Herdr's answer is held against the row.
     if let Some(row) = row.filter(|_| via.as_str() == "herdr") {
@@ -853,22 +887,52 @@ pub fn stamp_session(
     }
 }
 
-/// At session end, delete that session's row, and forget a target that an earlier build
-/// captured for this terminal, so nothing is typed into the pane after the agent has left
-/// it.
+/// At session end, delete that session's row, and forget the pane an earlier build
+/// captured for the agent, so nothing is typed into it after the agent has left.
+///
+/// A captured tmux or cmux pane (any transport but Herdr) is forgotten whether or not its
+/// transport is configured: forgetting runs no command and needs no config, and no build
+/// since command transports makes such a capture, so it cannot belong to a newer session.
+/// A Herdr capture is forgotten only by a session that ends in that pane, as before. A
+/// target set by hand is never touched.
 pub fn release_session(store: &Store, agent: &str, session_id: Option<&str>) {
     let here = current_target(&crate::transport::config_for(store));
     let place = here
         .as_ref()
         .map(|(via, target)| (via.as_str(), target.as_str()));
     let _ = store.end_transport_session(agent, session_id.unwrap_or_default(), place);
-    if place.is_some() {
-        let _ = store.clear_auto_wake_target(agent, place);
+    let Ok(Some(captured)) = store.wake_target(agent) else {
+        return;
+    };
+    let stored = (captured.via.as_str(), captured.target.as_str());
+    if captured.auto && (stored.0 != "herdr" || place == Some(stored)) {
+        let _ = store.clear_auto_wake_target(agent, Some(stored));
     }
 }
 
-/// An automatic target whose agent has not been seen for this long is stale.
+/// An automatic target whose agent has not been seen for this long is stale, and so is a
+/// session row whose hooks have been quiet for this long.
 const STALE_AFTER_MS: i64 = 24 * 3_600_000;
+
+/// Why the agent of an automatically captured target has left, if it has: the rule by
+/// which [`prune`] drops the target, and by which a wake by hand refuses it.
+fn agent_left(store: &Store, agent: &str) -> Option<&'static str> {
+    let Ok(agent) = store.agent(agent) else {
+        return Some("agent is no longer registered");
+    };
+    let unseen = agent
+        .last_seen_at
+        .as_deref()
+        .and_then(another_core::parse_ts)
+        .is_some_and(|seen| store.now() - seen > STALE_AFTER_MS);
+    if agent.status == "offline" {
+        Some("agent ended its session")
+    } else if unseen {
+        Some("agent not seen for over a day")
+    } else {
+        None
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PruneRow {
@@ -901,24 +965,11 @@ pub fn prune(store: &Store, dry_run: bool) -> Result<Vec<PruneRow>> {
             rows.push(row);
             continue;
         }
-        let agent = store.agent(&t.agent).ok();
-        let offline = agent.as_ref().is_some_and(|a| a.status == "offline");
-        let unseen = agent
-            .as_ref()
-            .and_then(|a| a.last_seen_at.as_deref())
-            .and_then(another_core::parse_ts)
-            .is_some_and(|seen| store.now() - seen > STALE_AFTER_MS);
         // A capture stored before targets were checked, which every wake now refuses.
         let stale = if another_core::refuse_option_like_target(&t.target).is_err() {
             Some("target starts with '-', which a wake refuses")
-        } else if agent.is_none() {
-            Some("agent is no longer registered")
-        } else if offline {
-            Some("agent ended its session")
-        } else if unseen {
-            Some("agent not seen for over a day")
         } else {
-            None
+            agent_left(store, &t.agent)
         };
         if stale.is_some() {
             if !dry_run {
