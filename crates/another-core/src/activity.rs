@@ -27,10 +27,11 @@ pub enum ActivityKind {
     Session,
     System,
     Federation,
+    Queue,
 }
 
 impl ActivityKind {
-    pub const ALL: [ActivityKind; 7] = [
+    pub const ALL: [ActivityKind; 8] = [
         ActivityKind::Mail,
         ActivityKind::Request,
         ActivityKind::Hold,
@@ -38,6 +39,7 @@ impl ActivityKind {
         ActivityKind::Session,
         ActivityKind::System,
         ActivityKind::Federation,
+        ActivityKind::Queue,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -49,6 +51,7 @@ impl ActivityKind {
             ActivityKind::Session => "session",
             ActivityKind::System => "system",
             ActivityKind::Federation => "federation",
+            ActivityKind::Queue => "queue",
         }
     }
 
@@ -61,6 +64,7 @@ impl ActivityKind {
             "resource" | "orphan" => ActivityKind::Resource,
             "session" | "agent" => ActivityKind::Session,
             "peer" | "sync" | "pair" | "federation" => ActivityKind::Federation,
+            "queue" => ActivityKind::Queue,
             _ => ActivityKind::System,
         }
     }
@@ -74,7 +78,7 @@ impl std::str::FromStr for ActivityKind {
             .find(|k| k.as_str() == s)
             .ok_or_else(|| {
                 Error::Invalid(format!(
-                    "unknown activity kind {s:?}; expected mail, request, hold, resource, session, system or federation"
+                    "unknown activity kind {s:?}; expected mail, request, hold, resource, session, system, federation or queue"
                 ))
             })
     }
@@ -546,6 +550,91 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             format!("unpaired node {}", s("node_id")),
             json!({ "node_id": s("node_id") }),
         ),
+        // Queue events. A line names the actor, the verb, the item's number, its scope id
+        // and a reason code. The title, body, done condition, notes, result text, reason
+        // text and error text are never shown, and `refs` is the item's id and number.
+        "queue.proposed"
+        | "queue.admitted"
+        | "queue.rejected"
+        | "queue.updated"
+        | "queue.claimed"
+        | "queue.noted"
+        | "queue.released"
+        | "queue.handoff"
+        | "queue.completed"
+        | "queue.notify_failed" => {
+            let (item, refs) = queue_item_ref(conn, &p)?;
+            let text = match row.kind.as_str() {
+                "queue.proposed" => match s("kind").as_str() {
+                    "security" => format!("{actor} proposed {item} [security]"),
+                    "data_loss" => format!("{actor} proposed {item} [data loss]"),
+                    _ => format!("{actor} proposed {item}"),
+                },
+                "queue.admitted" if p.get("self_admitted") == Some(&Value::Bool(true)) => {
+                    format!("{actor} admitted {item}, its own proposal")
+                }
+                "queue.admitted" => format!("{actor} admitted {item}"),
+                "queue.rejected" => format!("{actor} rejected {item}"),
+                "queue.updated" => format!("{actor} edited {item}"),
+                "queue.claimed" => format!("{actor} claimed {item}"),
+                "queue.noted" => format!("{actor} added a note to {item}"),
+                "queue.released" => {
+                    let reason = match s("reason").as_str() {
+                        "agent" => "agent",
+                        "owner" => "owner",
+                        "session_end" => "session_end",
+                        "grace" => "grace",
+                        "transport_gone" => "transport_gone",
+                        _ => "other",
+                    };
+                    format!("{actor} released {item}: {reason}")
+                }
+                "queue.handoff" => format!(
+                    "{actor} handed {item} to {}",
+                    agent_address(conn, &s("to"))?
+                ),
+                "queue.completed" => format!("{actor} completed {item}"),
+                _ => format!("a notice about {item} could not be sent"),
+            };
+            (text, refs)
+        }
+        "queue.limit_set" => {
+            let to = p.get("to").and_then(Value::as_i64).unwrap_or_default();
+            let text = if p.get("default") == Some(&Value::Bool(true)) {
+                format!("{actor} set the default queue limit to {to}")
+            } else {
+                format!(
+                    "{actor} set the queue limit of {} to {to}",
+                    agent_address(conn, &s("agent_id"))?
+                )
+            };
+            (text, json!({}))
+        }
+        "queue.delegate_added" | "queue.delegate_removed" => {
+            let verb = if row.kind == "queue.delegate_added" {
+                "named"
+            } else {
+                "removed"
+            };
+            (
+                format!(
+                    "{actor} {verb} a queue delegate: {}",
+                    agent_address(conn, &s("agent_id"))?
+                ),
+                json!({}),
+            )
+        }
+        "queue.setting_changed" => {
+            let text = match (s("key").as_str(), p.get("to").and_then(Value::as_i64)) {
+                ("grace_seconds", Some(to)) => {
+                    format!("{actor} set the queue grace period to {to} seconds")
+                }
+                _ => format!("{actor} changed a queue setting"),
+            };
+            (text, json!({}))
+        }
+        // A queue kind this build does not know must never fall through to the payload.
+        other if other.starts_with("queue.") => (format!("{actor}: {other}"), json!({})),
         other => (format!("{actor}: {other}"), p.clone()),
     };
     // Merged feed: events from other nodes carry their node's name.
@@ -569,6 +658,34 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
         kind: row.kind,
         summary,
         refs,
+    })
+}
+
+/// How a queue event names its item, `Q12 (M1)`, and its `refs`: the id and the number, both
+/// taken from the item's row, never copied from the payload. An item this node has no row
+/// for is named by its number alone, or `an item`, with empty `refs`.
+fn queue_item_ref(conn: &Connection, payload: &Value) -> Result<(String, Value)> {
+    let item_id = payload
+        .get("item_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let row: Option<(i64, Option<String>)> = conn
+        .query_row(
+            "SELECT seq, scope FROM queue_items WHERE item_id = ?1",
+            [item_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(match row {
+        Some((seq, Some(scope))) => (
+            format!("Q{seq} ({scope})"),
+            json!({ "item_id": item_id, "seq": seq }),
+        ),
+        Some((seq, None)) => (format!("Q{seq}"), json!({ "item_id": item_id, "seq": seq })),
+        None => match payload.get("seq").and_then(Value::as_i64) {
+            Some(seq) => (format!("Q{seq}"), json!({})),
+            None => ("an item".to_string(), json!({})),
+        },
     })
 }
 

@@ -76,14 +76,14 @@ pub struct AuditRecord {
     pub remote: Option<String>,
 }
 
-fn hash(secret: &str) -> String {
+pub(crate) fn hash(secret: &str) -> String {
     Sha256::digest(secret.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
 }
 
-fn random_hex(bytes: usize) -> Result<String> {
+pub(crate) fn random_hex(bytes: usize) -> Result<String> {
     let mut buf = vec![0u8; bytes];
     getrandom::fill(&mut buf)
         .map_err(|e| Error::Invalid(format!("no system randomness available: {e}")))?;

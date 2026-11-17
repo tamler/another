@@ -15,6 +15,7 @@ mod holds;
 mod identity;
 mod mail;
 mod oauth;
+mod queue;
 mod repo;
 mod requests;
 mod resources;
@@ -59,6 +60,14 @@ pub use oauth::{
     validate_cimd, validate_redirect_uri, Approval, AuthorizationStatus, AuthorizeInput,
     ClientProfile, ClientRegistration, CodeExchange, IssuedTokens, OAuthFail, OauthGrant,
     PendingAuthorization, PendingView, RefreshExchange, RegisteredClient, ACCESS_TTL_SECS,
+};
+pub use queue::{
+    AdmitItem, AuditFinding, DoneItem, EditItem, FailedNotice, NewQueueDelegate, PointerKind,
+    ProposeItem, QueueAdmitted, QueueAudit, QueueCaller, QueueClaim, QueueDelegate, QueueEdited,
+    QueueFilter, QueueGrace, QueueHistoryEntry, QueueItem, QueueKind, QueueLimit, QueueLimits,
+    QueueNeedsOwner, QueueNext, QueuePriority, QueueRefusal, QueueResult, QueueState, QuietClaim,
+    ReleaseItem, SelfAdmitted, DEFAULT_QUEUE_GRACE_SECONDS, DEFAULT_QUEUE_LIMIT,
+    MAX_QUEUE_GRACE_SECONDS, MAX_QUEUE_LIMIT, MIN_QUEUE_GRACE_SECONDS,
 };
 pub use repo::{link_for as repo_link_for, normalize_remote, RepoLink};
 pub use requests::{Request, RequestAction, RequestFilter, RequestStatus, RequestUpdate};

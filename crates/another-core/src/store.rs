@@ -830,6 +830,94 @@ ALTER TABLE announcements ADD COLUMN fingerprint TEXT;
 ALTER TABLE announcements ADD COLUMN duplicate_of TEXT REFERENCES messages(message_id);
 CREATE INDEX announcements_by_fingerprint ON announcements(agent_id, fingerprint, announced_at);
 "#,
+    // The work queue (queue.rs, docs/QUEUE.md). Node-local in v0.1.0: `node_id` is the home
+    // node of an item and `seq` its display number (`Q12`). The CHECK constraints keep the
+    // approval rules below the code: a ready or claimed row always carries who admitted it
+    // and when, and a security or data-loss row is never admitted by a delegate.
+    // `queue_sessions` is created here and first written by session binding.
+    r#"
+CREATE TABLE queue_items (
+    seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id         TEXT NOT NULL UNIQUE,
+    node_id         TEXT NOT NULL REFERENCES nodes(node_id),
+    state           TEXT NOT NULL CHECK (state IN ('proposed','ready','claimed','done')),
+    kind            TEXT NOT NULL CHECK (kind IN ('work','security','data_loss')),
+    title           TEXT NOT NULL,
+    body            TEXT NOT NULL DEFAULT '',
+    scope           TEXT,
+    done_condition  TEXT,
+    priority        INTEGER NOT NULL DEFAULT 2 CHECK (priority IN (1, 2)),
+    for_agent       TEXT REFERENCES agents(agent_id),
+    skip_agent      TEXT REFERENCES agents(agent_id),
+    proposed_by     TEXT REFERENCES agents(agent_id),
+    proposed_at     INTEGER NOT NULL,
+    admit_authority TEXT CHECK (admit_authority IN ('owner','delegate')),
+    admitted_by     TEXT REFERENCES agents(agent_id),
+    admitted_at     INTEGER,
+    claimer_id      TEXT REFERENCES agents(agent_id),
+    claimed_at      INTEGER,
+    claim_session   TEXT,
+    outcome         TEXT CHECK (outcome IN ('completed','rejected')),
+    result_summary  TEXT,
+    result_kind     TEXT CHECK (result_kind IN ('pr','commit','file')),
+    result_ref      TEXT,
+    closed_by       TEXT REFERENCES agents(agent_id),
+    closed_at       INTEGER,
+    updated_at      INTEGER NOT NULL,
+    CHECK (state NOT IN ('ready','claimed') OR (admit_authority IS NOT NULL
+           AND admitted_at IS NOT NULL AND scope IS NOT NULL AND done_condition IS NOT NULL)),
+    CHECK (admit_authority IS NULL OR (admit_authority = 'delegate') = (admitted_by IS NOT NULL)),
+    CHECK (kind = 'work' OR admit_authority IS NULL OR admit_authority = 'owner'),
+    CHECK ((state = 'claimed') = (claimer_id IS NOT NULL)),
+    CHECK ((state = 'done') = (outcome IS NOT NULL)),
+    CHECK (outcome IS NOT 'completed' OR (result_summary IS NOT NULL
+           AND result_kind IS NOT NULL AND result_ref IS NOT NULL AND admitted_at IS NOT NULL))
+);
+CREATE INDEX queue_ready   ON queue_items(state, priority, admitted_at, seq);
+CREATE INDEX queue_claimed ON queue_items(claimer_id) WHERE state = 'claimed';
+
+CREATE TABLE queue_history (
+    item_id  TEXT NOT NULL REFERENCES queue_items(item_id),
+    event_id TEXT NOT NULL,
+    at       INTEGER NOT NULL,
+    kind     TEXT NOT NULL,
+    actor    TEXT NOT NULL,
+    note     TEXT,
+    detail   TEXT,
+    PRIMARY KEY (item_id, event_id)
+);
+
+CREATE TABLE queue_sessions (
+    agent_id   TEXT NOT NULL REFERENCES agents(agent_id),
+    session_id TEXT NOT NULL,
+    started_at INTEGER NOT NULL,
+    seen_at    INTEGER NOT NULL,
+    ended_at   INTEGER,
+    PRIMARY KEY (agent_id, session_id)
+);
+
+CREATE TABLE queue_limits (
+    agent_id    TEXT PRIMARY KEY REFERENCES agents(agent_id),
+    max_claimed INTEGER NOT NULL CHECK (max_claimed BETWEEN 0 AND 20),
+    set_at      INTEGER NOT NULL,
+    event_id    TEXT NOT NULL
+);
+
+CREATE TABLE queue_delegates (
+    agent_id   TEXT PRIMARY KEY REFERENCES agents(agent_id),
+    key_hash   TEXT NOT NULL,
+    added_at   INTEGER NOT NULL,
+    removed_at INTEGER,
+    event_id   TEXT NOT NULL
+);
+
+CREATE TABLE queue_settings (
+    key      TEXT PRIMARY KEY,
+    value    TEXT NOT NULL,
+    set_at   INTEGER NOT NULL,
+    event_id TEXT NOT NULL
+);
+"#,
 ];
 
 /// Switch to WAL. While several connections convert a new database at once, SQLite answers
@@ -1005,6 +1093,7 @@ const CATALOGS: &[&str] = &[
     "f85d51188f29f23863c5e90224d308abd1150bb9ed019245681e7d6900614a73",
     "3263f7df9c4fd6613f7c466cbb01a84962fd4bd1635b3f87d96f2751b2d6f372",
     "5b76a246c4ba93c3edd4c1a7d03fe0f19f43aadceed5901dfa0ba6b439be9c54",
+    "b07ccde4e870699aff968c4508b5944ac3cc5ae157acfb336bfdc3a16e5f6325",
 ];
 
 /// Whether the database's tables and indexes are the ones this build has for `version`.
@@ -1263,7 +1352,7 @@ mod upgrade_tests {
     fn schema_versions_after_v8_are_hold_waits_then_request_holds() {
         // v1-v8 are main's released schema. v9 and v10 belong to the hold fixes (D62, D63);
         // a later migration must append after them, never reuse either number.
-        assert_eq!(MIGRATIONS.len(), 10);
+        assert!(MIGRATIONS.len() >= 10);
         let v8 = catalog_at(8);
         let v9 = catalog_at(9);
         let v10 = catalog_at(10);
@@ -1371,7 +1460,13 @@ mod upgrade_tests {
         // Take the home back to exactly main's v8 schema, keeping every v8 row.
         let db = Connection::open(home.join(DB_FILE)).unwrap();
         db.execute_batch(
-            "DROP TABLE hold_waits;
+            "DROP TABLE queue_history;
+             DROP TABLE queue_items;
+             DROP TABLE queue_sessions;
+             DROP TABLE queue_limits;
+             DROP TABLE queue_delegates;
+             DROP TABLE queue_settings;
+             DROP TABLE hold_waits;
              DROP TABLE request_holds;
              ALTER TABLE announcements RENAME TO announcements_v10;",
         )

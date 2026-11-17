@@ -4,11 +4,12 @@ use crate::reap::{self, OrphanReport, ReapPlan};
 use crate::remote::{self, RemotePeer};
 use another_core::{
     AckOutcome, AcquireHolds, ActivityFeed, ActivityKind, ActivityQuery, ActivitySummary, Agent,
-    AuditRecord, HeartbeatReport, Hold, HoldConflict, HoldFilter, Importance, Inbox, InboxQuery,
-    LeaseMode, LeaseOutcome, Message, NewRequest, Program, Project, RegisterAgent,
-    RegisterResource, Reply, Request, RequestAction, RequestUpdate, Resource, ResourceFilter,
-    ResourceKind, ResourceRef, SendMessage, SessionInfo, SessionPhase, Since, Store, Thread,
-    ThreadSummary,
+    AuditRecord, DoneItem, HeartbeatReport, Hold, HoldConflict, HoldFilter, Importance, Inbox,
+    InboxQuery, LeaseMode, LeaseOutcome, Message, NewRequest, PointerKind, Program, Project,
+    ProposeItem, QueueCaller, QueueFilter, QueueItem, QueueKind, QueueNext, QueueState,
+    RegisterAgent, RegisterResource, ReleaseItem, Reply, Request, RequestAction, RequestUpdate,
+    Resource, ResourceFilter, ResourceKind, ResourceRef, SendMessage, SessionInfo, SessionPhase,
+    Since, Store, Thread, ThreadSummary,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -371,6 +372,77 @@ pub struct ReapRequestOut {
     /// Always false: agents cannot reap. A human runs the command below.
     pub executed: bool,
     pub human_command: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct QueueProposeArgs {
+    /// The proposing agent (`name` or `name@project`).
+    pub agent: String,
+    /// One line, up to 200 characters.
+    pub title: String,
+    /// Details, up to 10,000 bytes.
+    pub body: Option<String>,
+    /// The scope id the work belongs to, for example `M1`.
+    pub scope: Option<String>,
+    /// The done condition: what must be true for the item to be finished.
+    pub done_when: Option<String>,
+    /// work (default) | security | data_loss. The last two are decided by the owner personally.
+    pub kind: Option<QueueKind>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct QueueNextArgs {
+    pub agent: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueUpdateAction {
+    Note,
+    Release,
+    Handoff,
+    Done,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct QueueUpdateArgs {
+    pub agent: String,
+    /// The item: its number (`Q12`) or its id.
+    pub item: String,
+    /// note | release | handoff | done. release, handoff and done are the claimer's.
+    pub action: QueueUpdateAction,
+    /// The note (required for note; optional for release and handoff).
+    pub note: Option<String>,
+    /// handoff: the agent the item goes to; it takes it with queue_next.
+    pub to: Option<String>,
+    /// done: what was done, up to 500 characters.
+    pub summary: Option<String>,
+    /// done: pr | commit | file.
+    pub pointer_kind: Option<PointerKind>,
+    /// done: the pull request number or https URL, the commit hash, or the file path.
+    pub pointer: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct QueueListArgs {
+    /// The agent `mine` refers to.
+    pub agent: Option<String>,
+    /// Only items the agent proposed or holds.
+    #[serde(default)]
+    pub mine: bool,
+    /// proposed | ready | claimed | done. Default: ready and claimed.
+    pub state: Option<QueueState>,
+    /// Only items with this scope id.
+    pub scope: Option<String>,
+    /// Return this one item (its number or id) with its history.
+    pub item: Option<String>,
+    /// Maximum items (default 100).
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct QueueListOut {
+    pub items: Vec<QueueItem>,
 }
 
 fn resource_ref(raw: &str) -> another_core::Result<ResourceRef> {
@@ -852,13 +924,142 @@ impl AnotherMcp {
         })
         .await
     }
+
+    #[tool(
+        description = "Propose an item for the work queue. Anyone may propose; the item waits \
+        until the owner or a delegate admits it, and cannot be taken before that. Use this for \
+        work you found that nobody asked for, instead of starting it."
+    )]
+    async fn queue_propose(
+        &self,
+        Parameters(a): Parameters<QueueProposeArgs>,
+    ) -> ToolResult<QueueItem> {
+        self.run(move |s| {
+            s.queue_propose(
+                &QueueCaller::agent(&a.agent),
+                ProposeItem {
+                    title: a.title,
+                    body: a.body.unwrap_or_default(),
+                    scope: a.scope,
+                    done_when: a.done_when,
+                    kind: a.kind.unwrap_or_default(),
+                },
+            )
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Take the next ready item from the work queue. Returns {claimed, refused}: \
+        claimed is the item with its done condition and history; both null means nothing is \
+        ready, so wait and do not start work that is not in the queue; refused says why the \
+        agent got nothing (at its limit, or no seat) and what to do."
+    )]
+    async fn queue_next(&self, Parameters(a): Parameters<QueueNextArgs>) -> ToolResult<QueueNext> {
+        self.run(move |s| s.queue_next(&a.agent)).await
+    }
+
+    #[tool(
+        description = "Act on a queue item: note adds a note; release gives your claimed item \
+        back; handoff gives it to another agent (to); done finishes it with a summary and one \
+        pointer (pointer_kind pr, commit or file). Admitting, rejecting and editing items are \
+        not available here."
+    )]
+    async fn queue_update(
+        &self,
+        Parameters(a): Parameters<QueueUpdateArgs>,
+    ) -> ToolResult<QueueItem> {
+        self.run(move |s| {
+            let missing = |what: &str| {
+                another_core::Error::Invalid(format!("{what} is required for this action"))
+            };
+            // An MCP caller presents no delegate key: it releases only its own claim.
+            let me = QueueCaller::agent(&a.agent);
+            match a.action {
+                QueueUpdateAction::Note => {
+                    s.queue_note(&a.agent, &a.item, &a.note.ok_or_else(|| missing("note"))?)
+                }
+                QueueUpdateAction::Release => {
+                    if a.to.is_some() {
+                        return Err(another_core::Error::Invalid(
+                            "release takes no to; use action handoff".into(),
+                        ));
+                    }
+                    s.queue_release(
+                        &me,
+                        &a.item,
+                        ReleaseItem {
+                            note: a.note,
+                            ..Default::default()
+                        },
+                    )
+                }
+                QueueUpdateAction::Handoff => s.queue_release(
+                    &me,
+                    &a.item,
+                    ReleaseItem {
+                        note: a.note,
+                        to: Some(a.to.ok_or_else(|| missing("to"))?),
+                        reason: None,
+                    },
+                ),
+                QueueUpdateAction::Done => s.queue_done(
+                    &a.agent,
+                    &a.item,
+                    DoneItem {
+                        summary: a.summary.ok_or_else(|| missing("summary"))?,
+                        pointer_kind: a.pointer_kind.ok_or_else(|| missing("pointer_kind"))?,
+                        pointer: a.pointer.ok_or_else(|| missing("pointer"))?,
+                    },
+                ),
+            }
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Read the work queue: ready and claimed items by default; filter by \
+        state, scope or mine (with agent); or pass item for one item with its history. Read \
+        only."
+    )]
+    async fn queue_list(
+        &self,
+        Parameters(a): Parameters<QueueListArgs>,
+    ) -> ToolResult<QueueListOut> {
+        self.run(move |s| {
+            if let Some(item) = &a.item {
+                return Ok(QueueListOut {
+                    items: vec![s.queue_item(item)?],
+                });
+            }
+            let mine = match (a.mine, a.agent) {
+                (false, _) => None,
+                (true, Some(agent)) => Some(agent),
+                (true, None) => {
+                    return Err(another_core::Error::Invalid("mine needs agent".into()))
+                }
+            };
+            Ok(QueueListOut {
+                items: s.queue_list(QueueFilter {
+                    state: a.state,
+                    scope: a.scope,
+                    mine,
+                    self_admitted: false,
+                    limit: a.limit.unwrap_or(0),
+                })?,
+            })
+        })
+        .await
+    }
 }
 
 #[tool_handler(router = self.tool_router, name = "another", instructions = "Another coordinates agents on this node, including hosted chat apps, through messaging, holds and shared resources. \
 Call whats_new first and follow its next field; if nothing is waiting, stop. \
 Send mail with send_message, acknowledge messages you have handled, and claim_request before \
 working a request. hold_paths before editing files another agent might touch. Before starting \
-a server or job, call resource_find and borrow what is already running. A hosted connection \
+a server or job, call resource_find and borrow what is already running. Local agents take work \
+with queue_next, finish it with queue_update, and record work nobody asked for with \
+queue_propose instead of starting it. A hosted connection \
 acts as exactly one agent: omit the agent field and it is filled in. Reaping is never remote. \
 Errors are {\"error\":{\"code\",\"message\",\"hint\"}}; follow hint.")]
 impl ServerHandler for AnotherMcp {

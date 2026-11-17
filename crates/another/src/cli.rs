@@ -371,7 +371,8 @@ pub enum Command {
         since: Option<String>,
         #[arg(long, default_value_t = 50)]
         limit: u32,
-        /// Only these categories: mail, request, hold, resource, session, system, federation.
+        /// Only these categories: mail, request, hold, resource, session, system, federation,
+        /// queue.
         #[arg(long, value_delimiter = ',')]
         kinds: Vec<String>,
         /// Print a summary (counts, active agents, highlights) instead of items.
@@ -407,6 +408,9 @@ pub enum Command {
         #[arg(long, default_value_t = another_core::DEFAULT_BOARD_LIMIT)]
         limit: u32,
     },
+    /// The work queue: propose items, admit them, take the next one, record its result.
+    #[command(subcommand)]
+    Queue(crate::queue_cli::QueueCmd),
     /// Install, remove or run client hook packs.
     #[command(subcommand)]
     Hook(HookCmd),
@@ -616,7 +620,7 @@ pub enum RemoteCmd {
     },
 }
 
-fn parse_secs(raw: &str) -> anyhow::Result<i64> {
+pub(crate) fn parse_secs(raw: &str) -> anyhow::Result<i64> {
     let raw = raw.trim();
     let split = raw.find(|c: char| !c.is_ascii_digit()).unwrap_or(raw.len());
     let (num, unit) = raw.split_at(split);
@@ -986,7 +990,7 @@ fn open(home: Option<&Path>) -> anyhow::Result<Store> {
     Ok(Store::open(&home)?)
 }
 
-fn body_arg(body: String) -> anyhow::Result<String> {
+pub(crate) fn body_arg(body: String) -> anyhow::Result<String> {
     if body == "-" {
         let mut buf = String::new();
         std::io::stdin().read_to_string(&mut buf)?;
@@ -1117,7 +1121,11 @@ fn resolve_hold_paths(store: &Store, project: &str, paths: Vec<String>) -> Vec<S
         .collect()
 }
 
-fn emit<T: Serialize>(json: bool, value: &T, human: impl FnOnce(&T) -> String) -> ExitCode {
+pub(crate) fn emit<T: Serialize>(
+    json: bool,
+    value: &T,
+    human: impl FnOnce(&T) -> String,
+) -> ExitCode {
     if json {
         println!(
             "{}",
@@ -1932,6 +1940,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 ExitCode::FAILURE
             }
         }
+        Command::Queue(cmd) => crate::queue_cli::run(&store, cmd, json)?,
         Command::Audit { limit } => {
             let entries = store.audit_log(limit)?;
             emit(json, &entries, |e| output::audit(e))
