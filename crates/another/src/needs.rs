@@ -365,8 +365,9 @@ fn proposal_row(kind: Kind, item: &QueueItem, now: i64) -> Row {
     row
 }
 
-/// The step for a claim whose name is active: a working session may hold the item, so
-/// nothing is woken and nothing is released.
+/// The second step of every quiet claim: ask the claimer by mail. The list prints no
+/// wake: whether a pane still holds the agent is for `another wake` to decide when it is
+/// run, and nothing the list reads can say it.
 fn ask_step(agent: &str, label: &str) -> String {
     format!(
         "ask {} whether a session is working on {}: another send --from <your agent> --to {} --subject {}",
@@ -377,10 +378,10 @@ fn ask_step(agent: &str, label: &str) -> String {
     )
 }
 
-/// `may_act`: what is stored licenses a wake and a release for a quiet name. It does
-/// when the name has no session row, or when every row of the name was checked in the
-/// last 5 minutes and none of them is working or blocked.
-fn quiet_claim_row(q: &QuietClaim, last_sign: Option<i64>, may_act: bool, now: i64) -> Row {
+/// `may_release`: what is stored licenses a release for a quiet name. It does when the
+/// name has no session row a hook made, or when every such row was checked in the last
+/// 5 minutes and is idle or gone.
+fn quiet_claim_row(q: &QuietClaim, last_sign: Option<i64>, may_release: bool, now: i64) -> Row {
     let item = &q.item;
     let claimer = item.claim.as_ref().map_or("", |c| c.agent.as_str());
     let claimed_at = item.claim.as_ref().and_then(|c| parse_ts(&c.at));
@@ -390,23 +391,14 @@ fn quiet_claim_row(q: &QuietClaim, last_sign: Option<i64>, may_act: bool, now: i
         _ => last_sign.max(claimed_at),
     };
     let label = word(&item.label);
-    let mut next = vec![format!("another queue show {label}")];
-    if q.reason == "name_quiet" && may_act {
-        // No `--force`: with a message the wake goes out anyway, and the flag would only
-        // switch off the check that refuses a pane which may hold someone else by now.
-        next.push(format!(
-            "another wake --agent {} --message {}",
-            word(claimer),
-            phrase(&format!(
-                "{0} is claimed under your name and has been quiet. Continue it, or run: another queue release {0}",
-                item.label
-            ))
-        ));
+    let mut next = vec![
+        format!("another queue show {label}"),
+        ask_step(claimer, &item.label),
+    ];
+    if q.reason == "name_quiet" && may_release {
         next.push(format!(
             "another queue release {label} --reason \"<why>\" --owner"
         ));
-    } else {
-        next.push(ask_step(claimer, &item.label));
     }
     let words = format!(
         "claimed by {}, {}",
@@ -733,18 +725,21 @@ pub fn report(store: &Store, limit: u32) -> anyhow::Result<Report> {
             .and_then(|a| a.last_seen_at.as_deref())
             .and_then(parse_ts);
         // An observation older than 5 minutes licenses nothing: the session may be inside
-        // one long tool call. So every row of the name must have been checked just now
-        // and be neither working nor blocked. A name with no row at all is only silent.
-        let may_act = status
+        // one long tool call. So every session row of the name must have been checked
+        // just now and be idle or gone; any other state (working, blocked, unknown,
+        // present, no answer) may be a session in a turn. A row that only holds the
+        // outcome of a wake by hand is no session and is never checked, so it is not
+        // counted. A name with no session row at all is only silent.
+        let may_release = status
             .sessions
             .iter()
-            .filter(|r| Some(r.agent.as_str()) == claimer)
+            .filter(|r| r.hook_made && Some(r.agent.as_str()) == claimer)
             .all(|r| {
                 r.observed_ms
                     .is_some_and(|at| now - at <= crate::transport::STALE_AFTER_MS)
-                    && !matches!(r.observed_state.as_deref(), Some("working" | "blocked"))
+                    && matches!(r.observed_state.as_deref(), Some("idle" | "gone"))
             });
-        rows.push(quiet_claim_row(q, last_sign, may_act, now));
+        rows.push(quiet_claim_row(q, last_sign, may_release, now));
     }
     // A seat, as the queue counts it: an agent of this node whose limit is above 0.
     let any_seat = agents.iter().any(|a| {

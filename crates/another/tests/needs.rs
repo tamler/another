@@ -641,7 +641,8 @@ fn every_printed_command_parses() {
     }
     for prefix in [
         "another queue release Q6 --reason \"session gone\" --owner",
-        "another wake --agent eve --message ",
+        "another queue release Q1 --reason \"<why>\" --owner",
+        "another send --from <your agent> --to eve --subject ",
         "another send --from <your agent> --to bob --subject ",
         "another queue edit Q5 --for-anyone --agent <delegate>",
     ] {
@@ -1299,8 +1300,8 @@ fn quiet_claim_commands_follow_the_evidence() {
     fx.quiet("cy", 95);
     let q = item.label.as_str();
     let show = format!("another queue show {q}");
-    let wake = format!(
-        "another wake --agent cy --message \"{q} is claimed under your name and has been quiet. Continue it, or run: another queue release {q}\""
+    let ask = format!(
+        "ask cy whether a session is working on {q}: another send --from <your agent> --to cy --subject \"Who holds {q}?\""
     );
     let v = fx.json();
     assert_eq!(v["total"], 1, "{v:#}");
@@ -1314,7 +1315,7 @@ fn quiet_claim_commands_follow_the_evidence() {
         strs(&row["next"]),
         [
             show.clone(),
-            wake.clone(),
+            ask.clone(),
             format!("another queue release {q} --reason \"<why>\" --owner"),
         ]
     );
@@ -1322,7 +1323,7 @@ fn quiet_claim_commands_follow_the_evidence() {
         strs(&row["next_delegate"]),
         [
             show.clone(),
-            wake,
+            ask.clone(),
             format!("another queue release {q} --reason \"<why>\" --agent <delegate>"),
         ]
     );
@@ -1348,10 +1349,7 @@ fn quiet_claim_commands_follow_the_evidence() {
         Value::Null
     );
 
-    // A session of the name is working now: no wake and no release.
-    let ask = format!(
-        "ask cy whether a session is working on {q}: another send --from <your agent> --to cy --subject \"Who holds {q}?\""
-    );
+    // A session of the name is working now: no release.
     fx.attention("cy", "work1111", "w1:p1", "working", "", 1);
     fx.set_session("cy", "work1111", "attention = NULL, attention_since = NULL");
     // The transport row is all that shows life; the name's own last sign stays old.
@@ -1359,17 +1357,34 @@ fn quiet_claim_commands_follow_the_evidence() {
     let row = one(&fx.json(), "quiet_claim");
     assert_eq!(row["reason"], "name_quiet");
     assert_eq!(strs(&row["next"]), [show.clone(), ask.clone()]);
-    for key in ["next", "next_delegate"] {
-        let steps = row[key].to_string();
-        assert!(!steps.contains("wake --agent"), "{steps}");
-        assert!(!steps.contains("queue release"), "{steps}");
-    }
+    assert_eq!(strs(&row["next_delegate"]), [show.clone(), ask.clone()]);
 
-    // An observation licenses a wake and a release only while it is fresh. A session of
-    // the name seen idle and checked just now: both are printed.
-    let full = |fx: &Fx| strs(&one(&fx.json(), "quiet_claim")["next"]).len() == 3;
+    // An observation licenses a release only while it is fresh. A session of the name
+    // seen idle and checked just now: the release is printed.
+    let full = |fx: &Fx| {
+        let next = strs(&one(&fx.json(), "quiet_claim")["next"]);
+        assert_eq!(next[..2], [show.clone(), ask.clone()], "{next:?}");
+        match next.len() {
+            2 => false,
+            3 => {
+                assert!(next[2].starts_with("another queue release "), "{next:?}");
+                true
+            }
+            _ => panic!("{next:?}"),
+        }
+    };
     fx.set_session("cy", "work1111", "state = 'idle'");
     assert!(full(&fx));
+    // Seen and not identified, or there with no state reported: the pane may hold the
+    // session in a turn, or someone else. Ask only.
+    for unclear in ["unknown", "present", "blocked", "no_answer"] {
+        fx.set_session("cy", "work1111", &format!("state = '{unclear}'"));
+        assert!(!full(&fx), "{unclear}");
+    }
+    // Gone and idle sessions, all checked just now, leave the release.
+    fx.set_session("cy", "work1111", "state = 'gone'");
+    assert!(full(&fx));
+    fx.set_session("cy", "work1111", "state = 'idle'");
     // Checks stopped: the row was last seen idle two hours ago, and the session may be
     // inside one long tool call. Only the ask step is printed.
     let two_hours_ago = now_ms() - 120 * MIN;
@@ -1385,16 +1400,45 @@ fn quiet_claim_commands_follow_the_evidence() {
     fx.attention("cy", "idle2222", "w1:p2", "idle", "", 1);
     fx.set_session("cy", "idle2222", "attention = NULL, attention_since = NULL");
     fx.quiet("cy", 95);
-    assert_eq!(
-        strs(&one(&fx.json(), "quiet_claim")["next"]),
-        [show.clone(), ask]
-    );
-    // A row that was never checked says nothing either.
+    assert!(!full(&fx));
+    // A row a hook made that was never checked says nothing either.
     fx.exec("DELETE FROM transport_sessions");
     assert!(full(&fx));
     fx.session("cy", "new03333", "tmux", "%3");
     fx.quiet("cy", 95);
-    assert_eq!(strs(&one(&fx.json(), "quiet_claim")["next"]).len(), 2);
+    assert!(!full(&fx));
+
+    // A row that only holds the outcome of a wake by hand is not a session: the sweep
+    // never checks it, and it does not hide the release.
+    fx.exec("DELETE FROM transport_sessions");
+    let out = fx.run(&[
+        "wake", "set", "--agent", "cy", "--via", "herdr", "--target", "w9:p9",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    fx.store
+        .record_transport_wake(&TransportWake {
+            agent: "cy".into(),
+            session_id: None,
+            transport: "herdr".into(),
+            target: "w9:p9".into(),
+            outcome: WakeOutcome::Unconfirmed,
+            detail: "sent".into(),
+            kind: WakeKind::Mail,
+            message_ids: Vec::new(),
+            trigger: "manual".into(),
+        })
+        .unwrap();
+    let made: (i64, Option<i64>, Option<i64>) = fx
+        .db()
+        .query_row(
+            "SELECT count(*), max(hook_seen_at), max(observed_at) FROM transport_sessions",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(made, (1, None, None), "one row, made by the wake alone");
+    fx.quiet("cy", 95);
+    assert!(full(&fx));
 
     // Reason 2: the name is active and the claim's own session has been quiet.
     let fx = Fx::new();
@@ -1471,7 +1515,7 @@ fn quiet_claim_commands_follow_the_evidence() {
 }
 
 #[test]
-fn no_output_holds_force() {
+fn no_output_prints_a_wake() {
     let fx = Fx::new();
     fx.everything();
     // Beside one row of every kind: a quiet claim of each reason and a gone session
@@ -1511,25 +1555,44 @@ fn no_output_holds_force() {
     for reason in ["name_quiet", "session_quiet", "old_unbound"] {
         assert!(reasons.contains(&reason), "{reason} in {reasons:?}");
     }
+    // The quiet name's claim keeps its release; no step of any row is a wake.
     assert!(v
         .to_string()
-        .contains("another wake --agent eve --message "));
+        .contains("another queue release Q1 --reason \\\"<why>\\\" --owner"));
+    for row in v["rows"].as_array().unwrap() {
+        for key in ["next", "next_delegate"] {
+            for step in strs(&row[key]) {
+                assert!(!step.contains("another wake"), "{row:#}");
+                assert!(!step.contains("--force"), "{row:#}");
+            }
+        }
+    }
+    // The one place the word stands is the closing line's read-only prune, which asks
+    // no transport and types nothing. Nothing else in any form names the command.
+    let prune = "another wake prune --dry-run";
+    let human = fx.needs(&["--limit", "200"]);
+    assert_eq!(human.matches(prune).count(), 1, "{human}");
     for out in [
-        fx.needs(&["--limit", "200"]),
+        human,
         fx.text(),
         fx.brief(),
         v.to_string(),
         fx.needs(&["--json", "--brief"]),
     ] {
+        let rest = out.replace(prune, "");
+        assert!(!rest.contains("another wake"), "{out}");
+        assert!(!rest.contains("wake --"), "{out}");
         assert!(!out.contains("--force"), "{out}");
     }
 }
 
-/// The reviewer's case: the claimer's session is gone and another agent now works in
-/// its pane. Pasting the wake line the list prints must type nothing there.
+/// The reviewers' cases: the claimer's name is quiet and another agent now works in its
+/// pane, on a transport that can type and cannot say who is in a pane. Whatever the
+/// claimer's own row says, the list prints no wake, and running every command it does
+/// print never runs the pane tool.
 #[cfg(unix)]
 #[test]
-fn the_printed_wake_types_nothing_into_another_agents_pane() {
+fn no_printed_step_types_into_another_agents_pane() {
     use std::os::unix::fs::PermissionsExt;
     let fx = Fx::new();
     let root = fx.home.parent().unwrap().to_path_buf();
@@ -1556,50 +1619,72 @@ fn the_printed_wake_types_nothing_into_another_agents_pane() {
     let item = fx.ready("Hold fixes");
     assert_eq!(fx.claim("eve").label, item.label);
     let now = now_ms();
-    let gone_at = now - 120 * MIN;
+    let quiet_at = now - 120 * MIN;
     fx.session("eve", "s-eve001", "fake", "%5");
-    fx.set_session(
-        "eve",
-        "s-eve001",
-        &format!(
-            "state = 'gone', state_since = {gone_at}, observed_at = {now}, hook_seen_at = {gone_at},
-             attention = 'gone', attention_since = {gone_at}"
-        ),
-    );
     fx.session("ann", "s-ann001", "fake", "%5");
     fx.set_session(
         "ann",
         "s-ann001",
         &format!("state = 'working', state_since = {now}, observed_at = {now}, matched = 1"),
     );
-    fx.quiet("eve", 120);
+    // Eve's row as a check leaves it: the pane lists another session's id (`unknown`),
+    // the pane is listed with no id (`present`), or the session is not listed (`gone`).
+    for (state, attention, releases) in [
+        ("unknown", "'unknown'", false),
+        ("present", "NULL", false),
+        ("gone", "'gone'", true),
+    ] {
+        fx.set_session(
+            "eve",
+            "s-eve001",
+            &format!(
+                "state = '{state}', state_since = {quiet_at}, observed_at = {now},
+                 hook_seen_at = {quiet_at}, matched = 0, attention = {attention},
+                 attention_since = {quiet_at}"
+            ),
+        );
+        fx.quiet("eve", 120);
+        let v = fx.json();
+        let row = one(&v, "quiet_claim");
+        assert_eq!(row["reason"], "name_quiet", "{state}");
+        let mut commands = Vec::new();
+        for all in v["rows"].as_array().unwrap() {
+            for key in ["next", "next_delegate"] {
+                for step in strs(&all[key]) {
+                    assert!(!step.contains("another wake"), "{state}: {step}");
+                    commands.extend(command_in(&step).map(str::to_string));
+                }
+            }
+        }
+        assert_eq!(
+            commands.iter().any(|c| c.contains("queue release")),
+            releases,
+            "{state}: {commands:?}"
+        );
+        assert!(commands.len() >= 3, "{state}: {commands:?}");
+        // Run each printed command as the owner or a delegate would paste it.
+        for command in &commands {
+            let filled = command
+                .replace("<why>", "why")
+                .replace("<delegate>", "arch")
+                .replace("<your agent>", "ann");
+            let argv = words(&filled);
+            let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+            fx.run(&args);
+            assert!(
+                !log.exists(),
+                "{state}: `{command}` ran the pane tool: {}",
+                std::fs::read_to_string(&log).unwrap_or_default()
+            );
+        }
+    }
 
-    let row = one(&fx.json(), "quiet_claim");
-    let next = strs(&row["next"]);
-    let wake = next
-        .iter()
-        .find(|step| step.starts_with("another wake --agent eve --message "))
-        .unwrap_or_else(|| panic!("a wake step in {next:?}"));
-    assert!(!wake.contains("--force"), "{wake}");
-
-    let argv = words(wake);
-    let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
-    let out = fx.run(&args);
-    let said = format!("{}{}", text(&out.stdout), text(&out.stderr));
-    assert!(said.contains("nothing was typed"), "{said}");
-    assert!(
-        !log.exists(),
-        "the pane tool was run: {}",
-        std::fs::read_to_string(&log).unwrap_or_default()
-    );
-
-    // The same line with the flag the list no longer prints does type into the pane,
-    // which is what this test guards against.
-    let mut forced = args.clone();
-    forced.push("--force");
-    fx.run(&forced);
+    // The control: the wake the list used to print for this claim does run the tool, in
+    // the pane where ann is working.
+    fx.set_session("eve", "s-eve001", "state = 'unknown'");
+    fx.run(&["wake", "--agent", "eve", "--message", "Q1 has been quiet"]);
     let typed = std::fs::read_to_string(&log).unwrap_or_default();
-    assert!(typed.contains("send %5 "), "{typed:?}");
+    assert!(typed.contains("send %5 Q1 has been quiet"), "{typed:?}");
 }
 
 #[test]

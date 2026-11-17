@@ -29,7 +29,7 @@ Nice to have (N1 to N5), frozen and cut lists are on the scope page. Frozen code
 
 - **No pull request without a ready queue item.** Every queue item and every pull request names one scope id. Work that names none is not agreed work.
 - **Anyone can propose; only the owner, or the architect the owner delegates to, admits.** If you find a problem, record it as a proposed item and move on. Do not open a pull request for it. Security and data-loss findings go to the owner.
-- **A coordinating agent reads what waits on the owner with `another needs --json`** ([docs/NEEDS.md](docs/NEEDS.md)). It runs the steps a row lists under `next_delegate` and reports the rest.
+- **A coordinating agent reads what waits on the owner with `another needs --json`** ([docs/NEEDS.md](docs/NEEDS.md)). It may run the steps a row lists under `next_delegate`, and nothing wider: it runs no step that is only under `next`, wakes no agent on the list's account, and reports every other row to the owner.
 - **Independent review only.** Nobody reviews or merges their own work. No force pushes. No admin bypass.
 - **A development build never runs against the live `~/.another`.** Use `ANOTHER_HOME=$(mktemp -d)` or `--home <tmp>`. Only the installed binary touches the live home.
 - **Schema and decision numbers are assigned at merge time** by the architect. Do not reserve them.

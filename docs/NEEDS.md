@@ -43,7 +43,7 @@ Rows never change the exit code. A script tests `--brief` for empty output and e
 
 ```text
 $ another needs
-7 need the owner (mac, 2026-11-17T14:26:01.912Z)
+7 need the owner (mac, 2026-11-17T16:05:18.244Z)
 
 Decide now (1)
   Q8 security  Token printed in debug output  proposed by codex@shop 3h ago
@@ -61,9 +61,9 @@ Agents (3)
           another queue release Q3 --reason "session gone" --owner
 
 Claims (2)
-  Q4 M4  Hold fixes  claimed by codex@api, quiet for 95 min, not bound to a session, grace ends 2026-11-18T12:51:00.971Z
+  Q4 M4  Hold fixes  claimed by codex@api, quiet for 95 min, not bound to a session, grace ends 2026-11-18T14:30:17.484Z
     next: another queue show Q4
-          another wake --agent codex@api --message "Q4 is claimed under your name and has been quiet. Continue it, or run: another queue release Q4"
+          ask codex@api whether a session is working on Q4: another send --from <your agent> --to codex@api --subject "Who holds Q4?"
           another queue release Q4 --reason "<why>" --owner
   Q7 M9  Hub backup restore  ready, reserved for claude@vps, which cannot take it now
     next: another queue edit Q7 --for-anyone --owner
@@ -157,13 +157,13 @@ What a row shows of the queue:
 
 Next steps:
 
-- Always `another queue show`.
-- For `name_quiet`, a wake with `--message`, then `another queue release <Q> --reason "<why>" --owner`, but only when what is stored licenses them: the name has no session row at all, or every session row of the name was checked in the last 5 minutes and none is working or blocked. A row last checked longer ago licenses nothing, whatever state it shows: with checks stopped, a session seen idle two hours ago may be inside one long tool call.
-- For the other two reasons, and for `name_quiet` in every other case: no wake and no release. The step is to ask the agent which session holds the item.
+- Always `another queue show`, then the ask step: mail the claimer and ask which session holds the item.
+- For `name_quiet` only, a third step, `another queue release <Q> --reason "<why>" --owner`, when what is stored licenses it: the name has no session row a hook made, or every such row was checked in the last 5 minutes and is `idle` or `gone`. Any other state means ask only: `working` and `blocked` are a session at work, and `unknown`, `present` and `no_answer` may be one. A row last checked longer ago licenses nothing, whatever state it shows: with checks stopped, a session seen idle two hours ago may be inside one long tool call. A row that only holds the outcome of a wake by hand is not a session and is not counted.
+- For the other two reasons there is never a release.
 
-The wake line carries no `--force`. With `--message` the wake is sent whether or not mail is unread, and `--force` would only switch off the check that refuses to type into a pane which may hold another agent by now. If the wake answers that nothing was typed, look at the pane; do not add the flag.
+The list prints no command that wakes an agent, for any row. (The closing line's `another wake prune --dry-run` only reads: it asks no transport and types nothing.) Whether a pane still holds the agent is for the wake command to decide when it runs, and nothing the list reads can say it: on a transport that cannot tell who is in a pane, a wake line printed here could type into another agent's session. If you want to wake a quiet agent, look at its pane first and run `another wake` yourself.
 
-With a command transport that cannot list its sessions, the rows of a name are never checked, so a quiet claim under such a name always gets the ask step.
+With a command transport that cannot list its sessions, the rows of a name are never checked, so a quiet claim under such a name gets no release.
 
 **Why no release is printed while the name is active.** A working sibling under the same name may hold the item, and nothing stored says which session made an unbound claim. Releasing it would take work from a running agent. If you have looked and know the session is gone, the command is `another queue release <Q> --reason "<why>" --owner`; it is safe once no session of that name is working on the item.
 
@@ -197,7 +197,7 @@ One object. Every key is always present; a value that does not apply is `null` o
 
 ```json
 {
-  "now": "2026-11-17T14:26:01.931Z",
+  "now": "2026-11-17T16:05:18.263Z",
   "node": "mac",
   "total": 7,
   "limit": 10,
@@ -207,7 +207,7 @@ One object. Every key is always present; a value that does not apply is `null` o
   },
   "closing": {
     "gone_idle": 4,
-    "failed_notices": [{"item": "Q1", "to": "claude@shop", "at": "2026-11-17T14:26:00.980Z"}],
+    "failed_notices": [{"item": "Q1", "to": "claude@shop", "at": "2026-11-17T16:05:17.492Z"}],
     "self_admitted": {"recent": ["Q6", "Q5"], "total": 2}
   },
   "rows": [
@@ -215,7 +215,7 @@ One object. Every key is always present; a value that does not apply is `null` o
       "kind": "unreachable",
       "key": "unreachable:claude@api:91c0f2aa",
       "who": "owner",
-      "since": "2026-11-17T12:21:00.982Z",
+      "since": "2026-11-17T14:00:17.495Z",
       "age_seconds": 7500,
       "agent": "claude@api",
       "item": null,
@@ -228,7 +228,7 @@ One object. Every key is always present; a value that does not apply is `null` o
       "reason": "gone",
       "claims": ["Q3"],
       "name_claims": [],
-      "as_of": "2026-11-17T14:26:00.982Z",
+      "as_of": "2026-11-17T16:05:17.495Z",
       "next": ["another queue show Q3", "another queue release Q3 --reason \"session gone\" --owner"],
       "next_delegate": []
     }
