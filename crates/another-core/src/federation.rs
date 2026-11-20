@@ -274,12 +274,71 @@ fn require_named(entry: &NodeEntry) -> Result<()> {
     Ok(())
 }
 
+/// Whether `name` already names a node other than `node_id`. A node is addressed by its
+/// display name or its id (`identity.rs` `resolve_remote`), so another node's id is taken
+/// too: otherwise `name@project@<node id>`, the form that resolves an ambiguity, is ambiguous.
+fn node_name_taken(conn: &Connection, name: &str, node_id: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM nodes WHERE (display_name = ?1 OR node_id = ?1) AND node_id != ?2",
+            params![name, node_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// Whether `node_id` is already another node's display name. Checked before a node is first
+/// recorded, the inverse of [`node_name_taken`]: a new node whose id is someone's name would
+/// make that identifier match two nodes.
+fn node_id_is_a_name(conn: &Connection, node_id: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM nodes WHERE display_name = ?1 AND node_id != ?1",
+            [node_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// `listed` as a peer's node list may apply it, or `None` to skip it. The name is used only
+/// when a local rename would accept it: valid, not the `local` placeholder, and not another
+/// node's. Otherwise a known node keeps its name, and an unknown one is recorded under its
+/// id, so its key is still learned and its signed events still verify. An unknown node whose
+/// id is already another node's name is skipped: recording it would make that identifier
+/// match two nodes, and skipping one entry keeps the rest of the sync going.
+fn listed_entry(tx: &Tx<'_>, listed: &NodeEntry) -> Result<Option<NodeEntry>> {
+    let known = tx
+        .query_row(
+            "SELECT display_name FROM nodes WHERE node_id = ?1",
+            [&listed.node_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?;
+    if known.is_none() && node_id_is_a_name(tx, &listed.node_id)? {
+        return Ok(None);
+    }
+    let usable = validate_node_name(&listed.display_name).is_ok()
+        && listed.display_name != "local"
+        && !node_name_taken(tx, &listed.display_name, &listed.node_id)?;
+    let display_name = if usable {
+        listed.display_name.clone()
+    } else {
+        known.unwrap_or_else(|| listed.node_id.clone())
+    };
+    Ok(Some(NodeEntry {
+        display_name,
+        ..listed.clone()
+    }))
+}
+
 /// Record (or confirm) another node. Keys are pinned on first sight.
 fn upsert_node(tx: &Tx<'_>, node: &NodeEntry) -> Result<()> {
     if node.node_id == tx.node_id {
         return Ok(());
     }
-    crypto::decode_public(&node.public_key)?;
+    crypto::decode_peer_public(&node.public_key)?;
     let known: Option<(String, Option<String>)> = tx
         .query_row(
             "SELECT display_name, public_key FROM nodes WHERE node_id = ?1",
@@ -306,6 +365,12 @@ fn upsert_node(tx: &Tx<'_>, node: &NodeEntry) -> Result<()> {
             Ok(())
         }
         None => {
+            if node_id_is_a_name(tx, &node.node_id)? {
+                return Err(Error::Conflict(format!(
+                    "node {}'s id is already another node's name; rename that node first",
+                    node.node_id
+                )));
+            }
             tx.execute(
                 "INSERT INTO nodes (node_id, display_name, role, is_local, created_at, public_key)
                  VALUES (?1, ?2, 'peer', 0, ?3, ?4)",
@@ -498,7 +563,9 @@ fn verify_wire(conn: &Connection, ev: &WireEvent) -> Result<()> {
         &ev.kind,
         &ev.payload,
     );
-    if crypto::verify(&key, &msg, &ev.sig) {
+    // Strict: a weak key pinned before keys were checked cannot verify the degenerate
+    // signature (FINDINGS-main-weak-keys).
+    if crypto::verify_strict(&key, &msg, &ev.sig) {
         Ok(())
     } else {
         Err(Error::Forbidden("bad event signature".into()))
@@ -595,15 +662,11 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
             else {
                 return Ok(());
             };
-            let taken = conn
-                .query_row(
-                    "SELECT 1 FROM nodes WHERE display_name = ?1 AND node_id != ?2",
-                    params![name, origin],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some();
-            if taken {
+            // The local rename rule. `set_node_name` always applies it; a `node.created`
+            // whose name came unchecked from ANOTHER_NODE_NAME is refused once, and pairing
+            // needs a valid rename first anyway.
+            validate_node_name(name)?;
+            if node_name_taken(conn, name, origin)? {
                 return Err(Error::Forbidden(format!(
                     "{kind} names {name:?}, which another node already has"
                 )));
@@ -629,6 +692,16 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
         "resource.registered" => {
             agent("owner_id")?;
             project()?;
+            // A local registration types these as u16 / u32; refuse what no build sends.
+            for (field, max) in [("port", u64::from(u16::MAX)), ("pid", u64::from(u32::MAX))] {
+                if let Some(v) = p.get(field).filter(|v| !v.is_null()) {
+                    if v.as_u64().is_none_or(|n| n > max) {
+                        return Err(Error::Invalid(format!(
+                            "resource {field} {v} is not a valid {field}"
+                        )));
+                    }
+                }
+            }
             resource()
         }
         "resource.adopted" => {
@@ -1123,15 +1196,7 @@ impl Store {
     pub fn set_node_name(&self, name: &str) -> Result<NodeEntry> {
         validate_node_name(name)?;
         self.write(|tx| {
-            let taken = tx
-                .query_row(
-                    "SELECT 1 FROM nodes WHERE display_name = ?1 AND is_local = 0",
-                    [name],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some();
-            if taken {
+            if node_name_taken(tx, name, tx.node_id)? {
                 return Err(Error::Conflict(format!(
                     "another known node is already named {name:?}"
                 )));
@@ -1199,7 +1264,7 @@ impl Store {
                 return Err(denied());
             };
             let msg = crypto::request_message(method, path_and_query, time_ms, body);
-            if crypto::verify(&key, &msg, signature) {
+            if crypto::verify_strict(&key, &msg, signature) {
                 Ok(perms_of(&perms))
             } else {
                 Err(denied())
@@ -1295,7 +1360,7 @@ impl Store {
     /// Hub side: accept a pairing request carrying a valid, unused invite.
     pub fn accept_pairing(&self, req: &PairRequest) -> Result<PairResponse> {
         validate_node_name(&req.node.display_name)?;
-        crypto::decode_public(&req.node.public_key)?;
+        crypto::decode_peer_public(&req.node.public_key)?;
         self.write(|tx| {
             let denied = || Error::Forbidden("invalid, used or expired invite".into());
             let row: Option<(String, String, i64, Option<i64>)> = tx
@@ -1312,14 +1377,7 @@ impl Store {
                 return Err(denied());
             }
             let hub = local_entry(tx)?;
-            let clash = tx
-                .query_row(
-                    "SELECT 1 FROM nodes WHERE display_name = ?1 AND node_id != ?2",
-                    params![req.node.display_name, req.node.node_id],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some();
+            let clash = node_name_taken(tx, &req.node.display_name, &req.node.node_id)?;
             if clash || req.node.node_id == hub.node_id {
                 return Err(Error::Conflict(format!(
                     "a node named {:?} is already known; rename the joining node",
@@ -1679,7 +1737,21 @@ impl Store {
                 return Err(Error::Forbidden("not a paired node".into()));
             };
             for n in nodes {
-                upsert_node(tx, n)?;
+                // A weak key in the directory (a hub may have pinned one before keys were
+                // checked) is never pinned here, but it does not stop the rest of the page
+                // from syncing: events from that node then fail as from an unknown origin
+                // (FINDINGS-197 adv197).
+                if crypto::decode_public(&n.public_key).is_ok_and(|k| k.is_weak()) {
+                    continue;
+                }
+                // A spoke speaks only for itself (public keys prove nothing about the
+                // sender); for its spokes, the hub's list is the directory.
+                if role == "spoke" && n.node_id != from {
+                    continue;
+                }
+                if let Some(entry) = listed_entry(tx, n)? {
+                    upsert_node(tx, &entry)?;
+                }
             }
             let mut report = IngestReport::default();
             for ev in events {
