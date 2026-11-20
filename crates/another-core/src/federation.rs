@@ -83,7 +83,7 @@ pub struct NodeEntry {
 }
 
 /// Contents of an invite code (`another pair invite`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Invite {
     pub v: u8,
     pub hub_url: String,
@@ -94,11 +94,38 @@ pub struct Invite {
     pub expires_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The pairing secret lets a node join until the invite expires, so `Debug` never prints
+/// it. `Serialize` keeps it: the invite code is built from it.
+impl std::fmt::Debug for Invite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Invite")
+            .field("v", &self.v)
+            .field("hub_url", &self.hub_url)
+            .field("hub", &self.hub)
+            .field("invite_id", &self.invite_id)
+            .field("secret", &"<redacted>")
+            .field("perms", &self.perms)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PairRequest {
     pub invite_id: String,
     pub secret: String,
     pub node: NodeEntry,
+}
+
+/// As for [`Invite`], the pairing secret is never printed.
+impl std::fmt::Debug for PairRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PairRequest")
+            .field("invite_id", &self.invite_id)
+            .field("secret", &"<redacted>")
+            .field("node", &self.node)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
