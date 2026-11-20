@@ -239,12 +239,23 @@ pub struct HoldPathsArgs {
     pub repo_wide: bool,
 }
 
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 #[derive(Debug, Default, Serialize, JsonSchema)]
 pub struct HoldPathsOut {
     pub granted: Vec<Hold>,
     pub conflicts: Vec<HoldConflict>,
     /// Overlapping holds on other nodes (same project name): warnings, never blocking.
     pub warnings: Vec<HoldConflict>,
+    /// Overlapping holds on other nodes found but not listed in `warnings` (it lists ten).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub warnings_more: u32,
+    /// Holds on other nodes that were not compared, by node: that comparison stops at a
+    /// fixed amount of work. They may overlap; they never block.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub not_compared: Vec<another_core::NotCompared>,
     pub renewed: Vec<Hold>,
     pub released: Vec<String>,
     pub holds: Vec<Hold>,
@@ -664,6 +675,8 @@ impl AnotherMcp {
                     out.granted = report.granted;
                     out.conflicts = report.conflicts;
                     out.warnings = report.warnings;
+                    out.warnings_more = report.warnings_more;
+                    out.not_compared = report.not_compared;
                 }
                 HoldAction::Check => {
                     out.conflicts = s.check_holds_scoped(

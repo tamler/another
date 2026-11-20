@@ -119,7 +119,11 @@ pub struct DashCounts {
     pub stale: u32,
     pub holds: u32,
     pub conflicts: u32,
+    /// Overlaps with holds on other nodes; at most ten are listed on the holds themselves.
     pub remote_warnings: u32,
+    /// Holds on other nodes that this snapshot did not compare: the comparison is best
+    /// effort within one fixed budget, and a peer chooses how many holds it sends.
+    pub remote_not_compared: u32,
     pub requests_open: u32,
     pub requests_claimed: u32,
     pub requests_stale: u32,
@@ -324,14 +328,6 @@ struct RawMessage {
     request_id: Option<String>,
 }
 
-struct ForeignHold {
-    hold_id: String,
-    agent: String,
-    project: String,
-    pattern: String,
-    node: String,
-}
-
 fn expose_body(
     include_bodies: bool,
     message_node: &str,
@@ -369,7 +365,7 @@ impl Store {
         let peers = self.peers()?;
         let hour = self.activity_summary(Some(Since::Time(now - HOUR_MS)))?;
         let day = self.activity_summary(Some(Since::Time(now - DAY_MS)))?;
-        let extra = self.read(|conn| load_extra(conn, self.node_id(), now, view.bodies))?;
+        let extra = self.read(|conn| load_extra(conn, self.node_id(), view.bodies))?;
 
         let mut agents: Vec<DashAgent> = extra
             .agents
@@ -427,23 +423,45 @@ impl Store {
                 dash_holds[j].conflicts.push(clash_of(a, None));
             }
         }
-        let mut warning_pairs = 0u32;
+        // Other nodes' holds, project by project, within one budget for the whole snapshot
+        // (`holds::FOREIGN_BUDGET`): a peer chooses how many there are and what they cost.
+        let mut by_project: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
         for (i, hold) in holds.iter().enumerate() {
-            for foreign in &extra.foreign_holds {
-                if foreign.project != hold.project
-                    || !patterns_overlap(&hold.pattern, &foreign.pattern)
-                {
-                    continue;
+            by_project.entry(hold.project.as_str()).or_default().push(i);
+        }
+        let mut foreign = holds::ForeignClashes::default();
+        let mut budget = holds::FOREIGN_BUDGET;
+        self.read(|conn| {
+            for (project, mine) in &by_project {
+                let patterns: Vec<(String, String)> = mine
+                    .iter()
+                    .map(|&i| (holds[i].pattern.clone(), holds[i].pattern.clone()))
+                    .collect();
+                let seen = foreign.listed.len();
+                holds::foreign_clashes(
+                    conn,
+                    self.node_id(),
+                    now,
+                    project,
+                    &patterns,
+                    &mut budget,
+                    &mut foreign,
+                )?;
+                for (local, clash, node) in &foreign.listed[seen..] {
+                    dash_holds[mine[*local]].remote_warnings.push(DashClash {
+                        hold_id: clash.held.hold_id.clone(),
+                        agent: clash.held.agent.clone(),
+                        project: clash.held.project.clone(),
+                        pattern: clash.held.pattern.clone(),
+                        node: Some(node.clone()),
+                    });
                 }
-                warning_pairs += 1;
-                dash_holds[i].remote_warnings.push(DashClash {
-                    hold_id: foreign.hold_id.clone(),
-                    agent: foreign.agent.clone(),
-                    project: foreign.project.clone(),
-                    pattern: foreign.pattern.clone(),
-                    node: Some(foreign.node.clone()),
-                });
             }
+            Ok(())
+        })?;
+        let warning_pairs = foreign.listed.len() as u32 + foreign.more;
+        let remote_not_compared = foreign.not_compared.iter().map(|n| n.holds).sum();
+        for (i, hold) in holds.iter().enumerate() {
             let agent = by_address.get(hold.agent.as_str());
             // A cross-node clash is only a warning. Releasing still requires the
             // local owner to be away or stale, even when the hold also overlaps locally.
@@ -487,6 +505,7 @@ impl Store {
             holds: dash_holds.len() as u32,
             conflicts: conflict_pairs,
             remote_warnings: warning_pairs,
+            remote_not_compared,
             requests_open: *request_counts.get("open").unwrap_or(&0),
             requests_claimed: *request_counts.get("claimed").unwrap_or(&0),
             requests_stale: *request_counts.get("stale").unwrap_or(&0),
@@ -768,13 +787,12 @@ struct Extra {
     unread: HashMap<String, u32>,
     projects: Vec<DashProject>,
     threads: Vec<DashThread>,
-    foreign_holds: Vec<ForeignHold>,
     request_to: HashMap<String, Vec<String>>,
     request_counts: Vec<(String, u32)>,
     seq: i64,
 }
 
-fn load_extra(conn: &Connection, local: &str, now: i64, include_bodies: bool) -> Result<Extra> {
+fn load_extra(conn: &Connection, local: &str, include_bodies: bool) -> Result<Extra> {
     let agents = {
         let mut stmt = conn.prepare(&format!(
             "SELECT {AGENT_COLUMNS} FROM agents a
@@ -803,27 +821,6 @@ fn load_extra(conn: &Connection, local: &str, now: i64, include_bodies: bool) ->
                 slug: r.get(0)?,
                 path: r.get(1)?,
                 node: r.get(2)?,
-            })
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    let foreign_holds = {
-        let mut stmt = conn.prepare(
-            "SELECT h.hold_id, a.address, p.slug, h.pattern, n.display_name
-             FROM holds h
-             JOIN projects p ON p.project_id = h.project_id
-             JOIN agents a ON a.agent_id = h.agent_id
-             JOIN nodes n ON n.node_id = h.node_id
-             WHERE h.released_at IS NULL AND h.expires_at > ?1 AND h.node_id != ?2
-             ORDER BY h.created_at",
-        )?;
-        let rows = stmt.query_map(params![now, local], |r| {
-            Ok(ForeignHold {
-                hold_id: r.get(0)?,
-                agent: r.get(1)?,
-                project: r.get(2)?,
-                pattern: r.get(3)?,
-                node: r.get(4)?,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -861,7 +858,6 @@ fn load_extra(conn: &Connection, local: &str, now: i64, include_bodies: bool) ->
         unread,
         projects,
         threads,
-        foreign_holds,
         request_to,
         request_counts,
         seq,
