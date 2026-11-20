@@ -175,7 +175,9 @@ fn a_hub_error_in_a_failed_command_cannot_retitle_the_terminal() {
     let said = String::from_utf8_lossy(&once.stderr);
     assert!(!once.status.success(), "{said:?}");
     assert!(said.starts_with("another: "), "{said:?}");
-    assert!(said.contains("hub says ?]0;pwned? ?[2J done"), "{said:?}");
+    // The hub's error body is not signed: it is quoted as one line, each control character
+    // a space, before the message reaches the terminal.
+    assert!(said.contains("hub says  ]0;pwned   [2J done"), "{said:?}");
     assert!(!has_control(&once.stderr), "{said:?}");
 }
 
@@ -219,5 +221,5 @@ fn a_hub_error_in_sync_watch_cannot_retitle_the_terminal() {
 
     assert!(got.contains("hub says"), "no watch error line: {got:?}");
     assert!(!has_control(got.trim_end().as_bytes()), "{got:?}");
-    assert!(got.contains("?]0;pwned?"), "{got:?}");
+    assert!(got.contains(" ]0;pwned "), "{got:?}");
 }

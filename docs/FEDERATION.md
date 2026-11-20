@@ -22,8 +22,13 @@ Several machines, such as a laptop, a remote runner and a GPU box, each run thei
     - This node already syncs with a different hub: ``this node already syncs with another hub; revoke it first: `another pair revoke <hub>` ``. Because this is refused before the request is sent, it does not use up the other hub's invite.
 
     The one revoke a join clears is this node's own revoke of its hub: a spoke that ran `another pair revoke <hub>` and joins that hub again with a fresh invite syncs with it again, with the new invite's URL and permissions. The invite may give the hub another name, so `pair join` then prints a second line, `this join lifted this node's own revoke of hub <name it was stored under> (key <fingerprint>); it syncs with that hub again`, and the local `peer.paired` event records `revoke_lifted` and `previous_name`.
-  - **An invite code is not signed.** The hub's answer to a join is signed; the code itself is not, and the address in it is covered by neither signature. So whoever hands you a code chooses the address this node sends its pairing request to and then syncs through. A genuine invite with only its address changed still joins, if what answers at that address passes the request on to the real hub; this node then syncs through that address, and the hub's answers to a pull are not signed yet, so what sits there can read what passes and change this node's view of the directory. It can do three more things. It can drop this node's pushes while `another sync` reports them as pushed, because the answer to a push is not signed either. It can put its own key on the id of a real node this node has not seen yet, and this node then accepts events signed with that key as that node's. And that key stays: after the owner joins again with an honest code, sync fails with `node <id> presented a different key than before; refusing`, no command recovers that home, and it needs a new home. None of this is closed here; it is to be closed by a later decision, under which the hub signs its invites and its answers to a pull. Take a code from the hub's owner directly, over a channel you trust, and check the address `pair join` prints. The joiner checks only the form of the address: it must be an `http://` or `https://` URL with a host, or nothing is sent (`this invite's hub address is not an http:// or https:// URL with a host; not joined`). A second join to the hub this node already has replaces the stored address with the new code's and the permissions with the ones the hub's signed answer grants, so the same care applies to every code, not only the first.
-  - **What is not covered.** A stolen home directory holds the private key, so its holder is that node; revoke it on the hub. A leaked invite code lets its holder join as a new node under any free name; the invite is single use, so the intended join then fails. An invite holder who knows the id of a node that has not paired yet can pair first under that id with its own key; the real node is then refused ("presented a different key") and the hub's audit log records the refusal. No command undoes that: revoke the squatter and give the real machine a new home. Spokes trust their hub's node list. The hub's answers to a pull are not signed, so a party between a spoke and its hub on a plaintext link can change the spoke's view of the directory; keep the link behind TLS or a private network as described in [REMOTE.md](REMOTE.md). There is no key rotation.
+  - **The hub signs its invites and its answers.** Something that answers in front of the real hub, at an address edited into an invite or on the path of a plain `http://` link, can make a sync fail. It cannot make a spoke apply anything the hub did not sign.
+    - **Invites.** The hub signs the whole invite with its node key: the format number, its id, key and name, the address, the invite id, the hash of the secret, the permissions and the expiry. `another pair join` checks that signature against the hub key in the invite before it sends anything. An invite with no signature is refused (`this invite is not signed by its hub: ...`), and so is one in which any field was changed after the hub made it (`this invite's signature does not match its contents: ...`). Nothing is sent and the invite is not used up. So the address a node syncs through is one the hub's owner gave to `another pair invite --url`. That command refuses an address that is not an `http://` or `https://` URL with a host, or that holds white space or a control character (`hub url must be an http:// or https:// URL with a host`); the joiner applies the same rule again before it dials.
+    - **Answers to a push and a pull.** A spoke sends a fresh random nonce with every push and pull. The hub signs each `200` answer with its node key over its id, the spoke's id, the nonce, the request's own signature and the SHA-256 of the answer body. The spoke checks that against the hub key it pinned at pairing before it reads one field of the body. An answer without a signature, or with one that is not the hub's for this request and this body, is refused: nothing from it is applied, no cursor moves, a `denied` row goes into the audit log (`another audit`), and `another sync` exits 1 with the reason. An old answer played again, an answer to an earlier request, and an answer meant for another spoke all fail that check.
+    - **No unsigned mode.** A spoke applies no unsigned answer. A hub refuses a push or pull that carries no nonce with `426` before anything is stored, with a text that tells the owner of that node to update it. So a hub and a spoke sync only when both run a build that signs (see "Upgrading" below).
+    - **What something on the path can still do.** Drop requests and answers: `another sync` then fails and says so, the cursors stay, and the events are sent again next time. `last sync` in `another peers` is the last sync that ran to its end, so a sync that keeps failing shows as stale in `another doctor` after 24 hours on the spoke, and after 7 days on the hub. Read a plain `http://` link: signatures hide nothing. `another pair invite`, `another pair join` and `another doctor` warn when the hub's address is plain `http://` and its host is not `127.0.0.1`, `localhost` or `[::1]`. That is right for a private network and wrong on the open internet; use an `https://` address there. An error answer (anything that is not `200`) is not signed and is only ever a failure: its text is quoted as one line of at most 600 characters, and nothing in it changes state.
+    - A second join to the hub this node already has replaces the stored address with the new invite's and the permissions with the ones the hub's signed answer grants. It keeps the cursors.
+  - **What is not covered.** A stolen home directory holds the private key, so its holder is that node; revoke it on the hub. A leaked invite code lets its holder join as a new node under any free name; the invite is single use, so the intended join then fails. An invite holder who knows the id of a node that has not paired yet can pair first under that id with its own key; the real node is then refused ("presented a different key") and the hub's audit log records the refusal. No command undoes that: revoke the squatter and give the real machine a new home. Secrecy needs `https://` or a private link: on a plain `http://` link anyone on the path can read mail and the feed in transit, and can make a sync fail; keep the link behind TLS or a private network as described in [REMOTE.md](REMOTE.md). A hub the owner chose is trusted for the directory: spokes take the node list their hub signs. An invite whose hub key was replaced, and which was signed again with that key, is a valid invite to another hub; no signature can show that, only the fingerprint can (see "Set up" below). There is no key rotation.
 
 ## What travels where
 
@@ -51,7 +56,7 @@ The hub enforces permissions on what spokes push, and each node checks them agai
 
 ## Set up
 
-Upgrade the hub before the spokes, and make invites after the hub's upgrade: a hub accepts only signed pairing requests, and a spoke joins only with an invite made by a build that signs (see "Upgrading" below). Nodes that are already paired keep syncing in any order.
+Upgrade a hub and all its spokes together, and make invites after the hub's upgrade: a hub and a spoke sync only when both run a build that signs answers, a hub accepts only signed pairing requests, and a spoke joins only with an invite its hub signed (see "Upgrading" below). Nodes that are already paired stay paired; they do not pair again.
 
 Name each node first; names must be unique across the federation, whatever their case:
 
@@ -69,7 +74,9 @@ another serve --federation --bind 127.0.0.1:7468
 another pair invite --url https://studio.my-tailnet.ts.net --perms read_feed,send_mail,borrow_resource --expires 1h
 ```
 
-The invite code is single-use. It carries the hub's URL, node id and public key, and a secret. Treat the code as a password until it is used or expires: whoever holds it can join as a new node. The code is not signed, so the URL in it is whatever the person who gave it to you put there: take a code from the hub's owner directly. If it came through an untrusted channel, compare the printed key fingerprint with `another node show` on the hub, and the printed address with the hub's own.
+The invite code is single-use. It carries the hub's URL, node id and public key, and a secret. Treat the code as a password until it is used or expires: whoever holds it can join as a new node. The code is signed by the hub key it names, so its address cannot be changed without that key. If the code came over a channel you do not trust, compare the fingerprint `pair join` prints with `another node show` on the hub before you run `another sync`: a join exchanges nothing but the pairing request, and `another pair revoke <hub>` undoes it.
+
+Give `--url` an `https://` address unless the link to the hub is a private network. For a plain `http://` address that is not loopback, `pair invite` prints the code and then a warning on standard error (with `--json`, in `"warnings"`), and `pair join` does the same on the spoke.
 
 On each spoke:
 
@@ -131,16 +138,49 @@ Two things you will see after a release, both expected:
 
 For a rebuilt hub: if a spoke joins the new hub while the old hub's row still holds the name, the new hub is recorded under its id, `another peers` shows that id as the name, and its agents are addressed `x@@<new hub id>`. After `another pair release-name <old hub>` the next `another sync` applies the new hub's name from its list. A spoke that never knew the old hub sees the name at once.
 
+### A pinned key that is wrong
+
+A node pins another node's key the first time it sees it, and never replaces it. `another sync` can fail with exit code 3 and this text:
+
+```
+the hub's signed node list gives node <node id> the key <listed fingerprint>, but this node pinned the key <pinned fingerprint> for it earlier; the answer is refused and this node cannot sync. ...
+```
+
+It means this home and its hub hold two different keys for one node. A node's key never changes, so one of the two is wrong. The answer that carried the list is not applied, and the refusal is in the audit log (`another audit`) as `node list names <node id> with key <listed fingerprint>; pinned <pinned fingerprint>`.
+
+- **Which one is wrong.** Run `another node show` on the node the text names and compare its fingerprint with the two in the text.
+- **The pinned key is wrong.** This home synced, on a build before the hub signed its answers, through something that answered in the hub's place and listed its own key for that node. The home may also hold events that were accepted under that key and has skipped that node's real ones. There is no repair command: replace the home. Make a new home, name it and join with a fresh invite; on the hub, `another pair revoke <old node>` and, to give the new home the old name, `another pair release-name <old node>` (see "Replacing a machine" above).
+- **The hub's key is wrong.** This can only be a hub that is itself a spoke of another hub and whose own home was damaged in the same way: it now signs the wrong key to its spokes. That hub's home is the one to replace.
+
+What a replaced home loses: its node id, and everything that never leaves a node, which is the queue, tokens, OAuth clients and grants, the local pairing history, wake targets and the audit log. What it shared (its agents' registrations, mail and activity) stays on the hub and the other nodes under the old node id.
+
+From this build on, a list reaches a spoke only in an answer its hub signed, so nothing on the path can pin a key. The one remaining way into this state is to join an invite whose hub key was replaced and to sync without comparing the fingerprint.
+
 ### Upgrading
 
-Nothing already paired stops syncing in any combination of old and new builds. Pairing changed:
+**A hub and its spokes are upgraded together.** From this build on the hub signs its answers to a push and a pull, and a spoke applies nothing else. There is no working mix of builds for sync:
+
+| Hub | Spoke | Join | Sync |
+|---|---|---|---|
+| this build | this build | signed invite required and verified | every answer verified |
+| this build | older | works as before | refused by the hub: the spoke prints ``push failed (426 Upgrade Required): this hub signs its answers and serves only nodes that ask for that, and this request did not. Update this node to the hub's build, then run `another sync`. Nothing was stored, nothing is lost, and the node does not need to pair again`` (or `pull failed ...` when it had nothing to push), exit 1. The hub stores nothing and writes a `denied` audit row |
+| older | this build | refused before anything is sent: `this invite is not signed by its hub: ...` | refused by the spoke: `the hub at <address> answered the push without a signature; refused, and nothing from that answer was applied. Either the hub runs an older build (update the hub and its spokes together), or ...`, exit 1. If that request was a push, the older hub has already stored the batch; it is sent again after the hub is updated and counts as already there |
+| older | older | as before | as before, and open to everything this build closes |
+
+- Upgrade a hub and all its spokes in one sitting. In a chain (a hub that is itself a spoke of another hub), go from the top down. Each link behaves by the table on its own: a node on this build between an older hub and its own spokes refuses the older hub's answers and keeps serving its spokes.
+- The order within the sitting does not matter for safety. Whichever end is behind, sync on that link stops with one of the two texts above until it follows, and then resumes from the stored cursors.
+- Nothing is lost in between. Events wait in each node's log, and cursors move only on an answer that was applied.
+- No node pairs again. Neither refusal touches a pairing, so after both ends are updated `another sync` works with the hub, key and cursors each node already has.
+- On each spoke, after upgrading: run `another sync`. For a hub that was joined on a build before invites were signed, `another doctor` then warns `hub <name> was joined before invites were signed, so its address <address> was never checked; ...`, `another sync` prints one `note:` line about it on standard error after each successful sync (with `--watch`, once), and `another peers` marks the hub's row `(joined before invites were signed; address not checked)`. Sync works all the same. The stored address came from an invite nothing had signed: compare it, as `another peers` shows it, with the address the hub's owner gives. To clear the warning, join again: on the hub `another pair invite --url <address> --perms <the spoke's current permissions>`, on the spoke `another pair join <code>`. A new join replaces the spoke's permissions with the invite's, on both sides, so give the invite the permissions `another peers` shows now. It keeps the cursors.
+
+Pairing changed twice before that. First pairing requests were signed, then invites:
 
 | Joiner | Hub | What happens |
 |---|---|---|
-| new | new | Works. |
-| old | new | The hub answers 403 and the joiner prints `pairing failed (403 Forbidden): this hub accepts only signed pairing requests; upgrade the joining node; an invite made before the hub was upgraded must be made again`. The invite is not used. |
-| new | any, with an invite made by an older build | The joiner refuses before sending anything: `this invite was made by an older build; make a new invite on an upgraded hub`. |
-| new | old | An older hub does not accept a signed request (it answers 422) and uses nothing. |
+| this build | this build | Works. |
+| a build before signed pairing | this build | The hub answers 403 and the joiner prints `pairing failed (403 Forbidden): this hub accepts only signed pairing requests; upgrade the joining node; an invite made before the hub was upgraded must be made again`. The invite is not used. |
+| this build | any, with an invite a build before signed invites made | The joiner refuses before sending anything: `this invite is not signed by its hub: an older build made it, or its signature was removed; not joined. Make a new invite on a hub that runs this build or a newer one`. An invite from before signed pairing does not decode and is refused as `invalid invite code`. |
+| this build | a build before signed pairing | An older hub does not accept a signed request (it answers 422) and uses nothing. |
 
 A node that an older build let be named `local` keeps that name wherever it is already recorded, but cannot pair or pair again until it is renamed. Two nodes whose names already differ only in case both keep working; nothing renames them.
 
@@ -276,7 +316,23 @@ What that costs: no other node ever receives that event. For an agent's registra
 
 ## Wire protocol (for implementers)
 
-- An invite code is `another-invite:` followed by the unpadded URL-safe base64 of the JSON `{v, hub_url, hub: {node_id, display_name, public_key}, invite_id, secret, perms, expires_at}`. `v` is `2`. `invite_id` is a ULID, like a node id; a joiner refuses a code with anything else there as `invalid invite code`, before it signs. The hub stores only the lowercase hex SHA-256 of the `secret` text.
+- An invite code is `another-invite:` followed by the unpadded URL-safe base64 of the JSON `{v, hub_url, hub: {node_id, display_name, public_key}, invite_id, secret, perms, expires_at, sig}`. `v` is `2`. `invite_id` is a ULID, like a node id; a joiner refuses a code with anything else there as `invalid invite code`, before it signs. The hub stores only the lowercase hex SHA-256 of the `secret` text.
+  - `sig` is the hub's Ed25519 signature, checked with the strict rules against `hub.public_key`, over these UTF-8 fields joined by one `\n`, with no trailing newline:
+
+    ```
+    another-invite-v1
+    {v as decimal}
+    {hub node_id}
+    {hub public_key}
+    {hub display_name}
+    {hub_url}
+    {invite_id}
+    {sha256_hex(secret)}
+    {perms, joined by ","}
+    {expires_at as decimal}
+    ```
+
+    The joiner checks it right after the code decodes and before any other field is judged, in this order: no `sig` is refused as not signed; a line break in the hub's id, key or name, the address or the invite id is `invalid invite code`; a signature that does not verify is refused as not matching the contents; then a `v` other than `2`, the expiry and the shape of each field. A field the joiner does not know is not signed and is ignored.
 - `POST /fed/pair`: `{invite_id, node: {node_id, display_name, public_key}, time_ms, sig}` returns `{hub: {node_id, display_name, public_key}, perms, sig}`. The request holds no secret.
   - The request's `sig` is the joiner's Ed25519 signature, checked with the strict rules against `node.public_key`, over these UTF-8 fields joined by one `\n`, with no trailing newline:
 
@@ -312,7 +368,21 @@ What that costs: no other node ever receives that event. For an agent's registra
   - `x-another-time: <ms>`
   - `x-another-signature: <Ed25519 over "another-request-v1\n{method}\n{path?query}\n{time}\n{sha256(body)}">`
 
-  The hub rejects requests from unpaired or revoked nodes, and requests whose clock is more than 5 minutes off.
+  - `x-another-nonce: <16 random bytes as 32 lowercase hex characters>`, new for every request, a retry included. It is not part of the request signature.
+
+  The hub rejects requests from unpaired or revoked nodes, and requests whose clock is more than 5 minutes off (`401`). After that check, and before anything is stored or read from its log, it answers a request with no `x-another-nonce` with `426`, the header `Upgrade: another-signed-sync/1` and an `invalid` error, and one whose nonce is not 32 lowercase hex characters with `400`.
+- Every `200` answer to a push or a pull carries `x-another-signature`: the hub's Ed25519 signature, checked by the spoke with the strict rules against the hub key it pinned at pairing, over these fields joined by one `\n`:
+
+  ```
+  another-answer-v1
+  {hub node_id}
+  {spoke node_id}
+  {the request's x-another-nonce}
+  {the request's x-another-signature, as text}
+  {sha256_hex(answer body)}
+  ```
+
+  The body is the answer as the hub serialized it, before any content encoding, and the hub sends exactly the bytes it hashed. The spoke hashes the body after content decoding, so a proxy that compresses the answer with gzip still verifies, and one that rewrites the JSON does not. The spoke verifies before it parses the body. Error answers are not signed.
 - A `WireEvent` is `{seq, event_id, node_id, ts, actor, kind, payload, prev_id, sig}`, where `payload` is the exact signed JSON text. The signature covers `"another-event-v1\n{event_id}\n{node_id}\n{ts}\n{actor}\n{kind}\n{sha256(payload)}"`.
 
 ## Limits (v2)

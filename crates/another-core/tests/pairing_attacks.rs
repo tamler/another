@@ -210,6 +210,38 @@ fn encode(invite: &Value) -> String {
     )
 }
 
+/// Sign `invite` as it now reads with the private key `secret_key`. A hub signs every field
+/// of its invites, so an invite that anyone else edited is refused for its signature before
+/// any other check; the attacks below that edit an invite are made by whoever holds the
+/// invite's key, and sign it again. The bytes are built by hand: `another-invite-v1`, the
+/// format number, hub id, hub key, hub name, address, invite id, sha256 hex of the secret,
+/// the permission names joined by `,`, the expiry; joined by one newline.
+fn resign(invite: &mut Value, secret_key: &str) {
+    let perms: Vec<&str> = invite["perms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect();
+    let bytes = [
+        "another-invite-v1".to_string(),
+        invite["v"].to_string(),
+        text(&invite["hub"], "node_id").to_string(),
+        text(&invite["hub"], "public_key").to_string(),
+        text(&invite["hub"], "display_name").to_string(),
+        text(invite, "hub_url").to_string(),
+        text(invite, "invite_id").to_string(),
+        crypto::sha256_hex(text(invite, "secret").as_bytes()),
+        perms.join(","),
+        invite["expires_at"].to_string(),
+    ]
+    .join("\n");
+    invite["sig"] = json!(crypto::sign(
+        &crypto::decode_secret(secret_key).unwrap(),
+        bytes.as_bytes()
+    ));
+}
+
 /// The bytes a pairing request signature covers, built by hand:
 /// `another-pair-v1`, hub id, hub key, invite id, sha256 hex of the secret, joiner id,
 /// joiner key, joiner name, time; joined by one newline.
@@ -584,6 +616,7 @@ fn a8_a_node_id_must_be_a_ulid() {
     for id in &bad_ids {
         let mut forged = fresh.clone();
         forged["hub"]["node_id"] = json!(id);
+        resign(&mut forged, &hub.secret());
         let shown: String = id.chars().take(30).collect();
         let err = match joiner.store.prepare_join(&encode(&forged)) {
             Ok(_) => panic!("built a pairing request for a hub whose id is {shown:?}"),
@@ -991,6 +1024,7 @@ fn a18_an_invite_cannot_name_this_node_or_swap_a_known_nodes_key() {
     let mut own = made.clone();
     own["hub"]["node_id"] = json!(solo.id());
     own["hub"]["display_name"] = json!("evil");
+    resign(&mut own, &mallory.secret());
     let before = solo.rows();
     let expected = "this invite names this node itself as its hub; a node cannot join itself";
     let err = match solo.store.prepare_join(&encode(&own)) {
@@ -1033,6 +1067,7 @@ fn a18_an_invite_cannot_name_this_node_or_swap_a_known_nodes_key() {
         let mut swapped = made.clone();
         swapped["hub"]["node_id"] = json!(known);
         swapped["hub"]["display_name"] = json!(name);
+        resign(&mut swapped, &mallory.secret());
         let before = joiner.rows();
         let expected = format!("node {known} presented a different key than before; refusing");
         let err = match joiner.store.prepare_join(&encode(&swapped)) {

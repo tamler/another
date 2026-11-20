@@ -3,6 +3,14 @@
 //!
 //! Node-to-node requests are signed with the sending node's key over method, path, time and
 //! body; the hub checks them against the key it pinned at pairing.
+//!
+//! The hub's answers to a push and a pull are signed too. A spoke sends a fresh nonce with
+//! each of those requests, the hub signs its `200` answer over its id, the spoke's id, the
+//! nonce, the request's signature and the hash of the answer body, and the spoke checks
+//! that against the hub key it pinned at pairing before it reads the body. So something
+//! that answers in front of the hub can make a sync fail, and nothing else. There is no
+//! unsigned mode: a spoke applies no unsigned answer, and a hub serves no push or pull
+//! that carries no nonce.
 
 use std::time::Duration;
 
@@ -13,7 +21,7 @@ use another_core::{
 use anyhow::{anyhow, bail, Context, Result};
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::{HeaderMap, Method, StatusCode, Uri};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use serde_json::json;
@@ -21,6 +29,23 @@ use serde_json::json;
 const H_NODE: &str = "x-another-node";
 const H_TIME: &str = "x-another-time";
 const H_SIG: &str = "x-another-signature";
+const H_NONCE: &str = "x-another-nonce";
+/// The `Upgrade` header of the `426` a hub gives a push or pull without a nonce. It names
+/// the signed exchange; nothing reads it.
+const SIGNED_SYNC: &str = "another-signed-sync/1";
+/// What a hub tells a node whose push or pull carries no nonce. An older spoke prints it.
+const NO_NONCE: &str = "this hub signs its answers and serves only nodes that ask for that, \
+                        and this request did not. Update this node to the hub's build, then \
+                        run `another sync`. Nothing was stored, nothing is lost, and the node \
+                        does not need to pair again";
+const NO_NONCE_AUDIT: &str = "no x-another-nonce header: the node runs an older build, or \
+                              something on the path removed it";
+const BAD_NONCE: &str = "x-another-nonce must be 32 lowercase hex characters";
+/// An unsigned error body is quoted in the failure it causes as one line, cut to this many
+/// characters: room for the longest refusal a hub sends, whole.
+const ERROR_BODY_CHARS: usize = 600;
+/// A hub address is shown cut to this many characters.
+const ADDRESS_CHARS: usize = 200;
 const BATCH: u32 = 500;
 /// Largest `/fed/pair` request body a hub reads: the value the HTTP library applied by
 /// default before D99, now stated. A pairing request is a few hundred bytes.
@@ -81,6 +106,19 @@ impl Limits {
     }
 }
 
+/// Whether one side of a sync speaks the signed exchange. Every build from this one on
+/// does, and nothing in the program chooses otherwise; `Unsigned` is kept so the tests can
+/// run a node of this build against one of an older build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exchange {
+    /// A spoke sends a nonce and applies only an answer the hub signed for its request; a
+    /// hub refuses a push or pull without a nonce and signs every `200` answer.
+    Signed,
+    /// What a build before signed answers did: a spoke sends no nonce and checks no
+    /// answer; a hub asks for no nonce, signs no answer and records no contact.
+    Unsigned,
+}
+
 /// Routes a hub serves when started with `another serve --federation`.
 pub fn router(store: Store) -> axum::Router {
     router_with(store, Limits::CURRENT)
@@ -89,6 +127,11 @@ pub fn router(store: Store) -> axum::Router {
 /// [`router`] with the size bounds given. Each route that reads a body states its limit;
 /// `/fed/pull` is a GET and reads none.
 pub fn router_with(store: Store, limits: Limits) -> axum::Router {
+    router_as(store, limits, Exchange::Signed)
+}
+
+/// [`router_with`] as a hub of the build `exchange` names.
+pub fn router_as(store: Store, limits: Limits, exchange: Exchange) -> axum::Router {
     let mut push = axum::routing::post(push).layer(DefaultBodyLimit::max(limits.push_body));
     if limits.unknown_sender_refused_first {
         push = push.layer(axum::middleware::from_fn_with_state(
@@ -104,6 +147,7 @@ pub fn router_with(store: Store, limits: Limits) -> axum::Router {
         .route("/fed/push", push)
         .route("/fed/pull", axum::routing::get(pull))
         .layer(axum::Extension(limits))
+        .layer(axum::Extension(exchange))
         .with_state(store)
 }
 
@@ -191,14 +235,15 @@ async fn pair(State(store): State<Store>, body: Bytes) -> Response {
     }
 }
 
-/// Verify the signature headers; returns the calling node id.
+/// Verify the signature headers; returns the calling node id and the text of the signature
+/// header that verified.
 async fn authenticate(
     store: &Store,
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
     body: &[u8],
-) -> Result<String, Box<Response>> {
+) -> Result<(String, String), Box<Response>> {
     let get = |h: &str| {
         headers
             .get(h)
@@ -214,14 +259,15 @@ async fn authenticate(
         .path_and_query()
         .map(|p| p.as_str().to_string())
         .unwrap_or_default();
-    let (s, m, b, n) = (
+    let (s, m, b, n, g) = (
         store.clone(),
         method.to_string(),
         body.to_vec(),
         node.clone(),
+        sig.clone(),
     );
-    match blocking(move || s.verify_peer_request(&n, &m, &path, time, &b, &sig)).await {
-        Ok(_) => Ok(node),
+    match blocking(move || s.verify_peer_request(&n, &m, &path, time, &b, &g)).await {
+        Ok(_) => Ok((node, sig)),
         Err(e) => {
             record(
                 store,
@@ -269,16 +315,66 @@ async fn known_sender(
     }
 }
 
+/// A nonce as a spoke writes it: 32 lowercase hex characters.
+fn is_nonce(text: &str) -> bool {
+    text.len() == 32 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The nonce of an authenticated push or pull. A request without one is answered `426`
+/// and one with a malformed one `400`, each audited, before anything is stored or read
+/// from the log: this hub has no unsigned answer for these routes, and a node that sends
+/// no nonce would not check a signed one.
+async fn nonce_of(
+    store: &Store,
+    node: &str,
+    operation: &str,
+    headers: &HeaderMap,
+) -> Result<String, Box<Response>> {
+    let Some(value) = headers.get(H_NONCE) else {
+        let e = another_core::Error::Invalid(NO_NONCE.into());
+        let detail = NO_NONCE_AUDIT.to_string();
+        record(store, Some(node.to_string()), operation, "denied", detail).await;
+        let mut refusal = error(StatusCode::UPGRADE_REQUIRED, &e);
+        refusal
+            .headers_mut()
+            .insert(header::UPGRADE, HeaderValue::from_static(SIGNED_SYNC));
+        return Err(Box::new(refusal));
+    };
+    match value.to_str() {
+        Ok(nonce) if is_nonce(nonce) => Ok(nonce.to_string()),
+        _ => {
+            let e = another_core::Error::Invalid(BAD_NONCE.into());
+            record(
+                store,
+                Some(node.to_string()),
+                operation,
+                "denied",
+                e.to_string(),
+            )
+            .await;
+            Err(Box::new(error(StatusCode::BAD_REQUEST, &e)))
+        }
+    }
+}
+
 async fn push(
     State(store): State<Store>,
+    axum::Extension(exchange): axum::Extension<Exchange>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let node = match authenticate(&store, &method, &uri, &headers, &body).await {
+    let (node, signature) = match authenticate(&store, &method, &uri, &headers, &body).await {
         Ok(n) => n,
         Err(r) => return *r,
+    };
+    let nonce = match exchange {
+        Exchange::Signed => match nonce_of(&store, &node, "POST /fed/push", &headers).await {
+            Ok(nonce) => Some(nonce),
+            Err(r) => return *r,
+        },
+        Exchange::Unsigned => None,
     };
     let req: PushRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -296,23 +392,73 @@ async fn push(
                 report.duplicates,
                 report.rejected.len()
             );
-            record(&store, Some(node), "POST /fed/push", "ok", detail).await;
-            axum::Json(report).into_response()
+            record(&store, Some(node.clone()), "POST /fed/push", "ok", detail).await;
+            answer(&store, node, nonce, signature, &report).await
         }
         Err(e) => error(status_for(&e), &e),
     }
 }
 
+/// The `200` answer to a push or a pull of `node`: `answer` serialized once, those bytes
+/// signed with this hub's key for the request (its nonce and the text of its signature
+/// header), and the same bytes sent. The spoke's contact time is written once the answer
+/// is built; if that write fails the answer is still sent, since it is correct and the
+/// spoke must not repeat an exchange that succeeded. Without a nonce, which only
+/// [`Exchange::Unsigned`] allows, the answer is what an older build sent.
+async fn answer<T: Serialize>(
+    store: &Store,
+    node: String,
+    nonce: Option<String>,
+    request_signature: String,
+    answer: &T,
+) -> Response {
+    let Some(nonce) = nonce else {
+        return axum::Json(answer).into_response();
+    };
+    let body = match serde_json::to_vec(answer) {
+        Ok(body) => body,
+        Err(e) => {
+            let e = another_core::Error::from(e);
+            return error(status_for(&e), &e);
+        }
+    };
+    let signature = store.sign_answer(&node, &nonce, &request_signature, &body);
+    let response = (
+        [
+            (
+                header::CONTENT_TYPE.as_str(),
+                "application/json".to_string(),
+            ),
+            (H_SIG, signature),
+        ],
+        body,
+    )
+        .into_response();
+    let (s, n) = (store.clone(), node.clone());
+    if let Err(e) = blocking(move || s.record_peer_contact(&n)).await {
+        tracing::warn!(node = %node, error = %e, "could not record the spoke's sync time");
+    }
+    response
+}
+
 async fn pull(
     State(store): State<Store>,
     axum::Extension(limits): axum::Extension<Limits>,
+    axum::Extension(exchange): axum::Extension<Exchange>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
 ) -> Response {
-    let node = match authenticate(&store, &method, &uri, &headers, b"").await {
+    let (node, signature) = match authenticate(&store, &method, &uri, &headers, b"").await {
         Ok(n) => n,
         Err(r) => return *r,
+    };
+    let nonce = match exchange {
+        Exchange::Signed => match nonce_of(&store, &node, "GET /fed/pull", &headers).await {
+            Ok(nonce) => Some(nonce),
+            Err(r) => return *r,
+        },
+        Exchange::Unsigned => None,
     };
     let mut after = 0i64;
     let mut limit = BATCH;
@@ -332,8 +478,8 @@ async fn pull(
     match blocking(move || s.pull_page(&n, after, &anchors, limit, budget)).await {
         Ok(resp) => {
             let detail = format!("after {after}: {} event(s)", resp.events.len());
-            record(&store, Some(node), "GET /fed/pull", "ok", detail).await;
-            axum::Json(resp).into_response()
+            record(&store, Some(node.clone()), "GET /fed/pull", "ok", detail).await;
+            answer(&store, node, nonce, signature, &resp).await
         }
         Err(e) => error(status_for(&e), &e),
     }
@@ -385,66 +531,114 @@ impl std::fmt::Display for OverSize {
 
 impl std::error::Error for OverSize {}
 
-/// Read an answer of at most `limit` bytes.
+/// The body of an answer, of at most `limit` bytes, after content decoding.
+fn read_body(
+    resp: &mut ureq::http::Response<ureq::Body>,
+    what: &str,
+    limit: u64,
+) -> Result<Vec<u8>> {
+    match resp.body_mut().with_config().limit(limit).read_to_vec() {
+        Ok(body) => Ok(body),
+        Err(ureq::Error::BodyExceedsLimit(_)) => Err(OverSize::Response(format!(
+            "the {what} response is larger than the {limit} bytes this node reads"
+        ))
+        .into()),
+        Err(e) => Err(e).with_context(|| format!("reading {what} response")),
+    }
+}
+
+/// The failure for an answer that is not 2xx. Its body is not signed and is quoted only:
+/// the `error.message` in it, or the body itself, as one line of at most `max_chars`
+/// characters.
+fn failure(status: StatusCode, body: &[u8], what: &str, max_chars: usize) -> anyhow::Error {
+    let text = String::from_utf8_lossy(body);
+    let msg = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
+        .unwrap_or_else(|| text.into_owned());
+    let msg = if max_chars == usize::MAX {
+        msg
+    } else {
+        another_core::display_line(&msg, max_chars)
+    };
+    if status == StatusCode::PAYLOAD_TOO_LARGE {
+        return OverSize::Request(format!("{what} failed ({status}): {msg}")).into();
+    }
+    anyhow!("{what} failed ({status}): {msg}")
+}
+
+/// Read a pairing answer of at most `limit` bytes. Its signature is inside the body and is
+/// checked by [`Store::complete_join_reporting`].
 fn read<T: serde::de::DeserializeOwned>(
     mut resp: ureq::http::Response<ureq::Body>,
     what: &str,
     limit: u64,
 ) -> Result<T> {
     let status = resp.status();
-    let text = match resp.body_mut().with_config().limit(limit).read_to_string() {
-        Ok(text) => text,
-        Err(ureq::Error::BodyExceedsLimit(_)) => {
-            return Err(OverSize::Response(format!(
-                "the {what} response is larger than the {limit} bytes this node reads"
-            ))
-            .into())
-        }
-        Err(e) => return Err(e).with_context(|| format!("reading {what} response")),
-    };
+    let body = read_body(&mut resp, what, limit)?;
     if !status.is_success() {
-        let msg = serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
-            .unwrap_or(text);
-        if status == StatusCode::PAYLOAD_TOO_LARGE {
-            return Err(OverSize::Request(format!("{what} failed ({status}): {msg}")).into());
-        }
-        bail!("{what} failed ({status}): {msg}");
+        return Err(failure(status, &body, what, ERROR_BODY_CHARS));
     }
-    serde_json::from_str(&text).with_context(|| format!("decoding {what} response"))
+    serde_json::from_slice(&body).with_context(|| format!("decoding {what} response"))
+}
+
+/// A push or pull that was sent, with what its answer is checked against.
+struct Sent {
+    resp: ureq::http::Response<ureq::Body>,
+    /// The nonce sent with the request; `None` only as [`Exchange::Unsigned`].
+    nonce: Option<String>,
+    /// The text of the request's signature header.
+    signature: String,
 }
 
 fn signed(
     store: &Store,
-    agent: &ureq::Agent,
-    base: &str,
+    to: &Dial<'_>,
     method: &str,
     path_and_query: &str,
     body: Option<Vec<u8>>,
-) -> Result<ureq::http::Response<ureq::Body>> {
+) -> Result<Sent> {
+    let base = to.url;
     let time = now_ms();
     let bytes = body.clone().unwrap_or_default();
-    let sig = store.sign_request(method, path_and_query, time, &bytes);
+    let signature = store.sign_request(method, path_and_query, time, &bytes);
+    // A new nonce for every request, a retry included. It is not part of the request
+    // signature: the hub signs it into its answer.
+    let nonce = match to.exchange {
+        Exchange::Signed => Some(another_core::crypto::request_nonce()?),
+        Exchange::Unsigned => None,
+    };
     let url = format!("{}{path_and_query}", base.trim_end_matches('/'));
     let node = store.node_id().to_string();
     let sent_body = body.is_some();
     let resp = match body {
-        Some(b) => agent
-            .post(&url)
-            .header(H_NODE, &node)
-            .header(H_TIME, time.to_string())
-            .header(H_SIG, &sig)
-            .header("content-type", "application/json")
-            .send(&b[..]),
-        None => agent
-            .get(&url)
-            .header(H_NODE, &node)
-            .header(H_TIME, time.to_string())
-            .header(H_SIG, &sig)
-            .call(),
+        Some(b) => {
+            let mut request = to
+                .agent
+                .post(&url)
+                .header(H_NODE, &node)
+                .header(H_TIME, time.to_string())
+                .header(H_SIG, &signature)
+                .header("content-type", "application/json");
+            if let Some(nonce) = &nonce {
+                request = request.header(H_NONCE, nonce);
+            }
+            request.send(&b[..])
+        }
+        None => {
+            let mut request = to
+                .agent
+                .get(&url)
+                .header(H_NODE, &node)
+                .header(H_TIME, time.to_string())
+                .header(H_SIG, &signature);
+            if let Some(nonce) = &nonce {
+                request = request.header(H_NONCE, nonce);
+            }
+            request.call()
+        }
     };
-    resp.map_err(|e| {
+    let resp = resp.map_err(|e| {
         let text = format!("cannot reach the hub at {base}: {e}");
         match &e {
             // Which error the closed connection shows as depends on the system and on
@@ -454,23 +648,192 @@ fn signed(
             ureq::Error::Io(io)
                 if sent_body && io.kind() != std::io::ErrorKind::ConnectionRefused =>
             {
-                OverSize::Dropped(text).into()
+                anyhow::Error::from(OverSize::Dropped(text))
             }
             _ => anyhow!(text),
         }
+    })?;
+    Ok(Sent {
+        resp,
+        nonce,
+        signature,
     })
+}
+
+/// Refuse an answer: write the audit row, and give the error the sync fails with. Nothing
+/// of the answer has been used when this is called.
+fn refuse(store: &Store, to: &Dial<'_>, what: &str, detail: &str, text: String) -> anyhow::Error {
+    audit_refusal(store, to, what, detail.to_string());
+    another_core::Error::Forbidden(text).into()
+}
+
+/// One `denied` row in this node's audit log for an answer of its hub that it refused.
+fn audit_refusal(store: &Store, to: &Dial<'_>, what: &str, detail: String) {
+    let operation = if what == "push" {
+        "sync POST /fed/push"
+    } else {
+        "sync GET /fed/pull"
+    };
+    let row = AuditRecord {
+        token_id: None,
+        agent: Some(format!("node:{}", to.hub)),
+        operation: operation.to_string(),
+        outcome: "denied".to_string(),
+        detail: Some(detail),
+        remote: None,
+    };
+    if let Err(e) = store.record_audit(row) {
+        tracing::warn!(error = %e, "could not write the audit row for a refused answer");
+    }
+}
+
+/// Read the answer to a push or a pull of at most `limit` bytes, and check it before one
+/// field of it is read: a 2xx answer must carry the hub's signature over this node's
+/// request (its nonce and its signature) and the body as received. An answer that is not
+/// 2xx is not signed and is only ever a failure. On a refusal nothing of the answer is
+/// used, and an audit row is written.
+fn read_answer<T: serde::de::DeserializeOwned>(
+    store: &Store,
+    to: &Dial<'_>,
+    sent: Sent,
+    what: &str,
+    limit: u64,
+) -> Result<T> {
+    let Sent {
+        mut resp,
+        nonce,
+        signature,
+    } = sent;
+    let status = resp.status();
+    let answer_signature = resp
+        .headers()
+        .get(H_SIG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let body = read_body(&mut resp, what, limit)?;
+    let Some(nonce) = nonce else {
+        // As a build before signed answers: the error quoted whole, the answer unchecked.
+        if !status.is_success() {
+            return Err(failure(status, &body, what, usize::MAX));
+        }
+        return serde_json::from_slice(&body).with_context(|| format!("decoding {what} response"));
+    };
+    let address = shown_address(to.url);
+    if status == StatusCode::UPGRADE_REQUIRED {
+        // The hub's own text for this status tells an older node to update, which this
+        // node is not: it sent a nonce, so the header was lost on the way or the refusal
+        // is not the hub's.
+        return Err(refuse(
+            store,
+            to,
+            what,
+            "refused as carrying no nonce, although one was sent",
+            format!(
+                "the hub at {address} refused the {what} as carrying no nonce, but this node \
+                 sent one; nothing was applied. Something between this node and the hub \
+                 removed the header, or the refusal is not the hub's; if a proxy in front of \
+                 the hub demands TLS, the hub's address may need to be https://"
+            ),
+        ));
+    }
+    if !status.is_success() {
+        return Err(failure(status, &body, what, ERROR_BODY_CHARS));
+    }
+    let Some(answer_signature) = answer_signature else {
+        return Err(refuse(
+            store,
+            to,
+            what,
+            "unsigned answer",
+            format!(
+                "the hub at {address} answered the {what} without a signature; refused, and \
+                 nothing from that answer was applied. Either the hub runs an older build \
+                 (update the hub and its spokes together), or something between this node \
+                 and the hub answered for it or removed the signature"
+            ),
+        ));
+    };
+    match store.verify_hub_answer(to.hub, &nonce, &signature, &body, &answer_signature) {
+        Ok(()) => {}
+        Err(another_core::Error::Forbidden(_)) => {
+            return Err(refuse(
+                store,
+                to,
+                what,
+                "answer signature is not the hub's for this request",
+                format!(
+                    "the hub at {address} answered the {what} with a signature that is not \
+                     the hub's (key {}) for this request and this body; refused, and nothing \
+                     from that answer was applied. Something between this node and the hub \
+                     changed the answer or replayed another one; a proxy that rewrites \
+                     answer bodies has the same effect",
+                    to.hub_key
+                ),
+            ))
+        }
+        Err(e) => return Err(e.into()),
+    }
+    serde_json::from_slice(&body).with_context(|| format!("decoding {what} response"))
+}
+
+/// Whether a hub address is plain `http://` to a host that is not this machine: anyone on
+/// the network path can then read what a sync carries. Loopback is the parsed host being
+/// exactly `127.0.0.1`, `localhost` or `[::1]`, so `http://localhost.example` is not it.
+pub fn plain_http_off_loopback(url: &str) -> bool {
+    url.parse::<ureq::http::Uri>().is_ok_and(|uri| {
+        uri.scheme_str() == Some("http")
+            && !matches!(uri.host(), Some("127.0.0.1" | "localhost" | "[::1]"))
+    })
+}
+
+/// A hub address as a warning or a refusal shows it: one line, cut.
+pub fn shown_address(url: &str) -> String {
+    another_core::display_line(url, ADDRESS_CHARS)
+}
+
+/// What `another pair invite` says after the code when the address given to it is plain
+/// `http://` off loopback. `url` is the `--url` argument; the address is shown as the
+/// invite holds it.
+pub fn invite_warning(url: &str) -> Option<String> {
+    let address = url.trim_end_matches('/');
+    plain_http_off_loopback(address).then(|| {
+        format!(
+            "warning: {} is plain http://. Anyone on the network path between a spoke and \
+             this hub can read mail and the feed in transit. Give spokes an https:// address \
+             unless the link is a private network",
+            shown_address(address)
+        )
+    })
+}
+
+/// What `another pair join` says after it joined a hub at a plain `http://` address off
+/// loopback.
+pub fn join_warning(hub: &Peer) -> Option<&'static str> {
+    hub.url
+        .as_deref()
+        .is_some_and(plain_http_off_loopback)
+        .then_some(
+            "warning: this hub is reached over plain http://. Anyone on the network path can \
+             read this node's mail and feed in transit; they cannot change them, because the \
+             hub's answers are signed. Ask for an https:// address unless the link is a \
+             private network",
+        )
+}
+
+/// This node's hub, when it was joined by a build before invites were signed: its stored
+/// address is one nothing checked. `None` when there is no such hub, and when the question
+/// cannot be answered, since what is said about it is advice.
+pub fn hub_with_unchecked_address(store: &Store) -> Option<Peer> {
+    let hub = store.hub_joined_before_signed_invites().ok().flatten()?;
+    store.peers().ok()?.into_iter().find(|p| p.node_id == hub)
 }
 
 /// The address in an invite is where this node will send its pairing request and then every
 /// sync, and it is stored. It must be an `http://` or `https://` URL with a host; anything
-/// else is refused before anything is sent. This checks the form only: an invite is not
-/// signed, so the address is whatever the code's author put there.
+/// else is refused before anything is sent. This checks the form only, by the rule the hub
+/// applied before it signed the address into the invite.
 fn hub_url_is_http(url: &str) -> another_core::Result<()> {
-    let ok = url.parse::<ureq::http::Uri>().is_ok_and(|uri| {
-        matches!(uri.scheme_str(), Some("http" | "https"))
-            && uri.host().is_some_and(|h| !h.is_empty())
-    });
-    if ok {
+    if another_core::hub_url_is_http(url) {
         Ok(())
     } else {
         Err(another_core::Error::Invalid(
@@ -534,6 +897,11 @@ pub fn sync(store: &Store) -> Result<SyncReport> {
 
 /// [`sync`] with the size bounds given.
 pub fn sync_with(store: &Store, limits: &Limits) -> Result<SyncReport> {
+    sync_as(store, limits, Exchange::Signed)
+}
+
+/// [`sync_with`] as a spoke of the build `exchange` names.
+pub fn sync_as(store: &Store, limits: &Limits, exchange: Exchange) -> Result<SyncReport> {
     let (hub, url) = store
         .hub()?
         .ok_or_else(|| anyhow!("this node has no hub; pair it with `another pair join <code>` (hubs do not sync, spokes dial them)"))?;
@@ -543,11 +911,19 @@ pub fn sync_with(store: &Store, limits: &Limits) -> Result<SyncReport> {
         ..Default::default()
     };
     let mut last = PassLast::default();
+    let hub_key = store
+        .peers()?
+        .into_iter()
+        .find(|p| p.node_id == hub)
+        .map(|p| p.fingerprint)
+        .unwrap_or_default();
     let to = Dial {
         agent: &agent,
         hub: &hub,
+        hub_key: &hub_key,
         url: &url,
         limits,
+        exchange,
     };
     if !sync_pass(store, &to, &mut report, &mut last)? {
         report.hub_reset = true;
@@ -564,6 +940,8 @@ pub fn sync_with(store: &Store, limits: &Limits) -> Result<SyncReport> {
         let received = last.received.as_ref().map(|(id, seq)| (id.as_str(), *seq));
         store.record_resync(&hub, received, last.pushed.as_deref())?;
     }
+    // The one write of the hub's sync time: only a sync that ran to its end counts.
+    store.record_sync_complete(&hub)?;
     Ok(report)
 }
 
@@ -579,8 +957,11 @@ struct PassLast {
 struct Dial<'a> {
     agent: &'a ureq::Agent,
     hub: &'a str,
+    /// The fingerprint of the key pinned for the hub, for the text of a refusal.
+    hub_key: &'a str,
     url: &'a str,
     limits: &'a Limits,
+    exchange: Exchange,
 }
 
 /// One push and pull. Returns false, having stopped early, when the hub reports `reset`.
@@ -591,10 +972,7 @@ fn sync_pass(
     last: &mut PassLast,
 ) -> Result<bool> {
     let Dial {
-        agent,
-        hub,
-        url,
-        limits,
+        hub, url, limits, ..
     } = *to;
     // The anchors are read before this pass pushes anything: a push can only add events to
     // the hub, never bring back the ones a restore lost.
@@ -618,8 +996,9 @@ fn sync_pass(
             let kind = events[0].kind.clone();
             let body = serde_json::to_vec(&PushRequest { events })?;
             let size = body.len();
-            let answer = signed(store, agent, url, "POST", "/fed/push", Some(body))
-                .and_then(|resp| read::<IngestReport>(resp, "push", REPLY_LIMIT_BYTES));
+            let answer = signed(store, to, "POST", "/fed/push", Some(body)).and_then(|sent| {
+                read_answer::<IngestReport>(store, to, sent, "push", REPLY_LIMIT_BYTES)
+            });
             let r = match answer {
                 Ok(r) => r,
                 Err(e) => match e.downcast_ref() {
@@ -687,8 +1066,9 @@ fn sync_pass(
                 path.push_str(&format!("&pushed_id={id}"));
             }
         }
-        let resp = signed(store, agent, url, "GET", &path, None)?;
-        let page: PullResponse = match read(resp, "pull", limits.pull_body as u64) {
+        let sent = signed(store, to, "GET", &path, None)?;
+        let answer = read_answer(store, to, sent, "pull", limits.pull_body as u64);
+        let page: PullResponse = match answer {
             Ok(page) => page,
             Err(e) if !matches!(e.downcast_ref(), Some(OverSize::Response(_))) => return Err(e),
             Err(_) if limit > 1 => {
@@ -707,7 +1087,19 @@ fn sync_pass(
             return Ok(false);
         }
         report.pulled += page.events.len();
-        let r = store.ingest(hub, &page.events, &page.nodes)?;
+        let r = match store.ingest(hub, &page.events, &page.nodes) {
+            Ok(r) => r,
+            Err(e) => {
+                // A listed key that differs from the pinned one: the refusal rolled back
+                // with the page, so its audit row is written here, after it.
+                if let Some(conflict) = store.listed_key_conflict(&page.nodes)? {
+                    if conflict.refusal().to_string() == e.to_string() {
+                        audit_refusal(store, to, "pull", conflict.detail());
+                    }
+                }
+                return Err(e.into());
+            }
+        };
         report.applied += r.accepted;
         report.pull_duplicates += r.duplicates;
         report.pull_rejected.extend(r.rejected);
