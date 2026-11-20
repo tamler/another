@@ -898,7 +898,7 @@ fn a_hubs_marker_for_a_relayed_event_sends_the_reader_to_the_events_node() {
         sync(&hub, spoke);
     }
     // An event of spoke T that neither spoke holds, marked by the hub.
-    let mut payload = marker("01RELAYED", &t.id());
+    let mut payload = marker("01RE1AYED00000000000000000", &t.id());
     payload["direction"] = json!("pull");
     let by_hub = hub.signed("sync.skipped", &payload);
     for spoke in [&s, &t] {
@@ -922,7 +922,7 @@ fn a_hubs_marker_for_a_relayed_event_sends_the_reader_to_the_events_node() {
     let lines: Vec<&str> = block.lines().collect();
     assert_eq!(
         lines[0],
-        "skipped 01RELAYED (agent.registered, 9437500 bytes, written by system): it is in node \
+        "skipped 01RE1AYED00000000000000000 (agent.registered, 9437500 bytes, written by system): it is in node \
          hub's log and is larger than a spoke reads in one pull answer (33554432 bytes), so \
          node hub did not send it; the events after it were sent"
     );
@@ -931,17 +931,19 @@ fn a_hubs_marker_for_a_relayed_event_sends_the_reader_to_the_events_node() {
     assert_eq!(lines[3], "  to get it across, on node spoket:");
     assert_eq!(
         lines.last().unwrap(),
-        &"  then, on node hub: another sync ack 01RELAYED --owner"
+        &"  then, on node hub: another sync ack 01RE1AYED00000000000000000 --owner"
     );
     let steps = on_s[0].needs_steps();
-    assert!(steps[0].starts_with("on node spoket: another agent register wordy "));
+    assert!(steps[0]
+        .starts_with("on node spoket: register the agent again: `another agent register wordy "));
+    assert_eq!(steps[5], "on node spoket: another sync");
     assert_eq!(
         steps.last().unwrap(),
-        "on node hub: another sync ack 01RELAYED --owner"
+        "on node hub: another sync ack 01RE1AYED00000000000000000 --owner"
     );
     assert_eq!(
         on_s[0].needs_line(),
-        "skipped event  01RELAYED (agent.registered, 9437500 bytes) in node hub's log was not \
+        "skipped event  01RE1AYED00000000000000000 (agent.registered, 9437500 bytes) in node hub's log was not \
          sent to this node: larger than one pull answer"
     );
 
@@ -954,12 +956,14 @@ fn a_hubs_marker_for_a_relayed_event_sends_the_reader_to_the_events_node() {
         block.contains("\n  to get it across, on this node:\n"),
         "{block}"
     );
-    assert!(block.ends_with("\n  then, on node hub: another sync ack 01RELAYED --owner"));
+    assert!(block
+        .ends_with("\n  then, on node hub: another sync ack 01RE1AYED00000000000000000 --owner"));
     let steps = on_t[0].needs_steps();
-    assert!(steps[0].starts_with("another agent register wordy "));
+    assert!(steps[0].starts_with("register the agent again: `another agent register wordy "));
+    assert_eq!(steps[5], "another sync");
     assert_eq!(
         steps.last().unwrap(),
-        "on node hub: another sync ack 01RELAYED --owner"
+        "on node hub: another sync ack 01RE1AYED00000000000000000 --owner"
     );
 }
 
@@ -1184,7 +1188,7 @@ fn a_marker_of_any_shape_in_the_log_does_not_break_the_report() {
         ("sync.skipped", "{\"event_id\": null, \"bytes\": \"many\"}"),
         ("sync.skip_acked", "not json"),
         ("sync.skip_acked", "{\"event_id\": 7}"),
-        ("sync.skip_acked", "{\"event_id\": [\"01REAL\"]}"),
+        ("sync.skip_acked", "{\"event_id\": [\"01REA1\"]}"),
     ]
     .iter()
     .enumerate()
@@ -1205,7 +1209,7 @@ fn a_marker_of_any_shape_in_the_log_does_not_break_the_report() {
     // A real skip beside them is reported, and acknowledged, as usual.
     n.store
         .mark_pull_skips(&[SkippedEvent {
-            event_id: "01REAL".into(),
+            event_id: "01REA1".into(),
             event_node: n_id.clone(),
             event_kind: "agent.registered".into(),
             event_actor: "wordy".into(),
@@ -1217,15 +1221,15 @@ fn a_marker_of_any_shape_in_the_log_does_not_break_the_report() {
         .unwrap();
     let reported = n.store.unacknowledged_skips().unwrap();
     assert_eq!(reported.len(), 1);
-    assert_eq!(reported[0].event_id, "01REAL");
+    assert_eq!(reported[0].event_id, "01REA1");
     assert!(reported[0].own && reported[0].event_is_local);
     assert_eq!(reported[0].direction, "pull");
     assert!(matches!(
-        n.store.acknowledge_skip("01REAL").unwrap(),
+        n.store.acknowledge_skip("01REA1").unwrap(),
         SkipAck::Skip { .. }
     ));
     assert!(matches!(
-        n.store.acknowledge_skip("01REAL").unwrap(),
+        n.store.acknowledge_skip("01REA1").unwrap(),
         SkipAck::Already { .. }
     ));
     assert!(n.store.unacknowledged_skips().unwrap().is_empty());

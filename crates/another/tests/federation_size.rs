@@ -1429,7 +1429,7 @@ fn a_hubs_marker_for_an_event_this_node_holds_is_not_reported() {
         &hub.node,
         "01PLANTEDMISSING",
         "sync.skipped",
-        &marker_for("01NOTHELD", &hub_id, "pull"),
+        &marker_for("01N0THE1D00000000000000000", &hub_id, "pull"),
     );
     let again = cli(&c, &["sync"]);
     hub.ct.cancel();
@@ -1439,7 +1439,8 @@ fn a_hubs_marker_for_an_event_this_node_holds_is_not_reported() {
     assert_eq!(reported, 0);
     assert!(!out(&synced).contains("skipped"), "{}", out(&synced));
     assert!(
-        out(&again).contains("\nskipped 01NOTHELD (agent.registered, 9437500 bytes, "),
+        out(&again)
+            .contains("\nskipped 01N0THE1D00000000000000000 (agent.registered, 9437500 bytes, "),
         "{}",
         out(&again)
     );
@@ -1485,9 +1486,11 @@ fn another_sync_reports_an_unacknowledged_skip_every_time_and_exits_zero() {
             "push_duplicates",
             "push_rejected",
             "pushed",
-            "skipped"
+            "skipped",
+            "skipped_total"
         ]
     );
+    assert_eq!(v["skipped_total"], json!(1));
     let skipped = v["skipped"].as_array().unwrap();
     assert_eq!(skipped.len(), 1);
     let s = &skipped[0];
@@ -1561,7 +1564,7 @@ fn a_hubs_marker_for_a_relayed_event_sends_the_reader_to_the_events_node() {
         &hub.node,
         "01PLANTEDRELAY",
         "sync.skipped",
-        &marker_for("01RELAYED", &id_of(&t), "pull"),
+        &marker_for("01RE1AYED00000000000000000", &id_of(&t), "pull"),
     );
     let on_s = cli(&s, &["sync"]);
     let on_t = cli(&t, &["sync"]);
@@ -1570,7 +1573,10 @@ fn a_hubs_marker_for_a_relayed_event_sends_the_reader_to_the_events_node() {
         assert_eq!(run.status.code(), Some(0), "{}", err(run));
         let text = out(run);
         let (_, rest) = text.split_once('\n').unwrap();
-        assert_eq!(rest, hub_block("01RELAYED", 9_437_500, place));
+        assert_eq!(
+            rest,
+            hub_block("01RE1AYED00000000000000000", 9_437_500, place)
+        );
     }
 }
 
@@ -1586,18 +1592,18 @@ fn more_than_five_skips_print_five_and_a_count() {
             &a,
             &format!("01PLANTED{i}"),
             "sync.skipped",
-            &marker_for(&format!("01SKIPPED{i}"), &a_id, "push"),
+            &marker_for(&format!("01SK1PPED0000000000000000{i}"), &a_id, "push"),
         );
     }
     let run = cli(&a, &["sync"]);
-    hub.ct.cancel();
+    let as_json = cli(&a, &["--json", "sync"]);
     assert_eq!(run.status.code(), Some(0), "{}", err(&run));
     let text = out(&run);
     let blocks: Vec<&str> = text.lines().filter(|l| l.starts_with("skipped ")).collect();
     assert_eq!(blocks.len(), 5, "{text}");
     for (i, line) in blocks.iter().enumerate() {
         assert!(
-            line.starts_with(&format!("skipped 01SKIPPED{i} (")),
+            line.starts_with(&format!("skipped 01SK1PPED0000000000000000{i} (")),
             "{line}"
         );
     }
@@ -1605,6 +1611,162 @@ fn more_than_five_skips_print_five_and_a_count() {
         text.ends_with("\nand 2 more skipped event(s): another needs\n"),
         "{text}"
     );
+    // The JSON form is cut at the same five, with the count of all beside it.
+    let v: Value = serde_json::from_str(&out(&as_json)).unwrap();
+    let listed: Vec<&str> = v["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["event_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        listed,
+        (0..5)
+            .map(|i| format!("01SK1PPED0000000000000000{i}"))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(v["skipped_total"], json!(7));
+
+    // Many markers do not make the report large: with 300 more it is the same five
+    // entries, in the text and in the JSON, and the JSON stays a few kilobytes.
+    for i in 0..300 {
+        plant(
+            &a,
+            &format!("01PLANTEDMORE{i:03}"),
+            "sync.skipped",
+            &marker_for(&format!("01M0RE00000000000000000{i:03}"), &a_id, "push"),
+        );
+    }
+    let run = cli(&a, &["sync"]);
+    let as_json = cli(&a, &["--json", "sync"]);
+    let needs = cli(&a, &["--json", "needs", "--limit", "200"]);
+    let feed = cli(&a, &["activity", "--kinds", "sync", "--limit", "500"]);
+    hub.ct.cancel();
+    assert!(
+        out(&run).ends_with("\nand 302 more skipped event(s): another needs\n"),
+        "{}",
+        out(&run)
+    );
+    let v: Value = serde_json::from_str(&out(&as_json)).unwrap();
+    assert_eq!(v["skipped"].as_array().unwrap().len(), 5);
+    assert_eq!(v["skipped_total"], json!(307));
+    assert!(out(&as_json).len() < 32 * 1024, "{}", out(&as_json).len());
+    // `another needs --json` counts them all and lists up to its row limit, and
+    // `another activity --kinds sync` lists every one.
+    let v: Value = serde_json::from_str(&out(&needs)).unwrap();
+    assert_eq!(v["counts"]["skipped_event"], json!(307));
+    assert_eq!(
+        v["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["kind"] == json!("skipped_event"))
+            .count(),
+        200
+    );
+    assert_eq!(out(&feed).lines().count(), 307, "{}", out(&feed));
+}
+
+/// A hub chooses every text in its markers, and it may mark an event as written by this
+/// node, so the steps then read "on this node". A value from a marker is put into a
+/// printed command only when it is a valid agent name or an id this software makes;
+/// anything else leaves the placeholder and is said. Before this rule a hub's
+/// `about: "hold ."` printed `another hold release --agent <agent> .`, which releases
+/// every hold under the directory it is run in.
+#[test]
+fn a_hubs_marker_puts_no_text_of_its_own_into_a_printed_command() {
+    let hub = start_hub();
+    let c = node("spokec");
+    join(&hub, &c);
+    let c_id = id_of(&c);
+    let mut hold = marker_for("01H01D00000000000000000000", &c_id, "pull");
+    hold["event_kind"] = json!("hold.acquired");
+    hold["about"] = json!("hold .");
+    let mut agent = marker_for("--all", &c_id, "pull");
+    agent["about"] = json!("agent x'; touch pwned; echo '");
+    plant(&hub.node, "01PLANTEDHOLD", "sync.skipped", &hold);
+    plant(&hub.node, "01PLANTEDNAME", "sync.skipped", &agent);
+    let run = cli(&c, &["sync"]);
+    let needs = cli(&c, &["needs"]);
+    let as_json = cli(&c, &["--json", "sync"]);
+    hub.ct.cancel();
+    assert_eq!(run.status.code(), Some(0), "{}", err(&run));
+    let text = out(&run);
+
+    assert!(
+        text.contains(
+            "\n  about: hold .\n  note: the hold id in this report is not an id this software \
+             makes, so <hold id> is left for you to fill\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "\n  to get it across, on this node:\n    another hold release --agent <agent> \
+             <hold id>\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "\n  then, on node hub: another sync ack 01H01D00000000000000000000 --owner\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "\n  note: the agent's name in this report is not a valid agent name, so <name> \
+             is left for you to fill\n  note: the event id in this report is not an id this \
+             software makes, so <event-id> is left for you to fill\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("\n    another agent register <name> --program <program> "),
+        "{text}"
+    );
+    assert!(
+        text.contains("\n  then, on node hub: another sync ack <event-id> --owner\n"),
+        "{text}"
+    );
+    // The hub's text is shown as what the report is about, and in no command.
+    for (what, shown) in [("sync", text.as_str()), ("needs", &out(&needs))] {
+        for line in shown.lines() {
+            let commands = line.contains("another ") && !line.trim_start().starts_with("about:");
+            assert!(
+                !(commands && (line.contains("touch pwned") || line.contains("--all"))),
+                "{what}: {line}"
+            );
+            assert!(!line.contains("<agent> ."), "{what}: {line}");
+            assert!(
+                !line.contains("release --agent <agent> `"),
+                "{what}: {line}"
+            );
+        }
+    }
+    let needs = out(&needs);
+    assert!(
+        needs.contains(
+            "    next: note: the hold id in this report is not an id this software makes, so \
+             <hold id> is left for you to fill\n          release the hold: `another hold \
+             release --agent <agent> <hold id>`\n"
+        ),
+        "{needs}"
+    );
+    assert!(
+        needs.contains(
+            "          on node hub: acknowledge it with `another sync ack <event-id> --owner`\n"
+        ),
+        "{needs}"
+    );
+    let v: Value = serde_json::from_str(&out(&as_json)).unwrap();
+    let notes: Vec<usize> = v["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["notes"].as_array().map_or(0, Vec::len))
+        .collect();
+    assert_eq!(notes, [1, 2]);
 }
 
 /// R15, through the CLI: `--kinds sync` lists the skips and acknowledgements and nothing
@@ -1622,9 +1784,11 @@ fn kinds_sync_lists_only_sync_events() {
         &a,
         "01PLANTEDKIND",
         "sync.skipped",
-        &marker_for("01SKIPPEDKIND", &a_id, "push"),
+        &marker_for("01K1ND00000000000000000000", &a_id, "push"),
     );
-    a.store.acknowledge_skip("01SKIPPEDKIND").unwrap();
+    a.store
+        .acknowledge_skip("01K1ND00000000000000000000")
+        .unwrap();
     for i in 0..60 {
         send(&a.store, "alice", "bob@@hub", &format!("m{i}"), "x".into());
         fed::sync(&a.store).unwrap();
@@ -1644,7 +1808,7 @@ fn kinds_sync_lists_only_sync_events() {
     assert_eq!(lines.len(), 2, "{lines:?}");
     assert!(
         lines[0].ends_with(
-            "skipped event 01SKIPPEDKIND (agent.registered, 9437500 bytes, written by wordy): \
+            "skipped event 01K1ND00000000000000000000 (agent.registered, 9437500 bytes, written by wordy): \
              too large to send; agent wordy"
         ),
         "{}",
@@ -1652,7 +1816,7 @@ fn kinds_sync_lists_only_sync_events() {
     );
     assert!(
         lines[1].ends_with(
-            "acknowledged the skip of event 01SKIPPEDKIND; it stays in the log and is not sent"
+            "acknowledged the skip of event 01K1ND00000000000000000000; it stays in the log and is not sent"
         ),
         "{}",
         lines[1]
@@ -1663,7 +1827,10 @@ fn kinds_sync_lists_only_sync_events() {
     assert!(items.iter().all(|i| i["category"] == json!("sync")));
     let fed_lines = out(&federation);
     assert!(fed_lines.lines().count() > 50, "{fed_lines}");
-    assert!(!fed_lines.contains("01SKIPPEDKIND"), "{fed_lines}");
+    assert!(
+        !fed_lines.contains("01K1ND00000000000000000000"),
+        "{fed_lines}"
+    );
     assert_eq!(unknown.status.code(), Some(1));
     assert_eq!(
         err(&unknown),
@@ -1724,7 +1891,7 @@ fn in_terminal(n: &Node, args: &[&str], typed: &str) -> (String, Option<i32>) {
     (text.replace("\r\n", "\n"), done.status.code())
 }
 
-/// A node with one unacknowledged skip of its own: a marker in its log for `01SKIPPED`.
+/// A node with one unacknowledged skip of its own: a marker in its log for `01SK1PPED00000000000000000`.
 /// It has no hub: the acknowledgement needs none.
 fn node_with_a_skip() -> Node {
     let n = node("solo");
@@ -1732,7 +1899,7 @@ fn node_with_a_skip() -> Node {
         &n,
         "01PLANTEDSOLO",
         "sync.skipped",
-        &marker_for("01SKIPPED", &id_of(&n), "push"),
+        &marker_for("01SK1PPED00000000000000000", &id_of(&n), "push"),
     );
     n
 }
@@ -1759,7 +1926,7 @@ fn an_acknowledgement_needs_owner_a_terminal_and_a_typed_yes() {
         assert_eq!(n.store.unacknowledged_skips().unwrap().len(), 1, "{what}");
     };
 
-    let no_owner = cli(&n, &["sync", "ack", "01SKIPPED"]);
+    let no_owner = cli(&n, &["sync", "ack", "01SK1PPED00000000000000000"]);
     assert_eq!(no_owner.status.code(), Some(1));
     assert_eq!(
         err(&no_owner),
@@ -1768,7 +1935,7 @@ fn an_acknowledgement_needs_owner_a_terminal_and_a_typed_yes() {
     assert!(out(&no_owner).is_empty());
     untouched(&n, "without --owner");
     // Even in a terminal: the flag is what is asked for.
-    let (shown, code) = in_terminal(&n, &["sync", "ack", "01SKIPPED"], "yes\n");
+    let (shown, code) = in_terminal(&n, &["sync", "ack", "01SK1PPED00000000000000000"], "yes\n");
     assert_eq!(code, Some(1), "{shown}");
     assert!(
         shown.contains("another sync ack is the owner's alone: run it with --owner at a terminal"),
@@ -1777,7 +1944,10 @@ fn an_acknowledgement_needs_owner_a_terminal_and_a_typed_yes() {
     assert!(!shown.contains("Type yes to confirm"), "{shown}");
     untouched(&n, "without --owner in a terminal");
 
-    let no_terminal = cli(&n, &["sync", "ack", "01SKIPPED", "--owner"]);
+    let no_terminal = cli(
+        &n,
+        &["sync", "ack", "01SK1PPED00000000000000000", "--owner"],
+    );
     assert_eq!(no_terminal.status.code(), Some(1));
     assert_eq!(
         err(&no_terminal),
@@ -1785,7 +1955,7 @@ fn an_acknowledgement_needs_owner_a_terminal_and_a_typed_yes() {
     );
     untouched(&n, "without a terminal");
 
-    let prompt = "Acknowledge the skip of event 01SKIPPED (agent.registered, 9437500 bytes, \
+    let prompt = "Acknowledge the skip of event 01SK1PPED00000000000000000 (agent.registered, 9437500 bytes, \
                   written by wordy) in this node's log.\n\
                   It was not sent because it is larger than one push. This does not send it \
                   and deletes nothing.\n\
@@ -1793,7 +1963,11 @@ fn an_acknowledgement_needs_owner_a_terminal_and_a_typed_yes() {
                   that received the report.\n\
                   Type yes to confirm: ";
     for typed in ["no\n", "\n", "yes please\n"] {
-        let (shown, code) = in_terminal(&n, &["sync", "ack", "01SKIPPED", "--owner"], typed);
+        let (shown, code) = in_terminal(
+            &n,
+            &["sync", "ack", "01SK1PPED00000000000000000", "--owner"],
+            typed,
+        );
         assert!(shown.starts_with(prompt), "{typed:?}: {shown}");
         assert!(
             shown.contains("another: not confirmed: nothing was changed"),
@@ -1803,11 +1977,15 @@ fn an_acknowledgement_needs_owner_a_terminal_and_a_typed_yes() {
         untouched(&n, typed);
     }
 
-    let (shown, code) = in_terminal(&n, &["sync", "ack", "01SKIPPED", "--owner"], "yes\n");
+    let (shown, code) = in_terminal(
+        &n,
+        &["sync", "ack", "01SK1PPED00000000000000000", "--owner"],
+        "yes\n",
+    );
     assert!(shown.starts_with(prompt), "{shown}");
     assert!(
         shown.contains(
-            "acknowledged: event 01SKIPPED (agent.registered, 9437500 bytes) stays in this \
+            "acknowledged: event 01SK1PPED00000000000000000 (agent.registered, 9437500 bytes) stays in this \
              node's log and is still not sent; another sync and another needs no longer \
              report it"
         ),
@@ -1819,7 +1997,11 @@ fn an_acknowledgement_needs_owner_a_terminal_and_a_typed_yes() {
 
     // `y` is a yes too.
     let n = node_with_a_skip();
-    let (shown, code) = in_terminal(&n, &["sync", "ack", "01SKIPPED", "--owner"], "y\n");
+    let (shown, code) = in_terminal(
+        &n,
+        &["sync", "ack", "01SK1PPED00000000000000000", "--owner"],
+        "y\n",
+    );
     assert_eq!(code, Some(0), "{shown}");
     assert_eq!(acknowledgements(&n), (1, 1));
 }
@@ -1829,10 +2011,22 @@ fn an_acknowledgement_needs_owner_a_terminal_and_a_typed_yes() {
 fn ack_takes_exactly_one_id_and_has_no_all() {
     let n = node_with_a_skip();
     for args in [
-        vec!["sync", "ack", "01SKIPPED", "01OTHER", "--owner"],
+        vec![
+            "sync",
+            "ack",
+            "01SK1PPED00000000000000000",
+            "01OTHER",
+            "--owner",
+        ],
         vec!["sync", "ack", "--owner"],
         vec!["sync", "ack", "--all", "--owner"],
-        vec!["sync", "ack", "01SKIPPED", "--all", "--owner"],
+        vec![
+            "sync",
+            "ack",
+            "01SK1PPED00000000000000000",
+            "--all",
+            "--owner",
+        ],
     ] {
         let run = cli(&n, &args);
         assert_eq!(run.status.code(), Some(2), "{args:?}: {}", err(&run));
@@ -1855,7 +2049,7 @@ fn ack_refuses_before_asking_for_an_unknown_id_and_on_a_node_that_is_not_the_hol
         &hub.node,
         "01PLANTEDHUB",
         "sync.skipped",
-        &marker_for("01INHUBSLOG", &hub_id, "pull"),
+        &marker_for("01HB5J0G000000000000000000", &hub_id, "pull"),
     );
     fed::sync(&c.store).unwrap();
     hub.ct.cancel();
@@ -1873,21 +2067,33 @@ fn ack_refuses_before_asking_for_an_unknown_id_and_on_a_node_that_is_not_the_hol
     let v: Value = serde_json::from_str(out(&as_json).trim()).unwrap();
     assert_eq!(v["error"]["code"], json!("not_found"));
 
-    let elsewhere = cli(&c, &["sync", "ack", "01INHUBSLOG", "--owner"]);
+    let elsewhere = cli(
+        &c,
+        &["sync", "ack", "01HB5J0G000000000000000000", "--owner"],
+    );
     assert_eq!(elsewhere.status.code(), Some(1));
     assert_eq!(
         err(&elsewhere),
-        "another: event 01INHUBSLOG is in node hub's log; acknowledge it there: another sync \
-         ack 01INHUBSLOG --owner\n"
+        "another: event 01HB5J0G000000000000000000 is in node hub's log; acknowledge it there: another sync \
+         ack 01HB5J0G000000000000000000 --owner\n"
     );
-    let as_json = cli(&c, &["--json", "sync", "ack", "01INHUBSLOG", "--owner"]);
+    let as_json = cli(
+        &c,
+        &[
+            "--json",
+            "sync",
+            "ack",
+            "01HB5J0G000000000000000000",
+            "--owner",
+        ],
+    );
     assert_eq!(as_json.status.code(), Some(1));
     let v: Value = serde_json::from_str(out(&as_json).trim()).unwrap();
     assert_eq!(v["error"]["code"], json!("invalid"));
     assert_eq!(acknowledgements(&c), (0, 0));
     assert_eq!(c.store.unacknowledged_skips().unwrap().len(), 1);
     #[cfg(unix)]
-    for id in ["01NOSUCH", "01INHUBSLOG"] {
+    for id in ["01NOSUCH", "01HB5J0G000000000000000000"] {
         let (shown, code) = in_terminal(&c, &["sync", "ack", id, "--owner"], "yes\n");
         assert_eq!(code, Some(1), "{shown}");
         assert!(!shown.contains("Type yes to confirm"), "{shown}");
@@ -1896,7 +2102,9 @@ fn ack_refuses_before_asking_for_an_unknown_id_and_on_a_node_that_is_not_the_hol
 
     // Already acknowledged, on the holder: said, exit 0, no prompt, nothing written.
     let n = node_with_a_skip();
-    n.store.acknowledge_skip("01SKIPPED").unwrap();
+    n.store
+        .acknowledge_skip("01SK1PPED00000000000000000")
+        .unwrap();
     let at: i64 = Connection::open(n.db())
         .unwrap()
         .query_row(
@@ -1905,12 +2113,15 @@ fn ack_refuses_before_asking_for_an_unknown_id_and_on_a_node_that_is_not_the_hol
             |r| r.get(0),
         )
         .unwrap();
-    let again = cli(&n, &["sync", "ack", "01SKIPPED", "--owner"]);
+    let again = cli(
+        &n,
+        &["sync", "ack", "01SK1PPED00000000000000000", "--owner"],
+    );
     assert_eq!(again.status.code(), Some(0), "{}", err(&again));
     assert_eq!(
         out(&again),
         format!(
-            "event 01SKIPPED was acknowledged at {}; nothing was changed\n",
+            "event 01SK1PPED00000000000000000 was acknowledged at {}; nothing was changed\n",
             fmt_ts(at)
         )
     );
@@ -2064,7 +2275,7 @@ fn after_an_acknowledgement_sync_is_quiet_and_the_skip_stays_readable() {
     let hub_feed = cli(&hub.node, &["activity", "--kinds", "sync"]);
     hub.ct.cancel();
     assert!(out(&loud).contains("\nskipped "), "{}", out(&loud));
-    assert_eq!(out(&hub_loud), "needs you: 1 (1 skipped event(s))\n");
+    assert_eq!(out(&hub_loud), "needs you: 1 (1 skipped event)\n");
     assert_eq!(code, Some(0), "{shown}");
     assert!(
         shown.contains("It was not sent because it is larger than one pull answer."),
@@ -2665,7 +2876,7 @@ fn one_event_over_the_other_sides_limit_is_reported_not_retried_forever() {
             "the next event the hub at {} holds for this node, after its sequence number \
              {cursor}, is by itself larger than this node reads in one answer; retrying will \
              not help; the hub runs an older build or holds an event over the size limit; a \
-             hub on a build with D-next steps past such an event and reports it, so update \
+             hub on this build or later steps past such an event and reports it, so update \
              the hub (the pull response is larger than the 102400 bytes this node reads)",
             hub.url
         )

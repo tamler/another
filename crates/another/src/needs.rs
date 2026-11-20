@@ -107,7 +107,7 @@ impl Kind {
         match self {
             Kind::ChecksStopped => "checks stopped".to_string(),
             Kind::TransportConfig => "transports.json refused".to_string(),
-            Kind::SkippedEvent => format!("{n} skipped event(s)"),
+            Kind::SkippedEvent => format!("{n} skipped event{plural}"),
             Kind::DecideNow => format!("{n} decide now"),
             Kind::Blocked => format!("{n} blocked"),
             Kind::Stuck => format!("{n} stuck"),

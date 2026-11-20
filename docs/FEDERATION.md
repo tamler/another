@@ -263,8 +263,8 @@ An event that does not fit the transport even alone is skipped, and the skip is 
 
 **Where it is reported.** A node reports the unacknowledged skips of its own log and of its hub's log:
 
-- `another sync` prints them after every sync, at most five in full and then `and <n> more skipped event(s): another needs`. The exit status stays 0, and `--json` lists them under `skipped`. When a sync fails, its error is printed as before and the skips return with the next sync that completes.
-- `another needs` has a `skipped_event` row for each ([NEEDS.md](NEEDS.md)). A hub runs no sync, so this is where a hub reports its own.
+- `another sync` prints them after every sync, at most five in full and then `and <n> more skipped event(s): another needs`. The exit status stays 0. `--json` lists the same five at most under `skipped`, oldest first, and gives the number of all of them as `skipped_total`, so a node that writes many markers cannot make this report large. `another needs --json` counts them all and lists up to its row limit (`--limit`, at most 200), and `another activity --kinds sync` lists every one. When a sync fails, its error is printed as before and the skips return with the next sync that completes.
+- `another needs` has a `skipped_event` row for each ([NEEDS.md](NEEDS.md)). A hub runs no sync, so this is where a hub reports its own. The row gives the same steps in that list's own wording: a step that is a complete command is printed bare (`another sync`, the acknowledgement), and every other step starts with a word and has its commands in backticks.
 - The holder writes an audit row (`sync skip`, outcome `skipped`), shown by `another audit`.
 - `another activity --kinds sync` lists every skip and acknowledgement a node knows, acknowledged or not. Markers written by other spokes show there only; they are not repeated by `another sync` or `another needs`.
 
@@ -281,6 +281,8 @@ skipped <id> (<kind>, <bytes> bytes, written by <actor>): it is in this node's l
 ```
 
 For an event in the hub's log, a spoke prints the same with `it is in node <hub>'s log and is larger than a spoke reads in one pull answer (33554432 bytes), so node <hub> did not send it`, `missing on this node:`, `to get it across, on <this node, or node <name>>:` and `then, on node <hub>: another sync ack <id> --owner`. The steps run on the node that wrote the event; the acknowledgement runs on the holder. Every value a peer wrote is shown as one bounded, safe line.
+
+A value from a marker is put into a printed command only when it is what this software writes there: the agent's name when it is a valid agent name that does not start with `-`, a hold id and the event's id when they are ids this software makes. Anything else leaves the placeholder (`<name>`, `<hold id>`, `<event-id>`), and a `note:` line under `about:` says so, for example `note: the hold id in this report is not an id this software makes, so <hold id> is left for you to fill`. A hub chooses the text of its markers, and these lines are there to be copied.
 
 **Getting the information across.** The steps are fixed per kind. No command re-sends the event itself.
 
@@ -348,7 +350,7 @@ The wire format, the cursors and the anchors are unchanged. A skip is visible to
 | new spoke, new hub | spoke | The spoke skips, its marker is pushed and relayed where the event would have gone, and it is reported as above |
 | new spoke, new hub | hub | The hub skips, the spoke pulls the marker and reports the hub's skip |
 | new spoke, older hub | spoke | The spoke skips. The older hub stores the marker and relays it as an activity event to every spoke with `read_feed`, and reports nothing beyond its own feed line |
-| new spoke, older hub | hub | The older hub does not skip. Its answer is over what the spoke reads, the spoke halves down to one event and then fails with `... the hub runs an older build or holds an event over the size limit; a hub on a build with D-next steps past such an event and reports it, so update the hub` |
+| new spoke, older hub | hub | The older hub does not skip, and what the spoke prints depends on the hub's build. Either way `another sync` exits non-zero on every run and nothing after that event arrives: update the hub, and it then steps past the event and reports it as above. A hub on a build with D99 and without this change names the event and answers 409; the spoke prints `pull failed (409 Conflict): event <id> (<kind>, <bytes> bytes on the wire) in the hub's log is larger than a spoke reads in one pull answer (33554432 bytes), so it cannot be sent and the events after it wait behind it; retrying will not help; the owner must decide whether it is skipped or keeps blocking (docs/FEDERATION.md, "If a sync reports an event that cannot be sent")`. That heading was this section's earlier name; the decision it speaks of is made, and no event needs removing by hand. A hub on a build before D99 sends an answer over what the spoke reads; the spoke halves down to one event and then fails with `... the hub runs an older build or holds an event over the size limit; a hub on this build or later steps past such an event and reports it, so update the hub` |
 | older spoke, new hub | hub | The hub skips for the older spoke too. The older spoke stores the marker as an unknown kind and its feed shows `[hub] system: sync.skipped`. An event between 10 MiB and 32 MiB is not skipped and still blocks that older spoke, which reads 10 MiB: update the spoke |
 | older spoke, new hub | spoke | The older spoke blocks on its own event as it always did. Update it, then it skips |
 | new spoke, older hub, an event of 2 MiB to 8 MiB | spoke | Not skipped: the event fits this build's limits. The sync fails with the message that says to update the hub |

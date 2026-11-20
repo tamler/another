@@ -88,7 +88,7 @@ $ another needs --brief
 needs you: 7 (1 decide now, 1 blocked, 1 stuck, 1 unreachable, 1 quiet claim, 1 no taker, 1 proposal)
 ```
 
-Only kinds above zero are named, in the order of the sections. `checks_stopped` reads `checks stopped`, `transport_config` reads `transports.json refused` and `skipped_event` reads `<n> skipped event(s)`.
+Only kinds above zero are named, in the order of the sections. `checks_stopped` reads `checks stopped`, `transport_config` reads `transports.json refused` and `skipped_event` reads `1 skipped event` or `<n> skipped events`.
 
 ## Sections and kinds
 
@@ -243,7 +243,7 @@ One object. Every key is always present; a value that does not apply is `null` o
 | `rows` | At most `limit` rows per kind, in the order of the sections. `[]` with `--brief` |
 | `key` | Stable while the condition lasts: `<kind>:<item>` for item rows, `<kind>:<agent>:<first 8 characters of the session id>` for session rows, `transport_silent:<transport>`, `skipped_event:<id of the node whose log holds the event>:<event id>`, and the bare kind for the other two `Another` rows |
 | `who` | `owner`, or `admitter` where a delegate's key covers the step that clears the row |
-| `next` | The steps. An entry that is not a command never starts with `another`, except in a `skipped_event` row: its steps are the fixed lines of [FEDERATION.md](FEDERATION.md#an-event-that-is-too-large-to-send), written for a person. Several are a command followed by a note in brackets, with placeholders such as `<program>` and `<project>`, and are not to be run as they stand. Its last step, `another sync ack <event-id> --owner`, is a command |
+| `next` | The steps. An entry that is not a command never starts with `another`. A step that explains a command, as most steps of a `skipped_event` row do, starts with a word and has the command in backticks, with placeholders such as `<program>` for you to fill; such a step may start with `note:` when a value in the report could not be put into a command |
 | `next_delegate` | The same steps as a delegate runs them: `--agent <delegate>` in place of `--owner`, with its key in `ANOTHER_ADMIT_KEY`. `[]` when `who` is `owner`; it never holds an owner-only command |
 | `agent` | The proposer, the claimer, the reserved agent or the session's agent; for `skipped_event`, the agent that wrote the skipped event |
 | `since`, `age_seconds` | When the condition began; `null` when that is not known |

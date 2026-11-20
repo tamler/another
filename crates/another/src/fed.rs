@@ -515,8 +515,13 @@ pub struct SyncReport {
     /// copy, or replaced), so this sync started over from zero in both directions.
     pub hub_reset: bool,
     /// The unacknowledged skips of this node's log and of its hub's log: events too large
-    /// to send, reported after every sync until acknowledged.
+    /// to send, reported after every sync until acknowledged. The oldest five at most, so a
+    /// peer that writes many markers cannot make this report large; `skipped_total` counts
+    /// them all, and `another needs --json` and `another activity --kinds sync` list the
+    /// rest.
     pub skipped: Vec<Skip>,
+    /// How many unacknowledged skips there are, the ones in `skipped` included.
+    pub skipped_total: usize,
 }
 
 /// An event id that can go in a query string as is. Ids this software makes are ULIDs;
@@ -568,7 +573,10 @@ pub fn sync_with(store: &Store, limits: &Limits) -> Result<SyncReport> {
         let received = last.received.as_ref().map(|(id, seq)| (id.as_str(), *seq));
         store.record_resync(&hub, received, last.pushed.as_deref())?;
     }
-    report.skipped = store.unacknowledged_skips()?;
+    let mut skipped = store.unacknowledged_skips()?;
+    report.skipped_total = skipped.len();
+    skipped.truncate(another_core::SYNC_SKIPS_SHOWN);
+    report.skipped = skipped;
     Ok(report)
 }
 
@@ -707,7 +715,7 @@ fn sync_pass(
                 "the next event the hub at {url} holds for this node, after its sequence \
                  number {cursor}, is by itself larger than this node reads in one answer; \
                  retrying will not help; the hub runs an older build or holds an event over \
-                 the size limit; a hub on a build with D-next steps past such an event and \
+                 the size limit; a hub on this build or later steps past such an event and \
                  reports it, so update the hub ({e})"
             ),
         };

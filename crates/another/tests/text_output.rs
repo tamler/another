@@ -351,18 +351,19 @@ fn a_peers_marker_text_is_shown_escaped_and_bounded() {
         text.contains(&format!(
             "\nskipped {id} ({kind}, 9437500 bytes, written by {actor}): it is in node hub's \
              log and is larger than a spoke reads in one pull answer (33554432 bytes), so node \
-             hub did not send it; the events after it were sent\n  about: {about}\n  missing \
-             on this node: this event and whatever it changed on other nodes; "
+             hub did not send it; the events after it were sent\n  about: {about}\n  note: the \
+             event id in this report is not an id this software makes, so <event-id> is left \
+             for you to fill\n  missing on this node: this event and whatever it changed on \
+             other nodes; "
         )),
         "{text}"
     );
-    // The id in the printed command is one shell word.
+    // The id is not one this software makes, so it is in no printed command.
     assert!(
-        text.contains(&format!(
-            "\n  then, on node hub: another sync ack '{id}' --owner\n"
-        )),
+        text.contains("\n  then, on node hub: another sync ack <event-id> --owner\n"),
         "{text}"
     );
+    assert!(!text.contains("sync ack 01"), "{text}");
     let text = String::from_utf8_lossy(&needs.stdout);
     assert!(
         text.contains(&format!(

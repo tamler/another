@@ -511,7 +511,8 @@ pub fn sync_report(r: &crate::fed::SyncReport) -> String {
     }
     // Every unacknowledged skip, after every sync, until `another sync ack`.
     if !r.skipped.is_empty() {
-        let _ = write!(out, "\n{}", another_core::sync_skip_lines(&r.skipped));
+        let lines = another_core::sync_skip_lines(&r.skipped, r.skipped_total);
+        let _ = write!(out, "\n{lines}");
     }
     out
 }

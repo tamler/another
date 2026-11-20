@@ -121,20 +121,24 @@ fn about(kind: &str, p: &Value) -> Option<String> {
             .and_then(Value::as_str)
             .map(|t| cut(t, ABOUT_CHARS))
     };
-    let count = |key: &str| p.get(key).and_then(Value::as_array).map(Vec::len);
+    let count = |key: &str, one: &str, many: &str| {
+        p.get(key)
+            .and_then(Value::as_array)
+            .map(|a| format!("{} {}", a.len(), if a.len() == 1 { one } else { many }))
+    };
     let family = kind.split('.').next().unwrap_or_default();
     let about = match (family, kind) {
         (_, "agent.registered") => format!("agent {}", text("name")?),
         (_, "message.sent") => format!(
-            "message {} to {} recipients",
+            "message {} to {}",
             text("message_id")?,
-            count("recipients")?
+            count("recipients", "recipient", "recipients")?
         ),
         ("hold", _) => match text("hold_id") {
             Some(id) => format!("hold {id}"),
-            None => format!("{} holds", count("hold_ids")?),
+            None => count("hold_ids", "hold", "holds")?,
         },
-        ("resource", _) => format!("{} leases", count("lease_ids")?),
+        ("resource", _) => count("lease_ids", "lease", "leases")?,
         ("request", _) => format!("request {}", text("request_id")?),
         _ => return None,
     };
@@ -418,14 +422,31 @@ impl Marker {
     }
 }
 
-/// A value as one word of a printed command: as it is when it holds nothing a shell reads,
-/// in single quotes otherwise.
-fn word(text: &str) -> String {
-    let plain = |c: char| c.is_ascii_alphanumeric() || "@._-:/+%".contains(c);
-    if !text.is_empty() && text.chars().all(plain) {
-        text.to_string()
+/// An id as this software makes them: a ULID. Only such a value from a marker is put into
+/// a printed command; anything else leaves the placeholder, so a peer's text is never an
+/// argument of a command the reader copies.
+fn usable_id(text: &str) -> bool {
+    crate::federation::validate_node_id(text).is_ok()
+}
+
+/// An agent name by the local name rule that a command line does not read as an option.
+fn usable_name(text: &str) -> bool {
+    crate::identity::validate_name(text).is_ok() && !text.starts_with('-')
+}
+
+const NAME_NOT_USABLE: &str = "the agent's name in this report is not a valid agent name, \
+    so <name> is left for you to fill";
+const HOLD_ID_NOT_USABLE: &str = "the hold id in this report is not an id this software \
+    makes, so <hold id> is left for you to fill";
+const EVENT_ID_NOT_USABLE: &str = "the event id in this report is not an id this software \
+    makes, so <event-id> is left for you to fill";
+
+/// `another sync ack <id> --owner`, with the id only when it is usable.
+fn ack_command(event_id: &str) -> (String, bool) {
+    if usable_id(event_id) {
+        (format!("another sync ack {event_id} --owner"), true)
     } else {
-        format!("'{}'", text.replace('\'', "'\\''"))
+        ("another sync ack <event-id> --owner".to_string(), false)
     }
 }
 
@@ -506,35 +527,161 @@ const MESSAGE_STEPS: [&str; 2] = [
     "another sync",
 ];
 
-/// What other nodes miss while an event of `kind` is skipped, and the steps that get the
-/// information across, in order. The lines are fixed per kind; `about` (the marker's short
-/// name of the thing) fills only `<name>` and `<hold id>`, as one shell word. Every other
-/// placeholder is for the reader to fill.
-pub fn remedy(kind: &str, about: Option<&str>) -> (&'static str, Vec<String>) {
+// The same steps as `another needs` prints them. Its rule for a step (docs/NEEDS.md): an
+// entry that starts with `another` is a complete command that runs as it stands. So only
+// such a command is printed bare; every other step starts with a word and puts each command
+// in backticks, and a placeholder is never in a bare command.
+const AGENT_NEEDS: [&str; 6] = [
+    "register the agent again: `another agent register <name> --program <program> --model \
+     <model> --description \"<4096 bytes or fewer>\"` (add `--project <path>` if it has one; \
+     a model left out is cleared)",
+    "each hold it has (`another holds --agent <name>` lists them): `another hold acquire \
+     --agent <name> -p <project> <the same paths>`, with --shared, --repo-wide, --reason and \
+     --ttl as the hold has them (the same hold is sent again; without -p from another \
+     directory it is a different hold, and without --shared a shared hold becomes exclusive \
+     or is refused)",
+    "each resource of this node it holds a lease on: `another release <resource id or \
+     kind:name> --agent <name>`, then at once `another borrow <the same> --agent <name>` (a \
+     borrow without the release only renews, and a renewal brings nothing to a node that \
+     never had the lease. Between the two commands the resource has no lease unless another \
+     agent holds one. Another agent on this node that borrows it in that moment becomes its \
+     owner, and if the resource is exclusive this agent's borrow is then refused. If another \
+     agent already holds a lease, that agent becomes the owner at the release and this agent \
+     comes back as a borrower)",
+    "each resource of another node it borrowed: `another release <resource id> --agent \
+     <name>`, then `another borrow <resource id> --agent <name>` (the id is in brackets in \
+     `another resources`; kind:name names only this node's resources. If the borrow is \
+     refused, the release has already happened: it is refused when the hub does not grant \
+     borrowing, when the resource has no live owner, or when it cannot be reached from this \
+     machine)",
+    "mail it sent to other nodes before step 1 is not delivered there and no command \
+     delivers it: send it again",
+    "another sync",
+];
+const HOLD_NEEDS: [&str; 3] = [
+    "release the hold: `another hold release --agent <agent> <hold id>`",
+    "acquire it again: `another hold acquire --agent <agent> -p <project> <paths>`, with \
+     --shared, --repo-wide and --ttl as the hold had them, each pattern 4096 bytes or fewer \
+     and --reason 1024 bytes or fewer",
+    "another sync",
+];
+const HOLD_RENEWED_NEEDS: [&str; 1] = [
+    "renew the holds: `another heartbeat --agent <agent>`, then `another sync` (the next \
+     heartbeat does the same by itself, in events of at most 10000 ids)",
+];
+const LEASE_RENEWED_NEEDS: [&str; 3] = [
+    "another sync",
+    "each resource of another node the agent borrowed: `another borrow <resource id> --agent \
+     <agent>` (the id is in brackets in `another resources`; kind:name names only this \
+     node's resources; this renews a lease that is still live and borrows again one that \
+     ended)",
+    "another sync",
+];
+const MESSAGE_NEEDS: [&str; 2] = [
+    "send it again with `another send`, to fewer recipients in each message (a body is at \
+     most 262144 bytes, so only the list of recipients makes a message this large)",
+    "another sync",
+];
+
+/// What other nodes miss while an event is skipped, and the steps that get the information
+/// across, in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Remedy {
+    pub missing: &'static str,
+    /// The steps as `another sync` and the docs word them.
+    pub steps: Vec<String>,
+    /// The same steps as `another needs` words them: a bare entry is a complete command.
+    pub needs_steps: Vec<String>,
+    /// Said beside the steps when a value in the report could not be put into them.
+    pub note: Option<&'static str>,
+}
+
+/// The remedy for a skipped event of `kind`. The lines are fixed per kind. `about` (the
+/// marker's short name of the thing) fills only `<name>`, and only with a valid agent
+/// name, and `<hold id>`, and only with an id this software makes. Any other value leaves
+/// the placeholder and is noted: a peer chose it, and the lines are there to be copied.
+/// Every other placeholder is for the reader to fill.
+pub fn remedy(kind: &str, about: Option<&str>) -> Remedy {
     let named = |prefix: &str| {
         about
             .and_then(|a| a.strip_prefix(prefix))
             .filter(|rest| !rest.is_empty())
-            .map(word)
     };
-    let fill = |steps: &[&str], placeholder: &str, value: Option<String>| -> Vec<String> {
+    let fill = |steps: &[&str], placeholder: &str, value: Option<&str>| -> Vec<String> {
         steps
             .iter()
-            .map(|step| match &value {
+            .map(|step| match value {
                 Some(value) => step.replace(placeholder, value),
                 None => (*step).to_string(),
             })
             .collect()
     };
-    match kind {
-        "agent.registered" => (AGENT_MISSING, fill(&AGENT_STEPS, "<name>", named("agent "))),
-        "hold.acquired" | "hold.updated" => {
-            (HOLD_MISSING, fill(&HOLD_STEPS, "<hold id>", named("hold ")))
-        }
-        "hold.renewed" => (HOLD_RENEWED_MISSING, fill(&HOLD_RENEWED_STEPS, "", None)),
-        "resource.renewed" => (LEASE_RENEWED_MISSING, fill(&LEASE_RENEWED_STEPS, "", None)),
-        "message.sent" => (MESSAGE_MISSING, fill(&MESSAGE_STEPS, "", None)),
-        _ => (GENERAL_MISSING, vec![GENERAL_STEP.to_string()]),
+    let (missing, steps, needs, placeholder, value, unusable): (
+        _,
+        &[&str],
+        &[&str],
+        _,
+        Option<&str>,
+        _,
+    ) = match kind {
+        "agent.registered" => (
+            AGENT_MISSING,
+            &AGENT_STEPS,
+            &AGENT_NEEDS,
+            "<name>",
+            named("agent "),
+            NAME_NOT_USABLE,
+        ),
+        "hold.acquired" | "hold.updated" => (
+            HOLD_MISSING,
+            &HOLD_STEPS,
+            &HOLD_NEEDS,
+            "<hold id>",
+            named("hold "),
+            HOLD_ID_NOT_USABLE,
+        ),
+        "hold.renewed" => (
+            HOLD_RENEWED_MISSING,
+            &HOLD_RENEWED_STEPS,
+            &HOLD_RENEWED_NEEDS,
+            "",
+            None,
+            "",
+        ),
+        "resource.renewed" => (
+            LEASE_RENEWED_MISSING,
+            &LEASE_RENEWED_STEPS,
+            &LEASE_RENEWED_NEEDS,
+            "",
+            None,
+            "",
+        ),
+        "message.sent" => (
+            MESSAGE_MISSING,
+            &MESSAGE_STEPS,
+            &MESSAGE_NEEDS,
+            "",
+            None,
+            "",
+        ),
+        _ => (
+            GENERAL_MISSING,
+            &[GENERAL_STEP],
+            &[GENERAL_STEP],
+            "",
+            None,
+            "",
+        ),
+    };
+    let usable = match placeholder {
+        "<name>" => value.filter(|v| usable_name(v)),
+        _ => value.filter(|v| usable_id(v)),
+    };
+    Remedy {
+        missing,
+        steps: fill(steps, placeholder, usable),
+        needs_steps: fill(needs, placeholder, usable),
+        note: (value.is_some() && usable.is_none()).then_some(unusable),
     }
 }
 
@@ -565,6 +712,17 @@ pub struct Skip {
     pub remedy: Vec<String>,
     /// The command that stops the report, to run on `holder`.
     pub ack: String,
+    /// What is said when a value of the report was not put into a command: it was not a
+    /// valid agent name, or not an id this software makes. Absent when there is nothing
+    /// to say.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    /// The steps as `another needs` words them.
+    #[serde(skip)]
+    pub needs_remedy: Vec<String>,
+    /// `ack` holds the event's id, so it runs as it stands.
+    #[serde(skip)]
+    pub ack_runs: bool,
     /// The holder is this node.
     #[serde(skip)]
     pub own: bool,
@@ -613,6 +771,9 @@ impl Skip {
         if let Some(about) = &self.about {
             out.push_str(&format!("\n  about: {about}"));
         }
+        for note in &self.notes {
+            out.push_str(&format!("\n  note: {note}"));
+        }
         let place = self.remedy_place();
         if self.own {
             out.push_str(&format!("\n  missing on other nodes: {}", self.missing));
@@ -657,38 +818,44 @@ impl Skip {
         }
     }
 
-    /// The steps `another needs` prints under the row: the remedy, then the acknowledgement.
+    /// The steps `another needs` prints under the row: any note, the remedy, then the
+    /// acknowledgement. An entry that starts with `another`, or that is `on <node>: `
+    /// followed by one, is a complete command; every other entry starts with a word and has
+    /// its commands in backticks.
     pub fn needs_steps(&self) -> Vec<String> {
         let place = self.remedy_place();
-        let mut steps: Vec<String> = self
-            .remedy
-            .iter()
-            .map(|step| {
-                if self.event_is_local {
-                    step.clone()
-                } else {
-                    format!("on {place}: {step}")
-                }
-            })
-            .collect();
-        steps.push(if self.own {
+        let mut steps: Vec<String> = self.notes.iter().map(|n| format!("note: {n}")).collect();
+        steps.extend(self.needs_remedy.iter().map(|step| {
+            if self.event_is_local {
+                step.clone()
+            } else {
+                format!("on {place}: {step}")
+            }
+        }));
+        let ack = if self.ack_runs {
             self.ack.clone()
         } else {
-            format!("on node {}: {}", self.holder_name, self.ack)
+            format!("acknowledge it with `{}`", self.ack)
+        };
+        steps.push(if self.own {
+            ack
+        } else {
+            format!("on node {}: {ack}", self.holder_name)
         });
         steps
     }
 }
 
-/// The lines `another sync` prints after a sync for the unacknowledged skips: at most
-/// [`SYNC_SKIPS_SHOWN`] in full, then a count. Empty when there is none.
-pub fn sync_skip_lines(skips: &[Skip]) -> String {
+/// The lines `another sync` prints after a sync for the unacknowledged skips: those given,
+/// which are at most [`SYNC_SKIPS_SHOWN`], in full, then a count of the rest of `total`.
+/// Empty when there is none.
+pub fn sync_skip_lines(skips: &[Skip], total: usize) -> String {
     let mut out: Vec<String> = skips
         .iter()
         .take(SYNC_SKIPS_SHOWN)
         .map(Skip::sync_block)
         .collect();
-    let more = skips.len().saturating_sub(SYNC_SKIPS_SHOWN);
+    let more = total.saturating_sub(out.len());
     if more > 0 {
         out.push(format!("and {more} more skipped event(s): another needs"));
     }
@@ -753,9 +920,17 @@ fn unacknowledged(conn: &Connection, local: &str) -> Result<Vec<Skip>> {
         }
         let event_id = display_line(&m.event_id, SHOWN_ID_CHARS);
         let about = m.about.as_deref().map(|a| display_line(a, ABOUT_CHARS));
-        let (missing, steps) = remedy(&m.kind, about.as_deref());
+        let remedy = remedy(&m.kind, about.as_deref());
+        let (ack, ack_runs) = ack_command(&event_id);
+        let mut notes: Vec<String> = remedy.note.iter().map(|n| (*n).to_string()).collect();
+        if !ack_runs {
+            notes.push(EVENT_ID_NOT_USABLE.to_string());
+        }
         out.push(Skip {
-            ack: format!("another sync ack {} --owner", word(&event_id)),
+            ack,
+            ack_runs,
+            notes,
+            needs_remedy: remedy.needs_steps,
             event_id,
             event_node_name: node_name(conn, &m.event_node)?,
             event_is_local: m.event_node == local,
@@ -770,8 +945,8 @@ fn unacknowledged(conn: &Connection, local: &str) -> Result<Vec<Skip>> {
             marker_id: m.marker_id,
             since: fmt_ts(m.ts),
             since_ms: m.ts,
-            missing: missing.to_string(),
-            remedy: steps,
+            missing: remedy.missing.to_string(),
+            remedy: remedy.steps,
             own,
         });
     }
@@ -816,9 +991,9 @@ fn ack_lookup(conn: &Connection, local: &str, event_id: &str) -> Result<(Marker,
         .optional()?;
     match other {
         Some(node) => Err(Error::Invalid(format!(
-            "event {shown} is in node {}'s log; acknowledge it there: another sync ack {} --owner",
+            "event {shown} is in node {}'s log; acknowledge it there: {}",
             node_name(conn, &node)?,
-            word(&shown)
+            ack_command(&shown).0
         ))),
         None => Err(Error::NotFound(format!(
             "no skipped event {shown}; skipped events are listed by: another activity --kinds sync"
@@ -910,7 +1085,7 @@ mod tests {
     /// One assertion per entry of the remedy lines (D-next).
     #[test]
     fn each_kind_gets_its_remedy_lines() {
-        let (missing, steps) = remedy("agent.registered", Some("agent wordy"));
+        let Remedy { missing, steps, .. } = remedy("agent.registered", Some("agent wordy"));
         assert!(missing
             .starts_with("what this registration changed: the agent's description and model. "));
         assert!(
@@ -946,7 +1121,8 @@ mod tests {
         assert_eq!(steps[5], "another sync");
 
         for kind in ["hold.acquired", "hold.updated"] {
-            let (missing, steps) = remedy(kind, Some("hold 01HOLD"));
+            let Remedy { missing, steps, .. } =
+                remedy(kind, Some("hold 01HD0000000000000000000000"));
             assert_eq!(
                 missing,
                 "this hold: an agent on another node is not warned before it edits the same \
@@ -955,7 +1131,7 @@ mod tests {
             assert_eq!(
                 steps,
                 [
-                    "another hold release --agent <agent> 01HOLD",
+                    "another hold release --agent <agent> 01HD0000000000000000000000",
                     "another hold acquire --agent <agent> -p <project> <paths>, with --shared, \
                      --repo-wide and --ttl as the hold had them, each pattern 4096 bytes or \
                      fewer and --reason 1024 bytes or fewer",
@@ -964,7 +1140,7 @@ mod tests {
             );
         }
 
-        let (missing, steps) = remedy("hold.renewed", Some("3 holds"));
+        let Remedy { missing, steps, .. } = remedy("hold.renewed", Some("3 holds"));
         assert_eq!(
             missing,
             "this renewal: other nodes may show these holds as expired, and not warn their \
@@ -978,7 +1154,7 @@ mod tests {
             ]
         );
 
-        let (missing, steps) = remedy("resource.renewed", Some("2 leases"));
+        let Remedy { missing, steps, .. } = remedy("resource.renewed", Some("2 leases"));
         assert!(missing.starts_with("this renewal. A lease on this node's own resource shows as expired on other nodes until the next renewal arrives. "));
         assert!(missing.ends_with("it ended the lease, on every node including this one, and a later renewal does not bring it back"));
         assert_eq!(steps.len(), 3);
@@ -992,7 +1168,8 @@ mod tests {
         );
         assert_eq!(steps[2], "another sync");
 
-        let (missing, steps) = remedy("message.sent", Some("message 01MSG to 9 recipients"));
+        let Remedy { missing, steps, .. } =
+            remedy("message.sent", Some("message 01MSG to 9 recipients"));
         assert_eq!(
             missing,
             "this message: its recipients on other nodes never received it"
@@ -1012,7 +1189,7 @@ mod tests {
             "request.completed",
             "no.such_kind",
         ] {
-            let (missing, steps) = remedy(kind, None);
+            let Remedy { missing, steps, .. } = remedy(kind, None);
             assert_eq!(
                 missing,
                 "this event and whatever it changed on other nodes; docs/FEDERATION.md, \"What \
@@ -1035,7 +1212,8 @@ mod tests {
     fn a_step_for_another_nodes_resource_names_it_by_id_only() {
         let mut foreign = 0;
         for kind in ["agent.registered", "resource.renewed"] {
-            for step in remedy(kind, None).1 {
+            let r = remedy(kind, None);
+            for step in r.steps.iter().chain(&r.needs_steps) {
                 if step.starts_with("each resource of another node") {
                     foreign += 1;
                     assert!(step.contains("<resource id>"), "{step}");
@@ -1047,27 +1225,166 @@ mod tests {
                 }
             }
         }
-        assert_eq!(foreign, 2);
+        assert_eq!(foreign, 4);
     }
 
-    /// A name a peer chose is one shell word in a printed command, and a marker with no
-    /// usable name leaves the placeholder for the reader.
+    /// A value from a marker goes into a printed command only when it is a valid agent
+    /// name or an id this software makes. Anything else, which a hub could have chosen,
+    /// leaves the placeholder and is noted, in both wordings of the steps.
     #[test]
-    fn a_name_from_a_marker_is_one_shell_word() {
-        let (_, steps) = remedy("agent.registered", Some("agent x; rm -rf ~"));
-        assert!(
-            steps[0].starts_with("another agent register 'x; rm -rf ~' --program"),
-            "{}",
-            steps[0]
-        );
-        for about in [None, Some("agent "), Some("3 holds")] {
-            let (_, steps) = remedy("agent.registered", about);
-            assert!(
-                steps[0].starts_with("another agent register <name> --program"),
-                "{}",
-                steps[0]
+    fn a_value_from_a_marker_fills_a_command_only_when_it_is_a_name_or_an_id() {
+        // A hub's `about: "hold ."` once printed a release of every hold under `.`.
+        for hostile in [
+            "hold .",
+            "hold --help",
+            "hold -p/x",
+            "hold 01H0LD",
+            "hold 01hd0000000000000000000000",
+            "hold 01HL0000000000000000000000",
+            "hold 01HD0000000000000000000000 x",
+            "hold '; rm -rf ~; echo '",
+            "hold $(id)",
+            "hold 81HD0000000000000000000000",
+        ] {
+            let r = remedy("hold.acquired", Some(hostile));
+            assert_eq!(
+                r.steps[0], "another hold release --agent <agent> <hold id>",
+                "{hostile}"
+            );
+            assert_eq!(
+                r.needs_steps[0],
+                "release the hold: `another hold release --agent <agent> <hold id>`",
+                "{hostile}"
+            );
+            assert_eq!(
+                r.note,
+                Some(
+                    "the hold id in this report is not an id this software makes, so <hold \
+                     id> is left for you to fill"
+                ),
+                "{hostile}"
             );
         }
+        for hostile in [
+            "agent x; rm -rf ~",
+            "agent it's",
+            "agent '$(touch pwned)'",
+            "agent --help",
+            "agent -x9",
+            "agent q z",
+            "agent wordy@shop",
+            "agent \u{202e}ydrow",
+        ] {
+            let r = remedy("agent.registered", Some(hostile));
+            for step in r.steps.iter().chain(&r.needs_steps) {
+                assert!(!step.contains(&hostile[6..]), "{hostile}: {step}");
+            }
+            assert!(
+                r.steps[0].starts_with("another agent register <name> --program"),
+                "{hostile}: {}",
+                r.steps[0]
+            );
+            assert_eq!(
+                r.note,
+                Some(
+                    "the agent's name in this report is not a valid agent name, so <name> is \
+                     left for you to fill"
+                ),
+                "{hostile}"
+            );
+        }
+        // No value at all is not a bad value: the placeholder stays and nothing is noted.
+        for about in [None, Some("agent "), Some("3 holds")] {
+            let r = remedy("agent.registered", about);
+            assert!(r.steps[0].starts_with("another agent register <name> --program"));
+            assert_eq!(r.note, None);
+        }
+        // An honest name and an honest id fill, with nothing noted.
+        let r = remedy("agent.registered", Some("agent word.y_2-b"));
+        assert!(r.steps[0].starts_with("another agent register word.y_2-b --program"));
+        assert_eq!(r.note, None);
+        let r = remedy("hold.updated", Some("hold 01HD0000000000000000000000"));
+        assert_eq!(r.note, None);
+
+        assert_eq!(
+            ack_command("01SK1PPED00000000000000000"),
+            (
+                "another sync ack 01SK1PPED00000000000000000 --owner".to_string(),
+                true
+            )
+        );
+        for hostile in [".", "--all", "01SKIPPED", "x; id", "it's"] {
+            assert_eq!(
+                ack_command(hostile),
+                ("another sync ack <event-id> --owner".to_string(), false),
+                "{hostile}"
+            );
+        }
+    }
+
+    /// The rule of `another needs` for a step: an entry that starts with `another` is a
+    /// complete command that runs as it stands. In the needs wording a bare entry is such a
+    /// command, with no placeholder and nothing after it; every other entry starts with a
+    /// word and has each command in backticks.
+    #[test]
+    fn a_bare_step_for_needs_is_a_complete_command() {
+        let mut bare = 0;
+        for (kind, about) in [
+            ("agent.registered", Some("agent wordy")),
+            ("agent.registered", Some("agent .; x")),
+            ("hold.acquired", Some("hold 01HD0000000000000000000000")),
+            ("hold.updated", Some("hold .")),
+            ("hold.renewed", Some("3 holds")),
+            ("resource.renewed", Some("1 lease")),
+            ("message.sent", Some("message 01M to 1 recipient")),
+            ("request.completed", None),
+        ] {
+            let r = remedy(kind, about);
+            assert_eq!(r.steps.len(), r.needs_steps.len(), "{kind}");
+            for step in &r.needs_steps {
+                if step.starts_with("another") {
+                    bare += 1;
+                    assert_eq!(step, "another sync", "{kind}");
+                    continue;
+                }
+                // Each `another` in it opens a backtick pair, and no pair is left open.
+                assert_eq!(step.matches('`').count() % 2, 0, "{kind}: {step}");
+                assert_eq!(
+                    step.matches("another ").count(),
+                    step.matches("`another ").count()
+                        + step.matches("another agent on this node").count()
+                        + step.matches("unless another agent").count()
+                        + step.matches("If another agent").count()
+                        + step.matches("of another node").count()
+                        + step.matches("from another directory").count(),
+                    "{kind}: {step}"
+                );
+                assert!(!step.contains(": another "), "{kind}: {step}");
+            }
+        }
+        assert!(bare >= 6, "{bare}");
+        let needs = remedy("message.sent", None).needs_steps;
+        assert_eq!(
+            needs[0],
+            "send it again with `another send`, to fewer recipients in each message (a body \
+             is at most 262144 bytes, so only the list of recipients makes a message this \
+             large)"
+        );
+        let needs = remedy("hold.renewed", None).needs_steps;
+        assert_eq!(
+            needs,
+            [
+                "renew the holds: `another heartbeat --agent <agent>`, then `another sync` (the \
+              next heartbeat does the same by itself, in events of at most 10000 ids)"
+            ]
+        );
+        let needs = remedy("agent.registered", Some("agent wordy")).needs_steps;
+        assert_eq!(
+            needs[0],
+            "register the agent again: `another agent register wordy --program <program> \
+             --model <model> --description \"<4096 bytes or fewer>\"` (add `--project <path>` \
+             if it has one; a model left out is cleared)"
+        );
     }
 
     #[test]
@@ -1087,6 +1404,15 @@ mod tests {
         assert_eq!(
             about("message.sent", &p).as_deref(),
             Some("message 01M to 2 recipients")
+        );
+        // One of a thing is not "1 holds".
+        let p = json!({ "hold_ids": ["a"], "lease_ids": ["a"] });
+        assert_eq!(about("hold.released", &p).as_deref(), Some("1 hold"));
+        assert_eq!(about("resource.released", &p).as_deref(), Some("1 lease"));
+        let p = json!({ "message_id": "01M", "recipients": [{}] });
+        assert_eq!(
+            about("message.sent", &p).as_deref(),
+            Some("message 01M to 1 recipient")
         );
         let p = json!({ "request_id": "01R" });
         assert_eq!(
