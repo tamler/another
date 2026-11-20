@@ -21,6 +21,9 @@ pub const MAX_LEASE_TTL_SECONDS: i64 = 24 * 60 * 60;
 pub const MAX_RESOURCE_ENDPOINT_BYTES: usize = 2 * 1024;
 /// Longest resource purpose accepted, in bytes: one line of prose.
 pub const MAX_RESOURCE_PURPOSE_BYTES: usize = 1024;
+/// Largest resource metadata accepted, measured as serialized JSON. Metadata is stored,
+/// written into the `resource.registered` event and synced to peers, so it stays small.
+pub const MAX_RESOURCE_METADATA_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -109,6 +112,7 @@ pub struct RegisterResource {
     pub mode: LeaseMode,
     pub ttl_seconds: Option<i64>,
     /// Free-form details: model, backend (`metal|mlx|cpu|cuda`), estimated_bytes, cmdline, ...
+    /// At most 64 KiB as JSON.
     pub metadata: Option<Value>,
 }
 
@@ -235,6 +239,21 @@ pub(crate) fn check_text_sizes(endpoint: Option<&str>, purpose: Option<&str>) ->
                 "resource {field} is {len} bytes; the limit is {max}"
             )));
         }
+    }
+    Ok(())
+}
+
+/// Resource metadata must be a JSON object of at most [`MAX_RESOURCE_METADATA_BYTES`] as
+/// serialized JSON. Local registration and a peer's `resource.registered` both apply it.
+pub(crate) fn check_metadata(metadata: &Value) -> Result<()> {
+    if !metadata.is_object() {
+        return Err(Error::Invalid("metadata must be a JSON object".into()));
+    }
+    let bytes = metadata.to_string().len();
+    if bytes > MAX_RESOURCE_METADATA_BYTES {
+        return Err(Error::Invalid(format!(
+            "metadata is {bytes} bytes as JSON; the limit is {MAX_RESOURCE_METADATA_BYTES}"
+        )));
     }
     Ok(())
 }
@@ -685,9 +704,7 @@ impl Store {
             .metadata
             .clone()
             .unwrap_or(Value::Object(Default::default()));
-        if !metadata.is_object() {
-            return Err(Error::Invalid("metadata must be a JSON object".into()));
-        }
+        check_metadata(&metadata)?;
         self.write(|tx| {
             crate::holds::sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, &input.agent)?;

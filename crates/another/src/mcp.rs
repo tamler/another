@@ -319,6 +319,7 @@ pub struct ResourceRegisterArgs {
     /// Lease length in seconds (default 1800, clamped to 60..86400); renew with resource_heartbeat.
     pub ttl_seconds: Option<i64>,
     /// Free-form object: model, backend (metal|mlx|cpu|cuda), estimated_bytes, cmdline, ...
+    /// At most 64 KiB as JSON.
     pub metadata: Option<serde_json::Value>,
 }
 

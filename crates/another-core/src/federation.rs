@@ -717,6 +717,11 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
                 p.get("endpoint").and_then(Value::as_str),
                 p.get("purpose").and_then(Value::as_str),
             )?;
+            // The same metadata rule as a local registration: an object of at most 64 KiB.
+            // An event without metadata is stored with `{}`.
+            if let Some(metadata) = p.get("metadata") {
+                crate::resources::check_metadata(metadata)?;
+            }
             // A local registration types these as u16 / u32; refuse what no build sends.
             for (field, max) in [("port", u64::from(u16::MAX)), ("pid", u64::from(u32::MAX))] {
                 if let Some(v) = p.get(field).filter(|v| !v.is_null()) {

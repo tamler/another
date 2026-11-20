@@ -1127,6 +1127,45 @@ fn adv_a_peers_resource_name_follows_the_local_rule() {
     );
 }
 
+/// The metadata cap holds on the way in from a peer too: a paired node that never applied it
+/// (an older build) cannot store oversized or non-object metadata on the hub, which would then
+/// relay it to every other spoke. Small object metadata, and no metadata, still sync.
+/// (FINDINGS-244-w9Z, failing test by claude@lanes.)
+#[test]
+fn a_peers_resource_cannot_carry_oversized_or_non_object_metadata() {
+    let fed = Fed::new();
+    let spy = fed.mallory.agent("spy");
+    push(&fed.hub, &fed.mallory);
+    let register = |rid: &str, metadata: Option<Value>| {
+        let mut payload = json!({ "resource_id": rid, "kind": "model_server", "name": format!("{rid}@1"),
+                                  "lease_id": format!("lease-{rid}"), "owner_id": spy });
+        if let Some(metadata) = metadata {
+            payload["metadata"] = metadata;
+        }
+        fed.forge("resource.registered", payload)
+    };
+    let stored = |rid: &str| -> Option<String> {
+        fed.hub_one("SELECT metadata FROM resources WHERE resource_id = ?1", rid)
+    };
+
+    let report = register(
+        "r-big",
+        Some(json!({ "blob": "x".repeat(MAX_RESOURCE_METADATA_BYTES) })),
+    );
+    assert_rejected(&report, "metadata over the limit");
+    assert_eq!(stored("r-big"), None, "a peer stored oversized metadata");
+    let report = register("r-array", Some(json!([1, 2, 3])));
+    assert_rejected(&report, "metadata that is not an object");
+    assert_eq!(stored("r-array"), None, "a peer stored non-object metadata");
+
+    let ok = register("r-small", Some(json!({ "backend": "metal" })));
+    assert!(ok.rejected.is_empty(), "{:?}", ok.rejected);
+    assert_eq!(stored("r-small").as_deref(), Some(r#"{"backend":"metal"}"#));
+    let ok = register("r-none", None);
+    assert!(ok.rejected.is_empty(), "{:?}", ok.rejected);
+    assert_eq!(stored("r-none").as_deref(), Some("{}"));
+}
+
 /// A peer's `endpoint` and `purpose` are held to the local size limits (2 KiB and 1 KiB): a
 /// larger one is refused and not stored, and one of exactly the limit still syncs.
 /// (FINDINGS-main-resource-text-size-w9W, failing test by its finder.)
