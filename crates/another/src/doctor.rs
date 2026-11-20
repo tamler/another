@@ -711,35 +711,81 @@ fn peers(store: &Store) -> Check {
             .and_then(another_core::parse_ts)
             .map(|ms| now - ms)
     };
+    // "Last sync" is the last sync that ran to its end: on a spoke, of this node with its
+    // hub; on a hub, the last push or pull of that spoke it answered.
     let mut stale = Vec::new();
+    let (mut stale_hub, mut stale_spoke) = (false, false);
     for p in &live {
         let limit = if p.role == "hub" {
             HUB_STALE_MS
         } else {
             SPOKE_STALE_MS
         };
-        match age(&p.last_sync_at) {
-            Some(a) if a <= limit => {}
-            Some(a) => stale.push(format!(
+        let line = match age(&p.last_sync_at) {
+            Some(a) if a <= limit => continue,
+            Some(a) => format!(
                 "{} {}: last sync {} h ago",
                 p.role,
                 p.display_name,
                 a / 3_600_000
-            )),
-            None => stale.push(format!("{} {}: never synced", p.role, p.display_name)),
+            ),
+            None => format!("{} {}: never synced", p.role, p.display_name),
+        };
+        stale.push(line);
+        if p.role == "hub" {
+            stale_hub = true;
+        } else {
+            stale_spoke = true;
         }
     }
+    // What is known about how this node reaches its hub. Neither stops a sync.
+    let mut warnings = Vec::new();
+    let unchecked = crate::fed::hub_with_unchecked_address(store).map(|p| p.node_id);
+    for p in live.iter().filter(|p| p.role == "hub") {
+        let Some(url) = p.url.as_deref() else {
+            continue;
+        };
+        let address = crate::fed::shown_address(url);
+        if crate::fed::plain_http_off_loopback(url) {
+            warnings.push(format!(
+                "hub {} is reached over plain http:// at {address}: anyone on the network \
+                 path can read mail and the feed in transit",
+                p.display_name
+            ));
+        }
+        if unchecked.as_deref() == Some(p.node_id.as_str()) {
+            warnings.push(format!(
+                "hub {} was joined before invites were signed, so its address {address} was \
+                 never checked; compare it with the address the hub's owner gives, or join \
+                 again with a fresh invite made with the same --perms",
+                p.display_name
+            ));
+        }
+    }
+    warnings.extend(own_row.map(str::to_string));
     if stale.is_empty() {
         let synced = format!("{} paired, all synced recently", live.len());
-        match own_row {
-            Some(text) => check("peers", Level::Warn, format!("{synced}; {text}")),
-            None => check("peers", Level::Ok, synced),
+        if warnings.is_empty() {
+            return check("peers", Level::Ok, synced);
         }
-    } else {
-        stale.extend(own_row.map(str::to_string));
-        check("peers", Level::Warn, stale.join("; "))
-            .fix("another sync, and check the hub URL with another peers")
+        return check(
+            "peers",
+            Level::Warn,
+            format!("{synced}; {}", warnings.join("; ")),
+        );
     }
+    stale.extend(warnings);
+    // The fix names what is stale: a hub is synced from here, a spoke from its own node.
+    let mut fixes = Vec::new();
+    if stale_hub {
+        fixes.push("another sync, and check the hub URL with another peers");
+    }
+    if stale_spoke {
+        fixes.push(
+            "run another sync on that node; if it is gone for good, another pair revoke <node>",
+        );
+    }
+    check("peers", Level::Warn, stale.join("; ")).fix(fixes.join("; "))
 }
 
 /// What `another doctor` says about a pairing row for this node itself.

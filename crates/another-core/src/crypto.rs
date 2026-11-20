@@ -32,6 +32,15 @@ pub fn generate_key() -> Result<SigningKey> {
     Ok(SigningKey::from_bytes(&seed))
 }
 
+/// A nonce for one push or pull request: 16 bytes from the system's randomness, written as
+/// 32 lowercase hex characters. Every request gets a new one, a retry included.
+pub fn request_nonce() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|e| Error::Invalid(format!("no system randomness available: {e}")))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 pub fn decode_secret(text: &str) -> Result<SigningKey> {
     let bytes: [u8; 32] = unb64(text)?
         .try_into()
@@ -138,6 +147,49 @@ pub fn pair_accept_message(
     .into_bytes()
 }
 
+/// The bytes a hub's signature on a `200` answer to a push or a pull covers, signed by the
+/// hub's key. `nonce` is the request's `x-another-nonce` header and `request_signature` the
+/// text of its `x-another-signature` header, which commits to the method, the path with its
+/// query, the request time and the request body; so one answer verifies for one request
+/// only. `body` is the answer body as the hub serialized it, before any content encoding.
+/// Fields are joined by one newline; none may contain one.
+pub fn answer_message(
+    hub_node_id: &str,
+    spoke_node_id: &str,
+    nonce: &str,
+    request_signature: &str,
+    body: &[u8],
+) -> Vec<u8> {
+    format!(
+        "another-answer-v1\n{hub_node_id}\n{spoke_node_id}\n{nonce}\n{request_signature}\n{}",
+        sha256_hex(body)
+    )
+    .into_bytes()
+}
+
+/// The bytes a hub's signature on an invite covers, signed by the hub's key: every field of
+/// the invite, the format number and the address included. `secret_hash` is the SHA-256 of
+/// the invite's secret, and `perms` each permission's name joined by `,`. Fields are joined
+/// by one newline; none may contain one.
+#[allow(clippy::too_many_arguments)]
+pub fn invite_message(
+    v: u8,
+    hub_node_id: &str,
+    hub_public_key: &str,
+    hub_display_name: &str,
+    hub_url: &str,
+    invite_id: &str,
+    secret_hash: &str,
+    perms: &str,
+    expires_at: i64,
+) -> Vec<u8> {
+    format!(
+        "another-invite-v1\n{v}\n{hub_node_id}\n{hub_public_key}\n{hub_display_name}\n\
+         {hub_url}\n{invite_id}\n{secret_hash}\n{perms}\n{expires_at}"
+    )
+    .into_bytes()
+}
+
 pub fn sign(key: &SigningKey, message: &[u8]) -> String {
     b64(&key.sign(message).to_bytes())
 }
@@ -205,6 +257,33 @@ mod tests {
         assert_eq!(
             pair_accept_message("I", "S", "N", "NK", "hub", "read_feed,send_mail"),
             b"another-pair-accept-v1\nI\nS\nN\nNK\nhub\nread_feed,send_mail"
+        );
+    }
+
+    #[test]
+    fn answer_message_is_the_documented_bytes() {
+        assert_eq!(
+            answer_message("H", "S", "0a", "SIG", b"{}"),
+            b"another-answer-v1\nH\nS\n0a\nSIG\n\
+              44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        );
+    }
+
+    #[test]
+    fn invite_message_is_the_documented_bytes() {
+        assert_eq!(
+            invite_message(
+                2,
+                "H",
+                "HK",
+                "hub",
+                "https://hub.example",
+                "I",
+                "S",
+                "read_feed,send_mail",
+                -5
+            ),
+            b"another-invite-v1\n2\nH\nHK\nhub\nhttps://hub.example\nI\nS\nread_feed,send_mail\n-5"
         );
     }
 }

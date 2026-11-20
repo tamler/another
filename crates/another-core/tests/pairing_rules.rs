@@ -173,6 +173,33 @@ fn invite(hub: &Node, perms: &[Perm]) -> (String, Value) {
     (code.clone(), decode(&code))
 }
 
+/// Sign `invite` as it now reads with the private key `secret_key`, as the hub that holds
+/// that key would have made it. A hub signs every field of its invites, so an edited
+/// invite reaches the checks after the signature only when its own hub signed the edit.
+fn resign(invite: &mut Value, secret_key: &str) {
+    let perms: Vec<&str> = invite["perms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect();
+    let message = crypto::invite_message(
+        invite["v"].as_u64().unwrap() as u8,
+        text(&invite["hub"], "node_id"),
+        text(&invite["hub"], "public_key"),
+        text(&invite["hub"], "display_name"),
+        text(invite, "hub_url"),
+        text(invite, "invite_id"),
+        &crypto::sha256_hex(text(invite, "secret").as_bytes()),
+        &perms.join(","),
+        invite["expires_at"].as_i64().unwrap(),
+    );
+    invite["sig"] = json!(crypto::sign(
+        &crypto::decode_secret(secret_key).unwrap(),
+        &message
+    ));
+}
+
 fn decode(code: &str) -> Value {
     let raw = code.strip_prefix("another-invite:").unwrap();
     serde_json::from_slice(&crypto::unb64(raw).unwrap()).unwrap()
@@ -932,15 +959,39 @@ fn an_old_invite_is_refused_before_anything_is_sent() {
     let (_, fresh) = invite(&hub, &Perm::ALL);
     assert_eq!(fresh["v"], json!(2));
     for v in [1, 0, 3] {
+        // The format number is inside the signed bytes: changed by anyone but the hub, the
+        // signature no longer holds.
         let mut old = fresh.clone();
         old["v"] = json!(v);
+        let err = spoke.store.prepare_join(&encode(&old)).unwrap_err();
+        assert_eq!(err.code(), "forbidden");
+        assert!(
+            err.to_string()
+                .starts_with("this invite's signature does not match its contents"),
+            "{err}"
+        );
+        // Signed by the hub in a format this build does not know.
+        resign(&mut old, &hub.secret());
         let err = spoke.store.prepare_join(&encode(&old)).unwrap_err();
         assert_eq!(err.code(), "invalid");
         assert_eq!(
             err.to_string(),
-            "this invite was made by an older build; make a new invite on an upgraded hub"
+            format!(
+                "this invite is signed but in a format this build does not know (v {v}); not \
+                 joined. Update this node to the hub's build"
+            )
         );
     }
+    // An invite of a build that did not sign.
+    let mut unsigned = fresh.clone();
+    unsigned.as_object_mut().unwrap().remove("sig");
+    let err = spoke.store.prepare_join(&encode(&unsigned)).unwrap_err();
+    assert_eq!(err.code(), "invalid");
+    assert!(
+        err.to_string()
+            .starts_with("this invite is not signed by its hub"),
+        "{err}"
+    );
     assert!(!hub.invite_used(&fresh));
     assert!(spoke.store.peers().unwrap().is_empty());
 }
@@ -1415,9 +1466,16 @@ fn a_key_must_be_in_its_canonical_text_form() {
         // The hub entry of an invite.
         let mut forged = fresh.clone();
         forged["hub"]["public_key"] = json!(format!("{before_key}{hub_key}{after_key}"));
+        resign(&mut forged, &hub.secret());
         let err = match spoke.store.prepare_join(&encode(&forged)) {
             Ok(_) => panic!("built a request for a hub whose key text is not canonical"),
             Err(e) => e,
+        };
+        // A line break in a signed field is refused before the signature is checked.
+        let expected = if after_key == "\n" {
+            "invalid invite code"
+        } else {
+            expected
         };
         assert_eq!(
             (err.code(), err.to_string().as_str()),
@@ -1490,6 +1548,7 @@ fn an_invite_whose_hub_name_is_not_a_pairing_name_is_refused() {
     for name in ["local", "a@b", "", "two words", "hub\nread_feed"] {
         let mut forged = fresh.clone();
         forged["hub"]["display_name"] = json!(name);
+        resign(&mut forged, &hub.secret());
         let err = match spoke.store.prepare_join(&encode(&forged)) {
             Ok(_) => panic!("built a request for a hub named {name:?}"),
             Err(e) => e,
@@ -1632,6 +1691,7 @@ fn an_invite_id_must_be_a_ulid() {
     ] {
         let mut forged = fresh.clone();
         forged["invite_id"] = json!(id);
+        resign(&mut forged, &hub.secret());
         let err = match spoke.store.prepare_join(&encode(&forged)) {
             Ok(_) => panic!("signed a request for the invite id {id:?}"),
             Err(e) => e,

@@ -8,7 +8,7 @@
 
 Another is a background messaging system that helps coding agents work on the same project on the same machine at the same time. It helps reduce editing conflicts, exchange updates and reuse registered resources. Free and open source, always. [Measured resource use](docs/RESOURCE-MEASUREMENTS.md) records a sample on one Mac and its limits.
 
-It also works across machines today, through a self-hosted federation hub or authenticated remote peers. The hub can read mail it relays; remote peers cannot reap processes. See [federation](docs/FEDERATION.md) and [remote access](docs/REMOTE.md).
+It also works across machines today, through a self-hosted federation hub or authenticated remote peers. The hub can read mail it relays; remote peers cannot reap processes. The hub signs its invites and its answers to a push and a pull, so something between a spoke and its hub can make a sync fail and nothing else; secrecy on that link needs `https://` or a private network. Upgrade a hub and its spokes together: a hub and a spoke sync only when both run a build that signs. See [federation](docs/FEDERATION.md) and [remote access](docs/REMOTE.md).
 
 Claude Code and Codex cannot see each other without something shared. They can edit the same files, start the same fix twice, or launch duplicate model servers. Another combines path holds, messages and requests, activity, and a registry for ports and model servers. Its mailbox is a way to address agents and exchange messages. It does not launch agents or enforce a resource limit. A work queue for one node, where agents take work the owner has admitted, is on `main` ([docs/QUEUE.md](docs/QUEUE.md)): a claim returns to the queue when the session that made it ends or after a grace period of silence, and `another needs` lists what is waiting on the owner ([docs/NEEDS.md](docs/NEEDS.md)).
 
@@ -65,6 +65,8 @@ Once v0.1.0 is published, prebuilt binaries for macOS (arm64, x86_64) and Linux 
 On macOS, when replacing an existing `another` with a new build, **remove the old binary first** (`rm "$(command -v another)"`) and then copy the new one in. Copying over the old file in place leaves a stale code signature cached, and macOS kills the new binary on launch. `cargo install` replaces it safely.
 
 After upgrading, restart every `another` process that was already running, since it keeps the old code: run `another daemon restart` (or `another daemon install` from the new binary if it lives at a different path), restart each client that runs `another serve --stdio` (or reconnect its MCP server), and restart any `another remote up`, `another serve --auth` or hand-started `another serve`. This matters most when the upgrade changes how repository keys are cached, as the one after #103 does: an old process reading keys written by the new one does not see holds in sibling worktrees and lets those edits through. See [docs/DAEMON.md](docs/DAEMON.md#upgrading).
+
+If the machine is part of a federation, upgrade its hub and all its spokes together. A hub and a spoke on different sides of the build that signs answers do not sync: each `another sync` fails with a text that says which end to update, nothing is lost, and no node pairs again. See [docs/FEDERATION.md](docs/FEDERATION.md#upgrading).
 
 **2. Create the local node** (`~/.another`, or `$ANOTHER_HOME`):
 

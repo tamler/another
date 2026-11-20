@@ -519,8 +519,9 @@ pub fn audit(es: &[AuditEntry]) -> String {
 }
 
 /// `own_id` is this node's id: a pairing row for the node itself, which an older build
-/// could write, is shown marked, because nothing acts on it.
-pub fn peers(ps: &[Peer], own_id: &str) -> String {
+/// could write, is shown marked, because nothing acts on it. `unchecked_hub` is the id of
+/// this node's hub when it was joined before invites were signed: its row is marked too.
+pub fn peers(ps: &[Peer], own_id: &str, unchecked_hub: Option<&str>) -> String {
     if ps.is_empty() {
         return "not paired with any node".to_string();
     }
@@ -528,7 +529,7 @@ pub fn peers(ps: &[Peer], own_id: &str) -> String {
         .map(|p| {
             let perms: Vec<&str> = p.perms.iter().map(|x| x.as_str()).collect();
             format!(
-                "{:<6} {:<16} {}  key {}  perms [{}]  last sync {}{}{}\n",
+                "{:<6} {:<16} {}  key {}  perms [{}]  last sync {}{}{}{}\n",
                 p.role,
                 p.display_name,
                 p.url.as_deref().unwrap_or("-"),
@@ -537,6 +538,11 @@ pub fn peers(ps: &[Peer], own_id: &str) -> String {
                 p.last_sync_at.as_deref().unwrap_or("never"),
                 if p.revoked_at.is_some() {
                     "  (revoked)"
+                } else {
+                    ""
+                },
+                if unchecked_hub == Some(p.node_id.as_str()) {
+                    "  (joined before invites were signed; address not checked)"
                 } else {
                     ""
                 },
