@@ -79,7 +79,7 @@ pub use requests::{Request, RequestAction, RequestFilter, RequestStatus, Request
 pub use resources::{
     derive_port, Lease, LeaseMode, LeaseOutcome, RegisterResource, Resource, ResourceFilter,
     ResourceKind, ResourceRef, DEFAULT_LEASE_TTL_SECONDS, MAX_LEASE_TTL_SECONDS,
-    MIN_LEASE_TTL_SECONDS,
+    MAX_RESOURCE_ENDPOINT_BYTES, MAX_RESOURCE_PURPOSE_BYTES, MIN_LEASE_TTL_SECONDS,
 };
 pub use stats::{BlockedEdit, TrialStats, WakeRecord};
 pub use store::{

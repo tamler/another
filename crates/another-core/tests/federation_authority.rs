@@ -1127,6 +1127,49 @@ fn adv_a_peers_resource_name_follows_the_local_rule() {
     );
 }
 
+/// A peer's `endpoint` and `purpose` are held to the local size limits (2 KiB and 1 KiB): a
+/// larger one is refused and not stored, and one of exactly the limit still syncs.
+/// (FINDINGS-main-resource-text-size-w9W, failing test by its finder.)
+#[test]
+fn adv_a_peers_resource_endpoint_and_purpose_are_size_limited() {
+    let fed = Fed::new();
+    let owner = fed.mallory.agent("m");
+    push(&fed.hub, &fed.mallory);
+    let register = |rid: &str, field: &str, len: usize| {
+        let mut payload = json!({ "resource_id": rid, "kind": "port", "name": format!("tcp:{rid}"),
+                                  "lease_id": format!("lease-{rid}"), "owner_id": owner });
+        payload[field] = json!("x".repeat(len));
+        fed.forge("resource.registered", payload)
+    };
+    let mut kept = Vec::new();
+    for (field, max) in [
+        ("endpoint", MAX_RESOURCE_ENDPOINT_BYTES),
+        ("purpose", MAX_RESOURCE_PURPOSE_BYTES),
+    ] {
+        for (case, len) in [("megabyte", 1024 * 1024), ("over", max + 1)] {
+            let rid = format!("mallory-{field}-{case}");
+            let report = register(&rid, field, len);
+            assert_rejected(&report, &format!("{field} of {len} bytes"));
+            let sql = format!("SELECT length({field}) FROM resources WHERE resource_id = ?1");
+            if let Some(len) = fed.hub_one::<i64>(&sql, &rid) {
+                kept.push(format!("{field}: {len} bytes"));
+            }
+        }
+        let rid = format!("mallory-{field}-at-limit");
+        let report = register(&rid, field, max);
+        assert!(
+            report.rejected.is_empty(),
+            "{field} at the limit: {report:?}"
+        );
+        let sql = format!("SELECT length({field}) FROM resources WHERE resource_id = ?1");
+        assert_eq!(fed.hub_one::<i64>(&sql, &rid), Some(max as i64));
+    }
+    assert!(
+        kept.is_empty(),
+        "the hub stored oversized peer text: {kept:?}"
+    );
+}
+
 /// A `message.sent` from mallory's agent `sender` to hub agent `alice`, with this subject
 /// and body.
 fn peer_mail(

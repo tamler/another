@@ -711,6 +711,12 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
             project()?;
             // The local resource-name rule. A missing name counts as empty and is refused.
             crate::resources::validate_name(p.get("name").and_then(Value::as_str).unwrap_or(""))?;
+            // The local size limits. Control characters in these two are cleaned by the
+            // projection (D97); a size over the limit cannot be cleaned, so it is refused.
+            crate::resources::check_text_sizes(
+                p.get("endpoint").and_then(Value::as_str),
+                p.get("purpose").and_then(Value::as_str),
+            )?;
             // A local registration types these as u16 / u32; refuse what no build sends.
             for (field, max) in [("port", u64::from(u16::MAX)), ("pid", u64::from(u32::MAX))] {
                 if let Some(v) = p.get(field).filter(|v| !v.is_null()) {
