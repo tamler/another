@@ -240,6 +240,12 @@ fn check_text(subject: &str, body: &str) -> Result<()> {
             "subject is longer than {MAX_SUBJECT_CHARS} characters"
         )));
     }
+    check_body(body)
+}
+
+/// The body size rule, shared with a paired peer's `message.sent` (see
+/// `federation::foreign_authority`), so a peer cannot store or relay a larger body.
+pub(crate) fn check_body(body: &str) -> Result<()> {
     if body.len() > MAX_BODY_BYTES {
         return Err(Error::Invalid(format!(
             "body is larger than {MAX_BODY_BYTES} bytes"

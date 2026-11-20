@@ -689,6 +689,16 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
         }
         "message.sent" => {
             agent("sender_id")?;
+            // The same body limit as a local send, so a peer without it (a changed build or
+            // a forged event) cannot store or relay an oversized body. A body that is not
+            // text is refused too: it would skip the limit and still be kept in the event.
+            // The subject is not checked here: the projection cuts it and stores it (D75),
+            // so an over-long subject never costs the recipient the message.
+            match p.get("body") {
+                None | Some(Value::Null) => {}
+                Some(Value::String(body)) => crate::mail::check_body(body)?,
+                Some(_) => return Err(Error::Invalid("message body must be text".into())),
+            }
             owned("message", "messages", "message_id", "message_id")
         }
         "hold.acquired" | "hold.updated" => {

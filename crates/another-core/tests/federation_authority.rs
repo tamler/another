@@ -1126,3 +1126,132 @@ fn adv_a_peers_resource_name_follows_the_local_rule() {
         Some("tcp:127.0.0.1:9")
     );
 }
+
+/// A `message.sent` from mallory's agent `sender` to hub agent `alice`, with this subject
+/// and body.
+fn peer_mail(
+    fed: &Fed,
+    sender: &str,
+    alice: &str,
+    id: &str,
+    subject: Value,
+    body: Value,
+) -> IngestReport {
+    fed.forge(
+        "message.sent",
+        json!({ "message_id": id, "sender_id": sender,
+                "subject": subject, "body": body, "importance": "normal",
+                "recipients": [{ "agent_id": alice, "node_id": fed.hub.id(), "role": "to" }],
+                "recipient_nodes": [fed.hub.id()] }),
+    )
+}
+
+/// A local send refuses a body over 256 KiB; a paired spoke's signed `message.sent` is held to
+/// the same limit, so the hub neither stores nor relays a larger body. A body of exactly the
+/// limit still arrives, after the refusal. (FINDINGS-main-peer-mail-body-w9T, failing test by
+/// its finder.)
+#[test]
+fn a_peers_message_body_is_capped_like_a_local_one() {
+    let fed = Fed::new();
+    let alice = fed.hub.agent("alice");
+    let sender = fed.mallory.agent("m");
+    push(&fed.hub, &fed.mallory);
+    let stored = |id: &str| -> Option<String> {
+        fed.hub_one("SELECT body FROM messages WHERE message_id = ?1", id)
+    };
+
+    let report = peer_mail(
+        &fed,
+        &sender,
+        &alice,
+        "mallory-big-mail",
+        json!("hello"),
+        json!("x".repeat(256 * 1024 + 1)),
+    );
+    assert_rejected(&report, "a body one byte over the limit");
+    assert_eq!(stored("mallory-big-mail"), None);
+
+    let report = peer_mail(
+        &fed,
+        &sender,
+        &alice,
+        "mallory-full-mail",
+        json!("hello"),
+        json!("x".repeat(256 * 1024)),
+    );
+    assert!(report.rejected.is_empty(), "{report:?}");
+    assert_eq!(
+        stored("mallory-full-mail").map(|b| b.len()),
+        Some(256 * 1024)
+    );
+}
+
+/// The body limit does not depend on the body being a JSON string: a peer's `message.sent`
+/// whose `body` is an array or object of more than the limit is refused too. Otherwise the
+/// projection stores an empty body but the hub keeps the whole signed payload in its event
+/// log and relays it to every spoke.
+#[test]
+fn a_peers_non_string_message_body_cannot_slip_past_the_cap() {
+    let fed = Fed::new();
+    let alice = fed.hub.agent("alice");
+    let sender = fed.mallory.agent("m");
+    push(&fed.hub, &fed.mallory);
+    let report = peer_mail(
+        &fed,
+        &sender,
+        &alice,
+        "mallory-array-mail",
+        json!("hello"),
+        json!(["x".repeat(300 * 1024)]),
+    );
+    assert_rejected(&report, "a body that is not text");
+    let kept: i64 = fed
+        .hub
+        .sql()
+        .query_row(
+            "SELECT coalesce(max(length(payload)), 0) FROM events
+             WHERE kind = 'message.sent' AND node_id = ?1",
+            [fed.mallory.id()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        kept <= 256 * 1024,
+        "the hub kept a {kept}-byte message.sent payload"
+    );
+}
+
+/// D75: a peer's over-long subject is cut to the local 300 characters and stored, never
+/// refused, so the message still reaches its recipient. This is a control for the body
+/// limit above, which refuses: it passes without that limit too.
+#[test]
+fn a_peers_over_long_subject_is_cut_and_stored_never_refused() {
+    let fed = Fed::new();
+    let alice = fed.hub.agent("alice");
+    let sender = fed.mallory.agent("m");
+    push(&fed.hub, &fed.mallory);
+    let report = peer_mail(
+        &fed,
+        &sender,
+        &alice,
+        "mallory-long-subject",
+        json!("s".repeat(MAX_SUBJECT_CHARS + 100)),
+        json!("b"),
+    );
+    assert!(report.rejected.is_empty(), "{report:?}");
+    assert_eq!(report.accepted, 1, "{report:?}");
+    let subject: Option<String> = fed.hub_one(
+        "SELECT subject FROM messages WHERE message_id = ?1",
+        "mallory-long-subject",
+    );
+    assert_eq!(
+        subject.map(|s| s.chars().count()),
+        Some(MAX_SUBJECT_CHARS),
+        "the subject was not cut and stored"
+    );
+    let delivered: Option<i64> = fed.hub_one(
+        "SELECT count(*) FROM deliveries WHERE message_id = ?1",
+        "mallory-long-subject",
+    );
+    assert_eq!(delivered, Some(1), "the message did not reach alice");
+}
