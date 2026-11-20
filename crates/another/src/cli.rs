@@ -939,7 +939,7 @@ pub fn main() -> ExitCode {
                 }
                 println!("{out}");
             } else {
-                eprintln!("another: {}", body.message);
+                eprintln!("another: {}", terminal_safe(&body.message));
                 if let Some(hint) = hint {
                     eprintln!("hint: {hint}");
                 }
@@ -1304,10 +1304,27 @@ pub(crate) fn emit<T: Serialize>(
     } else {
         let text = human(value);
         if !text.is_empty() {
-            println!("{}", text.trim_end());
+            println!("{}", terminal_safe(text.trim_end()));
         }
     }
     ExitCode::SUCCESS
+}
+
+/// Text for a person's terminal. Names, paths, subjects and reasons in human output come
+/// from other agents and other machines, and a file name can hold ESC or BEL: an OSC or
+/// CSI sequence there would retitle, clear or rewrite the operator's terminal. Every
+/// control or bidi-override character except the line breaks and tabs the renderers use
+/// for layout becomes `?` (the D75 rule, applied where text reaches a terminal). `--json`
+/// output keeps the exact text: JSON escapes C0 controls, but DEL, C1 and bidi characters
+/// stay raw UTF-8, for the reading program to handle (D97).
+fn terminal_safe(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\n' | '\t' => c,
+            c if another_core::is_unsafe_text_char(c) => '?',
+            c => c,
+        })
+        .collect()
 }
 
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
@@ -1727,7 +1744,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let (ids, notes) = release_holds(&store, &agent.agent, project, targets)?;
             // On stderr, so `--json` output stays the list of released ids.
             for note in &notes {
-                eprintln!("another: {note}");
+                eprintln!("another: {}", terminal_safe(note));
             }
             emit(json, &ids, |ids| format!("released {} hold(s)", ids.len()))
         }
@@ -2048,7 +2065,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                         break emitted;
                     }
                 }
-                Err(e) if watch => eprintln!("another: sync failed: {e:#}"),
+                // The message can quote the hub's error body (fed.rs).
+                Err(e) if watch => {
+                    eprintln!("another: sync failed: {}", terminal_safe(&format!("{e:#}")))
+                }
                 Err(e) => return Err(e),
             }
             std::thread::sleep(Duration::from_secs(every.max(5)));

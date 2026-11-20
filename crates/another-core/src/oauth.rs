@@ -27,6 +27,9 @@ use crate::store::{new_id, Store, Tx};
 use crate::time::{fmt_opt, fmt_ts};
 use crate::tokens::{AuditRecord, TokenScope};
 
+const CLIENT_NAME_ONE_LINE: &str =
+    "client_name must be one line of text: no line breaks, tabs, escape or other control characters";
+
 /// Access tokens last one hour.
 pub const ACCESS_TTL_SECS: u64 = 60 * 60;
 /// Refresh tokens last 30 days and rotate on every use.
@@ -535,6 +538,9 @@ pub fn validate_cimd(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or("client metadata is missing client_name")?;
+    if client_name.chars().any(crate::is_unsafe_text_char) {
+        return Err(CLIENT_NAME_ONE_LINE.into());
+    }
     if client_name.chars().count() > 120 {
         return Err("client_name is too long".into());
     }
@@ -927,6 +933,11 @@ impl Store {
             return Err(OAuthFail::InvalidRequest(
                 "client_name is required and must be at most 120 characters".into(),
             ));
+        }
+        // Registration needs no authentication, and `another serve` prints the name on the
+        // operator's terminal when the client asks to connect.
+        if name.chars().any(crate::is_unsafe_text_char) {
+            return Err(OAuthFail::InvalidRequest(CLIENT_NAME_ONE_LINE.into()));
         }
         if reg.redirect_uris.is_empty() || reg.redirect_uris.len() > 10 {
             return Err(OAuthFail::InvalidRequest(
@@ -1784,6 +1795,16 @@ mod tests {
             .unwrap()
             .remove("token_endpoint_auth_methods_supported");
         assert!(validate_cimd(url, &bad).is_err());
+        // `another serve` prints the name on the operator's terminal.
+        for name in ["Chat\u{1b}]0;x\u{7}GPT", "Chat\nGPT", "Chat\u{202e}GPT"] {
+            let mut bad = doc.clone();
+            bad["client_name"] = serde_json::json!(name);
+            assert_eq!(
+                validate_cimd(url, &bad).err().as_deref(),
+                Some(CLIENT_NAME_ONE_LINE),
+                "{name:?}"
+            );
+        }
     }
 
     #[test]
