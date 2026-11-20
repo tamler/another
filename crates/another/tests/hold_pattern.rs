@@ -207,9 +207,10 @@ fn the_edit_hook_denies_beside_a_stored_pattern_it_cannot_read() {
 }
 
 /// Rule D through the CLI: `hold check` and release by path refuse a pattern over the
-/// limit with the same words as `hold acquire` (D99), and a pattern far past the size
-/// that used to panic the glob library is refused the same way. The edit hook's own long
-/// path is still held (D99).
+/// limit with the same words as `hold acquire` (D99), and so is one of 100 KB, near the
+/// longest single argument Linux passes to a program (larger ones are covered in
+/// `another-core/tests/hold_pattern_limit.rs`). The edit hook's own long path is still
+/// held (D99).
 #[test]
 fn a_pattern_over_the_limit_is_refused_by_every_hold_command_and_the_hook_still_holds() {
     let env = Env::new();
@@ -231,12 +232,12 @@ fn a_pattern_over_the_limit_is_refused_by_every_hold_command_and_the_hook_still_
             &args[..2]
         );
     }
-    let big = format!("src/{}", "*a".repeat(100_000));
+    let big = format!("src/{}", "*a".repeat(50_000));
     let out = env.run(&["hold", "check", "--agent", "claude@shop", &big]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         text(&out.stderr).trim(),
-        "another: hold pattern is 200004 bytes; the limit is 4096"
+        "another: hold pattern is 100004 bytes; the limit is 4096"
     );
 
     // 1,600 brackets in short directory names: three bytes each once escaped.
