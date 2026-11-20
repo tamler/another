@@ -167,3 +167,30 @@ another: test/another is inside another checkout (/Users/jacob/Projects/test/ano
 ```
 
 That hold then applies to that checkout only, not to its other worktrees or clones.
+
+## Pattern size, and a pattern that cannot be read
+
+A hold pattern is at most 4,096 bytes, the longest path Linux takes in one call (macOS stops at 1,024), so every real path fits. `another hold acquire`, `another hold check`, `another hold release <path>` and the MCP tool `hold_paths` refuse a longer one and write nothing:
+
+```text
+another: hold pattern is 4097 bytes; the limit is 4096
+```
+
+The edit guard's own holds are not held to the limit. They are file names with `[`, `]`, `{`, `}`, `*` and `?` escaped (three bytes for each), compared as text and never compiled as a glob, so a long path cannot make an edit fail.
+
+The same limit applies to a hold another node sends ([FEDERATION.md](FEDERATION.md#model)). No command fails or stops because of a pattern, whoever wrote it. Comparing two patterns also has a bounded cost: a pattern that would need too much work to compare counts as overlapping.
+
+A row in the database can still hold a pattern this build cannot read: a glob longer than the limit, or one that does not compile, written by an earlier build or by hand. Such a hold counts as overlapping every path in the project it is in, and nothing outside that project. For a hold on this node, `another hold acquire`, `another hold check` and the edit guard refuse what it overlaps, name the holder and the node, and say how to clear it. The pattern is shown as its first 40 characters and its length, never whole:
+
+```text
+nothing acquired
+conflict: src/b.rs: hold 01M7W8JPVH7GWPJQ74323AW5CK of codex@shop on this node (mac) has a pattern that could not be read ("src/*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*…" (2097156 bytes)), so it counts as overlapping every path in project shop. To clear it: another hold release --agent codex@shop 01M7W8JPVH7GWPJQ74323AW5CK
+```
+
+A hold from another node never blocks, so one with such a pattern gives a warning on every `hold acquire` in the project of the same name, until it ends:
+
+```text
+warning: src/b.rs: hold 01M7W7XR88R0RV9HCEERP6EA00 of mal@shop@vps on node vps has a pattern that could not be read ("src/*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*…" (2097156 bytes)), so it counts as overlapping every path in project shop. It ends at 2026-11-20T11:30:00.000Z unless that node renews it; to clear it sooner, release hold 01M7W7XR88R0RV9HCEERP6EA00 on node vps and sync (holds are node-local; this one does not block you)
+```
+
+An agent's own hold with such a pattern covers none of its edits: the edit guard takes a narrow hold on the edited file as usual.

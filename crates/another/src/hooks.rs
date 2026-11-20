@@ -1525,6 +1525,11 @@ pub fn deny_message(
         .take(3)
         .map(|c| {
             let h = &c.held;
+            // A hold whose pattern could not be read: the note says whose it is and how
+            // to clear it.
+            if let Some(note) = &c.unreadable {
+                return format!("{} is blocked: {note}", c.path);
+            }
             let kind = if h.exclusive { "exclusive" } else { "shared" };
             let reason = h
                 .reason
@@ -2093,6 +2098,7 @@ mod tests {
         let conflict = HoldConflict {
             path: "src/a.rs".into(),
             held: held.clone(),
+            unreadable: None,
         };
         let msg = deny_message("claude@shop", std::slice::from_ref(&conflict), true, 30);
         assert_eq!(
@@ -2125,6 +2131,7 @@ mod tests {
                     hold_id: format!("h{n}"),
                     ..held.clone()
                 },
+                unreadable: None,
             })
             .collect();
         let msg = deny_message("claude@shop", &many, true, 30);
@@ -2145,6 +2152,7 @@ mod tests {
             &[HoldConflict {
                 path: "long/".repeat(300),
                 held,
+                unreadable: None,
             }],
             true,
             30,

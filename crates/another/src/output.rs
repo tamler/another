@@ -209,6 +209,11 @@ pub fn listed_holds(hs: &[ListedHold]) -> String {
 pub fn conflicts(cs: &[HoldConflict]) -> String {
     cs.iter()
         .map(|c| {
+            // A hold whose pattern could not be read: the note says whose it is, on which
+            // node, and how to clear it.
+            if let Some(note) = &c.unreadable {
+                return format!("conflict: {}: {note}\n", c.path);
+            }
             // The project matters: the holder may be in another project of the checkout,
             // one registered at a subdirectory of it.
             format!(
@@ -235,6 +240,14 @@ pub fn hold_report(r: &HoldReport) -> String {
         format!("nothing acquired\n{}", conflicts(&r.conflicts))
     };
     for w in &r.warnings {
+        if let Some(note) = &w.unreadable {
+            let _ = writeln!(
+                out,
+                "warning: {}: {note} (holds are node-local; this one does not block you)",
+                w.path
+            );
+            continue;
+        }
         let _ = writeln!(
             out,
             "warning: {} overlaps {} held on another node by {} (holds are node-local; coordinate)",
@@ -501,6 +514,9 @@ pub fn sync_report(r: &crate::fed::SyncReport) -> String {
     );
     for x in r.push_rejected.iter().chain(&r.pull_rejected) {
         let _ = write!(out, "\nrejected {}: {}", x.event_id, x.reason);
+    }
+    for x in &r.not_applied {
+        let _ = write!(out, "\nnot applied {}: {}", x.event_id, x.reason);
     }
     out
 }
