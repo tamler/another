@@ -636,7 +636,7 @@ pub enum OauthCmd {
     },
     /// Reject a waiting client.
     Deny { user_code: String },
-    /// List grants (each one is a single agent).
+    /// List grants (each one is a single agent), and any stored client that can no longer be approved.
     List,
     /// Revoke a grant and every token issued for it.
     Revoke { grant_id: String },
@@ -1970,9 +1970,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Command::Oauth(OauthCmd::List) => {
             let grants = store.oauth_grants()?;
+            let not_plain = store.oauth_clients_not_plain()?;
             emit(json, &grants, |grants| {
-                if grants.is_empty() {
-                    "no OAuth grants".into()
+                let mut rows: Vec<String> = if grants.is_empty() {
+                    vec!["no OAuth grants".into()]
                 } else {
                     grants
                         .iter()
@@ -1983,7 +1984,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                                 "active"
                             };
                             format!(
-                                "{}  {}  {}  {}  projects {}",
+                                "{}  {}  {}  {}  projects {}{}",
                                 g.grant_id,
                                 state,
                                 client_shown(&g.client_name),
@@ -1992,12 +1993,26 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                                     "none".into()
                                 } else {
                                     g.project_globs.join(",")
+                                },
+                                if g.client_redirect_not_plain.is_empty() {
+                                    ""
+                                } else {
+                                    "  [the redirect host of its client is not plain]"
                                 }
                             )
                         })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                }
+                        .collect()
+                };
+                // Clients a build before D100 stored. Each row is one shown line.
+                rows.extend(not_plain.iter().map(|c| {
+                    format!(
+                        "client {}  {}  redirect host {}  is not a plain host name or IP address: it can no longer be approved and must register again",
+                        client_shown(&c.client_id),
+                        client_shown(&c.client_name),
+                        c.redirect_hosts.join(",")
+                    )
+                }));
+                rows.join("\n")
             })
         }
         Command::Oauth(OauthCmd::Revoke { grant_id }) => {
