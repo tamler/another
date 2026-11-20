@@ -59,11 +59,12 @@ pub use mail::{
     UnreadAfter, UnreadItem, MAX_SUBJECT_CHARS,
 };
 pub use oauth::{
-    canonical_resource, error_redirect, redirect_host, redirect_is_loopback, redirect_matches,
-    shown_redirect_host, validate_cimd, validate_redirect_uri, Approval, AuthorizationStatus,
-    AuthorizeInput, ClientProfile, ClientRegistration, CodeExchange, IssuedTokens, OAuthFail,
-    OauthGrant, PendingAuthorization, PendingView, RefreshExchange, RegisteredClient,
-    ACCESS_TTL_SECS, NOT_A_PLAIN_HOST,
+    canonical_resource, error_redirect, not_plain_redirect, redirect_host, redirect_is_loopback,
+    redirect_matches, shown_redirect_host, validate_cimd, validate_redirect_uri, Approval,
+    AuthorizationStatus, AuthorizeInput, ClientProfile, ClientRegistration, CodeExchange,
+    IssuedTokens, NotPlainClient, OAuthFail, OauthGrant, PendingAuthorization, PendingView,
+    RefreshExchange, RegisteredClient, ACCESS_TTL_SECS, CLIENT_REDIRECT_NOT_PLAIN,
+    NOT_A_PLAIN_HOST, REDIRECT_URI_NOT_PLAIN,
 };
 pub use queue::{
     queue_stamp, AdmitItem, AuditFinding, DoneItem, EditItem, FailedNotice, HeldClaim,

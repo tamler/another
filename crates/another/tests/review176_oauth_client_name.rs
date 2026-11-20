@@ -230,16 +230,18 @@ fn oauth_pending_shows_a_redirect_host_exactly_or_escaped_behind_a_warning() {
             remote: None,
         })
         .unwrap();
+    // Since D100 no request is made for a host that is not plain, so each row is written
+    // as a build before it stored one: the redirect URI is set in the database.
+    let db = rusqlite::Connection::open(home.join(another_core::DB_FILE)).unwrap();
     let begin = |name: &str, authority: &str| {
-        let uri = format!("https://{authority}/cb");
-        store
+        let pending = store
             .begin_authorization(AuthorizeInput {
                 client: ClientProfile {
                     client_id: client.client_id.clone(),
                     client_name: name.into(),
-                    redirect_uris: vec![uri.clone()],
+                    redirect_uris: client.redirect_uris.clone(),
                 },
-                redirect_uri: uri,
+                redirect_uri: client.redirect_uris[0].clone(),
                 state: None,
                 scope: None,
                 resource: "https://another.example.com/mcp".into(),
@@ -247,8 +249,15 @@ fn oauth_pending_shows_a_redirect_host_exactly_or_escaped_behind_a_warning() {
                 code_challenge_method: "S256".into(),
                 remote: None,
             })
-            .unwrap()
-            .user_code
+            .unwrap();
+        let changed = db
+            .execute(
+                "UPDATE oauth_requests SET redirect_uri = ?1 WHERE request_id = ?2",
+                rusqlite::params![format!("https://{authority}/cb"), pending.request_id],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+        pending.user_code
     };
 
     let warned = |escaped: &str| format!("{NOT_A_PLAIN_HOST}{escaped}");
@@ -322,6 +331,7 @@ fn oauth_pending_shows_a_redirect_host_exactly_or_escaped_behind_a_warning() {
     let forged_name = "ChatGPT  redirect host chatgpt.com  expires 2026-11-20T09:00:00.000Z";
     let forged_code = begin(forged_name, "attacker.test");
     let quote_code = begin("ChatGPT\"  redirect host chatgpt.com", "attacker.test");
+    drop(db);
     drop(store);
 
     let out = Command::new(env!("CARGO_BIN_EXE_another"))
@@ -374,7 +384,20 @@ fn oauth_pending_shows_a_redirect_host_exactly_or_escaped_behind_a_warning() {
         "{row:?}"
     );
 
-    // The audit row of each request names the host by the same rule.
+    // The audit row of each denial names the host by the same rule. The row of the
+    // request itself was written for the plain host the request was made with.
+    for code in expected.keys() {
+        let out = Command::new(env!("CARGO_BIN_EXE_another"))
+            .args(["oauth", "deny", code])
+            .current_dir(dir.path())
+            .env("ANOTHER_HOME", &home)
+            .env_remove("ANOTHER_AGENT")
+            .env_remove("ANOTHER_LOG")
+            .stdin(Stdio::null())
+            .output()
+            .expect("run another");
+        assert!(out.status.success(), "{out:?}");
+    }
     let out = Command::new(env!("CARGO_BIN_EXE_another"))
         .args(["audit", "--limit", "100"])
         .current_dir(dir.path())
@@ -388,8 +411,9 @@ fn oauth_pending_shows_a_redirect_host_exactly_or_escaped_behind_a_warning() {
     let audit = String::from_utf8_lossy(&out.stdout);
     for (_, shown) in &cases {
         assert!(
-            audit.lines().any(|l| l.contains("oauth.authorize")
-                && l.ends_with(&format!(" redirect host {shown}"))),
+            audit.lines().any(
+                |l| l.contains("oauth.deny") && l.ends_with(&format!(" redirect host {shown}"))
+            ),
             "no audit row ends with the host shown as {shown:?}"
         );
     }
