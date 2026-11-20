@@ -40,7 +40,12 @@ struct Hub {
 }
 
 fn start_hub() -> Hub {
-    let node = node("hub");
+    start_served("hub")
+}
+
+/// A node named `name` that serves the federation routes, as a hub does.
+fn start_served(name: &str) -> Hub {
+    let node = node(name);
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -710,6 +715,62 @@ fn a_refused_pairing_audits_its_cause_over_http() {
 
     assert_eq!(hub.node.store.peers().unwrap().len(), 1);
     hub.ct.cancel();
+}
+
+/// The hub's `peers` row for `node_id`.
+fn row_of(hub: &Hub, node_id: &str) -> Peer {
+    let peers = hub.node.store.peers().unwrap();
+    peers.into_iter().find(|p| p.node_id == node_id).unwrap()
+}
+
+/// Review R1, P2-1, over HTTP: a hub's owner runs `pair join` on an invite made by one of
+/// the hub's own spokes. The spoke serves `/fed/pair` itself. The join is refused from the
+/// invite alone: nothing is sent, the spoke's row on the hub is unchanged (a revoked,
+/// name-released one stays revoked and unnamed), and the invite is not used.
+#[test]
+fn a_join_on_an_invite_from_this_nodes_own_spoke_is_refused_over_http() {
+    let hub = start_hub();
+    let mallory = start_served("mallory");
+    let plain = start_served("plain");
+    join(&hub, &mallory.node, &Perm::ALL);
+    join(&hub, &plain.node, &[Perm::ReadFeed]);
+    let mallory_id = mallory.node.store.node_id().to_string();
+    hub.node.store.revoke_peer("mallory").unwrap();
+    hub.node.store.release_peer_name(&mallory_id).unwrap();
+
+    for (spoke, known_as) in [(&mallory, mallory_id.as_str()), (&plain, "plain")] {
+        let spoke_id = spoke.node.store.node_id().to_string();
+        let row = |hub: &Hub| row_of(hub, &spoke_id);
+        let before = row(&hub);
+        let code = spoke
+            .node
+            .store
+            .create_invite(&spoke.url, &Perm::ALL, 3600)
+            .unwrap();
+        let err = fed::join(&hub.node.store, &code).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("node {known_as} is paired here as a spoke; it cannot also be this node's hub")
+        );
+        let after = row(&hub);
+        assert_eq!(after.role, "spoke");
+        assert_eq!(after.perms, before.perms);
+        assert_eq!(after.revoked_at, before.revoked_at);
+        assert_eq!(after.display_name, before.display_name);
+        assert_eq!(after.url, None);
+        assert!(hub.node.store.hub().unwrap().is_none());
+        // Nothing reached the spoke, so its invite is unused: another node can redeem it.
+        assert!(audit_rows(spoke, "POST /fed/pair").is_empty());
+        fed::join(&node("fresh").store, &code).unwrap();
+        assert_eq!(audit_rows(spoke, "POST /fed/pair").len(), 1);
+    }
+    assert!(row_of(&hub, &mallory_id).revoked_at.is_some());
+    // The revoked spoke is still refused by the hub.
+    let err = fed::sync(&mallory.node.store).unwrap_err();
+    assert!(err.to_string().contains("401"), "{err}");
+    hub.ct.cancel();
+    mallory.ct.cancel();
+    plain.ct.cancel();
 }
 
 /// `another pair readmit` and `another pair release-name`: the text and JSON of both, and

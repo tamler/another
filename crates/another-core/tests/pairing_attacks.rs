@@ -891,3 +891,70 @@ fn a16_a_pairing_request_does_not_carry_the_secret() {
     assert_eq!(err.code(), "forbidden", "{err}");
     assert_eq!(hub.rows(), before);
 }
+
+/// A17 (review R1, P2-1): the mirror of A4 on the joiner's side. A spoke makes an invite of
+/// its own and hands the code to its hub's owner, who runs `another pair join` on it. The
+/// spoke answers with its own key, which is the hub key of that invite. Before the fix the
+/// hub's `spoke` row took the permissions the answer named and lost its revoke. A join never
+/// changes a row whose role is not `hub`: it is refused before anything is sent, and again
+/// before anything is written.
+#[test]
+fn a17_joining_never_rewrites_a_spoke_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = Node::new(dir.path(), "hub");
+    let mallory = Node::new(dir.path(), "mallory");
+    let plain = Node::new(dir.path(), "plain");
+    pair(&hub, &mallory);
+    pair_with(&hub, &plain, &[Perm::ReadFeed]);
+    // Mallory is revoked and its name released, as `another pair release-name` leaves it.
+    hub.store.revoke_peer("mallory").unwrap();
+    hub.sql()
+        .execute(
+            "UPDATE nodes SET display_name = node_id WHERE node_id = ?1",
+            [mallory.id()],
+        )
+        .unwrap();
+
+    for (spoke, known_as) in [(&mallory, mallory.id()), (&plain, "plain".to_string())] {
+        let (code, fresh) = invite(spoke, &Perm::ALL);
+        let before = hub.rows();
+        let expected =
+            format!("node {known_as} is paired here as a spoke; it cannot also be this node's hub");
+
+        // As the command runs it: refused from the invite alone, so nothing is sent.
+        let err = match hub.store.prepare_join(&code) {
+            Ok(_) => panic!("built a request to join {known_as}, a spoke of this node"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code(), "conflict", "{err}");
+        assert_eq!(err.to_string(), expected);
+        assert_eq!(hub.rows(), before);
+
+        // And with an answer in hand, correctly signed by the invite's hub key.
+        let made: Invite = serde_json::from_value(fresh.clone()).unwrap();
+        let name = spoke.entry().display_name;
+        let sig = crypto::sign(
+            &crypto::decode_secret(&spoke.secret()).unwrap(),
+            &accept_bytes(&fresh, &hub.entry(), &name, &Perm::ALL),
+        );
+        let answer: PairResponse = serde_json::from_value(json!({
+            "hub": spoke.entry(),
+            "perms": ["read_feed", "send_mail", "borrow_resource"],
+            "sig": sig,
+        }))
+        .unwrap();
+        let err = match hub.store.complete_join(&made, &answer) {
+            Ok(peer) => panic!("a join rewrote the row of a spoke: {peer:?}"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code(), "conflict", "{err}");
+        assert_eq!(err.to_string(), expected);
+        assert_eq!(
+            hub.rows(),
+            before,
+            "a refused join changed {known_as}'s row"
+        );
+        assert!(!spoke.invite_used(&fresh));
+    }
+    assert!(hub.store.hub().unwrap().is_none());
+}

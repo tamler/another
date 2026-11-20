@@ -1362,3 +1362,192 @@ fn already_paired_nodes_keep_syncing() {
     let inbox = hub.store.inbox("carol", InboxQuery::default()).unwrap();
     assert_eq!(inbox.messages.len(), 1);
 }
+
+/// 4.3 step 3 and 4.6: a key is accepted only in the one text form `crypto::b64` writes.
+/// Decoding trims, so without the rule a key with a space or a line break around it names
+/// the same key under another text, and its signature still verifies.
+#[test]
+fn a_key_must_be_in_its_canonical_text_form() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = Node::new(dir.path(), "hub");
+    let spoke = Node::new(dir.path(), "spoke");
+    let (code, fresh) = invite(&hub, &Perm::ALL);
+    let (private, public) = new_key();
+    let before = hub.rows();
+    let expected = "node public key is not in its canonical text form";
+    let hub_key = text(&fresh["hub"], "public_key");
+    for (before_key, after_key) in [("", " "), (" ", ""), ("", "\n"), ("\t", "")] {
+        let key_text = format!("{before_key}{public}{after_key}");
+        let req = signed_request(&fresh, &entry(ULID_A, "joiner", &key_text), &private, T0);
+        let err = match hub.store.accept_pairing(&req) {
+            Ok(_) => panic!("paired a node whose key text is {key_text:?}"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            (err.code(), err.to_string().as_str()),
+            ("invalid", expected)
+        );
+        assert_eq!(hub.rows(), before, "{key_text:?}");
+
+        // The hub entry of an invite.
+        let mut forged = fresh.clone();
+        forged["hub"]["public_key"] = json!(format!("{before_key}{hub_key}{after_key}"));
+        let err = match spoke.store.prepare_join(&encode(&forged)) {
+            Ok(_) => panic!("built a request for a hub whose key text is not canonical"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            (err.code(), err.to_string().as_str()),
+            ("invalid", expected)
+        );
+    }
+    // The canonical text pairs, and the refusals used nothing up.
+    let req = signed_request(&fresh, &entry(ULID_A, "joiner", &public), &private, T0);
+    hub.store.accept_pairing(&req).unwrap();
+    assert!(spoke.store.prepare_join(&code).is_ok());
+}
+
+/// 5.2: a node whose id is another node's name is refused whatever the case of that name.
+#[test]
+fn a_node_id_that_is_another_nodes_name_in_any_case_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = Node::new(dir.path(), "hub");
+    let target = Node::new(dir.path(), "target");
+    // A node that took the lower-case text of the target's id as its name, and paired first.
+    let squatter = Node::at(dir.path(), "squatter", &target.id().to_lowercase());
+    pair(&hub, &squatter);
+
+    let (code, fresh) = invite(&hub, &Perm::ALL);
+    let (_, req) = target.store.prepare_join(&code).unwrap();
+    let before = hub.rows();
+    let err = hub
+        .store
+        .accept_pairing(&req)
+        .expect_err("paired a node whose id is another node's name in another case");
+    assert_eq!(err.code(), "conflict", "{err}");
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "node {}'s id is already another node's name; rename that node first",
+            target.id()
+        )
+    );
+    assert_eq!(hub.rows(), before);
+    assert!(!hub.invite_used(&fresh));
+
+    // The joiner's side of the same rule: the squatter knows a node by that name, so an
+    // invite from the node with that id is refused before anything is sent.
+    let (code, _) = invite(&target, &Perm::ALL);
+    let other = Node::new(dir.path(), "other");
+    other
+        .sql()
+        .execute(
+            "INSERT INTO nodes (node_id, display_name, role, is_local, created_at, public_key)
+             VALUES (?1, ?2, 'peer', 0, ?3, ?4)",
+            rusqlite::params![
+                ULID_A,
+                target.id().to_lowercase(),
+                T0,
+                squatter.entry().public_key
+            ],
+        )
+        .unwrap();
+    let err = other.store.prepare_join(&code).unwrap_err();
+    assert_eq!(err.code(), "conflict", "{err}");
+}
+
+/// 4.6: the hub entry of an invite must carry a name a node can pair under. The request is
+/// not built, so nothing is sent.
+#[test]
+fn an_invite_whose_hub_name_is_not_a_pairing_name_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = Node::new(dir.path(), "hub");
+    let spoke = Node::new(dir.path(), "spoke");
+    let (code, fresh) = invite(&hub, &Perm::ALL);
+    for name in ["local", "a@b", "", "two words", "hub\nread_feed"] {
+        let mut forged = fresh.clone();
+        forged["hub"]["display_name"] = json!(name);
+        let err = match spoke.store.prepare_join(&encode(&forged)) {
+            Ok(_) => panic!("built a request for a hub named {name:?}"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code(), "invalid", "{name:?}: {err}");
+    }
+    assert!(spoke.store.prepare_join(&code).is_ok());
+    assert!(!hub.invite_used(&fresh));
+}
+
+/// 4.2: no field of a signed message holds a line break when its signature is checked. The
+/// hub's name in an answer is refused for one before the check, even when the hub's key
+/// signed exactly those bytes.
+#[test]
+fn a_hub_name_with_a_line_break_is_refused_before_the_signature_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = Node::new(dir.path(), "hub");
+    let spoke = Node::new(dir.path(), "spoke");
+    let (code, fresh) = invite(&hub, &[Perm::ReadFeed]);
+    let (made, req) = spoke.store.prepare_join(&code).unwrap();
+    let genuine = hub.store.accept_pairing(&req).unwrap();
+    let before = spoke.rows();
+    for name in ["hub\nread_feed", "hub\n", "\nhub", "hub\r\nx"] {
+        let mut answer = genuine.clone();
+        answer.hub.display_name = name.into();
+        answer.sig = crypto::sign(
+            &crypto::decode_secret(&hub.secret()).unwrap(),
+            &crypto::pair_accept_message(
+                text(&fresh, "invite_id"),
+                &crypto::sha256_hex(text(&fresh, "secret").as_bytes()),
+                &spoke.id(),
+                &spoke.entry().public_key,
+                name,
+                "read_feed",
+            ),
+        );
+        let err = match spoke.store.complete_join(&made, &answer) {
+            Ok(_) => panic!("recorded a hub whose name in the answer is {name:?}"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code(), "invalid", "{name:?}: {err}");
+        assert_eq!(
+            err.to_string(),
+            "the hub's answer carries a name with a line break; not paired"
+        );
+        assert_eq!(spoke.rows(), before, "{name:?}");
+    }
+    spoke.store.complete_join(&made, &genuine).unwrap();
+}
+
+/// 4.5, last paragraph: a second join to a hub this node revoked clears this node's own
+/// revoke of it, takes the new URL and permissions, and changes no other row.
+#[test]
+fn a_second_join_to_a_revoked_hub_changes_only_that_hub_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = Node::new(dir.path(), "hub");
+    let spoke = Node::new(dir.path(), "spoke");
+    let below = Node::new(dir.path(), "below");
+    pair(&hub, &spoke);
+    pair(&spoke, &below);
+    spoke.store.revoke_peer("below").unwrap();
+    spoke.store.revoke_peer("hub").unwrap();
+    let before = spoke.rows();
+
+    let code = hub
+        .store
+        .create_invite("https://moved.example", &[Perm::SendMail], 3600)
+        .unwrap();
+    let (made, req) = spoke.store.prepare_join(&code).unwrap();
+    let resp = hub.store.accept_pairing(&req).unwrap();
+    let peer = spoke.store.complete_join(&made, &resp).unwrap();
+    assert_eq!(peer.role, "hub");
+    assert_eq!(peer.revoked_at, None);
+    assert_eq!(peer.perms, [Perm::SendMail]);
+    assert_eq!(peer.url.as_deref(), Some("https://moved.example"));
+
+    let after = spoke.rows();
+    assert_eq!(after.len(), before.len());
+    let changed: Vec<&String> = after.iter().filter(|l| !before.contains(l)).collect();
+    assert_eq!(changed.len(), 1, "{changed:#?}");
+    assert!(changed[0].starts_with(&format!("peers node_id={} role=hub", hub.id())));
+    // The spoke's own revoked spoke stays revoked.
+    assert!(spoke.peer(&below.id()).revoked_at.is_some());
+}

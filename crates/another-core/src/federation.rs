@@ -729,6 +729,26 @@ fn peer_row(conn: &Connection, node_id: &str) -> Result<Option<PeerRow>> {
         .map(|(role, perms, revoked)| (role, perms_of(&perms), revoked)))
 }
 
+/// Refuses to join `node_id` as a hub when this node already has it paired in another role.
+/// A join writes only a `hub` row: otherwise an invite made by one of this node's spokes
+/// would give that spoke the permissions it named and clear its revoke.
+fn not_paired_as_spoke(conn: &Connection, node_id: &str) -> Result<()> {
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT p.role, n.display_name FROM peers p JOIN nodes n ON n.node_id = p.node_id
+             WHERE p.node_id = ?1",
+            [node_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match row {
+        Some((role, name)) if role != "hub" => Err(Error::Conflict(format!(
+            "node {name} is paired here as a spoke; it cannot also be this node's hub"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// The hub this node syncs with, if it is a spoke: (node_id, url, granted perms).
 pub(crate) fn hub_of(conn: &Connection) -> Result<Option<(String, String, Vec<Perm>)>> {
     Ok(conn
@@ -1697,7 +1717,8 @@ impl Store {
             if !known && node_id_is_a_name(conn, &invite.hub.node_id)? {
                 return Err(id_is_a_name(&invite.hub.node_id));
             }
-            Ok(())
+            // The invite alone shows this one, so it is refused before anything is sent.
+            not_paired_as_spoke(conn, &invite.hub.node_id)
         })?;
         let time_ms = self.now();
         let sig = crypto::sign(
@@ -1945,6 +1966,15 @@ impl Store {
                 "the hub answered with a different identity than the invite".into(),
             ));
         }
+        // The fields of the signed bytes are joined by line breaks, so none may hold one
+        // when the signature is checked. The other fields are this node's own id and key
+        // and the invite's; the hub's name is the one that arrives with the answer. Whether
+        // it is a usable name is decided after the check, by the rule for a hub's list.
+        if resp.hub.display_name.contains(['\n', '\r']) {
+            return Err(Error::Invalid(
+                "the hub's answer carries a name with a line break; not paired".into(),
+            ));
+        }
         let me = self.node_entry()?;
         let message = crypto::pair_accept_message(
             &invite.invite_id,
@@ -1960,6 +1990,9 @@ impl Store {
             ));
         }
         self.write(|tx| {
+            // A join writes a `hub` row and nothing else: it never changes the row of a
+            // node paired here as a spoke and never clears a revoke on one.
+            not_paired_as_spoke(tx, &resp.hub.node_id)?;
             if let Some((existing, _, _)) = hub_of(tx)? {
                 if existing != resp.hub.node_id {
                     return Err(Error::Conflict(
@@ -1979,7 +2012,8 @@ impl Store {
             tx.execute(
                 "INSERT INTO peers (node_id, role, url, perms, paired_at) VALUES (?1, 'hub', ?2, ?3, ?4)
                  ON CONFLICT(node_id) DO UPDATE SET url = excluded.url, perms = excluded.perms,
-                   revoked_at = NULL",
+                   revoked_at = NULL
+                 WHERE peers.role = 'hub'",
                 params![hub.node_id, invite.hub_url, serde_json::to_string(&resp.perms)?, tx.now],
             )?;
             tx.emit(
