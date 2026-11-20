@@ -139,6 +139,19 @@ The server also prints the approve command when a client starts connecting. A wa
 
 Loopback redirect URIs (Claude Code, and other native clients) match any port on `127.0.0.1` or `localhost`, per RFC 8252. `localhost` and `127.0.0.1` are not aliases of each other. The consent page warns when the redirect is loopback.
 
+### Which redirect URIs a client may register
+
+Registration needs no authentication, so it accepts only a redirect URI whose host reads the same to a browser as it does to you (D100). That holds for dynamic client registration and for a Client ID Metadata Document:
+
+- the scheme is `https`, or `http` for a native client on `localhost`, `127.0.0.1` or `[::1]`;
+- the host is a plain name of ASCII letters, digits, `.` and `-` (at most 253 characters, no trailing dot, last label not a number), an IPv4 address written as four decimal parts, or an IPv6 address in brackets with no zone;
+- the port, if any, is decimal digits from 1 to 65535;
+- there is no white space, `#` or `@`.
+
+An internationalised name must be given in its punycode form (`xn--...`). Anything else is refused with 400 `invalid_redirect_uri`, and the answer does not repeat the URI. `https://claude.ai/...`, `https://chatgpt.com/...` and the loopback URIs above are all plain.
+
+A client that an older build stored with a host outside this rule is kept in the database but can no longer connect: its authorization request is refused before anything is listed for approval, `another serve` prints one line naming the client id, and `another oauth list` shows the client, with its host escaped, as one that must register again. A grant you already approved for such a client keeps working until you revoke it; `another oauth list` marks that grant.
+
 ## Publish the server
 
 Keep the unauthenticated server for local agents on `127.0.0.1:7466`. Publish a second, authenticated server on `127.0.0.1:7467`.

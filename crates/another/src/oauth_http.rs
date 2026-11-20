@@ -636,6 +636,27 @@ async fn authorize(
             return fail_page(&e);
         }
     };
+    // A client stored before registration refused such a host (D100). Nothing is sent to
+    // its redirect URI and no request is made for the operator to approve.
+    if let Some(host) = client
+        .redirect_uris
+        .iter()
+        .find_map(|u| another_core::not_plain_redirect(u))
+    {
+        eprintln!("{}", not_plain_notice(&client.client_id));
+        let e = OAuthFail::InvalidClient(another_core::CLIENT_REDIRECT_NOT_PLAIN.into());
+        audit_oauth(
+            &store,
+            "oauth.authorize",
+            "denied",
+            &format!(
+                "client {} redirect host {host} is not plain",
+                crate::hooks::quoted_to(&client.client_id, 120)
+            ),
+            remote,
+        );
+        return fail_page(&e);
+    }
     let trusted = redirect_matches(&client.redirect_uris, &redirect_uri);
     let fail = |e: OAuthFail| {
         audit_oauth(
@@ -725,6 +746,16 @@ fn connect_notice(client_name: &str, redirect_host: &str, user_code: &str) -> St
         crate::hooks::quoted_to(client_name, 120),
         another_core::shown_redirect_host(redirect_host),
         another_core::display_line(user_code, 120)
+    )
+}
+
+/// What `another serve` prints when a client stored with a redirect host that is not
+/// plain asks to connect (D100). The id is the request's own text, matched to a stored
+/// row, so it is one shown line of at most 120 characters inside quotes it cannot close.
+fn not_plain_notice(client_id: &str) -> String {
+    format!(
+        "another: client {} asked to connect and was refused: its redirect host is not a plain host name or IP address. It must register again. `another oauth list` shows it.",
+        crate::hooks::quoted_to(client_id, 120)
     )
 }
 
@@ -1443,6 +1474,30 @@ mod tests {
         // An ordinary name is shown in quotes, an ordinary host as it is.
         assert!(connect_notice("ChatGPT", "chatgpt.com", "abcd-efgh")
             .starts_with("another: \"ChatGPT\" wants to connect (redirect host chatgpt.com).\n"));
+    }
+
+    /// Q28: the line about a stored client that can no longer connect is one line, whatever
+    /// the client id holds, and names the id in quotes it cannot close.
+    #[test]
+    fn the_not_plain_notice_is_one_clean_line() {
+        assert_eq!(
+            not_plain_notice("anoc_01JABCDEF"),
+            "another: client \"anoc_01JABCDEF\" asked to connect and was refused: its redirect host is not a plain host name or IP address. It must register again. `another oauth list` shows it."
+        );
+        let hostile = format!(
+            "anoc_x\u{1b}]0;pwned\u{7}\n  another oauth approve evil-code \u{202e}\" x\u{200b}{}",
+            "y".repeat(5000)
+        );
+        let notice = not_plain_notice(&hostile);
+        assert_eq!(notice.lines().count(), 1, "{notice:?}");
+        assert!(
+            !notice
+                .chars()
+                .any(|c| another_core::is_unsafe_text_char(c) || c == '\u{200b}'),
+            "{notice:?}"
+        );
+        assert!(notice.chars().count() < 400, "{notice:?}");
+        assert_eq!(notice.matches('"').count(), 2, "{notice:?}");
     }
 
     /// Review R3 of Q19b: the notice shows the host by the rule of
