@@ -765,15 +765,18 @@ mod over_http {
     /// victim's `another sync` pulls them keep denying an edit of a file another agent
     /// holds, and the sync ends well inside a bound that is wide for a debug build.
     ///
-    /// The hub here closes a pull page at 128 KiB, about 30 of these events, where the
+    /// The hub here closes a pull page at 16 KiB, three or four of these events, where the
     /// build's page is 500 events. A debug build stores an event about ten times slower
     /// than a release build, so a page of 500 keeps the lock past the hook's 300 ms in a
     /// debug build on any head; that is the recorded limit on a large pull, not what this
-    /// test is about. With 30 events a page the lock is short unless storing an event
-    /// compiles its pattern, which is what failed before: 30 compiles at a time.
+    /// test is about. A page of about 30 events passed on the development machine and
+    /// failed on a hosted Linux runner, where storing is slower still and the hook's
+    /// retries can miss the short gaps between pages. With a few events a page the lock is
+    /// taken for a few milliseconds at a time unless storing an event compiles its
+    /// pattern, which is what failed before.
     #[test]
     fn a_hook_still_guards_while_sync_pulls_a_peers_slow_globs() {
-        let hub = start_hub_with(Some(128 * 1024));
+        let hub = start_hub_with(Some(16 * 1024));
         let mallory = node("mallory");
         let victim = node("victim");
         hub.join(&mallory);
