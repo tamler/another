@@ -686,9 +686,21 @@ fn peers(store: &Store) -> Check {
         Ok(p) => p,
         Err(e) => return check("peers", Level::Warn, format!("could not list peers: {e}")),
     };
-    let live: Vec<_> = peers.iter().filter(|p| p.revoked_at.is_none()).collect();
+    // A pairing row for this node itself: nothing acts on it, so it is not counted as a
+    // peer, but it is said to be there.
+    let own_row = peers
+        .iter()
+        .any(|p| p.node_id == store.node_id())
+        .then_some(SELF_ROW);
+    let live: Vec<_> = peers
+        .iter()
+        .filter(|p| p.revoked_at.is_none() && p.node_id != store.node_id())
+        .collect();
     if live.is_empty() {
-        return check("peers", Level::Info, "no paired nodes");
+        return match own_row {
+            Some(text) => check("peers", Level::Warn, text),
+            None => check("peers", Level::Info, "no paired nodes"),
+        };
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -718,16 +730,21 @@ fn peers(store: &Store) -> Check {
         }
     }
     if stale.is_empty() {
-        check(
-            "peers",
-            Level::Ok,
-            format!("{} paired, all synced recently", live.len()),
-        )
+        let synced = format!("{} paired, all synced recently", live.len());
+        match own_row {
+            Some(text) => check("peers", Level::Warn, format!("{synced}; {text}")),
+            None => check("peers", Level::Ok, synced),
+        }
     } else {
+        stale.extend(own_row.map(str::to_string));
         check("peers", Level::Warn, stale.join("; "))
             .fix("another sync, and check the hub URL with another peers")
     }
 }
+
+/// What `another doctor` says about a pairing row for this node itself.
+const SELF_ROW: &str = "a pairing record for this node itself is ignored: an older build \
+                        wrote it from an invite that named this node; no action is needed";
 
 /// Whether `program`, as a command transport would start it, can be found: a path as it
 /// is, a bare name in the directories of `PATH`.

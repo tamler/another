@@ -227,28 +227,54 @@ impl std::fmt::Debug for Invite {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+/// What a joining node sends to `/fed/pair`. It holds no secret: the invite's secret never
+/// leaves the joiner. `sig` is the joiner's signature over [`crypto::pair_message`], which
+/// includes the hash of the secret, so only a holder of the invite and of the node key can
+/// make it. A request from a build before signed pairing has no `sig` and is refused; its
+/// `secret` field is not a field here, so it is never read.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairRequest {
     pub invite_id: String,
-    pub secret: String,
     pub node: NodeEntry,
+    #[serde(default)]
+    pub time_ms: i64,
+    #[serde(default)]
+    pub sig: String,
 }
 
-/// As for [`Invite`], the pairing secret is never printed.
-impl std::fmt::Debug for PairRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PairRequest")
-            .field("invite_id", &self.invite_id)
-            .field("secret", &"<redacted>")
-            .field("node", &self.node)
-            .finish()
-    }
-}
-
+/// The hub's answer to a pairing request. `sig` is the hub's signature over
+/// [`crypto::pair_accept_message`]; the joiner checks it against the hub key in the invite.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairResponse {
     pub hub: NodeEntry,
     pub perms: Vec<Perm>,
+    #[serde(default)]
+    pub sig: String,
+}
+
+/// Why a pairing request failed the invite check. The caller is told one text for all four;
+/// the hub's audit row records which one it was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PairRefusal {
+    UnknownInvite,
+    /// `used_by` is the node id stored with the invite, or empty.
+    UsedInvite {
+        used_by: String,
+    },
+    ExpiredInvite,
+    BadSignature,
+}
+
+impl PairRefusal {
+    /// The audit detail for this cause.
+    pub fn detail(&self) -> String {
+        match self {
+            PairRefusal::UnknownInvite => "unknown invite".into(),
+            PairRefusal::UsedInvite { used_by } => format!("used invite (by {used_by})"),
+            PairRefusal::ExpiredInvite => "expired invite".into(),
+            PairRefusal::BadSignature => "bad signature".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -385,7 +411,53 @@ fn perms_of(text: &str) -> Vec<Perm> {
     serde_json::from_str(text).unwrap_or_default()
 }
 
-fn validate_node_name(name: &str) -> Result<()> {
+/// A node id is a ULID as `ulid::Ulid::new().to_string()` writes it, which is how every
+/// build has made node ids: exactly 26 ASCII characters from `0123456789ABCDEFGHJKMNPQRSTVWXYZ`,
+/// the first one `0` to `7`. Anything else is not an id, whoever sends it.
+pub fn validate_node_id(node_id: &str) -> Result<()> {
+    const ALPHABET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let bytes = node_id.as_bytes();
+    let ok = bytes.len() == 26
+        && (b'0'..=b'7').contains(&bytes[0])
+        && bytes.iter().all(|b| ALPHABET.contains(b));
+    if ok {
+        Ok(())
+    } else {
+        let shown: String = node_id.chars().take(40).collect();
+        Err(Error::Invalid(format!(
+            "invalid node id {:?}: a node id is 26 characters from \
+             0123456789ABCDEFGHJKMNPQRSTVWXYZ, the first one 0 to 7",
+            crate::mail::single_line(&shown, usize::MAX)
+        )))
+    }
+}
+
+/// [`crypto::decode_peer_public`], and the text must be the one form `crypto::b64` writes:
+/// decoding trims, so without this two texts would name one key.
+fn canonical_peer_public(text: &str) -> Result<()> {
+    let key = crypto::decode_peer_public(text)?;
+    if crypto::b64(key.as_bytes()) != text {
+        return Err(Error::Invalid(
+            "node public key is not in its canonical text form".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The name rule, and not the `local` placeholder: what a node must be called to pair.
+fn validate_pairing_name(name: &str) -> Result<()> {
+    validate_node_name(name)?;
+    if name == "local" {
+        return Err(Error::Invalid(
+            "a node named `local` is not named yet and cannot pair; name it first: \
+             `another node name <name>`"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_node_name(name: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name.len() <= 40
         && name
@@ -420,16 +492,28 @@ fn require_named(entry: &NodeEntry) -> Result<()> {
             "give this node a unique name before pairing: `another node name <name>`".into(),
         ));
     }
+    // A home made by an older build with an unchecked ANOTHER_NODE_NAME can hold a name a
+    // rename would refuse. The name is not quoted: it is exactly the text that is not safe.
+    if validate_node_name(&entry.display_name).is_err() {
+        return Err(Error::Invalid(
+            "this node's name is not valid (use 1-40 ASCII letters, digits, '-', '_' or '.'); \
+             rename it with `another node name <name>`"
+                .into(),
+        ));
+    }
     Ok(())
 }
 
 /// Whether `name` already names a node other than `node_id`. A node is addressed by its
 /// display name or its id (`identity.rs` `resolve_remote`), so another node's id is taken
 /// too: otherwise `name@project@<node id>`, the form that resolves an ambiguity, is ambiguous.
+/// Case is ignored: `Alpha` and `alpha` are one name, since a person reads them as one.
 fn node_name_taken(conn: &Connection, name: &str, node_id: &str) -> Result<bool> {
     Ok(conn
         .query_row(
-            "SELECT 1 FROM nodes WHERE (display_name = ?1 OR node_id = ?1) AND node_id != ?2",
+            "SELECT 1 FROM nodes
+             WHERE (display_name = ?1 COLLATE NOCASE OR node_id = ?1 COLLATE NOCASE)
+               AND node_id != ?2",
             params![name, node_id],
             |_| Ok(()),
         )
@@ -443,7 +527,7 @@ fn node_name_taken(conn: &Connection, name: &str, node_id: &str) -> Result<bool>
 fn node_id_is_a_name(conn: &Connection, node_id: &str) -> Result<bool> {
     Ok(conn
         .query_row(
-            "SELECT 1 FROM nodes WHERE display_name = ?1 AND node_id != ?1",
+            "SELECT 1 FROM nodes WHERE display_name = ?1 COLLATE NOCASE AND node_id != ?1",
             [node_id],
             |_| Ok(()),
         )
@@ -451,13 +535,33 @@ fn node_id_is_a_name(conn: &Connection, node_id: &str) -> Result<bool> {
         .is_some())
 }
 
+/// The refusal for a node that is new here and whose id is already another node's name.
+fn id_is_a_name(node_id: &str) -> Error {
+    Error::Conflict(format!(
+        "node {node_id}'s id is already another node's name; rename that node first"
+    ))
+}
+
+/// Permissions as a pairing answer's signature covers them: each name, joined by `,`.
+fn perms_text(perms: &[Perm]) -> String {
+    perms
+        .iter()
+        .map(|p| p.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// `listed` as a peer's node list may apply it, or `None` to skip it. The name is used only
 /// when a local rename would accept it: valid, not the `local` placeholder, and not another
 /// node's. Otherwise a known node keeps its name, and an unknown one is recorded under its
 /// id, so its key is still learned and its signed events still verify. An unknown node whose
 /// id is already another node's name is skipped: recording it would make that identifier
-/// match two nodes, and skipping one entry keeps the rest of the sync going.
+/// match two nodes, and skipping one entry keeps the rest of the sync going. An entry whose
+/// id is not a node id is skipped the same way.
 fn listed_entry(tx: &Tx<'_>, listed: &NodeEntry) -> Result<Option<NodeEntry>> {
+    if validate_node_id(&listed.node_id).is_err() {
+        return Ok(None);
+    }
     let known = tx
         .query_row(
             "SELECT display_name FROM nodes WHERE node_id = ?1",
@@ -482,14 +586,16 @@ fn listed_entry(tx: &Tx<'_>, listed: &NodeEntry) -> Result<Option<NodeEntry>> {
     }))
 }
 
-/// Record (or confirm) another node. Keys are pinned on first sight.
+/// Record (or confirm) another node from a hub's list or a hub's signed answer to a join.
+/// Keys are pinned on first sight. The hub side of pairing does not come through here: it
+/// never writes a key on a node it already knows (see [`Store::accept_pairing`]).
 fn upsert_node(tx: &Tx<'_>, node: &NodeEntry) -> Result<()> {
     if node.node_id == tx.node_id {
         return Ok(());
     }
     crypto::decode_peer_public(&node.public_key)?;
-    // The name prefixes every feed line from that node and is listed by `another node`. A
-    // hub's name in its answer to a join arrives here unchecked.
+    // The name prefixes every feed line from that node and is listed by `another node`.
+    // Callers pass it through `listed_entry` first; this keeps it one safe line regardless.
     let display_name = crate::mail::single_line(&node.display_name, usize::MAX);
     let known: Option<(String, Option<String>)> = tx
         .query_row(
@@ -518,10 +624,7 @@ fn upsert_node(tx: &Tx<'_>, node: &NodeEntry) -> Result<()> {
         }
         None => {
             if node_id_is_a_name(tx, &node.node_id)? {
-                return Err(Error::Conflict(format!(
-                    "node {}'s id is already another node's name; rename that node first",
-                    node.node_id
-                )));
+                return Err(id_is_a_name(&node.node_id));
             }
             tx.execute(
                 "INSERT INTO nodes (node_id, display_name, role, is_local, created_at, public_key)
@@ -620,10 +723,17 @@ fn known_nodes(conn: &Connection) -> Result<Vec<NodeEntry>> {
 /// (role, perms, revoked_at)
 type PeerRow = (String, Vec<Perm>, Option<i64>);
 
+/// A `peers` row for this node itself is never acted on. No command of this build writes
+/// one; a build before the joiner checked the hub id could, from an invite that named the
+/// node's own id. Every reader that decides something from a `peers` row (this node's hub,
+/// who is a paired spoke, whose signed requests are accepted) carries this condition, so
+/// such a row is inert: it is only shown, marked, by `another peers` and `another doctor`.
+const NOT_SELF: &str = "node_id NOT IN (SELECT node_id FROM nodes WHERE is_local = 1)";
+
 fn peer_row(conn: &Connection, node_id: &str) -> Result<Option<PeerRow>> {
     Ok(conn
         .query_row(
-            "SELECT role, perms, revoked_at FROM peers WHERE node_id = ?1",
+            &format!("SELECT role, perms, revoked_at FROM peers WHERE node_id = ?1 AND {NOT_SELF}"),
             [node_id],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get(2)?)),
         )
@@ -631,13 +741,114 @@ fn peer_row(conn: &Connection, node_id: &str) -> Result<Option<PeerRow>> {
         .map(|(role, perms, revoked)| (role, perms_of(&perms), revoked)))
 }
 
+/// Refuses to join `node_id` as a hub when this node already has it paired in another role.
+/// A join writes only a `hub` row: otherwise an invite made by one of this node's spokes
+/// would give that spoke the permissions it named and clear its revoke.
+fn not_paired_as_spoke(conn: &Connection, node_id: &str) -> Result<()> {
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT p.role, n.display_name FROM peers p JOIN nodes n ON n.node_id = p.node_id
+             WHERE p.node_id = ?1",
+            [node_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match row {
+        Some((role, name)) if role != "hub" => Err(Error::Conflict(format!(
+            "node {name} is paired here as a spoke; it cannot also be this node's hub"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// The refusal for a join while this node syncs with another hub.
+fn second_hub() -> Error {
+    Error::Conflict(
+        "this node already syncs with another hub; revoke it first: `another pair revoke <hub>`"
+            .into(),
+    )
+}
+
+/// The joiner's identity rule, for the node an invite names as the hub. Everything here is
+/// decided by what this node already stores, so it is checked before anything is sent and
+/// again before anything is written:
+///
+/// - the id is not this node's own;
+/// - a row stored for the id has a key (a keyless row is never given one by a join, as on
+///   the hub's side), and the invite carries that key;
+/// - the id is not paired here in a role other than `hub`;
+/// - this node does not sync with a different hub.
+fn may_join_as_hub(conn: &Connection, own_id: &str, hub: &NodeEntry) -> Result<()> {
+    if hub.node_id == own_id {
+        return Err(Error::Conflict(
+            "this invite names this node itself as its hub; a node cannot join itself".into(),
+        ));
+    }
+    let stored: Option<Option<String>> = conn
+        .query_row(
+            "SELECT public_key FROM nodes WHERE node_id = ?1",
+            [&hub.node_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match stored {
+        Some(None) => {
+            return Err(Error::Conflict(format!(
+                "node {} is known here without a key; it cannot be joined",
+                hub.node_id
+            )));
+        }
+        Some(Some(key)) if key != hub.public_key => {
+            return Err(Error::Conflict(format!(
+                "node {} presented a different key than before; refusing",
+                hub.node_id
+            )));
+        }
+        _ => {}
+    }
+    not_paired_as_spoke(conn, &hub.node_id)?;
+    match hub_of(conn)? {
+        Some((existing, _, _)) if existing != hub.node_id => Err(second_hub()),
+        _ => Ok(()),
+    }
+}
+
+/// An invite id is a ULID, as the hub makes it (the same form as a node id). It goes into
+/// both signed messages, so it is checked before either is built. The refusal is the fixed
+/// text for an invite that does not decode: the id is part of the code.
+fn validate_invite_id(invite_id: &str) -> Result<()> {
+    validate_node_id(invite_id).map_err(|_| Error::Invalid("invalid invite code".into()))
+}
+
+/// The refusal of `pair revoke`, `pair readmit` and `pair release-name` for this node's own
+/// id. No command makes a pairing row for the node itself; a home that has one from an
+/// older build must not end its own leases or rename itself through these commands.
+fn not_this_node(tx: &Tx<'_>, node_id: &str) -> Result<()> {
+    if node_id == tx.node_id {
+        return Err(Error::Invalid(format!(
+            "node {node_id} is this node itself; `another pair revoke`, `readmit` and \
+             `release-name` act on other nodes only"
+        )));
+    }
+    Ok(())
+}
+
 /// The hub this node syncs with, if it is a spoke: (node_id, url, granted perms).
 pub(crate) fn hub_of(conn: &Connection) -> Result<Option<(String, String, Vec<Perm>)>> {
     Ok(conn
         .query_row(
-            "SELECT node_id, url, perms FROM peers WHERE role = 'hub' AND revoked_at IS NULL LIMIT 1",
+            &format!(
+                "SELECT node_id, url, perms FROM peers
+                 WHERE role = 'hub' AND revoked_at IS NULL AND {NOT_SELF} LIMIT 1"
+            ),
             [],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
         )
         .optional()?
         .map(|(n, u, p)| (n, u, perms_of(&p))))
@@ -949,7 +1160,10 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
     let origin = ev.node_id.as_str();
     match ev.kind.as_str() {
         "node.created" | "node.renamed" => {
-            if let Some(name) = s("display_name") {
+            // `local` means "not named yet" and names no one, so it is never applied: the
+            // event is stored and relayed (an honest node's first `node.created` carries
+            // it), and the node keeps the name pairing or a hub's list gave it.
+            if let Some(name) = s("display_name").filter(|n| n != "local") {
                 tx.execute(
                     "UPDATE nodes SET display_name = ?2 WHERE node_id = ?1",
                     params![origin, name],
@@ -1382,10 +1596,26 @@ const PEER_SELECT: &str = "SELECT p.node_id, n.display_name, p.role, p.url, p.pe
        p.paired_at, p.last_sync_at, p.revoked_at, p.push_cursor, p.pull_cursor
      FROM peers p JOIN nodes n ON n.node_id = p.node_id";
 
+/// A paired node by id or name, with the lookup `another pair revoke` uses.
+fn find_peer(conn: &Connection, node: &str) -> Result<Peer> {
+    conn.query_row(
+        &format!("{PEER_SELECT} WHERE p.node_id = ?1 OR n.display_name = ?1"),
+        [node],
+        peer_from_row,
+    )
+    .optional()?
+    .ok_or_else(|| Error::NotFound(format!("no paired node {node:?}")))
+}
+
 impl Store {
     /// Rename this node (do it before pairing: other nodes address agents by node name).
     pub fn set_node_name(&self, name: &str) -> Result<NodeEntry> {
         validate_node_name(name)?;
+        if name == "local" {
+            return Err(Error::Invalid(
+                "`local` means a node that is not named yet; choose another name".into(),
+            ));
+        }
         self.write(|tx| {
             if node_name_taken(tx, name, tx.node_id)? {
                 return Err(Error::Conflict(format!(
@@ -1458,7 +1688,7 @@ impl Store {
                 .query_row(
                     "SELECT p.perms, p.revoked_at, n.public_key FROM peers p
                      JOIN nodes n ON n.node_id = p.node_id
-                     WHERE p.node_id = ?1 AND p.role = 'spoke'",
+                     WHERE p.node_id = ?1 AND p.role = 'spoke' AND n.is_local = 0",
                     [node_id],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
@@ -1517,7 +1747,7 @@ impl Store {
                 ],
             )?;
             let invite = Invite {
-                v: 1,
+                v: 2,
                 hub_url: hub_url.trim_end_matches('/').to_string(),
                 hub,
                 invite_id,
@@ -1532,18 +1762,35 @@ impl Store {
         })
     }
 
-    /// Spoke side: decode an invite and build the pairing request for it.
+    /// Spoke side: decode an invite and build the signed pairing request for it. Everything
+    /// that can be refused here is, so that nothing is sent and the invite is not used up.
     pub fn prepare_join(&self, code: &str) -> Result<(Invite, PairRequest)> {
         let raw = code.trim().strip_prefix("another-invite:").ok_or_else(|| {
             Error::Invalid("not an Another invite code (expected another-invite:...)".into())
         })?;
-        let invite: Invite = serde_json::from_slice(&crypto::unb64(raw)?)
-            .map_err(|e| Error::Invalid(format!("invalid invite code: {e}")))?;
+        // One fixed text for every decode failure: the base64 and JSON errors can quote
+        // the code, and the code holds the secret.
+        let invite: Invite = crypto::unb64(raw)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .ok_or_else(|| Error::Invalid("invalid invite code".into()))?;
+        if invite.v != 2 {
+            return Err(Error::Invalid(
+                "this invite was made by an older build; make a new invite on an upgraded hub"
+                    .into(),
+            ));
+        }
         if invite.expires_at <= self.now() {
             return Err(Error::Invalid(
                 "this invite has expired; ask for a new one".into(),
             ));
         }
+        validate_invite_id(&invite.invite_id)?;
+        // Only the shape of the hub entry is checked here. Whether its name is taken on
+        // this node is decided when the hub is recorded (`complete_join`).
+        validate_node_id(&invite.hub.node_id)?;
+        canonical_peer_public(&invite.hub.public_key)?;
+        validate_pairing_name(&invite.hub.display_name)?;
         let me = self.node_entry()?;
         require_named(&me)?;
         if me.display_name == invite.hub.display_name {
@@ -1552,96 +1799,359 @@ impl Store {
                 me.display_name
             )));
         }
+        self.read(|conn| {
+            let known = conn
+                .query_row(
+                    "SELECT 1 FROM nodes WHERE node_id = ?1",
+                    [&invite.hub.node_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !known && node_id_is_a_name(conn, &invite.hub.node_id)? {
+                return Err(id_is_a_name(&invite.hub.node_id));
+            }
+            // The invite and this node's own rows show all of this, so it is refused before
+            // anything is sent, and a refused join does not use up an honest hub's invite.
+            may_join_as_hub(conn, &me.node_id, &invite.hub)
+        })?;
+        let time_ms = self.now();
+        let sig = crypto::sign(
+            self.signing_key(),
+            &crypto::pair_message(
+                &invite.hub.node_id,
+                &invite.hub.public_key,
+                &invite.invite_id,
+                &crypto::sha256_hex(invite.secret.as_bytes()),
+                &me.node_id,
+                &me.public_key,
+                &me.display_name,
+                time_ms,
+            ),
+        );
         let req = PairRequest {
             invite_id: invite.invite_id.clone(),
-            secret: invite.secret.clone(),
             node: me,
+            time_ms,
+            sig,
         };
         Ok((invite, req))
     }
 
-    /// Hub side: accept a pairing request carrying a valid, unused invite.
+    /// Hub side: accept a signed pairing request for a valid, unused invite.
     pub fn accept_pairing(&self, req: &PairRequest) -> Result<PairResponse> {
-        validate_node_name(&req.node.display_name)?;
-        crypto::decode_peer_public(&req.node.public_key)?;
+        self.accept_pairing_with_cause(req).0
+    }
+
+    /// [`Store::accept_pairing`], and beside the result the cause when the request failed
+    /// the invite check. The error text for those four causes is one and the same, so a
+    /// caller learns nothing about an invite it does not hold; the cause is for this hub's
+    /// audit log only.
+    ///
+    /// Everything is checked before anything is written, and the writes share one
+    /// transaction, so a refused request never uses up the invite.
+    pub fn accept_pairing_with_cause(
+        &self,
+        req: &PairRequest,
+    ) -> (Result<PairResponse>, Option<PairRefusal>) {
+        let cause = std::cell::RefCell::new(None);
+        let result = self.accept_pairing_inner(req, &cause);
+        (result, cause.into_inner())
+    }
+
+    fn accept_pairing_inner(
+        &self,
+        req: &PairRequest,
+        cause: &std::cell::RefCell<Option<PairRefusal>>,
+    ) -> Result<PairResponse> {
+        let node = &req.node;
+        validate_node_id(&node.node_id)?;
+        validate_pairing_name(&node.display_name)?;
+        canonical_peer_public(&node.public_key)?;
+        if req.sig.is_empty() {
+            return Err(Error::Forbidden(
+                "this hub accepts only signed pairing requests; upgrade the joining node; \
+                 an invite made before the hub was upgraded must be made again"
+                    .into(),
+            ));
+        }
+        // `time_ms` comes from the request: compare without overflow, as for a signed
+        // request between paired nodes.
+        if self.now().abs_diff(req.time_ms) > 5 * 60 * 1000 {
+            return Err(Error::Forbidden(
+                "pairing request time is more than 5 minutes off; check the clocks".into(),
+            ));
+        }
         self.write(|tx| {
-            let denied = || Error::Forbidden("invalid, used or expired invite".into());
-            let row: Option<(String, String, i64, Option<i64>)> = tx
+            let denied = |why: PairRefusal| {
+                *cause.borrow_mut() = Some(why);
+                Error::Forbidden(
+                    "invalid, used or expired invite, or the request is not signed for it".into(),
+                )
+            };
+            type InviteRow = (String, String, i64, Option<i64>, Option<String>);
+            let row: Option<InviteRow> = tx
                 .query_row(
-                    "SELECT secret_hash, perms, expires_at, used_at FROM invites WHERE invite_id = ?1",
+                    "SELECT secret_hash, perms, expires_at, used_at, used_by FROM invites
+                     WHERE invite_id = ?1",
                     [&req.invite_id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                 )
                 .optional()?;
-            let Some((hash, perms, expires_at, None)) = row else {
-                return Err(denied());
+            let Some((secret_hash, perms, expires_at, used_at, used_by)) = row else {
+                return Err(denied(PairRefusal::UnknownInvite));
             };
-            if hash != crypto::sha256_hex(req.secret.as_bytes()) || expires_at <= tx.now {
-                return Err(denied());
+            if used_at.is_some() {
+                // An older build stored whatever id the request carried.
+                let used_by = used_by
+                    .filter(|id| validate_node_id(id).is_ok())
+                    .unwrap_or_default();
+                return Err(denied(PairRefusal::UsedInvite { used_by }));
+            }
+            if expires_at <= tx.now {
+                return Err(denied(PairRefusal::ExpiredInvite));
             }
             let hub = local_entry(tx)?;
-            let clash = node_name_taken(tx, &req.node.display_name, &req.node.node_id)?;
-            if clash || req.node.node_id == hub.node_id {
-                return Err(Error::Conflict(format!(
-                    "a node named {:?} is already known; rename the joining node",
-                    req.node.display_name
-                )));
+            // Built from this hub's own id and key and the stored hash, never from the
+            // request: the signature is the proof of the node key, of the invite and of
+            // the hub it was meant for.
+            let message = crypto::pair_message(
+                &hub.node_id,
+                &hub.public_key,
+                &req.invite_id,
+                &secret_hash,
+                &node.node_id,
+                &node.public_key,
+                &node.display_name,
+                req.time_ms,
+            );
+            if !crypto::verify_strict(&node.public_key, &message, &req.sig) {
+                return Err(denied(PairRefusal::BadSignature));
             }
-            upsert_node(tx, &req.node)?;
+
+            // The identity rules. The request is from the holder of `node.public_key`.
+            let name_taken = || {
+                Error::Conflict(format!(
+                    "a node named {:?} is already known; rename the joining node",
+                    node.display_name
+                ))
+            };
+            if node.node_id == hub.node_id {
+                return Err(name_taken());
+            }
+            let known: Option<(String, Option<String>)> = tx
+                .query_row(
+                    "SELECT display_name, public_key FROM nodes WHERE node_id = ?1",
+                    [&node.node_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let peer: Option<(String, Option<i64>, String)> = tx
+                .query_row(
+                    "SELECT role, revoked_at, perms FROM peers WHERE node_id = ?1",
+                    [&node.node_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            let mut previous = None;
+            match &known {
+                None => {
+                    if node_id_is_a_name(tx, &node.node_id)? {
+                        return Err(id_is_a_name(&node.node_id));
+                    }
+                    if node_name_taken(tx, &node.display_name, &node.node_id)? {
+                        return Err(name_taken());
+                    }
+                    tx.execute(
+                        "INSERT INTO nodes (node_id, display_name, role, is_local, created_at, public_key)
+                         VALUES (?1, ?2, 'peer', 0, ?3, ?4)",
+                        params![node.node_id, node.display_name, tx.now, node.public_key],
+                    )?;
+                }
+                Some((_, None)) => {
+                    return Err(Error::Conflict(format!(
+                        "node {} is known here without a key; it cannot be paired",
+                        node.node_id
+                    )));
+                }
+                Some((_, Some(key))) if *key != node.public_key => {
+                    return Err(Error::Conflict(format!(
+                        "node {} presented a different key than before; refusing",
+                        node.node_id
+                    )));
+                }
+                Some((name, Some(_))) => {
+                    match &peer {
+                        Some((role, _, _)) if role == "hub" => {
+                            return Err(Error::Conflict(format!(
+                                "this node syncs with {name} as its hub; it cannot also be its hub"
+                            )));
+                        }
+                        Some((_, Some(_), _)) => {
+                            return Err(Error::Forbidden(format!(
+                                "node {name} was revoked on this hub; the hub's owner can let \
+                                 it back in with `another pair readmit {name}`"
+                            )));
+                        }
+                        Some((_, None, old_perms)) => {
+                            previous = Some((name.clone(), perms_of(old_perms)));
+                        }
+                        None => {}
+                    }
+                    // The rename rule, only when the name changes: a node keeps a name
+                    // that predates a rule.
+                    if *name != node.display_name {
+                        if node_name_taken(tx, &node.display_name, &node.node_id)? {
+                            return Err(name_taken());
+                        }
+                        tx.execute(
+                            "UPDATE nodes SET display_name = ?2 WHERE node_id = ?1",
+                            params![node.node_id, node.display_name],
+                        )?;
+                    }
+                }
+            }
+            // Pairing never writes `revoked_at`: a revoked row was refused above.
             tx.execute(
                 "INSERT INTO peers (node_id, role, perms, paired_at) VALUES (?1, 'spoke', ?2, ?3)
                  ON CONFLICT(node_id) DO UPDATE SET perms = excluded.perms,
-                   paired_at = excluded.paired_at, revoked_at = NULL",
-                params![req.node.node_id, perms, tx.now],
+                   paired_at = excluded.paired_at",
+                params![node.node_id, perms, tx.now],
             )?;
             tx.execute(
                 "UPDATE invites SET used_at = ?2, used_by = ?3 WHERE invite_id = ?1",
-                params![req.invite_id, tx.now, req.node.node_id],
+                params![req.invite_id, tx.now, node.node_id],
             )?;
-            tx.emit(
-                "human (another pair)",
-                "peer.paired",
-                json!({ "node_id": req.node.node_id, "display_name": req.node.display_name, "role": "spoke", "perms": perms_of(&perms) }),
-            )?;
-            Ok(PairResponse {
-                hub,
-                perms: perms_of(&perms),
-            })
+            let perms = perms_of(&perms);
+            let mut record = json!({
+                "node_id": node.node_id,
+                "display_name": node.display_name,
+                "role": "spoke",
+                "perms": perms,
+                "again": peer.is_some(),
+                "invite_id": req.invite_id,
+                "fingerprint": crypto::fingerprint(&node.public_key),
+            });
+            if let Some((previous_name, previous_perms)) = previous {
+                record["previous_name"] = json!(previous_name);
+                record["previous_perms"] = json!(previous_perms);
+            }
+            tx.emit("human (another pair)", "peer.paired", record)?;
+            let sig = crypto::sign(
+                tx.key,
+                &crypto::pair_accept_message(
+                    &req.invite_id,
+                    &secret_hash,
+                    &node.node_id,
+                    &node.public_key,
+                    &hub.display_name,
+                    &perms_text(&perms),
+                ),
+            );
+            Ok(PairResponse { hub, perms, sig })
         })
     }
 
-    /// Spoke side: record the hub after it accepted the pairing.
+    /// Spoke side: record the hub after it accepted the pairing. The answer must be signed
+    /// by the hub key the invite carries, for this node, with the name and permissions it
+    /// states; otherwise nothing is recorded.
     pub fn complete_join(&self, invite: &Invite, resp: &PairResponse) -> Result<Peer> {
+        self.complete_join_reporting(invite, resp)
+            .map(|(peer, _)| peer)
+    }
+
+    /// [`Store::complete_join`], and beside the peer the name this node had stored for the
+    /// hub when the join lifted this node's own revoke of it (`None` for any other join).
+    /// A join to a hub this node revoked makes it sync with that hub again, whatever name
+    /// the invite gives it, so the caller says so.
+    pub fn complete_join_reporting(
+        &self,
+        invite: &Invite,
+        resp: &PairResponse,
+    ) -> Result<(Peer, Option<String>)> {
         if resp.hub.node_id != invite.hub.node_id || resp.hub.public_key != invite.hub.public_key {
             return Err(Error::Forbidden(
                 "the hub answered with a different identity than the invite".into(),
             ));
         }
+        validate_invite_id(&invite.invite_id)?;
+        // The fields of the signed bytes are joined by line breaks, so none may hold one
+        // when the signature is checked. The invite id was checked above; the other fields
+        // are this node's own id and key, a hash and the permission names; the hub's name
+        // is the one that arrives with the answer. Whether it is a usable name is decided
+        // after the check, by the rule for a hub's list.
+        if resp.hub.display_name.contains(['\n', '\r']) {
+            return Err(Error::Invalid(
+                "the hub's answer carries a name with a line break; not paired".into(),
+            ));
+        }
+        let me = self.node_entry()?;
+        let message = crypto::pair_accept_message(
+            &invite.invite_id,
+            &crypto::sha256_hex(invite.secret.as_bytes()),
+            &me.node_id,
+            &me.public_key,
+            &resp.hub.display_name,
+            &perms_text(&resp.perms),
+        );
+        if !crypto::verify_strict(&invite.hub.public_key, &message, &resp.sig) {
+            return Err(Error::Forbidden(
+                "the hub's answer is not signed with the hub key in the invite; not paired".into(),
+            ));
+        }
         self.write(|tx| {
-            if let Some((existing, _, _)) = hub_of(tx)? {
-                if existing != resp.hub.node_id {
-                    return Err(Error::Conflict(
-                        "this node already syncs with another hub; unpair it first".into(),
-                    ));
-                }
-            }
-            upsert_node(tx, &resp.hub)?;
+            // A join writes the `hub` row of another node and nothing else: never a row for
+            // this node itself, never the row of a node paired here as a spoke, never under
+            // a key other than the one stored for the id. The same rule ran before the
+            // request was sent; the rows may have changed since.
+            may_join_as_hub(tx, tx.node_id, &resp.hub)?;
+            // The hub's name is applied by the rule for a name in a hub's list: used when
+            // valid, not `local` and not another node's, otherwise the known name or the id.
+            let Some(hub) = listed_entry(tx, &resp.hub)? else {
+                return Err(id_is_a_name(&resp.hub.node_id));
+            };
+            let before = peer_row(tx, &hub.node_id)?;
+            let again = before.is_some();
+            // This node's own revoke of the hub is lifted by this join: remember the name
+            // it was stored under, which the invite may not repeat.
+            let lifted: Option<String> = match before {
+                Some((_, _, Some(_))) => tx
+                    .query_row(
+                        "SELECT display_name FROM nodes WHERE node_id = ?1",
+                        [&hub.node_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?,
+                _ => None,
+            };
+            upsert_node(tx, &hub)?;
             tx.execute(
                 "INSERT INTO peers (node_id, role, url, perms, paired_at) VALUES (?1, 'hub', ?2, ?3, ?4)
                  ON CONFLICT(node_id) DO UPDATE SET url = excluded.url, perms = excluded.perms,
-                   revoked_at = NULL",
-                params![resp.hub.node_id, invite.hub_url, serde_json::to_string(&resp.perms)?, tx.now],
+                   revoked_at = NULL
+                 WHERE peers.role = 'hub'",
+                params![hub.node_id, invite.hub_url, serde_json::to_string(&resp.perms)?, tx.now],
             )?;
-            tx.emit(
-                "human (another pair)",
-                "peer.paired",
-                json!({ "node_id": resp.hub.node_id, "display_name": resp.hub.display_name, "role": "hub", "perms": resp.perms }),
-            )?;
-            Ok(tx.query_row(
+            let mut record = json!({
+                "node_id": hub.node_id,
+                "display_name": hub.display_name,
+                "role": "hub",
+                "perms": resp.perms,
+                "again": again,
+                "invite_id": invite.invite_id,
+                "fingerprint": crypto::fingerprint(&hub.public_key),
+            });
+            if let Some(previous_name) = &lifted {
+                record["revoke_lifted"] = json!(true);
+                record["previous_name"] = json!(previous_name);
+            }
+            tx.emit("human (another pair)", "peer.paired", record)?;
+            let peer = tx.query_row(
                 &format!("{PEER_SELECT} WHERE p.node_id = ?1"),
-                [&resp.hub.node_id],
+                [&hub.node_id],
                 peer_from_row,
-            )?)
+            )?;
+            Ok((peer, lifted))
         })
     }
 
@@ -1670,6 +2180,7 @@ impl Store {
                 )
                 .optional()?
                 .ok_or_else(|| Error::NotFound(format!("no paired node {node:?}")))?;
+            not_this_node(tx, &id)?;
             tx.execute(
                 "UPDATE peers SET revoked_at = ?2 WHERE node_id = ?1",
                 params![id, tx.now],
@@ -1687,6 +2198,79 @@ impl Store {
                 [&id],
                 peer_from_row,
             )?)
+        })
+    }
+
+    /// Hub side: let a spoke this hub revoked sync again, with the permissions it had.
+    /// This is the only way a revoked node returns; an invite never does it. Leases the
+    /// revoke ended are not restored.
+    pub fn readmit_peer(&self, node: &str) -> Result<Peer> {
+        self.write(|tx| {
+            let peer = find_peer(tx, node)?;
+            not_this_node(tx, &peer.node_id)?;
+            if peer.role == "hub" {
+                return Err(Error::Invalid(format!(
+                    "{} is this node's hub; join it again with a fresh invite",
+                    peer.display_name
+                )));
+            }
+            if peer.revoked_at.is_none() {
+                return Err(Error::Conflict(format!(
+                    "node {} is not revoked",
+                    peer.display_name
+                )));
+            }
+            tx.execute(
+                "UPDATE peers SET revoked_at = NULL WHERE node_id = ?1",
+                [&peer.node_id],
+            )?;
+            tx.emit(
+                "human (another pair readmit)",
+                "peer.readmitted",
+                json!({
+                    "node_id": peer.node_id,
+                    "display_name": peer.display_name,
+                    "perms": peer.perms,
+                    "fingerprint": peer.fingerprint,
+                }),
+            )?;
+            find_peer(tx, &peer.node_id)
+        })
+    }
+
+    /// Free the name a revoked node holds: the node is listed by its id from now on. Its
+    /// row, key, revoked state and agents stay. Returns the peer and the name it had. The
+    /// name is free for any node at once.
+    pub fn release_peer_name(&self, node: &str) -> Result<(Peer, String)> {
+        self.write(|tx| {
+            let peer = find_peer(tx, node)?;
+            not_this_node(tx, &peer.node_id)?;
+            if peer.revoked_at.is_none() {
+                return Err(Error::Conflict(format!(
+                    "node {} is not revoked; revoke it first",
+                    peer.display_name
+                )));
+            }
+            if peer.display_name == peer.node_id {
+                return Err(Error::Conflict(format!(
+                    "node {} has no name to release",
+                    peer.node_id
+                )));
+            }
+            tx.execute(
+                "UPDATE nodes SET display_name = node_id WHERE node_id = ?1",
+                [&peer.node_id],
+            )?;
+            tx.emit(
+                "human (another pair release-name)",
+                "peer.name_released",
+                json!({
+                    "node_id": peer.node_id,
+                    "previous_name": peer.display_name,
+                    "fingerprint": peer.fingerprint,
+                }),
+            )?;
+            Ok((find_peer(tx, &peer.node_id)?, peer.display_name))
         })
     }
 
@@ -2019,11 +2603,11 @@ impl Store {
                 return Err(Error::Forbidden("not a paired node".into()));
             };
             for n in nodes {
-                // A weak key in the directory (a hub may have pinned one before keys were
-                // checked) is never pinned here, but it does not stop the rest of the page
-                // from syncing: events from that node then fail as from an unknown origin
-                // (FINDINGS-197 adv197).
-                if crypto::decode_public(&n.public_key).is_ok_and(|k| k.is_weak()) {
+                // A key in the directory that is weak (a hub may have pinned one before keys
+                // were checked) or does not decode is never pinned here, but it does not
+                // stop the rest of the page from syncing: events from that node then fail
+                // as from an unknown origin (FINDINGS-197 adv197).
+                if crypto::decode_peer_public(&n.public_key).is_err() {
                     continue;
                 }
                 // A spoke speaks only for itself (public keys prove nothing about the
