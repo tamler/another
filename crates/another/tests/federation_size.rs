@@ -598,54 +598,70 @@ fn a_body_over_a_routes_limit_is_refused() {
     let a = node("spokea");
     join(&hub, &a);
     let agent = http();
-    let post = |path: &str, bytes: usize| -> u16 {
-        agent
-            .post(&format!("{}{path}", hub.url))
-            .header("content-type", "application/json")
-            .send(&vec![b' '; bytes][..])
-            .unwrap()
-            .status()
-            .as_u16()
+    // The status of the answer, or `None` when the hub closed the connection on the body
+    // it would not read before the answer could be read (a refusal too, seen on Linux).
+    type Answer = Result<ureq::http::Response<ureq::Body>, ureq::Error>;
+    let status = |answer: Answer| -> Option<u16> {
+        use std::io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset};
+        match answer {
+            Ok(resp) => Some(resp.status().as_u16()),
+            Err(ureq::Error::Io(e))
+                if matches!(e.kind(), BrokenPipe | ConnectionAborted | ConnectionReset) =>
+            {
+                None
+            }
+            Err(e) => panic!("{e}"),
+        }
+    };
+    let post = |path: &str, bytes: usize| -> Option<u16> {
+        status(
+            agent
+                .post(&format!("{}{path}", hub.url))
+                .header("content-type", "application/json")
+                .send(&vec![b' '; bytes][..]),
+        )
     };
     // /fed/push: the limit is 8 MiB and is applied before the signature is checked.
     let over = post("/fed/push", PUSH_BODY_LIMIT_BYTES + 1);
     let at = post("/fed/push", PUSH_BODY_LIMIT_BYTES);
     // Without a declared length the hub stops reading at the limit.
-    let streamed = agent
-        .post(&format!("{}/fed/push", hub.url))
-        .header("content-type", "application/json")
-        .send(ureq::SendBody::from_reader(
-            &mut std::io::repeat(b' ').take(PUSH_BODY_LIMIT_BYTES as u64 + 1),
-        ))
-        .unwrap()
-        .status()
-        .as_u16();
+    let streamed = status(
+        agent
+            .post(&format!("{}/fed/push", hub.url))
+            .header("content-type", "application/json")
+            .send(ureq::SendBody::from_reader(
+                &mut std::io::repeat(b' ').take(PUSH_BODY_LIMIT_BYTES as u64 + 1),
+            )),
+    );
     // Signed by a paired spoke: the same limit.
     let body = vec![b' '; PUSH_BODY_LIMIT_BYTES + 1];
     let time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
-    let signed = agent
-        .post(&format!("{}/fed/push", hub.url))
-        .header("x-another-node", a.store.node_id())
-        .header("x-another-time", time.to_string())
-        .header(
-            "x-another-signature",
-            a.store.sign_request("POST", "/fed/push", time, &body),
-        )
-        .send(&body[..])
-        .unwrap()
-        .status()
-        .as_u16();
+    let signed = status(
+        agent
+            .post(&format!("{}/fed/push", hub.url))
+            .header("x-another-node", a.store.node_id())
+            .header("x-another-time", time.to_string())
+            .header(
+                "x-another-signature",
+                a.store.sign_request("POST", "/fed/push", time, &body),
+            )
+            .send(&body[..]),
+    );
     let pair_over = post("/fed/pair", fed::PAIR_BODY_LIMIT_BYTES + 1);
     let pair_at = post("/fed/pair", fed::PAIR_BODY_LIMIT_BYTES);
     hub.ct.cancel();
-    assert_eq!(over, 413);
-    assert_eq!(at, 401, "a body at the limit reaches the signature check");
-    assert_eq!(streamed, 413);
-    assert_eq!(signed, 413);
-    assert_eq!(pair_over, 413);
+    for refused in [over, streamed, signed, pair_over] {
+        assert!(matches!(refused, None | Some(413)), "{refused:?}");
+    }
+    assert_eq!(
+        at,
+        Some(401),
+        "a body at the limit reaches the signature check"
+    );
+    let pair_at = pair_at.expect("a body at the limit is read");
     assert_ne!(pair_at, 413);
     assert!((400..500).contains(&pair_at), "{pair_at}");
 }
@@ -775,22 +791,38 @@ fn one_event_over_the_other_sides_limit_is_reported_not_retried_forever() {
     let pull = format!("{:#}", fed::sync_with(&c.store, &deaf).unwrap_err());
     hub.ct.cancel();
 
-    assert!(
-        push.starts_with(&format!(
-            "the hub at {} refused event {event_id} (message.sent) as too large: it alone \
-             makes a push of ",
-            hub.url
-        )),
-        "{push}"
+    // The hub answers 413 without reading the body and closes. The spoke sees the answer,
+    // or (on Linux, usually) the closed connection; each has its message.
+    let refused = format!(
+        "the hub at {} refused event {event_id} (message.sent) as too large: it alone makes \
+         a push of ",
+        hub.url
     );
-    assert!(
-        push.contains(
-            " bytes, over what the hub reads in one request; retrying will not help; the hub \
-             runs a build with a smaller limit than this node's, so update the hub (push \
-             failed (413 Payload Too Large): "
-        ),
-        "{push}"
+    let dropped = format!(
+        "the hub at {} closed the connection while event {event_id} (message.sent) was sent \
+         alone in a push of ",
+        hub.url
     );
+    if push.starts_with(&refused) {
+        assert!(
+            push.contains(
+                " bytes, over what the hub reads in one request; retrying will not help; the \
+                 hub runs a build with a smaller limit than this node's, so update the hub \
+                 (push failed (413 Payload Too Large): "
+            ),
+            "{push}"
+        );
+    } else {
+        assert!(push.starts_with(&dropped), "{push}");
+        assert!(
+            push.contains(
+                " bytes; if this happens every time, the hub is refusing it as too large and \
+                 retrying will not help: the hub runs a build with a smaller limit than this \
+                 node's, so update the hub (cannot reach the hub at "
+            ),
+            "{push}"
+        );
+    }
     assert_eq!(
         pull,
         format!(

@@ -304,13 +304,17 @@ fn now_ms() -> i64 {
 enum OverSize {
     /// The hub answered 413: the request body was over its limit.
     Request(String),
+    /// The hub closed the connection while the request body was being sent. A hub that
+    /// refuses a body by its declared length answers 413 without reading it and closes, and
+    /// from here that can show as a broken connection instead of the answer.
+    Dropped(String),
     /// The answer was over the limit this node reads.
     Response(String),
 }
 
 impl std::fmt::Display for OverSize {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (OverSize::Request(text) | OverSize::Response(text)) = self;
+        let (OverSize::Request(text) | OverSize::Dropped(text) | OverSize::Response(text)) = self;
         f.write_str(text)
     }
 }
@@ -360,6 +364,7 @@ fn signed(
     let sig = store.sign_request(method, path_and_query, time, &bytes);
     let url = format!("{}{path_and_query}", base.trim_end_matches('/'));
     let node = store.node_id().to_string();
+    let sent_body = body.is_some();
     let resp = match body {
         Some(b) => agent
             .post(&url)
@@ -375,7 +380,19 @@ fn signed(
             .header(H_SIG, &sig)
             .call(),
     };
-    resp.map_err(|e| anyhow!("cannot reach the hub at {base}: {e}"))
+    resp.map_err(|e| {
+        use std::io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset};
+        let text = format!("cannot reach the hub at {base}: {e}");
+        match &e {
+            ureq::Error::Io(io)
+                if sent_body
+                    && matches!(io.kind(), BrokenPipe | ConnectionAborted | ConnectionReset) =>
+            {
+                OverSize::Dropped(text).into()
+            }
+            _ => anyhow!(text),
+        }
+    })
 }
 
 /// Spoke: redeem an invite code with the hub and record it as this node's hub.
@@ -492,8 +509,9 @@ fn sync_pass(
     let mut anchors = Some(store.pull_anchors()?);
     let (push_start, _) = store.push_cursor(hub)?;
     // Push. A batch is bounded by bytes as well as by count. A hub on a build before D99
-    // reads a smaller body than this node's budget and answers 413: the batch is then cut
-    // to half its bytes, down to one event, for the rest of this pass.
+    // reads a smaller body than this node's budget and answers 413, or closes the
+    // connection on the unread body: the batch is then cut to half its bytes, down to one
+    // event, for the rest of this pass.
     let mut budget = limits.push_budget;
     loop {
         let (cursor, _) = store.push_cursor(hub)?;
@@ -507,21 +525,32 @@ fn sync_pass(
             let kind = events[0].kind.clone();
             let body = serde_json::to_vec(&PushRequest { events })?;
             let size = body.len();
-            let resp = signed(store, agent, url, "POST", "/fed/push", Some(body))?;
-            let r: IngestReport = match read(resp, "push", REPLY_LIMIT_BYTES) {
+            let answer = signed(store, agent, url, "POST", "/fed/push", Some(body))
+                .and_then(|resp| read::<IngestReport>(resp, "push", REPLY_LIMIT_BYTES));
+            let r = match answer {
                 Ok(r) => r,
-                Err(e) if !matches!(e.downcast_ref(), Some(OverSize::Request(_))) => return Err(e),
-                Err(_) if ids.len() > 1 => {
-                    budget = size / 2;
-                    continue;
-                }
-                Err(e) => bail!(
-                    "the hub at {url} refused event {} ({kind}) as too large: it alone makes \
-                     a push of {size} bytes, over what the hub reads in one request; retrying \
-                     will not help; the hub runs a build with a smaller limit than this \
-                     node's, so update the hub ({e})",
-                    ids[0]
-                ),
+                Err(e) => match e.downcast_ref() {
+                    Some(OverSize::Request(_) | OverSize::Dropped(_)) if ids.len() > 1 => {
+                        budget = size / 2;
+                        continue;
+                    }
+                    Some(OverSize::Request(_)) => bail!(
+                        "the hub at {url} refused event {} ({kind}) as too large: it alone \
+                         makes a push of {size} bytes, over what the hub reads in one request; \
+                         retrying will not help; the hub runs a build with a smaller limit \
+                         than this node's, so update the hub ({e})",
+                        ids[0]
+                    ),
+                    Some(OverSize::Dropped(_)) => bail!(
+                        "the hub at {url} closed the connection while event {} ({kind}) was \
+                         sent alone in a push of {size} bytes; if this happens every time, the \
+                         hub is refusing it as too large and retrying will not help: the hub \
+                         runs a build with a smaller limit than this node's, so update the \
+                         hub ({e})",
+                        ids[0]
+                    ),
+                    _ => return Err(e),
+                },
             };
             report.pushed += r.accepted;
             report.push_duplicates += r.duplicates;

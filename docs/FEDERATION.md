@@ -135,7 +135,7 @@ A spoke reads a pull answer of at most 32 MiB, and a pairing or push answer of a
 
 **With a node on an earlier build.**
 
-- *New spoke, older hub.* The older hub reads at most 2 MiB per push and answers `413` to more. The spoke then halves the batch, down to one event, for the rest of that sync. The older hub bounds a page by count only; if an answer is over what the spoke reads, the spoke asks again with half the `limit`, down to one event.
+- *New spoke, older hub.* The older hub reads at most 2 MiB per push and answers `413` to more, without reading the body; the spoke sees that answer or, often on Linux, only the closed connection. Either way it then halves the batch, down to one event, for the rest of that sync. The older hub bounds a page by count only; if an answer is over what the spoke reads, the spoke asks again with half the `limit`, down to one event.
 - *Older spoke, new hub.* Nothing changes on the spoke. It gains from the hub's 8 MiB push limit and from pages closed at 8 MiB, under the 10 MiB it reads.
 - When one event alone is over what the other side takes, halving ends and the sync fails with a message that names the cause and says that retrying will not help, for example `the hub at <url> refused event <id> (message.sent) as too large: ...`.
 
