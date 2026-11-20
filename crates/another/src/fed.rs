@@ -463,6 +463,12 @@ fn signed(
 
 /// Spoke: redeem an invite code with the hub and record it as this node's hub.
 pub fn join(store: &Store, code: &str) -> Result<Peer> {
+    join_reporting(store, code).map(|(peer, _)| peer)
+}
+
+/// [`join`], and beside the peer the name this node had stored for the hub when the join
+/// lifted this node's own revoke of it.
+pub fn join_reporting(store: &Store, code: &str) -> Result<(Peer, Option<String>)> {
     let (invite, req) = store.prepare_join(code)?;
     let agent = agent_for(&invite.hub_url);
     let resp = agent
@@ -471,7 +477,7 @@ pub fn join(store: &Store, code: &str) -> Result<Peer> {
         .send(serde_json::to_vec(&req)?.as_slice())
         .map_err(|e| anyhow!("cannot reach the hub at {}: {e}", invite.hub_url))?;
     let paired: PairResponse = read(resp, "pairing", REPLY_LIMIT_BYTES)?;
-    Ok(store.complete_join(&invite, &paired)?)
+    Ok(store.complete_join_reporting(&invite, &paired)?)
 }
 
 #[derive(Debug, Default, Serialize)]

@@ -958,3 +958,99 @@ fn a17_joining_never_rewrites_a_spoke_row() {
     }
     assert!(hub.store.hub().unwrap().is_none());
 }
+
+/// The answer a hostile inviter gives: the invite's hub entry, signed with the key the
+/// invite carries, which the inviter holds.
+fn answer_signed_by(invite: &Value, joiner: &Node, secret_key: &str) -> PairResponse {
+    let name = text(&invite["hub"], "display_name");
+    let sig = crypto::sign(
+        &crypto::decode_secret(secret_key).unwrap(),
+        &accept_bytes(invite, &joiner.entry(), name, &Perm::ALL),
+    );
+    serde_json::from_value(json!({
+        "hub": invite["hub"],
+        "perms": ["read_feed", "send_mail", "borrow_resource"],
+        "sig": sig,
+    }))
+    .unwrap()
+}
+
+/// A18 (review R2, P2-A): an invite whose hub id is the joining node's own id, with a key
+/// the inviter holds. Before the fix the join recorded the node as its own hub at the
+/// inviter's URL: the one id whose key the node knows for certain was the one id never
+/// compared. And the rule for the whole class: for an id this node already knows, the key
+/// in the invite must be the key it has stored, or nothing is sent.
+#[test]
+fn a18_an_invite_cannot_name_this_node_or_swap_a_known_nodes_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let solo = Node::new(dir.path(), "solo");
+    let mallory = Node::new(dir.path(), "mallory");
+    let (_, made) = invite(&mallory, &Perm::ALL);
+
+    // This node's own id.
+    let mut own = made.clone();
+    own["hub"]["node_id"] = json!(solo.id());
+    own["hub"]["display_name"] = json!("evil");
+    let before = solo.rows();
+    let expected = "this invite names this node itself as its hub; a node cannot join itself";
+    let err = match solo.store.prepare_join(&encode(&own)) {
+        Ok(_) => panic!("built a request to join this node itself"),
+        Err(e) => e,
+    };
+    assert_eq!(
+        (err.code(), err.to_string().as_str()),
+        ("conflict", expected)
+    );
+    let as_invite: Invite = serde_json::from_value(own.clone()).unwrap();
+    let answer = answer_signed_by(&own, &solo, &mallory.secret());
+    let err = match solo.store.complete_join(&as_invite, &answer) {
+        Ok(peer) => panic!("a node became its own hub: {peer:?}"),
+        Err(e) => e,
+    };
+    assert_eq!(
+        (err.code(), err.to_string().as_str()),
+        ("conflict", expected)
+    );
+    assert_eq!(solo.rows(), before);
+    assert!(solo.store.peers().unwrap().is_empty());
+
+    // A node this one knows, as its hub or only from a list, under another key.
+    let hub = Node::new(dir.path(), "hub");
+    let spoke = Node::new(dir.path(), "spoke");
+    let listed = Node::new(dir.path(), "listed");
+    pair(&hub, &spoke);
+    pair(&hub, &listed);
+    pull(&hub, &spoke);
+    assert_eq!(spoke.name_of(&listed.id()).as_deref(), Some("listed"));
+    solo.sql()
+        .execute(
+            "INSERT INTO nodes (node_id, display_name, role, is_local, created_at, public_key)
+             VALUES (?1, 'listed', 'peer', 0, ?2, ?3)",
+            rusqlite::params![listed.id(), T0, listed.entry().public_key],
+        )
+        .unwrap();
+    for (joiner, known, name) in [(&spoke, hub.id(), "hub"), (&solo, listed.id(), "listed")] {
+        let mut swapped = made.clone();
+        swapped["hub"]["node_id"] = json!(known);
+        swapped["hub"]["display_name"] = json!(name);
+        let before = joiner.rows();
+        let expected = format!("node {known} presented a different key than before; refusing");
+        let err = match joiner.store.prepare_join(&encode(&swapped)) {
+            Ok(_) => panic!("built a request to join {name} under a key it does not have"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            (err.code(), err.to_string()),
+            ("conflict", expected.clone())
+        );
+        let as_invite: Invite = serde_json::from_value(swapped.clone()).unwrap();
+        let answer = answer_signed_by(&swapped, joiner, &mallory.secret());
+        let err = match joiner.store.complete_join(&as_invite, &answer) {
+            Ok(peer) => panic!("{name} was joined under another key: {peer:?}"),
+            Err(e) => e,
+        };
+        assert_eq!((err.code(), err.to_string()), ("conflict", expected));
+        assert_eq!(joiner.rows(), before);
+    }
+    assert!(!mallory.invite_used(&made));
+}

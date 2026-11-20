@@ -773,6 +773,156 @@ fn a_join_on_an_invite_from_this_nodes_own_spoke_is_refused_over_http() {
     plain.ct.cancel();
 }
 
+/// Review R2, P2-A, over HTTP: an invite whose hub id is the joining node's own id, made by
+/// a node that serves `/fed/pair` and holds the invite's key. The join is refused from the
+/// invite alone: nothing is sent and no pairing row is written, so the node does not become
+/// its own hub at the inviter's URL.
+#[test]
+fn a_join_on_an_invite_naming_this_node_itself_is_refused_over_http() {
+    let mallory = start_served("mallory");
+    let solo = node("solo");
+    let code = mallory
+        .node
+        .store
+        .create_invite(&mallory.url, &Perm::ALL, 3600)
+        .unwrap();
+    let mut forged = decode_invite(&code);
+    forged["hub"]["node_id"] = serde_json::json!(solo.store.node_id());
+    forged["hub"]["display_name"] = serde_json::json!("evil");
+    let forged = format!(
+        "another-invite:{}",
+        crypto::b64(forged.to_string().as_bytes())
+    );
+
+    let err = fed::join(&solo.store, &forged).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "this invite names this node itself as its hub; a node cannot join itself"
+    );
+    assert!(solo.store.peers().unwrap().is_empty());
+    assert!(solo.store.hub().unwrap().is_none());
+    assert!(audit_rows(&mallory, "POST /fed/pair").is_empty());
+    let err = fed::sync(&solo.store).unwrap_err();
+    assert!(err.to_string().contains("no hub"), "{err}");
+    // The node can still join an honest hub.
+    fed::join(&solo.store, &code).unwrap();
+    mallory.ct.cancel();
+}
+
+/// Review R2, P3-B, over HTTP: a node that already syncs with a hub is refused a second one
+/// before anything is sent, so the second hub's invite is not used up.
+#[test]
+fn a_second_hub_join_sends_nothing_over_http() {
+    let first = start_hub();
+    let second = start_served("second");
+    let laptop = node("laptop");
+    join(&first, &laptop, &Perm::ALL);
+    let code = second
+        .node
+        .store
+        .create_invite(&second.url, &Perm::ALL, 3600)
+        .unwrap();
+    let err = fed::join(&laptop.store, &code).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "this node already syncs with another hub; revoke it first: `another pair revoke <hub>`"
+    );
+    assert!(audit_rows(&second, "POST /fed/pair").is_empty());
+    assert!(second.node.store.peers().unwrap().is_empty());
+    // After the revoke the refusal names, the same invite still works.
+    laptop.store.revoke_peer("hub").unwrap();
+    let peer = fed::join(&laptop.store, &code).unwrap();
+    assert_eq!(peer.display_name, "second");
+    first.ct.cancel();
+    second.ct.cancel();
+}
+
+/// Review R2, P3-A and ruling 3, through the command line: a join that lifts this node's
+/// own revoke of its hub says so in a line of its own, naming the hub by its key and by the
+/// name it was stored under; and the pair commands refuse this node's own id.
+#[test]
+fn a_join_that_lifts_a_revoke_says_so_and_pair_commands_refuse_this_node_cli() {
+    let hub = start_hub();
+    let dir = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_another"))
+            .args(args)
+            .env("ANOTHER_HOME", dir.path())
+            .env_remove("ANOTHER_NODE_NAME")
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+    let invite = |hub: &Hub| {
+        hub.node
+            .store
+            .create_invite(&hub.url, &Perm::ALL, 3600)
+            .unwrap()
+    };
+    let fp = hub.node.store.node().unwrap().fingerprint;
+    assert!(run(&["node", "name", "laptop"]).0);
+
+    let (ok, out, err) = run(&["pair", "join", &invite(&hub)]);
+    assert!(ok, "{err}");
+    let first = format!(
+        "paired with hub hub at {} (key {fp}); run `another sync`",
+        hub.url
+    );
+    assert_eq!(out.trim_end(), first);
+    // A second join to a hub that is not revoked: still one line.
+    let (ok, out, err) = run(&["pair", "join", &invite(&hub)]);
+    assert!(ok, "{err}");
+    assert_eq!(out.trim_end(), first);
+
+    // The hub is revoked here, renames itself, and hands over a new code.
+    assert!(run(&["pair", "revoke", "hub"]).0);
+    hub.node.store.set_node_name("studio").unwrap();
+    let (ok, out, err) = run(&["pair", "join", &invite(&hub)]);
+    assert!(ok, "{err}");
+    assert_eq!(
+        out.trim_end(),
+        format!(
+            "paired with hub studio at {} (key {fp}); run `another sync`\n\
+             this join lifted this node's own revoke of hub hub (key {fp}); it syncs with that hub again",
+            hub.url
+        )
+    );
+
+    // A pairing row for this node itself, as an older build could leave one.
+    let (_, shown, _) = run(&["--json", "node", "show"]);
+    let own: serde_json::Value = serde_json::from_str(&shown).unwrap();
+    let own_id = own["node_id"].as_str().unwrap();
+    rusqlite::Connection::open(dir.path().join(DB_FILE))
+        .unwrap()
+        .execute(
+            "INSERT INTO peers (node_id, role, url, perms, paired_at)
+             VALUES (?1, 'hub', 'http://127.0.0.1:1', '[]', 0)",
+            [own_id],
+        )
+        .unwrap();
+    for command in ["revoke", "readmit", "release-name"] {
+        for name in [own_id, "laptop"] {
+            let (ok, _, err) = run(&["pair", command, name]);
+            assert!(!ok, "pair {command} {name} acted on this node itself");
+            assert!(
+                err.contains(&format!(
+                    "node {own_id} is this node itself; `another pair revoke`, `readmit` and \
+                     `release-name` act on other nodes only"
+                )),
+                "{err}"
+            );
+        }
+    }
+    let (_, shown, _) = run(&["--json", "node", "show"]);
+    let after: serde_json::Value = serde_json::from_str(&shown).unwrap();
+    assert_eq!(after["display_name"], "laptop");
+    hub.ct.cancel();
+}
+
 /// `another pair readmit` and `another pair release-name`: the text and JSON of both, and
 /// their refusals.
 #[test]

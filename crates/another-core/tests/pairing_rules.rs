@@ -1019,18 +1019,41 @@ fn a_second_hub_is_refused_with_the_revoke_command() {
     let first = Node::new(dir.path(), "first");
     let second = Node::new(dir.path(), "second");
     let spoke = Node::new(dir.path(), "spoke");
-    pair(&first, &spoke);
+    let expected =
+        "this node already syncs with another hub; revoke it first: `another pair revoke <hub>`";
+    // A request made while this node had no hub, answered after it got one: refused
+    // before any write.
     let (code, _) = invite(&second, &Perm::ALL);
-    let (invite, req) = spoke.store.prepare_join(&code).unwrap();
+    let (made, req) = spoke.store.prepare_join(&code).unwrap();
+    pair(&first, &spoke);
     let resp = second.store.accept_pairing(&req).unwrap();
     let before = spoke.rows();
-    let err = spoke.store.complete_join(&invite, &resp).unwrap_err();
-    assert_eq!(err.code(), "conflict");
+    let err = spoke.store.complete_join(&made, &resp).unwrap_err();
     assert_eq!(
-        err.to_string(),
-        "this node already syncs with another hub; revoke it first: `another pair revoke <hub>`"
+        (err.code(), err.to_string().as_str()),
+        ("conflict", expected)
     );
     assert_eq!(spoke.rows(), before);
+
+    // With a hub already recorded, the request is not built, so nothing is sent and the
+    // second hub's invite is not used up.
+    let (code, fresh) = invite(&second, &Perm::ALL);
+    let err = spoke.store.prepare_join(&code).unwrap_err();
+    assert_eq!(
+        (err.code(), err.to_string().as_str()),
+        ("conflict", expected)
+    );
+    assert_eq!(spoke.rows(), before);
+    assert!(!second.invite_used(&fresh));
+    // After the revoke the refusal names, the same invite works.
+    spoke.store.revoke_peer("first").unwrap();
+    let (made, req) = spoke.store.prepare_join(&code).unwrap();
+    let resp = second.store.accept_pairing(&req).unwrap();
+    spoke.store.complete_join(&made, &resp).unwrap();
+    assert_eq!(
+        spoke.store.hub().unwrap().map(|(id, _)| id),
+        Some(second.id())
+    );
 }
 
 /// Each failure of the invite check answers the one text and hands the hub its own cause.
@@ -1550,4 +1573,180 @@ fn a_second_join_to_a_revoked_hub_changes_only_that_hub_row() {
     assert!(changed[0].starts_with(&format!("peers node_id={} role=hub", hub.id())));
     // The spoke's own revoked spoke stays revoked.
     assert!(spoke.peer(&below.id()).revoked_at.is_some());
+}
+
+/// A join that lifts this node's own revoke of a hub reports the name the hub was stored
+/// under, whatever name the invite gives it, and records it. Any other join reports nothing.
+#[test]
+fn a_join_that_lifts_this_nodes_revoke_of_its_hub_reports_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = Node::new(dir.path(), "hub");
+    let spoke = Node::new(dir.path(), "spoke");
+    let join = |hub: &Node| -> (Peer, Option<String>) {
+        let (code, _) = invite(hub, &Perm::ALL);
+        let (made, req) = spoke.store.prepare_join(&code).unwrap();
+        let resp = hub.store.accept_pairing(&req).unwrap();
+        spoke.store.complete_join_reporting(&made, &resp).unwrap()
+    };
+
+    // A first join, and a second one to a hub that is not revoked.
+    assert_eq!(join(&hub).1, None);
+    assert_eq!(join(&hub).1, None);
+    assert!(spoke
+        .last_event("peer.paired")
+        .get("revoke_lifted")
+        .is_none());
+
+    // The hub renames itself, the spoke does not sync, and revokes it under the old name.
+    spoke.store.revoke_peer("hub").unwrap();
+    hub.store.set_node_name("studio").unwrap();
+    let (peer, lifted) = join(&hub);
+    assert_eq!(lifted.as_deref(), Some("hub"));
+    assert_eq!(peer.display_name, "studio");
+    assert_eq!(peer.revoked_at, None);
+    let paired = spoke.last_event("peer.paired");
+    assert_eq!(paired["revoke_lifted"], json!(true));
+    assert_eq!(paired["previous_name"], json!("hub"));
+    assert_eq!(paired["display_name"], json!("studio"));
+    assert_eq!(join(&hub).1, None);
+}
+
+/// 4.2: the invite id goes into both signed messages, so the joiner accepts only the form
+/// the hub makes, a ULID, before it signs and before it checks the answer.
+#[test]
+fn an_invite_id_must_be_a_ulid() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = Node::new(dir.path(), "hub");
+    let spoke = Node::new(dir.path(), "spoke");
+    let (code, fresh) = invite(&hub, &[Perm::ReadFeed]);
+    let real_id = text(&fresh, "invite_id").to_string();
+    let hub_key = crypto::decode_secret(&hub.secret()).unwrap();
+    let before = spoke.rows();
+    for id in [
+        format!("{real_id}\nhub\nread_feed"),
+        format!("{real_id}\n"),
+        format!("{real_id} "),
+        real_id.to_lowercase(),
+        "x".to_string(),
+        String::new(),
+    ] {
+        let mut forged = fresh.clone();
+        forged["invite_id"] = json!(id);
+        let err = match spoke.store.prepare_join(&encode(&forged)) {
+            Ok(_) => panic!("signed a request for the invite id {id:?}"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            (err.code(), err.to_string().as_str()),
+            ("invalid", "invalid invite code"),
+            "{id:?}"
+        );
+
+        // With an answer the invite's own key signed over exactly those bytes.
+        let made: Invite = serde_json::from_value(forged).unwrap();
+        let sig = crypto::sign(
+            &hub_key,
+            &crypto::pair_accept_message(
+                &id,
+                &crypto::sha256_hex(text(&fresh, "secret").as_bytes()),
+                &spoke.id(),
+                &spoke.entry().public_key,
+                "hub",
+                "read_feed",
+            ),
+        );
+        let answer = PairResponse {
+            hub: hub.entry(),
+            perms: vec![Perm::ReadFeed],
+            sig,
+        };
+        let err = match spoke.store.complete_join(&made, &answer) {
+            Ok(_) => panic!("recorded a hub for the invite id {id:?}"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            (err.code(), err.to_string().as_str()),
+            ("invalid", "invalid invite code"),
+            "{id:?}"
+        );
+        assert_eq!(spoke.rows(), before, "{id:?}");
+    }
+    assert!(spoke.store.prepare_join(&code).is_ok());
+}
+
+/// A home that an older build left with a pairing row for the node itself (a join on an
+/// invite naming its own id). `pair revoke`, `pair readmit` and `pair release-name` refuse
+/// it: none of them ends the node's own leases, renames it or changes the row.
+#[test]
+fn revoke_readmit_and_release_name_refuse_this_nodes_own_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let solo = Node::new(dir.path(), "solo");
+    let perms = r#"["read_feed"]"#;
+    solo.agent("alice");
+    let owned = solo
+        .store
+        .register_resource(RegisterResource {
+            agent: "alice".into(),
+            kind: ResourceKind::ModelServer,
+            name: "ollama@11434".into(),
+            endpoint: Some("http://127.0.0.1:11434".into()),
+            port: None,
+            pid: None,
+            project: None,
+            purpose: None,
+            mode: LeaseMode::Shared,
+            ttl_seconds: None,
+            metadata: None,
+        })
+        .unwrap();
+    let lease = owned.lease.unwrap().lease_id;
+    let lease_open = |solo: &Node| -> bool {
+        solo.sql()
+            .query_row(
+                "SELECT released_at IS NULL FROM resource_leases WHERE lease_id = ?1",
+                [&lease],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let expected = format!(
+        "node {} is this node itself; `another pair revoke`, `readmit` and `release-name` act \
+         on other nodes only",
+        solo.id()
+    );
+    let refused = |result: Result<Peer>| {
+        let err = result.expect_err("a pair command acted on this node itself");
+        assert_eq!((err.code(), err.to_string()), ("invalid", expected.clone()));
+    };
+
+    for revoked_at in ["NULL", "1800000000000"] {
+        solo.sql().execute("DELETE FROM peers", []).unwrap();
+        solo.sql()
+            .execute(
+                &format!(
+                    "INSERT INTO peers (node_id, role, url, perms, paired_at, revoked_at)
+                     VALUES (?1, 'hub', 'http://127.0.0.1:1', ?2, ?3, {revoked_at})"
+                ),
+                rusqlite::params![solo.id(), perms, T0],
+            )
+            .unwrap();
+        let before = solo.rows();
+        let events: i64 = solo
+            .sql()
+            .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        for name in [solo.id(), "solo".to_string()] {
+            refused(solo.store.revoke_peer(&name));
+            refused(solo.store.readmit_peer(&name));
+            refused(solo.store.release_peer_name(&name).map(|(peer, _)| peer));
+        }
+        assert_eq!(solo.rows(), before);
+        assert_eq!(solo.entry().display_name, "solo");
+        assert!(lease_open(&solo), "the node ended its own lease");
+        let after: i64 = solo
+            .sql()
+            .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(after, events);
+    }
 }

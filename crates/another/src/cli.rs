@@ -2076,14 +2076,24 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             })
         }
         Command::Pair(PairCmd::Join { code }) => {
-            let peer = crate::fed::join(&store, &code)?;
+            let (peer, lifted) = crate::fed::join_reporting(&store, &code)?;
             emit(json, &peer, |p| {
-                format!(
+                let paired = format!(
                     "paired with hub {} at {} (key {}); run `another sync`",
                     p.display_name,
                     p.url.as_deref().unwrap_or("-"),
                     p.fingerprint
-                )
+                );
+                // The invite may give the hub another name, so the hub this node revoked
+                // is named by its key and by the name it was stored under.
+                match &lifted {
+                    Some(previous_name) => format!(
+                        "{paired}\nthis join lifted this node's own revoke of hub \
+                         {previous_name} (key {}); it syncs with that hub again",
+                        p.fingerprint
+                    ),
+                    None => paired,
+                }
             })
         }
         Command::Pair(PairCmd::Revoke { node }) => {
