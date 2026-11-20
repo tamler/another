@@ -100,10 +100,11 @@ pub struct RegisterAgentArgs {
     pub program: Program,
     /// Absolute project path; lets the same name exist per project as `name@project`.
     pub project: Option<String>,
-    /// Model identifier, if known. One line: no line breaks, tabs or control characters.
+    /// Model identifier, if known. One line of at most 200 bytes: no line breaks, tabs or
+    /// control characters.
     pub model: Option<String>,
-    /// Short description of what this agent is working on. One line: no line breaks, tabs
-    /// or control characters.
+    /// Short description of what this agent is working on. One line of at most 4096 bytes:
+    /// no line breaks, tabs or control characters.
     pub description: Option<String>,
 }
 
@@ -190,7 +191,8 @@ pub struct ClaimRequestArgs {
     pub request_id: String,
     /// claim (default) | release | complete | cancel.
     pub action: Option<RequestAction>,
-    /// Completion or cancellation note; on completion it is mailed to the requester.
+    /// Completion or cancellation note of at most 16384 bytes; on completion it is mailed
+    /// to the requester.
     pub note: Option<String>,
     /// On claim: new due time, in seconds from now.
     pub due_in_seconds: Option<i64>,
@@ -217,7 +219,8 @@ pub struct HoldPathsArgs {
     /// paths, where it is the directory relative paths start from; filters list).
     pub project: Option<String>,
     /// Paths or globs relative to the project root (acquire/check). With release: the files
-    /// or directories you are done with; your holds on them are released.
+    /// or directories you are done with; your holds on them are released. Each is at most
+    /// 4096 bytes on acquire.
     #[serde(default)]
     pub paths: Vec<String>,
     /// Renew/release only these holds (default: all of the agent's holds).
@@ -227,8 +230,8 @@ pub struct HoldPathsArgs {
     pub ttl_seconds: Option<i64>,
     /// Exclusive holds (default) conflict with any overlapping hold; shared ones only with exclusive.
     pub exclusive: Option<bool>,
-    /// Why you hold these paths (acquire), shown to other agents. One line: no line
-    /// breaks, tabs or control characters.
+    /// Why you hold these paths (acquire), shown to other agents. One line of at most 1024
+    /// bytes: no line breaks, tabs or control characters.
     pub reason: Option<String>,
     /// Allow a pattern covering the whole project (`**`, the project root, `**/*.rs`).
     /// Refused by default because it blocks every other agent in the checkout.

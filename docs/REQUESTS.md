@@ -88,7 +88,7 @@ $ another activity --since 1h --kinds request
 
 ## 5a. The worker comes back and completes it
 
-`complete` marks the request `done` and mails the requester a `Done:` message in the original thread. `--note` becomes the body; without one the body is `Request <id> is done.`
+`complete` marks the request `done` and mails the requester a `Done:` message in the original thread. `--note` becomes the body; without one the body is `Request <id> is done.` A note on `complete` or `cancel` is at most 16 KiB.
 
 ```text
 $ another request complete --agent worker 01M77HNNEDVZ92ZVSKQEYXYRB5 --note "Fixed in the retry branch"

@@ -84,7 +84,7 @@ another sync --watch --every 30
 ## Restarts, restores and offline spokes
 
 - **Hub restart.** Everything is in the hub's database, so a restarted hub carries on where it stopped. Spokes resume from their cursors.
-- **Spoke offline for days.** On its next `another sync`, the spoke pushes its backlog and pulls everyone else's in pages of 500 until caught up. Days-old holds arrive already expired, so other nodes see only the spoke's current holds as live.
+- **Spoke offline for days.** On its next `another sync`, the spoke pushes its backlog and pulls everyone else's until caught up, in batches and pages of at most 500 events and a few MiB each (see "Size limits" below). Days-old holds arrive already expired, so other nodes see only the spoke's current holds as live.
 - **Replays are harmless.** Every event has a unique id, and both sides skip events they already have. Resending from zero changes nothing.
 - **Hub restored from an older backup.** A spoke keeps two cursors: how far it has pushed its own events (its own sequence numbers), and how far it has pulled (the hub's sequence numbers). A restore takes the hub's sequence back. The pull cursor then points past the hub's log, so new hub events would be skipped. The push cursor says the spoke's events reached the hub, but the restore lost some of them, so they would never be sent again.
 
@@ -109,11 +109,49 @@ another sync --watch --every 30
 
   Then run `another sync`. A resend from zero is always safe.
 
+## Size limits
+
+A sync between honest nodes does not stop because of how much is waiting (D99). Three things bound it: the size of one event, the size of one request or answer, and the size of the batch or page that fills it.
+
+**One event** is at most 2 MiB (2,097,152 bytes) as it travels: its wire JSON, escaping included, with the sequence number counted as one digit so that every node measures the same. The largest mail an honest node writes to one recipient is 1,837,191 bytes: a 256 KiB body made only of control characters, which cost seven bytes each on the wire, a 300-character subject and the longest names.
+
+- A local command or tool that would write a larger event is refused as `invalid`, with the kind of event and both sizes, and nothing is written. Mail has no rule on how many agents one message names, so this is what stops a message to thousands of recipients: with the costliest body and the longest names it is refused at roughly 1,500 recipients, with a plain 256 KiB body at roughly 10,000.
+- The fields that had no size rule each have one, so the caller is told which field is too long: an agent's description 4 KiB and model 200 bytes, a hold's reason 1 KiB and each pattern 4,096 bytes, a request's completion or cancellation note 16 KiB. The CLI prints, for example, `another: agent description is 4097 bytes; the limit is 4096` and exits non-zero; the MCP tools answer `invalid` with the same text. These rules apply to what a local caller writes, including a remote caller of `another serve`. The edit hook's holds and a session start are not held to them and write nothing near them.
+- A peer's event over 2 MiB is refused like any other event that breaks a local rule: listed in the sync report's rejected events, not stored, not relayed, and not sent again.
+
+**One request or answer.** Every route that reads a body states its limit:
+
+| Route | Who can reach it | Largest body read |
+|---|---|---|
+| `POST /fed/push` | anyone who can reach the hub's address; the body is read before the signature is checked | 8 MiB |
+| `POST /fed/pair` | anyone who can reach the hub's address (an invite is checked after the body is read) | 2 MiB, as before |
+| `GET /fed/pull` | paired nodes | no body |
+| OAuth and dashboard `POST` routes | as before | 2 MiB, as before |
+| `/mcp` | as before | read by the MCP library, unchanged |
+
+A spoke reads a pull answer of at most 32 MiB, and a pairing or push answer of at most 10 MiB, as before. A body over a limit is answered `413` and is not read further. So a caller with no pairing can make a hub buffer at most 8 MiB per request on `/fed/push`, where it was 2 MiB; refusing an unknown sender before reading the body is not built.
+
+**One batch or page.** A push batch is closed before its request body would pass 4 MiB, and a pull page before its answer, the node directory included, would pass 8 MiB. Both also stop at 500 events, and both always hold at least one event. One event at the 2 MiB limit fits either, each budget is under the limit of the side that reads it, and the build fails if a change breaks that. Cursors, anchors and ordering are unchanged: the same events arrive in the same order however they are cut. Ordinary traffic costs the same number of requests as before (2,000 small messages: 5 pushes, 5 pulls).
+
+**With a node on an earlier build.**
+
+- *New spoke, older hub.* The older hub reads at most 2 MiB per push and answers `413` to more. The spoke then halves the batch, down to one event, for the rest of that sync. The older hub bounds a page by count only; if an answer is over what the spoke reads, the spoke asks again with half the `limit`, down to one event.
+- *Older spoke, new hub.* Nothing changes on the spoke. It gains from the hub's 8 MiB push limit and from pages closed at 8 MiB, under the 10 MiB it reads.
+- When one event alone is over what the other side takes, halving ends and the sync fails with a message that names the cause and says that retrying will not help, for example `the hub at <url> refused event <id> (message.sent) as too large: ...`.
+
+**An event over 2 MiB that is already in a log.** An earlier build could write one, for example an agent registered with a multi-megabyte description. What happens to it is not decided yet; it is the owner's decision. Until then it does what it did before, and says so: the node sends everything before it, then `another sync` fails every time, exits non-zero, and prints
+
+```text
+another: event <id> (<kind>, <size> bytes on the wire) in this node's log is over the limit for one event (2097152 bytes), so it cannot be synced and the events after it wait behind it; retrying will not help; the owner must decide whether it is skipped or keeps blocking (docs/FEDERATION.md, "Size limits")
+```
+
+A hub that holds such an event answers a spoke's pull with the same message about `the hub's log`, after the page before it. The event is neither skipped nor deleted. The two choices: skip it, and peers never see that event while everything after it flows; or keep blocking, and nothing after it leaves that node until the owner removes or replaces the event. One difference from before: a hub's own event between 2 MiB and 10 MiB used to reach spokes on a pull and now blocks, because a node on this build would refuse it on arrival.
+
 ## Wire protocol (for implementers)
 
 - `POST /fed/pair`: `{invite_id, secret, node: {node_id, display_name, public_key}}` returns `{hub, perms}`.
-- `POST /fed/push`: `{events: [WireEvent]}` returns `{accepted, duplicates, rejected}`.
-- `GET /fed/pull?after=<hub seq>&limit=N[&after_id=<event id>[&after_id_seq=<hub seq>]][&pushed_id=<event id>]` returns `{events, cursor, more, nodes, reset}`. `after_id` is the last event the spoke received from this hub and `after_id_seq` the hub sequence number it came at; `pushed_id` is the last of the spoke's own events this hub accepted. `reset: true`, with no events, means the hub's log no longer reaches `after`, no longer holds `after_id` (at `after_id_seq`, when given), or no longer holds `pushed_id`; see "Restarts, restores and offline spokes" above. Hubs without `reset` omit it and ignore these parameters, and spokes without it ignore it.
+- `POST /fed/push`: `{events: [WireEvent]}` returns `{accepted, duplicates, rejected}`. A body over the hub's limit is answered `413`; send fewer events.
+- `GET /fed/pull?after=<hub seq>&limit=N[&after_id=<event id>[&after_id_seq=<hub seq>]][&pushed_id=<event id>]` returns `{events, cursor, more, nodes, reset}`. A page holds at most `limit` events (1 to 2000, default 500) and may hold fewer, with `more: true`, when the hub closes it by size. `after_id` is the last event the spoke received from this hub and `after_id_seq` the hub sequence number it came at; `pushed_id` is the last of the spoke's own events this hub accepted. `reset: true`, with no events, means the hub's log no longer reaches `after`, no longer holds `after_id` (at `after_id_seq`, when given), or no longer holds `pushed_id`; see "Restarts, restores and offline spokes" above. Hubs without `reset` omit it and ignore these parameters, and spokes without it ignore it.
 - Push and pull requests carry these headers:
   - `x-another-node: <node id>`
   - `x-another-time: <ms>`

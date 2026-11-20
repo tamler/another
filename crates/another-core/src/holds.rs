@@ -31,6 +31,10 @@ use crate::tokens::TokenScope;
 pub const DEFAULT_HOLD_TTL_SECONDS: i64 = 30 * 60;
 pub const MIN_HOLD_TTL_SECONDS: i64 = 60;
 pub const MAX_HOLD_TTL_SECONDS: i64 = 4 * 60 * 60;
+/// Longest hold reason a local caller may give, in bytes (D99).
+pub const MAX_HOLD_REASON_BYTES: usize = 1024;
+/// Longest hold pattern a local caller may give, in bytes: as long as any real path (D99).
+pub const MAX_HOLD_PATTERN_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Hold {
@@ -1350,7 +1354,11 @@ impl Store {
         }
         // A reason is printed by `another holds`, the board and the edit guard's denial.
         if let Some(reason) = &input.reason {
+            crate::queue::within_bytes("hold reason", reason, MAX_HOLD_REASON_BYTES)?;
             crate::queue::no_unsafe("a hold reason", reason, false)?;
+        }
+        for raw in &input.paths {
+            crate::queue::within_bytes("hold pattern", raw, MAX_HOLD_PATTERN_BYTES)?;
         }
         let ttl = clamp_ttl(input.ttl_seconds)?;
         self.write(|tx| {

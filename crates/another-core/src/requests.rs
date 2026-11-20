@@ -93,6 +93,9 @@ pub struct Request {
     pub closed_at: Option<String>,
 }
 
+/// Longest completion or cancellation note a local caller may give, in bytes (D99).
+pub const MAX_REQUEST_NOTE_BYTES: usize = 16 * 1024;
+
 /// Input for [`Store::update_request`].
 #[derive(Debug, Clone)]
 pub struct RequestUpdate {
@@ -507,6 +510,9 @@ impl Store {
         input: RequestUpdate,
         scope: Option<&crate::tokens::TokenScope>,
     ) -> Result<Request> {
+        if let Some(note) = &input.note {
+            crate::queue::within_bytes("request note", note, MAX_REQUEST_NOTE_BYTES)?;
+        }
         self.write(|tx| {
             stale_overdue_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, &input.agent)?;

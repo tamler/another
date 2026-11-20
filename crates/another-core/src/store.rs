@@ -664,6 +664,17 @@ impl Tx<'_> {
             self.key,
             &crate::crypto::event_message(&event_id, self.node_id, self.now, actor, kind, &payload),
         );
+        crate::federation::check_new_event(&crate::federation::NewEvent {
+            seq: 0,
+            event_id: &event_id,
+            node_id: self.node_id,
+            ts: self.now,
+            actor,
+            kind,
+            payload: &payload,
+            prev_id: prev_id.as_deref(),
+            sig: &sig,
+        })?;
         self.execute(
             "INSERT INTO events (event_id, node_id, ts, actor, kind, payload, prev_id, sig)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
