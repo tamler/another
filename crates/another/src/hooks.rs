@@ -908,12 +908,22 @@ fn own_address(address: &str) -> Result<&str> {
 /// invisible or text-direction character, cut at `max` characters, every kind of double
 /// quote turned into `'`, `<` and `>` turned into `[` and `]`, inside `"`. So it cannot
 /// end its own quotes, and nothing in it has the shape of a tag.
-fn quoted_to(text: &str, max: usize) -> String {
+pub(crate) fn quoted_to(text: &str, max: usize) -> String {
     let harmless: String = text
         .chars()
         .map(|c| match c {
-            '"' | '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' | '\u{AB}' | '\u{BB}'
-            | '\u{FF02}' => '\'',
+            '"'
+            | '\u{201C}'
+            | '\u{201D}'
+            | '\u{201E}'
+            | '\u{201F}'
+            | '\u{AB}'
+            | '\u{BB}'
+            | '\u{FF02}'
+            | '\u{2033}'
+            | '\u{2BA}'
+            | '\u{2DD}'
+            | '\u{301D}'..='\u{301F}' => '\'',
             '<' => '[',
             '>' => ']',
             c if is_never_shown(c) => ' ',
@@ -1903,6 +1913,24 @@ mod tests {
     fn quotes_for_sh() {
         assert_eq!(sh_quote("/a b/c"), "'/a b/c'");
         assert_eq!(sh_quote("it's"), r"'it'\''s'");
+    }
+
+    /// Review R4 of Q19b: quoted text cannot seem to end its quotes. Every character that
+    /// reads as a double quote becomes `'`: the ASCII one, the curly, low and angle ones,
+    /// the full-width one, and the look-alikes (double prime, the modifier letter, the
+    /// double acute accent and the three CJK ones).
+    #[test]
+    fn quoted_text_holds_nothing_that_reads_as_a_double_quote() {
+        let quotes = "\"\u{201C}\u{201D}\u{201E}\u{201F}\u{AB}\u{BB}\u{FF02}\u{2033}\u{2BA}\u{2DD}\u{301D}\u{301E}\u{301F}";
+        assert_eq!(quoted_to(quotes, 80), format!("\"{}\"", "'".repeat(14)));
+        // The reviewer's name: a look-alike quote, then the fields of an `oauth pending` row.
+        assert_eq!(
+            quoted_to(
+                "ChatGPT\u{2033}  redirect host chatgpt.com  \u{301D}\u{301E}\u{2BA}\u{2DD}",
+                120
+            ),
+            "\"ChatGPT'  redirect host chatgpt.com  ''''\""
+        );
     }
 
     #[test]

@@ -40,6 +40,12 @@ fn tool_error(e: &another_core::Error) -> String {
         another_core::Error::Invalid(m) if m.contains("since") => {
             Some("Pass since as a duration like 1h or 1d, an RFC 3339 time, or an event id from next_since.")
         }
+        // Before the agent hint: "an agent description must be one line" names no address.
+        another_core::Error::Invalid(m)
+            if m.contains("must be one line of text") || m.contains("text-direction") =>
+        {
+            Some("Send this field as one line: no line breaks, tabs, other control characters or text-direction characters.")
+        }
         another_core::Error::Invalid(m) if m.contains("agent") => {
             Some("Pass agent as name or name@project. On a hosted connection, omit agent.")
         }
@@ -94,9 +100,10 @@ pub struct RegisterAgentArgs {
     pub program: Program,
     /// Absolute project path; lets the same name exist per project as `name@project`.
     pub project: Option<String>,
-    /// Model identifier, if known.
+    /// Model identifier, if known. One line: no line breaks, tabs or control characters.
     pub model: Option<String>,
-    /// Short description of what this agent is working on.
+    /// Short description of what this agent is working on. One line: no line breaks, tabs
+    /// or control characters.
     pub description: Option<String>,
 }
 
@@ -220,6 +227,8 @@ pub struct HoldPathsArgs {
     pub ttl_seconds: Option<i64>,
     /// Exclusive holds (default) conflict with any overlapping hold; shared ones only with exclusive.
     pub exclusive: Option<bool>,
+    /// Why you hold these paths (acquire), shown to other agents. One line: no line
+    /// breaks, tabs or control characters.
     pub reason: Option<String>,
     /// Allow a pattern covering the whole project (`**`, the project root, `**/*.rs`).
     /// Refused by default because it blocks every other agent in the checkout.
@@ -289,9 +298,11 @@ pub struct WorkBoardArgs {
 pub struct ResourceRegisterArgs {
     pub agent: String,
     pub kind: ResourceKind,
-    /// Identity on this machine, e.g. `ollama@11434`, `vite@5173`, `tcp:127.0.0.1:5432`, `metal:0`.
+    /// Identity on this machine, e.g. `ollama@11434`, `vite@5173`, `tcp:127.0.0.1:5432`,
+    /// `metal:0`. One line: no line breaks, tabs or control characters.
     pub name: String,
-    /// How to reach it, e.g. `http://127.0.0.1:11434`.
+    /// How to reach it, e.g. `http://127.0.0.1:11434`. One line: no line breaks, tabs or
+    /// control characters.
     pub endpoint: Option<String>,
     /// Listening port (derived from name/endpoint when omitted).
     pub port: Option<u16>,
@@ -299,6 +310,8 @@ pub struct ResourceRegisterArgs {
     pub pid: Option<u32>,
     /// Project absolute path or slug.
     pub project: Option<String>,
+    /// What it is for, shown to other agents. One line: no line breaks, tabs or control
+    /// characters.
     pub purpose: Option<String>,
     /// Exclusive resources cannot be borrowed by others (default: shared).
     #[serde(default)]

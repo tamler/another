@@ -667,6 +667,9 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
         Some(node) => format!("[{node}] {summary}"),
         None => summary,
     };
+    // A summary quotes event payloads as recorded, a peer's included, and is printed by
+    // `another activity`, the dashboard and the MCP `whats_new` tool: keep it one line.
+    let summary = crate::mail::display_line(&summary, usize::MAX);
     Ok(ActivityItem {
         category: ActivityKind::of_event(&row.kind),
         event_id: row.event_id,

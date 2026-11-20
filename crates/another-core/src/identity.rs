@@ -460,6 +460,14 @@ impl Store {
     /// Register a new agent or update an existing one's details; touches `last_seen_at`.
     pub fn register_agent(&self, input: RegisterAgent) -> Result<Agent> {
         validate_name(&input.name)?;
+        for (what, text) in [
+            ("an agent model", &input.model),
+            ("an agent description", &input.description),
+        ] {
+            if let Some(text) = text {
+                crate::queue::no_unsafe(what, text, false)?;
+            }
+        }
         self.write(|tx| {
             let project = match &input.project {
                 Some(path) => Some(ensure_project_tx(tx, &input.name, path)?),

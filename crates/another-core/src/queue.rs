@@ -852,7 +852,7 @@ fn item_now(conn: &Connection, node_id: &str, item_id: &str) -> Result<QueueItem
     to_item(conn, find_item(conn, node_id, item_id)?, true)
 }
 
-fn no_unsafe(what: &str, text: &str, multi_line: bool) -> Result<()> {
+pub(crate) fn no_unsafe(what: &str, text: &str, multi_line: bool) -> Result<()> {
     // The Unicode line and paragraph separators end a line for some readers, so one-line
     // text refuses them as it refuses a line feed.
     let bad = |c: char| {
@@ -861,6 +861,15 @@ fn no_unsafe(what: &str, text: &str, multi_line: bool) -> Result<()> {
     };
     if !text.chars().any(bad) {
         return Ok(());
+    }
+    // The message names what was found: a text-direction character is not a control.
+    if !text
+        .chars()
+        .any(|c| bad(c) && (c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')))
+    {
+        return Err(Error::Invalid(format!(
+            "{what} holds a text-direction character (U+202A to U+202E or U+2066 to U+2069), which changes the order text is shown in: remove it"
+        )));
     }
     if multi_line && text.contains('\r') {
         return Err(Error::Invalid(format!(

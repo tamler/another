@@ -939,7 +939,7 @@ pub fn main() -> ExitCode {
                 }
                 println!("{out}");
             } else {
-                eprintln!("another: {}", body.message);
+                eprintln!("another: {}", terminal_safe(&body.message));
                 if let Some(hint) = hint {
                     eprintln!("hint: {hint}");
                 }
@@ -1304,10 +1304,37 @@ pub(crate) fn emit<T: Serialize>(
     } else {
         let text = human(value);
         if !text.is_empty() {
-            println!("{}", text.trim_end());
+            println!("{}", terminal_safe(text.trim_end()));
         }
     }
     ExitCode::SUCCESS
+}
+
+/// Text for a person's terminal. Names, paths, subjects and reasons in human output come
+/// from other agents and other machines, and a file name can hold ESC or BEL: an OSC or
+/// CSI sequence there would retitle, clear or rewrite the operator's terminal. Every
+/// control or bidi-override character except the line breaks and tabs the renderers use
+/// for layout becomes `?` (the D75 rule, applied where text reaches a terminal). `--json`
+/// output keeps the exact text: JSON escapes C0 controls, but DEL, C1 and bidi characters
+/// stay raw UTF-8, for the reading program to handle (D97).
+fn terminal_safe(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\n' | '\t' => c,
+            c if another_core::is_unsafe_text_char(c) => '?',
+            c => c,
+        })
+        .collect()
+}
+
+/// An OAuth client's name inside one row of the `another oauth` commands. The operator
+/// approves a client from these rows, and a name stored before registration refused
+/// control characters (D97) can hold a line break, which [`terminal_safe`] keeps. It is
+/// one shown line of at most 120 characters inside quotes it cannot close, as the hooks
+/// show a sender's text, so it cannot pass as the fields that follow it. A redirect host
+/// is shown by [`another_core::shown_redirect_host`].
+fn client_shown(text: &str) -> String {
+    hooks::quoted_to(text, 120)
 }
 
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
@@ -1727,7 +1754,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let (ids, notes) = release_holds(&store, &agent.agent, project, targets)?;
             // On stderr, so `--json` output stays the list of released ids.
             for note in &notes {
-                eprintln!("another: {note}");
+                eprintln!("another: {}", terminal_safe(note));
             }
             emit(json, &ids, |ids| format!("released {} hold(s)", ids.len()))
         }
@@ -1898,7 +1925,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                         .map(|r| {
                             format!(
                                 "{}  {}  redirect host {}  expires {}",
-                                r.user_code, r.client_name, r.redirect_host, r.expires_at
+                                r.user_code,
+                                client_shown(&r.client_name),
+                                another_core::shown_redirect_host(&r.redirect_host),
+                                r.expires_at
                             )
                         })
                         .collect::<Vec<_>>()
@@ -1921,7 +1951,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             emit(json, &grant, |g| {
                 format!(
                     "approved {} (redirect host from the request) as {}\nprojects: {}\ngrant {}",
-                    g.client_name,
+                    client_shown(&g.client_name),
                     g.agent,
                     if g.project_globs.is_empty() {
                         "none: mailbox, heartbeat and the activity feed only".into()
@@ -1935,7 +1965,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Oauth(OauthCmd::Deny { user_code }) => {
             let row = store.deny_oauth(&user_code)?;
             emit(json, &row, |r| {
-                format!("denied {} ({})", r.user_code, r.client_name)
+                format!("denied {} ({})", r.user_code, client_shown(&r.client_name))
             })
         }
         Command::Oauth(OauthCmd::List) => {
@@ -1956,7 +1986,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                                 "{}  {}  {}  {}  projects {}",
                                 g.grant_id,
                                 state,
-                                g.client_name,
+                                client_shown(&g.client_name),
                                 g.agent,
                                 if g.project_globs.is_empty() {
                                     "none".into()
@@ -1975,7 +2005,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             emit(json, &g, |g| {
                 format!(
                     "revoked grant {} ({}, {})",
-                    g.grant_id, g.client_name, g.agent
+                    g.grant_id,
+                    client_shown(&g.client_name),
+                    g.agent
                 )
             })
         }
@@ -2048,7 +2080,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                         break emitted;
                     }
                 }
-                Err(e) if watch => eprintln!("another: sync failed: {e:#}"),
+                // The message can quote the hub's error body (fed.rs).
+                Err(e) if watch => {
+                    eprintln!("another: sync failed: {}", terminal_safe(&format!("{e:#}")))
+                }
                 Err(e) => return Err(e),
             }
             std::thread::sleep(Duration::from_secs(every.max(5)));
