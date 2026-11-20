@@ -184,17 +184,27 @@ fn a_stored_client_name_cannot_add_a_row_to_the_oauth_commands() {
     let revoked = lines(&["oauth", "revoke", &grant]);
     assert_eq!(revoked.len(), 1, "{revoked:?}");
 
-    // Review R2: the audit rows of the approval and the revocation quote the stored name.
-    // Each entry is one line.
+    // Reviews R2 and R4: the audit rows of the approval and the revocation name the client
+    // from the stored name. Every row writes it the same way, quoted and escaped, so the
+    // stored detail holds no line break and each entry is one line.
     let entries: serde_json::Value =
         serde_json::from_str(&lines(&["--json", "audit"]).join("\n")).unwrap();
     let entries = entries.as_array().unwrap();
-    assert!(
+    let details = |operation: &str| -> Vec<&str> {
         entries
             .iter()
-            .any(|e| e["detail"].as_str().is_some_and(|d| d.contains('\n'))),
-        "an audit row holds the stored name: {entries:?}"
-    );
+            .filter(|e| e["operation"] == operation)
+            .filter_map(|e| e["detail"].as_str())
+            .collect()
+    };
+    for operation in ["oauth.approve", "oauth.revoke"] {
+        let found = details(operation);
+        assert_eq!(found.len(), 1, "{operation}: {entries:?}");
+        assert!(
+            found[0].starts_with("client \"Helper\\n0000-0000  ChatGPT  redirect host"),
+            "{operation}: {found:?}"
+        );
+    }
     let audit = lines(&["audit"]);
     assert_eq!(audit.len(), entries.len(), "{audit:?}");
 }
@@ -251,7 +261,17 @@ fn oauth_pending_shows_a_redirect_host_exactly_or_escaped_behind_a_warning() {
         // Plain: exactly, no warning. The port is not part of the host Another keeps.
         ("chatgpt.com".into(), "chatgpt.com".into()),
         ("chatgpt.com:8443".into(), "chatgpt.com".into()),
-        ("[2001:DB8::1]:8443".into(), "2001:db8::1".into()),
+        ("[2001:DB8::1]:8443".into(), "[2001:db8::1]".into()),
+        ("127.0.0.1:1234".into(), "127.0.0.1".into()),
+        // Review R4: a browser goes to 87.0.0.1 for the first and 127.0.0.1 for the second.
+        ("0127.0.0.1".into(), warned("0127.0.0.1")),
+        ("2130706433".into(), warned("2130706433")),
+        ("example.com.".into(), warned("example.com.")),
+        // Brackets around a name: no browser loads it, and the brackets are not dropped.
+        (
+            "[attacker.test]".into(),
+            warned("\\u{005B}attacker.test\\u{005D}"),
+        ),
         ("xn--bcher-kva.example".into(), "xn--bcher-kva.example".into()),
         (dns_limit.clone(), dns_limit.clone()),
         // Not plain: whole, escaped, warned.

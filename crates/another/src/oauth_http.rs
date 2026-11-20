@@ -1493,11 +1493,45 @@ mod tests {
         let huge = format!("good.example.com.{}.attacker.test", "h".repeat(5000 - 31));
         for plain in [
             "chatgpt.com",
-            "2001:db8::1",
+            "claude.ai",
+            "localhost",
+            "127.0.0.1",
+            "1.2.3.4",
+            "[::1]",
+            "[2001:db8::1]",
+            "example.com1",
             "xn--bcher-kva.example",
             &dns_limit,
         ] {
             assert_eq!(host_of(&first_line("ChatGPT", plain)), plain);
+        }
+        // Review R4: a browser reads a host that ends in a number as an IPv4 number, so
+        // `0127.0.0.1` goes to 87.0.0.1 and `2130706433` to 127.0.0.1. Brackets are plain
+        // only around an IPv6 address. A trailing dot is shown with the warning.
+        for (host, escaped) in [
+            ("0127.0.0.1", "0127.0.0.1"),
+            ("010.010.010.010", "010.010.010.010"),
+            ("2130706433", "2130706433"),
+            ("0x7f.1", "0x7f.1"),
+            ("1.2.3", "1.2.3"),
+            ("127.0.0.1.", "127.0.0.1."),
+            ("example.123", "example.123"),
+            ("example.com.", "example.com."),
+            ("a..b", "a..b"),
+            ("-a.b", "-a.b"),
+            ("[attacker.test]", "\\u{005B}attacker.test\\u{005D}"),
+            ("[a:b:c]", "\\u{005B}a\\u{003A}b\\u{003A}c\\u{005D}"),
+            (
+                "[fe80::1%eth0]",
+                "\\u{005B}fe80\\u{003A}\\u{003A}1\\u{0025}eth0\\u{005D}",
+            ),
+            ("2001:db8::1", "2001\\u{003A}db8\\u{003A}\\u{003A}1"),
+        ] {
+            assert_eq!(
+                host_of(&first_line("ChatGPT", host)),
+                format!("{warning}{escaped}"),
+                "{host:?}"
+            );
         }
         assert_eq!(
             host_of(&first_line("ChatGPT", &huge)),

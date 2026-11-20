@@ -406,6 +406,8 @@ fn parse_port(raw: &str) -> std::result::Result<u16, String> {
 struct ParsedRedirect {
     scheme: String,
     host: String,
+    /// The host was written in brackets, which `host` does not keep.
+    bracketed: bool,
     path: String,
     query: Option<String>,
 }
@@ -442,6 +444,7 @@ fn parse_redirect(raw: &str) -> Option<ParsedRedirect> {
     Some(ParsedRedirect {
         scheme,
         host,
+        bracketed: authority.starts_with('['),
         path,
         query,
     })
@@ -493,8 +496,20 @@ pub fn redirect_matches(registered: &[String], requested: &str) -> bool {
     })
 }
 
+/// The host of a redirect URI, without its port. A host written in brackets keeps them:
+/// what is shown is then judged as the URI has it ([`shown_redirect_host`]), so a name is
+/// never taken for an IPv6 address and brackets around a name are never dropped.
 pub fn redirect_host(uri: &str) -> String {
-    parse_redirect(uri).map_or_else(|| "unknown".into(), |p| p.host)
+    parse_redirect(uri).map_or_else(
+        || "unknown".into(),
+        |p| {
+            if p.bracketed {
+                format!("[{}]", p.host)
+            } else {
+                p.host
+            }
+        },
+    )
 }
 
 /// What Another puts in front of a redirect host that is not plain.
@@ -505,33 +520,66 @@ fn is_host_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '.' || c == '-'
 }
 
-/// Whether `host` reads the same to a person and to a browser: 1 to 253 ASCII letters,
-/// digits, `.` and `-`, or an IPv6 literal of hex digits, `:` and `.` in brackets, either
-/// with an optional `:` and decimal port. [`redirect_host`] hands an IPv6 literal over
-/// without its brackets and port, so that form (two or more colons) is plain too.
+/// Whether a browser reads a label as a number: all digits, or `0x` and hex digits. When
+/// the last label of a host is one, a browser takes the whole host for an IPv4 number, and
+/// reads a leading `0` as octal and short forms as one number, so `0127.0.0.1` is 87.0.0.1.
+fn is_number_label(label: &str) -> bool {
+    let hex = label
+        .strip_prefix("0x")
+        .or_else(|| label.strip_prefix("0X"));
+    match hex {
+        Some(digits) => digits.chars().all(|c| c.is_ascii_hexdigit()),
+        None => !label.is_empty() && label.chars().all(|c| c.is_ascii_digit()),
+    }
+}
+
+/// Whether `host` may be shown as it is. For a plain host, a browser that loads a URI
+/// with this host goes to the host as written here, compared without case; it never goes
+/// to another one. It does not say that a browser can load the URI, that the name
+/// resolves, or that the name is not a look-alike of another name in ASCII.
+///
+/// Plain is one of these, either with an optional `:` and decimal port:
+/// - a name of 1 to 253 ASCII letters, digits, `.` and `-`, with no empty label (so no
+///   leading, trailing or doubled dot), no label that starts or ends with `-`, and a last
+///   label that is not a number ([`is_number_label`]);
+/// - an IPv4 address written the one canonical way: four decimal parts of 0 to 255 with
+///   no leading zero. Every other host whose last label is a number is not plain;
+/// - an IPv6 address in brackets, as `std::net::Ipv6Addr` parses it, with no zone.
+///
+/// Brackets around anything else, and colons outside brackets other than the one before
+/// a port, are not plain.
 fn is_plain_host(host: &str) -> bool {
-    let ipv6 = |text: &str| {
-        !text.is_empty()
-            && text
-                .chars()
-                .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
-    };
     let port = |text: &str| !text.is_empty() && text.chars().all(|c| c.is_ascii_digit());
     if let Some(rest) = host.strip_prefix('[') {
-        return match rest.split_once(']') {
-            Some((inside, "")) => ipv6(inside),
-            Some((inside, after)) => ipv6(inside) && after.strip_prefix(':').is_some_and(port),
-            None => false,
+        let Some((inside, after)) = rest.split_once(']') else {
+            return false;
         };
-    }
-    if host.matches(':').count() >= 2 {
-        return ipv6(host);
+        return inside.parse::<std::net::Ipv6Addr>().is_ok()
+            && (after.is_empty() || after.strip_prefix(':').is_some_and(port));
     }
     let (name, after) = match host.split_once(':') {
         Some((name, after)) => (name, Some(after)),
         None => (host, None),
     };
-    (1..=253).contains(&name.len()) && name.chars().all(is_host_name_char) && after.is_none_or(port)
+    if !after.is_none_or(port)
+        || !(1..=253).contains(&name.len())
+        || !name.chars().all(is_host_name_char)
+    {
+        return false;
+    }
+    let mut labels = name.split('.');
+    if !labels
+        .clone()
+        .all(|l| !l.is_empty() && !l.starts_with('-') && !l.ends_with('-'))
+    {
+        return false;
+    }
+    if labels.next_back().is_some_and(is_number_label) {
+        return name
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|address| address.to_string() == name);
+    }
+    true
 }
 
 /// A redirect host as the operator is shown it, wherever one is printed: the line
@@ -1362,7 +1410,7 @@ impl Store {
                         agent: Some(grant.agent.clone()),
                         operation: "oauth.revoke".into(),
                         outcome: "ok".into(),
-                        detail: Some(format!("client {}", grant.client_name)),
+                        detail: Some(format!("client {:?}", grant.client_name)),
                         ..Default::default()
                     },
                 )?;
@@ -1531,7 +1579,7 @@ impl Store {
                     agent: Some(issued.agent.clone()),
                     operation: "oauth.token".into(),
                     outcome: "ok".into(),
-                    detail: Some(format!("client {}", req.client_name)),
+                    detail: Some(format!("client {:?}", req.client_name)),
                     remote,
                 },
             )?;
@@ -1831,9 +1879,6 @@ mod tests {
             "chatgpt.com:8443",
             "[2001:db8::1]",
             "[2001:db8::1]:8443",
-            // An IPv6 literal as `redirect_host` hands it over: no brackets, no port.
-            "2001:db8::1",
-            "::1",
             dns_limit.as_str(),
         ] {
             assert_eq!(shown_redirect_host(plain), plain);
@@ -1923,6 +1968,128 @@ mod tests {
         ] {
             escaped_part(&shown_redirect_host(odd));
         }
+    }
+
+    /// Review R4 of Q19b: plain means a browser goes to the host that is shown. A browser
+    /// reads a host whose last label is a number as an IPv4 number, in octal, hex and
+    /// short forms too, so `0127.0.0.1` goes to 87.0.0.1. Such a host is plain only as a
+    /// canonical dotted quad. Brackets are plain only around an IPv6 address.
+    #[test]
+    fn a_plain_host_is_one_a_browser_goes_to_as_shown() {
+        let plain = [
+            "localhost",
+            "claude.ai",
+            "chatgpt.com",
+            "ChatGPT.com",
+            "127.0.0.1",
+            "1.2.3.4",
+            "0.0.0.0",
+            "255.255.255.255",
+            "example.com1",
+            "1example.com",
+            "a1.b2",
+            "0x.example",
+            "[::1]",
+            "[2001:db8::1]",
+            "[2001:DB8::1]:8443",
+            "[::ffff:1.2.3.4]",
+        ];
+        for host in plain {
+            assert_eq!(shown_redirect_host(host), host);
+        }
+        let not_plain = [
+            // A browser reads each of these as a different IPv4 address from the one it
+            // seems to be, or as an address where it seems to be a name or a number.
+            "0127.0.0.1",
+            "010.0.0.1",
+            "0172.16.0.1",
+            "0300.0250.0.1",
+            "127.0.0.010",
+            "010.010.010.010",
+            "1.2.3",
+            "0x",
+            "0x.0x",
+            "0",
+            "00",
+            "0x0",
+            "127.0.0.1.",
+            "1.2.3.4.",
+            "0x7f.1",
+            "0x7f.0.0.1",
+            "0X7F.0.0.1",
+            "2130706433",
+            "017700000001",
+            "0x7f000001",
+            "0177.0.0.1",
+            "127.1",
+            "127.0.1",
+            "127.0.0.01",
+            "4294967295",
+            "1.2.3.0x4",
+            "0x8.0x8.0x8.0x8",
+            // Other hosts that end in a number.
+            "1.2.3.4.5",
+            "256.1.1.1",
+            "256.0.0.1",
+            "08.0.0.1",
+            "01.2.3.4",
+            "0x1.2.3.4",
+            "example.123",
+            "example.0x",
+            "com.1",
+            "123",
+            // A trailing dot, an empty label, a label that starts or ends with `-`.
+            "example.com.",
+            "a..b",
+            ".a",
+            "-a.b",
+            "a-.b",
+            "a.b-",
+            // Brackets around something that is not an IPv6 address, or with a zone.
+            "[attacker.test]",
+            "[evil.test:443]",
+            "[a:b:c]",
+            "[1::2::3]",
+            "[cafe.bad:face:b00c]",
+            "[fe80::1%eth0]",
+            "[::ffff:0127.0.0.1]",
+            "[127.0.0.1]",
+            "[::1]x",
+            "[::1]:",
+            "[::1]:+443",
+            // An IPv6 address or anything else with colons, outside brackets.
+            "2001:db8::1",
+            "::1",
+            "a:b:c",
+            "chatgpt.com:+443",
+        ];
+        for host in not_plain {
+            let shown = shown_redirect_host(host);
+            let escaped = escaped_part(&shown);
+            assert!(!escaped.is_empty(), "{host:?}");
+        }
+        assert_eq!(
+            shown_redirect_host("0127.0.0.1"),
+            format!("{NOT_A_PLAIN_HOST}0127.0.0.1")
+        );
+        assert_eq!(
+            shown_redirect_host("[attacker.test]"),
+            format!("{NOT_A_PLAIN_HOST}\\u{{005B}}attacker.test\\u{{005D}}")
+        );
+
+        // The host of a redirect URI keeps its brackets, so a name is never taken for an
+        // IPv6 address and brackets around a name are never dropped.
+        assert_eq!(
+            redirect_host("https://[2001:DB8::1]:8443/cb"),
+            "[2001:db8::1]"
+        );
+        assert_eq!(redirect_host("http://[::1]:5173/cb"), "[::1]");
+        assert_eq!(
+            redirect_host("https://[attacker.test]/cb"),
+            "[attacker.test]"
+        );
+        assert_eq!(redirect_host("https://chatgpt.com:8443/cb"), "chatgpt.com");
+        assert!(redirect_is_loopback("http://[::1]:5173/cb"));
     }
 
     #[test]
