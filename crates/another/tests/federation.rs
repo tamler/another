@@ -428,6 +428,399 @@ fn mail_feed_resources_and_holds_across_nodes() {
     hub.ct.cancel();
 }
 
+const ONE_TEXT: &str = "invalid, used or expired invite, or the request is not signed for it";
+
+/// POST `body` to the hub as a hand-made client would; returns the status and the body.
+fn post(hub: &Hub, path: &str, headers: &[(&str, &str)], body: &str) -> (u16, String) {
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .proxy(None)
+            .build(),
+    );
+    let mut request = agent
+        .post(&format!("{}{path}", hub.url))
+        .header("content-type", "application/json");
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let mut resp = request.send(body.as_bytes()).unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.body_mut().read_to_string().unwrap())
+}
+
+fn error_message(body: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    v["error"]["message"].as_str().unwrap().to_string()
+}
+
+fn decode_invite(code: &str) -> serde_json::Value {
+    let raw = code.strip_prefix("another-invite:").unwrap();
+    serde_json::from_slice(&crypto::unb64(raw).unwrap()).unwrap()
+}
+
+/// The hub's audit rows for `operation`, oldest first.
+fn audit_rows(hub: &Hub, operation: &str) -> Vec<AuditEntry> {
+    let mut rows: Vec<AuditEntry> = hub
+        .node
+        .store
+        .audit_log(500)
+        .unwrap()
+        .into_iter()
+        .filter(|a| a.operation == operation)
+        .collect();
+    rows.sort_by_key(|a| a.audit_id);
+    rows
+}
+
+/// A joiner and a hub of this build pair over HTTP and sync. A request in the shape an
+/// older joiner sends is answered 403 with the upgrade message, and does not use the invite.
+#[test]
+fn pairing_over_http_end_to_end() {
+    let hub = start_hub();
+    let laptop = node("laptop");
+    let code = hub
+        .node
+        .store
+        .create_invite(&hub.url, &[Perm::ReadFeed, Perm::SendMail], 3600)
+        .unwrap();
+    let invite = decode_invite(&code);
+    assert_eq!(invite["v"], 2);
+
+    let old_shape = serde_json::json!({
+        "invite_id": invite["invite_id"],
+        "secret": invite["secret"],
+        "node": laptop.store.node_entry().unwrap(),
+    });
+    let (status, body) = post(&hub, "/fed/pair", &[], &old_shape.to_string());
+    assert_eq!(status, 403, "{body}");
+    let upgrade = "this hub accepts only signed pairing requests; upgrade the joining node; \
+                   an invite made before the hub was upgraded must be made again";
+    assert_eq!(error_message(&body), upgrade);
+    assert!(hub.node.store.peers().unwrap().is_empty());
+    let denied = audit_rows(&hub, "POST /fed/pair");
+    assert_eq!(denied.len(), 1);
+    assert_eq!(denied[0].outcome, "denied");
+    assert_eq!(denied[0].detail.as_deref(), Some(upgrade));
+    assert!(
+        !format!("{denied:?}").contains(invite["secret"].as_str().unwrap()),
+        "the audit log holds the secret an older joiner sent"
+    );
+
+    // The same invite still works for a signed request.
+    let peer = fed::join(&laptop.store, &code).unwrap();
+    assert_eq!(
+        (peer.role.as_str(), peer.display_name.as_str()),
+        ("hub", "hub")
+    );
+    assert_eq!(peer.perms, [Perm::ReadFeed, Perm::SendMail]);
+    assert_eq!(peer.fingerprint, hub.node.store.node().unwrap().fingerprint);
+    let paired = audit_rows(&hub, "POST /fed/pair");
+    assert_eq!(paired.len(), 2);
+    assert_eq!(paired[1].outcome, "ok");
+    assert_eq!(
+        paired[1].agent.as_deref(),
+        Some(format!("node:{}", laptop.store.node_id()).as_str())
+    );
+    register(&laptop.store, "bob", Program::Codex, None);
+    assert!(sync(&laptop).pushed > 0);
+    hub.ct.cancel();
+}
+
+/// A body that is not a pairing request, with the invite's secret where the parser's error
+/// would quote it: the answer and the audit row are the fixed text and hold no secret.
+#[test]
+fn a_bad_pairing_body_answers_and_audits_fixed_text() {
+    let hub = start_hub();
+    let laptop = node("laptop");
+    let code = hub
+        .node
+        .store
+        .create_invite(&hub.url, &Perm::ALL, 3600)
+        .unwrap();
+    let invite = decode_invite(&code);
+    let secret = invite["secret"].as_str().unwrap();
+    let bodies = [
+        serde_json::json!({
+            "invite_id": invite["invite_id"],
+            "node": laptop.store.node_entry().unwrap(),
+            "time_ms": secret,
+        })
+        .to_string(),
+        serde_json::json!({ "invite_id": [secret], "secret": secret }).to_string(),
+        format!("{{\"invite_id\": \"{secret}"),
+        secret.to_string(),
+        String::new(),
+    ];
+    for (n, body) in bodies.iter().enumerate() {
+        let (status, answer) = post(&hub, "/fed/pair", &[], body);
+        assert_eq!(status, 400, "{answer}");
+        assert_eq!(error_message(&answer), "invalid pairing request");
+        assert!(!answer.contains(secret), "the answer quotes the body");
+        let rows = audit_rows(&hub, "POST /fed/pair");
+        assert_eq!(rows.len(), n + 1);
+        let row = &rows[n];
+        assert_eq!(row.outcome, "denied");
+        assert_eq!(row.detail.as_deref(), Some("invalid pairing request"));
+        assert_eq!(row.agent, None);
+    }
+    let everything = format!("{:?}", hub.node.store.audit_log(500).unwrap());
+    assert!(
+        !everything.contains(secret),
+        "the audit log holds the secret"
+    );
+    // Nothing was used up.
+    fed::join(&laptop.store, &code).unwrap();
+    hub.ct.cancel();
+}
+
+/// The node id in a pairing request or in the `x-another-node` header is the caller's
+/// text. It is written to the audit log only when it is a node id.
+#[test]
+fn an_invalid_node_id_is_not_written_to_the_audit_log() {
+    let hub = start_hub();
+    let laptop = node("laptop");
+    let code = hub
+        .node
+        .store
+        .create_invite(&hub.url, &Perm::ALL, 3600)
+        .unwrap();
+    let (_, honest) = laptop.store.prepare_join(&code).unwrap();
+
+    for bad in [
+        "x@y",
+        "",
+        "node:01ARZ3NDEKTSV4RRFFQ69G5FAV\nforged row",
+        "local",
+    ] {
+        let mut req = honest.clone();
+        req.node.node_id = bad.into();
+        let (status, body) = post(
+            &hub,
+            "/fed/pair",
+            &[],
+            &serde_json::to_string(&req).unwrap(),
+        );
+        assert_eq!(status, 400, "{body}");
+        let rows = audit_rows(&hub, "POST /fed/pair");
+        assert_eq!(
+            rows.last().unwrap().agent.as_deref(),
+            Some("node:(invalid id)"),
+            "{bad:?}"
+        );
+    }
+
+    // A denied push: a header that is not an id, then one that is an unpaired id.
+    let stranger = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    for (header, written) in [
+        ("evil@node", "node:(invalid id)".to_string()),
+        (
+            "01arz3ndektsv4rrffq69g5fav",
+            "node:(invalid id)".to_string(),
+        ),
+        (stranger, format!("node:{stranger}")),
+    ] {
+        let headers = [
+            ("x-another-node", header),
+            ("x-another-time", "0"),
+            ("x-another-signature", "x"),
+        ];
+        let (status, _) = post(&hub, "/fed/push", &headers, r#"{"events":[]}"#);
+        assert_eq!(status, 401);
+        let rows = audit_rows(&hub, "POST /fed/push");
+        let row = rows.last().unwrap();
+        assert_eq!(row.outcome, "denied");
+        assert_eq!(row.agent.as_deref(), Some(written.as_str()), "{header:?}");
+    }
+    // No audit row names an agent that is not `node:` and an id. The refusal text in the
+    // detail quotes at most 40 characters of a bad id, as one line.
+    for row in hub.node.store.audit_log(500).unwrap() {
+        let agent = row.agent.unwrap();
+        let id = agent.strip_prefix("node:").unwrap();
+        assert!(
+            id == "(invalid id)" || validate_node_id(id).is_ok(),
+            "{agent}"
+        );
+        let detail = row.detail.unwrap();
+        assert!(!detail.contains('\n') && detail.len() < 300, "{detail:?}");
+    }
+    hub.ct.cancel();
+}
+
+/// Every failure of the invite check answers the one text; the hub's audit row says which
+/// of the four it was.
+#[test]
+fn a_refused_pairing_audits_its_cause_over_http() {
+    let hub = start_hub();
+    let laptop = node("laptop");
+    let runner = node("runner");
+    let last_detail = |hub: &Hub| -> String {
+        let rows = audit_rows(hub, "POST /fed/pair");
+        let row = rows.last().unwrap();
+        assert_eq!(row.outcome, "denied");
+        row.detail.clone().unwrap()
+    };
+    let refused = |req: &PairRequest| {
+        let (status, body) = post(&hub, "/fed/pair", &[], &serde_json::to_string(req).unwrap());
+        assert_eq!(status, 403, "{body}");
+        assert_eq!(error_message(&body), ONE_TEXT);
+    };
+
+    let code = hub
+        .node
+        .store
+        .create_invite(&hub.url, &Perm::ALL, 3600)
+        .unwrap();
+    let (_, honest) = runner.store.prepare_join(&code).unwrap();
+
+    // A signature that does not cover the request.
+    let mut altered = honest.clone();
+    altered.time_ms += 1;
+    refused(&altered);
+    assert_eq!(last_detail(&hub), "bad signature");
+
+    // An invite this hub never made.
+    let mut unknown = honest.clone();
+    unknown.invite_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV".into();
+    refused(&unknown);
+    assert_eq!(last_detail(&hub), "unknown invite");
+
+    // A used invite: the honest retry of a second node, through the real client.
+    fed::join(&laptop.store, &code).unwrap();
+    let err = fed::join(&runner.store, &code).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!("pairing failed (403 Forbidden): {ONE_TEXT}")
+    );
+    assert_eq!(
+        last_detail(&hub),
+        format!("used invite (by {})", laptop.store.node_id())
+    );
+
+    // An invite that expired between the request being made and being sent.
+    let short = hub
+        .node
+        .store
+        .create_invite(&hub.url, &Perm::ALL, 1)
+        .unwrap();
+    let (_, late) = runner.store.prepare_join(&short).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    refused(&late);
+    assert_eq!(last_detail(&hub), "expired invite");
+
+    assert_eq!(hub.node.store.peers().unwrap().len(), 1);
+    hub.ct.cancel();
+}
+
+/// `another pair readmit` and `another pair release-name`: the text and JSON of both, and
+/// their refusals.
+#[test]
+fn pair_readmit_and_release_name_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_another"))
+            .args(args)
+            .env("ANOTHER_HOME", dir.path())
+            .env_remove("ANOTHER_NODE_NAME")
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+    let laptop = node("laptop");
+    let runner = node("runner");
+    let (laptop_fp, runner_id) = {
+        let hub = Store::open(dir.path()).unwrap();
+        hub.set_node_name("hub").unwrap();
+        for (spoke, perms) in [
+            (&laptop, &[Perm::ReadFeed, Perm::SendMail][..]),
+            (&runner, &Perm::ALL[..]),
+        ] {
+            let code = hub
+                .create_invite("https://hub.example", perms, 3600)
+                .unwrap();
+            let (invite, req) = spoke.store.prepare_join(&code).unwrap();
+            let resp = hub.accept_pairing(&req).unwrap();
+            spoke.store.complete_join(&invite, &resp).unwrap();
+        }
+        (
+            laptop.store.node().unwrap().fingerprint,
+            runner.store.node_id().to_string(),
+        )
+    };
+    let laptop_id = laptop.store.node_id().to_string();
+
+    let (ok, out, _) = run(&["pair", "--help"]);
+    assert!(
+        ok && out.contains("readmit") && out.contains("release-name"),
+        "{out}"
+    );
+
+    // readmit
+    let (ok, _, err) = run(&["pair", "readmit", "nobody"]);
+    assert!(!ok && err.contains("no paired node"), "{err}");
+    let (ok, _, err) = run(&["pair", "readmit", "laptop"]);
+    assert!(!ok && err.contains("node laptop is not revoked"), "{err}");
+    assert!(run(&["pair", "revoke", "laptop"]).0);
+    let (ok, out, err) = run(&["pair", "readmit", "laptop"]);
+    assert!(ok, "{err}");
+    assert_eq!(
+        out.trim_end(),
+        format!(
+            "re-admitted laptop (key {laptop_fp}); it can sync again with [read_feed, send_mail]"
+        )
+    );
+    assert!(run(&["pair", "revoke", "laptop"]).0);
+    let (ok, out, err) = run(&["--json", "pair", "readmit", &laptop_id]);
+    assert!(ok, "{err}");
+    let peer: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(peer["node_id"], laptop_id.as_str());
+    assert_eq!(peer["display_name"], "laptop");
+    assert_eq!(peer["revoked_at"], serde_json::Value::Null);
+    assert_eq!(peer["perms"], serde_json::json!(["read_feed", "send_mail"]));
+    assert_eq!(peer["fingerprint"], laptop_fp.as_str());
+
+    // release-name
+    let (ok, _, err) = run(&["pair", "release-name", "laptop"]);
+    assert!(
+        !ok && err.contains("node laptop is not revoked; revoke it first"),
+        "{err}"
+    );
+    assert!(run(&["pair", "revoke", "laptop"]).0);
+    let (ok, out, err) = run(&["pair", "release-name", "laptop"]);
+    assert!(ok, "{err}");
+    assert_eq!(
+        out.trim_end(),
+        format!(
+            "released the name laptop; node {laptop_id} (key {laptop_fp}) is now listed by its id\n\
+             the name laptop is now free for any node; give it to the intended node now"
+        )
+    );
+    let (ok, _, err) = run(&["pair", "release-name", &laptop_id]);
+    assert!(!ok && err.contains("has no name to release"), "{err}");
+    assert!(run(&["pair", "revoke", "runner"]).0);
+    let (ok, out, err) = run(&["--json", "pair", "release-name", "runner"]);
+    assert!(ok, "{err}");
+    let peer: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(peer["node_id"], runner_id.as_str());
+    assert_eq!(peer["display_name"], runner_id.as_str());
+    assert!(peer["revoked_at"].is_string());
+
+    // `local` is reserved.
+    let (ok, _, err) = run(&["node", "name", "local"]);
+    assert!(!ok && err.contains("not named yet"), "{err}");
+    let (ok, out, _) = run(&["activity"]);
+    assert!(ok);
+    assert!(out.contains("re-admitted node laptop"), "{out}");
+    assert!(
+        out.contains(&format!("released the name laptop of node {laptop_id}")),
+        "{out}"
+    );
+}
+
 #[test]
 fn signatures_authority_and_revocation() {
     let hub = start_hub();

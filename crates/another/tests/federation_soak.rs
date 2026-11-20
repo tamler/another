@@ -319,10 +319,13 @@ fn a_spoke_offline_for_days_catches_up_in_pages() {
     let hub = Hub::start(root.path());
     let alpha = spoke(root.path(), "alpha", Clock::System);
     let start = wall_ms() - 3 * DAY_MS;
-    let (beta_clock, beta_now): (Clock, Arc<AtomicI64>) = Clock::manual(start);
+    // A pairing request carries the joiner's time and the hub refuses one more than five
+    // minutes off, so beta joins on the real time and its clock is set back afterwards.
+    let (beta_clock, beta_now): (Clock, Arc<AtomicI64>) = Clock::manual(wall_ms());
     let beta = spoke(root.path(), "beta", beta_clock);
     hub.join(&alpha);
     hub.join(&beta);
+    beta_now.store(start, Ordering::SeqCst);
     register(&hub.store, "hq", None);
     register(&alpha.store, "a1", None);
     let beta_project = root.path().join("work").join("beta-app");

@@ -557,8 +557,24 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             format!("node renamed to {}", s("display_name")),
             json!({ "node_id": s("node_id") }),
         ),
-        "peer.paired" => (
-            format!("paired with node {} ({})", s("display_name"), s("role")),
+        "peer.paired" => {
+            let again = p.get("again").and_then(Value::as_bool) == Some(true);
+            let verb = if again { "paired again" } else { "paired" };
+            (
+                format!("{verb} with node {} ({})", s("display_name"), s("role")),
+                json!({ "node_id": s("node_id") }),
+            )
+        }
+        "peer.readmitted" => (
+            format!("re-admitted node {}", s("display_name")),
+            json!({ "node_id": s("node_id") }),
+        ),
+        "peer.name_released" => (
+            format!(
+                "released the name {} of node {}",
+                s("previous_name"),
+                s("node_id")
+            ),
             json!({ "node_id": s("node_id") }),
         ),
         "peer.revoked" => (

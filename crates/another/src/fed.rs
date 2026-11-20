@@ -140,7 +140,11 @@ async fn record(
         store,
         AuditRecord {
             token_id: None,
-            agent: node.map(|n| format!("node:{n}")),
+            // The id is whatever the caller sent, so it is written only when it is an id.
+            agent: node.map(|n| match another_core::validate_node_id(&n) {
+                Ok(()) => format!("node:{n}"),
+                Err(_) => "node:(invalid id)".to_string(),
+            }),
             operation: operation.to_string(),
             outcome: outcome.to_string(),
             detail: Some(detail),
@@ -150,23 +154,38 @@ async fn record(
     .await;
 }
 
-async fn pair(State(store): State<Store>, axum::Json(req): axum::Json<PairRequest>) -> Response {
+/// The body is parsed here, not by an extractor: a body that does not parse is answered and
+/// audited with one fixed text, so nothing from it (an older joiner's body holds the invite
+/// secret) reaches the answer, the audit log or a log line.
+async fn pair(State(store): State<Store>, body: Bytes) -> Response {
+    let req: PairRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(_) => {
+            let e = another_core::Error::Invalid("invalid pairing request".into());
+            record(&store, None, "POST /fed/pair", "denied", e.to_string()).await;
+            return error(StatusCode::BAD_REQUEST, &e);
+        }
+    };
     let node = req.node.node_id.clone();
     let s = store.clone();
-    match blocking(move || s.accept_pairing(&req)).await {
+    let (outcome, cause) = tokio::task::spawn_blocking(move || s.accept_pairing_with_cause(&req))
+        .await
+        .unwrap_or_else(|e| {
+            (
+                Err(another_core::Error::Invalid(format!("task failed: {e}"))),
+                None,
+            )
+        });
+    match outcome {
         Ok(resp) => {
             record(&store, Some(node), "POST /fed/pair", "ok", "paired".into()).await;
             axum::Json(resp).into_response()
         }
         Err(e) => {
-            record(
-                &store,
-                Some(node),
-                "POST /fed/pair",
-                "denied",
-                e.to_string(),
-            )
-            .await;
+            // The caller gets one text for every failure of the invite check; which one it
+            // was is recorded here only.
+            let detail = cause.map_or_else(|| e.to_string(), |c| c.detail());
+            record(&store, Some(node), "POST /fed/pair", "denied", detail).await;
             error(status_for(&e), &e)
         }
     }

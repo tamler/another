@@ -330,7 +330,7 @@ pub enum Command {
     /// Show or rename this node.
     #[command(subcommand)]
     Node(NodeCmd),
-    /// Pair nodes for federation: invite (hub), join (spoke), revoke.
+    /// Pair nodes for federation: invite (hub), join (spoke), revoke, readmit, release-name.
     #[command(subcommand)]
     Pair(PairCmd),
     /// List paired nodes.
@@ -563,8 +563,9 @@ pub enum DaemonCmd {
 pub enum NodeCmd {
     /// Show this node's id, name and key fingerprint.
     Show,
-    /// Rename this node (do this before pairing; names must be unique across nodes).
-    /// Without a name, prints the current one.
+    /// Rename this node (do this before pairing). A name is unique across nodes whatever
+    /// its case (`Alpha` and `alpha` are one name), and `local` is reserved: it means "not
+    /// named yet". Without a name, prints the current one.
     Name { name: Option<String> },
 }
 
@@ -586,10 +587,17 @@ pub enum PairCmd {
         #[arg(long, default_value = "1h")]
         expires: String,
     },
-    /// Spoke: redeem an invite code and record the hub.
+    /// Spoke: redeem an invite code and record the hub. The request is signed with this
+    /// node's key, and the hub's answer is checked against the hub key in the invite.
     Join { code: String },
     /// Stop accepting (or using) a paired node, by name or id.
     Revoke { node: String },
+    /// Hub: let a node this hub revoked sync again, by name or id, with the permissions it
+    /// had. An invite never does this.
+    Readmit { node: String },
+    /// Free the name a revoked node holds, by name or id: the node is then listed by its
+    /// id, and the name is free for any node at once.
+    ReleaseName { node: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2081,6 +2089,28 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Pair(PairCmd::Revoke { node }) => {
             let p = store.revoke_peer(&node)?;
             emit(json, &p, |p| format!("revoked {}", p.display_name))
+        }
+        Command::Pair(PairCmd::Readmit { node }) => {
+            let p = store.readmit_peer(&node)?;
+            emit(json, &p, |p| {
+                let perms: Vec<&str> = p.perms.iter().map(|x| x.as_str()).collect();
+                format!(
+                    "re-admitted {} (key {}); it can sync again with [{}]",
+                    p.display_name,
+                    p.fingerprint,
+                    perms.join(", ")
+                )
+            })
+        }
+        Command::Pair(PairCmd::ReleaseName { node }) => {
+            let (p, previous_name) = store.release_peer_name(&node)?;
+            emit(json, &p, |p| {
+                format!(
+                    "released the name {previous_name}; node {} (key {}) is now listed by its id\n\
+                     the name {previous_name} is now free for any node; give it to the intended node now",
+                    p.node_id, p.fingerprint
+                )
+            })
         }
         Command::Peers => {
             let ps = store.peers()?;

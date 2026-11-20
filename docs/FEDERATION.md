@@ -9,6 +9,12 @@ Several machines, such as a laptop, a remote runner and a GPU box, each run thei
 - **Signed events.** Every node has an Ed25519 key, created on first boot, and signs every event it authors. Relayed events are checked against their origin node's key, so the hub cannot forge another node's events.
 - **Hub and spoke.** Spokes **push** the events they authored and **pull** a filtered stream of everyone else's events. Spokes never talk to each other directly. A mesh may come later.
 - **Addressing.** Agents on other nodes are `name@project@node`, or `name@@node` for agents without a project. Local addresses (`name`, `name@project`) are unchanged.
+- **Node names and ids.** A node name is 1 to 40 ASCII letters, digits, `-`, `_` or `.`. Names are unique whatever their case: with `alpha` known, no other node can pair as, rename itself to, or be listed as `Alpha`. Addresses are still matched exactly as written. `local` is reserved. It means "not named yet": a node named `local` cannot make an invite, join or pair, `another node name local` is refused, and a peer's `node.created` or `node.renamed` event with the name `local` is accepted but does not change that node's name here. A node id is the 26 character ULID made when the home was created; a pairing request, an invite or a hub's node list with anything else in the place of a node id is refused or, in a list, skipped. `ANOTHER_NODE_NAME` names a new home only when the name is valid; otherwise the node starts as `local` and a warning is logged.
+- **Pairing.** An invite buys exactly one thing: a new node with the invite's permissions, or new permissions for the node whose key signed the request. It cannot touch any other node and cannot bring back a revoked one.
+  - **The proof.** The joiner signs its pairing request with its node key. The signed bytes name the hub (id and key), the invite, the SHA-256 of the invite's secret, the joiner (id, key and name) and the time. One valid signature therefore shows that the sender holds the node's private key, knows the invite, and meant this hub and this invite. The secret itself is never sent, and neither is its hash, so someone who can read or block a pairing request cannot redeem the invite. A captured request cannot be used with another invite, on another hub, or more than 5 minutes later.
+  - **The answer.** The hub signs its answer with its node key over the invite, the joiner, the hub's name and the permissions. The joiner checks it against the hub key in the invite and records nothing if it is missing or wrong, so a server at the hub's URL that does not hold the hub's key cannot complete a join. The hub's name in the answer is applied by the rule for a name in a hub's node list: used when it is valid, not `local` and not another node's, otherwise the hub is recorded under its id.
+  - **A node the hub already knows.** A known node id that presents a different key is always refused; there is no override. A node row without a key is never given one by pairing. With the same key, a paired spoke may pair again: its permissions become the new invite's, and its name changes only if the new one passes the rename rule. Nothing else changes. Pairing never clears a revoke, and never rewrites the row of the node's own hub.
+  - **What is not covered.** A stolen home directory holds the private key, so its holder is that node; revoke it on the hub. A leaked invite code lets its holder join as a new node under any free name; the invite is single use, so the intended join then fails. An invite holder who knows the id of a node that has not paired yet can pair first under that id with its own key; the real node is then refused ("presented a different key") and the hub's audit log records the refusal. No command undoes that: revoke the squatter and give the real machine a new home. Spokes trust their hub's node list. The hub's answers to a pull are not signed, so a party between a spoke and its hub on a plaintext link can change the spoke's view of the directory; keep the link behind TLS or a private network as described in [REMOTE.md](REMOTE.md). There is no key rotation.
 
 ## What travels where
 
@@ -36,7 +42,9 @@ The hub enforces permissions on what spokes push, and each node checks them agai
 
 ## Set up
 
-Name each node first; names must be unique across the federation:
+Upgrade the hub before the spokes, and make invites after the hub's upgrade: a hub accepts only signed pairing requests, and a spoke joins only with an invite made by a build that signs (see "Upgrading" below). Nodes that are already paired keep syncing in any order.
+
+Name each node first; names must be unique across the federation, whatever their case:
 
 ```bash
 another node name studio
@@ -52,7 +60,7 @@ another serve --federation --bind 127.0.0.1:7468
 another pair invite --url https://studio.my-tailnet.ts.net --perms read_feed,send_mail,borrow_resource --expires 1h
 ```
 
-The invite code is single-use. It carries the hub's URL, node id and public key. Compare the printed key fingerprint with `another node show` on the hub if the code came through an untrusted channel.
+The invite code is single-use. It carries the hub's URL, node id and public key, and a secret. Treat the code as a password until it is used or expires: whoever holds it can join as a new node. Compare the printed key fingerprint with `another node show` on the hub if the code came through an untrusted channel.
 
 On each spoke:
 
@@ -64,6 +72,8 @@ another node name laptop
 another pair join another-invite:...
 ```
 
+`pair join` signs the request with this node's key and sends it to the hub. The secret in the invite stays on this machine. The join is recorded only when the hub's answer is signed with the hub key in the invite. A refused request does not use up the invite.
+
 ```bash
 another sync
 ```
@@ -72,7 +82,83 @@ another sync
 another sync --watch --every 30
 ```
 
-`another peers` lists paired nodes with key fingerprints, permissions and last sync. `another pair revoke <node>` cuts a node off: the hub refuses its next request, and ends that node's leases on the hub's own resources (reason `peer_revoked`), so a revoked node is never promoted to owner. Its agents, holds and leases on other nodes' resources stay until they expire. A revoked node can pair again only with a fresh, unused invite.
+`another peers` lists paired nodes with key fingerprints, permissions and last sync. `another pair revoke <node>` cuts a node off: the hub refuses its next request, and ends that node's leases on the hub's own resources (reason `peer_revoked`), so a revoked node is never promoted to owner. Its agents, holds and leases on other nodes' resources stay until they expire.
+
+A revoked node stays out. An invite does not bring it back: its pairing request is refused, and the invite is not used up.
+
+- `another pair readmit <node>`, on the hub, lets a revoked spoke sync again with the permissions it had. It prints the node's key fingerprint; check it before relying on the node. Leases ended by the revoke are not restored. To change the node's permissions afterwards, pair it again with a fresh invite.
+- `another pair release-name <node>` frees the name a revoked node holds. The node is then listed by its id, and its row, key, revoked state and agents stay. The name is free for any node at once: any paired spoke can take it with a rename, and any invite holder by pairing under it. So first revoke every node you do not trust and have no unused invite outstanding, then release the name, then at once rename or pair the intended node and sync it. On a node that is a hub to others, its spokes see the released node under its id after their next sync. A released node that is later re-admitted is listed by its id until `another node name <name>` is run on it and synced.
+- A spoke that revoked its hub joins it again with a fresh invite.
+
+Neither command has an HTTP route or an MCP tool: they are typed on the node itself.
+
+### Pairing again
+
+A paired, unrevoked spoke may redeem a fresh invite to get other permissions or to follow a hub whose URL changed. Its permissions become the invite's. Its name changes only if it differs and passes the rename rule (valid, not `local`, not another node's). Nothing else changes. `another activity` shows `paired again with node <name> (spoke)`, and the local `peer.paired` event records the invite, the key fingerprint and the previous name and permissions.
+
+### Replacing a machine
+
+| Case | What to do | Pairs again? |
+|---|---|---|
+| Reinstall the binary, same home | Nothing. | No |
+| Move the home to another machine | Copy the home, run `another sync`. Same id and key. | No |
+| Rename a node | `another node name <new>` on the node, then `another sync`. | No |
+| A spoke's home is lost | Hub: `another pair revoke <old node>`. The new home is a new node: name it and join with a fresh invite. It takes a new name, or the hub runs `another pair release-name <old node>` and the new home takes the old name. | First pairing of a new node |
+| The hub's home is lost or rebuilt under the same name | New hub: name it, serve, make an invite per spoke. Each spoke: `another pair revoke <old hub>`, `another pair release-name <old hub>`, `another pair join <code>`. | Every spoke is new to the new hub |
+
+What a lost spoke home costs:
+
+- Without `release-name`, the old name stays on the revoked node. Addresses `x@@oldname` keep resolving to the dead node's agents, and mail sent to them is accepted by the hub and never delivered. The new machine's agents have addresses under the new name.
+- With `release-name`, the old node is listed by its id. `x@@oldname` resolves to the new node's agent `x` once that agent is registered and synced, and to nothing before. Mail already sent to the old node's agents stays undelivered; it is not moved to the new node.
+
+For a rebuilt hub: if a spoke joins the new hub while the old hub's row still holds the name, the new hub is recorded under its id, `another peers` shows that id as the name, and its agents are addressed `x@@<new hub id>`. After `another pair release-name <old hub>` the next `another sync` applies the new hub's name from its list. A spoke that never knew the old hub sees the name at once.
+
+### Upgrading
+
+Nothing already paired stops syncing in any combination of old and new builds. Pairing changed:
+
+| Joiner | Hub | What happens |
+|---|---|---|
+| new | new | Works. |
+| old | new | The hub answers 403 and the joiner prints `pairing failed (403 Forbidden): this hub accepts only signed pairing requests; upgrade the joining node; an invite made before the hub was upgraded must be made again`. The invite is not used. |
+| new | any, with an invite made by an older build | The joiner refuses before sending anything: `this invite was made by an older build; make a new invite on an upgraded hub`. |
+| new | old | An older hub does not accept a signed request (it answers 422) and uses nothing. |
+
+A node that an older build let be named `local` keeps that name wherever it is already recorded, but cannot pair or pair again until it is renamed. Two nodes whose names already differ only in case both keep working; nothing renames them.
+
+### After upgrading: has a node been taken over?
+
+Before this change, the holder of one valid invite could pair as a node the hub already knew: rename it, clear its revoke and replace its permissions, and then take its old name. Nothing proves who sent an old pairing request, but a second pairing and a name that moved are on record on the hub. These queries only read:
+
+- A node paired more than once:
+
+  ```sh
+  sqlite3 "$ANOTHER_HOME/another.db" "SELECT json_extract(payload,'$.node_id'), count(*), group_concat(json_extract(payload,'$.display_name'), ' -> ') FROM events WHERE kind = 'peer.paired' AND json_extract(payload,'$.role') = 'spoke' GROUP BY 1 HAVING count(*) > 1"
+  ```
+
+  Deliberate second pairings show too. A changed name, or a second pairing after a revoke you did not undo, is the mark.
+- A name that moved between nodes (the same name under two node ids):
+
+  ```sh
+  sqlite3 "$ANOTHER_HOME/another.db" "SELECT node_id, ts, json_extract(payload,'$.display_name') FROM events WHERE kind IN ('node.created','node.renamed') ORDER BY seq"
+  ```
+- Which node used each invite: `sqlite3 "$ANOTHER_HOME/another.db" "SELECT invite_id, used_at, used_by FROM invites"`. `another audit` lists every `POST /fed/pair`.
+- `another peers`: a node that is not revoked though you revoked it, permissions you did not grant, or a name on the wrong key fingerprint.
+
+To undo it, with commands only:
+
+1. Hub: `another pair revoke <attacker node id>`. Use the id; the names are swapped. Revoke every other node you do not trust as well, and make sure no unused invite is outstanding: a released name is free to any paired node or invite holder at once.
+2. Hub: `another pair release-name <attacker node id>`. Do step 3 straight after it, and hand out no invite until the victim holds the name again.
+3. Victim: `another sync`, `another node name <its old name>`, `another sync`. If the victim should be revoked, as it was before, run `another pair revoke <victim id>` on the hub instead.
+4. The victim's permissions were replaced by the attacker's invite: pair it again with an invite carrying the right ones.
+5. Other spokes: `another sync`, twice if the first still shows the old names.
+6. Mail sent to the taken name between the attacker's rename and its revoke went to the attacker's node and cannot be recalled. To list it, take `T1`, the `ts` of the attacker's `node.renamed` to that name, and `T2`, the `ts` of its `peer.revoked`, then:
+
+   ```sh
+   sqlite3 "$ANOTHER_HOME/another.db" "SELECT event_id, ts, actor FROM events WHERE kind = 'message.sent' AND ts BETWEEN <T1> AND <T2> AND payload LIKE '%<attacker node id>%'"
+   ```
+
+From now on every change to a peer's name, permissions or revoked state is on record with its cause: `peer.paired` (with `again`, `invite_id`, `fingerprint`, and on a second pairing `previous_name` and `previous_perms`), `peer.readmitted`, `peer.name_released`, `peer.revoked`, and an audit row for every refused pairing. The hub answers every failure of the invite check with one text, `invalid, used or expired invite, or the request is not signed for it`; the audit row's detail says which it was (`unknown invite`, `used invite (by <node id>)`, `expired invite` or `bad signature`), so an honest retry on a used invite can be told from a forged request.
 
 ## Cross-node behaviour
 
@@ -172,7 +258,35 @@ What that costs: no other node ever receives that event. For an agent's registra
 
 ## Wire protocol (for implementers)
 
-- `POST /fed/pair`: `{invite_id, secret, node: {node_id, display_name, public_key}}` returns `{hub, perms}`.
+- An invite code is `another-invite:` followed by the unpadded URL-safe base64 of the JSON `{v, hub_url, hub: {node_id, display_name, public_key}, invite_id, secret, perms, expires_at}`. `v` is `2`. The hub stores only the lowercase hex SHA-256 of the `secret` text.
+- `POST /fed/pair`: `{invite_id, node: {node_id, display_name, public_key}, time_ms, sig}` returns `{hub: {node_id, display_name, public_key}, perms, sig}`. The request holds no secret.
+  - The request's `sig` is the joiner's Ed25519 signature, checked with the strict rules against `node.public_key`, over these UTF-8 fields joined by one `\n`, with no trailing newline:
+
+    ```
+    another-pair-v1
+    {hub node_id}
+    {hub public_key}
+    {invite_id}
+    {sha256_hex(secret)}
+    {joiner node_id}
+    {joiner public_key}
+    {joiner display_name}
+    {time_ms as decimal}
+    ```
+
+    The joiner takes the hub's id and key from the invite as text. The hub builds the same bytes from its own id and key and the hash it stored for the invite, never from the request.
+  - The answer's `sig` is the hub's signature, checked the same way against the hub key in the invite, over:
+
+    ```
+    another-pair-accept-v1
+    {invite_id}
+    {sha256_hex(secret)}
+    {joiner node_id}
+    {joiner public_key}
+    {hub display_name as sent in the answer}
+    {perms as sent in the answer, joined by ","}
+    ```
+  - The hub checks, in this order and before it writes anything: the node id is a ULID; the name is valid and not `local`; the key decodes, is not a weak key and is in its canonical base64 form; `sig` is present (403 otherwise); `time_ms` is within 5 minutes of the hub's clock (403); the invite exists, is unused and unexpired and the signature verifies (403, one text for all four); then the rules for a node it already knows (409 or 403). A body that is not a pairing request is answered 400 `invalid pairing request`, and nothing from the body is logged or audited.
 - `POST /fed/push`: `{events: [WireEvent]}` returns `{accepted, duplicates, rejected}`. A body over the hub's limit is answered `413`; send fewer events.
 - `GET /fed/pull?after=<hub seq>&limit=N[&after_id=<event id>[&after_id_seq=<hub seq>]][&pushed_id=<event id>]` returns `{events, cursor, more, nodes, reset}`. A page holds at most `limit` events (1 to 2000, default 500) and may hold fewer, with `more: true`, when the hub closes it by size. `after_id` is the last event the spoke received from this hub and `after_id_seq` the hub sequence number it came at; `pushed_id` is the last of the spoke's own events this hub accepted. `reset: true`, with no events, means the hub's log no longer reaches `after`, no longer holds `after_id` (at `after_id_seq`, when given), or no longer holds `pushed_id`; see "Restarts, restores and offline spokes" above. Hubs without `reset` omit it and ignore these parameters, and spokes without it ignore it.
 - Push and pull requests carry these headers:
