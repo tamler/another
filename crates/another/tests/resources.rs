@@ -301,7 +301,7 @@ fn oversized_resource_text_and_metadata_are_refused_by_the_cli() {
         "blob={}",
         "x".repeat(another_core::MAX_RESOURCE_METADATA_BYTES)
     );
-    for (flag, value, message) in [
+    let mut cases = vec![
         (
             "--endpoint",
             &endpoint,
@@ -312,12 +312,17 @@ fn oversized_resource_text_and_metadata_are_refused_by_the_cli() {
             &purpose,
             "another: resource purpose is 1025 bytes; the limit is 1024\n",
         ),
-        (
+    ];
+    // A Windows command line holds at most 32,767 characters, so no `--meta` given there
+    // can reach the 64 KiB limit and the process cannot even be started with one.
+    if !cfg!(windows) {
+        cases.push((
             "--meta",
             &meta,
             "another: metadata is 65547 bytes as JSON; the limit is 65536\n",
-        ),
-    ] {
+        ));
+    }
+    for (flag, value, message) in cases {
         let out = another(
             home,
             &[
