@@ -335,8 +335,12 @@ pub enum Command {
     Pair(PairCmd),
     /// List paired nodes.
     Peers,
-    /// Spoke: push this node's events to the hub and pull everyone else's.
+    /// Spoke: push this node's events to the hub and pull everyone else's. An event too
+    /// large to send is skipped and reported after every sync until `sync ack`.
+    #[command(args_conflicts_with_subcommands = true)]
     Sync {
+        #[command(subcommand)]
+        cmd: Option<SyncCmd>,
         /// Keep syncing every --every seconds.
         #[arg(long)]
         watch: bool,
@@ -376,7 +380,7 @@ pub enum Command {
         #[arg(long, default_value_t = 50)]
         limit: u32,
         /// Only these categories: mail, request, hold, resource, session, system, federation,
-        /// queue.
+        /// queue, sync.
         #[arg(long, value_delimiter = ',')]
         kinds: Vec<String>,
         /// Print a summary (counts, active agents, highlights) instead of items.
@@ -471,6 +475,21 @@ pub struct WakeRun {
     /// without asking the transport is reported as refused.
     #[arg(long)]
     dry_run: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SyncCmd {
+    /// Acknowledge one skipped event on the node whose log holds it, so `another sync` and
+    /// `another needs` stop reporting it. Needs --owner, a terminal and a typed yes. It
+    /// deletes nothing and does not send the event; `another activity --kinds sync` keeps
+    /// listing it.
+    Ack {
+        /// The skipped event's id, as `another sync` and `another needs` print it.
+        event_id: String,
+        /// Act as the owner, at a terminal.
+        #[arg(long)]
+        owner: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2126,7 +2145,15 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let ps = store.peers()?;
             emit(json, &ps, |p| output::peers(p, store.node_id()))
         }
-        Command::Sync { watch, every } => loop {
+        Command::Sync {
+            cmd: Some(SyncCmd::Ack { event_id, owner }),
+            ..
+        } => sync_ack(&store, &event_id, owner)?,
+        Command::Sync {
+            cmd: None,
+            watch,
+            every,
+        } => loop {
             let report = crate::fed::sync(&store);
             match report {
                 Ok(r) => {
@@ -2323,6 +2350,64 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
 
 /// A `--via` value: `herdr`, or a transport configured on this node. Anything else is
 /// refused with what to set, before anything is stored or run.
+/// `another sync ack <event-id> --owner`: the owner's gate of the queue (`--owner`, a
+/// terminal, a typed yes), with the id looked up before anything is asked. With `--json`
+/// the success line is the same text.
+fn sync_ack(store: &Store, event_id: &str, owner: bool) -> anyhow::Result<ExitCode> {
+    use another_core::SkipAck;
+    if !owner {
+        return Err(another_core::Error::Forbidden(
+            "another sync ack is the owner's alone: run it with --owner at a terminal".into(),
+        )
+        .into());
+    }
+    let already = |id: &str, at: &str| {
+        println!(
+            "{}",
+            terminal_safe(&format!(
+                "event {id} was acknowledged at {at}; nothing was changed"
+            ))
+        );
+        Ok(ExitCode::SUCCESS)
+    };
+    let shown_id = another_core::display_line(event_id, 40);
+    match store.skip_to_acknowledge(event_id)? {
+        SkipAck::Already { at } => return already(&shown_id, &at),
+        SkipAck::Skip {
+            event_id: id,
+            kind,
+            bytes,
+            actor,
+            larger_than_one,
+        } => {
+            crate::queue_cli::owner_terminal()?;
+            crate::queue_cli::owner_confirm(&format!(
+                "Acknowledge the skip of event {id} ({kind}, {bytes} bytes, written by {actor}) in this node's log.\n\
+                 It was not sent because it is larger than one {larger_than_one}. This does not send it and deletes nothing.\n\
+                 another sync and another needs stop reporting it, here and on the nodes that received the report."
+            ))?;
+        }
+    }
+    match store.acknowledge_skip(event_id)? {
+        SkipAck::Already { at } => already(&shown_id, &at),
+        SkipAck::Skip {
+            event_id: id,
+            kind,
+            bytes,
+            ..
+        } => {
+            println!(
+                "{}",
+                terminal_safe(&format!(
+                    "acknowledged: event {id} ({kind}, {bytes} bytes) stays in this node's log \
+                     and is still not sent; another sync and another needs no longer report it"
+                ))
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
 fn known_transport(store: &Store, via: &str) -> anyhow::Result<another_core::WakeVia> {
     let config = crate::transport::config_for(store);
     if via != "rex" {

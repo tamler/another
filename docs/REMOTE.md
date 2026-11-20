@@ -306,11 +306,11 @@ A client that is not using MCP can still poll the feed with a bearer token or an
 curl -H "Authorization: Bearer $ANOTHER_TOKEN" "https://another.example.com/activity?since=1h&kinds=mail,request"
 ```
 
-`GET /activity` takes `since` (a duration like `30m`, an RFC 3339 time, or an event-id cursor), `limit` and `kinds`. It never includes message bodies.
+`GET /activity` takes `since` (a duration like `30m`, an RFC 3339 time, or an event-id cursor), `limit` and `kinds`. The kinds are `mail`, `request`, `hold`, `resource`, `session`, `system`, `federation`, `queue` and `sync`; `sync` holds the events a sync skipped as too large to send and their acknowledgements ([FEDERATION.md](FEDERATION.md#an-event-that-is-too-large-to-send)). It never includes message bodies.
 
 ## Audit log
 
-Every authenticated or rejected remote request is recorded with time, token or grant id, agent, operation, outcome (`ok`, `error`, `denied`), redacted arguments (message bodies and notes are replaced by their size) and the forwarding header or peer address. OAuth events (`oauth.register`, `oauth.authorize`, `oauth.approve`, `oauth.deny`, `oauth.token`, `oauth.refresh`, `oauth.revoke`) are recorded the same way. The audit log does not contain authorization codes, redirect tokens, access tokens, refresh tokens, or PKCE verifiers.
+Every authenticated or rejected remote request is recorded with time, token or grant id, agent, operation, outcome (`ok`, `error`, `denied`), redacted arguments (message bodies and notes are replaced by their size) and the forwarding header or peer address. OAuth events (`oauth.register`, `oauth.authorize`, `oauth.approve`, `oauth.deny`, `oauth.token`, `oauth.refresh`, `oauth.revoke`) are recorded the same way. The audit log does not contain authorization codes, redirect tokens, access tokens, refresh tokens, or PKCE verifiers. Two rows come from a node's own sync, not from a remote request, with the node as the agent (`node:<id>`): `sync skip` with the outcome `skipped`, when the node steps past an event too large to send, and `sync ack` with the outcome `ok`, when the owner acknowledges that skip ([FEDERATION.md](FEDERATION.md#an-event-that-is-too-large-to-send)).
 
 The database stores only SHA-256 hashes of those secrets. The authorization code is not a column. The server mints it in memory on the first poll after `another oauth approve`, after checking the one-time redirect token from the browser URL (also stored only as a hash), and puts it in that one redirect. A later poll does not return it again.
 

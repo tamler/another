@@ -301,7 +301,7 @@ fn usage(message: String) -> anyhow::Error {
 }
 
 /// An owner action needs a terminal on standard input and standard error.
-fn owner_terminal() -> anyhow::Result<()> {
+pub(crate) fn owner_terminal() -> anyhow::Result<()> {
     if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
         return Ok(());
     }
@@ -320,7 +320,7 @@ fn safe_lines(text: &str) -> String {
 }
 
 /// Print what is about to happen and proceed only on a typed `yes` or `y`.
-fn owner_confirm(what: &str) -> anyhow::Result<()> {
+pub(crate) fn owner_confirm(what: &str) -> anyhow::Result<()> {
     let mut err = std::io::stderr();
     writeln!(err, "{}", safe_lines(what))?;
     write!(err, "Type yes to confirm: ")?;

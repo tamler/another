@@ -88,7 +88,8 @@ fn sync(hub: &Node, spoke: &Node) {
             2000,
             usize::MAX,
         )
-        .unwrap();
+        .unwrap()
+        .0;
     let r = spoke
         .store
         .ingest(hub.store.node_id(), &page.events, &page.nodes)
@@ -422,15 +423,15 @@ fn a_push_batch_is_closed_at_the_byte_budget() {
         PUSH_ENVELOPE_BYTES - 1 + all[..k].iter().map(|e| e.wire_bytes() + 1).sum::<usize>()
     );
 
-    let (at, high) = a.store.outbound_events_within(0, 500, body).unwrap();
+    let (at, high, _) = a.store.outbound_events_within(0, 500, body).unwrap();
     assert_eq!(ids(&at), ids(&all[..k]));
     assert_eq!(high, all[k - 1].seq);
 
-    let (under, high) = a.store.outbound_events_within(0, 500, body - 1).unwrap();
+    let (under, high, _) = a.store.outbound_events_within(0, 500, body - 1).unwrap();
     assert_eq!(ids(&under), ids(&all[..k - 1]));
     assert_eq!(high, all[k - 2].seq);
     // The event that did not fit opens the next batch.
-    let (next, _) = a.store.outbound_events_within(high, 500, body - 1).unwrap();
+    let (next, _, _) = a.store.outbound_events_within(high, 500, body - 1).unwrap();
     assert_eq!(next[0].event_id, all[k - 1].event_id);
 
     // No budget is too small for one event, and walking the log one event at a time gives
@@ -438,7 +439,7 @@ fn a_push_batch_is_closed_at_the_byte_budget() {
     let mut cursor = 0;
     let mut walked = Vec::new();
     loop {
-        let (batch, high) = a.store.outbound_events_within(cursor, 500, 1).unwrap();
+        let (batch, high, _) = a.store.outbound_events_within(cursor, 500, 1).unwrap();
         if high == cursor {
             break;
         }
@@ -474,7 +475,8 @@ fn a_pull_page_is_closed_at_the_byte_budget() {
     let all = hub
         .store
         .pull_page(peer, 0, &none, 500, usize::MAX)
-        .unwrap();
+        .unwrap()
+        .0;
     assert!(!all.more);
     let k = all.events.len() - 2;
     // The size the hub counts: the body with the widest cursor and `more` it could carry.
@@ -488,7 +490,7 @@ fn a_pull_page_is_closed_at_the_byte_budget() {
     .unwrap()
     .len();
 
-    let at = hub.store.pull_page(peer, 0, &none, 500, counted).unwrap();
+    let at = hub.store.pull_page(peer, 0, &none, 500, counted).unwrap().0;
     assert_eq!(at.events.len(), k);
     assert!(at.more);
     assert_eq!(at.cursor, all.events[k - 1].seq);
@@ -497,14 +499,16 @@ fn a_pull_page_is_closed_at_the_byte_budget() {
     let under = hub
         .store
         .pull_page(peer, 0, &none, 500, counted - 1)
-        .unwrap();
+        .unwrap()
+        .0;
     assert_eq!(under.events.len(), k - 1);
     assert!(under.more);
     assert_eq!(under.cursor, all.events[k - 2].seq);
     let next = hub
         .store
         .pull_page(peer, under.cursor, &none, 500, counted - 1)
-        .unwrap();
+        .unwrap()
+        .0;
     assert_eq!(next.events[0].event_id, all.events[k - 1].event_id);
 
     // No budget is too small for one event, and paging one event at a time gives every
@@ -512,7 +516,7 @@ fn a_pull_page_is_closed_at_the_byte_budget() {
     let mut cursor = 0;
     let mut walked = Vec::new();
     loop {
-        let page = hub.store.pull_page(peer, cursor, &none, 500, 1).unwrap();
+        let page = hub.store.pull_page(peer, cursor, &none, 500, 1).unwrap().0;
         assert!(page.events.len() <= 1);
         walked.extend(page.events.iter().map(|e| e.event_id.clone()));
         if !page.more || page.cursor == cursor {
@@ -607,7 +611,7 @@ fn an_event_over_the_cap_already_in_a_spokes_log_is_sent_stored_and_relayed() {
     let mut cursor = 0;
     let mut batches: Vec<Vec<WireEvent>> = Vec::new();
     loop {
-        let (batch, high) = a
+        let (batch, high, _) = a
             .store
             .outbound_events_within(cursor, 500, 1024 * 1024)
             .unwrap();
@@ -661,12 +665,11 @@ fn an_event_over_the_cap_already_in_a_spokes_log_is_sent_stored_and_relayed() {
     }
 }
 
-/// What still cannot be sent is an event that does not fit the transport even alone: a
-/// spoke's own event that would make a push over the 8 MiB a hub reads. The events before
-/// it go, then the batch fails with a message that names the event, says that retrying
-/// will not help and that the owner decides.
+/// An event that does not fit the transport even alone, a spoke's own event that would make
+/// a push over the 8 MiB a hub reads, is stepped past (D-next): under each budget the scan
+/// returns it as stepped past, never as an event to send, and returns the events after it.
 #[test]
-fn a_spokes_event_over_the_push_limit_is_named_and_blocks() {
+fn a_spokes_event_over_the_push_limit_is_stepped_past_and_returned() {
     let hub = node("hub");
     let a = node("spokea");
     pair(&hub, &a);
@@ -674,34 +677,54 @@ fn a_spokes_event_over_the_push_limit_is_named_and_blocks() {
     register(&a.store, "wordy");
     let big = grow_last(&a, "agent.registered", "description", 9 * 1024 * 1024);
     register(&a.store, "after");
+    let after_big: Vec<String> = outbound(&a)
+        .into_iter()
+        .filter(|e| e.seq > big.seq)
+        .map(|e| e.event_id)
+        .collect();
+    assert!(!after_big.is_empty());
 
-    let (first, high) = a.store.outbound_events_within(0, 500, usize::MAX).unwrap();
-    assert!(!first.is_empty());
-    assert!(first.iter().all(|e| e.event_id != big.event_id));
-    assert_eq!(high, big.seq - 1);
     for budget in [1, PUSH_BATCH_BUDGET_BYTES, usize::MAX] {
-        let err = a
-            .store
-            .outbound_events_within(high, 500, budget)
-            .unwrap_err();
-        assert!(matches!(err, Error::Conflict(_)), "{err:?}");
-        assert_eq!(
-            err.to_string(),
-            format!(
-                "event {} (agent.registered, {} bytes on the wire) in this node's log is \
-                 larger than a hub reads in one push (8388608 bytes), so it cannot be sent \
-                 and the events after it wait behind it; retrying will not help; the owner \
-                 must decide whether it is skipped or keeps blocking (docs/FEDERATION.md, \
-                 \"If a sync reports an event that cannot be sent\")",
-                big.event_id,
-                big.wire_bytes()
-            )
-        );
+        let mut cursor = 0;
+        let mut sent = Vec::new();
+        let mut stepped_past = Vec::new();
+        loop {
+            let (batch, high, skipped) =
+                a.store.outbound_events_within(cursor, 500, budget).unwrap();
+            if high == cursor {
+                break;
+            }
+            sent.extend(batch.into_iter().map(|e| e.event_id));
+            stepped_past.extend(skipped);
+            cursor = high;
+        }
+        assert!(!sent.contains(&big.event_id), "budget {budget}");
+        for id in &after_big {
+            assert!(sent.contains(id), "budget {budget}: {id} was not returned");
+        }
+        assert_eq!(stepped_past.len(), 1, "budget {budget}");
+        let s = &stepped_past[0];
+        assert_eq!(s.event_id, big.event_id);
+        assert_eq!(s.event_node, a.store.node_id());
+        assert_eq!(s.event_kind, "agent.registered");
+        assert_eq!(s.bytes, big.wire_bytes());
+        assert_eq!(s.about.as_deref(), Some("agent wordy"));
+        assert_eq!((s.route.as_str(), s.route_nodes.len()), ("directory", 0));
     }
+    // The scan is a read: it wrote no marker.
+    let markers: i64 = Connection::open(a.db())
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind = 'sync.skipped'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(markers, 0);
 }
 
 /// The edge of what a push carries: an event whose push body is exactly the limit is sent,
-/// one byte more is not.
+/// one byte more is stepped past and not returned as an event.
 #[test]
 fn an_event_exactly_at_the_push_limit_is_sent() {
     let hub = node("hub");
@@ -719,25 +742,28 @@ fn an_event_exactly_at_the_push_limit_is_sent() {
     })
     .unwrap();
     assert_eq!(body.len(), PUSH_BODY_LIMIT_BYTES);
-    grow_last(&a, "agent.registered", "description", fits + 1);
-    let mut cursor = 0;
-    let err = loop {
-        match a.store.outbound_events_within(cursor, 500, usize::MAX) {
-            Ok((_, high)) => cursor = high,
-            Err(e) => break e,
-        }
-    };
-    assert!(err
-        .to_string()
-        .contains("larger than a hub reads in one push"));
+    let over = grow_last(&a, "agent.registered", "description", fits + 1);
+    assert_eq!(
+        over.wire_bytes() + PUSH_ENVELOPE_BYTES,
+        PUSH_BODY_LIMIT_BYTES + 1
+    );
+    let (events, high, skipped) = a
+        .store
+        .outbound_events_within(0, 10_000, usize::MAX)
+        .unwrap();
+    assert!(events.iter().all(|e| e.event_id != over.event_id));
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].event_id, over.event_id);
+    assert_eq!(skipped[0].bytes, over.wire_bytes());
+    assert!(high >= over.seq);
 }
 
 /// The same on a hub. An event of 12 MiB in the hub's own log, larger than the page budget
 /// and than anything a push carries, is sent to a spoke in a page of its own. One that
-/// would make an answer over the 32 MiB a spoke reads is not: the page before it is
-/// closed, and the next pull fails with the message that names it.
+/// would make an answer over the 32 MiB a spoke reads is not: the page steps past it
+/// (D-next), has `more` set so the spoke asks again, and carries the event after it.
 #[test]
-fn a_hubs_event_travels_alone_up_to_what_a_spoke_reads_and_is_named_beyond() {
+fn a_hubs_event_travels_alone_up_to_what_a_spoke_reads_and_is_stepped_past_beyond() {
     let hub = node("hub");
     let c = node("spokec");
     pair(&hub, &c);
@@ -777,27 +803,19 @@ fn a_hubs_event_travels_alone_up_to_what_a_spoke_reads_and_is_named_beyond() {
     register(&hub.store, "huge");
     let huge = grow_last(&hub, "agent.registered", "description", 33 * 1024 * 1024);
     register(&hub.store, "last");
-    let page = hub.store.pull_for_from(peer, cursor, &none, 500).unwrap();
-    assert!(page.events.iter().all(|e| e.event_id != huge.event_id));
-    assert!(page.more);
-    assert_eq!(page.cursor, huge.seq - 1);
-    let err = hub
+    let last = grow_last(&hub, "agent.registered", "description", 0);
+    let (page, skipped) = hub
         .store
-        .pull_for_from(peer, page.cursor, &none, 500)
-        .unwrap_err();
-    assert!(matches!(err, Error::Conflict(_)), "{err:?}");
-    assert_eq!(
-        err.to_string(),
-        format!(
-            "event {} (agent.registered, {} bytes on the wire) in the hub's log is larger \
-             than a spoke reads in one pull answer (33554432 bytes), so it cannot be sent and \
-             the events after it wait behind it; retrying will not help; the owner must \
-             decide whether it is skipped or keeps blocking (docs/FEDERATION.md, \"If a sync \
-             reports an event that cannot be sent\")",
-            huge.event_id,
-            huge.wire_bytes()
-        )
-    );
+        .pull_page(peer, cursor, &none, 500, PULL_PAGE_BUDGET_BYTES)
+        .unwrap();
+    assert!(page.events.iter().all(|e| e.event_id != huge.event_id));
+    assert!(page.events.iter().any(|e| e.event_id == last.event_id));
+    assert!(page.more);
+    assert!(page.cursor >= last.seq);
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].event_id, huge.event_id);
+    assert_eq!(skipped[0].bytes, huge.wire_bytes());
+    assert_eq!(skipped[0].about.as_deref(), Some("agent huge"));
 }
 
 /// Whatever arrived by push can be relayed: the largest event a push carries, alone in a

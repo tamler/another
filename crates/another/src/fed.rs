@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use another_core::{
     AuditRecord, IngestReport, PairRequest, PairResponse, Peer, PullAnchors, PullResponse,
-    PushRequest, Rejected, Store,
+    PushRequest, Rejected, Skip, Store,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use axum::body::Bytes;
@@ -329,7 +329,8 @@ async fn pull(
     }
     let (s, n) = (store.clone(), node.clone());
     let budget = limits.pull_budget;
-    match blocking(move || s.pull_page(&n, after, &anchors, limit, budget)).await {
+    // The markers for the events this page steps past are written before it is answered.
+    match blocking(move || s.pull_answer(&n, after, &anchors, limit, budget)).await {
         Ok(resp) => {
             let detail = format!("after {after}: {} event(s)", resp.events.len());
             record(&store, Some(node), "GET /fed/pull", "ok", detail).await;
@@ -513,6 +514,9 @@ pub struct SyncReport {
     /// The hub's log no longer matched this spoke's cursors (it was restored from an older
     /// copy, or replaced), so this sync started over from zero in both directions.
     pub hub_reset: bool,
+    /// The unacknowledged skips of this node's log and of its hub's log: events too large
+    /// to send, reported after every sync until acknowledged.
+    pub skipped: Vec<Skip>,
 }
 
 /// An event id that can go in a query string as is. Ids this software makes are ULIDs;
@@ -564,6 +568,7 @@ pub fn sync_with(store: &Store, limits: &Limits) -> Result<SyncReport> {
         let received = last.received.as_ref().map(|(id, seq)| (id.as_str(), *seq));
         store.record_resync(&hub, received, last.pushed.as_deref())?;
     }
+    report.skipped = store.unacknowledged_skips()?;
     Ok(report)
 }
 
@@ -605,10 +610,13 @@ fn sync_pass(
     // connection on the unread body: the batch is then cut to half as many events, down to
     // one, for the rest of this pass. From 500 that is at most eight cuts, so a network
     // that is simply failing costs at most nine failed requests before its error is given.
+    // An own event that does not fit a push even alone is stepped past: its marker is
+    // written with the cursor, and the next turn of this loop pushes the marker.
     let mut batch = BATCH;
     loop {
         let (cursor, _) = store.push_cursor(hub)?;
-        let (events, high) = store.outbound_events_within(cursor, batch, limits.push_budget)?;
+        let (events, high, skipped) =
+            store.outbound_events_within(cursor, batch, limits.push_budget)?;
         if high == cursor {
             break;
         }
@@ -654,7 +662,7 @@ fn sync_pass(
                 .find(|id| !r.rejected.iter().any(|x| &x.event_id == id));
             report.push_rejected.extend(r.rejected);
         }
-        store.advance_push(hub, high, accepted.as_deref())?;
+        store.advance_push_past(hub, high, accepted.as_deref(), &skipped)?;
         if accepted.is_some() {
             last.pushed = accepted;
         }
@@ -699,7 +707,8 @@ fn sync_pass(
                 "the next event the hub at {url} holds for this node, after its sequence \
                  number {cursor}, is by itself larger than this node reads in one answer; \
                  retrying will not help; the hub runs an older build or holds an event over \
-                 the size limit, and its owner must decide what happens to that event ({e})"
+                 the size limit; a hub on a build with D-next steps past such an event and \
+                 reports it, so update the hub ({e})"
             ),
         };
         anchors = None;

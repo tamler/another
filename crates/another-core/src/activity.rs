@@ -28,10 +28,12 @@ pub enum ActivityKind {
     System,
     Federation,
     Queue,
+    /// Events a sync skipped as too large to send, and their acknowledgements.
+    Sync,
 }
 
 impl ActivityKind {
-    pub const ALL: [ActivityKind; 8] = [
+    pub const ALL: [ActivityKind; 9] = [
         ActivityKind::Mail,
         ActivityKind::Request,
         ActivityKind::Hold,
@@ -40,6 +42,7 @@ impl ActivityKind {
         ActivityKind::System,
         ActivityKind::Federation,
         ActivityKind::Queue,
+        ActivityKind::Sync,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -52,6 +55,7 @@ impl ActivityKind {
             ActivityKind::System => "system",
             ActivityKind::Federation => "federation",
             ActivityKind::Queue => "queue",
+            ActivityKind::Sync => "sync",
         }
     }
 
@@ -63,8 +67,9 @@ impl ActivityKind {
             "hold" => ActivityKind::Hold,
             "resource" | "orphan" => ActivityKind::Resource,
             "session" | "agent" => ActivityKind::Session,
-            "peer" | "sync" | "pair" | "federation" => ActivityKind::Federation,
+            "peer" | "pair" | "federation" => ActivityKind::Federation,
             "queue" => ActivityKind::Queue,
+            "sync" => ActivityKind::Sync,
             _ => ActivityKind::System,
         }
     }
@@ -78,7 +83,7 @@ impl std::str::FromStr for ActivityKind {
             .find(|k| k.as_str() == s)
             .ok_or_else(|| {
                 Error::Invalid(format!(
-                    "unknown activity kind {s:?}; expected mail, request, hold, resource, session, system, federation or queue"
+                    "unknown activity kind {s:?}; expected mail, request, hold, resource, session, system, federation, queue or sync"
                 ))
             })
     }
@@ -666,6 +671,34 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
                 _ => format!("{actor} changed a queue setting"),
             };
             (text, json!({}))
+        }
+        // A peer wrote these values: each is shown as one bounded line (D97).
+        "sync.skipped" => {
+            let shown = |k: &str, max: usize| crate::mail::display_line(&s(k), max);
+            let mut text = format!(
+                "skipped event {} ({}, {} bytes, written by {}): too large to send",
+                shown("event_id", 40),
+                shown("event_kind", 80),
+                p.get("bytes").and_then(Value::as_u64).unwrap_or_default(),
+                shown("event_actor", 80),
+            );
+            if p.get("about").and_then(Value::as_str).is_some() {
+                text.push_str(&format!("; {}", shown("about", 120)));
+            }
+            (
+                text,
+                json!({ "event_id": shown("event_id", 128), "event_node": shown("event_node", 128) }),
+            )
+        }
+        "sync.skip_acked" => {
+            let shown = |max: usize| crate::mail::display_line(&s("event_id"), max);
+            (
+                format!(
+                    "acknowledged the skip of event {}; it stays in the log and is not sent",
+                    shown(40)
+                ),
+                json!({ "event_id": shown(128) }),
+            )
         }
         // A queue kind this build does not know must never fall through to the payload.
         other if other.starts_with("queue.") => (format!("{actor}: {other}"), json!({})),
