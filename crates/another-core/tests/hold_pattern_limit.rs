@@ -113,6 +113,31 @@ impl Node {
             .unwrap();
         assert_eq!(n, 1);
     }
+
+    /// `copies` more rows like the stored hold `like`, each with `pattern`: what the same
+    /// number of that node's events would have stored, without signing each one.
+    fn plant_copies(&self, like: &str, copies: usize, pattern: &str) {
+        let mut db = self.sql();
+        let tx = db.transaction().unwrap();
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO holds (hold_id, node_id, project_id, agent_id, pattern, exclusive,
+                       reason, ttl_seconds, created_at, renewed_at, expires_at)
+                     SELECT ?2, node_id, project_id, agent_id, ?3, exclusive, reason,
+                       ttl_seconds, created_at, renewed_at, expires_at
+                     FROM holds WHERE hold_id = ?1",
+                )
+                .unwrap();
+            for i in 0..copies {
+                let n = insert
+                    .execute((like, format!("{like}-copy-{i}"), pattern))
+                    .unwrap();
+                assert_eq!(n, 1);
+            }
+        }
+        tx.commit().unwrap();
+    }
 }
 
 fn pair(hub: &Node, spoke: &Node) {
@@ -699,4 +724,146 @@ fn a_pattern_inside_the_limit_cannot_make_a_comparison_slow() {
             );
         }
     }
+}
+
+/// The review's cheap hostile shape: 86 bytes, fourteen alternations and four classes. It
+/// compiles, so it is applied, and one comparison with it used to take 0.2 s in a release
+/// build.
+fn cheap_hostile() -> String {
+    format!("{}[!a][!b][!c][!d]", "{a,b}".repeat(14))
+}
+
+fn not_compared(report: &HoldReport) -> Value {
+    serde_json::to_value(report).unwrap()["not_compared"].clone()
+}
+
+/// A wide bound for one command, in a debug build on a loaded CI machine. The commands
+/// below take well under a second here; before this bound existed the first of them took
+/// 292 seconds in a release build with 1,000 such holds and did not finish in 600 with
+/// 10,000.
+const COMMAND_BOUND: Duration = Duration::from_secs(20);
+
+fn timed<T>(what: &str, f: impl FnOnce() -> T) -> T {
+    let start = Instant::now();
+    let out = f();
+    let took = start.elapsed();
+    assert!(took < COMMAND_BOUND, "{what} took {took:?}");
+    out
+}
+
+/// Review R1 of Q30, P1-1: a peer's many cheap holds. Each one compiles and is applied.
+/// Comparing with them is best effort within one budget for the whole command, so `hold
+/// acquire` answers at once, lists none of them one by one and says in one count how many
+/// holds of which node were not compared. The check, the edit guard and the dashboard
+/// answer at once too, and the guard still stops an edit of a file another agent holds.
+#[test]
+fn a_peers_many_cheap_holds_cost_one_count_and_no_time() {
+    for holds in [1_000usize, 10_000] {
+        let fed = Fed::new();
+        let held = fed.hub.acquire("bob", &fed.shop, &["src/held.rs"]).unwrap();
+        assert_eq!(held.granted.len(), 1);
+        let (_, report) = fed.forge_hold("cheap", &cheap_hostile());
+        assert!(not_applied(&report).is_empty(), "it compiles: {report:?}");
+        assert_eq!(fed.hub.hold_rows("cheap"), 1);
+        fed.hub.plant_copies("cheap", holds - 1, &cheap_hostile());
+
+        let got = timed("hold acquire", || {
+            fed.hub.acquire("alice", &fed.shop, &["src/a.rs"]).unwrap()
+        });
+        assert_eq!(got.granted.len(), 1, "a foreign hold never blocks");
+        assert!(got.warnings.is_empty(), "{} warnings", got.warnings.len());
+        assert_eq!(
+            not_compared(&got),
+            json!([{ "node": "mallory", "holds": holds }]),
+            "one count for all of them"
+        );
+        assert!(serde_json::to_string(&got).unwrap().len() < 1_000);
+
+        timed("hold check", || {
+            fed.hub
+                .store
+                .check_holds("alice", &fed.shop, &["src/*.rs".to_string()], true)
+                .unwrap()
+        });
+        let guard = timed("the edit guard", || {
+            fed.hub
+                .store
+                .guard_edit("alice", &fed.shop, &["src/b.rs".to_string()], "editing")
+                .unwrap()
+        });
+        assert_eq!(guard.held.len(), 1, "{guard:?}");
+        let stopped = timed("the edit guard on a held file", || {
+            fed.hub
+                .store
+                .guard_edit("alice", &fed.shop, &["src/held.rs".to_string()], "editing")
+                .unwrap()
+        });
+        assert_eq!(stopped.conflicts.len(), 1, "{stopped:?}");
+        let snap = timed("the dashboard snapshot", || {
+            fed.hub
+                .store
+                .dashboard_snapshot(DashboardView::LOCAL)
+                .unwrap()
+        });
+        let counts = serde_json::to_value(&snap.counts).unwrap();
+        assert_eq!(counts["remote_not_compared"], holds);
+        assert_eq!(counts["remote_warnings"], 0);
+        // Another project is not touched by any of it.
+        let other = fed.hub.acquire("carol", &fed.api, &["src/a.rs"]).unwrap();
+        assert_eq!(not_compared(&other), Value::Null);
+    }
+}
+
+/// The budget is spent on what a peer sent, not on honest holds: a hold on a short plain
+/// path costs 2 of the 40,000 (one to read it, one to compare it), so thousands of them
+/// are compared and the one that overlaps is found. Past the budget the rest are counted,
+/// never silently dropped: of 30,000 such holds 19,999 are compared.
+#[test]
+fn plain_holds_of_a_peer_are_compared_by_the_thousand() {
+    let fed = Fed::new();
+    let (_, report) = fed.forge_hold("plain", "src/other.rs");
+    assert_eq!(report.accepted, 1);
+    fed.hub.plant_copies("plain", 2_998, "src/other.rs");
+    fed.forge_hold("mine", "src/a.rs");
+    let got = timed("hold acquire", || {
+        fed.hub.acquire("alice", &fed.shop, &["src/a.rs"]).unwrap()
+    });
+    assert_eq!(got.warnings.len(), 1, "{:?}", got.warnings.len());
+    assert_eq!(got.warnings[0].held.hold_id, "mine");
+    assert_eq!(not_compared(&got), Value::Null, "all 3,000 were compared");
+
+    fed.hub.plant_copies("mine", 27_000, "src/unrelated.rs");
+    let got = timed("hold acquire", || {
+        fed.hub.acquire("alice", &fed.shop, &["src/b.rs"]).unwrap()
+    });
+    assert_eq!(
+        not_compared(&got),
+        json!([{ "node": "mallory", "holds": 10_001 }]),
+        "30,000 holds, 19,999 compared"
+    );
+}
+
+/// The warnings themselves are bounded: ten overlapping holds are listed and the rest are
+/// one number, where 1,000 overlapping holds used to be 465 KB of JSON.
+#[test]
+fn overlapping_holds_of_a_peer_are_listed_up_to_ten_and_then_counted() {
+    let fed = Fed::new();
+    fed.forge_hold("same", "src/a.rs");
+    fed.hub.plant_copies("same", 999, "src/a.rs");
+    let got = fed.hub.acquire("alice", &fed.shop, &["src/a.rs"]).unwrap();
+    assert_eq!(got.granted.len(), 1);
+    assert_eq!(got.warnings.len(), 10);
+    let json = serde_json::to_value(&got).unwrap();
+    assert_eq!(json["warnings_more"], 990);
+    assert_eq!(json["not_compared"], Value::Null);
+    let size = json.to_string().len();
+    assert!(size < 6_000, "{size} bytes");
+    let snap = fed
+        .hub
+        .store
+        .dashboard_snapshot(DashboardView::LOCAL)
+        .unwrap();
+    assert_eq!(snap.counts.remote_warnings, 1_000);
+    let listed: usize = snap.holds.iter().map(|h| h.remote_warnings.len()).sum();
+    assert_eq!(listed, 10);
 }

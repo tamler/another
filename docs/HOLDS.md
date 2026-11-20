@@ -170,15 +170,26 @@ That hold then applies to that checkout only, not to its other worktrees or clon
 
 ## Pattern size, and a pattern that cannot be read
 
-A hold pattern is at most 4,096 bytes, the longest path Linux takes in one call (macOS stops at 1,024), so every real path fits. `another hold acquire`, `another hold check`, `another hold release <path>` and the MCP tool `hold_paths` refuse a longer one and write nothing:
+A hold pattern is at most 4,096 bytes, the longest path Linux takes in one call (macOS stops at 1,024), so every real path fits. `another hold acquire`, `another hold check` and the MCP tool `hold_paths` refuse a longer one and write nothing:
 
 ```text
 another: hold pattern is 4097 bytes; the limit is 4096
 ```
 
+`another hold release <path>` refuses a glob over the limit with the same words. A plain path of any length is looked up as text, so a hold the edit guard took on a long path can still be released by path; when nothing matches it answers `nothing of yours is held at <path>` and exits 0.
+
 The edit guard's own holds are not held to the limit. They are file names with `[`, `]`, `{`, `}`, `*` and `?` escaped (three bytes for each), compared as text and never compiled as a glob, so a long path cannot make an edit fail.
 
-The same limit applies to a hold another node sends ([FEDERATION.md](FEDERATION.md#model)). No command fails or stops because of a pattern, whoever wrote it. Comparing two patterns also has a bounded cost: a pattern that would need too much work to compare counts as overlapping.
+The same limit applies to a hold another node sends ([FEDERATION.md](FEDERATION.md#model)). No pattern makes a command panic. What a pattern can cost is bounded as follows; the times are from a release build on the development machine.
+
+- **One comparison** of a glob with a path takes at most 2,000 steps, about 16 ms at the very most. The widest honest pattern measured takes 493 steps and the patterns in this repository's tests at most 37. Between two holds of this node, a comparison that runs out counts as an overlap, so the result is a conflict that a retry or a narrower pattern clears, never a missed one. For an agent's own hold it counts as "does not cover", so the edit guard takes a narrow hold on the edited file.
+- **Holds of other nodes** never block, so comparing with them is best effort within one budget for the whole command: about 40 ms of estimated work for `another hold acquire`, the MCP tool and the dashboard snapshot, whatever a peer sent. It runs after the command's own write has been committed, so it does not keep the database locked. Measured against 10,000 holds of each costly shape tried, `hold acquire` took 50 ms at most in all. A hold on a short plain path costs about two thousandths of a millisecond of that budget, so tens of thousands of ordinary holds are compared. When the budget is spent the remaining holds are not compared, and the command says so in one line. At most ten overlapping holds are listed one by one; the rest are a count.
+
+```text
+warning: 1000 hold(s) on other nodes were not compared with yours (1000 from vps): comparing with other nodes' holds stops at a fixed amount of work, so these may overlap (holds are node-local; they do not block you)
+```
+
+- **Not bounded:** how many holds a peer may send. `hold check` and the edit guard never read another node's holds, but expiring holds and listing them read every stored hold: with 10,000 holds of 4 KiB each from a peer, every command that takes or checks a hold took about 9 ms longer, and the dashboard snapshot about 120 ms in all. A comparison between two holds of this node is bounded one at a time, not in total: a project with many costly globs held by local agents costs up to 16 ms for each.
 
 A row in the database can still hold a pattern this build cannot read: a glob longer than the limit, or one that does not compile, written by an earlier build or by hand. Such a hold counts as overlapping every path in the project it is in, and nothing outside that project. For a hold on this node, `another hold acquire`, `another hold check` and the edit guard refuse what it overlaps, name the holder and the node, and say how to clear it. The pattern is shown as its first 40 characters and its length, never whole:
 

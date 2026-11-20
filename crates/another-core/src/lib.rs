@@ -52,8 +52,9 @@ pub use federation::{
 };
 pub use holds::{
     is_repo_wide, patterns_overlap, AcquireHolds, EditGuard, HeartbeatReport, Hold, HoldConflict,
-    HoldFilter, HoldReport, SessionInfo, SessionPhase, SweepReport, DEFAULT_HOLD_TTL_SECONDS,
-    MAX_HOLD_PATTERN_BYTES, MAX_HOLD_REASON_BYTES, MAX_HOLD_TTL_SECONDS, MIN_HOLD_TTL_SECONDS,
+    HoldFilter, HoldReport, NotCompared, SessionInfo, SessionPhase, SweepReport,
+    DEFAULT_HOLD_TTL_SECONDS, MAX_HOLD_PATTERN_BYTES, MAX_HOLD_REASON_BYTES, MAX_HOLD_TTL_SECONDS,
+    MIN_HOLD_TTL_SECONDS,
 };
 pub use identity::{
     Agent, Program, Project, RegisterAgent, MAX_AGENT_DESCRIPTION_BYTES, MAX_AGENT_MODEL_BYTES,

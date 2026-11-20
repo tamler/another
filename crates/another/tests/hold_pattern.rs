@@ -254,7 +254,9 @@ fn a_pattern_over_the_limit_is_refused_by_every_hold_command_and_the_hook_still_
 mod over_http {
     //! The finding end to end: a hub and two spokes over real loopback HTTP.
 
+    use std::io::Write;
     use std::net::SocketAddr;
+    use std::path::Path;
     use std::process::{Command, Output, Stdio};
 
     use another::fed;
@@ -291,6 +293,85 @@ mod over_http {
             })
             .unwrap();
         shop
+    }
+
+    /// A hub served over loopback HTTP, as `another serve --federation` serves it, until the
+    /// value is dropped.
+    struct Hub {
+        node: Node,
+        url: String,
+        ct: CancellationToken,
+        _rt: tokio::runtime::Runtime,
+    }
+
+    impl Drop for Hub {
+        fn drop(&mut self) {
+            self.ct.cancel();
+        }
+    }
+
+    impl Hub {
+        fn join(&self, spoke: &Node) {
+            let code = self
+                .node
+                .store
+                .create_invite(&self.url, &Perm::ALL, 3600)
+                .unwrap();
+            fed::join(&spoke.store, &code).unwrap();
+        }
+    }
+
+    fn start_hub() -> Hub {
+        let node = node("hub");
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let ct = CancellationToken::new();
+        let listener = rt
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let opts = HttpOptions {
+            federation: true,
+            bound_port: addr.port(),
+            ..Default::default()
+        };
+        let app = http_router(node.store.clone(), ct.clone(), &opts);
+        let stop = ct.clone();
+        rt.spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(async move { stop.cancelled_owned().await })
+            .await
+            .unwrap();
+        });
+        Hub {
+            node,
+            url: format!("http://{addr}"),
+            ct,
+            _rt: rt,
+        }
+    }
+
+    /// Mallory's agent `mal` takes a real hold on `src/x.rs` in its own project `shop`.
+    fn mallory_holds_a_file(mallory: &Node) {
+        let project = in_shop(mallory, "mal");
+        mallory
+            .store
+            .acquire_holds(AcquireHolds {
+                agent: "mal".into(),
+                project,
+                paths: vec!["src/x.rs".into()],
+                ttl_seconds: None,
+                exclusive: true,
+                reason: None,
+                repo_wide: false,
+            })
+            .unwrap();
     }
 
     /// Rewrite the pattern of the node's newest `hold.acquired` in its own log, signed with
@@ -348,55 +429,13 @@ mod over_http {
     /// the row, and `another hold acquire` in that project works.
     #[test]
     fn a_peers_seven_megabyte_pattern_is_reported_by_sync_and_hold_acquire_works() {
-        let hub = node("hub");
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
-        let ct = CancellationToken::new();
-        let listener = rt
-            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-            .unwrap();
-        let addr = listener.local_addr().unwrap();
-        let opts = HttpOptions {
-            federation: true,
-            bound_port: addr.port(),
-            ..Default::default()
-        };
-        let app = http_router(hub.store.clone(), ct.clone(), &opts);
-        let stop = ct.clone();
-        rt.spawn(async move {
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .with_graceful_shutdown(async move { stop.cancelled_owned().await })
-            .await
-            .unwrap();
-        });
-        let url = format!("http://{addr}");
-
+        let hub = start_hub();
         let mallory = node("mallory");
         let victim = node("victim");
-        for spoke in [&mallory, &victim] {
-            let code = hub.store.create_invite(&url, &Perm::ALL, 3600).unwrap();
-            fed::join(&spoke.store, &code).unwrap();
-        }
-        let mal_shop = in_shop(&mallory, "mal");
+        hub.join(&mallory);
+        hub.join(&victim);
+        mallory_holds_a_file(&mallory);
         let shop = in_shop(&victim, "alice");
-        mallory
-            .store
-            .acquire_holds(AcquireHolds {
-                agent: "mal".into(),
-                project: mal_shop,
-                paths: vec!["src/x.rs".into()],
-                ttl_seconds: None,
-                exclusive: true,
-                reason: None,
-                repo_wide: false,
-            })
-            .unwrap();
         let pattern = format!("src/{}", "*a".repeat(3_500_000));
         let event_id = grow_last_hold(&mallory, &pattern);
         let pushed = fed::sync(&mallory.store).unwrap();
@@ -456,6 +495,152 @@ mod over_http {
                 .any(|l| l.contains("refused") && l.contains("federation hold pattern")),
             "{audit}"
         );
-        ct.cancel();
+    }
+
+    /// One hook run for `client` in the victim's checkout, as the client calls it.
+    fn hook(victim: &Node, repo: &Path, event: &str, client: &str, tool: Option<&str>) -> Output {
+        let mut stdin = json!({ "session_id": format!("{client}-s1"), "cwd": repo });
+        if let Some(file) = tool {
+            stdin["hook_event_name"] = json!("PreToolUse");
+            stdin["tool_name"] = json!("Edit");
+            stdin["tool_input"] = json!({ "file_path": repo.join(file) });
+        }
+        let mut child = Command::new(env!("CARGO_BIN_EXE_another"))
+            .args(["hook", "run", event, "--client", client])
+            .current_dir(repo)
+            .env("HOME", victim.dir.path().join("home"))
+            .env("ANOTHER_HOME", victim.dir.path())
+            .env_remove("ANOTHER_AGENT")
+            .env_remove("GROK_HOOK_EVENT")
+            .env_remove("ANOTHER_LOG")
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("TMUX_PANE")
+            .env_remove("CMUX_SURFACE_ID")
+            .env_remove("TERM_PROGRAM")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.to_string().as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    }
+
+    /// Review R1 of Q30, P1-1, through the real binaries: a peer has 1,000 live holds with
+    /// an 86 byte glob in a project named like the victim's. `another hold acquire` there
+    /// used to compare all of them inside the write transaction, for minutes; every
+    /// pre-edit hook in that time gave up on the locked database and let its edit through,
+    /// one of a file another agent holds included. Now the hooks run while the acquire
+    /// does keep denying that edit, and the acquire ends at once with one count.
+    #[test]
+    fn a_hook_still_guards_while_hold_acquire_meets_a_thousand_cheap_peer_holds() {
+        let hub = start_hub();
+        let mallory = node("mallory");
+        let victim = node("victim");
+        hub.join(&mallory);
+        hub.join(&victim);
+        mallory_holds_a_file(&mallory);
+        fed::sync(&mallory.store).unwrap();
+
+        let repo = std::fs::canonicalize(victim.dir.path())
+            .unwrap()
+            .join("work")
+            .join("shop");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        for client in ["claude", "codex"] {
+            let out = hook(&victim, &repo, "session-start", client, None);
+            assert!(out.status.success(), "{}", text(&out.stderr));
+        }
+        let out = another(&victim, &["sync"]);
+        assert!(out.status.success(), "{}", text(&out.stderr));
+
+        // The peer's one real hold becomes 1,000 with the cheap hostile pattern, as 1,000
+        // of its events would have stored them (each compiles, so each is applied).
+        let cheap = format!("{}[!a][!b][!c][!d]", "{a,b}".repeat(14));
+        {
+            let mut db = Connection::open(victim.dir.path().join(DB_FILE)).unwrap();
+            let theirs: String = db
+                .query_row(
+                    "SELECT hold_id FROM holds
+                     WHERE node_id != (SELECT node_id FROM nodes WHERE is_local = 1)",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let tx = db.transaction().unwrap();
+            tx.execute(
+                "UPDATE holds SET pattern = ?2 WHERE hold_id = ?1",
+                params![theirs, cheap],
+            )
+            .unwrap();
+            for i in 1..1_000 {
+                tx.execute(
+                    "INSERT INTO holds (hold_id, node_id, project_id, agent_id, pattern, exclusive,
+                       reason, ttl_seconds, created_at, renewed_at, expires_at)
+                     SELECT ?2, node_id, project_id, agent_id, pattern, exclusive, reason,
+                       ttl_seconds, created_at, renewed_at, expires_at
+                     FROM holds WHERE hold_id = ?1",
+                    params![theirs, format!("{theirs}-copy-{i}")],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        // Codex holds src/b.rs; an edit of it by Claude is a denial.
+        let out = hook(&victim, &repo, "pre-edit", "codex", Some("src/b.rs"));
+        assert!(out.status.success() && out.stdout.is_empty(), "{out:?}");
+        let denied = |when: &str| {
+            let out = hook(&victim, &repo, "pre-edit", "claude", Some("src/b.rs"));
+            let answer = text(&out.stdout);
+            assert!(
+                out.status.success() && answer.contains("\"permissionDecision\":\"deny\""),
+                "{when}: the hook let an edit of a held file through (exit {:?}, stdout {answer:?})",
+                out.status.code()
+            );
+        };
+        denied("before the acquire");
+
+        let started = std::time::Instant::now();
+        let mut acquire = Command::new(env!("CARGO_BIN_EXE_another"))
+            .arg("--home")
+            .arg(victim.dir.path())
+            .args(["hold", "acquire", "--agent", "claude@shop", "--project"])
+            .arg(&repo)
+            .arg("src/a.rs")
+            .env_remove("ANOTHER_AGENT")
+            .env_remove("ANOTHER_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Hooks while it runs: at least three, and for as long as it does.
+        let mut runs = 0;
+        while runs < 3 || acquire.try_wait().unwrap().is_none() {
+            denied("during the acquire");
+            runs += 1;
+        }
+        let out = acquire.wait_with_output().unwrap();
+        let took = started.elapsed();
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        // A wide bound for a debug build on a loaded machine; it was 292 s in a release build.
+        assert!(took < std::time::Duration::from_secs(30), "took {took:?}");
+        let printed = text(&out.stdout);
+        assert!(
+            printed.lines().any(|l| l
+                == "warning: 1000 hold(s) on other nodes were not compared with yours (1000 from \
+                    mallory): comparing with other nodes' holds stops at a fixed amount of work, \
+                    so these may overlap (holds are node-local; they do not block you)"),
+            "{printed}"
+        );
+        assert_eq!(printed.matches("warning:").count(), 1, "{printed}");
+        denied("after the acquire");
     }
 }

@@ -254,6 +254,42 @@ pub fn hold_report(r: &HoldReport) -> String {
             w.path, w.held.pattern, w.held.agent
         );
     }
+    if r.warnings_more > 0 {
+        let _ = writeln!(
+            out,
+            "warning: {} more hold(s) on other nodes overlap and are not listed",
+            r.warnings_more
+        );
+    }
+    if !r.not_compared.is_empty() {
+        // One line however many holds and nodes there are: a peer chooses both.
+        let total: u64 = r.not_compared.iter().map(|n| u64::from(n.holds)).sum();
+        let mut from: Vec<String> = r
+            .not_compared
+            .iter()
+            .take(5)
+            .map(|n| {
+                format!(
+                    "{} from {}",
+                    n.holds,
+                    another_core::display_line(&n.node, 64)
+                )
+            })
+            .collect();
+        if r.not_compared.len() > 5 {
+            from.push(format!(
+                "the rest from {} more nodes",
+                r.not_compared.len() - 5
+            ));
+        }
+        let _ = writeln!(
+            out,
+            "warning: {total} hold(s) on other nodes were not compared with yours ({}): \
+             comparing with other nodes' holds stops at a fixed amount of work, so these may \
+             overlap (holds are node-local; they do not block you)",
+            from.join(", ")
+        );
+    }
     out
 }
 

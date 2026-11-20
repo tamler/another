@@ -80,8 +80,28 @@ pub struct HoldReport {
     pub granted: Vec<Hold>,
     pub conflicts: Vec<HoldConflict>,
     /// Overlapping holds on other nodes in a project with the same name. Holds are node-local,
-    /// so these never block; they flag a likely cross-machine clash.
+    /// so these never block; they flag a likely cross-machine clash. At most ten are listed.
     pub warnings: Vec<HoldConflict>,
+    /// Overlapping holds on other nodes that were found but are not listed in `warnings`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub warnings_more: u32,
+    /// Holds on other nodes that were not compared, by node: comparing with other nodes'
+    /// holds is best effort within a fixed budget per command, and a peer chooses how many
+    /// holds it sends and how costly their patterns are. They may overlap.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub not_compared: Vec<NotCompared>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// Holds of one other node that a command did not compare.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct NotCompared {
+    /// The node's name.
+    pub node: String,
+    pub holds: u32,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -353,8 +373,19 @@ pub(crate) fn hold_covers(held: &str, path: &str) -> bool {
     match literal_pattern(held) {
         Some(held) => covers(&held, &path),
         // An own glob that cannot be read covers nothing: the edit takes its own narrow
-        // hold instead of resting on one nobody can check.
-        None => held == "**" || (compile(held).is_ok() && glob_touches_literal(held, &path, false)),
+        // hold instead of resting on one nobody can check. One too costly to walk covers
+        // only what it matches as a whole, for the same reason.
+        None => {
+            held == "**"
+                || compile(held).is_ok_and(|whole| {
+                    let mut budget = WALK_BUDGET;
+                    match glob_walk(held, &path, false, &mut budget) {
+                        Touch::Yes => true,
+                        Touch::No => false,
+                        Touch::Unknown => whole.is_match(&path),
+                    }
+                })
+        }
     }
 }
 
@@ -375,21 +406,28 @@ fn covers(dir: &str, path: &str) -> bool {
 /// covers everything below it, so holding `src` overlaps `src/main.rs`. False positives
 /// are acceptable for advisory holds; false negatives are not.
 pub fn patterns_overlap(a: &str, b: &str) -> bool {
+    let mut budget = WALK_BUDGET;
+    overlap_within(a, b, &mut budget) != Touch::No
+}
+
+/// [`patterns_overlap`] within `budget` steps, with "ran out" as its own answer.
+fn overlap_within(a: &str, b: &str, budget: &mut usize) -> Touch {
+    let yes = |found: bool| if found { Touch::Yes } else { Touch::No };
     if a == b || a == "**" || b == "**" {
-        return true;
+        return Touch::Yes;
     }
     // Older auto holds stored filenames without escapes. Keep their exact spelling
     // protected while also interpreting any deliberate manual glob conservatively.
     if literal_pattern(a).as_deref() == Some(b) || literal_pattern(b).as_deref() == Some(a) {
-        return true;
+        return Touch::Yes;
     }
     match (literal_pattern(a), literal_pattern(b)) {
-        (Some(a), Some(b)) => covers(&a, &b) || covers(&b, &a),
-        (None, Some(b)) => glob_touches_literal(a, &b, true),
-        (Some(a), None) => glob_touches_literal(b, &a, true),
+        (Some(a), Some(b)) => yes(covers(&a, &b) || covers(&b, &a)),
+        (None, Some(b)) => glob_walk(a, &b, true, budget),
+        (Some(a), None) => glob_walk(b, &a, true, budget),
         (None, None) => {
             let (pa, pb) = (literal_prefix(a), literal_prefix(b));
-            pa.starts_with(pb) || pb.starts_with(pa)
+            yes(pa.starts_with(pb) || pb.starts_with(pa))
         }
     }
 }
@@ -583,11 +621,38 @@ fn first_alternation(pattern: &str) -> Option<(&str, Vec<String>, &str)> {
     Some((&pattern[..open_at], alternatives, &pattern[close_at + 1..]))
 }
 
-/// Steps one component walk may take. A comparison that runs past it counts as an
-/// overlap: a spurious conflict costs a retry, a missed one lets two agents edit one file.
-/// A realistic pattern takes a few dozen steps; only a pattern that branches at every
-/// component, such as `{**,x}` many times over, gets near this.
-const WALK_BUDGET: usize = 20_000;
+/// Steps one comparison may take. One that runs past it counts as an overlap between
+/// holds of this node: a spurious conflict costs a retry, a missed one lets two agents
+/// edit one file. A step costs about 8 microseconds in a release build (it compiles one
+/// component, twice at most), so one comparison takes 16 ms at the very most. The
+/// patterns in this repository's tests take at most 37 steps and the widest honest one
+/// measured takes 493 (`honest_patterns_stay_far_inside_the_walk_budget`); only a pattern
+/// that branches at every component, such as `{a,b}` fourteen times over, reaches this.
+/// It was 20,000 until the review of Q30 measured 0.2 s for one comparison of an 86 byte
+/// glob.
+const WALK_BUDGET: usize = 2_000;
+
+/// What one command may spend on comparing with the holds of other nodes, all of them
+/// together, in estimated microseconds of a release build. Those holds never block, so
+/// the comparison is best effort: when the budget is spent the rest are not compared and
+/// the command says how many, from which nodes. The estimates, each measured as an upper
+/// bound on this project's development machine: reading a hold or comparing two patterns
+/// as text costs 1 and one more for every [`TEXT_BYTES_PER_MICRO`] bytes, compiling a glob
+/// to learn whether it can be read costs half a microsecond a byte, and a walk costs
+/// [`STEP_MICROS`] a step, [`WALK_BUDGET`] steps at most. A hold on a plain path costs
+/// about 2, so tens of thousands of those are compared; three globs built to be costly
+/// use all of it. Measured against 10,000 holds of each hostile shape tried, a whole
+/// `hold acquire` takes 50 ms at most (docs/DECISIONS.md, the Q30 row).
+pub(crate) const FOREIGN_BUDGET: usize = 40_000;
+
+/// The estimated cost of one walk step, in microseconds.
+const STEP_MICROS: usize = 8;
+
+/// Bytes of pattern text read or compared as text in one estimated microsecond.
+const TEXT_BYTES_PER_MICRO: usize = 128;
+
+/// Overlapping holds of other nodes one command lists one by one; the rest are counted.
+pub(crate) const FOREIGN_LISTED: usize = 10;
 
 /// Compiling a component is what a step costs, and a long component costs more: every
 /// this many bytes of a compiled component take one more step from the budget. A
@@ -649,20 +714,36 @@ fn components_touch(
 
 /// A glob against a literal path: component by component with alternations spelled out
 /// as they are reached, and the whole as globset reads it.
-fn glob_touches_literal(glob: &str, literal: &str, path_may_be_dir: bool) -> bool {
+///
+/// The answer is `Unknown` when `budget` ran out. Each caller says what that means: an
+/// overlap where a missed one would let two agents edit one file, "does not cover" for an
+/// agent's own hold, "not compared" for another node's hold.
+fn glob_walk(glob: &str, literal: &str, path_may_be_dir: bool, budget: &mut usize) -> Touch {
     // A glob over the limit is not walked or compiled at all (a peer or an older build
     // can have stored megabytes): it overlaps everything, at no cost.
     if glob.len() > MAX_HOLD_PATTERN_BYTES {
-        return true;
+        return Touch::Yes;
     }
     let lit: Vec<&str> = literal.split('/').collect();
-    let mut budget = WALK_BUDGET;
-    components_touch(
-        &pattern_components(glob),
-        &lit,
-        path_may_be_dir,
-        &mut budget,
-    ) || matches(glob, literal)
+    let touched = components_touch(&pattern_components(glob), &lit, path_may_be_dir, budget);
+    // The whole-glob reading compiles the glob once more, and pays for it.
+    *budget = budget.saturating_sub(1 + glob.len() / COMPILE_BYTES_PER_STEP);
+    if *budget == 0 {
+        Touch::Unknown
+    } else if touched || matches(glob, literal) {
+        Touch::Yes
+    } else {
+        Touch::No
+    }
+}
+
+/// What a bounded comparison found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Touch {
+    Yes,
+    No,
+    /// The budget ran out before an answer.
+    Unknown,
 }
 
 /// Link local projects that hold live holds but have no current repository link: never
@@ -753,7 +834,7 @@ fn conflicts_for(
                 )
             };
             if overlap && *unreadable {
-                conflicts.push(unreadable_conflict(tx, requested, held)?);
+                conflicts.push(unreadable_conflict(tx, tx.node_id, requested, held)?);
             } else if overlap {
                 conflicts.push(HoldConflict {
                     path: requested.clone(),
@@ -769,12 +850,17 @@ fn conflicts_for(
 /// The conflict a hold makes when its stored pattern cannot be read. The note names the
 /// holder's node and says how to clear the hold; the pattern is shown as a short prefix
 /// and a length, never whole.
-fn unreadable_conflict(tx: &Tx<'_>, requested: &str, held: &Hold) -> Result<HoldConflict> {
-    let node: Option<(String, bool)> = tx
+fn unreadable_conflict(
+    conn: &Connection,
+    local: &str,
+    requested: &str,
+    held: &Hold,
+) -> Result<HoldConflict> {
+    let node: Option<(String, bool)> = conn
         .query_row(
             "SELECT n.display_name, n.node_id = ?2 FROM holds h
              JOIN nodes n ON n.node_id = h.node_id WHERE h.hold_id = ?1",
-            params![held.hold_id, tx.node_id],
+            params![held.hold_id, local],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
@@ -875,36 +961,147 @@ fn upsert_hold_tx(
     })
 }
 
-/// Live holds on other nodes, in a project with the same slug, overlapping `patterns`.
-fn remote_clashes(
-    tx: &Tx<'_>,
-    project: &Project,
+/// What one command found when it compared with the holds of other nodes.
+#[derive(Debug, Default)]
+pub(crate) struct ForeignClashes {
+    /// The first [`FOREIGN_LISTED`] overlaps: the index of the local pattern, the clash and
+    /// the name of the node that holds it.
+    pub listed: Vec<(usize, HoldConflict, String)>,
+    /// Overlaps found after those.
+    pub more: u32,
+    /// Holds that were not compared, by node, in node name order.
+    pub not_compared: Vec<NotCompared>,
+}
+
+/// Compare `patterns` with the live holds other nodes have in a project called `slug`,
+/// and add what is found to `found`.
+///
+/// Best effort and bounded, because those holds never block and a peer chooses how many
+/// there are and what they cost: every hold read and every step of every comparison comes
+/// out of `budget`, which the caller sets once for the whole command. When it is spent, or
+/// one comparison runs past [`WALK_BUDGET`], the hold is not compared; such holds are
+/// counted by node from the index alone. The holds are read one at a time, in no promised
+/// order, so nothing a peer sent is loaded that is not compared. Reads only: it runs
+/// outside the write transaction.
+///
+/// A peer's pattern that cannot be read (a row stored before patterns were checked on
+/// arrival) fails closed: it counts as overlapping every path in this project.
+pub(crate) fn foreign_clashes(
+    conn: &Connection,
+    local: &str,
+    now: i64,
+    slug: &str,
     patterns: &[(String, String)],
-) -> Result<Vec<HoldConflict>> {
-    let mut stmt = tx.prepare(&format!(
-        "{HOLD_SELECT} WHERE h.released_at IS NULL AND h.expires_at > ?1 AND h.node_id != ?2
-           AND p.slug = ?3 ORDER BY h.created_at"
-    ))?;
-    let theirs = stmt
-        .query_map(params![tx.now, tx.node_id, project.slug], hold_from_row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut out = Vec::new();
-    for (requested, pattern) in patterns {
-        for held in &theirs {
-            // A peer's pattern that cannot be read (a row stored before patterns were
-            // checked on arrival) fails closed: it counts as overlapping, in this project.
-            if pattern_unreadable(&held.pattern) {
-                out.push(unreadable_conflict(tx, requested, held)?);
-            } else if patterns_overlap(pattern, &held.pattern) {
-                out.push(HoldConflict {
+    budget: &mut usize,
+    found: &mut ForeignClashes,
+) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT h.hold_id, p.slug, a.address, NULL, h.pattern, h.exclusive, h.reason,
+           h.ttl_seconds, h.created_at, h.expires_at, n.display_name
+         FROM holds h
+         JOIN projects p ON p.project_id = h.project_id
+         JOIN agents a ON a.agent_id = h.agent_id
+         JOIN nodes n ON n.node_id = p.node_id
+         WHERE h.released_at IS NULL AND h.expires_at > ?1 AND p.node_id != ?2 AND p.slug = ?3",
+    )?;
+    let mut compared: std::collections::BTreeMap<String, u32> = Default::default();
+    let mut all_compared = true;
+    let mut rows = stmt.query(params![now, local, slug])?;
+    // Take `cost` from the budget; false when that spends it.
+    let spend = |budget: &mut usize, cost: usize| {
+        *budget = budget.saturating_sub(cost);
+        *budget > 0
+    };
+    while let Some(row) = rows.next()? {
+        if *budget == 0 {
+            all_compared = false;
+            break;
+        }
+        let held = hold_from_row(row)?;
+        let node: String = row.get(10)?;
+        let size = held.pattern.len();
+        let glob = literal_pattern(&held.pattern).is_none();
+        // Reading the row, and compiling a glob once to learn whether it can be read.
+        let mut known = spend(budget, 1 + size / TEXT_BYTES_PER_MICRO)
+            && (!glob || spend(budget, size.min(MAX_HOLD_PATTERN_BYTES) / 2));
+        let unreadable = known && glob && compile(&held.pattern).is_err();
+        // The local patterns this hold overlaps, by index.
+        let mut clashes = Vec::new();
+        if unreadable {
+            clashes.extend(0..patterns.len());
+        } else if known {
+            for (i, (_, pattern)) in patterns.iter().enumerate() {
+                // Comparing the two as text, then the walk if one of them is a glob.
+                if !spend(budget, 1 + (size + pattern.len()) / TEXT_BYTES_PER_MICRO) {
+                    known = false;
+                    break;
+                }
+                let allowed = (*budget / STEP_MICROS).min(WALK_BUDGET);
+                let mut steps = allowed;
+                let touch = overlap_within(pattern, &held.pattern, &mut steps);
+                *budget -= (allowed - steps) * STEP_MICROS;
+                match touch {
+                    Touch::Yes => clashes.push(i),
+                    Touch::No => {}
+                    Touch::Unknown => {
+                        known = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if !known {
+            all_compared = false;
+            continue;
+        }
+        *compared.entry(node.clone()).or_default() += 1;
+        for i in clashes {
+            // Only a clash that is listed is built: the rest are a number.
+            if found.listed.len() >= FOREIGN_LISTED {
+                found.more += 1;
+                continue;
+            }
+            let requested = &patterns[i].0;
+            let clash = if unreadable {
+                unreadable_conflict(conn, local, requested, &held)?
+            } else {
+                HoldConflict {
                     path: requested.clone(),
                     held: held.clone(),
                     unreadable: None,
-                });
-            }
+                }
+            };
+            found.listed.push((i, clash, node.clone()));
         }
     }
-    Ok(out)
+    drop(rows);
+    if all_compared {
+        return Ok(());
+    }
+    // How many there are, by node, from the index alone: no pattern is read for this.
+    let mut stmt = conn.prepare(
+        "SELECT n.display_name, count(*) FROM holds h
+         JOIN projects p ON p.project_id = h.project_id
+         JOIN nodes n ON n.node_id = p.node_id
+         WHERE h.released_at IS NULL AND h.expires_at > ?1 AND p.node_id != ?2 AND p.slug = ?3
+         GROUP BY n.node_id ORDER BY n.display_name",
+    )?;
+    let totals = stmt
+        .query_map(params![now, local, slug], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (node, total) in totals {
+        let left = total.saturating_sub(compared.get(&node).copied().unwrap_or(0));
+        if left == 0 {
+            continue;
+        }
+        match found.not_compared.iter_mut().find(|n| n.node == node) {
+            Some(n) => n.holds += left,
+            None => found.not_compared.push(NotCompared { node, holds: left }),
+        }
+    }
+    Ok(())
 }
 
 /// Why a peer's `hold.acquired` or `hold.updated` is not applied as a hold: its pattern is
@@ -1548,7 +1745,7 @@ impl Store {
             crate::queue::within_bytes("hold pattern", raw, MAX_HOLD_PATTERN_BYTES)?;
         }
         let ttl = clamp_ttl(input.ttl_seconds)?;
-        self.write(|tx| {
+        let (mut report, slug, patterns) = self.write(|tx| {
             sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, &input.agent)?;
             let project = find_project(tx, tx.node_id, &input.project)?;
@@ -1575,14 +1772,16 @@ impl Store {
                 }
             }
             let conflicts = conflicts_for(tx, &project, &me.id, &patterns, input.exclusive)?;
-            let warnings = remote_clashes(tx, &project, &patterns)?;
+            let report = |granted, conflicts| HoldReport {
+                granted,
+                conflicts,
+                warnings: Vec::new(),
+                warnings_more: 0,
+                not_compared: Vec::new(),
+            };
             if !conflicts.is_empty() {
                 touch(tx, &me.id)?;
-                return Ok(HoldReport {
-                    granted: Vec::new(),
-                    conflicts,
-                    warnings,
-                });
+                return Ok((report(Vec::new(), conflicts), project.slug, patterns));
             }
             let mut granted_ids = Vec::new();
             for (_, pattern) in &patterns {
@@ -1600,12 +1799,28 @@ impl Store {
                 )?);
             }
             touch(tx, &me.id)?;
-            Ok(HoldReport {
-                granted: holds_by_id(tx, &granted_ids)?,
-                conflicts: Vec::new(),
-                warnings,
-            })
-        })
+            let granted = holds_by_id(tx, &granted_ids)?;
+            Ok((report(granted, Vec::new()), project.slug, patterns))
+        })?;
+        // Other nodes' holds only ever add warnings, so they are compared after the write
+        // transaction has committed: nothing a peer sent can keep the database locked.
+        let mut found = ForeignClashes::default();
+        let mut budget = FOREIGN_BUDGET;
+        self.read(|conn| {
+            foreign_clashes(
+                conn,
+                self.node_id(),
+                self.now(),
+                &slug,
+                &patterns,
+                &mut budget,
+                &mut found,
+            )
+        })?;
+        report.warnings = found.listed.into_iter().map(|(_, c, _)| c).collect();
+        report.warnings_more = found.more;
+        report.not_compared = found.not_compared;
+        Ok(report)
     }
 
     /// Report which of `paths` would conflict for `agent` (no holds are taken).
@@ -2409,6 +2624,76 @@ mod tests {
         assert!(patterns_overlap(&branching, &globset::escape(&deep)));
         assert!(patterns_overlap(&globset::escape(&deep), &branching));
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    /// What honest patterns need, so that the budget can be read against it: globs like
+    /// the ones in this file's tests and in the docs, against a 30 component path, a 3,700
+    /// byte path and ordinary ones. The most any of them takes is 493 steps (the two
+    /// alternations between three `**`); the widest realistic one takes 304. The budget
+    /// is at least four times that, and the hostile shape of the Q30 review (an 86 byte
+    /// glob of fourteen alternations) is cut off by it.
+    #[test]
+    fn honest_patterns_stay_far_inside_the_walk_budget() {
+        let deep = format!("{}file.test.ts", "packages/web/src/components/".repeat(10));
+        let long = format!("src/{}/x.rs", "a-directory-name-of-some-length".repeat(120));
+        let globs = [
+            "**/*.rs",
+            "**/*.test.ts",
+            "src/**/*.rs",
+            "packages/*/src/**/*.test.ts",
+            "packages/**/src/**/components/**/*.test.ts",
+            "**/packages/**/web/**/src/**/components/**/*.ts",
+            "**/node_modules/**",
+            "{src,docs,tests}/**/*.{rs,md,toml}",
+            "{packages,apps}/{web,api,mobile}/src/**/*.{ts,tsx,js,jsx}",
+            "packages/{web,api}/**/{components,hooks,lib}/**/*.{ts,tsx}",
+            "app/[id]/**/page.tsx",
+            "app/(group)/[[...slug]]/*.tsx",
+            "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+            "**/{a,b,c,d,e,f,g,h}/**/{i,j,k,l}/**",
+            "*/*/*/*/*/*/*/*/*/*",
+            "**/*/**/*/**/*.ts",
+        ];
+        let paths = [
+            deep.as_str(),
+            long.as_str(),
+            "src/a.rs",
+            "packages/web/src/components/x/y/z/file.test.ts",
+            "README.md",
+        ];
+        let mut most = 0;
+        for glob in globs {
+            for path in paths {
+                let lit: Vec<&str> = path.split('/').collect();
+                let mut budget = usize::MAX;
+                components_touch(&pattern_components(glob), &lit, true, &mut budget);
+                let used = usize::MAX - budget;
+                assert!(used * 4 <= WALK_BUDGET, "{glob} took {used} steps");
+                most = most.max(used);
+            }
+        }
+        assert_eq!(most, 493);
+        let hostile = format!("{}[!a][!b][!c][!d]", "{a,b}".repeat(14));
+        let mut budget = WALK_BUDGET;
+        assert_eq!(
+            glob_walk(&hostile, "src/a.rs", true, &mut budget),
+            Touch::Unknown
+        );
+        assert!(patterns_overlap(&hostile, "src/a.rs"), "fail closed");
+    }
+
+    /// Review R1 of Q30: when the walk runs out, an agent's own costly glob does not count
+    /// as covering the edited file, so the edit guard takes a narrow hold. The same glob
+    /// still covers what globset itself says it matches.
+    #[test]
+    fn an_own_glob_too_costly_to_walk_covers_only_what_it_matches_whole() {
+        let costly = format!("src/{}[!a][!b][!c][!d]", "{a,b}".repeat(14));
+        assert!(!hold_covers(&costly, "src/a.rs"));
+        assert!(
+            patterns_overlap(&costly, "src/a.rs"),
+            "others still conflict"
+        );
+        assert!(hold_covers(&costly, "src/aaaaaaaaaaaaaabcde"));
     }
 
     #[test]
