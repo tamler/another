@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use globset::{Glob, GlobBuilder, GlobMatcher};
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -38,7 +38,12 @@ pub const MAX_HOLD_TTL_SECONDS: i64 = 4 * 60 * 60;
 const HOLD_IDS_PER_EVENT: usize = 10_000;
 /// Longest hold reason a local caller may give, in bytes (D99).
 pub const MAX_HOLD_REASON_BYTES: usize = 1024;
-/// Longest hold pattern a local caller may give, in bytes: as long as any real path (D99).
+/// Longest hold pattern, in bytes: as long as any real path (D99). 4096 is the longest
+/// path Linux takes in one call (macOS stops at 1024). A glob of this size compiles in a
+/// few milliseconds. D99 set it for what a local caller gives to `hold acquire`; it is
+/// also the most this build compiles as a glob, wherever the pattern came from, and the
+/// limit for a pattern a peer sends. The edit hook's holds are file names compared as
+/// text, never compiled, and are not held to it.
 pub const MAX_HOLD_PATTERN_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -61,6 +66,12 @@ pub struct HoldConflict {
     pub path: String,
     /// The existing hold it collides with.
     pub held: Hold,
+    /// Set when the existing hold's pattern could not be read (longer than the limit, or
+    /// not a glob that compiles), so it counts as overlapping every path in its project.
+    /// The text names the holder's node and says how to clear the hold; `held.pattern` is
+    /// then a short prefix and a length, never the stored pattern.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unreadable: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -216,6 +227,10 @@ fn clamp_ttl(ttl: Option<i64>) -> Result<i64> {
 
 /// Normalize a requested path or glob to a project-relative pattern.
 pub(crate) fn normalize_pattern(project: &Project, raw: &str) -> Result<String> {
+    // Longer than any pattern in this project can be: refused before any message quotes it.
+    if raw.trim().len() > MAX_HOLD_PATTERN_BYTES + project.abs_path.len() + 1 {
+        crate::queue::within_bytes("hold pattern", raw.trim(), MAX_HOLD_PATTERN_BYTES)?;
+    }
     let path = normalize_path(project, raw)?;
     let pattern = if path.is_empty() {
         "**".to_string()
@@ -264,12 +279,42 @@ fn normalize_path(project: &Project, raw: &str) -> Result<String> {
     Ok(parts.join("/"))
 }
 
-fn compile(pattern: &str) -> Result<GlobMatcher> {
-    let glob: Glob = GlobBuilder::new(pattern)
+/// A pattern for a message: its first 40 characters as one shown line, quoted, and its
+/// length. A pattern can come from a peer or from a row an older build stored, and can be
+/// megabytes long, so it is never printed whole.
+pub(crate) fn pattern_brief(pattern: &str) -> String {
+    let head: String = pattern.chars().take(41).collect();
+    format!(
+        "{:?} ({} bytes)",
+        crate::mail::display_line(&head, 40),
+        pattern.len()
+    )
+}
+
+/// Compile a pattern, or say why not. Never panics, whatever the pattern: one over
+/// [`MAX_HOLD_PATTERN_BYTES`] is refused unread, and the matcher is built as a set of one
+/// glob, because globset returns an error from a set when the compiled form passes its own
+/// size limit (10 MiB) where `Glob::compile_matcher` panics.
+fn compile(pattern: &str) -> Result<GlobSet> {
+    crate::queue::within_bytes("hold pattern", pattern, MAX_HOLD_PATTERN_BYTES)?;
+    let glob = GlobBuilder::new(pattern)
         .literal_separator(true)
         .build()
         .map_err(|e| Error::Invalid(format!("invalid glob {pattern:?}: {e}")))?;
-    Ok(glob.compile_matcher())
+    GlobSetBuilder::new().add(glob).build().map_err(|_| {
+        Error::Invalid(format!(
+            "invalid glob {}: it is too large to compile",
+            pattern_brief(pattern)
+        ))
+    })
+}
+
+/// A stored pattern this build cannot use: a glob longer than the limit, or one that does
+/// not compile. A pattern without glob syntax is compared as text and never compiled, so
+/// it is readable whatever it spells and however long it is; the edit hook's holds are
+/// such patterns and are not held to the limit (D99).
+pub(crate) fn pattern_unreadable(pattern: &str) -> bool {
+    literal_pattern(pattern).is_none() && compile(pattern).is_err()
 }
 
 /// Decode an entirely literal pattern, including globset's single-character escapes.
@@ -307,7 +352,9 @@ pub(crate) fn hold_covers(held: &str, path: &str) -> bool {
     }
     match literal_pattern(held) {
         Some(held) => covers(&held, &path),
-        None => held == "**" || glob_touches_literal(held, &path, false),
+        // An own glob that cannot be read covers nothing: the edit takes its own narrow
+        // hold instead of resting on one nobody can check.
+        None => held == "**" || (compile(held).is_ok() && glob_touches_literal(held, &path, false)),
     }
 }
 
@@ -542,6 +589,14 @@ fn first_alternation(pattern: &str) -> Option<(&str, Vec<String>, &str)> {
 /// component, such as `{**,x}` many times over, gets near this.
 const WALK_BUDGET: usize = 20_000;
 
+/// Compiling a component is what a step costs, and a long component costs more: every
+/// this many bytes of a compiled component take one more step from the budget. A
+/// component shorter than this (nearly every real file or directory name pattern) costs
+/// nothing extra, so realistic patterns are judged exactly as before. Without it a pattern
+/// inside the size limit, a 4,000 byte component behind a dozen alternations, was compiled
+/// thousands of times in one comparison, which took minutes.
+const COMPILE_BYTES_PER_STEP: usize = 16;
+
 /// Glob components against the components of a literal path. An alternation in the first
 /// component is spelled out one alternative at a time, each respliced into components, so
 /// `{a/b,c}` continues as `a`, `b` or as `c` and no chain of alternations is ever expanded
@@ -581,6 +636,7 @@ fn components_touch(
                 || components_touch(glob, deeper, path_may_be_dir, budget)
         }
         (Some((g, rest)), Some((p, deeper))) => {
+            *budget = budget.saturating_sub(g.len() / COMPILE_BYTES_PER_STEP);
             component_touches(g, p)
                 && if rest.is_empty() {
                     deeper.is_empty() || names_entries(g)
@@ -594,6 +650,11 @@ fn components_touch(
 /// A glob against a literal path: component by component with alternations spelled out
 /// as they are reached, and the whole as globset reads it.
 fn glob_touches_literal(glob: &str, literal: &str, path_may_be_dir: bool) -> bool {
+    // A glob over the limit is not walked or compiled at all (a peer or an older build
+    // can have stored megabytes): it overlaps everything, at no cost.
+    if glob.len() > MAX_HOLD_PATTERN_BYTES {
+        return true;
+    }
     let lit: Vec<&str> = literal.split('/').collect();
     let mut budget = WALK_BUDGET;
     components_touch(
@@ -669,30 +730,82 @@ fn conflicts_for(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let fold = folds_case(Path::new(&project.abs_path));
     let overlaps = |a: &str, b: &str| overlap_on_volume(a, b, fold);
+    // A stored pattern that cannot be read (a row an older build wrote) fails closed: it
+    // stands for every path of the project it is in, and for nothing outside that project.
+    let unreadable: Vec<bool> = others
+        .iter()
+        .map(|(held, _, _)| pattern_unreadable(&held.pattern))
+        .collect();
     let mut conflicts = Vec::new();
     for (requested, pattern) in patterns {
-        for (held, held_project, held_prefix) in &others {
+        for ((held, held_project, held_prefix), unreadable) in others.iter().zip(&unreadable) {
             if !(exclusive || held.exclusive) {
                 continue;
             }
+            let theirs = if *unreadable { "**" } else { &held.pattern };
             let overlap = if *held_project == project.project_id {
-                overlaps(pattern, &held.pattern)
+                overlaps(pattern, theirs)
             } else {
                 // Compare as paths from the top of the checkout.
                 overlaps(
                     &crate::repo::in_repo(&my_prefix, pattern),
-                    &crate::repo::in_repo(held_prefix, &held.pattern),
+                    &crate::repo::in_repo(held_prefix, theirs),
                 )
             };
-            if overlap {
+            if overlap && *unreadable {
+                conflicts.push(unreadable_conflict(tx, requested, held)?);
+            } else if overlap {
                 conflicts.push(HoldConflict {
                     path: requested.clone(),
                     held: held.clone(),
+                    unreadable: None,
                 });
             }
         }
     }
     Ok(conflicts)
+}
+
+/// The conflict a hold makes when its stored pattern cannot be read. The note names the
+/// holder's node and says how to clear the hold; the pattern is shown as a short prefix
+/// and a length, never whole.
+fn unreadable_conflict(tx: &Tx<'_>, requested: &str, held: &Hold) -> Result<HoldConflict> {
+    let node: Option<(String, bool)> = tx
+        .query_row(
+            "SELECT n.display_name, n.node_id = ?2 FROM holds h
+             JOIN nodes n ON n.node_id = h.node_id WHERE h.hold_id = ?1",
+            params![held.hold_id, tx.node_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let brief = pattern_brief(&held.pattern);
+    let (id, agent, project) = (&held.hold_id, &held.agent, &held.project);
+    let note = match node {
+        Some((name, false)) => format!(
+            "hold {id} of {agent} on node {name} has a pattern that could not be read \
+             ({brief}), so it counts as overlapping every path in project {project}. It ends \
+             at {} unless that node renews it; to clear it sooner, release hold {id} on node \
+             {name} and sync",
+            held.expires_at
+        ),
+        Some((name, true)) => format!(
+            "hold {id} of {agent} on this node ({name}) has a pattern that could not be read \
+             ({brief}), so it counts as overlapping every path in project {project}. To clear \
+             it: another hold release --agent {agent} {id}"
+        ),
+        None => format!(
+            "hold {id} of {agent} has a pattern that could not be read ({brief}), so it counts \
+             as overlapping every path in project {project}"
+        ),
+    };
+    Ok(HoldConflict {
+        path: requested.to_string(),
+        held: Hold {
+            pattern: brief,
+            ..held.clone()
+        },
+        unreadable: Some(crate::mail::display_line(&note, 700)),
+    })
 }
 
 /// Create a hold, or update and renew the agent's existing hold on the same pattern.
@@ -778,15 +891,74 @@ fn remote_clashes(
     let mut out = Vec::new();
     for (requested, pattern) in patterns {
         for held in &theirs {
-            if patterns_overlap(pattern, &held.pattern) {
+            // A peer's pattern that cannot be read (a row stored before patterns were
+            // checked on arrival) fails closed: it counts as overlapping, in this project.
+            if pattern_unreadable(&held.pattern) {
+                out.push(unreadable_conflict(tx, requested, held)?);
+            } else if patterns_overlap(pattern, &held.pattern) {
                 out.push(HoldConflict {
                     path: requested.clone(),
                     held: held.clone(),
+                    unreadable: None,
                 });
             }
         }
     }
     Ok(out)
+}
+
+/// Why a peer's `hold.acquired` or `hold.updated` is not applied as a hold: its pattern is
+/// longer than a local `hold acquire` accepts, or is a glob that does not compile. None
+/// for every other event. The event itself stays stored and relayed, so sync goes on; the
+/// refusal is written to the audit log with the origin node and the event id, and the
+/// returned text is what `another sync` prints. The pattern is never quoted whole.
+pub(crate) fn refuse_foreign_pattern(
+    tx: &Tx<'_>,
+    origin: &str,
+    event_id: &str,
+    kind: &str,
+    payload: &Value,
+) -> Result<Option<String>> {
+    if !matches!(kind, "hold.acquired" | "hold.updated") {
+        return Ok(None);
+    }
+    let Some(pattern) = payload.get("pattern").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let why = if pattern.len() > MAX_HOLD_PATTERN_BYTES {
+        format!("is longer than the limit of {MAX_HOLD_PATTERN_BYTES} bytes")
+    } else if pattern_unreadable(pattern) {
+        "is not a glob that compiles".to_string()
+    } else {
+        return Ok(None);
+    };
+    let name: Option<String> = tx
+        .query_row(
+            "SELECT display_name FROM nodes WHERE node_id = ?1",
+            [origin],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let reason = crate::mail::display_line(
+        &format!(
+            "{kind} from node {} ({origin}) was stored and relayed but not applied as a hold: \
+             its pattern {} {why}",
+            name.as_deref().unwrap_or("unknown"),
+            pattern_brief(pattern)
+        ),
+        700,
+    );
+    tx.execute(
+        "INSERT INTO audit_log (node_id, ts, token_id, agent, operation, outcome, detail, remote)
+         VALUES (?1, ?2, NULL, ?3, 'federation hold pattern', 'refused', ?4, NULL)",
+        params![
+            tx.node_id,
+            tx.now,
+            format!("node:{origin}"),
+            format!("event {event_id}: {reason}")
+        ],
+    )?;
+    Ok(Some(reason))
 }
 
 /// The blocked paths and, per path, the sorted ids of the holds blocking it. This is the
@@ -1323,7 +1495,13 @@ impl Store {
                  WHERE rh.hold_id = ?1 AND r.created_by = ?2 AND r.status IN ('open', 'claimed', 'stale')",
                 params![hold_id, me.id], |r| r.get(0)).optional()?;
             if let Some(mid) = existing { return load_message(tx, &mid); }
-            let pattern = literal_pattern(&held.pattern).unwrap_or(held.pattern);
+            // A pattern that cannot be read is named by its prefix and length: whole, it can
+            // be megabytes, which no message body takes.
+            let pattern = if pattern_unreadable(&held.pattern) {
+                pattern_brief(&held.pattern)
+            } else {
+                literal_pattern(&held.pattern).unwrap_or(held.pattern)
+            };
             // A held file name may contain a line break; subjects are one line (D75).
             let title = crate::mail::single_line(&pattern, 280);
             let message = send_by_id_tx(tx, &me.id, &holder_id, &SendMessage {

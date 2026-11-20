@@ -130,7 +130,11 @@ fn glob_allows(globs: &[String], candidates: &[String]) -> bool {
         let Ok(glob) = GlobBuilder::new(g).literal_separator(true).build() else {
             return false;
         };
-        let m = glob.compile_matcher();
+        // A set of one glob: it returns an error where `compile_matcher` panics on a glob
+        // too large to compile. A glob that cannot be compiled allows nothing.
+        let Ok(m) = globset::GlobSetBuilder::new().add(glob).build() else {
+            return false;
+        };
         candidates.iter().any(|c| m.is_match(c))
     })
 }
@@ -409,5 +413,12 @@ mod tests {
         assert!(!glob_allows(&g, &["/other/shop".into()]));
         assert!(glob_allows(&["**".to_string()], &["/any/where".into()]));
         assert!(!glob_allows(&[], &["/work/shop".into()]));
+    }
+
+    /// A stored glob too large to compile allows nothing and does not panic (Q30).
+    #[test]
+    fn a_project_glob_too_large_to_compile_allows_nothing() {
+        let huge = format!("/work/{}", "*a".repeat(1 << 20));
+        assert!(!glob_allows(&[huge], &["/work/a".into()]));
     }
 }

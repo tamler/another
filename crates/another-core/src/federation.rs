@@ -275,6 +275,11 @@ pub struct IngestReport {
     pub accepted: usize,
     pub duplicates: usize,
     pub rejected: Vec<Rejected>,
+    /// Events that were accepted, stored and relayed, but not applied to this node's read
+    /// models: a hold whose pattern is over the limit or does not compile. Counted in
+    /// `accepted`. Absent when empty, and from older builds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_applied: Vec<Rejected>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2693,7 +2698,16 @@ impl Store {
                     report.duplicates += 1;
                     continue;
                 }
-                if let Err(e) = project_foreign(tx, ev, &payload) {
+                if let Some(reason) = crate::holds::refuse_foreign_pattern(
+                    tx,
+                    &ev.node_id,
+                    &ev.event_id,
+                    &ev.kind,
+                    &payload,
+                )? {
+                    tracing::warn!(event = %ev.event_id, node = %ev.node_id, %reason, "foreign hold not applied");
+                    report.not_applied.push(reject(reason));
+                } else if let Err(e) = project_foreign(tx, ev, &payload) {
                     tracing::warn!(event = %ev.event_id, kind = %ev.kind, error = %e, "could not project foreign event");
                 }
                 report.accepted += 1;
