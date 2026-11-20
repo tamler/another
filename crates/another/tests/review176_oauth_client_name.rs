@@ -199,12 +199,14 @@ fn a_stored_client_name_cannot_add_a_row_to_the_oauth_commands() {
     assert_eq!(audit.len(), entries.len(), "{audit:?}");
 }
 
-/// Review R2 of Q19b: the redirect host is what tells the operator who receives the code,
-/// and its end is the part that says so. `another oauth pending` shows a host of up to 253
-/// characters whole, and a longer one by a mark, its length and its last 120 characters.
+/// Review R3 of Q19b: `another oauth pending` is what the operator approves from. The
+/// redirect host is the client's text, and a browser does not read it as a person does,
+/// so only a plain host is shown as it is. Any other is shown whole, each character that
+/// is not a letter, digit, `.` or `-` as an escape, behind Another's warning. Nothing is
+/// cut and nothing becomes a space. The client's name is inside quotes it cannot close.
 #[test]
-fn oauth_pending_shows_the_end_of_a_long_redirect_host() {
-    use another_core::{AuthorizeInput, ClientProfile, ClientRegistration};
+fn oauth_pending_shows_a_redirect_host_exactly_or_escaped_behind_a_warning() {
+    use another_core::{AuthorizeInput, ClientProfile, ClientRegistration, NOT_A_PLAIN_HOST};
     use std::process::{Command, Stdio};
 
     let dir = tempfile::tempdir().unwrap();
@@ -218,20 +220,13 @@ fn oauth_pending_shows_the_end_of_a_long_redirect_host() {
             remote: None,
         })
         .unwrap();
-    // A trusted-looking start, the attacker's registrable domain at the end.
-    let long = format!(
-        "good.example.com.{}.{}.attacker.test",
-        "x".repeat(60),
-        "x".repeat(60)
-    );
-    let huge = format!("good.example.com.{}.attacker.test", "h".repeat(5000 - 31));
-    for host in [&long, &huge] {
-        let uri = format!("https://{host}/cb");
+    let begin = |name: &str, authority: &str| {
+        let uri = format!("https://{authority}/cb");
         store
             .begin_authorization(AuthorizeInput {
                 client: ClientProfile {
                     client_id: client.client_id.clone(),
-                    client_name: client.client_name.clone(),
+                    client_name: name.into(),
                     redirect_uris: vec![uri.clone()],
                 },
                 redirect_uri: uri,
@@ -242,8 +237,71 @@ fn oauth_pending_shows_the_end_of_a_long_redirect_host() {
                 code_challenge_method: "S256".into(),
                 remote: None,
             })
-            .unwrap();
+            .unwrap()
+            .user_code
+    };
+
+    let warned = |escaped: &str| format!("{NOT_A_PLAIN_HOST}{escaped}");
+    let dns_limit = format!("{}.attacker.test", "a".repeat(253 - 14));
+    let over_limit = format!("a{dns_limit}");
+    let huge = format!("good.example.com.{}.attacker.test", "h".repeat(5000 - 31));
+    let backslash_long = format!("attacker.test\\{}.good.example.com", "x".repeat(300));
+    // (the authority in the redirect URI, what the row shows as the host)
+    let cases: Vec<(String, String)> = vec![
+        // Plain: exactly, no warning. The port is not part of the host Another keeps.
+        ("chatgpt.com".into(), "chatgpt.com".into()),
+        ("chatgpt.com:8443".into(), "chatgpt.com".into()),
+        ("[2001:DB8::1]:8443".into(), "2001:db8::1".into()),
+        ("xn--bcher-kva.example".into(), "xn--bcher-kva.example".into()),
+        (dns_limit.clone(), dns_limit.clone()),
+        // Not plain: whole, escaped, warned.
+        (over_limit.clone(), warned(&over_limit)),
+        (huge.clone(), warned(&huge)),
+        (
+            "b\u{fc}cher.example".into(),
+            warned("b\\u{00FC}cher.example"),
+        ),
+        // A browser ends the host at the backslash: the code goes to `attacker.test`.
+        (
+            "attacker.test\\good.example.com".into(),
+            warned("attacker.test\\u{005C}good.example.com"),
+        ),
+        (
+            backslash_long,
+            warned(&format!(
+                "attacker.test\\u{{005C}}{}.good.example.com",
+                "x".repeat(300)
+            )),
+        ),
+        // A browser drops zero-width characters: one joined name, not two.
+        (
+            "auth.openai.com\u{200b}\u{200b}\u{200b}chatgpt.com".into(),
+            warned("auth.openai.com\\u{200B}\\u{200B}\\u{200B}chatgpt.com"),
+        ),
+        // A host that spells the row's own fields.
+        (
+            "attacker.test\u{200b}\u{200b}expires\u{200b}2026-11-20t09.00.00.000z\u{200b}\u{200b}redirect\u{200b}host\u{200b}chatgpt.com".into(),
+            warned("attacker.test\\u{200B}\\u{200B}expires\\u{200B}2026-11-20t09.00.00.000z\\u{200B}\\u{200B}redirect\\u{200B}host\\u{200B}chatgpt.com"),
+        ),
+        // A host that imitates the mark an earlier build printed for a cut host.
+        (
+            "(cut,\u{200b}12\u{200b}characters)\u{200b}...good.example.com".into(),
+            warned("\\u{0028}cut\\u{002C}\\u{200B}12\\u{200B}characters\\u{0029}\\u{200B}...good.example.com"),
+        ),
+        // A host that imitates the warning.
+        (
+            "x[warning\u{200b}plain\u{200b}host]\u{200b}chatgpt.com".into(),
+            warned("x\\u{005B}warning\\u{200B}plain\\u{200B}host\\u{005D}\\u{200B}chatgpt.com"),
+        ),
+    ];
+    let mut expected = std::collections::BTreeMap::new();
+    for (authority, shown) in &cases {
+        expected.insert(begin("ChatGPT", authority), shown.clone());
     }
+    // A name that spells the row's fields, and one that tries to close its quotes.
+    let forged_name = "ChatGPT  redirect host chatgpt.com  expires 2026-11-20T09:00:00.000Z";
+    let forged_code = begin(forged_name, "attacker.test");
+    let quote_code = begin("ChatGPT\"  redirect host chatgpt.com", "attacker.test");
     drop(store);
 
     let out = Command::new(env!("CARGO_BIN_EXE_another"))
@@ -257,16 +315,62 @@ fn oauth_pending_shows_the_end_of_a_long_redirect_host() {
         .expect("run another");
     assert!(out.status.success(), "{out:?}");
     let text = String::from_utf8_lossy(&out.stdout);
-    let rows: Vec<&str> = text.lines().collect();
-    assert_eq!(rows.len(), 2, "{rows:?}");
     assert!(
-        rows.iter()
-            .any(|r| r.contains(&format!("  ChatGPT  redirect host {long}  expires "))),
-        "{rows:?}"
+        !text
+            .chars()
+            .any(|c| c != '\n' && (another_core::is_unsafe_text_char(c) || c == '\u{200b}')),
+        "{text:?}"
     );
-    let cut = format!(
-        "  ChatGPT  redirect host (cut, 5000 characters) ...{}.attacker.test  expires ",
-        "h".repeat(120 - 14)
+    let rows: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        rows.len(),
+        cases.len() + 2,
+        "one row for each request: {rows:?}"
     );
-    assert!(rows.iter().any(|r| r.contains(&cut)), "{rows:?}");
+    for (code, shown) in &expected {
+        let row = rows
+            .iter()
+            .find(|r| r.starts_with(code.as_str()))
+            .unwrap_or_else(|| panic!("no row for {code}"));
+        let rest = row
+            .strip_prefix(&format!("{code}  \"ChatGPT\"  redirect host "))
+            .unwrap_or_else(|| panic!("{row:?}"));
+        let (host, expires) = rest.rsplit_once("  expires ").unwrap();
+        assert_eq!(host, shown, "{row:?}");
+        assert!(!expires.contains(' '), "{row:?}");
+    }
+    let row = rows.iter().find(|r| r.starts_with(&forged_code)).unwrap();
+    assert!(
+        row.starts_with(&format!(
+            "{forged_code}  \"{forged_name}\"  redirect host attacker.test  expires "
+        )),
+        "{row:?}"
+    );
+    let row = rows.iter().find(|r| r.starts_with(&quote_code)).unwrap();
+    assert!(
+        row.starts_with(&format!(
+            "{quote_code}  \"ChatGPT'  redirect host chatgpt.com\"  redirect host attacker.test  expires "
+        )),
+        "{row:?}"
+    );
+
+    // The audit row of each request names the host by the same rule.
+    let out = Command::new(env!("CARGO_BIN_EXE_another"))
+        .args(["audit", "--limit", "100"])
+        .current_dir(dir.path())
+        .env("ANOTHER_HOME", &home)
+        .env_remove("ANOTHER_AGENT")
+        .env_remove("ANOTHER_LOG")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run another");
+    assert!(out.status.success(), "{out:?}");
+    let audit = String::from_utf8_lossy(&out.stdout);
+    for (_, shown) in &cases {
+        assert!(
+            audit.lines().any(|l| l.contains("oauth.authorize")
+                && l.ends_with(&format!(" redirect host {shown}"))),
+            "no audit row ends with the host shown as {shown:?}"
+        );
+    }
 }

@@ -497,6 +497,69 @@ pub fn redirect_host(uri: &str) -> String {
     parse_redirect(uri).map_or_else(|| "unknown".into(), |p| p.host)
 }
 
+/// What Another puts in front of a redirect host that is not plain.
+pub const NOT_A_PLAIN_HOST: &str = "[warning: not a plain host name. A browser may read it differently from how it looks. Do not approve it unless you know exactly what it is.] ";
+
+/// The characters of a plain host name.
+fn is_host_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '.' || c == '-'
+}
+
+/// Whether `host` reads the same to a person and to a browser: 1 to 253 ASCII letters,
+/// digits, `.` and `-`, or an IPv6 literal of hex digits, `:` and `.` in brackets, either
+/// with an optional `:` and decimal port. [`redirect_host`] hands an IPv6 literal over
+/// without its brackets and port, so that form (two or more colons) is plain too.
+fn is_plain_host(host: &str) -> bool {
+    let ipv6 = |text: &str| {
+        !text.is_empty()
+            && text
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+    };
+    let port = |text: &str| !text.is_empty() && text.chars().all(|c| c.is_ascii_digit());
+    if let Some(rest) = host.strip_prefix('[') {
+        return match rest.split_once(']') {
+            Some((inside, "")) => ipv6(inside),
+            Some((inside, after)) => ipv6(inside) && after.strip_prefix(':').is_some_and(port),
+            None => false,
+        };
+    }
+    if host.matches(':').count() >= 2 {
+        return ipv6(host);
+    }
+    let (name, after) = match host.split_once(':') {
+        Some((name, after)) => (name, Some(after)),
+        None => (host, None),
+    };
+    (1..=253).contains(&name.len()) && name.chars().all(is_host_name_char) && after.is_none_or(port)
+}
+
+/// A redirect host as the operator is shown it, wherever one is printed: the line
+/// `another serve` prints when a client asks to connect, `another oauth pending` and the
+/// audit rows. The host is the client's text, and registration accepts almost any, so
+/// nothing is assumed about it.
+///
+/// A plain host ([`is_plain_host`]) is shown exactly. Any other is shown whole behind
+/// [`NOT_A_PLAIN_HOST`], with every character that is not an ASCII letter, a digit, `.`
+/// or `-` written as `\u{XXXX}`: a browser ends a host at a backslash and drops zero-width
+/// characters, so such a host can go somewhere other than where it seems to. Nothing is
+/// cut and nothing is turned into a space, so no part of it can be hidden and it cannot
+/// spell another field of the row it is printed in.
+pub fn shown_redirect_host(host: &str) -> String {
+    if is_plain_host(host) {
+        return host.to_string();
+    }
+    let mut shown = String::from(NOT_A_PLAIN_HOST);
+    for c in host.chars() {
+        if is_host_name_char(c) {
+            shown.push(c);
+        } else {
+            shown.push_str(&format!("\\u{{{:04X}}}", u32::from(c)));
+        }
+    }
+    shown
+}
+
 /// Authorization error redirect, including the issuer (`iss`) on every response.
 pub fn error_redirect(
     uri: &str,
@@ -986,7 +1049,7 @@ impl Store {
                         "client {client_id} name {name:?} redirects {}",
                         reg.redirect_uris
                             .iter()
-                            .map(|u| redirect_host(u))
+                            .map(|u| shown_redirect_host(&redirect_host(u)))
                             .collect::<Vec<_>>()
                             .join(",")
                     )),
@@ -1097,7 +1160,8 @@ impl Store {
                     operation: "oauth.authorize".into(),
                     outcome: "pending".into(),
                     detail: Some(format!(
-                        "client {client_name:?} redirect host {redirect_host}"
+                        "client {client_name:?} redirect host {}",
+                        shown_redirect_host(&redirect_host)
                     )),
                     remote,
                     ..Default::default()
@@ -1190,7 +1254,7 @@ impl Store {
                     detail: Some(format!(
                         "client {:?} redirect host {} globs {}",
                         req.client_name,
-                        redirect_host(&req.redirect_uri),
+                        shown_redirect_host(&redirect_host(&req.redirect_uri)),
                         if globs.is_empty() {
                             "none".to_string()
                         } else {
@@ -1238,7 +1302,7 @@ impl Store {
                     detail: Some(format!(
                         "client {:?} redirect host {}",
                         req.client_name,
-                        redirect_host(&req.redirect_uri)
+                        shown_redirect_host(&redirect_host(&req.redirect_uri))
                     )),
                     ..Default::default()
                 },
@@ -1724,6 +1788,142 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The part of a shown host after Another's warning. It must hold nothing but ASCII
+    /// letters, digits, `.`, `-` and whole `\u{XXXX}` escapes.
+    fn escaped_part(shown: &str) -> &str {
+        let rest = shown
+            .strip_prefix(NOT_A_PLAIN_HOST)
+            .unwrap_or_else(|| panic!("no warning in front of {shown:?}"));
+        let mut left = rest;
+        while let Some(c) = left.chars().next() {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                left = &left[1..];
+                continue;
+            }
+            let after = left
+                .strip_prefix("\\u{")
+                .unwrap_or_else(|| panic!("{c:?} is shown as it is in {rest:?}"));
+            let end = after.find('}').expect("an escape is closed");
+            let hex = &after[..end];
+            assert!(
+                hex.len() >= 4 && hex.chars().all(|h| h.is_ascii_hexdigit()),
+                "{rest:?}"
+            );
+            left = &after[end + 1..];
+        }
+        rest
+    }
+
+    /// Review R3 of Q19b. The host is the client's text, and a browser does not read it
+    /// as a person does: it ends the host at a backslash and drops zero-width characters.
+    /// So only a plain host is shown as it is. Anything else is shown whole, each other
+    /// character as an escape, behind a warning. Nothing is cut and nothing becomes a space.
+    #[test]
+    fn a_redirect_host_is_shown_exactly_or_escaped_behind_a_warning() {
+        // Plain: shown exactly, no warning.
+        let dns_limit = format!("{}.attacker.test", "a".repeat(253 - 14));
+        assert_eq!(dns_limit.len(), 253);
+        for plain in [
+            "chatgpt.com",
+            "127.0.0.1",
+            "xn--bcher-kva.example",
+            "chatgpt.com:8443",
+            "[2001:db8::1]",
+            "[2001:db8::1]:8443",
+            // An IPv6 literal as `redirect_host` hands it over: no brackets, no port.
+            "2001:db8::1",
+            "::1",
+            dns_limit.as_str(),
+        ] {
+            assert_eq!(shown_redirect_host(plain), plain);
+        }
+
+        // The backslash: a browser sends the code to `attacker.test`.
+        let short = "attacker.test\\good.example.com";
+        assert_eq!(
+            shown_redirect_host(short),
+            format!("{NOT_A_PLAIN_HOST}attacker.test\\u{{005C}}good.example.com")
+        );
+        let long = format!("attacker.test\\{}.good.example.com", "x".repeat(300));
+        let shown = shown_redirect_host(&long);
+        assert_eq!(
+            escaped_part(&shown),
+            format!(
+                "attacker.test\\u{{005C}}{}.good.example.com",
+                "x".repeat(300)
+            )
+        );
+
+        // Zero-width characters: a browser joins the two names into one.
+        let joined = "auth.openai.com\u{200b}\u{200b}\u{200b}chatgpt.com";
+        let shown = shown_redirect_host(joined);
+        assert_eq!(
+            escaped_part(&shown),
+            "auth.openai.com\\u{200B}\\u{200B}\\u{200B}chatgpt.com"
+        );
+        // A host that spells the fields of an `oauth pending` row.
+        let forged = "attacker.test\u{200b}\u{200b}expires\u{200b}2026-11-20t09.00.00.000z\u{200b}\u{200b}redirect\u{200b}host\u{200b}chatgpt.com";
+        let shown = shown_redirect_host(forged);
+        let escaped = escaped_part(&shown);
+        assert!(!escaped.contains(' '), "{escaped:?}");
+        assert!(
+            escaped.starts_with("attacker.test\\u{200B}\\u{200B}expires\\u{200B}"),
+            "{escaped:?}"
+        );
+        // A host that imitates the mark an earlier build used, or the warning itself.
+        for imitation in [
+            "(cut,\u{200b}12\u{200b}characters)\u{200b}...good.example.com".to_string(),
+            format!(
+                "{}good.example.com",
+                NOT_A_PLAIN_HOST.replace(' ', "\u{200b}")
+            ),
+        ] {
+            let shown = shown_redirect_host(&imitation);
+            let escaped = escaped_part(&shown);
+            assert!(escaped.ends_with("good.example.com"), "{escaped:?}");
+            assert!(
+                !escaped.contains(['(', ')', '[', ']', ',', ':', ' ']),
+                "{escaped:?}"
+            );
+        }
+
+        // Nothing is cut: one character over the DNS limit is not plain, and is whole.
+        let over = format!("a{dns_limit}");
+        assert_eq!(
+            shown_redirect_host(&over),
+            format!("{NOT_A_PLAIN_HOST}{over}")
+        );
+        let huge = format!("good.example.com.{}.attacker.test", "h".repeat(5000 - 31));
+        assert_eq!(
+            shown_redirect_host(&huge),
+            format!("{NOT_A_PLAIN_HOST}{huge}")
+        );
+
+        // An internationalised host is escaped; its punycode form (above) is plain.
+        assert_eq!(
+            shown_redirect_host("b\u{fc}cher.example"),
+            format!("{NOT_A_PLAIN_HOST}b\\u{{00FC}}cher.example")
+        );
+        // Control and text-direction characters, a space, `%`, a tag character.
+        let hostile = "a\u{1b}[2Jb\u{202e}c d%2e\u{e0041}\n.attacker.test";
+        assert_eq!(
+            shown_redirect_host(hostile),
+            format!(
+                "{NOT_A_PLAIN_HOST}a\\u{{001B}}\\u{{005B}}2Jb\\u{{202E}}c\\u{{0020}}d\\u{{0025}}2e\\u{{E0041}}\\u{{000A}}.attacker.test"
+            )
+        );
+        // Not plain either: no host, a bad port, brackets around something else.
+        for odd in [
+            "",
+            "chatgpt.com:",
+            "chatgpt.com:80a",
+            "[attacker.test]",
+            "x:y:z",
+        ] {
+            escaped_part(&shown_redirect_host(odd));
+        }
+    }
 
     #[test]
     fn redirect_rules() {

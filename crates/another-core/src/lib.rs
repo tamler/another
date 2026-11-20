@@ -60,9 +60,10 @@ pub use mail::{
 };
 pub use oauth::{
     canonical_resource, error_redirect, redirect_host, redirect_is_loopback, redirect_matches,
-    validate_cimd, validate_redirect_uri, Approval, AuthorizationStatus, AuthorizeInput,
-    ClientProfile, ClientRegistration, CodeExchange, IssuedTokens, OAuthFail, OauthGrant,
-    PendingAuthorization, PendingView, RefreshExchange, RegisteredClient, ACCESS_TTL_SECS,
+    shown_redirect_host, validate_cimd, validate_redirect_uri, Approval, AuthorizationStatus,
+    AuthorizeInput, ClientProfile, ClientRegistration, CodeExchange, IssuedTokens, OAuthFail,
+    OauthGrant, PendingAuthorization, PendingView, RefreshExchange, RegisteredClient,
+    ACCESS_TTL_SECS, NOT_A_PLAIN_HOST,
 };
 pub use queue::{
     queue_stamp, AdmitItem, AuditFinding, DoneItem, EditItem, FailedNotice, HeldClaim,

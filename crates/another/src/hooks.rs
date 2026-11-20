@@ -908,7 +908,7 @@ fn own_address(address: &str) -> Result<&str> {
 /// invisible or text-direction character, cut at `max` characters, every kind of double
 /// quote turned into `'`, `<` and `>` turned into `[` and `]`, inside `"`. So it cannot
 /// end its own quotes, and nothing in it has the shape of a tag.
-fn quoted_to(text: &str, max: usize) -> String {
+pub(crate) fn quoted_to(text: &str, max: usize) -> String {
     let harmless: String = text
         .chars()
         .map(|c| match c {

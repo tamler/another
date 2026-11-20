@@ -713,38 +713,19 @@ async fn authorize(
 
 /// What `another serve` prints on the operator's terminal when a client asks to connect.
 /// The name and the redirect host are the client's, and a name stored before registration
-/// refused control characters (D97) is still in the database: each value is one shown
-/// line, so it cannot send an escape sequence or add a line below this one.
+/// refused control characters (D97) is still in the database. The name is one shown line
+/// of at most 120 characters inside quotes it cannot close, so it cannot send an escape
+/// sequence, add a line below this one or pass as the rest of this one. The host is shown
+/// by the rule of [`another_core::shown_redirect_host`].
 fn connect_notice(client_name: &str, redirect_host: &str, user_code: &str) -> String {
-    let shown = |text: &str| another_core::display_line(text, 120);
     format!(
         "another: {} wants to connect (redirect host {}).\n  \
          Approve it on this machine (this page cannot approve it):\n  \
          another oauth approve {} --agent NAME --project '/path/*'",
-        shown(client_name),
-        shown_redirect_host(redirect_host),
-        shown(user_code)
+        crate::hooks::quoted_to(client_name, 120),
+        another_core::shown_redirect_host(redirect_host),
+        another_core::display_line(user_code, 120)
     )
-}
-
-/// Longest redirect host shown whole: the longest name DNS allows.
-const MAX_HOST_SHOWN_WHOLE: usize = 253;
-/// How much of the end of a longer host is shown.
-const HOST_END_SHOWN: usize = 120;
-
-/// A redirect host as the operator is shown it, in the notice above and in
-/// `another oauth pending`: one clean line that always includes the host's end, because
-/// the end says who receives the code. Registration accepts a host of any length, so a
-/// cut that kept the start would show `good.example.com.` and hide `attacker.test`. A
-/// host longer than DNS allows is shown by a mark, its length and its end only.
-pub(crate) fn shown_redirect_host(host: &str) -> String {
-    let clean = another_core::display_line(host, usize::MAX);
-    let length = clean.chars().count();
-    if length <= MAX_HOST_SHOWN_WHOLE {
-        return clean;
-    }
-    let end: String = clean.chars().skip(length - HOST_END_SHOWN).collect();
-    format!("(cut, {length} characters) ...{end}")
 }
 
 async fn resolve_client(
@@ -1448,67 +1429,93 @@ mod tests {
                 .any(|l| l.chars().any(another_core::is_unsafe_text_char)),
             "{notice:?}"
         );
+        let warning = another_core::NOT_A_PLAIN_HOST;
         assert_eq!(
             lines[0],
-            "another: Helper ]0;pwned  [2J   another oauth approve evil-code  x wants to connect (redirect host example.com [2J)."
+            format!(
+                "another: \"Helper ]0;pwned  [2J   another oauth approve evil-code  x\" wants to connect (redirect host {warning}example.com\\u{{001B}}\\u{{005B}}2J)."
+            )
         );
         assert_eq!(
             lines[2],
             "  another oauth approve abcd-efgh  --agent NAME --project '/path/*'"
         );
-        // An ordinary name is shown as it is.
+        // An ordinary name is shown in quotes, an ordinary host as it is.
         assert!(connect_notice("ChatGPT", "chatgpt.com", "abcd-efgh")
-            .starts_with("another: ChatGPT wants to connect (redirect host chatgpt.com).\n"));
+            .starts_with("another: \"ChatGPT\" wants to connect (redirect host chatgpt.com).\n"));
     }
 
-    /// Review R2 of Q19b: the end of a redirect host says who receives the code, so what
-    /// is shown always includes the end. A host of up to 253 characters (the DNS limit) is
-    /// shown whole; a longer one by a fixed mark, its length and its last 120 characters.
+    /// Review R3 of Q19b: the notice shows the host by the rule of
+    /// `another_core::shown_redirect_host`, and a name inside quotes it cannot close.
     #[test]
-    fn a_redirect_host_is_always_shown_with_its_end() {
-        // A trusted-looking start, the attacker's registrable domain at the end.
-        let long = format!(
-            "good.example.com.{}.{}.attacker.test",
-            "x".repeat(60),
-            "x".repeat(60)
-        );
-        assert_eq!(shown_redirect_host(&long), long);
-        let notice = connect_notice("ChatGPT", &long, "abcd-efgh");
-        assert!(
-            notice.contains(&format!("(redirect host {long}).\n")),
-            "{notice:?}"
-        );
+    fn the_connect_notice_never_shows_a_host_as_something_else() {
+        let warning = another_core::NOT_A_PLAIN_HOST;
+        let first_line = |name: &str, host: &str| {
+            let notice = connect_notice(name, host, "abcd-efgh");
+            assert_eq!(notice.split('\n').count(), 3, "{notice:?}");
+            notice.split('\n').next().unwrap().to_string()
+        };
+        let host_of = |line: &str| {
+            line.strip_prefix("another: \"ChatGPT\" wants to connect (redirect host ")
+                .and_then(|rest| rest.strip_suffix(")."))
+                .unwrap_or_else(|| panic!("{line:?}"))
+                .to_string()
+        };
 
-        let dns_limit = format!("{}.attacker.test", "a".repeat(253 - 14));
-        assert_eq!(dns_limit.chars().count(), 253);
-        assert_eq!(shown_redirect_host(&dns_limit), dns_limit);
-
-        let huge = format!("good.example.com.{}.attacker.test", "h".repeat(5000 - 31));
-        assert_eq!(huge.chars().count(), 5000);
-        let shown = shown_redirect_host(&huge);
+        // A browser ends the host at the backslash: the code goes to `attacker.test`.
+        let long = format!("attacker.test\\{}.good.example.com", "x".repeat(300));
         assert_eq!(
-            shown,
+            host_of(&first_line("ChatGPT", &long)),
             format!(
-                "(cut, 5000 characters) ...{}.attacker.test",
-                "h".repeat(120 - 14)
+                "{warning}attacker.test\\u{{005C}}{}.good.example.com",
+                "x".repeat(300)
             )
         );
-        assert!(!shown.contains("good.example.com"), "{shown:?}");
-
-        // Control, invisible and text-direction characters: still one clean line, whole
-        // or cut.
-        let hostile = "a\u{1b}[2Jb\u{202e}c\u{200b}d\ne.attacker.test";
-        assert_eq!(shown_redirect_host(hostile), "a [2Jb c d e.attacker.test");
-        let hostile_huge = format!("{}{hostile}", "h".repeat(300));
-        let shown = shown_redirect_host(&hostile_huge);
-        assert!(
-            shown.starts_with("(cut, 326 characters) ...hhh"),
-            "{shown:?}"
+        assert_eq!(
+            host_of(&first_line("ChatGPT", "attacker.test\\good.example.com")),
+            format!("{warning}attacker.test\\u{{005C}}good.example.com")
         );
-        assert!(shown.ends_with("a [2Jb c d e.attacker.test"), "{shown:?}");
+        // A browser drops zero-width characters: one joined name, not two.
+        let joined = host_of(&first_line(
+            "ChatGPT",
+            "auth.openai.com\u{200b}\u{200b}\u{200b}chatgpt.com",
+        ));
+        assert_eq!(
+            joined,
+            format!("{warning}auth.openai.com\\u{{200B}}\\u{{200B}}\\u{{200B}}chatgpt.com")
+        );
         assert!(
-            !shown.chars().any(another_core::is_unsafe_text_char),
-            "{shown:?}"
+            !joined[warning.len()..].contains(' '),
+            "a space in a shown host: {joined:?}"
+        );
+        // Plain hosts: exactly, with no warning. Nothing is cut.
+        let dns_limit = format!("{}.attacker.test", "a".repeat(253 - 14));
+        let huge = format!("good.example.com.{}.attacker.test", "h".repeat(5000 - 31));
+        for plain in [
+            "chatgpt.com",
+            "2001:db8::1",
+            "xn--bcher-kva.example",
+            &dns_limit,
+        ] {
+            assert_eq!(host_of(&first_line("ChatGPT", plain)), plain);
+        }
+        assert_eq!(
+            host_of(&first_line("ChatGPT", &huge)),
+            format!("{warning}{huge}")
+        );
+        assert_eq!(
+            host_of(&first_line("ChatGPT", "b\u{fc}cher.example")),
+            format!("{warning}b\\u{{00FC}}cher.example")
+        );
+
+        // A name that spells the rest of the line stays inside its quotes.
+        let line = first_line(
+            "ChatGPT\" wants to connect (redirect host chatgpt.com).",
+            "attacker.test",
+        );
+        assert_eq!(
+            line,
+            "another: \"ChatGPT' wants to connect (redirect host chatgpt.com).\" wants to connect (redirect host attacker.test)."
         );
     }
 

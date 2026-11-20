@@ -1329,11 +1329,12 @@ fn terminal_safe(text: &str) -> String {
 
 /// An OAuth client's name inside one row of the `another oauth` commands. The operator
 /// approves a client from these rows, and a name stored before registration refused
-/// control characters (D97) can hold a line break, which [`terminal_safe`] keeps. A long
-/// name keeps its start, which is what identifies it; a redirect host keeps its end
-/// ([`crate::oauth_http::shown_redirect_host`]).
+/// control characters (D97) can hold a line break, which [`terminal_safe`] keeps. It is
+/// one shown line of at most 120 characters inside quotes it cannot close, as the hooks
+/// show a sender's text, so it cannot pass as the fields that follow it. A redirect host
+/// is shown by [`another_core::shown_redirect_host`].
 fn client_shown(text: &str) -> String {
-    another_core::display_line(text, 120)
+    hooks::quoted_to(text, 120)
 }
 
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
@@ -1926,7 +1927,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                                 "{}  {}  redirect host {}  expires {}",
                                 r.user_code,
                                 client_shown(&r.client_name),
-                                crate::oauth_http::shown_redirect_host(&r.redirect_host),
+                                another_core::shown_redirect_host(&r.redirect_host),
                                 r.expires_at
                             )
                         })
