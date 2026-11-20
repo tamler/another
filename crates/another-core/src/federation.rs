@@ -339,6 +339,9 @@ fn upsert_node(tx: &Tx<'_>, node: &NodeEntry) -> Result<()> {
         return Ok(());
     }
     crypto::decode_peer_public(&node.public_key)?;
+    // The name prefixes every feed line from that node and is listed by `another node`. A
+    // hub's name in its answer to a join arrives here unchecked.
+    let display_name = crate::mail::single_line(&node.display_name, usize::MAX);
     let known: Option<(String, Option<String>)> = tx
         .query_row(
             "SELECT display_name, public_key FROM nodes WHERE node_id = ?1",
@@ -352,10 +355,10 @@ fn upsert_node(tx: &Tx<'_>, node: &NodeEntry) -> Result<()> {
             node.node_id
         ))),
         Some((name, _)) => {
-            if name != node.display_name {
+            if name != display_name {
                 tx.execute(
                     "UPDATE nodes SET display_name = ?2 WHERE node_id = ?1",
-                    params![node.node_id, node.display_name],
+                    params![node.node_id, display_name],
                 )?;
             }
             tx.execute(
@@ -374,7 +377,7 @@ fn upsert_node(tx: &Tx<'_>, node: &NodeEntry) -> Result<()> {
             tx.execute(
                 "INSERT INTO nodes (node_id, display_name, role, is_local, created_at, public_key)
                  VALUES (?1, ?2, 'peer', 0, ?3, ?4)",
-                params![node.node_id, node.display_name, tx.now, node.public_key],
+                params![node.node_id, display_name, tx.now, node.public_key],
             )?;
             Ok(())
         }
@@ -759,6 +762,11 @@ fn project_exists(conn: &Connection, id: &str) -> Result<bool> {
 /// mail, presence or receipts in the future).
 fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
     let s = |k: &str| p.get(k).and_then(Value::as_str).map(str::to_string);
+    // A peer's free text skips the local checks: names, hold reasons, models, descriptions
+    // and resource text are stored as one safe line, like a subject (D75); the signed event
+    // keeps the original. Held patterns, project paths and slugs name real files and are
+    // matched across nodes, so they are kept as sent.
+    let line = |k: &str| s(k).map(|t| crate::mail::single_line(&t, usize::MAX));
     let ts = ev.ts.min(tx.now);
     let origin = ev.node_id.as_str();
     match ev.kind.as_str() {
@@ -781,7 +789,7 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
             let Some(agent_id) = s("agent_id") else {
                 return Ok(());
             };
-            let name = s("name").unwrap_or_default();
+            let name = line("name").unwrap_or_default();
             let project_id = s("project_id").filter(|id| project_exists(tx, id).unwrap_or(false));
             let slug: Option<String> = match &project_id {
                 Some(id) => tx
@@ -798,7 +806,12 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                 [origin],
                 |r| r.get(0),
             )?;
-            let address = format!("{name}@{}@{node_name}", slug.unwrap_or_default());
+            // The stored slug stays as sent, since it is matched against local slugs; in an
+            // address, which is printed and typed, it is one safe line.
+            let address = format!(
+                "{name}@{}@{node_name}",
+                crate::mail::single_line(&slug.unwrap_or_default(), usize::MAX)
+            );
             tx.execute(
                 "INSERT INTO agents (agent_id, node_id, project_id, name, program, model, description,
                    status, created_at, updated_at, last_seen_at, event_id, address)
@@ -812,9 +825,9 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                     origin,
                     project_id,
                     name,
-                    s("program").unwrap_or_else(|| "other".into()),
-                    s("model"),
-                    s("description"),
+                    line("program").unwrap_or_else(|| "other".into()),
+                    line("model"),
+                    line("description"),
                     ts,
                     ev.event_id,
                     address
@@ -939,7 +952,7 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                    reason = excluded.reason, ttl_seconds = excluded.ttl_seconds,
                    renewed_at = excluded.renewed_at, expires_at = excluded.expires_at
                  WHERE holds.node_id = excluded.node_id",
-                params![hold_id, origin, project, agent, s("pattern"), exclusive, s("reason"), ttl, ts, expires],
+                params![hold_id, origin, project, agent, s("pattern"), exclusive, line("reason"), ttl, ts, expires],
             )?;
         }
         "hold.renewed" => {
@@ -980,12 +993,12 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                     rid,
                     origin,
                     s("kind"),
-                    s("name"),
-                    s("endpoint"),
+                    line("name"),
+                    line("endpoint"),
                     p.get("port").and_then(Value::as_i64),
                     p.get("pid").and_then(Value::as_i64),
                     project,
-                    s("purpose"),
+                    line("purpose"),
                     s("mode").unwrap_or_else(|| "shared".into()),
                     p.get("metadata").cloned().unwrap_or(json!({})).to_string(),
                     ts,

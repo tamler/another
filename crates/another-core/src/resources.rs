@@ -209,7 +209,10 @@ pub fn derive_port(text: &str) -> Option<u16> {
 }
 
 fn validate_name(name: &str) -> Result<()> {
-    if name.trim().is_empty() || name.len() > 200 || name.chars().any(char::is_control) {
+    if name.trim().is_empty()
+        || name.len() > 200
+        || name.chars().any(crate::mail::is_unsafe_text_char)
+    {
         return Err(Error::Invalid(
             "resource name must be 1-200 printable characters".into(),
         ));
@@ -649,6 +652,14 @@ impl Store {
     /// leases (borrow it instead), and adopts it when it has lapsed.
     pub fn register_resource(&self, input: RegisterResource) -> Result<LeaseOutcome> {
         validate_name(&input.name)?;
+        for (what, text) in [
+            ("a resource endpoint", &input.endpoint),
+            ("a resource purpose", &input.purpose),
+        ] {
+            if let Some(text) = text {
+                crate::queue::no_unsafe(what, text, false)?;
+            }
+        }
         let ttl = clamp_ttl(input.ttl_seconds)?;
         let metadata = input
             .metadata

@@ -852,7 +852,7 @@ fn item_now(conn: &Connection, node_id: &str, item_id: &str) -> Result<QueueItem
     to_item(conn, find_item(conn, node_id, item_id)?, true)
 }
 
-fn no_unsafe(what: &str, text: &str, multi_line: bool) -> Result<()> {
+pub(crate) fn no_unsafe(what: &str, text: &str, multi_line: bool) -> Result<()> {
     // The Unicode line and paragraph separators end a line for some readers, so one-line
     // text refuses them as it refuses a line feed.
     let bad = |c: char| {

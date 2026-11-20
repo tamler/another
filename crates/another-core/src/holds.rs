@@ -1348,6 +1348,10 @@ impl Store {
         if input.paths.is_empty() {
             return Err(Error::Invalid("no paths given".into()));
         }
+        // A reason is printed by `another holds`, the board and the edit guard's denial.
+        if let Some(reason) = &input.reason {
+            crate::queue::no_unsafe("a hold reason", reason, false)?;
+        }
         let ttl = clamp_ttl(input.ttl_seconds)?;
         self.write(|tx| {
             sweep_tx(tx)?;
