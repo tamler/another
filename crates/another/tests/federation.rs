@@ -809,6 +809,149 @@ fn a_join_on_an_invite_naming_this_node_itself_is_refused_over_http() {
     mallory.ct.cancel();
 }
 
+/// The address in an invite must be an `http://` or `https://` URL with a host, or nothing
+/// is sent. This is a check of form only: an invite is not signed.
+#[test]
+fn a_hub_address_that_is_not_http_is_refused_before_sending() {
+    let hub = start_hub();
+    let laptop = node("laptop");
+    let code = hub
+        .node
+        .store
+        .create_invite(&hub.url, &Perm::ALL, 3600)
+        .unwrap();
+    for url in [
+        "ftp://attacker.example/x",
+        "file:///etc/hosts",
+        "http://",
+        "https:///path",
+        "hub.example",
+        "//hub.example",
+        "http://two words.example",
+        "javascript:alert(1)",
+        "",
+    ] {
+        let mut edited = decode_invite(&code);
+        edited["hub_url"] = serde_json::json!(url);
+        let edited = format!(
+            "another-invite:{}",
+            crypto::b64(edited.to_string().as_bytes())
+        );
+        let err = match fed::join(&laptop.store, &edited) {
+            Ok(peer) => panic!("joined through the address {url:?}: {peer:?}"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err.to_string(),
+            "this invite's hub address is not an http:// or https:// URL with a host; not joined",
+            "{url:?}"
+        );
+        assert!(laptop.store.peers().unwrap().is_empty(), "{url:?}");
+    }
+    assert!(audit_rows(&hub, "POST /fed/pair").is_empty());
+    fed::join(&laptop.store, &code).unwrap();
+    hub.ct.cancel();
+}
+
+/// A home that an older build left with a pairing row for the node itself. The row is
+/// inert: `another sync` dials nothing, `another peers` and `another doctor` say what it is,
+/// and an honest join then works and syncs.
+#[test]
+fn a_planted_pairing_row_for_this_node_itself_is_inert_cli() {
+    let hub = start_hub();
+    // Where the planted row points. Nothing may arrive there.
+    let trap = start_served("trap");
+    let dir = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_another"))
+            .args(args)
+            .env("ANOTHER_HOME", dir.path())
+            .env_remove("ANOTHER_NODE_NAME")
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+    assert!(run(&["node", "name", "solo"]).0);
+    let (_, shown, _) = run(&["--json", "node", "show"]);
+    let own: serde_json::Value = serde_json::from_str(&shown).unwrap();
+    let own_id = own["node_id"].as_str().unwrap();
+    rusqlite::Connection::open(dir.path().join(DB_FILE))
+        .unwrap()
+        .execute(
+            "INSERT INTO peers (node_id, role, url, perms, paired_at)
+             VALUES (?1, 'hub', ?2, '[\"read_feed\"]', 0)",
+            [own_id, trap.url.as_str()],
+        )
+        .unwrap();
+
+    // Sync has no hub to dial.
+    let (ok, _, err) = run(&["sync"]);
+    assert!(!ok);
+    assert!(err.contains("this node has no hub"), "{err}");
+    assert!(trap.node.store.audit_log(100).unwrap().is_empty());
+
+    let (ok, out, _) = run(&["peers"]);
+    assert!(ok);
+    assert_eq!(out.lines().count(), 1, "{out}");
+    assert!(out.starts_with("hub    solo"), "{out}");
+    assert!(
+        out.trim_end().ends_with("(this node itself; ignored)"),
+        "{out}"
+    );
+
+    let self_row = "a pairing record for this node itself is ignored: an older build wrote it \
+                    from an invite that named this node; no action is needed";
+    let peers_check = || -> serde_json::Value {
+        let (_, out, _) = run(&["--json", "doctor"]);
+        let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let checks = report["checks"].as_array().unwrap();
+        checks
+            .iter()
+            .find(|c| c["name"] == "peers")
+            .unwrap()
+            .clone()
+    };
+    let check = peers_check();
+    assert_eq!(check["status"], "warn", "{check}");
+    assert_eq!(check["detail"], self_row);
+    assert_eq!(check["fix"], serde_json::Value::Null);
+    let (_, text, _) = run(&["doctor"]);
+    assert!(text.contains(self_row), "{text}");
+
+    // An honest join is not refused as a second hub, and the node syncs with that hub.
+    let code = hub
+        .node
+        .store
+        .create_invite(&hub.url, &Perm::ALL, 3600)
+        .unwrap();
+    let (ok, out, err) = run(&["pair", "join", &code]);
+    assert!(ok, "{err}");
+    assert!(out.starts_with("paired with hub hub at "), "{out}");
+    let (ok, out, err) = run(&["sync"]);
+    assert!(ok, "{err}");
+    assert!(out.contains(&hub.url), "{out}");
+    assert!(trap.node.store.audit_log(100).unwrap().is_empty());
+    let (_, out, _) = run(&["peers"]);
+    assert_eq!(out.lines().count(), 2, "{out}");
+    assert_eq!(
+        out.matches("(this node itself; ignored)").count(),
+        1,
+        "{out}"
+    );
+    let check = peers_check();
+    assert_eq!(check["status"], "warn", "{check}");
+    assert_eq!(
+        check["detail"],
+        format!("1 paired, all synced recently; {self_row}")
+    );
+    hub.ct.cancel();
+    trap.ct.cancel();
+}
+
 /// Review R2, P3-B, over HTTP: a node that already syncs with a hub is refused a second one
 /// before anything is sent, so the second hub's invite is not used up.
 #[test]

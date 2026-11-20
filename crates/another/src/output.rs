@@ -469,7 +469,9 @@ pub fn audit(es: &[AuditEntry]) -> String {
         .collect()
 }
 
-pub fn peers(ps: &[Peer]) -> String {
+/// `own_id` is this node's id: a pairing row for the node itself, which an older build
+/// could write, is shown marked, because nothing acts on it.
+pub fn peers(ps: &[Peer], own_id: &str) -> String {
     if ps.is_empty() {
         return "not paired with any node".to_string();
     }
@@ -477,7 +479,7 @@ pub fn peers(ps: &[Peer]) -> String {
         .map(|p| {
             let perms: Vec<&str> = p.perms.iter().map(|x| x.as_str()).collect();
             format!(
-                "{:<6} {:<16} {}  key {}  perms [{}]  last sync {}{}\n",
+                "{:<6} {:<16} {}  key {}  perms [{}]  last sync {}{}{}\n",
                 p.role,
                 p.display_name,
                 p.url.as_deref().unwrap_or("-"),
@@ -486,6 +488,11 @@ pub fn peers(ps: &[Peer]) -> String {
                 p.last_sync_at.as_deref().unwrap_or("never"),
                 if p.revoked_at.is_some() {
                     "  (revoked)"
+                } else {
+                    ""
+                },
+                if p.node_id == own_id {
+                    "  (this node itself; ignored)"
                 } else {
                     ""
                 }

@@ -477,7 +477,9 @@ impl Store {
 
         let active_peers: Vec<Peer> = peers
             .into_iter()
-            .filter(|p| p.revoked_at.is_none())
+            // A pairing row for this node itself (an older build could write one) is inert
+            // everywhere, so it is not a peer here either.
+            .filter(|p| p.revoked_at.is_none() && p.node_id != node.node_id)
             .collect();
         let counts = DashCounts {
             live: agents.iter().filter(|a| a.presence == "live").count() as u32,

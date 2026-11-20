@@ -461,6 +461,25 @@ fn signed(
     })
 }
 
+/// The address in an invite is where this node will send its pairing request and then every
+/// sync, and it is stored. It must be an `http://` or `https://` URL with a host; anything
+/// else is refused before anything is sent. This checks the form only: an invite is not
+/// signed, so the address is whatever the code's author put there.
+fn hub_url_is_http(url: &str) -> another_core::Result<()> {
+    let ok = url.parse::<ureq::http::Uri>().is_ok_and(|uri| {
+        matches!(uri.scheme_str(), Some("http" | "https"))
+            && uri.host().is_some_and(|h| !h.is_empty())
+    });
+    if ok {
+        Ok(())
+    } else {
+        Err(another_core::Error::Invalid(
+            "this invite's hub address is not an http:// or https:// URL with a host; not joined"
+                .into(),
+        ))
+    }
+}
+
 /// Spoke: redeem an invite code with the hub and record it as this node's hub.
 pub fn join(store: &Store, code: &str) -> Result<Peer> {
     join_reporting(store, code).map(|(peer, _)| peer)
@@ -470,6 +489,7 @@ pub fn join(store: &Store, code: &str) -> Result<Peer> {
 /// lifted this node's own revoke of it.
 pub fn join_reporting(store: &Store, code: &str) -> Result<(Peer, Option<String>)> {
     let (invite, req) = store.prepare_join(code)?;
+    hub_url_is_http(&invite.hub_url)?;
     let agent = agent_for(&invite.hub_url);
     let resp = agent
         .post(&format!("{}/fed/pair", invite.hub_url))

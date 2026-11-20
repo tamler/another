@@ -1750,3 +1750,111 @@ fn revoke_readmit_and_release_name_refuse_this_nodes_own_id() {
         assert_eq!(after, events);
     }
 }
+
+/// The joiner's side of spec 4.4's keyless rule (the architect's ruling of 20 Nov 2026,
+/// amending 4.6): a node row stored without a key for the invite's hub id is never given
+/// one by a join. No build makes such a row, so the test inserts it.
+#[test]
+fn a_node_known_without_a_key_is_never_given_one_by_a_join() {
+    let dir = tempfile::tempdir().unwrap();
+    let other = Node::new(dir.path(), "other");
+    let fresh = Node::new(dir.path(), "fresh");
+    fresh
+        .sql()
+        .execute(
+            "INSERT INTO nodes (node_id, display_name, role, is_local, created_at)
+             VALUES (?1, 'other', 'peer', 0, ?2)",
+            rusqlite::params![other.id(), T0],
+        )
+        .unwrap();
+    let (code, made) = invite(&other, &Perm::ALL);
+    let before = fresh.rows();
+    let expected = format!(
+        "node {} is known here without a key; it cannot be joined",
+        other.id()
+    );
+    let err = match fresh.store.prepare_join(&code) {
+        Ok(_) => panic!("built a request to join a node known here without a key"),
+        Err(e) => e,
+    };
+    assert_eq!(
+        (err.code(), err.to_string()),
+        ("conflict", expected.clone())
+    );
+
+    // With the hub's genuine answer in hand.
+    let req = signed_request(&made, &fresh.entry(), &fresh.secret(), T0);
+    let answer = other.store.accept_pairing(&req).unwrap();
+    let as_invite: Invite = serde_json::from_value(made).unwrap();
+    let err = match fresh.store.complete_join(&as_invite, &answer) {
+        Ok(peer) => panic!("a join gave a keyless node row a key: {peer:?}"),
+        Err(e) => e,
+    };
+    assert_eq!((err.code(), err.to_string()), ("conflict", expected));
+    assert_eq!(fresh.rows(), before);
+    let key: Option<String> = fresh
+        .sql()
+        .query_row(
+            "SELECT public_key FROM nodes WHERE node_id = ?1",
+            [other.id()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(key, None);
+}
+
+/// A pairing row for the node itself, as a build before the joiner checked the hub id could
+/// leave one. Nothing acts on it: the node has no hub because of it, an honest join is not
+/// refused as a second hub, and no request, push or pull is accepted in its name.
+#[test]
+fn a_pairing_row_for_this_node_itself_is_inert() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = Node::new(dir.path(), "hub");
+    let solo = Node::new(dir.path(), "solo");
+    let plant = |role: &str| {
+        solo.sql()
+            .execute("DELETE FROM peers WHERE node_id = ?1", [solo.id()])
+            .unwrap();
+        solo.sql()
+            .execute(
+                "INSERT INTO peers (node_id, role, url, perms, paired_at)
+                 VALUES (?1, ?2, 'http://127.0.0.1:1', ?3, ?4)",
+                rusqlite::params![
+                    solo.id(),
+                    role,
+                    r#"["read_feed","send_mail","borrow_resource"]"#,
+                    T0
+                ],
+            )
+            .unwrap();
+    };
+
+    for role in ["hub", "spoke"] {
+        plant(role);
+        assert_eq!(solo.store.hub().unwrap(), None, "role {role}");
+        assert!(!solo.store.is_paired_spoke(&solo.id()).unwrap());
+        // A request this node's own key signed, under its own id.
+        assert!(!signed_push_accepted(&solo, &solo), "role {role}");
+        let (events, _) = solo.store.outbound_events(0, 10).unwrap();
+        let err = solo.store.ingest(&solo.id(), &events, &[]).unwrap_err();
+        assert_eq!(err.code(), "forbidden", "{err}");
+        let err = solo.store.pull_for(&solo.id(), 0, 10).unwrap_err();
+        assert_eq!(err.code(), "forbidden", "{err}");
+        let shown = solo.store.dashboard_snapshot(DashboardView::LOCAL).unwrap();
+        assert!(shown.peers.is_empty(), "role {role}: {:?}", shown.peers);
+        // It is still listed, for `another peers` and `another doctor` to mark.
+        assert_eq!(solo.store.peers().unwrap().len(), 1);
+    }
+
+    // An honest join is not refused as a second hub, and the node then syncs with that hub.
+    plant("hub");
+    pair(&hub, &solo);
+    assert_eq!(solo.store.hub().unwrap().map(|(id, _)| id), Some(hub.id()));
+    solo.agent("bob");
+    assert!(push(&hub, &solo).rejected.is_empty());
+    pull(&hub, &solo);
+    assert!(signed_push_accepted(&hub, &solo));
+    let shown = solo.store.dashboard_snapshot(DashboardView::LOCAL).unwrap();
+    assert_eq!(shown.peers.len(), 1);
+    assert_eq!(shown.peers[0].node_id, hub.id());
+}

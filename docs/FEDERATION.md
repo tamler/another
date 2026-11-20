@@ -17,10 +17,12 @@ Several machines, such as a laptop, a remote runner and a GPU box, each run thei
   - **What the joiner checks against its own records.** `another pair join` writes one thing: the `hub` row of the node the invite names, and on a first meeting that node's entry. Before anything is sent, and again before anything is written, the node the invite names as the hub is held to what this node already stores. In each case below nothing is written and the invite is not used.
     - The invite names this node's own id: `this invite names this node itself as its hub; a node cannot join itself`. A node never has a pairing row for itself.
     - This node has a key stored for that id (its hub, or a node it knows from a hub's list) and the invite carries another key: `node <id> presented a different key than before; refusing`.
+    - This node has a row for that id with no key: `node <id> is known here without a key; it cannot be joined`. A join never gives a keyless row a key, as pairing on the hub never does.
     - That node is paired here as a spoke, revoked or not: `node <name> is paired here as a spoke; it cannot also be this node's hub`. So a spoke cannot change its own permissions or undo its revoke by handing its hub's owner an invite of its own.
     - This node already syncs with a different hub: ``this node already syncs with another hub; revoke it first: `another pair revoke <hub>` ``. Because this is refused before the request is sent, it does not use up the other hub's invite.
 
     The one revoke a join clears is this node's own revoke of its hub: a spoke that ran `another pair revoke <hub>` and joins that hub again with a fresh invite syncs with it again, with the new invite's URL and permissions. The invite may give the hub another name, so `pair join` then prints a second line, `this join lifted this node's own revoke of hub <name it was stored under> (key <fingerprint>); it syncs with that hub again`, and the local `peer.paired` event records `revoke_lifted` and `previous_name`.
+  - **An invite code is not signed.** The hub's answer to a join is signed; the code itself is not, and the address in it is covered by neither signature. So whoever hands you a code chooses the address this node sends its pairing request to and then syncs through. A genuine invite with only its address changed still joins, if what answers at that address passes the request on to the real hub; this node then syncs through that address, and the hub's answers to a pull are not signed yet, so what sits there can read what passes and change this node's view of the directory. Take a code from the hub's owner directly, over a channel you trust, and check the address `pair join` prints. The joiner checks only the form of the address: it must be an `http://` or `https://` URL with a host, or nothing is sent (`this invite's hub address is not an http:// or https:// URL with a host; not joined`). A second join to the hub this node already has replaces the stored address with the new code's and the permissions with the ones the hub's signed answer grants, so the same care applies to every code, not only the first.
   - **What is not covered.** A stolen home directory holds the private key, so its holder is that node; revoke it on the hub. A leaked invite code lets its holder join as a new node under any free name; the invite is single use, so the intended join then fails. An invite holder who knows the id of a node that has not paired yet can pair first under that id with its own key; the real node is then refused ("presented a different key") and the hub's audit log records the refusal. No command undoes that: revoke the squatter and give the real machine a new home. Spokes trust their hub's node list. The hub's answers to a pull are not signed, so a party between a spoke and its hub on a plaintext link can change the spoke's view of the directory; keep the link behind TLS or a private network as described in [REMOTE.md](REMOTE.md). There is no key rotation.
 
 ## What travels where
@@ -67,7 +69,7 @@ another serve --federation --bind 127.0.0.1:7468
 another pair invite --url https://studio.my-tailnet.ts.net --perms read_feed,send_mail,borrow_resource --expires 1h
 ```
 
-The invite code is single-use. It carries the hub's URL, node id and public key, and a secret. Treat the code as a password until it is used or expires: whoever holds it can join as a new node. Compare the printed key fingerprint with `another node show` on the hub if the code came through an untrusted channel.
+The invite code is single-use. It carries the hub's URL, node id and public key, and a secret. Treat the code as a password until it is used or expires: whoever holds it can join as a new node. The code is not signed, so the URL in it is whatever the person who gave it to you put there: take a code from the hub's owner directly. If it came through an untrusted channel, compare the printed key fingerprint with `another node show` on the hub, and the printed address with the hub's own.
 
 On each spoke:
 
@@ -99,7 +101,9 @@ A revoked node stays out. An invite does not bring it back, in either direction:
 
 Neither command has an HTTP route or an MCP tool: they are typed on the node itself.
 
-`pair revoke`, `pair readmit` and `pair release-name` act on other nodes only. Given this node's own id or name, when a pairing row for it exists, they refuse: ``node <id> is this node itself; `another pair revoke`, `readmit` and `release-name` act on other nodes only``. No command of this build makes such a row.
+`pair revoke`, `pair readmit` and `pair release-name` act on other nodes only. Given this node's own id or name, when a pairing row for it exists, they refuse: ``node <id> is this node itself; `another pair revoke`, `readmit` and `release-name` act on other nodes only``.
+
+No command of this build makes a pairing row for the node itself. A build before the joiner checked the hub id could write one, from an invite that named the joining node's own id. Such a row is ignored everywhere: it is not this node's hub, `another sync` never dials its address, a join is not refused as a second hub because of it, and no request, push or pull is accepted in its name. `another peers` lists it marked `(this node itself; ignored)`, and `another doctor` warns `a pairing record for this node itself is ignored: an older build wrote it from an invite that named this node; no action is needed`. There is no command to remove it and none is needed.
 
 ### Pairing again
 

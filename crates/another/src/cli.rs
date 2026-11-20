@@ -2124,7 +2124,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Command::Peers => {
             let ps = store.peers()?;
-            emit(json, &ps, |p| output::peers(p))
+            emit(json, &ps, |p| output::peers(p, store.node_id()))
         }
         Command::Sync { watch, every } => loop {
             let report = crate::fed::sync(&store);

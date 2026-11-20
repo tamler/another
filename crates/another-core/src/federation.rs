@@ -718,10 +718,17 @@ fn known_nodes(conn: &Connection) -> Result<Vec<NodeEntry>> {
 /// (role, perms, revoked_at)
 type PeerRow = (String, Vec<Perm>, Option<i64>);
 
+/// A `peers` row for this node itself is never acted on. No command of this build writes
+/// one; a build before the joiner checked the hub id could, from an invite that named the
+/// node's own id. Every reader that decides something from a `peers` row (this node's hub,
+/// who is a paired spoke, whose signed requests are accepted) carries this condition, so
+/// such a row is inert: it is only shown, marked, by `another peers` and `another doctor`.
+const NOT_SELF: &str = "node_id NOT IN (SELECT node_id FROM nodes WHERE is_local = 1)";
+
 fn peer_row(conn: &Connection, node_id: &str) -> Result<Option<PeerRow>> {
     Ok(conn
         .query_row(
-            "SELECT role, perms, revoked_at FROM peers WHERE node_id = ?1",
+            &format!("SELECT role, perms, revoked_at FROM peers WHERE node_id = ?1 AND {NOT_SELF}"),
             [node_id],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get(2)?)),
         )
@@ -762,7 +769,8 @@ fn second_hub() -> Error {
 /// again before anything is written:
 ///
 /// - the id is not this node's own;
-/// - when a key is stored for the id, the invite carries that key;
+/// - a row stored for the id has a key (a keyless row is never given one by a join, as on
+///   the hub's side), and the invite carries that key;
 /// - the id is not paired here in a role other than `hub`;
 /// - this node does not sync with a different hub.
 fn may_join_as_hub(conn: &Connection, own_id: &str, hub: &NodeEntry) -> Result<()> {
@@ -778,11 +786,20 @@ fn may_join_as_hub(conn: &Connection, own_id: &str, hub: &NodeEntry) -> Result<(
             |r| r.get(0),
         )
         .optional()?;
-    if stored.flatten().is_some_and(|key| key != hub.public_key) {
-        return Err(Error::Conflict(format!(
-            "node {} presented a different key than before; refusing",
-            hub.node_id
-        )));
+    match stored {
+        Some(None) => {
+            return Err(Error::Conflict(format!(
+                "node {} is known here without a key; it cannot be joined",
+                hub.node_id
+            )));
+        }
+        Some(Some(key)) if key != hub.public_key => {
+            return Err(Error::Conflict(format!(
+                "node {} presented a different key than before; refusing",
+                hub.node_id
+            )));
+        }
+        _ => {}
     }
     not_paired_as_spoke(conn, &hub.node_id)?;
     match hub_of(conn)? {
@@ -815,9 +832,18 @@ fn not_this_node(tx: &Tx<'_>, node_id: &str) -> Result<()> {
 pub(crate) fn hub_of(conn: &Connection) -> Result<Option<(String, String, Vec<Perm>)>> {
     Ok(conn
         .query_row(
-            "SELECT node_id, url, perms FROM peers WHERE role = 'hub' AND revoked_at IS NULL LIMIT 1",
+            &format!(
+                "SELECT node_id, url, perms FROM peers
+                 WHERE role = 'hub' AND revoked_at IS NULL AND {NOT_SELF} LIMIT 1"
+            ),
             [],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
         )
         .optional()?
         .map(|(n, u, p)| (n, u, perms_of(&p))))
@@ -1657,7 +1683,7 @@ impl Store {
                 .query_row(
                     "SELECT p.perms, p.revoked_at, n.public_key FROM peers p
                      JOIN nodes n ON n.node_id = p.node_id
-                     WHERE p.node_id = ?1 AND p.role = 'spoke'",
+                     WHERE p.node_id = ?1 AND p.role = 'spoke' AND n.is_local = 0",
                     [node_id],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
