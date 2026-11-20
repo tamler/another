@@ -86,9 +86,30 @@ fn a_target_that_starts_with_a_dash_is_not_stored() {
 fn a_target_with_an_invisible_or_bidirectional_character_is_refused() {
     let (_dir, s) = store(&["bob"]);
     let hidden = [
-        '\u{200B}', '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}',
-        '\u{202C}', '\u{202D}', '\u{202E}', '\u{2060}', '\u{2061}', '\u{2066}', '\u{2067}',
-        '\u{2068}', '\u{2069}', '\u{FEFF}', '\u{2028}', '\u{2029}',
+        '\u{200B}',
+        '\u{200C}',
+        '\u{200D}',
+        '\u{200E}',
+        '\u{200F}',
+        '\u{202A}',
+        '\u{202B}',
+        '\u{202C}',
+        '\u{202D}',
+        '\u{202E}',
+        '\u{2060}',
+        '\u{2061}',
+        '\u{2066}',
+        '\u{2067}',
+        '\u{2068}',
+        '\u{2069}',
+        '\u{FEFF}',
+        '\u{2028}',
+        '\u{2029}',
+        // Unicode tag characters: not seen by a person, read as letters by a model (D96).
+        '\u{E0000}',
+        '\u{E0001}',
+        '\u{E0041}',
+        '\u{E007F}',
     ];
     for c in hidden {
         for bad in [format!("p{c}x"), format!("{c}p"), format!("p{c}")] {
