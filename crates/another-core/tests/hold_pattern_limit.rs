@@ -71,6 +71,21 @@ impl Node {
     }
 
     fn acquire(&self, agent: &str, project: &str, paths: &[&str]) -> Result<HoldReport> {
+        self.acquire_as(agent, project, paths, false)
+    }
+
+    /// [`Node::acquire`] with `--repo-wide`, for a glob that starts with a wildcard.
+    fn acquire_wide(&self, agent: &str, project: &str, path: &str) -> HoldReport {
+        self.acquire_as(agent, project, &[path], true).unwrap()
+    }
+
+    fn acquire_as(
+        &self,
+        agent: &str,
+        project: &str,
+        paths: &[&str],
+        repo_wide: bool,
+    ) -> Result<HoldReport> {
         self.store.acquire_holds(AcquireHolds {
             agent: agent.into(),
             project: project.into(),
@@ -78,7 +93,7 @@ impl Node {
             ttl_seconds: None,
             exclusive: true,
             reason: None,
-            repo_wide: false,
+            repo_wide,
         })
     }
 
@@ -117,6 +132,11 @@ impl Node {
     /// `copies` more rows like the stored hold `like`, each with `pattern`: what the same
     /// number of that node's events would have stored, without signing each one.
     fn plant_copies(&self, like: &str, copies: usize, pattern: &str) {
+        self.plant_each(like, (0..copies).map(|_| pattern.to_string()));
+    }
+
+    /// One more row like the stored hold `like` for each of `patterns`, in that order.
+    fn plant_each(&self, like: &str, patterns: impl Iterator<Item = String>) {
         let mut db = self.sql();
         let tx = db.transaction().unwrap();
         {
@@ -129,9 +149,12 @@ impl Node {
                      FROM holds WHERE hold_id = ?1",
                 )
                 .unwrap();
-            for i in 0..copies {
+            let first: i64 = tx
+                .query_row("SELECT count(*) FROM holds", [], |r| r.get(0))
+                .unwrap();
+            for (i, pattern) in patterns.enumerate() {
                 let n = insert
-                    .execute((like, format!("{like}-copy-{i}"), pattern))
+                    .execute((like, format!("{like}-copy-{}", first + i as i64), pattern))
                     .unwrap();
                 assert_eq!(n, 1);
             }
@@ -393,28 +416,40 @@ fn a_peers_over_limit_pattern_is_stored_and_relayed_but_never_applied() {
     assert_eq!(refusals(&fed.hub).len(), 1);
 }
 
-/// Rule B for a short pattern: one inside the limit that is not a glob globset compiles.
-/// A `hold.updated` is held to the same rule.
+/// Nothing is compiled when a peer's event is stored (review R2 of Q30: that compile ran
+/// inside the write transaction, 2 ms a glob). A pattern inside the limit is applied
+/// whether or not it compiles, with no report. That it does not compile is found when it
+/// is compared: it then counts as overlapping every path in its project, as a warning
+/// that says so (rule C). Only the length decides at arrival, for `hold.updated` too.
 #[test]
-fn a_peers_short_pattern_that_does_not_compile_is_not_applied() {
-    let fed = Fed::new();
+fn a_peers_short_pattern_that_does_not_compile_is_applied_and_warns_when_compared() {
     for (i, pattern) in ["src/{a", "src/[z-a]*", "src/*a}"].iter().enumerate() {
+        let fed = Fed::new();
         let id = format!("short-{i}");
         let (ev, report) = fed.forge_hold(&id, pattern);
         assert_eq!(report.accepted, 1, "{pattern}: {report:?}");
         assert_eq!(fed.hub.event_rows(&ev.event_id), 1);
-        assert_eq!(fed.hub.hold_rows(&id), 0, "{pattern} must not be applied");
-        let listed = not_applied(&report);
-        assert_eq!(listed.len(), 1, "{pattern}: {report:?}");
-        let reason = listed[0]["reason"].as_str().unwrap();
+        assert_eq!(fed.hub.hold_rows(&id), 1, "{pattern} is applied");
+        assert!(not_applied(&report).is_empty(), "{pattern}: {report:?}");
+        assert!(refusals(&fed.hub).is_empty());
+        let got = fed
+            .hub
+            .acquire("alice", &fed.shop, &["docs/unrelated.md"])
+            .unwrap();
+        assert_eq!(got.granted.len(), 1, "{got:?}");
+        assert_eq!(got.warnings.len(), 1, "{pattern}: {got:?}");
+        let text = note(&got.warnings[0]);
         assert!(
-            reason.ends_with(&format!(
-                "its pattern {pattern:?} ({} bytes) is not a glob that compiles",
-                pattern.len()
-            )),
-            "{reason}"
+            text.starts_with(&format!("hold {id} of "))
+                && text.contains(&format!(
+                    "on node mallory has a pattern that could not be read ({pattern:?} ({} \
+                     bytes)), so it counts as overlapping every path in project shop.",
+                    pattern.len()
+                )),
+            "{text}"
         );
     }
+    let fed = Fed::new();
     let (_, report) = fed.forge(
         "hold.updated",
         json!({
@@ -424,7 +459,7 @@ fn a_peers_short_pattern_that_does_not_compile_is_not_applied() {
     );
     assert_eq!(report.accepted, 1);
     assert_eq!(fed.hub.hold_rows("updated"), 0);
-    assert_eq!(refusals(&fed.hub).len(), 4);
+    assert_eq!(refusals(&fed.hub).len(), 1);
     // A path with no glob syntax is compared as text and never compiled: it is applied,
     // even one that would not be a valid glob (an unescaped file name from an older build).
     let (_, report) = fed.forge_hold("plain", "src/odd}name.rs");
@@ -453,6 +488,11 @@ fn a_peers_pattern_at_the_limit_is_applied_and_one_byte_more_is_not() {
     assert_eq!(got.granted.len(), 1);
     assert_eq!(got.warnings.len(), 1, "{:?}", got.warnings.len());
     assert_eq!(note(&got.warnings[0]), "");
+    // A long pattern in a warning is its start and its length, never 4 KB.
+    assert_eq!(
+        got.warnings[0].held.pattern,
+        "\"src/*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*…\" (4096 bytes)"
+    );
     let got = fed.hub.acquire("alice", &fed.shop, &["src/aa"]).unwrap();
     assert!(got.warnings.is_empty());
 }
@@ -751,6 +791,30 @@ fn timed<T>(what: &str, f: impl FnOnce() -> T) -> T {
     out
 }
 
+/// `hold acquire` with a hard limit: it runs on a thread of its own and the test fails at
+/// the bound, where waiting for the answer would hang the run for as long as a regression
+/// takes (on the head before the budget, more than fifteen minutes).
+fn acquire_within_the_bound(node: &Node, agent: &str, project: &str, path: &str) -> HoldReport {
+    let (answer, waiting) = std::sync::mpsc::channel();
+    let store = node.store.clone();
+    let input = AcquireHolds {
+        agent: agent.into(),
+        project: project.into(),
+        paths: vec![path.into()],
+        ttl_seconds: None,
+        exclusive: true,
+        reason: None,
+        repo_wide: false,
+    };
+    std::thread::spawn(move || {
+        let _ = answer.send(store.acquire_holds(input));
+    });
+    waiting
+        .recv_timeout(COMMAND_BOUND)
+        .unwrap_or_else(|_| panic!("hold acquire did not answer in {COMMAND_BOUND:?}"))
+        .unwrap()
+}
+
 /// Review R1 of Q30, P1-1: a peer's many cheap holds. Each one compiles and is applied.
 /// Comparing with them is best effort within one budget for the whole command, so `hold
 /// acquire` answers at once, lists none of them one by one and says in one count how many
@@ -767,9 +831,7 @@ fn a_peers_many_cheap_holds_cost_one_count_and_no_time() {
         assert_eq!(fed.hub.hold_rows("cheap"), 1);
         fed.hub.plant_copies("cheap", holds - 1, &cheap_hostile());
 
-        let got = timed("hold acquire", || {
-            fed.hub.acquire("alice", &fed.shop, &["src/a.rs"]).unwrap()
-        });
+        let got = acquire_within_the_bound(&fed.hub, "alice", &fed.shop, "src/a.rs");
         assert_eq!(got.granted.len(), 1, "a foreign hold never blocks");
         assert!(got.warnings.is_empty(), "{} warnings", got.warnings.len());
         assert_eq!(
@@ -841,6 +903,100 @@ fn plain_holds_of_a_peer_are_compared_by_the_thousand() {
         json!([{ "node": "mallory", "holds": 10_001 }]),
         "30,000 holds, 19,999 compared"
     );
+}
+
+/// An honest peer's edit holds: one file each, on paths like a real monorepo's.
+fn honest_path(i: usize) -> String {
+    format!("apps/web/src/features/f{i}/components/table/Row{i}.tsx")
+}
+
+/// How many of the peer's holds in `shop` a request left uncompared.
+fn left_uncompared(got: &HoldReport) -> u64 {
+    not_compared(got).as_array().map_or(0, |nodes| {
+        nodes.iter().map(|n| n["holds"].as_u64().unwrap()).sum()
+    })
+}
+
+/// Review R2 of Q30, P2-B: with an honest peer and no hostile input, a glob request left
+/// 142 of 300 plain holds uncompared, and with 2,000 another left 825 and missed a real
+/// overlap. A requested glob is now matched directly against a hold on a plain path, so
+/// every one is compared and every overlap is found.
+#[test]
+fn a_glob_request_is_compared_with_every_plain_hold_of_an_honest_peer() {
+    for holds in [300usize, 2_000] {
+        let fed = Fed::new();
+        fed.forge_hold("first", &honest_path(0));
+        fed.hub.plant_each("first", (1..holds).map(honest_path));
+        // Taken last, and the only one under apps/api.
+        fed.forge_hold("server", "apps/api/src/server.ts");
+        for (request, overlaps) in [
+            ("apps/api/src/*.ts", 1),
+            ("apps/api/**", 1),
+            ("apps/api/src/server.ts", 1),
+            ("apps/api/src/other.ts", 0),
+            // Every one of the peer's files is a .ts or .tsx file under apps/*/src.
+            ("{apps,packages}/*/src/**/*.{ts,tsx}", holds + 1),
+            // The walk's reading, kept: a path below `apps` may be a directory that holds
+            // what the glob names, so it counts as overlapping.
+            ("apps/**/{api,server}/**/*.ts", holds + 1),
+            ("packages/**/*.ts", 0),
+        ] {
+            let got = fed.hub.acquire_wide("alice", &fed.shop, request);
+            let json = serde_json::to_value(&got).unwrap();
+            let found = got.warnings.len() as u64 + json["warnings_more"].as_u64().unwrap_or(0);
+            assert_eq!(left_uncompared(&got), 0, "{request} with {holds} holds");
+            assert_eq!(found, overlaps as u64, "{request} with {holds} holds");
+            if overlaps == 1 {
+                assert_eq!(got.warnings[0].held.hold_id, "server", "{request}");
+            }
+        }
+    }
+}
+
+/// What one command compares of a peer's holds, as the docs state it: these are the
+/// figures in docs/HOLDS.md. Holds on plain paths are compared as they are read and cost
+/// about the same whatever is asked for. Glob holds are set aside and compared after, and
+/// each costs a compile and, against a plain request, a walk: of 10,000 of them 541 are
+/// compared for a path and 1,769 for a glob.
+#[test]
+fn what_one_command_compares_of_a_peers_holds() {
+    let compared = |fed: &Fed, total: u64, request: &str| {
+        total - left_uncompared(&fed.hub.acquire_wide("alice", &fed.shop, request))
+    };
+    // 30,000 holds on plain paths of about 50 bytes.
+    let plain = Fed::new();
+    plain.forge_hold("first", &honest_path(0));
+    plain.hub.plant_each("first", (1..30_000).map(honest_path));
+    assert_eq!(
+        [
+            compared(&plain, 30_000, "apps/api/src/server.ts"),
+            compared(&plain, 30_000, "apps/api/src/*.ts"),
+            compared(&plain, 30_000, "{apps,packages}/*/src/**/*.{ts,tsx}"),
+        ],
+        [19_999, 19_995, 19_991]
+    );
+    // 10,000 glob holds of about 30 bytes, the kind a person asks for.
+    let globs = Fed::new();
+    globs.forge_hold("first", "packages/pkg0/src/**/*.test.ts");
+    globs.hub.plant_each(
+        "first",
+        (1..10_000).map(|i| format!("packages/pkg{i}/src/**/*.test.ts")),
+    );
+    assert_eq!(
+        [
+            compared(&globs, 10_000, "packages/pkg7/src/a.test.ts"),
+            compared(&globs, 10_000, "packages/*/src/**/*.ts"),
+        ],
+        [541, 1_769]
+    );
+    // A plain hold stored after all those globs is still compared, and found.
+    globs.forge_hold("plain", "apps/api/src/server.ts");
+    let got = globs
+        .hub
+        .acquire("alice", &globs.shop, &["apps/api/src/*.ts"])
+        .unwrap();
+    assert_eq!(got.warnings.len(), 1);
+    assert_eq!(got.warnings[0].held.hold_id, "plain");
 }
 
 /// The warnings themselves are bounded: ten overlapping holds are listed and the rest are

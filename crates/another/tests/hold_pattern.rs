@@ -322,6 +322,12 @@ mod over_http {
     }
 
     fn start_hub() -> Hub {
+        start_hub_with(None)
+    }
+
+    /// With a number, a hub that serves only the federation routes and closes a pull page
+    /// at that many bytes where the build's own budget is 8 MiB.
+    fn start_hub_with(pull_page_bytes: Option<usize>) -> Hub {
         let node = node("hub");
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -338,7 +344,16 @@ mod over_http {
             bound_port: addr.port(),
             ..Default::default()
         };
-        let app = http_router(node.store.clone(), ct.clone(), &opts);
+        let app = match pull_page_bytes {
+            Some(pull_budget) => fed::router_with(
+                node.store.clone(),
+                fed::Limits {
+                    pull_budget,
+                    ..fed::Limits::CURRENT
+                },
+            ),
+            None => http_router(node.store.clone(), ct.clone(), &opts),
+        };
         let stop = ct.clone();
         rt.spawn(async move {
             axum::serve(
@@ -372,6 +387,62 @@ mod over_http {
                 repo_wide: false,
             })
             .unwrap();
+    }
+
+    /// Mallory takes `holds` real holds, then every one of its `hold.acquired` events gets
+    /// the pattern `pattern(i)`, signed with mallory's own key: what a peer on a changed
+    /// build can send. Each pattern here is inside the limit and compiles, so a build
+    /// without the change would have written the same events.
+    fn mallory_holds_globs(mallory: &Node, holds: usize, pattern: impl Fn(usize) -> String) {
+        let project = in_shop(mallory, "mal");
+        mallory
+            .store
+            .acquire_holds(AcquireHolds {
+                agent: "mal".into(),
+                project,
+                paths: (0..holds).map(|i| format!("src/f{i}.rs")).collect(),
+                ttl_seconds: None,
+                exclusive: true,
+                reason: None,
+                repo_wide: false,
+            })
+            .unwrap();
+        let mut c = Connection::open(mallory.dir.path().join(DB_FILE)).unwrap();
+        let secret: String = c
+            .query_row("SELECT secret_key FROM nodes WHERE is_local = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let key = crypto::decode_secret(&secret).unwrap();
+        let events: Vec<(String, String, i64, String, String)> = c
+            .prepare(
+                "SELECT event_id, node_id, ts, actor, payload FROM events
+                 WHERE kind = 'hold.acquired' ORDER BY seq",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(events.len(), holds);
+        let tx = c.transaction().unwrap();
+        for (i, (event_id, node_id, ts, actor, payload)) in events.into_iter().enumerate() {
+            let mut p: Value = serde_json::from_str(&payload).unwrap();
+            p["pattern"] = json!(pattern(i));
+            let payload = p.to_string();
+            let sig = crypto::sign(
+                &key,
+                &crypto::event_message(&event_id, &node_id, ts, &actor, "hold.acquired", &payload),
+            );
+            tx.execute(
+                "UPDATE events SET payload = ?2, sig = ?3 WHERE event_id = ?1",
+                params![event_id, payload, sig],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
     }
 
     /// Rewrite the pattern of the node's newest `hold.acquired` in its own log, signed with
@@ -608,26 +679,26 @@ mod over_http {
         denied("before the acquire");
 
         let started = std::time::Instant::now();
-        let mut acquire = Command::new(env!("CARGO_BIN_EXE_another"))
-            .arg("--home")
-            .arg(victim.dir.path())
-            .args(["hold", "acquire", "--agent", "claude@shop", "--project"])
-            .arg(&repo)
-            .arg("src/a.rs")
-            .env_remove("ANOTHER_AGENT")
-            .env_remove("ANOTHER_LOG")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let repo_arg = repo.to_string_lossy().into_owned();
+        let mut acquire = Running::start(
+            &victim,
+            &[
+                "hold",
+                "acquire",
+                "--agent",
+                "claude@shop",
+                "--project",
+                &repo_arg,
+                "src/a.rs",
+            ],
+        );
         // Hooks while it runs: at least three, and for as long as it does.
         let mut runs = 0;
-        while runs < 3 || acquire.try_wait().unwrap().is_none() {
+        while runs < 3 || acquire.running() {
             denied("during the acquire");
             runs += 1;
         }
-        let out = acquire.wait_with_output().unwrap();
+        let out = acquire.finish();
         let took = started.elapsed();
         assert!(out.status.success(), "{}", text(&out.stderr));
         // A wide bound for a debug build on a loaded machine; it was 292 s in a release build.
@@ -642,5 +713,118 @@ mod over_http {
         );
         assert_eq!(printed.matches("warning:").count(), 1, "{printed}");
         denied("after the acquire");
+    }
+
+    /// An `another` command of the victim's that runs while the test goes on. If the test
+    /// fails before it has ended, it is stopped here and not left running after the test
+    /// (on a head with the regression it ran for minutes, its home already deleted).
+    struct Running(Option<std::process::Child>);
+
+    impl Running {
+        fn start(home: &Node, args: &[&str]) -> Running {
+            Running(Some(
+                Command::new(env!("CARGO_BIN_EXE_another"))
+                    .arg("--home")
+                    .arg(home.dir.path())
+                    .args(args)
+                    .env_remove("ANOTHER_AGENT")
+                    .env_remove("ANOTHER_LOG")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap(),
+            ))
+        }
+
+        fn running(&mut self) -> bool {
+            let child = self.0.as_mut().expect("not finished");
+            child.try_wait().unwrap().is_none()
+        }
+
+        fn finish(mut self) -> Output {
+            let child = self.0.take().expect("not finished");
+            child.wait_with_output().unwrap()
+        }
+    }
+
+    impl Drop for Running {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    /// Review R2 of Q30, P1-A, through the real binaries: a peer sends 2,000 holds whose
+    /// patterns are 4 KB globs that are slow to compile. Storing them used to compile each
+    /// one inside the write transaction (2 ms a glob in a release build), so a `sync` kept
+    /// the database locked for seconds and most pre-edit hooks in that time let their edit
+    /// through. Nothing is compiled when an event is stored now: the hooks run while the
+    /// victim's `another sync` pulls them keep denying an edit of a file another agent
+    /// holds, and the sync ends well inside a bound that is wide for a debug build.
+    ///
+    /// The hub here closes a pull page at 128 KiB, about 30 of these events, where the
+    /// build's page is 500 events. A debug build stores an event about ten times slower
+    /// than a release build, so a page of 500 keeps the lock past the hook's 300 ms in a
+    /// debug build on any head; that is the recorded limit on a large pull, not what this
+    /// test is about. With 30 events a page the lock is short unless storing an event
+    /// compiles its pattern, which is what failed before: 30 compiles at a time.
+    #[test]
+    fn a_hook_still_guards_while_sync_pulls_a_peers_slow_globs() {
+        let hub = start_hub_with(Some(128 * 1024));
+        let mallory = node("mallory");
+        let victim = node("victim");
+        hub.join(&mallory);
+        hub.join(&victim);
+        mallory_holds_globs(&mallory, 2_000, |i| format!("{}{i:05}", "*?".repeat(2030)));
+        fed::sync(&mallory.store).unwrap();
+
+        let repo = std::fs::canonicalize(victim.dir.path())
+            .unwrap()
+            .join("work")
+            .join("shop");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        for client in ["claude", "codex"] {
+            let out = hook(&victim, &repo, "session-start", client, None);
+            assert!(out.status.success(), "{}", text(&out.stderr));
+        }
+        let out = hook(&victim, &repo, "pre-edit", "codex", Some("src/b.rs"));
+        assert!(out.status.success() && out.stdout.is_empty(), "{out:?}");
+        let denied = |when: &str| {
+            let out = hook(&victim, &repo, "pre-edit", "claude", Some("src/b.rs"));
+            let answer = text(&out.stdout);
+            assert!(
+                out.status.success() && answer.contains("\"permissionDecision\":\"deny\""),
+                "{when}: the hook let an edit of a held file through (exit {:?}, stdout {answer:?})",
+                out.status.code()
+            );
+        };
+        denied("before the sync");
+
+        let started = std::time::Instant::now();
+        let mut sync = Running::start(&victim, &["sync"]);
+        let mut runs = 0;
+        while runs < 3 || sync.running() {
+            denied("during the sync");
+            runs += 1;
+        }
+        let out = sync.finish();
+        let took = started.elapsed();
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        assert!(took < std::time::Duration::from_secs(60), "took {took:?}");
+        let stored: i64 = Connection::open(victim.dir.path().join(DB_FILE))
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM holds
+                 WHERE node_id != (SELECT node_id FROM nodes WHERE is_local = 1)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, 2_000, "every one is applied");
+        denied("after the sync");
     }
 }
