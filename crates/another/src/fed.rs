@@ -12,7 +12,7 @@ use another_core::{
 };
 use anyhow::{anyhow, bail, Context, Result};
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
@@ -22,13 +22,88 @@ const H_NODE: &str = "x-another-node";
 const H_TIME: &str = "x-another-time";
 const H_SIG: &str = "x-another-signature";
 const BATCH: u32 = 500;
+/// Largest `/fed/pair` request body a hub reads: the value the HTTP library applied by
+/// default before D99, now stated. A pairing request is a few hundred bytes.
+pub const PAIR_BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
+/// Largest pairing or push answer a spoke reads: the value the HTTP client applied by
+/// default before D99, now stated. Neither answer carries events.
+const REPLY_LIMIT_BYTES: u64 = 10 * 1024 * 1024;
+
+/// The size bounds one side of a sync runs with (D99). A hub uses `push_body` and
+/// `pull_budget`; a spoke uses `push_budget` and `pull_body`.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// A push batch is closed before its request body would pass this many bytes.
+    pub push_budget: usize,
+    /// Largest `/fed/push` request body the hub reads.
+    pub push_body: usize,
+    /// A pull page is closed before its response body would pass this many bytes.
+    pub pull_budget: usize,
+    /// Largest `/fed/pull` response body the spoke reads.
+    pub pull_body: usize,
+    /// The hub refuses a push whose node header names no paired spoke before it reads the
+    /// body. A build before D99 read the body first.
+    pub unknown_sender_refused_first: bool,
+}
+
+impl Limits {
+    /// What this build runs with.
+    pub const CURRENT: Limits = Limits {
+        push_budget: another_core::PUSH_BATCH_BUDGET_BYTES,
+        push_body: another_core::PUSH_BODY_LIMIT_BYTES,
+        pull_budget: another_core::PULL_PAGE_BUDGET_BYTES,
+        pull_body: another_core::PULL_BODY_LIMIT_BYTES,
+        unknown_sender_refused_first: true,
+    };
+
+    /// What a build before D99 ran with: batches and pages bounded by count only, and the
+    /// HTTP libraries' default body limits. Kept so the tests can run a new node against an
+    /// older one.
+    pub const BEFORE_D99: Limits = Limits {
+        push_budget: usize::MAX,
+        push_body: 2 * 1024 * 1024,
+        pull_budget: usize::MAX,
+        pull_body: 10 * 1024 * 1024,
+        unknown_sender_refused_first: false,
+    };
+
+    /// One event at the cap fits a batch and a page, each budget fits under its limit, and
+    /// an event that arrived by push fits a pull answer with as much room again for the
+    /// node directory.
+    pub fn consistent(&self) -> bool {
+        // A real sequence number adds at most 19 bytes to the one digit the cap counts.
+        let one_event = another_core::MAX_EVENT_WIRE_BYTES + 19 + another_core::PUSH_ENVELOPE_BYTES;
+        one_event <= self.push_budget
+            && one_event <= self.pull_budget
+            && self.push_budget <= self.push_body
+            && self.pull_budget <= self.pull_body
+            && self.push_body.saturating_mul(2) <= self.pull_body
+    }
+}
 
 /// Routes a hub serves when started with `another serve --federation`.
 pub fn router(store: Store) -> axum::Router {
+    router_with(store, Limits::CURRENT)
+}
+
+/// [`router`] with the size bounds given. Each route that reads a body states its limit;
+/// `/fed/pull` is a GET and reads none.
+pub fn router_with(store: Store, limits: Limits) -> axum::Router {
+    let mut push = axum::routing::post(push).layer(DefaultBodyLimit::max(limits.push_body));
+    if limits.unknown_sender_refused_first {
+        push = push.layer(axum::middleware::from_fn_with_state(
+            store.clone(),
+            known_sender,
+        ));
+    }
     axum::Router::new()
-        .route("/fed/pair", axum::routing::post(pair))
-        .route("/fed/push", axum::routing::post(push))
+        .route(
+            "/fed/pair",
+            axum::routing::post(pair).layer(DefaultBodyLimit::max(PAIR_BODY_LIMIT_BYTES)),
+        )
+        .route("/fed/push", push)
         .route("/fed/pull", axum::routing::get(pull))
+        .layer(axum::Extension(limits))
         .with_state(store)
 }
 
@@ -142,6 +217,39 @@ async fn authenticate(
     }
 }
 
+/// Refuse a push before its body is read when the node header names no paired, unrevoked
+/// spoke, so a caller with no pairing makes the hub buffer nothing. The answer is the one
+/// [`authenticate`] gives such a caller after the body. The time header is not judged
+/// here: a caller can set it freely, so refusing early on it would stop nobody, and a
+/// paired spoke with a wrong clock would lose the answer that tells it so. The signature
+/// is checked as before, once the body is read.
+async fn known_sender(
+    State(store): State<Store>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let Some(node) = req
+        .headers()
+        .get(H_NODE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+    else {
+        let e = another_core::Error::Forbidden("missing node signature headers".into());
+        return error(StatusCode::UNAUTHORIZED, &e);
+    };
+    let (s, n) = (store.clone(), node.clone());
+    match blocking(move || s.is_paired_spoke(&n)).await {
+        Ok(true) => next.run(req).await,
+        Ok(false) => {
+            let e = another_core::Error::Forbidden("request not signed by a paired node".into());
+            let operation = format!("{} {}", req.method(), req.uri().path());
+            record(&store, Some(node), &operation, "denied", e.to_string()).await;
+            error(StatusCode::UNAUTHORIZED, &e)
+        }
+        Err(e) => error(status_for(&e), &e),
+    }
+}
+
 async fn push(
     State(store): State<Store>,
     method: Method,
@@ -178,6 +286,7 @@ async fn push(
 
 async fn pull(
     State(store): State<Store>,
+    axum::Extension(limits): axum::Extension<Limits>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -200,7 +309,8 @@ async fn pull(
         }
     }
     let (s, n) = (store.clone(), node.clone());
-    match blocking(move || s.pull_for_from(&n, after, &anchors, limit)).await {
+    let budget = limits.pull_budget;
+    match blocking(move || s.pull_page(&n, after, &anchors, limit, budget)).await {
         Ok(resp) => {
             let detail = format!("after {after}: {} event(s)", resp.events.len());
             record(&store, Some(node), "GET /fed/pull", "ok", detail).await;
@@ -233,20 +343,54 @@ fn now_ms() -> i64 {
         .unwrap_or_default()
 }
 
+/// A sync request or answer that was over a size limit of the other side or of this one.
+/// The caller sends or asks for less and tries again.
+#[derive(Debug)]
+enum OverSize {
+    /// The hub answered 413: the request body was over its limit.
+    Request(String),
+    /// An I/O error while a request with a body was being sent. A hub that refuses a body
+    /// by its declared length answers 413 without reading it and closes, and from here
+    /// that can show as a failed connection instead of the answer.
+    Dropped(String),
+    /// The answer was over the limit this node reads.
+    Response(String),
+}
+
+impl std::fmt::Display for OverSize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (OverSize::Request(text) | OverSize::Dropped(text) | OverSize::Response(text)) = self;
+        f.write_str(text)
+    }
+}
+
+impl std::error::Error for OverSize {}
+
+/// Read an answer of at most `limit` bytes.
 fn read<T: serde::de::DeserializeOwned>(
     mut resp: ureq::http::Response<ureq::Body>,
     what: &str,
+    limit: u64,
 ) -> Result<T> {
     let status = resp.status();
-    let text = resp
-        .body_mut()
-        .read_to_string()
-        .with_context(|| format!("reading {what} response"))?;
+    let text = match resp.body_mut().with_config().limit(limit).read_to_string() {
+        Ok(text) => text,
+        Err(ureq::Error::BodyExceedsLimit(_)) => {
+            return Err(OverSize::Response(format!(
+                "the {what} response is larger than the {limit} bytes this node reads"
+            ))
+            .into())
+        }
+        Err(e) => return Err(e).with_context(|| format!("reading {what} response")),
+    };
     if !status.is_success() {
         let msg = serde_json::from_str::<serde_json::Value>(&text)
             .ok()
             .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
             .unwrap_or(text);
+        if status == StatusCode::PAYLOAD_TOO_LARGE {
+            return Err(OverSize::Request(format!("{what} failed ({status}): {msg}")).into());
+        }
         bail!("{what} failed ({status}): {msg}");
     }
     serde_json::from_str(&text).with_context(|| format!("decoding {what} response"))
@@ -265,6 +409,7 @@ fn signed(
     let sig = store.sign_request(method, path_and_query, time, &bytes);
     let url = format!("{}{path_and_query}", base.trim_end_matches('/'));
     let node = store.node_id().to_string();
+    let sent_body = body.is_some();
     let resp = match body {
         Some(b) => agent
             .post(&url)
@@ -280,7 +425,21 @@ fn signed(
             .header(H_SIG, &sig)
             .call(),
     };
-    resp.map_err(|e| anyhow!("cannot reach the hub at {base}: {e}"))
+    resp.map_err(|e| {
+        let text = format!("cannot reach the hub at {base}: {e}");
+        match &e {
+            // Which error the closed connection shows as depends on the system and on
+            // timing (broken pipe, reset, and on macOS also "invalid argument"), so every
+            // I/O error of a request with a body counts, except a refused connection,
+            // where nothing was sent.
+            ureq::Error::Io(io)
+                if sent_body && io.kind() != std::io::ErrorKind::ConnectionRefused =>
+            {
+                OverSize::Dropped(text).into()
+            }
+            _ => anyhow!(text),
+        }
+    })
 }
 
 /// Spoke: redeem an invite code with the hub and record it as this node's hub.
@@ -292,7 +451,7 @@ pub fn join(store: &Store, code: &str) -> Result<Peer> {
         .header("content-type", "application/json")
         .send(serde_json::to_vec(&req)?.as_slice())
         .map_err(|e| anyhow!("cannot reach the hub at {}: {e}", invite.hub_url))?;
-    let paired: PairResponse = read(resp, "pairing")?;
+    let paired: PairResponse = read(resp, "pairing", REPLY_LIMIT_BYTES)?;
     Ok(store.complete_join(&invite, &paired)?)
 }
 
@@ -325,6 +484,11 @@ fn is_plain_id(id: &str) -> bool {
 /// hub reports that its log went backwards (`reset`), rewind both cursors and run once more,
 /// so events the hub lost are pushed again and its new events are not skipped.
 pub fn sync(store: &Store) -> Result<SyncReport> {
+    sync_with(store, &Limits::CURRENT)
+}
+
+/// [`sync`] with the size bounds given.
+pub fn sync_with(store: &Store, limits: &Limits) -> Result<SyncReport> {
     let (hub, url) = store
         .hub()?
         .ok_or_else(|| anyhow!("this node has no hub; pair it with `another pair join <code>` (hubs do not sync, spokes dial them)"))?;
@@ -334,12 +498,18 @@ pub fn sync(store: &Store) -> Result<SyncReport> {
         ..Default::default()
     };
     let mut last = PassLast::default();
-    if !sync_pass(store, &agent, &hub, &url, &mut report, &mut last)? {
+    let to = Dial {
+        agent: &agent,
+        hub: &hub,
+        url: &url,
+        limits,
+    };
+    if !sync_pass(store, &to, &mut report, &mut last)? {
         report.hub_reset = true;
         store.reset_sync_cursors(&hub)?;
         last = PassLast::default();
         // From zero no anchor is sent, so the hub cannot report reset again.
-        if !sync_pass(store, &agent, &hub, &url, &mut report, &mut last)? {
+        if !sync_pass(store, &to, &mut report, &mut last)? {
             return Err(anyhow!(
                 "the hub at {url} reported its log reset twice in one sync; try again"
             ));
@@ -360,32 +530,76 @@ struct PassLast {
     pushed: Option<String>,
 }
 
+/// The hub a sync dials and the size bounds it runs with.
+struct Dial<'a> {
+    agent: &'a ureq::Agent,
+    hub: &'a str,
+    url: &'a str,
+    limits: &'a Limits,
+}
+
 /// One push and pull. Returns false, having stopped early, when the hub reports `reset`.
 fn sync_pass(
     store: &Store,
-    agent: &ureq::Agent,
-    hub: &str,
-    url: &str,
+    to: &Dial<'_>,
     report: &mut SyncReport,
     last: &mut PassLast,
 ) -> Result<bool> {
+    let Dial {
+        agent,
+        hub,
+        url,
+        limits,
+    } = *to;
     // The anchors are read before this pass pushes anything: a push can only add events to
     // the hub, never bring back the ones a restore lost.
     let mut anchors = Some(store.pull_anchors()?);
     let (push_start, _) = store.push_cursor(hub)?;
-    // Push.
+    // Push. A batch is bounded by bytes as well as by count. A hub on a build before D99
+    // reads a smaller body than this node's budget and answers 413, or closes the
+    // connection on the unread body: the batch is then cut to half as many events, down to
+    // one, for the rest of this pass. From 500 that is at most eight cuts, so a network
+    // that is simply failing costs at most nine failed requests before its error is given.
+    let mut batch = BATCH;
     loop {
         let (cursor, _) = store.push_cursor(hub)?;
-        let (events, high) = store.outbound_events(cursor, BATCH)?;
+        let (events, high) = store.outbound_events_within(cursor, batch, limits.push_budget)?;
         if high == cursor {
             break;
         }
         let mut accepted = None;
         if !events.is_empty() {
             let ids: Vec<String> = events.iter().map(|e| e.event_id.clone()).collect();
+            let kind = events[0].kind.clone();
             let body = serde_json::to_vec(&PushRequest { events })?;
-            let resp = signed(store, agent, url, "POST", "/fed/push", Some(body))?;
-            let r: IngestReport = read(resp, "push")?;
+            let size = body.len();
+            let answer = signed(store, agent, url, "POST", "/fed/push", Some(body))
+                .and_then(|resp| read::<IngestReport>(resp, "push", REPLY_LIMIT_BYTES));
+            let r = match answer {
+                Ok(r) => r,
+                Err(e) => match e.downcast_ref() {
+                    Some(OverSize::Request(_) | OverSize::Dropped(_)) if ids.len() > 1 => {
+                        batch = ids.len() as u32 / 2;
+                        continue;
+                    }
+                    Some(OverSize::Request(_)) => bail!(
+                        "the hub at {url} refused event {} ({kind}) as too large: it alone \
+                         makes a push of {size} bytes, over what the hub reads in one request; \
+                         retrying will not help; the hub runs a build with a smaller limit \
+                         than this node's, so update the hub ({e})",
+                        ids[0]
+                    ),
+                    Some(OverSize::Dropped(_)) => bail!(
+                        "the connection to the hub at {url} failed while event {} ({kind}) was \
+                         sent alone in a push of {size} bytes; if this happens every time, the \
+                         hub is refusing it as too large and retrying will not help: the hub \
+                         runs a build with a smaller limit than this node's, so update the \
+                         hub ({e})",
+                        ids[0]
+                    ),
+                    _ => return Err(e),
+                },
+            };
             report.pushed += r.accepted;
             report.push_duplicates += r.duplicates;
             // The hub holds every event it did not reject: accepted now, or before.
@@ -402,22 +616,48 @@ fn sync_pass(
     }
     // Pull. The first page carries the anchors. The received anchor goes only with a pull
     // cursor, and the pushed one only with a push cursor: from zero there is nothing to lose.
+    // A hub on a build before D99 bounds a page by count only, so its answer can be over
+    // what this node reads: the page is then asked for again with half the count, down to
+    // one event, for the rest of this pass. The anchors go with every try of the first page.
+    let mut limit = BATCH;
     loop {
         let (_, cursor) = store.push_cursor(hub)?;
-        let mut path = format!("/fed/pull?after={cursor}&limit={BATCH}");
-        if let Some(a) = anchors.take() {
-            if let Some(id) = a.received.filter(|id| cursor > 0 && is_plain_id(id)) {
+        let mut path = format!("/fed/pull?after={cursor}&limit={limit}");
+        if let Some(a) = &anchors {
+            if let Some(id) = a
+                .received
+                .as_ref()
+                .filter(|id| cursor > 0 && is_plain_id(id))
+            {
                 path.push_str(&format!("&after_id={id}"));
                 if let Some(seq) = a.received_seq {
                     path.push_str(&format!("&after_id_seq={seq}"));
                 }
             }
-            if let Some(id) = a.pushed.filter(|id| push_start > 0 && is_plain_id(id)) {
+            if let Some(id) = a
+                .pushed
+                .as_ref()
+                .filter(|id| push_start > 0 && is_plain_id(id))
+            {
                 path.push_str(&format!("&pushed_id={id}"));
             }
         }
         let resp = signed(store, agent, url, "GET", &path, None)?;
-        let page: PullResponse = read(resp, "pull")?;
+        let page: PullResponse = match read(resp, "pull", limits.pull_body as u64) {
+            Ok(page) => page,
+            Err(e) if !matches!(e.downcast_ref(), Some(OverSize::Response(_))) => return Err(e),
+            Err(_) if limit > 1 => {
+                limit /= 2;
+                continue;
+            }
+            Err(e) => bail!(
+                "the next event the hub at {url} holds for this node, after its sequence \
+                 number {cursor}, is by itself larger than this node reads in one answer; \
+                 retrying will not help; the hub runs an older build or holds an event over \
+                 the size limit, and its owner must decide what happens to that event ({e})"
+            ),
+        };
+        anchors = None;
         if page.reset {
             return Ok(false);
         }

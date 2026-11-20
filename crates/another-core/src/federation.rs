@@ -75,6 +75,123 @@ pub struct WireEvent {
     pub sig: String,
 }
 
+/// Largest single event this build writes, in bytes of its wire JSON (a [`WireEvent`],
+/// escaping included, with the sequence number counted as one digit). A local write over it
+/// is refused (D99). It is a rule for local writes only: an event already in a log, or one
+/// a peer sends, is not judged by it, and travels if it fits the transport.
+pub const MAX_EVENT_WIRE_BYTES: usize = 2 * 1024 * 1024;
+/// A push batch is closed before its request body would pass this; it always holds one event.
+pub const PUSH_BATCH_BUDGET_BYTES: usize = 4 * 1024 * 1024;
+/// Largest `/fed/push` request body a hub reads.
+pub const PUSH_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+/// A pull page is closed before its response body, the node directory included, would pass
+/// this; it always holds one event.
+pub const PULL_PAGE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+/// Largest `/fed/pull` response body a spoke reads.
+pub const PULL_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
+/// Bytes of a push request body around its events: `{"events":[]}`.
+pub const PUSH_ENVELOPE_BYTES: usize = 13;
+/// The most a real sequence number adds to the one digit [`MAX_EVENT_WIRE_BYTES`] counts.
+const SEQ_EXTRA_BYTES: usize = 19;
+
+// One event at the cap fits a batch and a page, and each budget fits under its limit. An
+// event that arrived by push is at most the push limit, so a pull answer that carries it
+// alone has at least as much room again for the node directory: whatever a hub accepted,
+// it can relay. The build fails when a change breaks one of these.
+const _: () = {
+    let one_event = MAX_EVENT_WIRE_BYTES + SEQ_EXTRA_BYTES + PUSH_ENVELOPE_BYTES;
+    assert!(one_event <= PUSH_BATCH_BUDGET_BYTES);
+    assert!(one_event <= PULL_PAGE_BUDGET_BYTES);
+    assert!(PUSH_BATCH_BUDGET_BYTES <= PUSH_BODY_LIMIT_BYTES);
+    assert!(PULL_PAGE_BUDGET_BYTES <= PULL_BODY_LIMIT_BYTES);
+    assert!(2 * PUSH_BODY_LIMIT_BYTES <= PULL_BODY_LIMIT_BYTES);
+};
+
+/// Counts the bytes written to it.
+struct ByteCount(usize);
+
+impl std::io::Write for ByteCount {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn json_bytes(value: &impl Serialize) -> usize {
+    let mut count = ByteCount(0);
+    // Writing to the counter cannot fail, and these types always serialise.
+    let _ = serde_json::to_writer(&mut count, value);
+    count.0
+}
+
+impl WireEvent {
+    /// The bytes of this event's JSON as sync sends it.
+    pub fn wire_bytes(&self) -> usize {
+        json_bytes(self)
+    }
+
+    /// [`WireEvent::wire_bytes`] with the sequence number counted as one digit: the size
+    /// [`MAX_EVENT_WIRE_BYTES`] is compared with.
+    pub fn capped_bytes(&self) -> usize {
+        self.wire_bytes() + 1 - self.seq.to_string().len()
+    }
+}
+
+/// The fields of an event about to be written, in [`WireEvent`]'s order, for measuring it
+/// before it has a sequence number.
+#[derive(Serialize)]
+pub(crate) struct NewEvent<'a> {
+    pub seq: i64,
+    pub event_id: &'a str,
+    pub node_id: &'a str,
+    pub ts: i64,
+    pub actor: &'a str,
+    pub kind: &'a str,
+    pub payload: &'a str,
+    pub prev_id: Option<&'a str>,
+    pub sig: &'a str,
+}
+
+/// Refuse a local event over [`MAX_EVENT_WIRE_BYTES`] before it is written. Each field that
+/// can grow has its own smaller rule; this is the backstop for what they do not cover, such
+/// as a message to thousands of recipients.
+pub(crate) fn check_new_event(event: &NewEvent<'_>) -> Result<()> {
+    let bytes = json_bytes(event);
+    if bytes > MAX_EVENT_WIRE_BYTES {
+        return Err(Error::Invalid(format!(
+            "this {} event would be {bytes} bytes when sent to another node; the limit for \
+             one event is {MAX_EVENT_WIRE_BYTES}",
+            event.kind
+        )));
+    }
+    Ok(())
+}
+
+/// An event already in a log, written by an earlier build, that does not fit the transport
+/// even alone: a spoke's own event that makes a push over [`PUSH_BODY_LIMIT_BYTES`], or an
+/// event on a hub that makes a pull answer over [`PULL_BODY_LIMIT_BYTES`]. Every smaller
+/// event is sent, alone in its batch or page if need be, whatever its size.
+///
+/// UNDECIDED, THE OWNER'S CHOICE (D99): this is the one place that says what happens to
+/// such an event. As built it blocks: the sync fails with this message and the events after
+/// it wait, which is what a build before D99 did (at 2 MiB and 10 MiB) without naming the
+/// event. The other choice is to skip it: the callers would step past it instead of
+/// returning this error, and peers would then never see that event.
+fn over_limit_in_log(e: &WireEvent, whose: &str, reader: &str, limit: usize) -> Error {
+    Error::Conflict(format!(
+        "event {} ({}, {} bytes on the wire) in {whose} log is larger than {reader} \
+         ({limit} bytes), so it cannot be sent and the events after it wait behind it; \
+         retrying will not help; the owner must decide whether it is skipped or keeps \
+         blocking (docs/FEDERATION.md, \"If a sync reports an event that cannot be sent\")",
+        crate::mail::single_line(&e.event_id, 40),
+        crate::mail::single_line(&e.kind, 80),
+        e.wire_bytes(),
+    ))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NodeEntry {
     pub node_id: String,
@@ -1301,6 +1418,18 @@ impl Store {
         )
     }
 
+    /// Hub side: whether `node_id` names a spoke that is paired and not revoked. A hub asks
+    /// this of a request's node header before it reads the body, so a caller that names no
+    /// paired node makes it buffer nothing; the signature is still checked after the body.
+    pub fn is_paired_spoke(&self, node_id: &str) -> Result<bool> {
+        self.read(|conn| {
+            Ok(matches!(
+                peer_row(conn, node_id)?,
+                Some((role, _, None)) if role == "spoke"
+            ))
+        })
+    }
+
     /// Hub side: check a signed request from a paired node. Returns its granted perms.
     pub fn verify_peer_request(
         &self,
@@ -1559,21 +1688,55 @@ impl Store {
     /// Spoke side: events this node authored that may leave it, after `after_seq`.
     /// Returns them and the highest sequence scanned (to advance the cursor past skips).
     pub fn outbound_events(&self, after_seq: i64, limit: u32) -> Result<(Vec<WireEvent>, i64)> {
+        self.outbound_events_within(after_seq, limit, PUSH_BATCH_BUDGET_BYTES)
+    }
+
+    /// [`Store::outbound_events`] with the byte budget given: the batch is closed before
+    /// the push request body carrying it would pass `budget` bytes, and always holds one
+    /// event when there is one to send, so an event larger than the budget travels alone.
+    /// `usize::MAX` bounds it by count only, as builds before D99 did. Fails when the next
+    /// event to send would alone make a push over [`PUSH_BODY_LIMIT_BYTES`].
+    pub fn outbound_events_within(
+        &self,
+        after_seq: i64,
+        limit: u32,
+        budget: usize,
+    ) -> Result<(Vec<WireEvent>, i64)> {
         self.read(|conn| {
             let mut stmt = conn.prepare(&format!(
                 "{WIRE_SELECT} WHERE node_id = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3"
             ))?;
-            let rows = stmt
-                .query_map(params![self.node_id(), after_seq, limit], wire_from_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let high = rows.last().map_or(after_seq, |e| e.seq);
-            let out = rows
-                .into_iter()
-                .filter(|e| {
-                    let p: Value = serde_json::from_str(&e.payload).unwrap_or(Value::Null);
-                    classify(&e.kind, &p, &e.node_id) != Share::Never
-                })
-                .collect();
+            let mut rows = stmt.query(params![self.node_id(), after_seq, limit])?;
+            let mut high = after_seq;
+            let mut out: Vec<WireEvent> = Vec::new();
+            // The body is the envelope, the events and a comma between each two.
+            let mut bytes = PUSH_ENVELOPE_BYTES - 1;
+            while let Some(row) = rows.next()? {
+                let e = wire_from_row(row)?;
+                let seq = e.seq;
+                let p: Value = serde_json::from_str(&e.payload).unwrap_or(Value::Null);
+                if classify(&e.kind, &p, &e.node_id) != Share::Never {
+                    let len = e.wire_bytes() + 1;
+                    // Alone it would still be over what a hub reads.
+                    if PUSH_ENVELOPE_BYTES - 1 + len > PUSH_BODY_LIMIT_BYTES {
+                        if high == after_seq {
+                            return Err(over_limit_in_log(
+                                &e,
+                                "this node's",
+                                "a hub reads in one push",
+                                PUSH_BODY_LIMIT_BYTES,
+                            ));
+                        }
+                        break;
+                    }
+                    if !out.is_empty() && bytes.saturating_add(len) > budget {
+                        break;
+                    }
+                    bytes += len;
+                    out.push(e);
+                }
+                high = seq;
+            }
             Ok((out, high))
         })
     }
@@ -1630,6 +1793,23 @@ impl Store {
         anchors: &PullAnchors,
         limit: u32,
     ) -> Result<PullResponse> {
+        self.pull_page(peer, after_seq, anchors, limit, PULL_PAGE_BUDGET_BYTES)
+    }
+
+    /// [`Store::pull_for_from`] with the byte budget given: the page is closed, with `more`
+    /// set, before its response body (the node directory included) would pass `budget`
+    /// bytes, and always holds one event when there is one to send, so an event larger than
+    /// the budget travels alone. `usize::MAX` bounds it by count only, as builds before D99
+    /// did. Fails when the next event to send would alone make an answer over
+    /// [`PULL_BODY_LIMIT_BYTES`].
+    pub fn pull_page(
+        &self,
+        peer: &str,
+        after_seq: i64,
+        anchors: &PullAnchors,
+        limit: u32,
+        budget: usize,
+    ) -> Result<PullResponse> {
         self.read(|conn| {
             let Some((role, perms, None)) = peer_row(conn, peer)? else {
                 return Err(Error::Forbidden("not a paired node".into()));
@@ -1671,14 +1851,25 @@ impl Store {
             let mut stmt = conn.prepare(&format!(
                 "{WIRE_SELECT} WHERE seq > ?1 AND node_id != ?2 ORDER BY seq LIMIT ?3"
             ))?;
-            let rows = stmt
-                .query_map(params![after_seq, peer, scan], wire_from_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let more = rows.len() as u32 == scan;
+            let mut rows = stmt.query(params![after_seq, peer, scan])?;
+            let mut page = PullResponse {
+                events: Vec::new(),
+                cursor: i64::MAX,
+                more: false,
+                nodes: known_nodes(conn)?,
+                reset: false,
+            };
+            // The body with no events and the widest cursor, then the events and a comma
+            // between each two.
+            let envelope = json_bytes(&page) - 1;
+            let mut bytes = envelope;
+            let mut scanned = 0u32;
+            // The page was closed with an event still to send.
+            let mut closed = false;
             let mut cursor = after_seq;
-            let mut events = Vec::new();
-            for e in rows {
-                cursor = e.seq;
+            while let Some(row) = rows.next()? {
+                let e = wire_from_row(row)?;
+                scanned += 1;
                 let p: Value = serde_json::from_str(&e.payload).unwrap_or(Value::Null);
                 let send = match classify(&e.kind, &p, &e.node_id) {
                     Share::Never => false,
@@ -1688,21 +1879,38 @@ impl Store {
                     }
                     Share::Mail(nodes) => nodes.iter().any(|n| n == peer),
                 };
-                if send {
-                    events.push(e);
-                    if events.len() as u32 >= limit {
-                        break;
+                if !send {
+                    cursor = e.seq;
+                    continue;
+                }
+                let len = e.wire_bytes() + 1;
+                // Alone it would still be over what a spoke reads.
+                if envelope + len > PULL_BODY_LIMIT_BYTES {
+                    if cursor == after_seq {
+                        return Err(over_limit_in_log(
+                            &e,
+                            "the hub's",
+                            "a spoke reads in one pull answer",
+                            PULL_BODY_LIMIT_BYTES,
+                        ));
                     }
+                    closed = true;
+                    break;
+                }
+                if !page.events.is_empty() && bytes.saturating_add(len) > budget {
+                    closed = true;
+                    break;
+                }
+                bytes += len;
+                cursor = e.seq;
+                page.events.push(e);
+                if page.events.len() as u32 >= limit {
+                    break;
                 }
             }
-            let more = more || events.len() as u32 >= limit;
-            Ok(PullResponse {
-                events,
-                cursor,
-                more,
-                nodes: known_nodes(conn)?,
-                reset: false,
-            })
+            page.more = closed || scanned == scan || page.events.len() as u32 >= limit;
+            page.cursor = cursor;
+            Ok(page)
         })
     }
 

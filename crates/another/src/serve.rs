@@ -214,6 +214,12 @@ pub async fn serve_stdio(store: Store, sweep_every: Duration) -> Result<()> {
     Ok(())
 }
 
+/// Largest request body a route reads through an axum extractor, unless the route states
+/// its own: the value the HTTP library applied by default before D99, now stated. It covers
+/// the OAuth and dashboard POST routes and `/fed/pair`. `/mcp` is served by the MCP
+/// library, which reads its own body, and is not covered.
+pub const HTTP_BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
+
 /// Build the HTTP app: MCP at `/mcp`, the activity feed at `GET /activity`, and
 /// `GET /health`. With `auth`, `/mcp` and `/activity` require a bearer token.
 pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> axum::Router {
@@ -294,10 +300,12 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
         &opts.allowed_hosts,
         opts.oauth.as_ref(),
     );
-    app.layer(axum::middleware::from_fn(move |req, next| {
-        let guard = guard.clone();
-        async move { enforce_edge(guard, req, next).await }
-    }))
+    // `/fed/push` states its own, larger limit on its route, which wins over this one.
+    app.layer(axum::extract::DefaultBodyLimit::max(HTTP_BODY_LIMIT_BYTES))
+        .layer(axum::middleware::from_fn(move |req, next| {
+            let guard = guard.clone();
+            async move { enforce_edge(guard, req, next).await }
+        }))
 }
 
 /// `Host` on every route, and `Origin` on state-changing requests that send one.

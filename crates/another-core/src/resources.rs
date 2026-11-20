@@ -17,6 +17,9 @@ use crate::time::{fmt_opt, fmt_ts};
 pub const DEFAULT_LEASE_TTL_SECONDS: i64 = 30 * 60;
 pub const MIN_LEASE_TTL_SECONDS: i64 = 60;
 pub const MAX_LEASE_TTL_SECONDS: i64 = 24 * 60 * 60;
+/// Most lease ids one `resource.renewed` or `resource.released` event of a heartbeat or a
+/// session end lists.
+const LEASE_IDS_PER_EVENT: usize = 10_000;
 /// Longest resource endpoint accepted, in bytes: room for any real URL.
 pub const MAX_RESOURCE_ENDPOINT_BYTES: usize = 2 * 1024;
 /// Longest resource purpose accepted, in bytes: one line of prose.
@@ -651,14 +654,24 @@ pub(crate) fn session_leases_tx(
     if leases.is_empty() {
         return Ok(0);
     }
-    let ids: Vec<&String> = leases.iter().map(|(id, _, _)| id).collect();
-    let nodes = foreign_nodes_for(tx, &ids)?;
+    // One event lists at most `LEASE_IDS_PER_EVENT` leases, so a heartbeat or a session end
+    // cannot meet the size limit for one event (D99); readers take the ids event by event.
+    for chunk in leases.chunks(LEASE_IDS_PER_EVENT) {
+        let ids: Vec<&String> = chunk.iter().map(|(id, _, _)| id).collect();
+        let nodes = foreign_nodes_for(tx, &ids)?;
+        let payload = if release {
+            json!({ "lease_ids": ids, "reason": "session_end", "resource_nodes": nodes })
+        } else {
+            json!({ "lease_ids": ids, "resource_nodes": nodes })
+        };
+        let kind = if release {
+            "resource.released"
+        } else {
+            "resource.renewed"
+        };
+        tx.emit(&agent.address, kind, payload)?;
+    }
     if release {
-        tx.emit(
-            &agent.address,
-            "resource.released",
-            json!({ "lease_ids": ids, "reason": "session_end", "resource_nodes": nodes }),
-        )?;
         for (lease_id, resource_id, _) in &leases {
             tx.execute(
                 "UPDATE resource_leases SET released_at = ?2, release_reason = 'session_end'
@@ -668,11 +681,6 @@ pub(crate) fn session_leases_tx(
             settle(tx, resource_id, &agent.address, tx.now)?;
         }
     } else {
-        tx.emit(
-            &agent.address,
-            "resource.renewed",
-            json!({ "lease_ids": ids, "resource_nodes": nodes }),
-        )?;
         for (lease_id, _, ttl) in &leases {
             tx.execute(
                 "UPDATE resource_leases SET renewed_at = ?2, expires_at = ?2 + ?3 * 1000

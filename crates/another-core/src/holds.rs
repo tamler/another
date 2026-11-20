@@ -31,6 +31,15 @@ use crate::tokens::TokenScope;
 pub const DEFAULT_HOLD_TTL_SECONDS: i64 = 30 * 60;
 pub const MIN_HOLD_TTL_SECONDS: i64 = 60;
 pub const MAX_HOLD_TTL_SECONDS: i64 = 4 * 60 * 60;
+/// Most hold ids one `hold.renewed` or `hold.released` event lists (about 310 KiB). A
+/// heartbeat or a session end over more holds writes several such events in its one
+/// transaction, so neither can meet the size limit for one event (D99). Every reader takes
+/// the ids event by event, so several events read as one.
+const HOLD_IDS_PER_EVENT: usize = 10_000;
+/// Longest hold reason a local caller may give, in bytes (D99).
+pub const MAX_HOLD_REASON_BYTES: usize = 1024;
+/// Longest hold pattern a local caller may give, in bytes: as long as any real path (D99).
+pub const MAX_HOLD_PATTERN_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Hold {
@@ -1200,11 +1209,13 @@ pub(crate) fn release_tx(
     if hold_ids.is_empty() {
         return Ok(());
     }
-    tx.emit(
-        actor,
-        "hold.released",
-        json!({ "hold_ids": hold_ids, "reason": reason }),
-    )?;
+    for ids in hold_ids.chunks(HOLD_IDS_PER_EVENT) {
+        tx.emit(
+            actor,
+            "hold.released",
+            json!({ "hold_ids": ids, "reason": reason }),
+        )?;
+    }
     for id in hold_ids {
         tx.execute(
             "UPDATE holds SET released_at = ?2, release_reason = ?3 WHERE hold_id = ?1",
@@ -1220,8 +1231,10 @@ fn renew_tx(tx: &Tx<'_>, actor: &str, holds: &[(String, i64)]) -> Result<()> {
     if holds.is_empty() {
         return Ok(());
     }
-    let ids: Vec<&String> = holds.iter().map(|(id, _)| id).collect();
-    tx.emit(actor, "hold.renewed", json!({ "hold_ids": ids }))?;
+    for chunk in holds.chunks(HOLD_IDS_PER_EVENT) {
+        let ids: Vec<&String> = chunk.iter().map(|(id, _)| id).collect();
+        tx.emit(actor, "hold.renewed", json!({ "hold_ids": ids }))?;
+    }
     for (id, ttl) in holds {
         tx.execute(
             "UPDATE holds SET renewed_at = ?2, expires_at = ?2 + ?3 * 1000 WHERE hold_id = ?1",
@@ -1350,7 +1363,11 @@ impl Store {
         }
         // A reason is printed by `another holds`, the board and the edit guard's denial.
         if let Some(reason) = &input.reason {
+            crate::queue::within_bytes("hold reason", reason, MAX_HOLD_REASON_BYTES)?;
             crate::queue::no_unsafe("a hold reason", reason, false)?;
+        }
+        for raw in &input.paths {
+            crate::queue::within_bytes("hold pattern", raw, MAX_HOLD_PATTERN_BYTES)?;
         }
         let ttl = clamp_ttl(input.ttl_seconds)?;
         self.write(|tx| {

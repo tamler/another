@@ -852,6 +852,18 @@ fn item_now(conn: &Connection, node_id: &str, item_id: &str) -> Result<QueueItem
     to_item(conn, find_item(conn, node_id, item_id)?, true)
 }
 
+/// Refuse text a local caller wrote that is over `max` bytes. The text goes into an event
+/// that is synced to peers, so it stays small (D99); the message follows the resource caps.
+pub(crate) fn within_bytes(what: &str, text: &str, max: usize) -> Result<()> {
+    let len = text.len();
+    if len > max {
+        return Err(Error::Invalid(format!(
+            "{what} is {len} bytes; the limit is {max}"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn no_unsafe(what: &str, text: &str, multi_line: bool) -> Result<()> {
     // The Unicode line and paragraph separators end a line for some readers, so one-line
     // text refuses them as it refuses a line feed.

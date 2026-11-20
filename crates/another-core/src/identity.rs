@@ -90,6 +90,11 @@ pub struct Agent {
     pub last_seen_at: Option<String>,
 }
 
+/// Longest agent description a local caller may register, in bytes (D99).
+pub const MAX_AGENT_DESCRIPTION_BYTES: usize = 4 * 1024;
+/// Longest agent model name a local caller may register, in bytes (D99).
+pub const MAX_AGENT_MODEL_BYTES: usize = 200;
+
 /// Input for [`Store::register_agent`].
 #[derive(Debug, Clone)]
 pub struct RegisterAgent {
@@ -464,11 +469,22 @@ impl Store {
     /// Register a new agent or update an existing one's details; touches `last_seen_at`.
     pub fn register_agent(&self, input: RegisterAgent) -> Result<Agent> {
         validate_name(&input.name)?;
-        for (what, text) in [
-            ("an agent model", &input.model),
-            ("an agent description", &input.description),
+        for (what, field, text, max) in [
+            (
+                "an agent model",
+                "agent model",
+                &input.model,
+                MAX_AGENT_MODEL_BYTES,
+            ),
+            (
+                "an agent description",
+                "agent description",
+                &input.description,
+                MAX_AGENT_DESCRIPTION_BYTES,
+            ),
         ] {
             if let Some(text) = text {
+                crate::queue::within_bytes(field, text, max)?;
                 crate::queue::no_unsafe(what, text, false)?;
             }
         }

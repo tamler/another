@@ -45,14 +45,17 @@ pub use dashboard::{
 pub use error::{Error, ErrorBody, Result};
 pub use federation::{
     reachable, IngestReport, Invite, NodeEntry, PairRequest, PairResponse, Peer, Perm, PullAnchors,
-    PullResponse, PushRequest, Rejected, WireEvent,
+    PullResponse, PushRequest, Rejected, WireEvent, MAX_EVENT_WIRE_BYTES, PULL_BODY_LIMIT_BYTES,
+    PULL_PAGE_BUDGET_BYTES, PUSH_BATCH_BUDGET_BYTES, PUSH_BODY_LIMIT_BYTES, PUSH_ENVELOPE_BYTES,
 };
 pub use holds::{
     is_repo_wide, patterns_overlap, AcquireHolds, EditGuard, HeartbeatReport, Hold, HoldConflict,
     HoldFilter, HoldReport, SessionInfo, SessionPhase, SweepReport, DEFAULT_HOLD_TTL_SECONDS,
-    MAX_HOLD_TTL_SECONDS, MIN_HOLD_TTL_SECONDS,
+    MAX_HOLD_PATTERN_BYTES, MAX_HOLD_REASON_BYTES, MAX_HOLD_TTL_SECONDS, MIN_HOLD_TTL_SECONDS,
 };
-pub use identity::{Agent, Program, Project, RegisterAgent};
+pub use identity::{
+    Agent, Program, Project, RegisterAgent, MAX_AGENT_DESCRIPTION_BYTES, MAX_AGENT_MODEL_BYTES,
+};
 pub use mail::{
     display_line, is_unsafe_text_char, reply_subject, single_line, AckOutcome, Importance, Inbox,
     InboxItem, InboxQuery, Message, NewRequest, Reply, SendMessage, Thread, ThreadSummary,
@@ -76,7 +79,9 @@ pub use queue::{
     MAX_QUEUE_GRACE_SECONDS, MAX_QUEUE_LIMIT, MIN_QUEUE_GRACE_SECONDS, QUEUE_SESSION_CLIENTS,
 };
 pub use repo::{link_for as repo_link_for, normalize_remote, resolve_existing, RepoLink};
-pub use requests::{Request, RequestAction, RequestFilter, RequestStatus, RequestUpdate};
+pub use requests::{
+    Request, RequestAction, RequestFilter, RequestStatus, RequestUpdate, MAX_REQUEST_NOTE_BYTES,
+};
 pub use resources::{
     derive_port, Lease, LeaseMode, LeaseOutcome, RegisterResource, Resource, ResourceFilter,
     ResourceKind, ResourceRef, DEFAULT_LEASE_TTL_SECONDS, MAX_LEASE_TTL_SECONDS,
