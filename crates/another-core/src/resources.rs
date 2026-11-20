@@ -208,7 +208,9 @@ pub fn derive_port(text: &str) -> Option<u16> {
         .filter(|p| *p > 0)
 }
 
-fn validate_name(name: &str) -> Result<()> {
+/// The resource name rule, for a local registration and for a peer's `resource.registered`
+/// (see `federation::foreign_authority`).
+pub(crate) fn validate_name(name: &str) -> Result<()> {
     if name.trim().is_empty() || name.len() > 200 {
         return Err(Error::Invalid(
             "resource name must be 1-200 printable characters".into(),

@@ -699,6 +699,8 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
         "resource.registered" => {
             agent("owner_id")?;
             project()?;
+            // The local resource-name rule. A missing name counts as empty and is refused.
+            crate::resources::validate_name(p.get("name").and_then(Value::as_str).unwrap_or(""))?;
             // A local registration types these as u16 / u32; refuse what no build sends.
             for (field, max) in [("port", u64::from(u16::MAX)), ("pid", u64::from(u32::MAX))] {
                 if let Some(v) = p.get(field).filter(|v| !v.is_null()) {
@@ -767,10 +769,11 @@ fn project_exists(conn: &Connection, id: &str) -> Result<bool> {
 fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
     let s = |k: &str| p.get(k).and_then(Value::as_str).map(str::to_string);
     // A peer's free text skips the local checks: hold reasons, programs, models,
-    // descriptions and resource text are stored as one safe line, like a subject (D75); the
-    // signed event keeps the original. An agent's name is not cleaned: `foreign_authority`
-    // holds it to the local name rule, so it is stored as sent. Held patterns, project
-    // paths and slugs name real files and are matched across nodes, so they are kept as sent.
+    // descriptions and a resource's endpoint and purpose are stored as one safe line, like a
+    // subject (D75); the signed event keeps the original. The name of an agent or a resource
+    // is not cleaned: `foreign_authority` holds it to the local name rule, so it is stored
+    // as sent. Held patterns, project paths and slugs name real files and are matched
+    // across nodes, so they are kept as sent.
     let line = |k: &str| s(k).map(|t| crate::mail::single_line(&t, usize::MAX));
     let ts = ev.ts.min(tx.now);
     let origin = ev.node_id.as_str();
@@ -998,7 +1001,7 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                     rid,
                     origin,
                     s("kind"),
-                    line("name"),
+                    s("name"),
                     line("endpoint"),
                     p.get("port").and_then(Value::as_i64),
                     p.get("pid").and_then(Value::as_i64),

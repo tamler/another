@@ -1060,3 +1060,69 @@ fn adv248_a_peers_node_renamed_follows_the_local_name_rule() {
         "the hub renamed a peer to names a local rename refuses: {kept:#?}"
     );
 }
+
+/// adv-peer-resource-name: a local registration refuses a resource name that is blank, over
+/// 200 bytes or holds a control or text-direction character (`resources::validate_name`). A
+/// paired spoke's signed `resource.registered` is held to the same rule: it is refused and
+/// nothing is stored. (FINDINGS-main-peer-resource-name-w9T, failing test by its finder.)
+#[test]
+fn adv_a_peers_resource_name_follows_the_local_rule() {
+    let fed = Fed::new();
+    let owner = fed.mallory.agent("m");
+    push(&fed.hub, &fed.mallory);
+    let mut kept = Vec::new();
+    for (n, name) in [
+        "x".repeat(100_000),
+        "   ".to_string(),
+        "a\u{1b}[2Jb".to_string(),
+        "a\u{202e}b".to_string(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let rid = format!("mallory-name-{n}");
+        let report = fed.forge(
+            "resource.registered",
+            json!({ "resource_id": rid, "kind": "port", "name": name,
+                    "lease_id": format!("lease-{rid}"), "owner_id": owner }),
+        );
+        assert_rejected(&report, &format!("resource name case {n}"));
+        if let Some(stored) =
+            fed.hub_one::<String>("SELECT name FROM resources WHERE resource_id = ?1", &rid)
+        {
+            kept.push(format!(
+                "case {n}: {} bytes stored {:?} {report:?}",
+                stored.len(),
+                &stored[..stored.len().min(12)]
+            ));
+        }
+    }
+    assert!(
+        kept.is_empty(),
+        "the hub stored peer resource names a local registration refuses: {kept:#?}"
+    );
+
+    // No name at all is refused too: the projection would otherwise store a NULL name.
+    let report = fed.forge(
+        "resource.registered",
+        json!({ "resource_id": "mallory-noname", "kind": "port",
+                "lease_id": "lease-mallory-noname", "owner_id": owner }),
+    );
+    assert_eq!(report.rejected.len(), 1, "a nameless resource: {report:?}");
+
+    // A name the local rule accepts still syncs, after the refusals above.
+    let report = fed.forge(
+        "resource.registered",
+        json!({ "resource_id": "mallory-ok", "kind": "port", "name": "tcp:127.0.0.1:9",
+                "lease_id": "lease-mallory-ok", "owner_id": owner }),
+    );
+    assert!(report.rejected.is_empty(), "{report:?}");
+    assert_eq!(
+        fed.hub_one::<String>(
+            "SELECT name FROM resources WHERE resource_id = ?1",
+            "mallory-ok"
+        )
+        .as_deref(),
+        Some("tcp:127.0.0.1:9")
+    );
+}
