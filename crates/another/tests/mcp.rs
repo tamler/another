@@ -513,6 +513,68 @@ async fn call_error(client: &Client, tool: &str, args: Value) -> Value {
     serde_json::from_str::<Value>(&text).unwrap()["error"].clone()
 }
 
+/// Q20: a resource's endpoint, purpose and metadata are size limited. Over MCP, in process
+/// or through `another serve`, the refusal is an `invalid` tool error that names the field,
+/// its size and the limit; nothing is registered; and the schema states each limit.
+#[tokio::test]
+async fn resource_size_limits_are_refused_as_invalid_and_described() {
+    let client = in_process(Store::open_in_memory(Clock::System).unwrap()).await;
+    call_ok(
+        &client,
+        "register_agent",
+        json!({ "name": "alice", "program": "claude" }),
+    )
+    .await;
+    let cases = [
+        (
+            json!({ "endpoint": "x".repeat(another_core::MAX_RESOURCE_ENDPOINT_BYTES + 1) }),
+            "resource endpoint is 2049 bytes; the limit is 2048",
+        ),
+        (
+            json!({ "purpose": "x".repeat(another_core::MAX_RESOURCE_PURPOSE_BYTES + 1) }),
+            "resource purpose is 1025 bytes; the limit is 1024",
+        ),
+        (
+            json!({ "metadata": { "blob": "x".repeat(another_core::MAX_RESOURCE_METADATA_BYTES) } }),
+            "metadata is 65547 bytes as JSON; the limit is 65536",
+        ),
+    ];
+    for (extra, message) in cases {
+        let mut args = json!({ "agent": "alice", "kind": "model_server", "name": "ollama" });
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let error = call_error(&client, "resource_register", args).await;
+        assert_eq!(error["code"], "invalid", "{error}");
+        assert_eq!(error["message"], message);
+        assert!(error.get("hint").is_none(), "{error}");
+    }
+    let found = call_ok(&client, "resource_find", json!({})).await;
+    assert_eq!(
+        found["resources"],
+        json!([]),
+        "a refusal registered a resource"
+    );
+
+    let tools = client.list_all_tools().await.unwrap();
+    let schema = tools
+        .iter()
+        .find(|t| t.name == "resource_register")
+        .unwrap();
+    let schema = serde_json::to_value(&schema.input_schema).unwrap();
+    for (field, limit) in [
+        ("endpoint", "At most 2 KiB"),
+        ("purpose", "At most 1 KiB"),
+        ("metadata", "At most 64 KiB"),
+    ] {
+        let described = schema["properties"][field]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(described.contains(limit), "{field}: {described:?}");
+    }
+    client.cancel().await.unwrap();
+}
+
 /// Q19b review R1: a description, model, hold reason or resource text that is not one line
 /// is refused (D97). The error names the field and what it found, and its hint is about
 /// that, not about how to pass an agent name. The tool schemas say so before a model sends one.

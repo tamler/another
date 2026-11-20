@@ -287,6 +287,61 @@ async fn mcp_reap_never_terminates() {
     child.wait().unwrap();
 }
 
+/// Q20: the CLI refuses an endpoint, purpose or `--meta` over its size limit with one line
+/// on standard error that names the field, its size and the limit, and a failing exit code.
+/// Nothing is registered.
+#[test]
+fn oversized_resource_text_and_metadata_are_refused_by_the_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    setup(home);
+    let endpoint = "x".repeat(another_core::MAX_RESOURCE_ENDPOINT_BYTES + 1);
+    let purpose = "x".repeat(another_core::MAX_RESOURCE_PURPOSE_BYTES + 1);
+    let meta = format!(
+        "blob={}",
+        "x".repeat(another_core::MAX_RESOURCE_METADATA_BYTES)
+    );
+    for (flag, value, message) in [
+        (
+            "--endpoint",
+            &endpoint,
+            "another: resource endpoint is 2049 bytes; the limit is 2048\n",
+        ),
+        (
+            "--purpose",
+            &purpose,
+            "another: resource purpose is 1025 bytes; the limit is 1024\n",
+        ),
+        (
+            "--meta",
+            &meta,
+            "another: metadata is 65547 bytes as JSON; the limit is 65536\n",
+        ),
+    ] {
+        let out = another(
+            home,
+            &[
+                "resource",
+                "register",
+                "dev_server",
+                "vite@5173",
+                "--agent",
+                "alice",
+                flag,
+                value,
+            ],
+        );
+        assert!(!out.status.success(), "{flag} was accepted");
+        assert_eq!(String::from_utf8_lossy(&out.stderr), message, "{flag}");
+        assert!(out.stdout.is_empty(), "{flag}");
+    }
+    assert_eq!(
+        json(home, &["resources", "--all"]),
+        json!([]),
+        "a refusal registered a resource"
+    );
+}
+
 #[test]
 fn scan_finds_unregistered_listeners() {
     let dir = tempfile::tempdir().unwrap();
