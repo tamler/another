@@ -98,6 +98,46 @@ pub fn request_message(method: &str, path_and_query: &str, time_ms: i64, body: &
     .into_bytes()
 }
 
+/// The bytes a pairing request signature covers, signed by the joining node's key. The hub
+/// builds them from its own id and key and the secret hash it stored for the invite, so one
+/// valid signature shows that the signer holds the node key, knows the hash of the invite's
+/// secret, and meant this hub and this invite. Fields are joined by one newline; none may
+/// contain one.
+#[allow(clippy::too_many_arguments)]
+pub fn pair_message(
+    hub_node_id: &str,
+    hub_public_key: &str,
+    invite_id: &str,
+    secret_hash: &str,
+    node_id: &str,
+    public_key: &str,
+    display_name: &str,
+    time_ms: i64,
+) -> Vec<u8> {
+    format!(
+        "another-pair-v1\n{hub_node_id}\n{hub_public_key}\n{invite_id}\n{secret_hash}\n\
+         {node_id}\n{public_key}\n{display_name}\n{time_ms}"
+    )
+    .into_bytes()
+}
+
+/// The bytes a pairing answer signature covers, signed by the hub's key. `perms` is each
+/// permission's name, joined by `,` in the order the answer lists them.
+pub fn pair_accept_message(
+    invite_id: &str,
+    secret_hash: &str,
+    node_id: &str,
+    public_key: &str,
+    hub_display_name: &str,
+    perms: &str,
+) -> Vec<u8> {
+    format!(
+        "another-pair-accept-v1\n{invite_id}\n{secret_hash}\n{node_id}\n{public_key}\n\
+         {hub_display_name}\n{perms}"
+    )
+    .into_bytes()
+}
+
 pub fn sign(key: &SigningKey, message: &[u8]) -> String {
     b64(&key.sign(message).to_bytes())
 }
@@ -116,8 +156,9 @@ pub fn verify(public_b64: &str, message: &[u8], signature_b64: &str) -> bool {
 }
 
 /// [`verify`] with Ed25519's strict rules: a small-order (weak) key or a non-canonical or
-/// small-order signature component is refused. Key rotations use it, because accepting a
-/// weak key would let a signature verify for every message.
+/// small-order signature component is refused. Signed requests between nodes and both
+/// pairing signatures use it, because accepting a weak key would let a signature verify for
+/// every message.
 pub fn verify_strict(public_b64: &str, message: &[u8], signature_b64: &str) -> bool {
     let Ok(key) = decode_public(public_b64) else {
         return false;
@@ -153,5 +194,17 @@ mod tests {
         let round = decode_secret(&b64(key.as_bytes())).unwrap();
         assert_eq!(public_of(&round), public);
         assert_eq!(fingerprint(&public).len(), 19);
+    }
+
+    #[test]
+    fn pairing_messages_are_the_documented_bytes() {
+        assert_eq!(
+            pair_message("H", "HK", "I", "S", "N", "NK", "name", -5),
+            b"another-pair-v1\nH\nHK\nI\nS\nN\nNK\nname\n-5"
+        );
+        assert_eq!(
+            pair_accept_message("I", "S", "N", "NK", "hub", "read_feed,send_mail"),
+            b"another-pair-accept-v1\nI\nS\nN\nNK\nhub\nread_feed,send_mail"
+        );
     }
 }

@@ -1682,7 +1682,22 @@ fn ensure_local_node(
     }
     let node_id = new_id();
     let key = crate::crypto::generate_key()?;
-    let display_name = std::env::var("ANOTHER_NODE_NAME").unwrap_or_else(|_| "local".to_string());
+    // The variable names a new node only when a rename would accept the name. Otherwise the
+    // node starts as `local`, the "not named yet" placeholder, like one made without it.
+    let display_name = match std::env::var("ANOTHER_NODE_NAME") {
+        Ok(name) => match crate::federation::validate_node_name(&name) {
+            Ok(()) => name,
+            Err(e) => {
+                tracing::warn!(
+                    reason = %crate::mail::single_line(&e.to_string(), 200),
+                    "ANOTHER_NODE_NAME was ignored; this node is named local until \
+                     `another node name <name>` is run"
+                );
+                "local".to_string()
+            }
+        },
+        Err(_) => "local".to_string(),
+    };
     tx.execute(
         "INSERT INTO nodes (node_id, display_name, role, is_local, created_at, public_key, secret_key)
          VALUES (?1, ?2, 'home', 1, ?3, ?4, ?5)",

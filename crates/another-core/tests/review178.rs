@@ -276,8 +276,10 @@ fn a_peer_resource_endpoint_and_purpose_are_cleaned_on_import() {
 }
 
 /// Q19b: a node name from a peer's node list or a signed event is held to the local name
-/// rule. The hub's name in its answer to a join is the one name still stored as sent, and
-/// it prefixes every feed line from the hub and ends the address of each of its agents.
+/// rule. The hub's name prefixes every feed line from the hub and ends the address of each
+/// of its agents. Since Q27 the hub signs its answer to a join, so a name changed on the
+/// way is refused and nothing is recorded; and a name arriving by the hub's list is still
+/// never stored with a terminal sequence in it.
 #[test]
 fn a_hub_name_in_the_answer_to_a_join_is_stored_as_one_safe_line() {
     let hub = node("hub");
@@ -287,16 +289,31 @@ fn a_hub_name_in_the_answer_to_a_join_is_stored_as_one_safe_line() {
         .create_invite("https://hub.example", &Perm::ALL, 3600)
         .unwrap();
     let (invite, req) = spoke.store.prepare_join(&code).unwrap();
-    let mut resp = hub.store.accept_pairing(&req).unwrap();
-    resp.hub.display_name = "hub\u{1b}]0;pwned\u{7}".into();
+    let resp = hub.store.accept_pairing(&req).unwrap();
+    let names = || -> Vec<String> {
+        Connection::open(spoke.home.join(DB_FILE))
+            .unwrap()
+            .prepare("SELECT display_name FROM nodes WHERE is_local = 0")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let unsafe_name = "hub\u{1b}]0;pwned\u{7}";
+
+    let mut tampered = resp.clone();
+    tampered.hub.display_name = unsafe_name.into();
+    let err = spoke.store.complete_join(&invite, &tampered).unwrap_err();
+    assert_eq!(err.code(), "forbidden", "{err}");
+    assert!(names().is_empty(), "a refused answer recorded the hub");
+
     spoke.store.complete_join(&invite, &resp).unwrap();
-    let names: Vec<String> = Connection::open(spoke.home.join(DB_FILE))
-        .unwrap()
-        .prepare("SELECT display_name FROM nodes WHERE is_local = 0")
-        .unwrap()
-        .query_map([], |r| r.get(0))
-        .unwrap()
-        .collect::<rusqlite::Result<_>>()
+    let mut listed = resp.hub.clone();
+    listed.display_name = unsafe_name.into();
+    spoke
+        .store
+        .ingest(&resp.hub.node_id, &[], &[listed])
         .unwrap();
-    assert_eq!(names, ["hub ]0;pwned "]);
+    assert_eq!(names(), ["hub"]);
 }

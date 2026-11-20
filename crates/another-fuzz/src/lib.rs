@@ -28,7 +28,8 @@ use serde_json::{json, Map, Value};
 const T0: i64 = 1_800_000_000_000;
 /// Fixed test key for the fuzzing spoke (32 zero-ish bytes, base64url). Not a secret.
 const SPOKE_SECRET: &str = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA";
-const SPOKE_NODE: &str = "01FUZZSPOKENODE00000000000";
+/// A well-formed node id (a ULID: no `I`, `L`, `O` or `U`), as pairing requires.
+const SPOKE_NODE: &str = "01FZZSPQKEN0DE000000000000";
 
 /// Reads values from the fuzz input; past the end it yields zeros, so every input is a
 /// complete, deterministic recipe.
@@ -258,14 +259,30 @@ fn hub() -> Hub {
     let raw = code.trim().strip_prefix("another-invite:").expect("code");
     let invite: Value = serde_json::from_slice(&crypto::unb64(raw).expect("b64")).expect("json");
     let key = crypto::decode_secret(SPOKE_SECRET).expect("spoke key");
+    let text = |v: &Value| v.as_str().expect("text").to_string();
+    let public_key = crypto::public_of(&key);
+    let sig = crypto::sign(
+        &key,
+        &crypto::pair_message(
+            &text(&invite["hub"]["node_id"]),
+            &text(&invite["hub"]["public_key"]),
+            &text(&invite["invite_id"]),
+            &crypto::sha256_hex(text(&invite["secret"]).as_bytes()),
+            SPOKE_NODE,
+            &public_key,
+            "fuzzspoke",
+            T0,
+        ),
+    );
     let req: another_core::PairRequest = serde_json::from_value(json!({
         "invite_id": invite["invite_id"],
-        "secret": invite["secret"],
         "node": {
             "node_id": SPOKE_NODE,
             "display_name": "fuzzspoke",
-            "public_key": crypto::public_of(&key),
+            "public_key": public_key,
         },
+        "time_ms": T0,
+        "sig": sig,
     }))
     .expect("pair request");
     store.accept_pairing(&req).expect("pairing");
