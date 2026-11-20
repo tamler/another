@@ -199,7 +199,10 @@ pub struct NodeEntry {
     pub public_key: String,
 }
 
-/// Contents of an invite code (`another pair invite`).
+/// Contents of an invite code (`another pair invite`). `sig` is the hub's signature over
+/// [`crypto::invite_message`], which covers every other field; a joiner checks it against
+/// the hub key the invite names before it sends anything. An invite from a build that did
+/// not sign has no `sig` and is refused.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Invite {
     pub v: u8,
@@ -209,6 +212,125 @@ pub struct Invite {
     pub secret: String,
     pub perms: Vec<Perm>,
     pub expires_at: i64,
+    #[serde(default)]
+    pub sig: String,
+}
+
+/// What is wrong with an invite's signature.
+enum InviteSignature {
+    Missing,
+    /// A signed field holds a line break, so the signed bytes would be ambiguous.
+    LineBreak,
+    Wrong,
+}
+
+impl Invite {
+    /// The bytes the hub signed for this invite.
+    fn signed_message(&self) -> Vec<u8> {
+        crypto::invite_message(
+            self.v,
+            &self.hub.node_id,
+            &self.hub.public_key,
+            &self.hub.display_name,
+            &self.hub_url,
+            &self.invite_id,
+            &crypto::sha256_hex(self.secret.as_bytes()),
+            &perms_text(&self.perms),
+            self.expires_at,
+        )
+    }
+
+    /// Check `sig` against the hub key this invite names. A key that does not decode, or a
+    /// weak one, fails as a wrong signature.
+    fn check_signature(&self) -> std::result::Result<(), InviteSignature> {
+        if self.sig.is_empty() {
+            return Err(InviteSignature::Missing);
+        }
+        let texts = [
+            &self.hub.node_id,
+            &self.hub.public_key,
+            &self.hub.display_name,
+            &self.hub_url,
+            &self.invite_id,
+        ];
+        if texts.iter().any(|t| t.contains(['\n', '\r'])) {
+            return Err(InviteSignature::LineBreak);
+        }
+        if crypto::verify_strict(&self.hub.public_key, &self.signed_message(), &self.sig) {
+            Ok(())
+        } else {
+            Err(InviteSignature::Wrong)
+        }
+    }
+}
+
+/// Whether `url` can be a hub's address: an `http://` or `https://` URL with a host. The
+/// hub applies it to the address it signs into an invite and the joiner to the address it
+/// is about to dial, so both sides share one rule. It checks the form only.
+pub fn hub_url_is_http(url: &str) -> bool {
+    url.parse::<http::Uri>().is_ok_and(|uri| {
+        matches!(uri.scheme_str(), Some("http" | "https"))
+            && uri.host().is_some_and(|h| !h.is_empty())
+    })
+}
+
+/// A node that a hub's signed list names with another key than the one this node pinned
+/// for it. Both keys are shown as fingerprints, computed here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyConflict {
+    pub node_id: String,
+    pub listed_fingerprint: String,
+    pub pinned_fingerprint: String,
+}
+
+impl KeyConflict {
+    /// The audit detail for this refusal.
+    pub fn detail(&self) -> String {
+        format!(
+            "node list names {} with key {}; pinned {}",
+            self.node_id, self.listed_fingerprint, self.pinned_fingerprint
+        )
+    }
+
+    /// The error a sync fails with for this conflict.
+    pub fn refusal(&self) -> Error {
+        Error::Conflict(format!(
+            "the hub's signed node list gives node {} the key {}, but this node pinned the \
+             key {} for it earlier; the answer is refused and this node cannot sync. A \
+             node's key never changes, so one of the two is wrong. Compare both with the \
+             fingerprint that `another node show` prints on that node. If the pinned key is \
+             the wrong one, this home must be replaced; if the hub's is, the hub's home \
+             must be: see \"A pinned key that is wrong\" in docs/FEDERATION.md",
+            self.node_id, self.listed_fingerprint, self.pinned_fingerprint
+        ))
+    }
+}
+
+/// `listed` against the key pinned here for its id: the conflict when a different key is
+/// stored. This node's own id, and an id with no key stored, never conflict.
+fn key_conflict(
+    conn: &Connection,
+    own_id: &str,
+    listed: &NodeEntry,
+) -> Result<Option<KeyConflict>> {
+    if listed.node_id == own_id {
+        return Ok(None);
+    }
+    let pinned: Option<String> = conn
+        .query_row(
+            "SELECT public_key FROM nodes WHERE node_id = ?1",
+            [&listed.node_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(pinned
+        .filter(|key| *key != listed.public_key)
+        .map(|key| KeyConflict {
+            node_id: listed.node_id.clone(),
+            listed_fingerprint: crypto::fingerprint(&listed.public_key),
+            pinned_fingerprint: crypto::fingerprint(&key),
+        }))
 }
 
 /// The pairing secret lets a node join until the invite expires, so `Debug` never prints
@@ -223,6 +345,7 @@ impl std::fmt::Debug for Invite {
             .field("secret", &"<redacted>")
             .field("perms", &self.perms)
             .field("expires_at", &self.expires_at)
+            .field("sig", &self.sig)
             .finish()
     }
 }
@@ -1700,16 +1823,43 @@ impl Store {
         })
     }
 
-    /// Hub side: create a single-use invite code for a spoke.
+    /// Hub side: create a single-use invite code for a spoke, signed with this node's key
+    /// over all of its fields, the address included.
     pub fn create_invite(
         &self,
         hub_url: &str,
         perms: &[Perm],
         expires_in_seconds: i64,
     ) -> Result<String> {
-        if !(hub_url.starts_with("http://") || hub_url.starts_with("https://")) {
+        self.create_invite_as(hub_url, perms, expires_in_seconds, true)
+    }
+
+    /// [`Store::create_invite`] as a build before invites were signed made it: no `sig`.
+    #[cfg(feature = "test-support")]
+    pub fn create_invite_before_signed_invites(
+        &self,
+        hub_url: &str,
+        perms: &[Perm],
+        expires_in_seconds: i64,
+    ) -> Result<String> {
+        self.create_invite_as(hub_url, perms, expires_in_seconds, false)
+    }
+
+    fn create_invite_as(
+        &self,
+        hub_url: &str,
+        perms: &[Perm],
+        expires_in_seconds: i64,
+        signed: bool,
+    ) -> Result<String> {
+        // The address is signed into the invite as text and dialled by the joiner: it must
+        // be one the joiner accepts, and hold nothing that makes the signed bytes ambiguous.
+        let hub_url = hub_url.trim_end_matches('/');
+        if !hub_url_is_http(hub_url)
+            || hub_url.contains(|c: char| c.is_whitespace() || c.is_control())
+        {
             return Err(Error::Invalid(
-                "hub url must start with http:// or https://".into(),
+                "hub url must be an http:// or https:// URL with a host".into(),
             ));
         }
         if expires_in_seconds <= 0 {
@@ -1741,15 +1891,19 @@ impl Store {
                     expires_at
                 ],
             )?;
-            let invite = Invite {
+            let mut invite = Invite {
                 v: 2,
-                hub_url: hub_url.trim_end_matches('/').to_string(),
+                hub_url: hub_url.to_string(),
                 hub,
                 invite_id,
                 secret,
                 perms,
                 expires_at,
+                sig: String::new(),
             };
+            if signed {
+                invite.sig = crypto::sign(self.signing_key(), &invite.signed_message());
+            }
             Ok(format!(
                 "another-invite:{}",
                 crypto::b64(serde_json::to_string(&invite)?.as_bytes())
@@ -1759,21 +1913,64 @@ impl Store {
 
     /// Spoke side: decode an invite and build the signed pairing request for it. Everything
     /// that can be refused here is, so that nothing is sent and the invite is not used up.
+    ///
+    /// The hub's signature on the invite is checked first, right after the code decodes,
+    /// against the hub key the invite names: an invite without one, or one whose contents
+    /// were changed after the hub made it, is refused before any other field is judged.
     pub fn prepare_join(&self, code: &str) -> Result<(Invite, PairRequest)> {
+        self.prepare_join_as(code, true)
+    }
+
+    /// [`Store::prepare_join`] as a build before invites were signed did it: `sig` is not
+    /// a field that build knows, so it is neither checked nor kept.
+    #[cfg(feature = "test-support")]
+    pub fn prepare_join_before_signed_invites(&self, code: &str) -> Result<(Invite, PairRequest)> {
+        self.prepare_join_as(code, false)
+    }
+
+    fn prepare_join_as(&self, code: &str, signed: bool) -> Result<(Invite, PairRequest)> {
         let raw = code.trim().strip_prefix("another-invite:").ok_or_else(|| {
             Error::Invalid("not an Another invite code (expected another-invite:...)".into())
         })?;
         // One fixed text for every decode failure: the base64 and JSON errors can quote
         // the code, and the code holds the secret.
-        let invite: Invite = crypto::unb64(raw)
+        let invalid_code = || Error::Invalid("invalid invite code".into());
+        let mut invite: Invite = crypto::unb64(raw)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .ok_or_else(|| Error::Invalid("invalid invite code".into()))?;
+            .ok_or_else(invalid_code)?;
+        if signed {
+            match invite.check_signature() {
+                Ok(()) => {}
+                Err(InviteSignature::Missing) => {
+                    return Err(Error::Invalid(
+                        "this invite is not signed by its hub: an older build made it, or its \
+                         signature was removed; not joined. Make a new invite on a hub that \
+                         runs this build or a newer one"
+                            .into(),
+                    ))
+                }
+                Err(InviteSignature::LineBreak) => return Err(invalid_code()),
+                Err(InviteSignature::Wrong) => {
+                    return Err(Error::Forbidden(
+                        "this invite's signature does not match its contents: the code was \
+                         changed after the hub made it, or a newer build made it in a form \
+                         this build cannot check; not joined. Ask the hub's owner for a new \
+                         invite over a channel you trust, and update this node if the hub \
+                         runs a newer build"
+                            .into(),
+                    ))
+                }
+            }
+        } else {
+            invite.sig.clear();
+        }
         if invite.v != 2 {
-            return Err(Error::Invalid(
-                "this invite was made by an older build; make a new invite on an upgraded hub"
-                    .into(),
-            ));
+            return Err(Error::Invalid(format!(
+                "this invite is signed but in a format this build does not know (v {}); not \
+                 joined. Update this node to the hub's build",
+                invite.v
+            )));
         }
         if invite.expires_at <= self.now() {
             return Err(Error::Invalid(
@@ -2094,6 +2291,7 @@ impl Store {
                 "the hub's answer is not signed with the hub key in the invite; not paired".into(),
             ));
         }
+        let invite_signed = invite.check_signature().is_ok();
         self.write(|tx| {
             // A join writes the `hub` row of another node and nothing else: never a row for
             // this node itself, never the row of a node paired here as a spoke, never under
@@ -2136,6 +2334,11 @@ impl Store {
                 "invite_id": invite.invite_id,
                 "fingerprint": crypto::fingerprint(&hub.public_key),
             });
+            // The stored address is one the hub's key signed. A join without this mark is
+            // one an older build made, on an invite whose address nothing checked.
+            if invite_signed {
+                record["invite_signed"] = json!(true);
+            }
             if let Some(previous_name) = &lifted {
                 record["revoke_lifted"] = json!(true);
                 record["previous_name"] = json!(previous_name);
@@ -2331,12 +2534,16 @@ impl Store {
     pub fn advance_push(&self, peer: &str, seq: i64, last_accepted: Option<&str>) -> Result<()> {
         self.write(|tx| {
             tx.execute(
-                "UPDATE peers SET push_cursor = max(push_cursor, ?2), last_sync_at = ?3 WHERE node_id = ?1",
-                params![peer, seq, tx.now],
+                "UPDATE peers SET push_cursor = max(push_cursor, ?2) WHERE node_id = ?1",
+                params![peer, seq],
             )?;
             if let Some(id) = last_accepted {
                 if pushed_anchor(tx, tx.node_id)?.as_deref() != Some(id) {
-                    tx.emit("system", "peer.pushed", json!({ "peer": peer, "anchor": id }))?;
+                    tx.emit(
+                        "system",
+                        "peer.pushed",
+                        json!({ "peer": peer, "anchor": id }),
+                    )?;
                 }
             }
             Ok(())
@@ -2536,8 +2743,8 @@ impl Store {
     ) -> Result<()> {
         self.write(|tx| {
             tx.execute(
-                "UPDATE peers SET pull_cursor = max(pull_cursor, ?2), last_sync_at = ?3 WHERE node_id = ?1",
-                params![peer, seq, tx.now],
+                "UPDATE peers SET pull_cursor = max(pull_cursor, ?2) WHERE node_id = ?1",
+                params![peer, seq],
             )?;
             if let Some((id, at)) = last_received {
                 if relayed_anchor(tx, tx.node_id)? != Some((id.to_string(), Some(at))) {
@@ -2549,6 +2756,131 @@ impl Store {
                 }
             }
             Ok(())
+        })
+    }
+
+    /// Spoke side: a sync with `hub` ran to its end. This is the only write of the hub's
+    /// `last_sync_at`: a push batch or a pull page by itself does not count, so a sync that
+    /// keeps failing part way shows as stale.
+    pub fn record_sync_complete(&self, hub: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE peers SET last_sync_at = ?2 WHERE node_id = ?1 AND role = 'hub'",
+                params![hub, tx.now],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Hub side: a push or a pull of `spoke` was answered with a signed `200`. Writes that
+    /// spoke's `last_sync_at`, so the hub can tell a spoke that stopped syncing.
+    pub fn record_peer_contact(&self, spoke: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE peers SET last_sync_at = ?2 WHERE node_id = ?1 AND role = 'spoke'",
+                params![spoke, tx.now],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Hub side: sign a `200` answer to a push or a pull of `spoke_node_id`. `nonce` and
+    /// `request_signature` are the header texts of the request being answered, and `body`
+    /// the exact bytes that are sent.
+    pub fn sign_answer(
+        &self,
+        spoke_node_id: &str,
+        nonce: &str,
+        request_signature: &str,
+        body: &[u8],
+    ) -> String {
+        crypto::sign(
+            self.signing_key(),
+            &crypto::answer_message(
+                self.node_id(),
+                spoke_node_id,
+                nonce,
+                request_signature,
+                body,
+            ),
+        )
+    }
+
+    /// Spoke side: check the hub's signature on an answer to a push or a pull, under the
+    /// key pinned for `hub_id` at pairing. `nonce` and `request_signature` are what this
+    /// node sent with the request, and `body` the answer body as received, after content
+    /// decoding. Nothing of the body may be read before this returns `Ok`.
+    pub fn verify_hub_answer(
+        &self,
+        hub_id: &str,
+        nonce: &str,
+        request_signature: &str,
+        body: &[u8],
+        signature: &str,
+    ) -> Result<()> {
+        let key: Option<String> = self.read(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT public_key FROM nodes WHERE node_id = ?1 AND is_local = 0",
+                    [hub_id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten())
+        })?;
+        let message =
+            crypto::answer_message(hub_id, self.node_id(), nonce, request_signature, body);
+        match key {
+            Some(key) if crypto::verify_strict(&key, &message, signature) => Ok(()),
+            _ => Err(Error::Forbidden(
+                "answer signature is not the hub's for this request".into(),
+            )),
+        }
+    }
+
+    /// Spoke side: the first entry of a hub's list that names a node with another key than
+    /// the one pinned here, as [`Store::ingest`] refuses it. Read after such a refusal, to
+    /// record it: the refusal itself rolled back with its transaction.
+    pub fn listed_key_conflict(&self, nodes: &[NodeEntry]) -> Result<Option<KeyConflict>> {
+        self.read(|conn| {
+            for n in nodes {
+                if crypto::decode_peer_public(&n.public_key).is_err()
+                    || validate_node_id(&n.node_id).is_err()
+                {
+                    continue;
+                }
+                if let Some(conflict) = key_conflict(conn, self.node_id(), n)? {
+                    return Ok(Some(conflict));
+                }
+            }
+            Ok(None)
+        })
+    }
+
+    /// Spoke side: this node's hub, when the newest local `peer.paired` record of it does
+    /// not say the invite was signed. Its stored address is then one nothing checked: the
+    /// join was made by a build before invites were signed. `None` for a hub joined on a
+    /// signed invite, and for a node with no hub.
+    pub fn hub_joined_before_signed_invites(&self) -> Result<Option<String>> {
+        self.read(|conn| {
+            let Some((hub, _, _)) = hub_of(conn)? else {
+                return Ok(None);
+            };
+            let newest: Option<rusqlite::types::Value> = conn
+                .query_row(
+                    "SELECT json_extract(payload, '$.invite_signed') FROM events
+                     WHERE node_id = ?1 AND kind = 'peer.paired'
+                       AND json_extract(payload, '$.node_id') = ?2
+                       AND json_extract(payload, '$.role') = 'hub'
+                     ORDER BY seq DESC LIMIT 1",
+                    params![self.node_id(), hub],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            Ok(match newest {
+                Some(rusqlite::types::Value::Integer(1)) | None => None,
+                Some(_) => Some(hub),
+            })
         })
     }
 
@@ -2611,6 +2943,14 @@ impl Store {
                     continue;
                 }
                 if let Some(entry) = listed_entry(tx, n)? {
+                    // A hub's list reaches here only from an answer the hub signed. A key
+                    // in it that differs from the pinned one is refused with both
+                    // fingerprints: one of the two is wrong, and the owner must see which.
+                    if role == "hub" {
+                        if let Some(conflict) = key_conflict(tx, tx.node_id, &entry)? {
+                            return Err(conflict.refusal());
+                        }
+                    }
                     upsert_node(tx, &entry)?;
                 }
             }

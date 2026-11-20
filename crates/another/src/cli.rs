@@ -2067,17 +2067,32 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 .collect::<Result<Vec<_>, _>>()?;
             let code = store.create_invite(&url, &perms, parse_secs(&expires)?)?;
             let node = store.node()?;
-            let out = serde_json::json!({ "code": code, "hub": node.display_name, "fingerprint": node.fingerprint });
-            emit(json, &out, |_| {
+            let mut out = serde_json::json!({ "code": code, "hub": node.display_name, "fingerprint": node.fingerprint });
+            let warning = crate::fed::invite_warning(&url);
+            if let Some(warning) = &warning {
+                out["warnings"] = serde_json::json!([warning]);
+            }
+            let emitted = emit(json, &out, |_| {
                 format!(
                     "invite for hub {} (key {}), single use:\n\n{code}\n\nOn the spoke: another pair join <code>",
                     node.display_name, node.fingerprint
                 )
-            })
+            });
+            // After the code, so the code stays easy to copy.
+            if let (false, Some(warning)) = (json, &warning) {
+                eprintln!("{}", terminal_safe(warning));
+            }
+            emitted
         }
         Command::Pair(PairCmd::Join { code }) => {
             let (peer, lifted) = crate::fed::join_reporting(&store, &code)?;
-            emit(json, &peer, |p| {
+            let warning = crate::fed::join_warning(&peer);
+            if let (true, Some(warning)) = (json, warning) {
+                let mut out = serde_json::to_value(&peer)?;
+                out["warnings"] = serde_json::json!([warning]);
+                return Ok(emit(json, &out, |_| String::new()));
+            }
+            let emitted = emit(json, &peer, |p| {
                 let paired = format!(
                     "paired with hub {} at {} (key {}); run `another sync`",
                     p.display_name,
@@ -2094,7 +2109,11 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     ),
                     None => paired,
                 }
-            })
+            });
+            if let Some(warning) = warning {
+                eprintln!("{warning}");
+            }
+            emitted
         }
         Command::Pair(PairCmd::Revoke { node }) => {
             let p = store.revoke_peer(&node)?;
@@ -2124,25 +2143,44 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Command::Peers => {
             let ps = store.peers()?;
-            emit(json, &ps, |p| output::peers(p, store.node_id()))
+            let unchecked = crate::fed::hub_with_unchecked_address(&store).map(|p| p.node_id);
+            emit(json, &ps, |p| {
+                output::peers(p, store.node_id(), unchecked.as_deref())
+            })
         }
-        Command::Sync { watch, every } => loop {
-            let report = crate::fed::sync(&store);
-            match report {
-                Ok(r) => {
-                    let emitted = emit(json, &r, output::sync_report);
-                    if !watch {
-                        break emitted;
+        Command::Sync { watch, every } => {
+            // Said once: after the first sync that succeeds.
+            let mut noted = false;
+            loop {
+                let report = crate::fed::sync(&store);
+                match report {
+                    Ok(r) => {
+                        let emitted = emit(json, &r, output::sync_report);
+                        if !noted {
+                            noted = true;
+                            if let Some(hub) = crate::fed::hub_with_unchecked_address(&store) {
+                                let note = format!(
+                                    "note: hub {} was joined before invites were signed, so \
+                                     its address {} was never checked; see another doctor",
+                                    hub.display_name,
+                                    crate::fed::shown_address(hub.url.as_deref().unwrap_or("-"))
+                                );
+                                eprintln!("{}", terminal_safe(&note));
+                            }
+                        }
+                        if !watch {
+                            break emitted;
+                        }
                     }
+                    // The message can quote the hub's error body (fed.rs).
+                    Err(e) if watch => {
+                        eprintln!("another: sync failed: {}", terminal_safe(&format!("{e:#}")))
+                    }
+                    Err(e) => return Err(e),
                 }
-                // The message can quote the hub's error body (fed.rs).
-                Err(e) if watch => {
-                    eprintln!("another: sync failed: {}", terminal_safe(&format!("{e:#}")))
-                }
-                Err(e) => return Err(e),
+                std::thread::sleep(Duration::from_secs(every.max(5)));
             }
-            std::thread::sleep(Duration::from_secs(every.max(5)));
-        },
+        }
         Command::Wake {
             cmd: Some(WakeCmd::Set { agent, via, target }),
             ..

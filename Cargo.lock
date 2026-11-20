@@ -62,6 +62,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.3.4",
  "globset",
+ "http",
  "rusqlite",
  "schemars",
  "serde",

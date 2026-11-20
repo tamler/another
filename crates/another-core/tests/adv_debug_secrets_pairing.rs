@@ -34,6 +34,7 @@ fn an_invite_hides_its_secret() {
         secret: SECRET.into(),
         perms: Vec::new(),
         expires_at: 0,
+        sig: String::new(),
     };
     assert_hidden(&i, "Invite", SECRET);
     assert!(
