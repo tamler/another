@@ -1327,9 +1327,11 @@ fn terminal_safe(text: &str) -> String {
         .collect()
 }
 
-/// An OAuth client's name or redirect host inside one row of the `another oauth` commands.
-/// The operator approves a client from these rows, and a name stored before registration
-/// refused control characters (D97) can hold a line break, which [`terminal_safe`] keeps.
+/// An OAuth client's name inside one row of the `another oauth` commands. The operator
+/// approves a client from these rows, and a name stored before registration refused
+/// control characters (D97) can hold a line break, which [`terminal_safe`] keeps. A long
+/// name keeps its start, which is what identifies it; a redirect host keeps its end
+/// ([`crate::oauth_http::shown_redirect_host`]).
 fn client_shown(text: &str) -> String {
     another_core::display_line(text, 120)
 }
@@ -1924,7 +1926,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                                 "{}  {}  redirect host {}  expires {}",
                                 r.user_code,
                                 client_shown(&r.client_name),
-                                client_shown(&r.redirect_host),
+                                crate::oauth_http::shown_redirect_host(&r.redirect_host),
                                 r.expires_at
                             )
                         })

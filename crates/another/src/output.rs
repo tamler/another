@@ -457,7 +457,9 @@ pub fn audit(es: &[AuditEntry]) -> String {
                 e.outcome,
                 e.agent.as_deref().unwrap_or("-"),
                 e.operation,
-                e.detail.as_deref().unwrap_or(""),
+                // A detail can quote stored text, such as an OAuth client's name: one row
+                // is one line. Nothing is cut: a detail can end with a redirect host.
+                another_core::display_line(e.detail.as_deref().unwrap_or(""), usize::MAX),
                 e.remote
                     .as_deref()
                     .map(|r| format!("  [{r}]"))

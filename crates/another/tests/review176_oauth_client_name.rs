@@ -183,4 +183,90 @@ fn a_stored_client_name_cannot_add_a_row_to_the_oauth_commands() {
     let grant = listed[0].split_whitespace().next().unwrap().to_string();
     let revoked = lines(&["oauth", "revoke", &grant]);
     assert_eq!(revoked.len(), 1, "{revoked:?}");
+
+    // Review R2: the audit rows of the approval and the revocation quote the stored name.
+    // Each entry is one line.
+    let entries: serde_json::Value =
+        serde_json::from_str(&lines(&["--json", "audit"]).join("\n")).unwrap();
+    let entries = entries.as_array().unwrap();
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["detail"].as_str().is_some_and(|d| d.contains('\n'))),
+        "an audit row holds the stored name: {entries:?}"
+    );
+    let audit = lines(&["audit"]);
+    assert_eq!(audit.len(), entries.len(), "{audit:?}");
+}
+
+/// Review R2 of Q19b: the redirect host is what tells the operator who receives the code,
+/// and its end is the part that says so. `another oauth pending` shows a host of up to 253
+/// characters whole, and a longer one by a mark, its length and its last 120 characters.
+#[test]
+fn oauth_pending_shows_the_end_of_a_long_redirect_host() {
+    use another_core::{AuthorizeInput, ClientProfile, ClientRegistration};
+    use std::process::{Command, Stdio};
+
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let store = Store::open(&home).unwrap();
+    let client = store
+        .register_oauth_client(ClientRegistration {
+            client_name: "ChatGPT".into(),
+            redirect_uris: vec!["https://example.com/cb".into()],
+            application_type: Some("web".into()),
+            remote: None,
+        })
+        .unwrap();
+    // A trusted-looking start, the attacker's registrable domain at the end.
+    let long = format!(
+        "good.example.com.{}.{}.attacker.test",
+        "x".repeat(60),
+        "x".repeat(60)
+    );
+    let huge = format!("good.example.com.{}.attacker.test", "h".repeat(5000 - 31));
+    for host in [&long, &huge] {
+        let uri = format!("https://{host}/cb");
+        store
+            .begin_authorization(AuthorizeInput {
+                client: ClientProfile {
+                    client_id: client.client_id.clone(),
+                    client_name: client.client_name.clone(),
+                    redirect_uris: vec![uri.clone()],
+                },
+                redirect_uri: uri,
+                state: None,
+                scope: None,
+                resource: "https://another.example.com/mcp".into(),
+                code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM".into(),
+                code_challenge_method: "S256".into(),
+                remote: None,
+            })
+            .unwrap();
+    }
+    drop(store);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_another"))
+        .args(["oauth", "pending"])
+        .current_dir(dir.path())
+        .env("ANOTHER_HOME", &home)
+        .env_remove("ANOTHER_AGENT")
+        .env_remove("ANOTHER_LOG")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run another");
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let rows: Vec<&str> = text.lines().collect();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(
+        rows.iter()
+            .any(|r| r.contains(&format!("  ChatGPT  redirect host {long}  expires "))),
+        "{rows:?}"
+    );
+    let cut = format!(
+        "  ChatGPT  redirect host (cut, 5000 characters) ...{}.attacker.test  expires ",
+        "h".repeat(120 - 14)
+    );
+    assert!(rows.iter().any(|r| r.contains(&cut)), "{rows:?}");
 }

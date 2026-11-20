@@ -722,9 +722,29 @@ fn connect_notice(client_name: &str, redirect_host: &str, user_code: &str) -> St
          Approve it on this machine (this page cannot approve it):\n  \
          another oauth approve {} --agent NAME --project '/path/*'",
         shown(client_name),
-        shown(redirect_host),
+        shown_redirect_host(redirect_host),
         shown(user_code)
     )
+}
+
+/// Longest redirect host shown whole: the longest name DNS allows.
+const MAX_HOST_SHOWN_WHOLE: usize = 253;
+/// How much of the end of a longer host is shown.
+const HOST_END_SHOWN: usize = 120;
+
+/// A redirect host as the operator is shown it, in the notice above and in
+/// `another oauth pending`: one clean line that always includes the host's end, because
+/// the end says who receives the code. Registration accepts a host of any length, so a
+/// cut that kept the start would show `good.example.com.` and hide `attacker.test`. A
+/// host longer than DNS allows is shown by a mark, its length and its end only.
+pub(crate) fn shown_redirect_host(host: &str) -> String {
+    let clean = another_core::display_line(host, usize::MAX);
+    let length = clean.chars().count();
+    if length <= MAX_HOST_SHOWN_WHOLE {
+        return clean;
+    }
+    let end: String = clean.chars().skip(length - HOST_END_SHOWN).collect();
+    format!("(cut, {length} characters) ...{end}")
 }
 
 async fn resolve_client(
@@ -1439,6 +1459,57 @@ mod tests {
         // An ordinary name is shown as it is.
         assert!(connect_notice("ChatGPT", "chatgpt.com", "abcd-efgh")
             .starts_with("another: ChatGPT wants to connect (redirect host chatgpt.com).\n"));
+    }
+
+    /// Review R2 of Q19b: the end of a redirect host says who receives the code, so what
+    /// is shown always includes the end. A host of up to 253 characters (the DNS limit) is
+    /// shown whole; a longer one by a fixed mark, its length and its last 120 characters.
+    #[test]
+    fn a_redirect_host_is_always_shown_with_its_end() {
+        // A trusted-looking start, the attacker's registrable domain at the end.
+        let long = format!(
+            "good.example.com.{}.{}.attacker.test",
+            "x".repeat(60),
+            "x".repeat(60)
+        );
+        assert_eq!(shown_redirect_host(&long), long);
+        let notice = connect_notice("ChatGPT", &long, "abcd-efgh");
+        assert!(
+            notice.contains(&format!("(redirect host {long}).\n")),
+            "{notice:?}"
+        );
+
+        let dns_limit = format!("{}.attacker.test", "a".repeat(253 - 14));
+        assert_eq!(dns_limit.chars().count(), 253);
+        assert_eq!(shown_redirect_host(&dns_limit), dns_limit);
+
+        let huge = format!("good.example.com.{}.attacker.test", "h".repeat(5000 - 31));
+        assert_eq!(huge.chars().count(), 5000);
+        let shown = shown_redirect_host(&huge);
+        assert_eq!(
+            shown,
+            format!(
+                "(cut, 5000 characters) ...{}.attacker.test",
+                "h".repeat(120 - 14)
+            )
+        );
+        assert!(!shown.contains("good.example.com"), "{shown:?}");
+
+        // Control, invisible and text-direction characters: still one clean line, whole
+        // or cut.
+        let hostile = "a\u{1b}[2Jb\u{202e}c\u{200b}d\ne.attacker.test";
+        assert_eq!(shown_redirect_host(hostile), "a [2Jb c d e.attacker.test");
+        let hostile_huge = format!("{}{hostile}", "h".repeat(300));
+        let shown = shown_redirect_host(&hostile_huge);
+        assert!(
+            shown.starts_with("(cut, 326 characters) ...hhh"),
+            "{shown:?}"
+        );
+        assert!(shown.ends_with("a [2Jb c d e.attacker.test"), "{shown:?}");
+        assert!(
+            !shown.chars().any(another_core::is_unsafe_text_char),
+            "{shown:?}"
+        );
     }
 
     #[test]
