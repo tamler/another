@@ -95,7 +95,8 @@ fn a_held_file_name_cannot_retitle_or_clear_the_terminal() {
     let out = run(&["hold", "release", "-a", "b", hostile]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!has_control(&out.stderr), "{err:?}");
-    assert!(err.contains("src/x?]0;pwned??gpj.rs"), "{err:?}");
+    // The note shows the path with the platform's separator.
+    assert!(err.contains("x?]0;pwned??gpj.rs"), "{err:?}");
 
     // --json keeps the exact text: JSON escapes the C0 controls (ESC, BEL); the bidi
     // override stays raw UTF-8 (D97), and the value decodes to what was held.
