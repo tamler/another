@@ -302,7 +302,7 @@ pub struct ResourceRegisterArgs {
     /// `metal:0`. One line: no line breaks, tabs or control characters.
     pub name: String,
     /// How to reach it, e.g. `http://127.0.0.1:11434`. One line: no line breaks, tabs or
-    /// control characters.
+    /// control characters. At most 2 KiB.
     pub endpoint: Option<String>,
     /// Listening port (derived from name/endpoint when omitted).
     pub port: Option<u16>,
@@ -311,7 +311,7 @@ pub struct ResourceRegisterArgs {
     /// Project absolute path or slug.
     pub project: Option<String>,
     /// What it is for, shown to other agents. One line: no line breaks, tabs or control
-    /// characters.
+    /// characters. At most 1 KiB.
     pub purpose: Option<String>,
     /// Exclusive resources cannot be borrowed by others (default: shared).
     #[serde(default)]
@@ -319,6 +319,7 @@ pub struct ResourceRegisterArgs {
     /// Lease length in seconds (default 1800, clamped to 60..86400); renew with resource_heartbeat.
     pub ttl_seconds: Option<i64>,
     /// Free-form object: model, backend (metal|mlx|cpu|cuda), estimated_bytes, cmdline, ...
+    /// At most 64 KiB as JSON.
     pub metadata: Option<serde_json::Value>,
 }
 

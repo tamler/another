@@ -182,15 +182,16 @@ fn a_peer_agent_description_and_model_are_cleaned_on_import() {
     );
 }
 
-/// Q19b: a peer's agent name is the first part of its address, and its program is listed
-/// with it (`another agent show`, the dashboard). Neither passes a local check on import.
+/// Q19b: a peer's agent program is listed with its address (`another agent show`, the
+/// dashboard) and passes no local check on import. Q20: the name is the first part of that
+/// address and is held to the local name rule instead (`peer_agent_name.rs`), so only the
+/// program is cleaned here.
 #[test]
-fn a_peer_agent_name_and_program_are_cleaned_on_import() {
+fn a_peer_agent_program_is_cleaned_on_import() {
     let hub = node("hub");
     let spoke = spoke_with_agent_and_hold(&hub);
     let events = resigned(&spoke, |kind, p| {
         if kind == "agent.registered" {
-            p["name"] = Value::String(EVIL.into());
             p["program"] = Value::String(EVIL.into());
         }
     });
@@ -215,9 +216,10 @@ fn a_peer_agent_name_and_program_are_cleaned_on_import() {
 }
 
 /// Q19b: `another resources` and the dashboard list a peer's resources by name, endpoint
-/// and purpose.
+/// and purpose. Q20: the name is held to the local name rule instead
+/// (`federation_authority.rs`), so only the endpoint and purpose are cleaned here.
 #[test]
-fn a_peer_resource_name_endpoint_and_purpose_are_cleaned_on_import() {
+fn a_peer_resource_endpoint_and_purpose_are_cleaned_on_import() {
     let hub = node("hub");
     let spoke = spoke_with_agent_and_hold(&hub);
     spoke
@@ -238,7 +240,7 @@ fn a_peer_resource_name_endpoint_and_purpose_are_cleaned_on_import() {
         .unwrap();
     let events = resigned(&spoke, |kind, p| {
         if kind == "resource.registered" {
-            for field in ["name", "endpoint", "purpose"] {
+            for field in ["endpoint", "purpose"] {
                 p[field] = Value::String(EVIL.into());
             }
         }

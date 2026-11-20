@@ -29,6 +29,7 @@ another borrow model_server:ollama@11434 --agent codex@shop
 another resource register model_server ollama@11434 --agent claude@shop --endpoint http://127.0.0.1:11434 --pid 4242 --purpose "local llm" --meta backend=metal
 ```
 
+- **Limits**: a name is at most 200 bytes, an endpoint 2 KiB, a purpose 1 KiB, and metadata 64 KiB as JSON. A larger value is refused as `invalid`, naming the field, its size and the limit, and nothing is registered. The same limits apply to a resource another node registered (see [FEDERATION.md](FEDERATION.md#model)).
 - **Leases**: the registering agent holds the **owner** lease; others take **borrower** leases (shared resources only; `--exclusive` refuses borrowers). `refcount` is the number of live leases.
 - **TTL**: default 30 minutes, clamped to 1 minute-24 hours. `another heartbeat` (and the session hooks) renew every lease the agent holds; `another resource heartbeat` renews just resources.
 - **Release**: `another release <target> --agent X`. If the owner leaves while others borrow, the oldest borrower becomes owner. After shutting a resource down, the owner runs `another release <target> --agent X --stopped`.

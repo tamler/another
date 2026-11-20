@@ -83,7 +83,7 @@ pub struct NodeEntry {
 }
 
 /// Contents of an invite code (`another pair invite`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Invite {
     pub v: u8,
     pub hub_url: String,
@@ -94,11 +94,38 @@ pub struct Invite {
     pub expires_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The pairing secret lets a node join until the invite expires, so `Debug` never prints
+/// it. `Serialize` keeps it: the invite code is built from it.
+impl std::fmt::Debug for Invite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Invite")
+            .field("v", &self.v)
+            .field("hub_url", &self.hub_url)
+            .field("hub", &self.hub)
+            .field("invite_id", &self.invite_id)
+            .field("secret", &"<redacted>")
+            .field("perms", &self.perms)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PairRequest {
     pub invite_id: String,
     pub secret: String,
     pub node: NodeEntry,
+}
+
+/// As for [`Invite`], the pairing secret is never printed.
+impl std::fmt::Debug for PairRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PairRequest")
+            .field("invite_id", &self.invite_id)
+            .field("secret", &"<redacted>")
+            .field("node", &self.node)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -678,6 +705,10 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
         }
         "agent.registered" => {
             agent("agent_id")?;
+            // The local name rule, so a peer without it (a changed build or a forged event)
+            // cannot add an agent whose name is oversized, look-alike or not addressable.
+            // A missing name counts as empty and is refused.
+            crate::identity::validate_name(p.get("name").and_then(Value::as_str).unwrap_or(""))?;
             project()
         }
         "session.started" | "session.ended" | "delivery.read" | "delivery.acked" => {
@@ -685,6 +716,16 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
         }
         "message.sent" => {
             agent("sender_id")?;
+            // The same body limit as a local send, so a peer without it (a changed build or
+            // a forged event) cannot store or relay an oversized body. A body that is not
+            // text is refused too: it would skip the limit and still be kept in the event.
+            // The subject is not checked here: the projection cuts it and stores it (D75),
+            // so an over-long subject never costs the recipient the message.
+            match p.get("body") {
+                None | Some(Value::Null) => {}
+                Some(Value::String(body)) => crate::mail::check_body(body)?,
+                Some(_) => return Err(Error::Invalid("message body must be text".into())),
+            }
             owned("message", "messages", "message_id", "message_id")
         }
         "hold.acquired" | "hold.updated" => {
@@ -695,6 +736,19 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
         "resource.registered" => {
             agent("owner_id")?;
             project()?;
+            // The local resource-name rule. A missing name counts as empty and is refused.
+            crate::resources::validate_name(p.get("name").and_then(Value::as_str).unwrap_or(""))?;
+            // The local size limits. Control characters in these two are cleaned by the
+            // projection (D97); a size over the limit cannot be cleaned, so it is refused.
+            crate::resources::check_text_sizes(
+                p.get("endpoint").and_then(Value::as_str),
+                p.get("purpose").and_then(Value::as_str),
+            )?;
+            // The same metadata rule as a local registration: an object of at most 64 KiB.
+            // An event without metadata is stored with `{}`.
+            if let Some(metadata) = p.get("metadata") {
+                crate::resources::check_metadata(metadata)?;
+            }
             // A local registration types these as u16 / u32; refuse what no build sends.
             for (field, max) in [("port", u64::from(u16::MAX)), ("pid", u64::from(u32::MAX))] {
                 if let Some(v) = p.get(field).filter(|v| !v.is_null()) {
@@ -762,10 +816,12 @@ fn project_exists(conn: &Connection, id: &str) -> Result<bool> {
 /// mail, presence or receipts in the future).
 fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
     let s = |k: &str| p.get(k).and_then(Value::as_str).map(str::to_string);
-    // A peer's free text skips the local checks: names, hold reasons, models, descriptions
-    // and resource text are stored as one safe line, like a subject (D75); the signed event
-    // keeps the original. Held patterns, project paths and slugs name real files and are
-    // matched across nodes, so they are kept as sent.
+    // A peer's free text skips the local checks: hold reasons, programs, models,
+    // descriptions and a resource's endpoint and purpose are stored as one safe line, like a
+    // subject (D75); the signed event keeps the original. The name of an agent or a resource
+    // is not cleaned: `foreign_authority` holds it to the local name rule, so it is stored
+    // as sent. Held patterns, project paths and slugs name real files and are matched
+    // across nodes, so they are kept as sent.
     let line = |k: &str| s(k).map(|t| crate::mail::single_line(&t, usize::MAX));
     let ts = ev.ts.min(tx.now);
     let origin = ev.node_id.as_str();
@@ -789,7 +845,7 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
             let Some(agent_id) = s("agent_id") else {
                 return Ok(());
             };
-            let name = line("name").unwrap_or_default();
+            let name = s("name").unwrap_or_default();
             let project_id = s("project_id").filter(|id| project_exists(tx, id).unwrap_or(false));
             let slug: Option<String> = match &project_id {
                 Some(id) => tx
@@ -993,7 +1049,7 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                     rid,
                     origin,
                     s("kind"),
-                    line("name"),
+                    s("name"),
                     line("endpoint"),
                     p.get("port").and_then(Value::as_i64),
                     p.get("pid").and_then(Value::as_i64),

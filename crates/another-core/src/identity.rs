@@ -143,7 +143,10 @@ pub(crate) fn agent_from_row(r: &Row<'_>) -> rusqlite::Result<Agent> {
     })
 }
 
-fn validate_name(name: &str) -> Result<()> {
+/// The agent name rule, for a local registration and for a peer's `agent.registered` (see
+/// `federation::foreign_authority`). The refusal quotes at most the start of the name: a
+/// peer chose it, and the refusal is sent back to that peer and printed by `another sync`.
+pub(crate) fn validate_name(name: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name.len() <= 64
         && name
@@ -153,7 +156,8 @@ fn validate_name(name: &str) -> Result<()> {
         Ok(())
     } else {
         Err(Error::Invalid(format!(
-            "invalid agent name {name:?}: use 1-64 ASCII letters, digits, '-', '_' or '.'"
+            "invalid agent name {:?}: use 1-64 ASCII letters, digits, '-', '_' or '.'",
+            crate::mail::single_line(name, 80)
         )))
     }
 }
