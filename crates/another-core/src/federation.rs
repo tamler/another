@@ -678,6 +678,10 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
         }
         "agent.registered" => {
             agent("agent_id")?;
+            // The local name rule, so a peer without it (a changed build or a forged event)
+            // cannot add an agent whose name is oversized, look-alike or not addressable.
+            // A missing name counts as empty and is refused.
+            crate::identity::validate_name(p.get("name").and_then(Value::as_str).unwrap_or(""))?;
             project()
         }
         "session.started" | "session.ended" | "delivery.read" | "delivery.acked" => {
@@ -762,10 +766,11 @@ fn project_exists(conn: &Connection, id: &str) -> Result<bool> {
 /// mail, presence or receipts in the future).
 fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
     let s = |k: &str| p.get(k).and_then(Value::as_str).map(str::to_string);
-    // A peer's free text skips the local checks: names, hold reasons, models, descriptions
-    // and resource text are stored as one safe line, like a subject (D75); the signed event
-    // keeps the original. Held patterns, project paths and slugs name real files and are
-    // matched across nodes, so they are kept as sent.
+    // A peer's free text skips the local checks: hold reasons, programs, models,
+    // descriptions and resource text are stored as one safe line, like a subject (D75); the
+    // signed event keeps the original. An agent's name is not cleaned: `foreign_authority`
+    // holds it to the local name rule, so it is stored as sent. Held patterns, project
+    // paths and slugs name real files and are matched across nodes, so they are kept as sent.
     let line = |k: &str| s(k).map(|t| crate::mail::single_line(&t, usize::MAX));
     let ts = ev.ts.min(tx.now);
     let origin = ev.node_id.as_str();
@@ -789,7 +794,7 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
             let Some(agent_id) = s("agent_id") else {
                 return Ok(());
             };
-            let name = line("name").unwrap_or_default();
+            let name = s("name").unwrap_or_default();
             let project_id = s("project_id").filter(|id| project_exists(tx, id).unwrap_or(false));
             let slug: Option<String> = match &project_id {
                 Some(id) => tx

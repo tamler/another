@@ -182,15 +182,16 @@ fn a_peer_agent_description_and_model_are_cleaned_on_import() {
     );
 }
 
-/// Q19b: a peer's agent name is the first part of its address, and its program is listed
-/// with it (`another agent show`, the dashboard). Neither passes a local check on import.
+/// Q19b: a peer's agent program is listed with its address (`another agent show`, the
+/// dashboard) and passes no local check on import. Q20: the name is the first part of that
+/// address and is held to the local name rule instead (`peer_agent_name.rs`), so only the
+/// program is cleaned here.
 #[test]
-fn a_peer_agent_name_and_program_are_cleaned_on_import() {
+fn a_peer_agent_program_is_cleaned_on_import() {
     let hub = node("hub");
     let spoke = spoke_with_agent_and_hold(&hub);
     let events = resigned(&spoke, |kind, p| {
         if kind == "agent.registered" {
-            p["name"] = Value::String(EVIL.into());
             p["program"] = Value::String(EVIL.into());
         }
     });
