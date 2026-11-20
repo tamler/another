@@ -824,7 +824,12 @@ fn texts() {
         let length = digest.trim_end().chars().count();
         assert!(length <= 1500, "{length}");
         if client == "claude" {
-            assert_eq!(length, 1500, "the inbox filled the digest: {digest}");
+            // The inbox filled the digest: the cap dropped whole lines, so the last line
+            // is a complete one and the next would not have fitted (D96).
+            let last = digest.trim_end().lines().last().unwrap();
+            assert!(last.starts_with("- ") && last.ends_with('"'), "{digest}");
+            assert!(length + 1 + last.chars().count() > 1500, "{digest}");
+            assert!(digest.lines().count() < 3 + 1 + 10, "{digest}");
         }
     }
     // Cursor has no edit guard, so nothing is held for it and the line is left out.

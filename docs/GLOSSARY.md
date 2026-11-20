@@ -29,7 +29,7 @@ Short definitions of the words Another uses, with the places that explain each o
 - **Done condition**: what must be true for an item to be finished, set by the time it is admitted.
 - **Fast lane**: items of kind `security` or `data-loss`. Only the owner decides them, and they are first in the owner list.
 - **`next`**: `another queue next` or the `queue_next` tool. It hands one ready item to one agent, and is the only way an item becomes claimed.
-- **Limit**, **seat**: how many claimed, unfinished items one agent name may hold, set by the owner; 1 by default. A limit of 0 is no seat.
+- **Limit**, **seat**: how many claimed, unfinished items one agent name may hold, set by the owner; 1 by default. A limit of 0 is no seat. A name is **seated** when the owner set a limit above 0 for it by name: only then do the hook packs, `queue done` and `queue release` tell its sessions that an item is ready (D96).
 - **Reservation**, **skip**: an item reserved with `--for` is offered to that agent first; the agent that gave an item up is skipped. Both end as [QUEUE.md](QUEUE.md) describes.
 - **Handoff**: the claimer gives its item to a named agent with `another queue release --to`. The item returns to `ready`, reserved for that agent.
 - **Result**: the short summary and one pointer (pull request, commit or file) stored on an item by `another queue done`.
@@ -49,8 +49,8 @@ Short definitions of the words Another uses, with the places that explain each o
 
 ## Awareness
 
-- **Hook**: a user-global entry in a coding client's config that runs Another at session start, on each prompt, after each tool call and at session end, and before each file edit in Claude Code, Codex CLI and Grok CLI (Cursor has no edit hook). [HOOKS.md](HOOKS.md).
-- **Digest**: the short inbox and activity summary a hook gives a session. Never message bodies.
+- **Hook**: a user-global entry in a coding client's config that runs Another at session start, on each prompt, after each tool call and at session end, and before each file edit in Claude Code, Codex CLI and Grok CLI (Cursor has no edit hook). Hooks tell a session about new mail at each of the first three, and about the queue at session start and on a prompt, with no transport. [HOOKS.md](HOOKS.md).
+- **Digest**: the short text a hook gives a session at its start: the inbox counts, the queue lines (an item the session holds; for a seated name, that an item is ready), then unread subjects and requests under a sentence that says other agents wrote them. No activity summary. Never message bodies or queue item titles.
 - **Activity feed**: who did what: sessions, mail subjects, requests, holds and resources. `another activity`.
 - **Event log**: the signed, append-only record behind everything. Query tables are projections of it, and it is what federation syncs. [SPEC.md](SPEC.md).
 - **Sweep**: the pass that records expired holds, marks overdue requests stale and expires lapsed leases. `another sweep` runs it once; `another serve` runs it every 30 seconds; `another requests` and `another inbox` run it before they list. The **queue sweep** is a separate pass that releases queue claims with no sign of life for the grace period; it runs in `another sweep`, in `another serve` and in other agents' hooks, heartbeats and `queue next`, and never before a read ([QUEUE.md](QUEUE.md)).

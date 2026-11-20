@@ -63,7 +63,8 @@ pub struct WakeTarget {
 /// which text is shown: zero-width characters and directional marks (U+200B to U+200F),
 /// bidirectional embeddings and overrides (U+202A to U+202E), the word joiner, invisible
 /// operators and bidirectional isolates (U+2060 to U+2069), the byte order mark, the
-/// line and paragraph separators, and the Arabic letter mark (U+061C).
+/// line and paragraph separators, the Arabic letter mark (U+061C), and the Unicode tag
+/// characters (U+E0000 to U+E007F), which no person sees and a model reads as letters.
 pub(crate) fn is_invisible(c: char) -> bool {
     matches!(
         c,
@@ -74,6 +75,7 @@ pub(crate) fn is_invisible(c: char) -> bool {
             | '\u{FEFF}'
             | '\u{2028}'
             | '\u{2029}'
+            | '\u{E0000}'..='\u{E007F}'
     )
 }
 

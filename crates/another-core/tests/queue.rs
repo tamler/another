@@ -4026,3 +4026,245 @@ fn claims_past_one_hundred_are_not_lost() {
     assert_eq!(distinct.len(), 150);
     assert!(claims.iter().all(|c| c.session.is_none()));
 }
+
+// The read behind the hook packs' queue lines (scope id M6, D96): what `next` would give an
+// agent now, without writing.
+
+/// A small repeatable generator, so a failing state can be found again by its seed.
+struct Gen(u64);
+
+impl Gen {
+    fn below(&mut self, n: u64) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (self.0 >> 33) % n
+    }
+}
+
+// Q10 T1
+#[test]
+fn offer_and_next_agree() {
+    let (mut offered, mut silent) = (0, 0);
+    for seed in 0..120u64 {
+        let mut gen = Gen(seed);
+        let fx = Fx::new();
+        // Room for the setup; ann's real limit is set at the end.
+        fx.store.queue_set_limit(&owner(), "ann", 5).unwrap();
+        fx.store.queue_set_limit(&owner(), "bob", 3).unwrap();
+        // Claims of the name and of others, taken while nothing else is ready.
+        for (who, most) in [("ann", 3), ("bob", 2)] {
+            for n in 0..gen.below(most + 1) {
+                fx.ready(&format!("held by {who} {n}"));
+                fx.claim(who);
+            }
+        }
+        // An item ann gave back: skipped for ann for one hour from the release.
+        if gen.below(2) == 0 {
+            let item = fx.ready("given back by ann");
+            fx.claim("ann");
+            fx.store
+                .queue_release(&agent("ann"), &item.label, ReleaseItem::default())
+                .unwrap();
+            fx.advance(if gen.below(2) == 0 {
+                HOUR / 2
+            } else {
+                HOUR + 1
+            });
+        }
+        // Ready items: both priorities, reserved for ann, for another agent, or for nobody.
+        for n in 0..gen.below(4) {
+            let item = fx.propose("ann", &format!("ready {n}"));
+            let admit = AdmitItem {
+                priority: (gen.below(2) == 0).then_some(QueuePriority::High),
+                for_agent: match gen.below(4) {
+                    0 => Some("ann".to_string()),
+                    1 => Some("cy".to_string()),
+                    _ => None,
+                },
+                ..Default::default()
+            };
+            fx.store.queue_admit(&owner(), &item.label, admit).unwrap();
+            fx.advance(1 + gen.below(5) as i64);
+            // An item of another node is never handed out here.
+            if gen.below(5) == 0 {
+                let db = fx.db();
+                let foreign = foreign_node(&db);
+                db.execute(
+                    "UPDATE queue_items SET node_id = ?1 WHERE item_id = ?2",
+                    [&foreign, &item.item_id],
+                )
+                .unwrap();
+            }
+        }
+        match gen.below(5) {
+            4 => {
+                // No limit of its own: the default applies.
+                fx.db()
+                    .execute(
+                        "DELETE FROM queue_limits WHERE agent_id = ?1",
+                        [fx.agent_id("ann")],
+                    )
+                    .unwrap();
+            }
+            limit => {
+                fx.store
+                    .queue_set_limit(&owner(), "ann", limit as i64)
+                    .unwrap();
+            }
+        }
+
+        let offer = fx.store.queue_offer("ann").unwrap();
+        let next = fx.store.queue_next("ann").unwrap();
+        assert_eq!(
+            offer.ready.is_some(),
+            next.claimed.is_some(),
+            "seed {seed}: the offer was {offer:?}, next gave {next:?}"
+        );
+        match (&offer.ready, &next.claimed) {
+            (Some(mark), Some(item)) => {
+                offered += 1;
+                assert!(
+                    mark.starts_with(&format!("{}:", item.item_id)),
+                    "seed {seed}: the mark {mark} names another item than {}",
+                    item.label
+                );
+            }
+            _ => silent += 1,
+        }
+        if let Some(refused) = &next.refused {
+            assert_eq!(offer.limit, refused.limit, "seed {seed}");
+            let held: Vec<&str> = offer.held.iter().map(|h| h.label.as_str()).collect();
+            assert_eq!(held, refused.held, "seed {seed}");
+        }
+    }
+    assert!(
+        offered > 10 && silent > 10,
+        "both outcomes are covered: {offered} offered, {silent} not"
+    );
+}
+
+fn last_seen_of(fx: &Fx, who: &str) -> Option<i64> {
+    fx.db()
+        .query_row(
+            "SELECT last_seen_at FROM agents WHERE agent_id = ?1",
+            [fx.agent_id(who)],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+// Q10 T2
+#[test]
+fn offer_reads_only() {
+    let fx = Fx::new();
+    fx.store.queue_set_limit(&owner(), "ann", 2).unwrap();
+    fx.store.queue_set_limit(&owner(), "bob", 1).unwrap();
+    let lapsed = fx.ready("claimed by bob, then silence");
+    fx.claim("bob");
+    let held = fx.ready("claimed by ann in session s1");
+    fx.start("ann", "s1");
+    fx.claim("ann");
+    let head = fx.ready("ready for ann");
+    // Bob is past the grace period: a write by ann would release his claim.
+    fx.advance(DAY + HOUR);
+    let seen_before = last_seen_of(&fx, "ann");
+    let events_before = fx.store.events(100_000).unwrap().len();
+    let before = fx.snapshot();
+
+    let read_only =
+        Store::open_read_only(&fx.home(), std::time::Duration::from_millis(50)).unwrap();
+    let offer = read_only.queue_offer("ann").unwrap();
+    assert_eq!(offer.agent, "ann");
+    assert!(offer.seated);
+    assert_eq!(offer.limit, 2);
+    assert_eq!(offer.held.len(), 1);
+    assert_eq!(offer.held[0].label, held.label);
+    assert_eq!(offer.held[0].session.as_deref(), Some("s1"));
+    assert_eq!(
+        offer.ready.as_deref(),
+        Some(format!("{}:0", head.item_id).as_str()),
+        "the mark is the item's id and the time it last came back to ready"
+    );
+    assert_eq!(offer.announce(), offer.ready.as_deref());
+
+    assert_eq!(fx.snapshot(), before, "nothing in the queue changed");
+    assert_eq!(fx.store.events(100_000).unwrap().len(), events_before);
+    assert_eq!(last_seen_of(&fx, "ann"), seen_before, "no sign of life");
+    assert_eq!(
+        fx.item(&lapsed.label).state,
+        QueueState::Claimed,
+        "the lapsed claim was not released by the read"
+    );
+
+    // A name on the default limit is offered the same item by `next`; announce() is silent.
+    let default_seat = read_only.queue_offer("cy").unwrap();
+    assert!(!default_seat.seated);
+    assert_eq!(default_seat.limit, DEFAULT_QUEUE_LIMIT);
+    assert!(default_seat.ready.is_some());
+    assert_eq!(default_seat.announce(), None);
+    // A limit of 0 is no seat.
+    fx.store.queue_set_limit(&owner(), "cy", 0).unwrap();
+    let no_seat = fx.store.queue_offer("cy").unwrap();
+    assert!(!no_seat.seated);
+    assert_eq!((no_seat.limit, no_seat.ready), (0, None));
+}
+
+/// The ready mark changes exactly when the item comes back to ready: a note or an edit
+/// leaves it as it was (spec 3.1).
+#[test]
+fn the_ready_mark_changes_only_on_a_return_to_ready() {
+    let fx = Fx::new();
+    fx.store.queue_set_limit(&owner(), "ann", 1).unwrap();
+    let head = fx.ready("the head of the queue");
+    let mark = |fx: &Fx| fx.store.queue_offer("ann").unwrap().ready.unwrap();
+    let first = mark(&fx);
+    fx.store.queue_note("bob", &head.label, "a note").unwrap();
+    fx.store
+        .queue_edit(
+            &owner(),
+            &head.label,
+            EditItem {
+                done_when: Some("the tests still pass".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(mark(&fx), first);
+
+    fx.store.queue_set_limit(&owner(), "bob", 1).unwrap();
+    fx.claim("bob");
+    assert_eq!(fx.store.queue_offer("ann").unwrap().ready, None);
+    fx.advance(HOUR);
+    fx.store
+        .queue_release(&agent("bob"), &head.label, ReleaseItem::default())
+        .unwrap();
+    let again = mark(&fx);
+    assert!(again.starts_with(&format!("{}:", head.item_id)), "{again}");
+    assert_ne!(again, first, "a return to ready is a new mark");
+    assert_eq!(queue_stamp(&again).len(), 16);
+    assert!(queue_stamp(&again).chars().all(|c| c.is_ascii_hexdigit()));
+    assert_ne!(queue_stamp(&again), queue_stamp(&first));
+}
+
+// Q10 T3
+#[test]
+fn one_selection() {
+    let source = include_str!("../src/queue.rs");
+    for needle in [
+        "WHERE state = 'ready' AND node_id",
+        "ORDER BY priority, admitted_at, seq",
+    ] {
+        assert_eq!(
+            source.matches(needle).count(),
+            1,
+            "one copy of the ready-row selection: {needle:?}"
+        );
+    }
+    assert_eq!(
+        source.matches("first_ready(").count(),
+        3,
+        "the selection is defined once and called by `next` and by the offer"
+    );
+}
