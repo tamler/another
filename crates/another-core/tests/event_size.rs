@@ -586,100 +586,446 @@ fn grow_last(n: &Node, kind: &str, field: &str, bytes: usize) -> WireEvent {
     }
 }
 
-/// An event over the cap that an earlier build left in a log. Its own node does not send
-/// it: the events before it go, then the batch fails with a message that names the event
-/// and says the owner decides. A hub that is sent one anyway refuses it like any other
-/// event that breaks a rule: reported, not stored.
+/// The cap is a rule for what this build writes, not for what is already in a log. An
+/// event over it that an earlier build left in a spoke's log is sent, alone in its batch
+/// when it is larger than the budget; the hub stores it and relays it to a second spoke,
+/// and the events around it travel too.
 #[test]
-fn an_event_over_the_cap_already_in_a_log_is_named_and_a_peers_is_refused() {
+fn an_event_over_the_cap_already_in_a_spokes_log_is_sent_stored_and_relayed() {
+    let hub = node("hub");
+    let a = node("spokea");
+    let c = node("spokec");
+    pair(&hub, &a);
+    pair(&hub, &c);
+    register(&a.store, "alice");
+    register(&a.store, "wordy");
+    let big = grow_last(&a, "agent.registered", "description", 3 * 1024 * 1024);
+    assert!(big.capped_bytes() > MAX_EVENT_WIRE_BYTES);
+    register(&a.store, "after");
+
+    // Under a budget a third its size it still travels, in a batch of its own.
+    let mut cursor = 0;
+    let mut batches: Vec<Vec<WireEvent>> = Vec::new();
+    loop {
+        let (batch, high) = a
+            .store
+            .outbound_events_within(cursor, 500, 1024 * 1024)
+            .unwrap();
+        if high == cursor {
+            break;
+        }
+        cursor = high;
+        if !batch.is_empty() {
+            batches.push(batch);
+        }
+    }
+    let alone: Vec<&Vec<WireEvent>> = batches
+        .iter()
+        .filter(|b| b.iter().any(|e| e.event_id == big.event_id))
+        .collect();
+    assert_eq!(alone.len(), 1);
+    assert_eq!(alone[0].len(), 1);
+    assert_eq!(batches.len(), 3);
+
+    for batch in &batches {
+        let r = hub.store.ingest(a.store.node_id(), batch, &[]).unwrap();
+        assert!(r.rejected.is_empty(), "{:?}", r.rejected);
+        assert_eq!(r.accepted, batch.len());
+    }
+    for name in ["alice", "wordy", "after"] {
+        assert!(
+            hub.store.agent(&format!("{name}@@spokea")).is_ok(),
+            "{name}"
+        );
+    }
+
+    // The hub relays it to the second spoke under the page budget of this build.
+    let mut cursor = 0;
+    loop {
+        let page = hub
+            .store
+            .pull_for_from(c.store.node_id(), cursor, &PullAnchors::default(), 500)
+            .unwrap();
+        let r = c
+            .store
+            .ingest(hub.store.node_id(), &page.events, &page.nodes)
+            .unwrap();
+        assert!(r.rejected.is_empty(), "{:?}", r.rejected);
+        if !page.more || page.cursor == cursor {
+            break;
+        }
+        cursor = page.cursor;
+    }
+    for name in ["alice", "wordy", "after"] {
+        assert!(c.store.agent(&format!("{name}@@spokea")).is_ok(), "{name}");
+    }
+}
+
+/// What still cannot be sent is an event that does not fit the transport even alone: a
+/// spoke's own event that would make a push over the 8 MiB a hub reads. The events before
+/// it go, then the batch fails with a message that names the event, says that retrying
+/// will not help and that the owner decides.
+#[test]
+fn a_spokes_event_over_the_push_limit_is_named_and_blocks() {
     let hub = node("hub");
     let a = node("spokea");
     pair(&hub, &a);
     register(&a.store, "alice");
     register(&a.store, "wordy");
-    let big = grow_last(&a, "agent.registered", "description", 3 * 1024 * 1024);
+    let big = grow_last(&a, "agent.registered", "description", 9 * 1024 * 1024);
     register(&a.store, "after");
 
-    // The events before it are sent first.
     let (first, high) = a.store.outbound_events_within(0, 500, usize::MAX).unwrap();
     assert!(!first.is_empty());
     assert!(first.iter().all(|e| e.event_id != big.event_id));
     assert_eq!(high, big.seq - 1);
-    let err = a
-        .store
-        .outbound_events_within(high, 500, usize::MAX)
-        .unwrap_err();
-    assert!(matches!(err, Error::Conflict(_)), "{err:?}");
-    assert_eq!(
-        err.to_string(),
-        format!(
-            "event {} (agent.registered, {} bytes on the wire) in this node's log is over the \
-             limit for one event (2097152 bytes), so it cannot be synced and the events after \
-             it wait behind it; retrying will not help; the owner must decide whether it is \
-             skipped or keeps blocking (docs/FEDERATION.md, \"Size limits\")",
-            big.event_id,
-            big.capped_bytes()
-        )
-    );
-
-    // Sent anyway, as a spoke on an earlier build would: the hub refuses that event only.
-    let before = hub.store.events(100_000).unwrap().len();
-    let r = hub
-        .store
-        .ingest(a.store.node_id(), &[first, vec![big.clone()]].concat(), &[])
-        .unwrap();
-    assert_eq!(r.rejected.len(), 1);
-    assert_eq!(r.rejected[0].event_id, big.event_id);
-    assert_eq!(
-        r.rejected[0].reason,
-        format!(
-            "event is {} bytes on the wire; the limit for one event is 2097152",
-            big.capped_bytes()
-        )
-    );
-    assert_eq!(
-        hub.store.events(100_000).unwrap().len(),
-        before + r.accepted
-    );
-    assert!(hub.store.agent("wordy@@spokea").is_err());
-    assert!(hub.store.agent("alice@@spokea").is_ok());
+    for budget in [1, PUSH_BATCH_BUDGET_BYTES, usize::MAX] {
+        let err = a
+            .store
+            .outbound_events_within(high, 500, budget)
+            .unwrap_err();
+        assert!(matches!(err, Error::Conflict(_)), "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "event {} (agent.registered, {} bytes on the wire) in this node's log is \
+                 larger than a hub reads in one push (8388608 bytes), so it cannot be sent \
+                 and the events after it wait behind it; retrying will not help; the owner \
+                 must decide whether it is skipped or keeps blocking (docs/FEDERATION.md, \
+                 \"If a sync reports an event that cannot be sent\")",
+                big.event_id,
+                big.wire_bytes()
+            )
+        );
+    }
 }
 
-/// The same on a hub: an event over the cap in the hub's log is not sent to a spoke. The
-/// page before it is closed, and the next pull fails with the message that names it.
+/// The edge of what a push carries: an event whose push body is exactly the limit is sent,
+/// one byte more is not.
 #[test]
-fn an_event_over_the_cap_in_the_hubs_log_is_named_to_the_spoke() {
+fn an_event_exactly_at_the_push_limit_is_sent() {
+    let hub = node("hub");
+    let a = node("spokea");
+    pair(&hub, &a);
+    register(&a.store, "wordy");
+    let base = grow_last(&a, "agent.registered", "description", 0).wire_bytes();
+    let fits = PUSH_BODY_LIMIT_BYTES - PUSH_ENVELOPE_BYTES - base;
+    let at = grow_last(&a, "agent.registered", "description", fits);
+    assert_eq!(at.wire_bytes() + PUSH_ENVELOPE_BYTES, PUSH_BODY_LIMIT_BYTES);
+    let sent = outbound(&a);
+    assert!(sent.iter().any(|e| e.event_id == at.event_id));
+    let body = serde_json::to_vec(&PushRequest {
+        events: vec![at.clone()],
+    })
+    .unwrap();
+    assert_eq!(body.len(), PUSH_BODY_LIMIT_BYTES);
+    grow_last(&a, "agent.registered", "description", fits + 1);
+    let mut cursor = 0;
+    let err = loop {
+        match a.store.outbound_events_within(cursor, 500, usize::MAX) {
+            Ok((_, high)) => cursor = high,
+            Err(e) => break e,
+        }
+    };
+    assert!(err
+        .to_string()
+        .contains("larger than a hub reads in one push"));
+}
+
+/// The same on a hub. An event of 12 MiB in the hub's own log, larger than the page budget
+/// and than anything a push carries, is sent to a spoke in a page of its own. One that
+/// would make an answer over the 32 MiB a spoke reads is not: the page before it is
+/// closed, and the next pull fails with the message that names it.
+#[test]
+fn a_hubs_event_travels_alone_up_to_what_a_spoke_reads_and_is_named_beyond() {
     let hub = node("hub");
     let c = node("spokec");
     pair(&hub, &c);
     register(&hub.store, "bob");
     register(&hub.store, "wordy");
-    let big = grow_last(&hub, "agent.registered", "description", 3 * 1024 * 1024);
+    let big = grow_last(&hub, "agent.registered", "description", 12 * 1024 * 1024);
     register(&hub.store, "after");
     let peer = c.store.node_id();
     let none = PullAnchors::default();
-    let page = hub
-        .store
-        .pull_page(peer, 0, &none, 500, usize::MAX)
-        .unwrap();
-    assert!(!page.events.is_empty());
-    assert!(page.events.iter().all(|e| e.event_id != big.event_id));
+    let mut cursor = 0;
+    let mut pages = Vec::new();
+    loop {
+        let page = hub.store.pull_for_from(peer, cursor, &none, 500).unwrap();
+        assert!(serde_json::to_vec(&page).unwrap().len() <= PULL_BODY_LIMIT_BYTES);
+        let r = c
+            .store
+            .ingest(hub.store.node_id(), &page.events, &page.nodes)
+            .unwrap();
+        assert!(r.rejected.is_empty(), "{:?}", r.rejected);
+        let (more, next) = (page.more, page.cursor);
+        pages.push(page.events);
+        if !more || next == cursor {
+            break;
+        }
+        cursor = next;
+    }
+    let with_big: Vec<&Vec<WireEvent>> = pages
+        .iter()
+        .filter(|p| p.iter().any(|e| e.event_id == big.event_id))
+        .collect();
+    assert_eq!(with_big.len(), 1);
+    assert_eq!(with_big[0].len(), 1);
+    for name in ["bob", "wordy", "after"] {
+        assert!(c.store.agent(&format!("{name}@@hub")).is_ok(), "{name}");
+    }
+
+    register(&hub.store, "huge");
+    let huge = grow_last(&hub, "agent.registered", "description", 33 * 1024 * 1024);
+    register(&hub.store, "last");
+    let page = hub.store.pull_for_from(peer, cursor, &none, 500).unwrap();
+    assert!(page.events.iter().all(|e| e.event_id != huge.event_id));
     assert!(page.more);
-    assert_eq!(page.cursor, big.seq - 1);
+    assert_eq!(page.cursor, huge.seq - 1);
     let err = hub
         .store
-        .pull_page(peer, page.cursor, &none, 500, usize::MAX)
+        .pull_for_from(peer, page.cursor, &none, 500)
         .unwrap_err();
     assert!(matches!(err, Error::Conflict(_)), "{err:?}");
-    let text = err.to_string();
-    assert!(
-        text.starts_with(&format!(
-            "event {} (agent.registered, {} bytes on the wire) in the hub's log is over the \
-             limit for one event (2097152 bytes)",
-            big.event_id,
-            big.capped_bytes()
-        )),
-        "{text}"
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "event {} (agent.registered, {} bytes on the wire) in the hub's log is larger \
+             than a spoke reads in one pull answer (33554432 bytes), so it cannot be sent and \
+             the events after it wait behind it; retrying will not help; the owner must \
+             decide whether it is skipped or keeps blocking (docs/FEDERATION.md, \"If a sync \
+             reports an event that cannot be sent\")",
+            huge.event_id,
+            huge.wire_bytes()
+        )
     );
-    assert!(text.contains("retrying will not help; the owner must decide"));
+}
+
+/// Whatever arrived by push can be relayed: the largest event a push carries, alone in a
+/// pull answer with the node directory, is under what a spoke reads.
+#[test]
+fn the_largest_pushed_event_fits_a_pull_answer() {
+    let hub = node("hub");
+    let a = node("spokea");
+    let c = node("spokec");
+    pair(&hub, &a);
+    pair(&hub, &c);
+    register(&a.store, "wordy");
+    let base = grow_last(&a, "agent.registered", "description", 0).wire_bytes();
+    let largest = grow_last(
+        &a,
+        "agent.registered",
+        "description",
+        PUSH_BODY_LIMIT_BYTES - PUSH_ENVELOPE_BYTES - base,
+    );
+    let sent = outbound(&a);
+    let r = hub.store.ingest(a.store.node_id(), &sent, &[]).unwrap();
+    assert!(r.rejected.is_empty(), "{:?}", r.rejected);
+    let none = PullAnchors::default();
+    let mut cursor = 0;
+    let mut seen = false;
+    loop {
+        let page = hub
+            .store
+            .pull_for_from(c.store.node_id(), cursor, &none, 500)
+            .unwrap();
+        let bytes = serde_json::to_vec(&page).unwrap().len();
+        if page.events.iter().any(|e| e.event_id == largest.event_id) {
+            seen = true;
+            assert_eq!(page.events.len(), 1);
+            assert!(bytes < PULL_BODY_LIMIT_BYTES / 2, "{bytes}");
+        }
+        if !page.more || page.cursor == cursor {
+            break;
+        }
+        cursor = page.cursor;
+    }
+    assert!(seen);
+}
+
+/// A heartbeat and a session end over more holds than one event lists write several
+/// events in their one transaction, so neither meets the cap: with 75,000 live holds both
+/// succeed, every hold is renewed and then released, and a hub that syncs ends in the same
+/// state. Up to 10,000 holds it is one event, as before.
+#[test]
+fn a_heartbeat_and_a_session_end_over_75_000_holds_succeed_in_several_events() {
+    let hub = node("hub");
+    let a = node("spokea");
+    pair(&hub, &a);
+    register(&a.store, "alice");
+    let project = a.project("shop");
+    a.store.ensure_project("alice", &project).unwrap();
+    sync(&hub, &a);
+    // Taking 75,000 holds through `acquire_holds` compares each with every other and takes
+    // many minutes in a debug build, so the rows are written straight into the spoke's
+    // table, and into the hub's as it would hold them after importing them.
+    const HOLDS: usize = 75_000;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let planted_at = now - 60_000;
+    let (agent_id, project_id): (String, String) = Connection::open(a.db())
+        .unwrap()
+        .query_row(
+            "SELECT (SELECT agent_id FROM agents WHERE name = 'alice'),
+                    (SELECT project_id FROM projects LIMIT 1)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    for n in [&a, &hub] {
+        let mut c = Connection::open(n.db()).unwrap();
+        let tx = c.transaction().unwrap();
+        for i in 0..HOLDS {
+            tx.execute(
+                "INSERT INTO holds (hold_id, node_id, project_id, agent_id, pattern, exclusive,
+                   ttl_seconds, created_at, renewed_at, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, 14400, ?6, ?6, ?7)",
+                params![
+                    format!("01HOLD{i:020}"),
+                    a.store.node_id(),
+                    project_id,
+                    agent_id,
+                    format!("src/f{i}.rs"),
+                    planted_at,
+                    now + 3_600_000
+                ],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    let kinds = |n: &Node, kind: &str| -> Vec<usize> {
+        let c = Connection::open(n.db()).unwrap();
+        let mut stmt = c
+            .prepare("SELECT payload FROM events WHERE kind = ?1 ORDER BY seq")
+            .unwrap();
+        let rows = stmt.query_map([kind], |r| r.get::<_, String>(0)).unwrap();
+        rows.map(|p| {
+            let p: Value = serde_json::from_str(&p.unwrap()).unwrap();
+            p["hold_ids"].as_array().unwrap().len()
+        })
+        .collect()
+    };
+    let live = |n: &Node| -> i64 {
+        Connection::open(n.db())
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM holds WHERE released_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+
+    a.store.heartbeat("alice", false).unwrap();
+    assert_eq!(
+        kinds(&a, "hold.renewed"),
+        [10_000, 10_000, 10_000, 10_000, 10_000, 10_000, 10_000, 5_000]
+    );
+    assert_eq!(live(&a), HOLDS as i64);
+
+    a.store.heartbeat("alice", true).unwrap();
+    assert_eq!(kinds(&a, "hold.released").iter().sum::<usize>(), HOLDS);
+    assert_eq!(kinds(&a, "hold.released").len(), 8);
+    assert_eq!(live(&a), 0);
+    for e in outbound(&a) {
+        assert!(e.capped_bytes() < MAX_EVENT_WIRE_BYTES / 4, "{}", e.kind);
+    }
+
+    // The hub ends in the same state: every hold renewed, then released.
+    let mut cursor = 0;
+    loop {
+        let (batch, high) = a.store.outbound_events(cursor, 500).unwrap();
+        if high == cursor {
+            break;
+        }
+        let r = hub.store.ingest(a.store.node_id(), &batch, &[]).unwrap();
+        assert!(r.rejected.is_empty(), "{:?}", r.rejected.first());
+        cursor = high;
+    }
+    for n in [&a, &hub] {
+        let (held, renewed, released): (i64, i64, i64) = Connection::open(n.db())
+            .unwrap()
+            .query_row(
+                "SELECT count(*), coalesce(sum(renewed_at > ?1), 0),
+                        coalesce(sum(released_at IS NOT NULL), 0) FROM holds",
+                [planted_at],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (held, renewed, released),
+            (HOLDS as i64, HOLDS as i64, HOLDS as i64)
+        );
+    }
+}
+
+/// The ordinary case is unchanged: one renewal and one release event, with the payload a
+/// build before D99 wrote.
+#[test]
+fn a_heartbeat_and_a_session_end_over_a_few_holds_write_one_event_each() {
+    let a = node("solo");
+    register(&a.store, "alice");
+    let project = a.project("shop");
+    a.store.ensure_project("alice", &project).unwrap();
+    let report = a
+        .store
+        .acquire_holds(AcquireHolds {
+            agent: "alice".into(),
+            project: project.clone(),
+            paths: vec!["src/a.rs".into(), "src/b.rs".into()],
+            ttl_seconds: None,
+            exclusive: true,
+            reason: None,
+            repo_wide: false,
+        })
+        .unwrap();
+    let ids: Vec<&str> = report.granted.iter().map(|h| h.hold_id.as_str()).collect();
+    a.store.heartbeat("alice", false).unwrap();
+    a.store.heartbeat("alice", true).unwrap();
+    let payloads = |kind: &str| -> Vec<String> {
+        let c = Connection::open(a.db()).unwrap();
+        let mut stmt = c
+            .prepare("SELECT payload FROM events WHERE kind = ?1 ORDER BY seq")
+            .unwrap();
+        let rows = stmt.query_map([kind], |r| r.get::<_, String>(0)).unwrap();
+        rows.map(|p| p.unwrap()).collect()
+    };
+    assert_eq!(
+        payloads("hold.renewed"),
+        [format!(r#"{{"hold_ids":["{}","{}"]}}"#, ids[0], ids[1])]
+    );
+    assert_eq!(
+        payloads("hold.released"),
+        [format!(
+            r#"{{"hold_ids":["{}","{}"],"reason":"session_end"}}"#,
+            ids[0], ids[1]
+        )]
+    );
+}
+
+/// An automatic path that did meet the cap gives the error to its caller and writes
+/// nothing. The edit guard is not held to the field rules, so a reason of 3 MiB reaches the
+/// one place events are written, which refuses it.
+#[test]
+fn an_automatic_write_over_the_cap_surfaces_the_error() {
+    let a = node("solo");
+    register(&a.store, "alice");
+    let project = a.project("shop");
+    a.store.ensure_project("alice", &project).unwrap();
+    let before = a.store.events(1000).unwrap().len();
+    let err = invalid(a.store.guard_edit(
+        "alice",
+        &project,
+        &["src/a.rs".to_string()],
+        &"r".repeat(3 * 1024 * 1024),
+    ));
+    assert!(
+        err.starts_with("this hold.acquired event would be ")
+            && err.ends_with("the limit for one event is 2097152"),
+        "{err}"
+    );
+    assert_eq!(a.store.events(1000).unwrap().len(), before);
+    assert!(a.store.holds(HoldFilter::default()).unwrap().is_empty());
 }

@@ -225,6 +225,11 @@ fn each_budget_fits_one_event_and_stays_under_its_limit() {
             pull_budget: MAX_EVENT_WIRE_BYTES,
             ..now
         },
+        // A hub that took a push it could not relay to a spoke.
+        Limits {
+            push_body: now.pull_body,
+            ..now
+        },
         Limits::BEFORE_D99,
     ] {
         assert!(!broken.consistent(), "{broken:?}");
@@ -360,18 +365,209 @@ fn grow_last_registration(n: &Node, bytes: usize) -> (String, usize) {
         prev_id,
         sig,
     }
-    .capped_bytes();
+    .wire_bytes();
     (event_id, size)
 }
 
-/// One event already in a spoke's log that alone is over the limit for one event, left by
-/// an earlier build (this build refuses to write one). What happens to it is the owner's
-/// decision and is not made here: as before, the events after it wait. The sync now sends
-/// what came before it, then fails with a message that names the event, says that retrying
-/// will not help and that the owner must decide, every time, and `another sync` prints it
-/// and exits non-zero. The event is neither skipped nor removed.
+/// An event of 3 MiB that an earlier build left in a hub's own log (this build refuses to
+/// write one over 2 MiB). A build before D99 delivered it on a pull, and so does this one:
+/// every spoke receives it and the mail before and after it.
 #[test]
-fn an_event_over_the_limit_in_a_spokes_log_blocks_with_a_message_that_names_it() {
+fn a_3_mib_event_in_a_hubs_log_reaches_every_spoke_with_the_mail_around_it() {
+    let hub = start_hub();
+    let a = node("spokea");
+    let c = node("spokec");
+    join(&hub, &a);
+    join(&hub, &c);
+    register(&hub.node.store, "bob");
+    register(&a.store, "alice");
+    register(&c.store, "carol");
+    fed::sync(&a.store).unwrap();
+    fed::sync(&c.store).unwrap();
+    for to in ["alice@@spokea", "carol@@spokec"] {
+        send(&hub.node.store, "bob", to, "before", "small".into());
+    }
+    register(&hub.node.store, "wordy");
+    let (event_id, size) = grow_last_registration(&hub.node, 3 * MIB);
+    for to in ["alice@@spokea", "carol@@spokec"] {
+        send(&hub.node.store, "wordy", to, "from wordy", "small".into());
+        send(&hub.node.store, "bob", to, "after", "small".into());
+    }
+    let reports = [fed::sync(&a.store), fed::sync(&c.store)];
+    let inboxes = [
+        inbox_subjects(&a.store, "alice"),
+        inbox_subjects(&c.store, "carol"),
+    ];
+    let stored = [&a, &c].map(|n| {
+        count(
+            &n.db(),
+            &format!("SELECT count(*) FROM events WHERE event_id = '{event_id}'"),
+        )
+    });
+    let known = [&a, &c].map(|n| n.store.agent("wordy@@hub").is_ok());
+    hub.ct.cancel();
+    assert!(size > 3 * MIB);
+    for report in reports {
+        let report = report.map_err(|e| format!("{e:#}")).unwrap();
+        assert!(
+            report.pull_rejected.is_empty(),
+            "{:?}",
+            report.pull_rejected
+        );
+    }
+    for inbox in inboxes {
+        assert_eq!(inbox, ["after", "before", "from wordy"]);
+    }
+    assert_eq!(stored, [1, 1]);
+    assert_eq!(known, [true, true]);
+}
+
+/// The same event in a spoke's log. A build before D99 could not push it (413 on every
+/// sync). This build pushes it, the hub stores it and relays it to a second spoke, and the
+/// mail around it, the wordy agent's own included, is delivered. It is run twice: with the
+/// spoke on this build, and with the spoke bounded as a build before D99 was.
+#[test]
+fn a_3_mib_event_in_a_spokes_log_reaches_the_hub_and_a_second_spoke() {
+    for spoke_limits in [Limits::CURRENT, Limits::BEFORE_D99] {
+        let hub = start_hub();
+        let a = node("spokea");
+        let c = node("spokec");
+        join(&hub, &a);
+        join(&hub, &c);
+        register(&hub.node.store, "bob");
+        register(&a.store, "alice");
+        register(&c.store, "carol");
+        fed::sync_with(&a.store, &spoke_limits).unwrap();
+        fed::sync(&c.store).unwrap();
+        fed::sync_with(&a.store, &spoke_limits).unwrap();
+        for to in ["bob@@hub", "carol@@spokec"] {
+            send(&a.store, "alice", to, "before", "small".into());
+        }
+        register(&a.store, "wordy");
+        let (event_id, size) = grow_last_registration(&a, 3 * MIB);
+        for to in ["bob@@hub", "carol@@spokec"] {
+            send(&a.store, "wordy", to, "from wordy", "small".into());
+            send(&a.store, "alice", to, "after", "small".into());
+        }
+        let pushed = fed::sync_with(&a.store, &spoke_limits);
+        let again = fed::sync_with(&a.store, &spoke_limits);
+        let pulled = fed::sync(&c.store);
+        let inboxes = [
+            inbox_subjects(&hub.node.store, "bob"),
+            inbox_subjects(&c.store, "carol"),
+        ];
+        let stored = [&hub.node, &c].map(|n| {
+            count(
+                &n.db(),
+                &format!("SELECT count(*) FROM events WHERE event_id = '{event_id}'"),
+            )
+        });
+        let known = [&hub.node.store, &c.store].map(|s| s.agent("wordy@@spokea").is_ok());
+        hub.ct.cancel();
+        assert!(size > 3 * MIB);
+        let pushed = pushed.map_err(|e| format!("{e:#}")).unwrap();
+        assert!(
+            pushed.push_rejected.is_empty(),
+            "{:?}",
+            pushed.push_rejected
+        );
+        let again = again.map_err(|e| format!("{e:#}")).unwrap();
+        assert_eq!((again.pushed, again.push_duplicates), (0, 0));
+        let pulled = pulled.map_err(|e| format!("{e:#}")).unwrap();
+        assert!(
+            pulled.pull_rejected.is_empty(),
+            "{:?}",
+            pulled.pull_rejected
+        );
+        for inbox in inboxes {
+            assert_eq!(inbox, ["after", "before", "from wordy"]);
+        }
+        assert_eq!(stored, [1, 1]);
+        assert_eq!(known, [true, true]);
+    }
+}
+
+/// Mixed pairings around the same 3 MiB event, with one side bounded as a build before D99
+/// was. An older hub's own event reaches a spoke on this build, and a hub on this build's
+/// own event reaches an older spoke, as both did before. A spoke on this build cannot push
+/// its 3 MiB event to an older hub, which reads 2 MiB: as before nothing after it leaves,
+/// and now the sync says which event and why.
+#[test]
+fn a_3_mib_event_with_one_side_on_a_build_before_d99() {
+    // Older hub, new spoke: pull delivers, push of the spoke's own is refused by the hub.
+    let hub = start_hub_with(Some(Limits::BEFORE_D99));
+    let a = node("spokea");
+    join(&hub, &a);
+    register(&hub.node.store, "bob");
+    register(&a.store, "alice");
+    fed::sync(&a.store).unwrap();
+    register(&hub.node.store, "wordy");
+    grow_last_registration(&hub.node, 3 * MIB);
+    send(
+        &hub.node.store,
+        "wordy",
+        "alice@@spokea",
+        "from the hub",
+        "small".into(),
+    );
+    let pulled = fed::sync(&a.store).map(|r| r.pull_rejected.len());
+    let alice = inbox_subjects(&a.store, "alice");
+    send(&a.store, "alice", "bob@@hub", "before", "small".into());
+    register(&a.store, "wordier");
+    let (event_id, _) = grow_last_registration(&a, 3 * MIB);
+    send(&a.store, "alice", "bob@@hub", "after", "small".into());
+    let first = format!("{:#}", fed::sync(&a.store).unwrap_err());
+    let second = format!("{:#}", fed::sync(&a.store).unwrap_err());
+    let bob = inbox_subjects(&hub.node.store, "bob");
+    let url = hub.url.clone();
+    hub.ct.cancel();
+    assert_eq!(pulled.map_err(|e| format!("{e:#}")), Ok(0));
+    assert_eq!(alice, ["from the hub"]);
+    for message in [first, second] {
+        assert!(
+            message.starts_with(&format!(
+                "the hub at {url} refused event {event_id} (agent.registered) as too large"
+            )) || message.starts_with(&format!(
+                "the connection to the hub at {url} failed while event {event_id} \
+                 (agent.registered) was sent alone"
+            )),
+            "{message}"
+        );
+        assert!(message.contains("retrying will not help"), "{message}");
+    }
+    assert_eq!(bob, ["before"]);
+
+    // New hub, older spoke: the hub's own 3 MiB event fits the 10 MiB the spoke reads.
+    let hub = start_hub();
+    let c = node("spokec");
+    join(&hub, &c);
+    register(&hub.node.store, "bob");
+    register(&c.store, "carol");
+    fed::sync_with(&c.store, &Limits::BEFORE_D99).unwrap();
+    register(&hub.node.store, "wordy");
+    grow_last_registration(&hub.node, 3 * MIB);
+    send(
+        &hub.node.store,
+        "wordy",
+        "carol@@spokec",
+        "from the hub",
+        "small".into(),
+    );
+    let pulled = fed::sync_with(&c.store, &Limits::BEFORE_D99).map(|r| r.pull_rejected.len());
+    let carol = inbox_subjects(&c.store, "carol");
+    hub.ct.cancel();
+    assert_eq!(pulled.map_err(|e| format!("{e:#}")), Ok(0));
+    assert_eq!(carol, ["from the hub"]);
+}
+
+/// What still blocks: an event in a spoke's log that does not fit a push even alone (here
+/// 9 MiB, over the 8 MiB a hub reads). A build before D99 blocked on it too, at 2 MiB.
+/// What happens to it is the owner's decision and is not made here. The sync sends what
+/// came before it, then fails with a message that names the event, says that retrying will
+/// not help and that the owner must decide, every time, and `another sync` prints it and
+/// exits non-zero. The event is neither skipped nor removed.
+#[test]
+fn an_event_over_the_push_limit_in_a_spokes_log_blocks_with_a_message_that_names_it() {
     let hub = start_hub();
     let a = node("spokea");
     join(&hub, &a);
@@ -380,7 +576,7 @@ fn an_event_over_the_limit_in_a_spokes_log_blocks_with_a_message_that_names_it()
     fed::sync(&a.store).unwrap();
     send(&a.store, "alice", "bob@@hub", "before", "small".into());
     register(&a.store, "wordy");
-    let (event_id, size) = grow_last_registration(&a, 3 * MIB);
+    let (event_id, size) = grow_last_registration(&a, 9 * MIB);
     send(&a.store, "alice", "bob@@hub", "after", "small".into());
 
     let first = format!("{:#}", fed::sync(&a.store).unwrap_err());
@@ -393,15 +589,33 @@ fn an_event_over_the_limit_in_a_spokes_log_blocks_with_a_message_that_names_it()
         .output()
         .unwrap();
     let got = inbox_subjects(&hub.node.store, "bob");
+    let kept = count(
+        &a.db(),
+        &format!("SELECT count(*) FROM events WHERE event_id = '{event_id}'"),
+    );
+    // The way out the docs give the owner today: remove the event from this node's log by
+    // hand. The next sync then sends everything after it; peers never see that event.
+    Connection::open(a.db())
+        .unwrap()
+        .execute("DELETE FROM events WHERE event_id = ?1", [&event_id])
+        .unwrap();
+    let after_removal = fed::sync(&a.store).map(|r| r.push_rejected.len());
+    let delivered = inbox_subjects(&hub.node.store, "bob");
+    let wordy_on_hub = hub.node.store.agent("wordy@@spokea").is_ok();
     hub.ct.cancel();
 
+    assert_eq!(kept, 1);
+    assert_eq!(after_removal.map_err(|e| format!("{e:#}")), Ok(0));
+    assert_eq!(delivered, ["after", "before"]);
+    assert!(!wordy_on_hub);
     let want = format!(
         "event {event_id} (agent.registered, {size} bytes on the wire) in this node's log is \
-         over the limit for one event (2097152 bytes), so it cannot be synced and the events \
-         after it wait behind it; retrying will not help; the owner must decide whether it \
-         is skipped or keeps blocking (docs/FEDERATION.md, \"Size limits\")"
+         larger than a hub reads in one push (8388608 bytes), so it cannot be sent and the \
+         events after it wait behind it; retrying will not help; the owner must decide \
+         whether it is skipped or keeps blocking (docs/FEDERATION.md, \"If a sync reports an \
+         event that cannot be sent\")"
     );
-    assert!(size > 3 * MIB);
+    assert!(size > 9 * MIB);
     assert_eq!(first, want);
     assert_eq!(second, want);
     assert!(!cli.status.success());
@@ -413,13 +627,6 @@ fn an_event_over_the_limit_in_a_spokes_log_blocks_with_a_message_that_names_it()
     assert_eq!(got, ["before"]);
     assert_eq!(
         count(
-            &a.db(),
-            &format!("SELECT count(*) FROM events WHERE event_id = '{event_id}'")
-        ),
-        1
-    );
-    assert_eq!(
-        count(
             &hub.node.db(),
             &format!("SELECT count(*) FROM events WHERE event_id = '{event_id}'")
         ),
@@ -427,10 +634,12 @@ fn an_event_over_the_limit_in_a_spokes_log_blocks_with_a_message_that_names_it()
     );
 }
 
-/// The same on the hub's side: an event over the limit in the hub's own log is not sent.
-/// A spoke receives what came before it, then its sync fails with the hub's message.
+/// The same on the hub's side: an event in the hub's own log that does not fit a pull
+/// answer even alone (here 33 MiB, over the 32 MiB a spoke reads; a build before D99
+/// blocked at 10 MiB) is not sent. A spoke receives what came before it, then its sync
+/// fails with the hub's message.
 #[test]
-fn an_event_over_the_limit_in_the_hubs_log_blocks_a_pull_with_a_message_that_names_it() {
+fn an_event_over_the_pull_limit_in_the_hubs_log_blocks_with_a_message_that_names_it() {
     let hub = start_hub();
     let c = node("spokec");
     join(&hub, &c);
@@ -445,7 +654,7 @@ fn an_event_over_the_limit_in_the_hubs_log_blocks_a_pull_with_a_message_that_nam
         "small".into(),
     );
     register(&hub.node.store, "wordy");
-    let (event_id, size) = grow_last_registration(&hub.node, 3 * MIB);
+    let (event_id, size) = grow_last_registration(&hub.node, 33 * MIB);
     send(
         &hub.node.store,
         "bob",
@@ -460,10 +669,10 @@ fn an_event_over_the_limit_in_the_hubs_log_blocks_a_pull_with_a_message_that_nam
     hub.ct.cancel();
     let want = format!(
         "pull failed (409 Conflict): event {event_id} (agent.registered, {size} bytes on the \
-         wire) in the hub's log is over the limit for one event (2097152 bytes), so it cannot \
-         be synced and the events after it wait behind it; retrying will not help; the owner \
-         must decide whether it is skipped or keeps blocking (docs/FEDERATION.md, \"Size \
-         limits\")"
+         wire) in the hub's log is larger than a spoke reads in one pull answer (33554432 \
+         bytes), so it cannot be sent and the events after it wait behind it; retrying will \
+         not help; the owner must decide whether it is skipped or keeps blocking \
+         (docs/FEDERATION.md, \"If a sync reports an event that cannot be sent\")"
     );
     assert_eq!(first, want);
     assert_eq!(second, want);
@@ -568,6 +777,7 @@ fn many_batches_and_pages_keep_the_order_of_one_through_a_relay() {
         push_body: 64 * MIB,
         pull_budget: usize::MAX,
         pull_body: 64 * MIB,
+        ..Limits::CURRENT
     };
     let narrow = Limits {
         push_budget: 600 * 1024,
@@ -591,7 +801,8 @@ fn many_batches_and_pages_keep_the_order_of_one_through_a_relay() {
 
 /// A body over a route's limit is refused with 413, signed or not, with or without a
 /// declared length; a body under the limit goes on to the signature check. `/fed/pair`,
-/// which nobody signs, keeps the 2 MiB it had.
+/// which nobody signs, keeps the 2 MiB it had. The pushes name a paired spoke, since a
+/// push that names none is refused before its body is looked at (the next test).
 #[test]
 fn a_body_over_a_routes_limit_is_refused() {
     let hub = start_hub();
@@ -599,17 +810,13 @@ fn a_body_over_a_routes_limit_is_refused() {
     join(&hub, &a);
     let agent = http();
     // The status of the answer, or `None` when the hub closed the connection on the body
-    // it would not read before the answer could be read (a refusal too, seen on Linux).
+    // it would not read before the answer could be read (a refusal too; which I/O error
+    // it shows as depends on the system).
     type Answer = Result<ureq::http::Response<ureq::Body>, ureq::Error>;
     let status = |answer: Answer| -> Option<u16> {
-        use std::io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset};
         match answer {
             Ok(resp) => Some(resp.status().as_u16()),
-            Err(ureq::Error::Io(e))
-                if matches!(e.kind(), BrokenPipe | ConnectionAborted | ConnectionReset) =>
-            {
-                None
-            }
+            Err(ureq::Error::Io(_)) => None,
             Err(e) => panic!("{e}"),
         }
     };
@@ -618,6 +825,7 @@ fn a_body_over_a_routes_limit_is_refused() {
             agent
                 .post(&format!("{}{path}", hub.url))
                 .header("content-type", "application/json")
+                .header("x-another-node", a.store.node_id())
                 .send(&vec![b' '; bytes][..]),
         )
     };
@@ -629,6 +837,7 @@ fn a_body_over_a_routes_limit_is_refused() {
         agent
             .post(&format!("{}/fed/push", hub.url))
             .header("content-type", "application/json")
+            .header("x-another-node", a.store.node_id())
             .send(ureq::SendBody::from_reader(
                 &mut std::io::repeat(b' ').take(PUSH_BODY_LIMIT_BYTES as u64 + 1),
             )),
@@ -664,6 +873,106 @@ fn a_body_over_a_routes_limit_is_refused() {
     let pair_at = pair_at.expect("a body at the limit is read");
     assert_ne!(pair_at, 413);
     assert!((400..500).contains(&pair_at), "{pair_at}");
+}
+
+/// Send the head of a push that declares a 4 MiB body, and none of the body. The status of
+/// the answer, or `None` when the hub gives none within two seconds because it is waiting
+/// for the body.
+fn push_head_only(hub: &Hub, headers: &[(&str, String)]) -> Option<u16> {
+    use std::io::Write;
+    let addr = hub.url.strip_prefix("http://").unwrap();
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .unwrap();
+    let mut head = format!(
+        "POST /fed/push HTTP/1.1\r\nhost: {addr}\r\ncontent-type: application/json\r\n\
+         content-length: {}\r\n",
+        4 * MIB
+    );
+    for (name, value) in headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes()).unwrap();
+    let mut answer = [0u8; 12];
+    match stream.read_exact(&mut answer) {
+        Ok(()) => std::str::from_utf8(&answer[9..12]).unwrap().parse().ok(),
+        Err(_) => None,
+    }
+}
+
+/// A push whose node header names no paired, unrevoked spoke is refused before the hub
+/// reads any of its body, so a caller with no pairing makes the hub buffer nothing. A
+/// paired spoke's push is read as before, whatever its time header says: that header is
+/// checked with the signature, after the body.
+#[test]
+fn a_push_that_names_no_paired_spoke_is_refused_before_its_body_is_read() {
+    let hub = start_hub();
+    let a = node("spokea");
+    let b = node("spokeb");
+    join(&hub, &a);
+    join(&hub, &b);
+    hub.node.store.revoke_peer(b.store.node_id()).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let headers = |node: &str, time: i64| {
+        vec![
+            ("x-another-node", node.to_string()),
+            ("x-another-time", time.to_string()),
+            ("x-another-signature", "AAAA".to_string()),
+        ]
+    };
+    let none = push_head_only(&hub, &[]);
+    let unknown = push_head_only(&hub, &headers("01UNKNOWNNODE0000000000000", now));
+    let revoked = push_head_only(&hub, &headers(b.store.node_id(), now));
+    let paired = push_head_only(&hub, &headers(a.store.node_id(), now));
+    let paired_stale = push_head_only(&hub, &headers(a.store.node_id(), now - 3_600_000));
+    let denied = count(
+        &hub.node.db(),
+        "SELECT count(*) FROM audit_log WHERE operation = 'POST /fed/push' AND outcome = 'denied'",
+    );
+    hub.ct.cancel();
+    assert_eq!(none, Some(401));
+    assert_eq!(unknown, Some(401));
+    assert_eq!(revoked, Some(401));
+    assert_eq!(paired, None, "the hub waits for a paired spoke's body");
+    assert_eq!(paired_stale, None);
+    assert_eq!(denied, 2);
+}
+
+/// Halving goes all the way down to one event: two events of 200 KiB to a hub that reads
+/// 300 KiB are refused together and delivered one at a time.
+#[test]
+fn a_refused_batch_of_two_is_sent_one_event_at_a_time() {
+    let hub = start_hub_with(Some(Limits {
+        push_body: 300 * 1024,
+        ..Limits::BEFORE_D99
+    }));
+    let a = node("spokea");
+    join(&hub, &a);
+    register(&hub.node.store, "bob");
+    register(&a.store, "alice");
+    fed::sync(&a.store).unwrap();
+    for subject in ["one", "two"] {
+        send(
+            &a.store,
+            "alice",
+            "bob@@hub",
+            subject,
+            "x".repeat(200 * 1024),
+        );
+    }
+    let before = round_trips(&hub).0;
+    let pushed = fed::sync(&a.store).map(|r| r.pushed);
+    let trips = round_trips(&hub).0 - before;
+    let bob = inbox_subjects(&hub.node.store, "bob");
+    hub.ct.cancel();
+    assert_eq!(pushed.map_err(|e| format!("{e:#}")), Ok(2));
+    assert_eq!(bob, ["one", "two"]);
+    assert_eq!(trips, 2);
 }
 
 /// A spoke on this build with a hub on a build before D99 (2 MiB request limit, pages
@@ -799,8 +1108,8 @@ fn one_event_over_the_other_sides_limit_is_reported_not_retried_forever() {
         hub.url
     );
     let dropped = format!(
-        "the hub at {} closed the connection while event {event_id} (message.sent) was sent \
-         alone in a push of ",
+        "the connection to the hub at {} failed while event {event_id} (message.sent) was \
+         sent alone in a push of ",
         hub.url
     );
     if push.starts_with(&refused) {

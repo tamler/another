@@ -111,41 +111,64 @@ another sync --watch --every 30
 
 ## Size limits
 
-A sync between honest nodes does not stop because of how much is waiting (D99). Three things bound it: the size of one event, the size of one request or answer, and the size of the batch or page that fills it.
+A sync between honest nodes does not stop because of how much is waiting (D99). Three things bound it: the size of one event this build writes, the size of one request or answer, and the size of the batch or page that fills it.
 
-**One event** is at most 2 MiB (2,097,152 bytes) as it travels: its wire JSON, escaping included, with the sequence number counted as one digit so that every node measures the same. The largest mail an honest node writes to one recipient is 1,837,191 bytes: a 256 KiB body made only of control characters, which cost seven bytes each on the wire, a 300-character subject and the longest names.
+**One event this build writes** is at most 2 MiB (2,097,152 bytes) as it travels: its wire JSON, escaping included, with the sequence number counted as one digit. The largest mail an honest node writes to one recipient is 1,837,191 bytes: a 256 KiB body made only of control characters, which cost seven bytes each on the wire, a 300-character subject and the longest names. This is a rule for local writes only. An event already in a log, or one a peer sends, is not judged by it: it travels if it fits the transport (below).
 
 - A local command or tool that would write a larger event is refused as `invalid`, with the kind of event and both sizes, and nothing is written. Mail has no rule on how many agents one message names, so this is what stops a message to thousands of recipients: with the costliest body and the longest names it is refused at roughly 1,500 recipients, with a plain 256 KiB body at roughly 10,000.
 - The fields that had no size rule each have one, so the caller is told which field is too long: an agent's description 4 KiB and model 200 bytes, a hold's reason 1 KiB and each pattern 4,096 bytes, a request's completion or cancellation note 16 KiB. The CLI prints, for example, `another: agent description is 4097 bytes; the limit is 4096` and exits non-zero; the MCP tools answer `invalid` with the same text. These rules apply to what a local caller writes, including a remote caller of `another serve`. The edit hook's holds and a session start are not held to them and write nothing near them.
-- A peer's event over 2 MiB is refused like any other event that breaks a local rule: listed in the sync report's rejected events, not stored, not relayed, and not sent again.
+- A heartbeat or a session end over more than 10,000 holds, or 10,000 leases, writes several `hold.renewed`, `hold.released`, `resource.renewed` or `resource.released` events of at most 10,000 ids each in its one transaction, so neither can meet the 2 MiB rule. Up to 10,000 it is one event, as before, and a reader takes the ids event by event.
+- A peer's event is not refused for its size. What bounds it is the transport: it reaches a hub only in a push, so it is at most 8 MiB, and only the signed push of a paired, unrevoked node is read and stored. The other rules for a peer's event (see "Model") are unchanged.
 
 **One request or answer.** Every route that reads a body states its limit:
 
 | Route | Who can reach it | Largest body read |
 |---|---|---|
-| `POST /fed/push` | anyone who can reach the hub's address; the body is read before the signature is checked | 8 MiB |
+| `POST /fed/push` | a caller whose node header names a paired, unrevoked spoke; any other is answered `401` before any of its body is read. The signature and the time are checked after the body | 8 MiB |
 | `POST /fed/pair` | anyone who can reach the hub's address (an invite is checked after the body is read) | 2 MiB, as before |
 | `GET /fed/pull` | paired nodes | no body |
 | OAuth and dashboard `POST` routes | as before | 2 MiB, as before |
 | `/mcp` | as before | read by the MCP library, unchanged |
 
-A spoke reads a pull answer of at most 32 MiB, and a pairing or push answer of at most 10 MiB, as before. A body over a limit is answered `413` and is not read further. So a caller with no pairing can make a hub buffer at most 8 MiB per request on `/fed/push`, where it was 2 MiB; refusing an unknown sender before reading the body is not built.
+A spoke reads a pull answer of at most 32 MiB, and a pairing or push answer of at most 10 MiB, as before. A body over a limit is answered `413` and is not read further. A caller with no pairing makes a hub buffer nothing on `/fed/push`. A caller that knows the id of a paired node, which every node of the federation does, can make it buffer 8 MiB per request before the signature fails, where it was 2 MiB; there is no limit on how many requests run at once, as before.
 
-**One batch or page.** A push batch is closed before its request body would pass 4 MiB, and a pull page before its answer, the node directory included, would pass 8 MiB. Both also stop at 500 events, and both always hold at least one event. One event at the 2 MiB limit fits either, each budget is under the limit of the side that reads it, and the build fails if a change breaks that. Cursors, anchors and ordering are unchanged: the same events arrive in the same order however they are cut. Ordinary traffic costs the same number of requests as before (2,000 small messages: 5 pushes, 5 pulls).
+**One batch or page.** A push batch is closed before its request body would pass 4 MiB, and a pull page before its answer, the node directory included, would pass 8 MiB. Both also stop at 500 events, and both always hold at least one event, so an event larger than the budget travels alone. One event at the 2 MiB rule fits either, each budget is under the limit of the side that reads it, and the build fails if a change breaks that. Cursors, anchors and ordering are unchanged: the same events arrive in the same order however they are cut. Ordinary traffic costs the same number of requests as before (2,000 small messages: 5 pushes, 5 pulls).
+
+**What can travel.** The limits of the transport decide, not the 2 MiB rule:
+
+- A spoke's own event is pushed, alone if need be, when the push that carries it is at most 8 MiB (the event itself up to 8,388,595 bytes).
+- Whatever a hub took in a push it can relay: the event is at most 8 MiB, a pull answer may be 32 MiB, and the rest of an answer is the node directory, which is about 150 bytes a node. The build fails if the pull limit is ever less than twice the push limit.
+- A hub's own event is pulled, alone if need be, when the answer that carries it is at most 32 MiB.
+- A build before these limits blocked at 2 MiB on a push and 10 MiB on a pull, so nothing it delivered is blocked now, and events between those sizes and the new ones now travel.
 
 **With a node on an earlier build.**
 
-- *New spoke, older hub.* The older hub reads at most 2 MiB per push and answers `413` to more, without reading the body; the spoke sees that answer or, often on Linux, only the closed connection. Either way it then halves the batch, down to one event, for the rest of that sync. The older hub bounds a page by count only; if an answer is over what the spoke reads, the spoke asks again with half the `limit`, down to one event.
+- *New spoke, older hub.* The older hub reads at most 2 MiB per push and answers `413` to more, without reading the body; the spoke sees that answer or only a failed connection (a broken pipe on Linux, and on macOS sometimes "invalid argument"). On a `413`, or on any I/O error while a push is being sent other than a refused connection, it sends half as many events, down to one, for the rest of that sync. From 500 events that is at most eight cuts, so a network that is simply failing costs at most nine failed requests before its error is reported. The older hub bounds a page by count only; if an answer is over what the spoke reads, the spoke asks again with half the `limit`, down to one event.
 - *Older spoke, new hub.* Nothing changes on the spoke. It gains from the hub's 8 MiB push limit and from pages closed at 8 MiB, under the 10 MiB it reads.
 - When one event alone is over what the other side takes, halving ends and the sync fails with a message that names the cause and says that retrying will not help, for example `the hub at <url> refused event <id> (message.sent) as too large: ...`.
 
-**An event over 2 MiB that is already in a log.** An earlier build could write one, for example an agent registered with a multi-megabyte description. What happens to it is not decided yet; it is the owner's decision. Until then it does what it did before, and says so: the node sends everything before it, then `another sync` fails every time, exits non-zero, and prints
+## If a sync reports an event that cannot be sent
+
+Only an event that does not fit the transport even alone is left behind: in a spoke's log, one over the 8 MiB a hub reads; in a hub's log, one over the 32 MiB a spoke reads. No build from D99 on writes one (it writes at most 2 MiB), but an earlier build could, for example by registering an agent with a description of many megabytes through an MCP tool. The node sends everything before it, then `another sync` fails every time, exits non-zero, and prints
 
 ```text
-another: event <id> (<kind>, <size> bytes on the wire) in this node's log is over the limit for one event (2097152 bytes), so it cannot be synced and the events after it wait behind it; retrying will not help; the owner must decide whether it is skipped or keeps blocking (docs/FEDERATION.md, "Size limits")
+another: event <id> (<kind>, <size> bytes on the wire) in this node's log is larger than a hub reads in one push (8388608 bytes), so it cannot be sent and the events after it wait behind it; retrying will not help; the owner must decide whether it is skipped or keeps blocking (docs/FEDERATION.md, "If a sync reports an event that cannot be sent")
 ```
 
-A hub that holds such an event answers a spoke's pull with the same message about `the hub's log`, after the page before it. The event is neither skipped nor deleted. The two choices: skip it, and peers never see that event while everything after it flows; or keep blocking, and nothing after it leaves that node until the owner removes or replaces the event. One difference from before: a hub's own event between 2 MiB and 10 MiB used to reach spokes on a pull and now blocks, because a node on this build would refuse it on arrival.
+A hub that holds such an event answers a spoke's pull with `pull failed (409 Conflict): event <id> ... in the hub's log is larger than a spoke reads in one pull answer (33554432 bytes) ...`, after the page before it. An earlier build stopped in the same place, at 2 MiB and 10 MiB, with a message that named nothing.
+
+Whether Another should step past such an event by itself is not decided; it is the owner's decision, and the review of this change recommends skipping with a loud report. Until then the event is neither skipped nor deleted, and Another has no command that removes or steps past an event. What the owner can do today, on the node the message names (for the hub's message, on the hub):
+
+1. Stop whatever runs Another there (`another serve`, the daemon) and copy the home directory as a backup.
+2. Remove the one event from the log by hand:
+
+   ```sh
+   sqlite3 "$ANOTHER_HOME/another.db" "DELETE FROM events WHERE event_id = '<id>'"
+   ```
+
+3. Start Another again and run `another sync`.
+
+What that costs: no other node ever receives that event. For an agent's registration, the agent stays unknown on the other nodes, so nobody there can address it and mail it sends is not delivered there, until it registers again with a description inside the limits. The node's own state is unchanged, since the event had already been applied there. The events after it are then sent. This removal on a spoke is run in the tests; it is a hand edit of the database, not a supported command.
 
 ## Wire protocol (for implementers)
 
