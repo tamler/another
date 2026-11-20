@@ -209,15 +209,12 @@ pub fn derive_port(text: &str) -> Option<u16> {
 }
 
 fn validate_name(name: &str) -> Result<()> {
-    if name.trim().is_empty()
-        || name.len() > 200
-        || name.chars().any(crate::mail::is_unsafe_text_char)
-    {
+    if name.trim().is_empty() || name.len() > 200 {
         return Err(Error::Invalid(
             "resource name must be 1-200 printable characters".into(),
         ));
     }
-    Ok(())
+    crate::queue::no_unsafe("a resource name", name, false)
 }
 
 const RESOURCE_COLUMNS: &str =

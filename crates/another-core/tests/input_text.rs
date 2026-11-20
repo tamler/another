@@ -72,13 +72,20 @@ fn resource(fx: &Fx, name: &str, endpoint: Option<&str>, purpose: Option<&str>) 
         .map(|_| ())
 }
 
-fn refused(r: Result<impl std::fmt::Debug>, field: &str) {
+/// What a refusal says it found.
+const CONTROL: &str = "control characters";
+const DIRECTION: &str = "text-direction character";
+
+/// The refusal names the field and what it found there.
+fn refused(r: Result<impl std::fmt::Debug>, field: &str, found: &str) {
     match r {
         Err(e) => {
             assert_eq!(e.code(), "invalid", "{e}");
             let msg = e.to_string();
             assert!(msg.contains(field), "{msg}");
-            assert!(msg.contains("one line of text"), "{msg}");
+            assert!(msg.contains(found), "{msg}");
+            let other = if found == CONTROL { DIRECTION } else { CONTROL };
+            assert!(!msg.contains(other), "{msg}");
             assert!(!msg.chars().any(is_unsafe_text_char), "{msg:?}");
         }
         Ok(v) => panic!("{field} with a control character was accepted: {v:?}"),
@@ -88,8 +95,12 @@ fn refused(r: Result<impl std::fmt::Debug>, field: &str) {
 #[test]
 fn hold_reasons_with_control_characters_are_refused() {
     let fx = fx();
-    refused(hold(&fx, "src/a.rs", Some(EVIL)), "a hold reason");
-    refused(hold(&fx, "src/a.rs", Some(BIDI)), "a hold reason");
+    refused(hold(&fx, "src/a.rs", Some(EVIL)), "a hold reason", CONTROL);
+    refused(
+        hold(&fx, "src/a.rs", Some(BIDI)),
+        "a hold reason",
+        DIRECTION,
+    );
     // Nothing was granted on the way.
     let held = fx
         .store
@@ -144,12 +155,54 @@ fn a_held_path_with_control_characters_is_still_held_and_the_feed_line_is_clean(
     );
 }
 
+/// Q19b review R1: a summary is read by a model too (`whats_new`). A zero-width space
+/// cannot be seen, and a Unicode tag character is read by a model as a letter no person
+/// sees; both pass `single_line`, so the summary is made a shown line (`display_line`).
+#[test]
+fn a_feed_line_shows_no_zero_width_or_tag_characters() {
+    let fx = fx();
+    let odd = "src/a\u{200b}b\u{e0041}\u{e0042}c.rs";
+    let ok = hold(&fx, odd, None).unwrap();
+    assert_eq!(ok.granted.len(), 1, "{ok:?}");
+    assert_eq!(ok.granted[0].pattern, odd, "the held path is kept as given");
+    let feed = fx
+        .store
+        .activity(ActivityQuery {
+            since: None,
+            limit: 100,
+            kinds: vec![],
+        })
+        .unwrap();
+    let line = feed
+        .items
+        .iter()
+        .find(|i| i.kind == "hold.acquired")
+        .unwrap();
+    assert!(line.summary.contains("src/a b  c.rs"), "{:?}", line.summary);
+    assert!(
+        !line
+            .summary
+            .chars()
+            .any(|c| matches!(c, '\u{200b}' | '\u{e0000}'..='\u{e007f}')),
+        "{:?}",
+        line.summary
+    );
+}
+
 #[test]
 fn agent_models_and_descriptions_with_control_characters_are_refused() {
     let fx = fx();
-    refused(register(&fx, Some(EVIL), None), "an agent model");
-    refused(register(&fx, None, Some(EVIL)), "an agent description");
-    refused(register(&fx, None, Some(BIDI)), "an agent description");
+    refused(register(&fx, Some(EVIL), None), "an agent model", CONTROL);
+    refused(
+        register(&fx, None, Some(EVIL)),
+        "an agent description",
+        CONTROL,
+    );
+    refused(
+        register(&fx, None, Some(BIDI)),
+        "an agent description",
+        DIRECTION,
+    );
     let a = register(&fx, Some("opus 5.5"), Some("reviews the café module")).unwrap();
     assert_eq!(a.description.as_deref(), Some("reviews the café module"));
 }
@@ -160,14 +213,20 @@ fn resource_text_with_control_characters_is_refused() {
     refused(
         resource(&fx, "ollama", Some(EVIL), None),
         "a resource endpoint",
+        CONTROL,
     );
     refused(
         resource(&fx, "ollama", None, Some(EVIL)),
         "a resource purpose",
+        CONTROL,
     );
     // Names already refused C0/C1 controls; bidi overrides now too.
-    let err = resource(&fx, BIDI, None, None).unwrap_err();
-    assert_eq!(err.code(), "invalid");
+    refused(resource(&fx, EVIL, None, None), "a resource name", CONTROL);
+    refused(
+        resource(&fx, BIDI, None, None),
+        "a resource name",
+        DIRECTION,
+    );
     resource(
         &fx,
         "ollama@11434",

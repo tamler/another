@@ -28,7 +28,7 @@ use crate::time::{fmt_opt, fmt_ts};
 use crate::tokens::{AuditRecord, TokenScope};
 
 const CLIENT_NAME_ONE_LINE: &str =
-    "client_name must be one line of text: no line breaks, tabs, escape or other control characters";
+    "client_name must be one line of text: no line breaks, tabs, escape, other control characters or text-direction characters";
 
 /// Access tokens last one hour.
 pub const ACCESS_TTL_SECS: u64 = 60 * 60;

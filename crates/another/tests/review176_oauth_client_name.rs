@@ -95,3 +95,92 @@ async fn a_registered_client_name_cannot_carry_terminal_control_characters() {
         "a client_name with ESC/BEL was accepted ({status}); `another serve` later prints it raw: {body}"
     );
 }
+
+/// Review R1 of Q19b: a name stored by a build before that refusal is still in the
+/// database. The operator approves a client from what `another oauth pending` lists, so a
+/// stored name must not add a row there, nor a line to what approve, deny, list and revoke
+/// print. The name is handed over as `resolve_client` reads it from `oauth_clients`.
+#[test]
+fn a_stored_client_name_cannot_add_a_row_to_the_oauth_commands() {
+    use another_core::{AuthorizeInput, ClientProfile, ClientRegistration, Program, RegisterAgent};
+    use std::process::{Command, Stdio};
+
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let store = Store::open(&home).unwrap();
+    store
+        .register_agent(RegisterAgent {
+            name: "helper".into(),
+            program: Program::Other,
+            project: None,
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    let client = store
+        .register_oauth_client(ClientRegistration {
+            client_name: "Helper".into(),
+            redirect_uris: vec!["https://example.com/cb".into()],
+            application_type: Some("web".into()),
+            remote: None,
+        })
+        .unwrap();
+    let stored = "Helper\n0000-0000  ChatGPT  redirect host chatgpt.com  expires never\u{1b}[2J";
+    let begin = || {
+        store
+            .begin_authorization(AuthorizeInput {
+                client: ClientProfile {
+                    client_id: client.client_id.clone(),
+                    client_name: stored.into(),
+                    redirect_uris: client.redirect_uris.clone(),
+                },
+                redirect_uri: client.redirect_uris[0].clone(),
+                state: None,
+                scope: None,
+                resource: "https://another.example.com/mcp".into(),
+                code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM".into(),
+                code_challenge_method: "S256".into(),
+                remote: None,
+            })
+            .unwrap()
+    };
+    let (first, second) = (begin(), begin());
+    drop(store);
+
+    let lines = |args: &[&str]| -> Vec<String> {
+        let out = Command::new(env!("CARGO_BIN_EXE_another"))
+            .args(args)
+            .current_dir(dir.path())
+            .env("ANOTHER_HOME", &home)
+            .env_remove("ANOTHER_AGENT")
+            .env_remove("ANOTHER_LOG")
+            .stdin(Stdio::null())
+            .output()
+            .expect("run another");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        assert!(
+            !text
+                .chars()
+                .any(|c| c != '\n' && another_core::is_unsafe_text_char(c)),
+            "{args:?}: {text:?}"
+        );
+        text.lines().map(str::to_string).collect()
+    };
+
+    let pending = lines(&["oauth", "pending"]);
+    assert_eq!(pending.len(), 2, "one row for each request: {pending:?}");
+    assert!(
+        pending.iter().all(|l| !l.starts_with("0000-0000")),
+        "{pending:?}"
+    );
+    let denied = lines(&["oauth", "deny", &second.user_code]);
+    assert_eq!(denied.len(), 1, "{denied:?}");
+    let approved = lines(&["oauth", "approve", &first.user_code, "--agent", "helper"]);
+    assert_eq!(approved.len(), 3, "{approved:?}");
+    let listed = lines(&["oauth", "list"]);
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    let grant = listed[0].split_whitespace().next().unwrap().to_string();
+    let revoked = lines(&["oauth", "revoke", &grant]);
+    assert_eq!(revoked.len(), 1, "{revoked:?}");
+}

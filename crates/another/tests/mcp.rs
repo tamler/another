@@ -501,3 +501,133 @@ async fn streamable_http_on_loopback() {
     ct.cancel();
     server.await.unwrap();
 }
+
+/// The whole error body of a failed call: `{"code", "message", "hint"?}`.
+async fn call_error(client: &Client, tool: &str, args: Value) -> Value {
+    let res = call(client, tool, args).await;
+    assert_eq!(res.is_error, Some(true), "{tool} should fail: {res:?}");
+    let text = serde_json::to_value(&res.content).unwrap()[0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    serde_json::from_str::<Value>(&text).unwrap()["error"].clone()
+}
+
+/// Q19b review R1: a description, model, hold reason or resource text that is not one line
+/// is refused (D97). The error names the field and what it found, and its hint is about
+/// that, not about how to pass an agent name. The tool schemas say so before a model sends one.
+#[tokio::test]
+async fn one_line_fields_are_described_and_their_refusal_has_a_fitting_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("site");
+    std::fs::create_dir_all(&project).unwrap();
+    let project = project.to_string_lossy().into_owned();
+    let client = in_process(Store::open_in_memory(Clock::System).unwrap()).await;
+    call_ok(
+        &client,
+        "register_agent",
+        json!({ "name": "alice", "program": "claude", "project": project }),
+    )
+    .await;
+
+    let two_lines = "Working on X\nand Y";
+    let reversed = "fine\u{202e}gpj.rs";
+    let register = |extra: Value| {
+        let mut args = json!({ "name": "alice", "program": "claude", "project": project });
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        args
+    };
+    let resource = |extra: Value| {
+        let mut args = json!({ "agent": "alice", "kind": "model_server", "name": "ollama" });
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        args
+    };
+    let hold = |reason: &str| json!({ "agent": "alice", "project": project, "paths": ["src/a.rs"], "reason": reason });
+    let cases = [
+        (
+            "register_agent",
+            register(json!({ "description": two_lines })),
+            "an agent description",
+            "control characters",
+        ),
+        (
+            "register_agent",
+            register(json!({ "description": reversed })),
+            "an agent description",
+            "text-direction",
+        ),
+        (
+            "register_agent",
+            register(json!({ "model": two_lines })),
+            "an agent model",
+            "control characters",
+        ),
+        (
+            "hold_paths",
+            hold(two_lines),
+            "a hold reason",
+            "control characters",
+        ),
+        (
+            "hold_paths",
+            hold(reversed),
+            "a hold reason",
+            "text-direction",
+        ),
+        (
+            "resource_register",
+            resource(json!({ "endpoint": two_lines })),
+            "a resource endpoint",
+            "control characters",
+        ),
+        (
+            "resource_register",
+            resource(json!({ "purpose": reversed })),
+            "a resource purpose",
+            "text-direction",
+        ),
+        (
+            "resource_register",
+            resource(json!({ "name": reversed })),
+            "a resource name",
+            "text-direction",
+        ),
+    ];
+    for (tool, args, field, found) in cases {
+        let error = call_error(&client, tool, args).await;
+        assert_eq!(error["code"], "invalid", "{tool} {field}: {error}");
+        let message = error["message"].as_str().unwrap();
+        assert!(message.starts_with(field), "{tool}: {message}");
+        assert!(message.contains(found), "{tool} {field}: {message}");
+        let hint = error["hint"].as_str().unwrap_or_default();
+        assert!(hint.contains("one line"), "{tool} {field}: hint {hint:?}");
+        assert!(
+            !hint.contains("name@project"),
+            "{tool} {field}: hint {hint:?}"
+        );
+    }
+
+    let tools = client.list_all_tools().await.unwrap();
+    for (tool, fields) in [
+        ("register_agent", &["model", "description"][..]),
+        ("hold_paths", &["reason"][..]),
+        ("resource_register", &["name", "endpoint", "purpose"][..]),
+    ] {
+        let schema = tools.iter().find(|t| t.name == tool).unwrap();
+        let schema = serde_json::to_value(&schema.input_schema).unwrap();
+        for field in fields {
+            let described = schema["properties"][field]["description"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(
+                described.contains("One line"),
+                "{tool}.{field} does not say it is one line: {described:?}"
+            );
+        }
+    }
+    client.cancel().await.unwrap();
+}

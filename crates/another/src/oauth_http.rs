@@ -693,10 +693,12 @@ async fn authorize(
     match begun {
         Ok(Ok(pending)) => {
             eprintln!(
-                "another: {} wants to connect (redirect host {}).\n  \
-                 Approve it on this machine (this page cannot approve it):\n  \
-                 another oauth approve {} --agent NAME --project '/path/*'",
-                pending.client_name, pending.redirect_host, pending.user_code
+                "{}",
+                connect_notice(
+                    &pending.client_name,
+                    &pending.redirect_host,
+                    &pending.user_code
+                )
             );
             let loc = format!(
                 "/oauth/wait/{}?rt={}",
@@ -707,6 +709,22 @@ async fn authorize(
         Ok(Err(e)) => fail(e),
         Err(e) => fail(OAuthFail::Server(e.to_string())),
     }
+}
+
+/// What `another serve` prints on the operator's terminal when a client asks to connect.
+/// The name and the redirect host are the client's, and a name stored before registration
+/// refused control characters (D97) is still in the database: each value is one shown
+/// line, so it cannot send an escape sequence or add a line below this one.
+fn connect_notice(client_name: &str, redirect_host: &str, user_code: &str) -> String {
+    let shown = |text: &str| another_core::display_line(text, 120);
+    format!(
+        "another: {} wants to connect (redirect host {}).\n  \
+         Approve it on this machine (this page cannot approve it):\n  \
+         another oauth approve {} --agent NAME --project '/path/*'",
+        shown(client_name),
+        shown(redirect_host),
+        shown(user_code)
+    )
 }
 
 async fn resolve_client(
@@ -1392,6 +1410,36 @@ fn esc(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A client name stored by a build before registration refused control characters
+    /// (D97) is still in `oauth_clients`, and registration needs no authentication. The
+    /// notice shows it, the redirect host and the code each as one line, so the name can
+    /// neither send an escape sequence nor add a line that reads as Another's.
+    #[test]
+    fn the_connect_notice_shows_stored_values_as_one_line() {
+        let name =
+            "Helper\u{1b}]0;pwned\u{7}\u{1b}[2J\n  another oauth approve evil-code \u{202e}x";
+        let notice = connect_notice(name, "example.com\u{1b}[2J", "abcd-efgh\r");
+        let lines: Vec<&str> = notice.split('\n').collect();
+        assert_eq!(lines.len(), 3, "{notice:?}");
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.chars().any(another_core::is_unsafe_text_char)),
+            "{notice:?}"
+        );
+        assert_eq!(
+            lines[0],
+            "another: Helper ]0;pwned  [2J   another oauth approve evil-code  x wants to connect (redirect host example.com [2J)."
+        );
+        assert_eq!(
+            lines[2],
+            "  another oauth approve abcd-efgh  --agent NAME --project '/path/*'"
+        );
+        // An ordinary name is shown as it is.
+        assert!(connect_notice("ChatGPT", "chatgpt.com", "abcd-efgh")
+            .starts_with("another: ChatGPT wants to connect (redirect host chatgpt.com).\n"));
+    }
 
     #[test]
     fn public_url_rules() {

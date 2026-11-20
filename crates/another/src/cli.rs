@@ -1327,6 +1327,13 @@ fn terminal_safe(text: &str) -> String {
         .collect()
 }
 
+/// An OAuth client's name or redirect host inside one row of the `another oauth` commands.
+/// The operator approves a client from these rows, and a name stored before registration
+/// refused control characters (D97) can hold a line break, which [`terminal_safe`] keeps.
+fn client_shown(text: &str) -> String {
+    another_core::display_line(text, 120)
+}
+
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     let json = cli.json;
     let home = cli.home.as_deref();
@@ -1915,7 +1922,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                         .map(|r| {
                             format!(
                                 "{}  {}  redirect host {}  expires {}",
-                                r.user_code, r.client_name, r.redirect_host, r.expires_at
+                                r.user_code,
+                                client_shown(&r.client_name),
+                                client_shown(&r.redirect_host),
+                                r.expires_at
                             )
                         })
                         .collect::<Vec<_>>()
@@ -1938,7 +1948,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             emit(json, &grant, |g| {
                 format!(
                     "approved {} (redirect host from the request) as {}\nprojects: {}\ngrant {}",
-                    g.client_name,
+                    client_shown(&g.client_name),
                     g.agent,
                     if g.project_globs.is_empty() {
                         "none: mailbox, heartbeat and the activity feed only".into()
@@ -1952,7 +1962,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Oauth(OauthCmd::Deny { user_code }) => {
             let row = store.deny_oauth(&user_code)?;
             emit(json, &row, |r| {
-                format!("denied {} ({})", r.user_code, r.client_name)
+                format!("denied {} ({})", r.user_code, client_shown(&r.client_name))
             })
         }
         Command::Oauth(OauthCmd::List) => {
@@ -1973,7 +1983,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                                 "{}  {}  {}  {}  projects {}",
                                 g.grant_id,
                                 state,
-                                g.client_name,
+                                client_shown(&g.client_name),
                                 g.agent,
                                 if g.project_globs.is_empty() {
                                     "none".into()
@@ -1992,7 +2002,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             emit(json, &g, |g| {
                 format!(
                     "revoked grant {} ({}, {})",
-                    g.grant_id, g.client_name, g.agent
+                    g.grant_id,
+                    client_shown(&g.client_name),
+                    g.agent
                 )
             })
         }

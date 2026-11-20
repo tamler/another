@@ -862,6 +862,15 @@ pub(crate) fn no_unsafe(what: &str, text: &str, multi_line: bool) -> Result<()> 
     if !text.chars().any(bad) {
         return Ok(());
     }
+    // The message names what was found: a text-direction character is not a control.
+    if !text
+        .chars()
+        .any(|c| bad(c) && (c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')))
+    {
+        return Err(Error::Invalid(format!(
+            "{what} holds a text-direction character (U+202A to U+202E or U+2066 to U+2069), which changes the order text is shown in: remove it"
+        )));
+    }
     if multi_line && text.contains('\r') {
         return Err(Error::Invalid(format!(
             "{what} contains a carriage return: end lines with a line feed only (convert CRLF line endings first)"

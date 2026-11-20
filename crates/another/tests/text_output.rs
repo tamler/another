@@ -107,14 +107,10 @@ fn a_held_file_name_cannot_retitle_or_clear_the_terminal() {
     assert_eq!(v[0]["pattern"].as_str(), Some(hostile), "{v}");
 }
 
-/// Review R1 of #176 (P2): `sync --watch` keeps going after a failed round and prints the
-/// error itself, outside `main`'s error path. The error can quote the hub's reply, which
-/// another machine wrote. A fake hub answers 500 with an OSC title sequence in its
-/// message; the watch line must carry it cleaned.
-#[cfg(unix)]
-#[test]
-fn a_hub_error_in_sync_watch_cannot_retitle_the_terminal() {
-    use std::io::{BufRead, BufReader, Read, Write};
+/// A spoke's home under `dir`, paired with a fake hub that answers every request with a
+/// 500 whose message holds an OSC title sequence and a clear-screen.
+fn spoke_of_a_hostile_hub(dir: &Path) -> std::path::PathBuf {
+    use std::io::{Read, Write};
     use std::net::TcpListener;
 
     let hub = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -154,28 +150,45 @@ fn a_hub_error_in_sync_watch_cannot_retitle_the_terminal() {
     });
 
     // A spoke paired with a hub at `url`, through the store (no hub process).
-    let dir = tempfile::tempdir().unwrap();
-    let spoke_home = dir.path().join("spoke");
-    {
-        let hub_store = another_core::Store::open(&dir.path().join("hub")).unwrap();
-        hub_store.set_node_name("hub").unwrap();
-        let spoke = another_core::Store::open(&spoke_home).unwrap();
-        spoke.set_node_name("spoke").unwrap();
-        let code = hub_store
-            .create_invite(&url, &another_core::Perm::ALL, 3600)
-            .unwrap();
-        let (invite, req) = spoke.prepare_join(&code).unwrap();
-        let resp = hub_store.accept_pairing(&req).unwrap();
-        spoke.complete_join(&invite, &resp).unwrap();
-    }
+    let spoke_home = dir.join("spoke");
+    let hub_store = another_core::Store::open(&dir.join("hub")).unwrap();
+    hub_store.set_node_name("hub").unwrap();
+    let spoke = another_core::Store::open(&spoke_home).unwrap();
+    spoke.set_node_name("spoke").unwrap();
+    let code = hub_store
+        .create_invite(&url, &another_core::Perm::ALL, 3600)
+        .unwrap();
+    let (invite, req) = spoke.prepare_join(&code).unwrap();
+    let resp = hub_store.accept_pairing(&req).unwrap();
+    spoke.complete_join(&invite, &resp).unwrap();
+    spoke_home
+}
 
-    // Q19b: one round without `--watch` fails through `main`'s error path, which prints the
-    // same reply.
+/// Q19b: a failed command ends with `another: <message>` on stderr, and the message can
+/// quote what another machine wrote, here a hub's error body. One `another sync` fails
+/// through that path. It starts no long-running process, so it runs on every platform.
+#[test]
+fn a_hub_error_in_a_failed_command_cannot_retitle_the_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let spoke_home = spoke_of_a_hostile_hub(dir.path());
     let once = another(&spoke_home, dir.path(), &["sync"]);
     let said = String::from_utf8_lossy(&once.stderr);
     assert!(!once.status.success(), "{said:?}");
+    assert!(said.starts_with("another: "), "{said:?}");
     assert!(said.contains("hub says ?]0;pwned? ?[2J done"), "{said:?}");
     assert!(!has_control(&once.stderr), "{said:?}");
+}
+
+/// Review R1 of #176 (P2): `sync --watch` keeps going after a failed round and prints the
+/// error itself, outside `main`'s error path. The error can quote the hub's reply, which
+/// another machine wrote; the watch line must carry it cleaned.
+#[cfg(unix)]
+#[test]
+fn a_hub_error_in_sync_watch_cannot_retitle_the_terminal() {
+    use std::io::{BufRead, BufReader};
+
+    let dir = tempfile::tempdir().unwrap();
+    let spoke_home = spoke_of_a_hostile_hub(dir.path());
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_another"))
         .args(["sync", "--watch"])
