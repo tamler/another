@@ -927,16 +927,24 @@ fn a_hubs_marker_for_a_relayed_event_sends_the_reader_to_the_events_node() {
          node hub did not send it; the events after it were sent"
     );
     assert_eq!(lines[1], "  about: agent wordy");
-    assert!(lines[2].starts_with("  missing on this node: what this registration changed: "));
-    assert_eq!(lines[3], "  to get it across, on node spoket:");
+    assert_eq!(
+        lines[2],
+        "  note: this report is a hub's marker about another node's event, so <name> is left for you to fill; check `another events` before acting"
+    );
+    assert!(lines[3].starts_with("  missing on this node: what this registration changed: "));
+    assert_eq!(lines[4], "  to get it across, on node spoket:");
     assert_eq!(
         lines.last().unwrap(),
         &"  then, on node hub: another sync ack 01RE1AYED00000000000000000 --owner"
     );
     let steps = on_s[0].needs_steps();
-    assert!(steps[0]
-        .starts_with("on node spoket: register the agent again: `another agent register wordy "));
-    assert_eq!(steps[5], "on node spoket: another sync");
+    assert_eq!(
+        steps[0],
+        "note: this report is a hub's marker about another node's event, so <name> is left for you to fill; check `another events` before acting"
+    );
+    assert!(steps[1]
+        .starts_with("on node spoket: register the agent again: `another agent register <name> "));
+    assert_eq!(steps[6], "on node spoket: another sync");
     assert_eq!(
         steps.last().unwrap(),
         "on node hub: another sync ack 01RE1AYED00000000000000000 --owner"
@@ -959,8 +967,12 @@ fn a_hubs_marker_for_a_relayed_event_sends_the_reader_to_the_events_node() {
     assert!(block
         .ends_with("\n  then, on node hub: another sync ack 01RE1AYED00000000000000000 --owner"));
     let steps = on_t[0].needs_steps();
-    assert!(steps[0].starts_with("register the agent again: `another agent register wordy "));
-    assert_eq!(steps[5], "another sync");
+    assert_eq!(
+        steps[0],
+        "note: this report is a hub's marker about another node's event, so <name> is left for you to fill; check `another events` before acting"
+    );
+    assert!(steps[1].starts_with("register the agent again: `another agent register <name> "));
+    assert_eq!(steps[6], "another sync");
     assert_eq!(
         steps.last().unwrap(),
         "on node hub: another sync ack 01RE1AYED00000000000000000 --owner"
