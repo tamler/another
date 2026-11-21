@@ -517,8 +517,9 @@ pub struct SyncReport {
     /// The unacknowledged skips of this node's log and of its hub's log: events too large
     /// to send, reported after every sync until acknowledged. The oldest five at most, so a
     /// peer that writes many markers cannot make this report large; `skipped_total` counts
-    /// them all, and `another needs --json` and `another activity --kinds sync` list the
-    /// rest.
+    /// them all. `another needs --json` lists up to its row limit, and
+    /// `another activity --kinds sync` lists them, at most 500 per call; page with
+    /// `--since <time or event id>`.
     pub skipped: Vec<Skip>,
     /// How many unacknowledged skips there are, the ones in `skipped` included.
     pub skipped_total: usize,

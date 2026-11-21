@@ -440,6 +440,9 @@ const HOLD_ID_NOT_USABLE: &str = "the hold id in this report is not an id this s
     makes, so <hold id> is left for you to fill";
 const EVENT_ID_NOT_USABLE: &str = "the event id in this report is not an id this software \
     makes, so <event-id> is left for you to fill";
+const FOREIGN_MARKER_NAME: &str = "this report is a hub's marker about another node's event, so <name> is left for you to fill; check `another events` before acting";
+const FOREIGN_MARKER_HOLD: &str = "this report is a hub's marker about another node's event, so <hold id> is left for you to fill; check `another events` before acting";
+const HUB_SYNC_SENTENCE: &str = "spokes receive it at their next sync";
 
 /// `another sync ack <id> --owner`, with the id only when it is usable.
 fn ack_command(event_id: &str) -> (String, bool) {
@@ -598,10 +601,17 @@ pub struct Remedy {
 
 /// The remedy for a skipped event of `kind`. The lines are fixed per kind. `about` (the
 /// marker's short name of the thing) fills only `<name>`, and only with a valid agent
-/// name, and `<hold id>`, and only with an id this software makes. Any other value leaves
-/// the placeholder and is noted: a peer chose it, and the lines are there to be copied.
-/// Every other placeholder is for the reader to fill.
+/// name, and `<hold id>`, and only with an id this software makes, and only when the
+/// marker speaks of its writer's own event. Any other value leaves the placeholder and is
+/// noted: a peer chose it, and the lines are there to be copied. Every other placeholder
+/// is for the reader to fill.
+#[allow(dead_code)]
 pub fn remedy(kind: &str, about: Option<&str>) -> Remedy {
+    remedy_from(kind, about, true)
+}
+
+/// [`remedy`], filling from `about` only when `own_event` is true (`event_node == holder`).
+pub fn remedy_from(kind: &str, about: Option<&str>, own_event: bool) -> Remedy {
     let named = |prefix: &str| {
         about
             .and_then(|a| a.strip_prefix(prefix))
@@ -673,16 +683,42 @@ pub fn remedy(kind: &str, about: Option<&str>) -> Remedy {
             "",
         ),
     };
-    let usable = match placeholder {
+    let would_fill = match placeholder {
         "<name>" => value.filter(|v| usable_name(v)),
         _ => value.filter(|v| usable_id(v)),
+    };
+    let usable = if own_event { would_fill } else { None };
+    let note = if !own_event && would_fill.is_some() {
+        Some(match placeholder {
+            "<name>" => FOREIGN_MARKER_NAME,
+            "<hold id>" => FOREIGN_MARKER_HOLD,
+            _ => unusable,
+        })
+        .filter(|n| !n.is_empty())
+    } else {
+        (value.is_some() && usable.is_none()).then_some(unusable)
     };
     Remedy {
         missing,
         steps: fill(steps, placeholder, usable),
         needs_steps: fill(needs, placeholder, usable),
-        note: (value.is_some() && usable.is_none()).then_some(unusable),
+        note,
     }
+}
+
+/// A bare `another sync` step is not a command a hub can run. Replace it when the event
+/// lives on a node that has no hub.
+fn replace_hub_sync_steps(steps: Vec<String>) -> Vec<String> {
+    steps
+        .into_iter()
+        .map(|step| {
+            if step == "another sync" {
+                HUB_SYNC_SENTENCE.to_string()
+            } else {
+                step
+            }
+        })
+        .collect()
 }
 
 /// One unacknowledged skip this node reports: one of its own log, or one of its hub's log.
@@ -888,8 +924,8 @@ fn holds_event(conn: &Connection, event_id: &str) -> Result<bool> {
 }
 
 fn unacknowledged(conn: &Connection, local: &str) -> Result<Vec<Skip>> {
-    let hub = hub_of(conn)?.map(|(hub, _, _)| hub);
-    let hub = hub.as_deref().unwrap_or(local);
+    let local_hub = hub_of(conn)?.map(|(hub, _, _)| hub);
+    let hub = local_hub.as_deref().unwrap_or(local);
     let mut acked: BTreeSet<(String, String)> = BTreeSet::new();
     let mut stmt = conn.prepare(&format!(
         "SELECT node_id, {NAMED_EVENT} FROM events WHERE kind = ?1 AND node_id IN (?2, ?3)"
@@ -920,7 +956,16 @@ fn unacknowledged(conn: &Connection, local: &str) -> Result<Vec<Skip>> {
         }
         let event_id = display_line(&m.event_id, SHOWN_ID_CHARS);
         let about = m.about.as_deref().map(|a| display_line(a, ABOUT_CHARS));
-        let remedy = remedy(&m.kind, about.as_deref());
+        let own_event = m.event_node == m.holder;
+        let mut remedy = remedy_from(&m.kind, about.as_deref(), own_event);
+        let event_node_is_hub = match local_hub.as_deref() {
+            None => m.event_node == local,
+            Some(h) => m.event_node == h,
+        };
+        if event_node_is_hub {
+            remedy.steps = replace_hub_sync_steps(remedy.steps);
+            remedy.needs_steps = replace_hub_sync_steps(remedy.needs_steps);
+        }
         let (ack, ack_runs) = ack_command(&event_id);
         let mut notes: Vec<String> = remedy.note.iter().map(|n| (*n).to_string()).collect();
         if !ack_runs {
@@ -1424,5 +1469,57 @@ mod tests {
         let p = json!({ "name": "n".repeat(5000) });
         let long = about("agent.registered", &p).unwrap();
         assert_eq!(long.chars().count(), ABOUT_CHARS);
+    }
+    #[test]
+    fn a_hub_marker_about_a_spoke_event_does_not_fill() {
+        let id = "01M7WV7X0X33GJDE8SX6BVSBP7";
+        let r = remedy_from("hold.acquired", Some(&format!("hold {id}")), false);
+        assert!(
+            r.needs_steps.iter().any(|s| s.contains("<hold id>")),
+            "{:#?}",
+            r.needs_steps
+        );
+        assert!(
+            !r.needs_steps.iter().any(|s| s.contains(id)),
+            "{:#?}",
+            r.needs_steps
+        );
+        assert_eq!(r.note, Some(FOREIGN_MARKER_HOLD));
+
+        let r = remedy_from("hold.acquired", Some(&format!("hold {id}")), true);
+        assert!(
+            r.needs_steps.iter().any(|s| s.contains(id)),
+            "{:#?}",
+            r.needs_steps
+        );
+        assert_eq!(r.note, None);
+
+        let r = remedy_from("agent.registered", Some("agent bob"), false);
+        assert!(
+            r.needs_steps.iter().any(|s| s.contains("<name>")),
+            "{:#?}",
+            r.needs_steps
+        );
+        assert!(
+            !r.needs_steps
+                .iter()
+                .any(|s| s.contains(" bob") || s.ends_with("bob") || s.contains("register bob ")),
+            "{:#?}",
+            r.needs_steps
+        );
+        assert_eq!(r.note, Some(FOREIGN_MARKER_NAME));
+    }
+
+    #[test]
+    fn a_hubs_own_skip_does_not_print_another_sync_as_a_command() {
+        let r = remedy("hold.acquired", Some("hold 01HD0000000000000000000000"));
+        let needs = replace_hub_sync_steps(r.needs_steps);
+        let steps = replace_hub_sync_steps(r.steps);
+        assert!(!needs.iter().any(|s| s == "another sync"), "{needs:#?}");
+        assert!(needs.iter().any(|s| s == HUB_SYNC_SENTENCE), "{needs:#?}");
+        assert!(!steps.iter().any(|s| s == "another sync"), "{steps:#?}");
+        assert!(steps.iter().any(|s| s == HUB_SYNC_SENTENCE), "{steps:#?}");
+        // The acknowledgement is unchanged and still a command.
+        // (needs_steps() on Skip adds the ack after these remedy steps.)
     }
 }

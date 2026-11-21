@@ -785,6 +785,32 @@ fn hub_block(event_id: &str, bytes: usize, place: &str) -> String {
          missing on this node: {WORDY_MISSING}\n  to get it across, on {place}:\n"
     );
     for step in WORDY_STEPS {
+        let step = if step == "another sync" {
+            "spokes receive it at their next sync"
+        } else {
+            step
+        };
+        block.push_str(&format!("    {step}\n"));
+    }
+    block.push_str(&format!(
+        "  then, on node hub: another sync ack {event_id} --owner\n"
+    ));
+    block
+}
+
+/// A hub's marker about another node's event: do not fill names or ids from the marker,
+/// keep `another sync` because the remedy runs on that node, and say why the name was left.
+fn relayed_block(event_id: &str, bytes: usize, place: &str) -> String {
+    let mut block = format!(
+        "skipped {event_id} (agent.registered, {bytes} bytes, written by wordy): it is in node \
+         hub's log and is larger than a spoke reads in one pull answer (33554432 bytes), so \
+         node hub did not send it; the events after it were sent\n  about: agent wordy\n  \
+         note: this report is a hub's marker about another node's event, so <name> is left \
+         for you to fill; check `another events` before acting\n  missing on this node: \
+         {WORDY_MISSING}\n  to get it across, on {place}:\n"
+    );
+    for step in WORDY_STEPS {
+        let step = step.replace("wordy", "<name>");
         block.push_str(&format!("    {step}\n"));
     }
     block.push_str(&format!(
@@ -1575,7 +1601,7 @@ fn a_hubs_marker_for_a_relayed_event_sends_the_reader_to_the_events_node() {
         let (_, rest) = text.split_once('\n').unwrap();
         assert_eq!(
             rest,
-            hub_block("01RE1AYED00000000000000000", 9_437_500, place)
+            relayed_block("01RE1AYED00000000000000000", 9_437_500, place)
         );
     }
 }
@@ -1652,7 +1678,7 @@ fn more_than_five_skips_print_five_and_a_count() {
     assert_eq!(v["skipped_total"], json!(307));
     assert!(out(&as_json).len() < 32 * 1024, "{}", out(&as_json).len());
     // `another needs --json` counts them all and lists up to its row limit, and
-    // `another activity --kinds sync` lists every one.
+    // `another activity --kinds sync` lists them, at most 500 per call.
     let v: Value = serde_json::from_str(&out(&needs)).unwrap();
     assert_eq!(v["counts"]["skipped_event"], json!(307));
     assert_eq!(
