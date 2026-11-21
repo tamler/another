@@ -509,6 +509,11 @@ pub fn sync_report(r: &crate::fed::SyncReport) -> String {
     for x in r.push_rejected.iter().chain(&r.pull_rejected) {
         let _ = write!(out, "\nrejected {}: {}", x.event_id, x.reason);
     }
+    // Every unacknowledged skip, after every sync, until `another sync ack`.
+    if !r.skipped.is_empty() {
+        let lines = another_core::sync_skip_lines(&r.skipped, r.skipped_total);
+        let _ = write!(out, "\n{lines}");
+    }
     out
 }
 

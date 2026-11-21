@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 use crate::crypto;
 use crate::error::{Error, Result};
 use crate::store::{new_id, Store, Tx};
+use crate::sync_skip::{self, SkippedEvent};
 use crate::time::{fmt_opt, fmt_ts, later_secs};
 
 /// What a paired node may do through the hub.
@@ -78,16 +79,19 @@ pub struct WireEvent {
 /// Largest single event this build writes, in bytes of its wire JSON (a [`WireEvent`],
 /// escaping included, with the sequence number counted as one digit). A local write over it
 /// is refused (D99). It is a rule for local writes only: an event already in a log, or one
-/// a peer sends, is not judged by it, and travels if it fits the transport.
+/// a peer sends, is not judged by it. It travels if it fits the transport, and is skipped
+/// and reported if it does not fit even alone (`sync_skip`).
 pub const MAX_EVENT_WIRE_BYTES: usize = 2 * 1024 * 1024;
 /// A push batch is closed before its request body would pass this; it always holds one event.
 pub const PUSH_BATCH_BUDGET_BYTES: usize = 4 * 1024 * 1024;
-/// Largest `/fed/push` request body a hub reads.
+/// Largest `/fed/push` request body a hub reads. A spoke's own event that alone makes a
+/// push over it is skipped and reported.
 pub const PUSH_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 /// A pull page is closed before its response body, the node directory included, would pass
 /// this; it always holds one event.
 pub const PULL_PAGE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
-/// Largest `/fed/pull` response body a spoke reads.
+/// Largest `/fed/pull` response body a spoke reads. An event in a hub's log that alone
+/// makes an answer over it is skipped and reported.
 pub const PULL_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 /// Bytes of a push request body around its events: `{"events":[]}`.
 pub const PUSH_ENVELOPE_BYTES: usize = 13;
@@ -168,28 +172,6 @@ pub(crate) fn check_new_event(event: &NewEvent<'_>) -> Result<()> {
         )));
     }
     Ok(())
-}
-
-/// An event already in a log, written by an earlier build, that does not fit the transport
-/// even alone: a spoke's own event that makes a push over [`PUSH_BODY_LIMIT_BYTES`], or an
-/// event on a hub that makes a pull answer over [`PULL_BODY_LIMIT_BYTES`]. Every smaller
-/// event is sent, alone in its batch or page if need be, whatever its size.
-///
-/// UNDECIDED, THE OWNER'S CHOICE (D99): this is the one place that says what happens to
-/// such an event. As built it blocks: the sync fails with this message and the events after
-/// it wait, which is what a build before D99 did (at 2 MiB and 10 MiB) without naming the
-/// event. The other choice is to skip it: the callers would step past it instead of
-/// returning this error, and peers would then never see that event.
-fn over_limit_in_log(e: &WireEvent, whose: &str, reader: &str, limit: usize) -> Error {
-    Error::Conflict(format!(
-        "event {} ({}, {} bytes on the wire) in {whose} log is larger than {reader} \
-         ({limit} bytes), so it cannot be sent and the events after it wait behind it; \
-         retrying will not help; the owner must decide whether it is skipped or keeps \
-         blocking (docs/FEDERATION.md, \"If a sync reports an event that cannot be sent\")",
-        crate::mail::single_line(&e.event_id, 40),
-        crate::mail::single_line(&e.kind, 80),
-        e.wire_bytes(),
-    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -390,6 +372,17 @@ fn classify(kind: &str, payload: &Value, origin: &str) -> Share {
             match payload.get("message_node").and_then(Value::as_str) {
                 Some(n) if n != origin => Share::Mail(vec![n.to_string()]),
                 _ => Share::Never,
+            }
+        }
+        // A marker and its acknowledgement go where the skipped event would have gone.
+        sync_skip::KIND_SKIPPED | sync_skip::KIND_ACKED => {
+            let (route, nodes) = sync_skip::route_of(payload);
+            let nodes = not_origin(nodes);
+            match route {
+                "directory" => Share::Directory,
+                "mail" if nodes.is_empty() => Share::Never,
+                "mail" => Share::Mail(nodes),
+                _ => Share::Feed(nodes),
             }
         }
         _ => {
@@ -1116,7 +1109,18 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
             }
         }
         "resource.stopped" | "resource.reaped" => resource(),
+        sync_skip::KIND_SKIPPED => sync_skip::check_marker(conn, origin, p),
+        sync_skip::KIND_ACKED => sync_skip::check_ack(p),
         _ => Ok(()),
+    }
+}
+
+/// The class and the node ids `classify` gives an event that is sent, for its marker.
+fn route_of_share(share: Share) -> (&'static str, Vec<String>) {
+    match share {
+        Share::Directory | Share::Never => ("directory", Vec::new()),
+        Share::Feed(also) => ("feed", also),
+        Share::Mail(nodes) => ("mail", nodes),
     }
 }
 
@@ -2272,20 +2276,23 @@ impl Store {
     /// Spoke side: events this node authored that may leave it, after `after_seq`.
     /// Returns them and the highest sequence scanned (to advance the cursor past skips).
     pub fn outbound_events(&self, after_seq: i64, limit: u32) -> Result<(Vec<WireEvent>, i64)> {
-        self.outbound_events_within(after_seq, limit, PUSH_BATCH_BUDGET_BYTES)
+        let (events, high, _) =
+            self.outbound_events_within(after_seq, limit, PUSH_BATCH_BUDGET_BYTES)?;
+        Ok((events, high))
     }
 
     /// [`Store::outbound_events`] with the byte budget given: the batch is closed before
     /// the push request body carrying it would pass `budget` bytes, and always holds one
     /// event when there is one to send, so an event larger than the budget travels alone.
-    /// `usize::MAX` bounds it by count only, as builds before D99 did. Fails when the next
-    /// event to send would alone make a push over [`PUSH_BODY_LIMIT_BYTES`].
+    /// `usize::MAX` bounds it by count only, as builds before D99 did. An event that would
+    /// alone make a push over [`PUSH_BODY_LIMIT_BYTES`] is stepped past: the scan goes on,
+    /// and the event is returned third, for [`Store::advance_push_past`] to mark. A read.
     pub fn outbound_events_within(
         &self,
         after_seq: i64,
         limit: u32,
         budget: usize,
-    ) -> Result<(Vec<WireEvent>, i64)> {
+    ) -> Result<(Vec<WireEvent>, i64, Vec<SkippedEvent>)> {
         self.read(|conn| {
             let mut stmt = conn.prepare(&format!(
                 "{WIRE_SELECT} WHERE node_id = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3"
@@ -2293,25 +2300,22 @@ impl Store {
             let mut rows = stmt.query(params![self.node_id(), after_seq, limit])?;
             let mut high = after_seq;
             let mut out: Vec<WireEvent> = Vec::new();
+            let mut skipped: Vec<SkippedEvent> = Vec::new();
             // The body is the envelope, the events and a comma between each two.
             let mut bytes = PUSH_ENVELOPE_BYTES - 1;
             while let Some(row) = rows.next()? {
                 let e = wire_from_row(row)?;
                 let seq = e.seq;
                 let p: Value = serde_json::from_str(&e.payload).unwrap_or(Value::Null);
-                if classify(&e.kind, &p, &e.node_id) != Share::Never {
+                let share = classify(&e.kind, &p, &e.node_id);
+                if share != Share::Never {
                     let len = e.wire_bytes() + 1;
-                    // Alone it would still be over what a hub reads.
+                    // Alone it would still be over what a hub reads: stepped past.
                     if PUSH_ENVELOPE_BYTES - 1 + len > PUSH_BODY_LIMIT_BYTES {
-                        if high == after_seq {
-                            return Err(over_limit_in_log(
-                                &e,
-                                "this node's",
-                                "a hub reads in one push",
-                                PUSH_BODY_LIMIT_BYTES,
-                            ));
-                        }
-                        break;
+                        let (route, nodes) = route_of_share(share);
+                        skipped.push(SkippedEvent::of(&e, &p, route, nodes));
+                        high = seq;
+                        continue;
                     }
                     if !out.is_empty() && bytes.saturating_add(len) > budget {
                         break;
@@ -2321,7 +2325,7 @@ impl Store {
                 }
                 high = seq;
             }
-            Ok((out, high))
+            Ok((out, high, skipped))
         })
     }
 
@@ -2329,11 +2333,26 @@ impl Store {
     /// transaction, the pushed anchor: `last_accepted`, the batch's last event the hub
     /// accepted or already held. A node-local `peer.pushed` records it when it changes.
     pub fn advance_push(&self, peer: &str, seq: i64, last_accepted: Option<&str>) -> Result<()> {
+        self.advance_push_past(peer, seq, last_accepted, &[])
+    }
+
+    /// [`Store::advance_push`] for a batch whose scan stepped past `skipped`: the marker of
+    /// each, and its audit row, is written in the transaction that moves the cursor past
+    /// it, unless this node already has one. So the cursor is never past an event that has
+    /// no marker, and a push that failed leaves neither.
+    pub fn advance_push_past(
+        &self,
+        peer: &str,
+        seq: i64,
+        last_accepted: Option<&str>,
+        skipped: &[SkippedEvent],
+    ) -> Result<()> {
         self.write(|tx| {
             tx.execute(
                 "UPDATE peers SET push_cursor = max(push_cursor, ?2), last_sync_at = ?3 WHERE node_id = ?1",
                 params![peer, seq, tx.now],
             )?;
+            sync_skip::mark_tx(tx, skipped, sync_skip::Direction::Push)?;
             if let Some(id) = last_accepted {
                 if pushed_anchor(tx, tx.node_id)?.as_deref() != Some(id) {
                     tx.emit("system", "peer.pushed", json!({ "peer": peer, "anchor": id }))?;
@@ -2377,16 +2396,14 @@ impl Store {
         anchors: &PullAnchors,
         limit: u32,
     ) -> Result<PullResponse> {
-        self.pull_page(peer, after_seq, anchors, limit, PULL_PAGE_BUDGET_BYTES)
+        self.pull_answer(peer, after_seq, anchors, limit, PULL_PAGE_BUDGET_BYTES)
     }
 
-    /// [`Store::pull_for_from`] with the byte budget given: the page is closed, with `more`
-    /// set, before its response body (the node directory included) would pass `budget`
-    /// bytes, and always holds one event when there is one to send, so an event larger than
-    /// the budget travels alone. `usize::MAX` bounds it by count only, as builds before D99
-    /// did. Fails when the next event to send would alone make an answer over
-    /// [`PULL_BODY_LIMIT_BYTES`].
-    pub fn pull_page(
+    /// Hub side: the answer to a pull. [`Store::pull_page`] builds the page; then, before
+    /// the page is answered, one write transaction writes the missing markers for the
+    /// events the page stepped past. If that write fails so does the answer, and the
+    /// spoke's cursor has not moved.
+    pub fn pull_answer(
         &self,
         peer: &str,
         after_seq: i64,
@@ -2394,6 +2411,27 @@ impl Store {
         limit: u32,
         budget: usize,
     ) -> Result<PullResponse> {
+        let (page, skipped) = self.pull_page(peer, after_seq, anchors, limit, budget)?;
+        self.mark_pull_skips(&skipped)?;
+        Ok(page)
+    }
+
+    /// [`Store::pull_for_from`] with the byte budget given: the page is closed, with `more`
+    /// set, before its response body (the node directory included) would pass `budget`
+    /// bytes, and always holds one event when there is one to send, so an event larger than
+    /// the budget travels alone. `usize::MAX` bounds it by count only, as builds before D99
+    /// did. An event meant for this spoke that would alone make an answer over
+    /// [`PULL_BODY_LIMIT_BYTES`] is stepped past: the page goes on, has `more` set so the
+    /// spoke asks again and receives the marker, and the event is returned beside the page
+    /// for [`Store::mark_pull_skips`]. A read.
+    pub fn pull_page(
+        &self,
+        peer: &str,
+        after_seq: i64,
+        anchors: &PullAnchors,
+        limit: u32,
+        budget: usize,
+    ) -> Result<(PullResponse, Vec<SkippedEvent>)> {
         self.read(|conn| {
             let Some((role, perms, None)) = peer_row(conn, peer)? else {
                 return Err(Error::Forbidden("not a paired node".into()));
@@ -2423,13 +2461,14 @@ impl Store {
                 None => false,
             };
             if after_seq > high || received_lost || pushed_lost {
-                return Ok(PullResponse {
+                let reset = PullResponse {
                     events: Vec::new(),
                     cursor: 0,
                     more: false,
                     nodes: known_nodes(conn)?,
                     reset: true,
-                });
+                };
+                return Ok((reset, Vec::new()));
             }
             let scan = limit.saturating_mul(4).max(limit);
             let mut stmt = conn.prepare(&format!(
@@ -2451,11 +2490,13 @@ impl Store {
             // The page was closed with an event still to send.
             let mut closed = false;
             let mut cursor = after_seq;
+            let mut skipped: Vec<SkippedEvent> = Vec::new();
             while let Some(row) = rows.next()? {
                 let e = wire_from_row(row)?;
                 scanned += 1;
                 let p: Value = serde_json::from_str(&e.payload).unwrap_or(Value::Null);
-                let send = match classify(&e.kind, &p, &e.node_id) {
+                let share = classify(&e.kind, &p, &e.node_id);
+                let send = match &share {
                     Share::Never => false,
                     Share::Directory => true,
                     Share::Feed(also) => {
@@ -2468,18 +2509,12 @@ impl Store {
                     continue;
                 }
                 let len = e.wire_bytes() + 1;
-                // Alone it would still be over what a spoke reads.
+                // Alone it would still be over what a spoke reads: stepped past.
                 if envelope + len > PULL_BODY_LIMIT_BYTES {
-                    if cursor == after_seq {
-                        return Err(over_limit_in_log(
-                            &e,
-                            "the hub's",
-                            "a spoke reads in one pull answer",
-                            PULL_BODY_LIMIT_BYTES,
-                        ));
-                    }
-                    closed = true;
-                    break;
+                    let (route, nodes) = route_of_share(share);
+                    skipped.push(SkippedEvent::of(&e, &p, route, nodes));
+                    cursor = e.seq;
+                    continue;
                 }
                 if !page.events.is_empty() && bytes.saturating_add(len) > budget {
                     closed = true;
@@ -2492,9 +2527,13 @@ impl Store {
                     break;
                 }
             }
-            page.more = closed || scanned == scan || page.events.len() as u32 >= limit;
+            // After a skip the spoke asks again, and that answer carries the marker.
+            page.more = closed
+                || !skipped.is_empty()
+                || scanned == scan
+                || page.events.len() as u32 >= limit;
             page.cursor = cursor;
-            Ok(page)
+            Ok((page, skipped))
         })
     }
 

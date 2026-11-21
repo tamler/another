@@ -88,13 +88,13 @@ $ another needs --brief
 needs you: 7 (1 decide now, 1 blocked, 1 stuck, 1 unreachable, 1 quiet claim, 1 no taker, 1 proposal)
 ```
 
-Only kinds above zero are named, in the order of the sections. `checks_stopped` reads `checks stopped` and `transport_config` reads `transports.json refused`.
+Only kinds above zero are named, in the order of the sections. `checks_stopped` reads `checks stopped`, `transport_config` reads `transports.json refused` and `skipped_event` reads `1 skipped event` or `<n> skipped events`.
 
 ## Sections and kinds
 
 | Section | Kinds, in order |
 |---|---|
-| `Another` | `checks_stopped`, `transport_config` |
+| `Another` | `checks_stopped`, `transport_config`, `skipped_event` |
 | `Decide now` | `decide_now` |
 | `Agents` | `blocked`, `stuck`, `unreachable`, `transport_silent` |
 | `Claims` | `quiet_claim`, `no_taker` |
@@ -108,6 +108,7 @@ A counted row exists only for a condition that stops agreed work or waits on a d
 |---|---|---|---|
 | `checks_stopped` | Herdr sessions are live (a hook of each ran in the last 10 minutes) and none of them was checked in the last 5 minutes | A check reaches any live Herdr session, or every such session's hooks stop for 10 minutes | `another daemon status` |
 | `transport_config` | `transports.json` was refused | The file loads | `another doctor` |
+| `skipped_event` | A sync stepped past an event too large to send, in this node's log or in its hub's log, and the skip is not acknowledged ([FEDERATION.md](FEDERATION.md#an-event-that-is-too-large-to-send)) | `another sync ack <event-id> --owner` on the node whose log holds the event; on a spoke, when that acknowledgement arrives with a sync | The steps that get the information across, fixed per kind of event, then `another sync ack <event-id> --owner` |
 
 `checks_stopped` means the rows under `Agents` may be out of date. The daemon checks every 30 seconds, so the row can show for up to that long when the first Herdr session on a node starts or the machine wakes from sleep. A server started with `--no-wake` or `--auth` runs no checks. A node whose sessions are all on command transports gets no such row: whether those can be listed depends on your config.
 
@@ -202,7 +203,7 @@ One object. Every key is always present; a value that does not apply is `null` o
   "total": 7,
   "limit": 10,
   "counts": {
-    "checks_stopped": 0, "transport_config": 0, "decide_now": 1, "blocked": 1, "stuck": 1,
+    "checks_stopped": 0, "transport_config": 0, "skipped_event": 0, "decide_now": 1, "blocked": 1, "stuck": 1,
     "unreachable": 1, "transport_silent": 0, "quiet_claim": 1, "no_taker": 1, "proposal": 1
   },
   "closing": {
@@ -240,22 +241,22 @@ One object. Every key is always present; a value that does not apply is `null` o
 |---|---|
 | `total` | The sum of `counts`. Nothing under `closing` is in it |
 | `rows` | At most `limit` rows per kind, in the order of the sections. `[]` with `--brief` |
-| `key` | Stable while the condition lasts: `<kind>:<item>` for item rows, `<kind>:<agent>:<first 8 characters of the session id>` for session rows, `transport_silent:<transport>`, and the bare kind for the two `Another` rows |
+| `key` | Stable while the condition lasts: `<kind>:<item>` for item rows, `<kind>:<agent>:<first 8 characters of the session id>` for session rows, `transport_silent:<transport>`, `skipped_event:<id of the node whose log holds the event>:<event id>`, and the bare kind for the other two `Another` rows |
 | `who` | `owner`, or `admitter` where a delegate's key covers the step that clears the row |
-| `next` | The steps. An entry that is not a command never starts with `another` |
+| `next` | The steps. An entry that is not a command never starts with `another`. A step that explains a command, as most steps of a `skipped_event` row do, starts with a word and has the command in backticks, with placeholders such as `<program>` for you to fill; such a step may start with `note:` when a value in the report could not be put into a command |
 | `next_delegate` | The same steps as a delegate runs them: `--agent <delegate>` in place of `--owner`, with its key in `ANOTHER_ADMIT_KEY`. `[]` when `who` is `owner`; it never holds an owner-only command |
-| `agent` | The proposer, the claimer, the reserved agent or the session's agent |
+| `agent` | The proposer, the claimer, the reserved agent or the session's agent; for `skipped_event`, the agent that wrote the skipped event |
 | `since`, `age_seconds` | When the condition began; `null` when that is not known |
 | `session` | The first 8 characters of the session id, `""` when the session has none, `null` for rows not about a session |
 | `claims`, `name_claims` | Items bound to this row's session; claimed items of the name bound to no session |
-| `reason` | The stored reason for a session row (`stuck` gives the wake outcome that stopped it); the quiet-claim reason; `reserved`, `no_seat` or `skipped` for `no_taker`; why the file was refused for `transport_config` |
+| `reason` | The stored reason for a session row (`stuck` gives the wake outcome that stopped it); the quiet-claim reason; `reserved`, `no_seat` or `skipped` for `no_taker`; why the file was refused for `transport_config`; `push` or `pull` for `skipped_event`, the transport the event did not fit |
 | `as_of` | When the session row was last checked |
 
 `<why>`, `<delegate>` and `<your agent>` in a step are for you to fill in.
 
 ## What is shown, and what never is
 
-Shown: agent addresses; item numbers, kinds, scope ids and titles (cut at 60 characters); transport names and pane ids, because the pane is where you go; why `transports.json` was refused; times. Session ids are cut to 4 characters in text and 8 in JSON.
+Shown: agent addresses; item numbers, kinds, scope ids and titles (cut at 60 characters); transport names and pane ids, because the pane is where you go; why `transports.json` was refused; a skipped event's id, kind, size, the agent that wrote it and the node whose log holds it, each as one bounded line; times. Session ids are cut to 4 characters in text and 8 in JSON.
 
 Never shown: mail subjects and bodies; item bodies, done conditions, notes, reasons and result text; the detail a transport reported; the directory a hook ran in; delegate keys and tokens.
 
