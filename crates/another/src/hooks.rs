@@ -15,9 +15,13 @@
 //! `post-tool` mentions new mail mid-task (read only, nothing printed when nothing is new),
 //! and `pre-edit` takes a narrow hold on each file about to be edited, or stops the edit
 //! when another agent holds it. Both open the database without migrating and with a short
-//! lock timeout, and both fail open: an error never blocks the agent.
+//! lock wait. `post-tool` fails open: an error never blocks the agent. `pre-edit` waits
+//! 300 ms, then up to 2.7 s more (3 s in all) if the database is still locked, and then
+//! denies the edit; a check that fails or panics is also a deny. A missing database or an
+//! old schema still fails open.
 
 use std::io::{IsTerminal, Read};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -185,16 +189,29 @@ impl HookEvent {
         matches!(self, HookEvent::PostTool | HookEvent::PreEdit)
     }
 
-    /// How long a hook waits for a database lock before giving up (and failing open).
+    /// How long a hook waits for a database lock on its first attempt.
+    ///
+    /// `post-tool` then fails open. `pre-edit` waits [`PRE_EDIT_LOCK_RETRY`] more if this
+    /// first wait expires, and denies the edit if the database is still locked.
     pub fn busy_timeout(self) -> Duration {
         match self {
             // Runs on every tool call: even a fully locked database must cost under ~100 ms.
             HookEvent::PostTool => Duration::from_millis(50),
-            HookEvent::PreEdit => Duration::from_millis(300),
+            HookEvent::PreEdit => PRE_EDIT_LOCK_WAIT,
             _ => Duration::from_secs(5),
         }
     }
 }
+
+/// First wait for the pre-edit hook to get a database lock.
+pub const PRE_EDIT_LOCK_WAIT: Duration = Duration::from_millis(300);
+/// Extra wait after the first attempt, if the database is still locked.
+pub const PRE_EDIT_LOCK_RETRY: Duration = Duration::from_millis(2_700);
+/// Total bound: first wait plus the extra. After this the hook denies the edit.
+pub const PRE_EDIT_LOCK_BOUND: Duration = Duration::from_millis(3_000);
+
+const PRE_EDIT_LOCK_DENY: &str = "Another stopped this edit: the hold database stayed locked for 3 seconds, so the edit was not allowed. Try again in a moment.";
+const PRE_EDIT_CHECK_DENY: &str = "Another stopped this edit: the hold check failed, so the edit was not allowed. Try again in a moment.";
 
 /// Locations used by install/uninstall.
 #[derive(Debug, Clone)]
@@ -260,7 +277,8 @@ fn script_text(env: &HookEnv) -> String {
     format!(
         "#!/bin/sh\n\
          # Another hook wrapper, written by `another hook install`; removed by `another hook uninstall`.\n\
-         # It always exits 0, so a missing or failing another never blocks the agent.\n\
+         # It always exits 0: a missing another never blocks the agent. The pre-edit hook\n\
+         # may still print a deny when it cannot check holds after waiting for a lock.\n\
          ANOTHER_BIN={exe}\n\
          if [ ! -x \"$ANOTHER_BIN\" ]; then\n\
          \x20 ANOTHER_BIN=$(command -v another 2>/dev/null) || exit 0\n\
@@ -685,7 +703,7 @@ pub fn install(
 // `another hook run`
 
 /// What the client told us on stdin (all optional; clients differ).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct HookInput {
     pub cwd: Option<PathBuf>,
     pub session_id: Option<String>,
@@ -1855,6 +1873,163 @@ fn log_refusal_once(another_home: &Path, event: HookEvent, client: Client, reaso
         .is_ok_and(|log| log.contains(&reason));
     if !logged {
         log_hook_error(another_home, event, client, &reason);
+    }
+}
+
+/// Whether a store error is a SQLite lock (`database is locked` / busy).
+fn is_db_locked(err: &another_core::Error) -> bool {
+    let mut cur: Option<&dyn std::error::Error> = Some(err);
+    while let Some(e) = cur {
+        if e.to_string().contains("database is locked") {
+            return true;
+        }
+        cur = e.source();
+    }
+    false
+}
+
+fn is_locked_anyhow(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|e| e.to_string().contains("database is locked"))
+}
+
+fn pre_edit_deny(reason: &str) -> String {
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    })
+    .to_string()
+}
+
+/// Append one line for a pre-edit hook that denied because it could not check.
+fn log_hook_denied(another_home: &Path, event: HookEvent, client: Client, error: &str) {
+    use std::io::Write;
+    let dir = another_home.join("logs");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join("hooks.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_HOOK_LOG) {
+        let _ = std::fs::rename(&path, dir.join("hooks.log.1"));
+    }
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_default();
+    let line = format!(
+        "{} {} --client {}: {} (denied; could not check)\n",
+        another_core::fmt_ts(ms),
+        event.as_str(),
+        client.as_str(),
+        error.replace('\n', " ")
+    );
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    if let Ok(mut f) = opts.open(&path) {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+/// Open and run a pre-edit hook with one lock budget, classifying the result.
+enum PreEditAttempt {
+    Ok(String),
+    /// The database was locked for the whole budget.
+    Locked(String),
+    /// The store could not be opened for a reason other than a lock (missing, old schema).
+    OpenFailed(String),
+    /// The store opened, but the hold check failed or panicked.
+    CheckFailed(String),
+}
+
+fn attempt_pre_edit(
+    home: &Path,
+    env: &HookEnv,
+    client: Client,
+    input: HookInput,
+    busy: Duration,
+) -> PreEditAttempt {
+    let store = match Store::open_quick(home, busy) {
+        Ok(store) => store,
+        Err(e) if is_db_locked(&e) => return PreEditAttempt::Locked(format!("{e:#}")),
+        Err(e) => return PreEditAttempt::OpenFailed(format!("{e:#}")),
+    };
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        run(&store, env, HookEvent::PreEdit, client, input)
+    }));
+    match outcome {
+        Ok(Ok(text)) => PreEditAttempt::Ok(text),
+        Ok(Err(e)) if is_locked_anyhow(&e) => PreEditAttempt::Locked(format!("{e:#}")),
+        Ok(Err(e)) => PreEditAttempt::CheckFailed(format!("{e:#}")),
+        Err(_) => PreEditAttempt::CheckFailed("the hold check panicked".into()),
+    }
+}
+
+/// Entry point for `pre-edit`: wait [`PRE_EDIT_LOCK_WAIT`], then [`PRE_EDIT_LOCK_RETRY`]
+/// if the database is still locked, and deny when that bound expires. A check that fails
+/// or panics is also a deny. A missing database or an old schema still fails open.
+pub fn run_pre_edit(home: Option<&Path>, env: anyhow::Result<HookEnv>, client: Client) -> String {
+    let input = HookInput::read_stdin();
+    let Some(home) = home else {
+        tracing::warn!("another pre-edit hook failed; continuing");
+        return String::new();
+    };
+    let env = match env {
+        Ok(env) => env,
+        Err(e) => {
+            let error = format!("{e:#}");
+            tracing::warn!(error = %error, "another pre-edit hook failed; continuing");
+            log_hook_error(home, HookEvent::PreEdit, client, &error);
+            return String::new();
+        }
+    };
+    match attempt_pre_edit(home, &env, client, input.clone(), PRE_EDIT_LOCK_WAIT) {
+        PreEditAttempt::Ok(text) => text,
+        PreEditAttempt::CheckFailed(error) => {
+            tracing::warn!(error = %error, "another pre-edit hook failed; denying");
+            log_hook_denied(home, HookEvent::PreEdit, client, &error);
+            pre_edit_deny(PRE_EDIT_CHECK_DENY)
+        }
+        PreEditAttempt::OpenFailed(error) => {
+            tracing::warn!(error = %error, "another pre-edit hook failed; continuing");
+            if let Some(reason) = Store::refusal(home) {
+                log_refusal_once(home, HookEvent::PreEdit, client, &reason);
+            } else {
+                log_hook_error(home, HookEvent::PreEdit, client, &error);
+            }
+            String::new()
+        }
+        PreEditAttempt::Locked(_) => {
+            match attempt_pre_edit(home, &env, client, input, PRE_EDIT_LOCK_RETRY) {
+                PreEditAttempt::Ok(text) => text,
+                PreEditAttempt::CheckFailed(error) => {
+                    tracing::warn!(error = %error, "another pre-edit hook failed; denying");
+                    log_hook_denied(home, HookEvent::PreEdit, client, &error);
+                    pre_edit_deny(PRE_EDIT_CHECK_DENY)
+                }
+                PreEditAttempt::OpenFailed(error) => {
+                    tracing::warn!(error = %error, "another pre-edit hook failed; continuing");
+                    if let Some(reason) = Store::refusal(home) {
+                        log_refusal_once(home, HookEvent::PreEdit, client, &reason);
+                    } else {
+                        log_hook_error(home, HookEvent::PreEdit, client, &error);
+                    }
+                    String::new()
+                }
+                PreEditAttempt::Locked(error) => {
+                    tracing::warn!(error = %error, "another pre-edit hook locked; denying");
+                    log_hook_denied(home, HookEvent::PreEdit, client, &error);
+                    pre_edit_deny(PRE_EDIT_LOCK_DENY)
+                }
+            }
+        }
     }
 }
 

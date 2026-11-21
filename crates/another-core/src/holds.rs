@@ -325,8 +325,10 @@ const PATTERN_BRIEF_CHARS: usize = 40;
 /// the whole glob when it has no `**`, and otherwise the glob cut after its first `**`,
 /// since a path that matches up to there overlaps whatever follows. The shapes it does not
 /// take (`of` returns none, or `touches` does) keep the walk: a glob whose last component
-/// has no wildcard, a glob with a `/` inside braces or a class, a path with a bracket or a
-/// brace in it, and a path with fewer components than the glob has up to its first `**`.
+/// has no wildcard or contains an alternation, a glob with a `/` inside braces or a class,
+/// a piece with a `\\`, an empty alternative or `**` inside braces, a class that can match
+/// `/`, a path with a bracket or a brace in it, and a path with fewer components than the
+/// glob has up to its first `**`.
 /// `the_direct_match_agrees_with_the_walk` holds the two to the same answers.
 struct DirectMatch<'a> {
     /// The glob's text before its first wildcard: a path that neither starts with it nor
@@ -340,7 +342,11 @@ struct DirectMatch<'a> {
 impl<'a> DirectMatch<'a> {
     fn of(glob: &'a str) -> Option<Self> {
         let pieces = pattern_components(glob);
-        if pieces.iter().any(|p| p.contains('/')) || names_entries(pieces.last()?) {
+        if pieces
+            .iter()
+            .any(|p| p.contains('/') || !direct_piece_ok(p))
+            || last_falls_back_to_walk(pieces.last()?)
+        {
             return None;
         }
         let (matcher, need) = match pieces.iter().position(|p| *p == "**") {
@@ -620,6 +626,58 @@ fn outside_classes(pattern: &str) -> Vec<(usize, char)> {
         out.push((i, c));
     }
     out
+}
+
+/// The last component keeps the walk when it names a directory or file (no wildcard), or
+/// when it is an alternation: `{core,*-plugin}` spells out `core`, which the walk treats
+/// as a directory hold covering everything below it, and a direct match of the original
+/// glob does not.
+fn last_falls_back_to_walk(last: &str) -> bool {
+    names_entries(last) || first_alternation(last).is_some()
+}
+
+/// Shapes the direct match does not take, so the walk is kept: a backslash, an empty
+/// alternative or `**` inside braces, or a character class that can match `/`.
+fn direct_piece_ok(piece: &str) -> bool {
+    if piece.contains('\\') || class_can_match_slash(piece) {
+        return false;
+    }
+    let Some((_, alts, after)) = first_alternation(piece) else {
+        return true;
+    };
+    if alts.iter().any(|a| a.is_empty() || a.contains("**")) {
+        return false;
+    }
+    alts.iter().all(|a| direct_piece_ok(a)) && direct_piece_ok(after)
+}
+
+/// A class matches `/` when it contains one, or when it is negated (`[!` / `[^`) and so
+/// can. An unclosed `[` is a plain character and does not.
+fn class_can_match_slash(pattern: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    let mut i = 0;
+    while i < pattern.len() {
+        if bytes[i] == b'[' {
+            if let Some(end) = class_end(pattern, i) {
+                let mut inner = i + 1;
+                let negated = matches!(bytes.get(inner), Some(b'!' | b'^'));
+                if negated {
+                    inner += 1;
+                }
+                if negated || pattern[inner..end].contains('/') {
+                    return true;
+                }
+                i = end + 1;
+                continue;
+            }
+        }
+        i += pattern[i..]
+            .chars()
+            .next()
+            .map(|c| c.len_utf8())
+            .unwrap_or(1);
+    }
+    false
 }
 
 /// A glob component that names a directory or a file rather than a set of them: no `*` and
@@ -2897,10 +2955,18 @@ mod tests {
                 }
             }
         }
-        // Of the 700 pairs, 528 are decided without a walk, 113 of them as overlaps.
-        assert_eq!((decided, yes), (528, 113));
-        // The shapes that keep the walk.
-        for kept in ["apps/{web,api}", "docs/**/guide", "src/{a/b,c}/*"] {
+        // Of the 700 pairs, 514 are decided without a walk, 108 of them as overlaps.
+        // Last-component alternations such as `*.{ts,tsx}` now keep the walk (P2-C).
+        assert_eq!((decided, yes), (514, 108));
+        // The shapes that keep the walk, including a last-component alternation that
+        // spells a directory name plus a wildcard (review R3 P2-C).
+        for kept in [
+            "apps/{web,api}",
+            "docs/**/guide",
+            "src/{a/b,c}/*",
+            "src/{lib,*.rs}",
+            "packages/{core,*-plugin}",
+        ] {
             assert!(DirectMatch::of(kept).is_none(), "{kept}");
         }
         let d = DirectMatch::of("apps/*/src/*.ts").unwrap();
@@ -2911,6 +2977,33 @@ mod tests {
             "a bracket in the path"
         );
         assert_eq!(d.touches("packages/web/src/a.ts"), Some(false));
+    }
+
+    /// Review R3 of Q30, P2-C: a last-component alternation such as `{core,*-plugin}`
+    /// must not be decided by the direct match, which would miss a path under `core`.
+    #[test]
+    fn a_last_component_alternation_falls_back_to_the_walk() {
+        let cases = [
+            ("packages/{core,*-plugin}", "packages/core/src/index.ts"),
+            ("lib/{util,*-x}", "lib/util/x.rs"),
+            ("src/{a,?}", "src/a/b.rs"),
+            ("src/{*.rs,a}", "src/a/b.rs"),
+            ("src/{lib,*.rs}", "src/lib/mod.rs"),
+        ];
+        for (glob, path) in cases {
+            assert!(
+                DirectMatch::of(glob).is_none(),
+                "direct match should fall back for {glob}"
+            );
+            let mut budget = usize::MAX;
+            let walk = overlap_within(glob, &globset::escape(path), &mut budget);
+            assert_eq!(walk, Touch::Yes, "{glob} should warn on {path}");
+        }
+        // `{,app}/*` has an empty alternative, so it also falls back (P3-G).
+        assert!(DirectMatch::of("{,app}/*").is_none());
+        assert!(DirectMatch::of("packages/core").is_none()); // last component names entries
+        assert!(DirectMatch::of("packages/{core,ui}/**").is_some());
+        assert!(DirectMatch::of("packages/*/src/*.ts").is_some());
     }
 
     #[test]
