@@ -767,13 +767,14 @@ mod over_http {
     ///
     /// The hub here closes a pull page at 16 KiB, three or four of these events, where the
     /// build's page is 500 events. A debug build stores an event about ten times slower
-    /// than a release build, so a page of 500 keeps the lock past the hook's 300 ms in a
-    /// debug build on any head; that is the recorded limit on a large pull, not what this
-    /// test is about. A page of about 30 events passed on the development machine and
-    /// failed on a hosted Linux runner, where storing is slower still and the hook's
-    /// retries can miss the short gaps between pages. With a few events a page the lock is
-    /// taken for a few milliseconds at a time unless storing an event compiles its
-    /// pattern, which is what failed before.
+    /// than a release build, so a page of 500 can keep the lock past the hook's 3 s bound
+    /// in a debug build; the hook then denies the edit rather than allowing it. That is a
+    /// recorded limit on a large pull, not what this test is about. A page of about 30
+    /// events passed on the development machine and failed on a hosted Linux runner when
+    /// the hook waited only 300 ms and failed open if it missed the gaps between pages.
+    /// With a few events a page the lock is taken for a few milliseconds at a time unless
+    /// storing an event compiles its pattern, which is what failed before. If a page still
+    /// outlasts the bound, the hook's deny keeps this test from letting a held file through.
     #[test]
     fn a_hook_still_guards_while_sync_pulls_a_peers_slow_globs() {
         let hub = start_hub_with(Some(16 * 1024));
