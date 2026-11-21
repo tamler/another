@@ -510,6 +510,9 @@ pub struct SyncReport {
     pub applied: usize,
     pub pull_duplicates: usize,
     pub pull_rejected: Vec<Rejected>,
+    /// Pulled events that were stored but not applied here: a peer's hold whose pattern is
+    /// over the limit or does not compile.
+    pub not_applied: Vec<Rejected>,
     /// The hub's log no longer matched this spoke's cursors (it was restored from an older
     /// copy, or replaced), so this sync started over from zero in both directions.
     pub hub_reset: bool,
@@ -711,6 +714,7 @@ fn sync_pass(
         report.applied += r.accepted;
         report.pull_duplicates += r.duplicates;
         report.pull_rejected.extend(r.rejected);
+        report.not_applied.extend(r.not_applied);
         // The cursor and the anchor (the last event the hub sent, stored or not) commit
         // together, so neither can move without the other (REVIEW-R1 and R2 P2).
         let page_last = page.events.last().map(|e| (e.event_id.as_str(), e.seq));

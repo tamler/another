@@ -82,7 +82,7 @@ For Codex, review and trust Another's new or changed hooks yourself in `/hooks`.
 
 The same hooks show the work queue at session start and at a prompt: a session is told which items it holds, and a name the owner gave its own limit is told when `another queue next` would hand it an item ([Queue lines](docs/HOOKS.md#queue-lines)).
 
-Besides session start, prompts and session end, the pack adds a hook after each tool call (new mail shows up mid-task) and, for Claude Code, Codex and Grok, one before each file edit (the edit takes a hold, or is stopped when another agent holds the file). Both fail open. See [docs/HOOKS.md](docs/HOOKS.md).
+Besides session start, prompts and session end, the pack adds a hook after each tool call (new mail shows up mid-task) and, for Claude Code, Codex and Grok, one before each file edit (the edit takes a hold, or is stopped when another agent holds the file). The mail hook fails open. The edit hook waits 300 ms for a database lock, then up to 2.7 s more (3 s in all), and then denies the edit; a check that fails is also a deny. A missing database or an old schema still fails open. See [docs/HOOKS.md](docs/HOOKS.md).
 
 **Optional: keep the daemon running** (a launchd LaunchAgent on macOS, a systemd user unit on Linux, a Task Scheduler logon task on Windows). It expires holds in the background and wakes idle Herdr agents when mail arrives:
 
@@ -232,7 +232,7 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 
 - **Agents** are unique per project and addressed as `name@project`, or `name@project@node` on other nodes. A bare `name` works when it is unambiguous; once a second project registers the same name it stops resolving, and [docs/ADDRESSING.md](docs/ADDRESSING.md) shows the error and the fix.
 - **Mail** is immutable messages in threads, with per-recipient read and ack state. **Requests** go `open → claimed → done`; claiming assigns an owner. They become `stale` past their due time and anyone may take them over. An ack records receipt, not completion: [docs/REQUESTS.md](docs/REQUESTS.md) walks through a worker that acks, claims, and crashes.
-- **Path holds** are expiring leases on project-relative globs. Exclusive holds conflict with overlapping holds inside the same checkout (working directory); other worktrees and clones of the repository are separate and never block each other. The edit hook enforces them for client file edits; across machines, a clash is a warning, never a lock.
+- **Path holds** are expiring leases on project-relative globs of at most 4,096 bytes. Exclusive holds conflict with overlapping holds inside the same checkout (working directory); other worktrees and clones of the repository are separate and never block each other. The edit hook enforces them for client file edits; across machines, a clash is a warning, never a lock.
 - **Resources** are model and dev servers, ports, GPUs, containers and jobs, held by owner and borrower leases with TTLs. Orphans are listed, and only a human can reap them (`another reap … --confirm`); reaping is never remote.
 - **Event log**: every change is appended to a signed, chained, append-only log, and the query tables are projections of it. That log is what federation syncs.
 - [docs/GLOSSARY.md](docs/GLOSSARY.md) defines every term and sets the easily confused pairs side by side: an ack versus request ownership, a path hold versus a resource lease, and what expiry means for each.

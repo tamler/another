@@ -138,6 +138,7 @@ function summaryHtml(snap, now) {
   const attention = [];
   if (c.conflicts) attention.push(c.conflicts + " conflicting hold" + (c.conflicts === 1 ? "" : "s"));
   if (c.remote_warnings) attention.push(c.remote_warnings + " cross-node clash" + (c.remote_warnings === 1 ? "" : "es"));
+  if (c.remote_not_compared) attention.push(c.remote_not_compared + " hold" + (c.remote_not_compared === 1 ? "" : "s") + " on other nodes not compared");
   if (c.requests_stale) attention.push(c.requests_stale + " stale request" + (c.requests_stale === 1 ? "" : "s"));
   if (expiring) attention.push(expiring + " hold" + (expiring === 1 ? "" : "s") + " ending soon");
   const highlights = (snap.hour.highlights || []).slice(-3).reverse();
