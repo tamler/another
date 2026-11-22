@@ -464,6 +464,40 @@ fn decode_invite(code: &str) -> serde_json::Value {
     serde_json::from_slice(&crypto::unb64(raw).unwrap()).unwrap()
 }
 
+/// Sign `invite` as it now reads with the private key of `by`, read from that test node's
+/// temporary home. A hub signs every field of its invites, so an edited invite reaches the
+/// checks after the signature only when the holder of its key signed the edit.
+fn resign(invite: &mut serde_json::Value, by: &Store) {
+    let secret: String = rusqlite::Connection::open(by.db_path().unwrap())
+        .unwrap()
+        .query_row("SELECT secret_key FROM nodes WHERE is_local = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let text = |v: &serde_json::Value| v.as_str().unwrap().to_string();
+    let perms: Vec<String> = invite["perms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(text)
+        .collect();
+    let message = crypto::invite_message(
+        invite["v"].as_u64().unwrap() as u8,
+        &text(&invite["hub"]["node_id"]),
+        &text(&invite["hub"]["public_key"]),
+        &text(&invite["hub"]["display_name"]),
+        &text(&invite["hub_url"]),
+        &text(&invite["invite_id"]),
+        &crypto::sha256_hex(text(&invite["secret"]).as_bytes()),
+        &perms.join(","),
+        invite["expires_at"].as_i64().unwrap(),
+    );
+    invite["sig"] = serde_json::json!(crypto::sign(
+        &crypto::decode_secret(&secret).unwrap(),
+        &message
+    ));
+}
+
 /// The hub's audit rows for `operation`, oldest first.
 fn audit_rows(hub: &Hub, operation: &str) -> Vec<AuditEntry> {
     let mut rows: Vec<AuditEntry> = hub
@@ -789,6 +823,7 @@ fn a_join_on_an_invite_naming_this_node_itself_is_refused_over_http() {
     let mut forged = decode_invite(&code);
     forged["hub"]["node_id"] = serde_json::json!(solo.store.node_id());
     forged["hub"]["display_name"] = serde_json::json!("evil");
+    resign(&mut forged, &mallory.node.store);
     let forged = format!(
         "another-invite:{}",
         crypto::b64(forged.to_string().as_bytes())
@@ -810,7 +845,9 @@ fn a_join_on_an_invite_naming_this_node_itself_is_refused_over_http() {
 }
 
 /// The address in an invite must be an `http://` or `https://` URL with a host, or nothing
-/// is sent. This is a check of form only: an invite is not signed.
+/// is sent. A hub of this build refuses to sign such an address; the invites here are signed
+/// by the hub's key all the same, as a hub of another build could, and the joiner's own
+/// check of the form refuses them.
 #[test]
 fn a_hub_address_that_is_not_http_is_refused_before_sending() {
     let hub = start_hub();
@@ -833,6 +870,7 @@ fn a_hub_address_that_is_not_http_is_refused_before_sending() {
     ] {
         let mut edited = decode_invite(&code);
         edited["hub_url"] = serde_json::json!(url);
+        resign(&mut edited, &hub.node.store);
         let edited = format!(
             "another-invite:{}",
             crypto::b64(edited.to_string().as_bytes())
