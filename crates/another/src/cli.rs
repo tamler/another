@@ -125,8 +125,10 @@ pub enum Command {
             required_unless_present = "template"
         )]
         to: Vec<String>,
+        /// CC recipients (more than one is allowed).
         #[arg(long, value_delimiter = ',')]
         cc: Vec<String>,
+        /// Subject line (optional).
         #[arg(
             long,
             short = 's',
@@ -161,7 +163,9 @@ pub enum Command {
     },
     /// Reply to a message within its thread.
     Reply {
+        /// Message id to reply to. Must be a message that the recipient received.
         message_id: String,
+        /// Reply-from agent name.
         #[arg(long, short = 'f', env = "ANOTHER_AGENT")]
         from: String,
         /// Reply body; `-` reads stdin.
@@ -793,7 +797,9 @@ pub enum HookCmd {
     Status,
     /// Called by the hook wrapper; reads the client's JSON on stdin. Always exits 0.
     Run {
+        /// Client event kind.
         event: HookEvent,
+        /// Which client emitted the event.
         #[arg(long)]
         client: Client,
     },
@@ -803,6 +809,7 @@ pub enum HookCmd {
 pub enum ProjectCmd {
     /// Register a project by path (default: current directory).
     Ensure {
+        /// Project directory.
         path: Option<PathBuf>,
     },
     List,
@@ -812,6 +819,7 @@ pub enum ProjectCmd {
 pub enum AgentCmd {
     /// Register or update an agent.
     Register {
+        /// Agent name.
         name: String,
         /// claude | grok | codex | cursor | grok_bot | other
         #[arg(long)]
@@ -819,13 +827,16 @@ pub enum AgentCmd {
         /// Project path to scope the name to (enables name@project).
         #[arg(long)]
         project: Option<PathBuf>,
+        /// Model name (optional).
         #[arg(long)]
         model: Option<String>,
+        /// Freeform agent description (optional).
         #[arg(long)]
         description: Option<String>,
     },
     List,
     Show {
+        /// Agent name.
         name: String,
     },
 }
@@ -852,6 +863,7 @@ pub enum HoldCmd {
         agent: AgentArg,
         #[command(flatten)]
         project: ProjectArg,
+        /// Files or globs.
         #[arg(required = true)]
         paths: Vec<String>,
         /// Lease seconds (default 1800).
@@ -860,6 +872,7 @@ pub enum HoldCmd {
         /// Shared instead of exclusive.
         #[arg(long)]
         shared: bool,
+        /// Short reason string to help a human decide whether to force a handoff.
         #[arg(long)]
         reason: Option<String>,
         /// Allow a pattern that covers the whole project (`**`, `.`, `**/*.rs`).
@@ -873,8 +886,10 @@ pub enum HoldCmd {
         agent: AgentArg,
         #[command(flatten)]
         project: ProjectArg,
+        /// Files or globs.
         #[arg(required = true)]
         paths: Vec<String>,
+        /// Check for shared holds too.
         #[arg(long)]
         shared: bool,
     },
@@ -882,6 +897,7 @@ pub enum HoldCmd {
     Renew {
         #[command(flatten)]
         agent: AgentArg,
+        /// Hold ids (empty means all of your live holds).
         hold_ids: Vec<String>,
     },
     /// Release your holds: all of them, the given hold ids, or the ones on the given files
