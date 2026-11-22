@@ -513,6 +513,7 @@ pub struct SyncReport {
     pub pull_rejected: Vec<Rejected>,
     /// Pulled events that were stored but not applied here: a peer's hold whose pattern is
     /// over the limit or does not compile.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub not_applied: Vec<Rejected>,
     /// The hub's log no longer matched this spoke's cursors (it was restored from an older
     /// copy, or replaced), so this sync started over from zero in both directions.
