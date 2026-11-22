@@ -2,6 +2,8 @@
 
 Several machines, such as a laptop, a remote runner and a GPU box, each run their own Another **node** and stay aware of each other. Nodes exchange their append-only, signed event logs through a **hub**. The hub is just another free Another node that you host yourself; spokes dial out to it, so spokes need no inbound ports.
 
+**Status:** Federation is present, but frozen for v0.1.0 and treated as experimental. It stays in the tree and gets only admitted security and data-loss fixes.
+
 ## Model
 
 - **Per-node authority.** Each node is authoritative for its own agents, path holds and resources. Events from other nodes are projected into local read models but never rewrite another node's ownership. Only the owning node can stop or reap its resources. A signature proves only who sent an event, so before storing one a node also checks that the agents, projects, messages, holds and resources it would create or change belong to the event's origin node. An event that names another node's object (for example, a registration reusing another node's agent id, mail claiming another node's sender, or a read, ack, transfer or stop for another node's delivery or resource) is rejected, listed in the sync report's rejected events, and is not relayed. Mail to another node's agents and borrowing another node's resource are still allowed, within the permissions below. Whether a borrow needs `borrow_resource` follows the resource the hub knows, not any routing field in the event. A node may not rename itself to a name another known node has, and an address whose node name matches more than one known node is refused as ambiguous (use the node id). The origin chooses an event's time and TTLs, so a receiver takes the time no later than its own clock and clamps lease and hold TTLs to the local limits (24 hours for leases, 4 hours for holds): a skewed clock or a huge TTL cannot keep a foreign lease or hold alive. Each node bounds a lease by its own clock, and a node that syncs later sees the same borrow later. So the node that owns a resource also expires other nodes' leases on it when they run out, and publishes that expiry. Every node that replays the history then ends the lease at the same point, including the lease holder's node, which is always sent the expiry. A hub that ran an earlier build with untrusted spokes may still hold rows that forged events changed before this check existed; those rows are not repaired automatically.
@@ -379,8 +381,10 @@ While an event is skipped, a node that would have received it treats later event
 | `resource.adopted`, `resource.borrowed`, `resource.transferred` | The lease or its role is absent | Its renewals and its release change nothing there |
 | `resource.renewed` | The leases look expired early | For a borrow on another node's resource, that node ends the lease when it runs out there, on every node; borrow again. For a lease on the holder's own resource, the next renewal corrects it |
 | `resource.released` | The leases look held until they run out there, at most 24 hours after the last renewal seen | None |
-| `session.*`, the other `hold.*` and `resource.*` kinds, `push.*`, `transport.*` | Presence is older, or a feed line is absent | None |
+| `session.*` and the other `hold.*` and `resource.*` kinds | Presence is older, or a feed line is absent | None |
 | `request.*` | A feed line is absent | None |
+
+`push.*` and `transport.*` kinds are node-local operational evidence and are never synced. Other nodes never see them, so they do not participate in skip reporting.
 
 ### With an earlier build
 

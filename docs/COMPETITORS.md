@@ -49,7 +49,7 @@ Another's column describes `main` today. Where a capability is in the v0.1.0 sco
 | Recorded approvals, with approver | No | M1, M2 | Unverified | Yes | Yes: human validation before release |
 | Result stored on the item | No | M2 | Not applicable | Yes: artifacts | Yes: run snapshots |
 | Recovery after a crashed session | Stale requests can be taken over | M2 | Not stated | Not stated | Yes: durable retries, worktree recovery |
-| File conflict prevention | Yes: holds at the edit, across worktrees | M4 | No | No | By isolation: worktree per ticket |
+| File conflict prevention | Yes: holds at the edit, within a checkout | M4 | No | No | By isolation: worktree per ticket |
 | Serialized merge into a shared branch | No | not in scope | No | No | Yes |
 | Limit on work in progress | No | not in scope | No | Not stated | Yes: column capacity |
 | Wake an idle agent | Herdr, tmux, cmux; delivery only | M5: confirmed start | Claude and Grok background pickup | Yes: hook wait, no multiplexer | It launches the agent itself |
@@ -81,7 +81,7 @@ Another's column describes `main` today. Where a capability is in the v0.1.0 sco
 
 Each is on `main` and covered by tests or by the owner's daily use. None needs a comparison to make.
 
-- An edit to a file another agent holds is stopped at the edit, with the holder named, for Claude Code and Codex, across worktrees and clones on one machine. None of the three tools stops an edit.
+- An edit to a file another agent holds is stopped at the edit, with the holder named, for Claude Code and Codex, within one checkout on one machine. None of the three tools stops an edit.
 - One local SQLite database, no account, no telemetry, no network call you did not configure. Zipline and Polyroom are hosted; KittyClaw sends a heartbeat.
 - Agents you started yourself, in your own terminals, coordinate without Another launching or owning them.
 - A registry of running servers and ports with leases, so an agent borrows a model server instead of starting a second one. None of the three has this.

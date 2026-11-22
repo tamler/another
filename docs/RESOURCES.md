@@ -2,6 +2,8 @@
 
 Before an agent starts a model server, dev server, database, container or long job, it asks Another whether one is already running and **borrows** it instead of spawning a duplicate. Resources carry an owner, a purpose and leases that expire unless renewed. Anything left without a lease shows up as an orphan, and only a human can reap it.
 
+**Status:** The resource registry is present, but frozen for v0.1.0 and treated as experimental. It stays in the tree and gets only admitted security and data-loss fixes.
+
 ## Kinds
 
 | Kind | Example name | Notes |

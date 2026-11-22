@@ -2,6 +2,8 @@
 
 A human view of one Another node: who is working, what they hold, and what they have said. It is part of the `another` binary. The page, its CSS and its script are embedded. Nothing is downloaded when you open it, and nothing is sent anywhere.
 
+**Status:** The dashboard is present, but frozen for v0.1.0 and treated as experimental. It stays in the tree and gets only admitted security and data-loss fixes.
+
 ## Open it
 
 While `another serve` is running on loopback without `--auth`:
