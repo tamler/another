@@ -45,8 +45,9 @@ fn a_worktree_with_a_relative_gitdir_shares_the_checkouts_key() {
     let wt = repo_link_for(&dir.path().join("wt-a")).expect("the worktree is a repository");
     assert_eq!(main.key, "example.com/me/shop");
     assert_eq!(
-        wt, main,
-        "both checkouts of one repository share key and prefix"
+        (wt.key.as_str(), wt.prefix.as_str()),
+        (main.key.as_str(), main.prefix.as_str()),
+        "both checkouts of one repository share key and prefix (checkout paths differ after D92)"
     );
 
     let deep = repo_link_for(&dir.path().join("wt-a/src/deep")).unwrap();
@@ -140,7 +141,8 @@ fn adv237_a_symlinked_relative_worktree_still_shares_the_checkouts_key() {
 }
 
 /// A worktree whose link was cached under the old key rules (KEY_VERSION v2, from before the
-/// symlink fix) is relinked, not trusted: its holds count against the main checkout's.
+/// symlink fix) is relinked, not trusted. Holds are scoped to a checkout (D92), so this
+/// pins the cache refresh itself: the stale key is replaced with the shared origin key.
 #[cfg(unix)]
 #[test]
 fn a_link_cached_under_the_old_key_rules_is_recomputed() {
@@ -192,10 +194,17 @@ fn a_link_cached_under_the_old_key_rules_is_recomputed() {
             .unwrap()
     };
     assert_eq!(hold("alice", &main).granted.len(), 1);
-    let bob = hold("bob", &wt);
-    assert!(
-        bob.granted.is_empty(),
-        "the stale v2 key was trusted: {bob:?}"
+    let _bob = hold("bob", &wt);
+    let key: String = rusqlite::Connection::open(home.join(DB_FILE))
+        .unwrap()
+        .query_row(
+            "SELECT repo_key FROM project_repos WHERE project_id = ?1",
+            [&wt.project_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        key, "v3:example.com/me/shop",
+        "the stale v2 key was still cached: {key}"
     );
-    assert_eq!(bob.conflicts.len(), 1, "{bob:?}");
 }
