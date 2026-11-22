@@ -209,6 +209,11 @@ pub fn listed_holds(hs: &[ListedHold]) -> String {
 pub fn conflicts(cs: &[HoldConflict]) -> String {
     cs.iter()
         .map(|c| {
+            // A hold whose pattern could not be read: the note says whose it is, on which
+            // node, and how to clear it.
+            if let Some(note) = &c.unreadable {
+                return format!("conflict: {}: {note}\n", c.path);
+            }
             // The project matters: the holder may be in another project of the checkout,
             // one registered at a subdirectory of it.
             format!(
@@ -235,10 +240,54 @@ pub fn hold_report(r: &HoldReport) -> String {
         format!("nothing acquired\n{}", conflicts(&r.conflicts))
     };
     for w in &r.warnings {
+        if let Some(note) = &w.unreadable {
+            let _ = writeln!(
+                out,
+                "warning: {}: {note} (holds are node-local; this one does not block you)",
+                w.path
+            );
+            continue;
+        }
         let _ = writeln!(
             out,
             "warning: {} overlaps {} held on another node by {} (holds are node-local; coordinate)",
             w.path, w.held.pattern, w.held.agent
+        );
+    }
+    if r.warnings_more > 0 {
+        let _ = writeln!(
+            out,
+            "warning: {} more hold(s) on other nodes overlap and are not listed",
+            r.warnings_more
+        );
+    }
+    if !r.not_compared.is_empty() {
+        // One line however many holds and nodes there are: a peer chooses both.
+        let total: u64 = r.not_compared.iter().map(|n| u64::from(n.holds)).sum();
+        let mut from: Vec<String> = r
+            .not_compared
+            .iter()
+            .take(5)
+            .map(|n| {
+                format!(
+                    "{} from {}",
+                    n.holds,
+                    another_core::display_line(&n.node, 64)
+                )
+            })
+            .collect();
+        if r.not_compared.len() > 5 {
+            from.push(format!(
+                "the rest from {} more nodes",
+                r.not_compared.len() - 5
+            ));
+        }
+        let _ = writeln!(
+            out,
+            "warning: {total} hold(s) on other nodes were not compared with yours ({}): \
+             comparing with other nodes' holds stops at a fixed amount of work, so these may \
+             overlap (holds are node-local; they do not block you)",
+            from.join(", ")
         );
     }
     out
@@ -508,6 +557,9 @@ pub fn sync_report(r: &crate::fed::SyncReport) -> String {
     );
     for x in r.push_rejected.iter().chain(&r.pull_rejected) {
         let _ = write!(out, "\nrejected {}: {}", x.event_id, x.reason);
+    }
+    for x in &r.not_applied {
+        let _ = write!(out, "\nnot applied {}: {}", x.event_id, x.reason);
     }
     // Every unacknowledged skip, after every sync, until `another sync ack`.
     if !r.skipped.is_empty() {

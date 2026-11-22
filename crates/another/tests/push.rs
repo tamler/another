@@ -822,7 +822,7 @@ fn pre_edit_holds_files_and_stops_edits_of_other_agents_in_the_checkout() {
 }
 
 #[test]
-fn tool_hooks_fail_open_fast_when_the_database_is_missing_or_locked() {
+fn tool_hooks_fail_open_when_the_database_is_missing_and_pre_edit_denies_a_held_lock() {
     let env = Env::new();
     let edit = tool(
         &env.main,
@@ -849,10 +849,14 @@ fn tool_hooks_fail_open_fast_when_the_database_is_missing_or_locked() {
     let (out, took) = env.hook_timed("post-tool", "claude", &after, &[]);
     assert_eq!(out, "");
     assert!(took < Duration::from_secs(2), "{took:?}");
-    // The edit guard cannot write: it lets the edit through and logs why.
+    // The edit guard cannot write: it waits, then denies the edit and logs why.
     let (out, took) = env.hook_timed("pre-edit", "claude", &edit, &[]);
-    assert_eq!(out, "");
-    assert!(took < Duration::from_secs(3), "{took:?}");
+    assert!(
+        out.contains("\"permissionDecision\":\"deny\"")
+            && out.contains("the hold database stayed locked for 3 seconds"),
+        "{out}"
+    );
+    assert!(took < Duration::from_secs(6), "{took:?}");
     db.execute_batch("ROLLBACK").unwrap();
     drop(db);
     let (out, _) = env.hook_timed("post-tool", "claude", &after, &[]);
@@ -871,14 +875,23 @@ fn tool_hooks_fail_open_fast_when_the_database_is_missing_or_locked() {
     assert_eq!(out, "");
     assert!(took < Duration::from_secs(2), "{took:?}");
     let (out, took) = env.hook_timed("pre-edit", "claude", &edit, &[]);
-    assert_eq!(out, "");
-    assert!(took < Duration::from_secs(3), "{took:?}");
+    assert!(
+        out.contains("\"permissionDecision\":\"deny\"")
+            && out.contains("the hold database stayed locked for 3 seconds"),
+        "{out}"
+    );
+    assert!(took < Duration::from_secs(6), "{took:?}");
     db.execute_batch("ROLLBACK").unwrap();
     drop(db);
 
     let log = std::fs::read_to_string(env.another_home.join("logs/hooks.log")).unwrap();
     assert!(log.contains("pre-edit --client claude"), "{log}");
-    assert!(log.contains("failing open"), "{log}");
+    assert!(
+        log.lines().any(
+            |l| l.contains("pre-edit --client claude") && l.contains("denied; could not check")
+        ),
+        "{log}"
+    );
 }
 
 impl Env {

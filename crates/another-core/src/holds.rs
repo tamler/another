@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use globset::{Glob, GlobBuilder, GlobMatcher};
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -38,7 +38,12 @@ pub const MAX_HOLD_TTL_SECONDS: i64 = 4 * 60 * 60;
 const HOLD_IDS_PER_EVENT: usize = 10_000;
 /// Longest hold reason a local caller may give, in bytes (D99).
 pub const MAX_HOLD_REASON_BYTES: usize = 1024;
-/// Longest hold pattern a local caller may give, in bytes: as long as any real path (D99).
+/// Longest hold pattern, in bytes: as long as any real path (D99). 4096 is the longest
+/// path Linux takes in one call (macOS stops at 1024). A glob of this size compiles in a
+/// few milliseconds. D99 set it for what a local caller gives to `hold acquire`; it is
+/// also the most this build compiles as a glob, wherever the pattern came from, and the
+/// limit for a pattern a peer sends. The edit hook's holds are file names compared as
+/// text, never compiled, and are not held to it.
 pub const MAX_HOLD_PATTERN_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -61,6 +66,12 @@ pub struct HoldConflict {
     pub path: String,
     /// The existing hold it collides with.
     pub held: Hold,
+    /// Set when the existing hold's pattern could not be read (longer than the limit, or
+    /// not a glob that compiles), so it counts as overlapping every path in its project.
+    /// The text names the holder's node and says how to clear the hold; `held.pattern` is
+    /// then a short prefix and a length, never the stored pattern.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unreadable: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -69,8 +80,28 @@ pub struct HoldReport {
     pub granted: Vec<Hold>,
     pub conflicts: Vec<HoldConflict>,
     /// Overlapping holds on other nodes in a project with the same name. Holds are node-local,
-    /// so these never block; they flag a likely cross-machine clash.
+    /// so these never block; they flag a likely cross-machine clash. At most ten are listed.
     pub warnings: Vec<HoldConflict>,
+    /// Overlapping holds on other nodes that were found but are not listed in `warnings`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub warnings_more: u32,
+    /// Holds on other nodes that were not compared, by node: comparing with other nodes'
+    /// holds is best effort within a fixed budget per command, and a peer chooses how many
+    /// holds it sends and how costly their patterns are. They may overlap.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub not_compared: Vec<NotCompared>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// Holds of one other node that a command did not compare.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct NotCompared {
+    /// The node's name.
+    pub node: String,
+    pub holds: u32,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -216,6 +247,10 @@ fn clamp_ttl(ttl: Option<i64>) -> Result<i64> {
 
 /// Normalize a requested path or glob to a project-relative pattern.
 pub(crate) fn normalize_pattern(project: &Project, raw: &str) -> Result<String> {
+    // Longer than any pattern in this project can be: refused before any message quotes it.
+    if raw.trim().len() > MAX_HOLD_PATTERN_BYTES + project.abs_path.len() + 1 {
+        crate::queue::within_bytes("hold pattern", raw.trim(), MAX_HOLD_PATTERN_BYTES)?;
+    }
     let path = normalize_path(project, raw)?;
     let pattern = if path.is_empty() {
         "**".to_string()
@@ -264,12 +299,107 @@ fn normalize_path(project: &Project, raw: &str) -> Result<String> {
     Ok(parts.join("/"))
 }
 
-fn compile(pattern: &str) -> Result<GlobMatcher> {
-    let glob: Glob = GlobBuilder::new(pattern)
+/// A pattern for a message: its first 40 characters as one shown line, quoted, and its
+/// length. A pattern can come from a peer or from a row an older build stored, and can be
+/// megabytes long, so it is never printed whole.
+pub(crate) fn pattern_brief(pattern: &str) -> String {
+    let head: String = pattern.chars().take(PATTERN_BRIEF_CHARS + 1).collect();
+    format!(
+        "{:?} ({} bytes)",
+        crate::mail::display_line(&head, PATTERN_BRIEF_CHARS),
+        pattern.len()
+    )
+}
+
+/// How much of a pattern [`pattern_brief`] shows.
+const PATTERN_BRIEF_CHARS: usize = 40;
+
+/// A requested glob, prepared to judge holds on plain paths without a walk.
+///
+/// For a plain path the walk of [`glob_walk`] says "overlaps" in four ways: the glob
+/// matches the path; the glob names a directory above it (its last component has no
+/// wildcard); the path may be a directory above what the glob names (the path ends before
+/// the glob does, or reaches a `**`); or a `[`, `]`, `{` or `}` in the path is matched as
+/// a plain character. One compiled matcher gives the same answer whenever the second and
+/// fourth cannot apply and the path is long enough for the third to be decided by a match:
+/// the whole glob when it has no `**`, and otherwise the glob cut after its first `**`,
+/// since a path that matches up to there overlaps whatever follows. The shapes it does not
+/// take (`of` returns none, or `touches` does) keep the walk: a glob whose last component
+/// can name an entry without a wildcard, a glob with a `/` inside braces or a class,
+/// a piece with a `\\`, an empty alternative or `**` inside braces, a class that can match
+/// `/`, a path with a bracket or a brace in it, and a path with fewer components than the
+/// glob has up to its first `**`.
+/// `the_direct_match_agrees_with_the_walk` holds the two to the same answers.
+struct DirectMatch<'a> {
+    /// The glob's text before its first wildcard: a path that neither starts with it nor
+    /// is the start of it cannot overlap, by any reading.
+    prefix: &'a str,
+    /// The fewest components a path needs for the matcher to decide.
+    need: usize,
+    matcher: GlobSet,
+}
+
+impl<'a> DirectMatch<'a> {
+    fn of(glob: &'a str) -> Option<Self> {
+        let pieces = pattern_components(glob);
+        if pieces
+            .iter()
+            .any(|p| p.contains('/') || !direct_piece_ok(p))
+            || last_falls_back_to_walk(pieces.last()?)
+        {
+            return None;
+        }
+        let (matcher, need) = match pieces.iter().position(|p| *p == "**") {
+            Some(at) => {
+                let head: String = pieces[..at].iter().map(|p| format!("{p}/")).collect();
+                (compile(&format!("{head}**")).ok()?, at + 1)
+            }
+            None => (compile(glob).ok()?, pieces.len()),
+        };
+        Some(Self {
+            prefix: literal_prefix(glob),
+            need,
+            matcher,
+        })
+    }
+
+    /// Whether the glob overlaps a hold on the plain path `path`; none when only the walk
+    /// can say.
+    fn touches(&self, path: &str) -> Option<bool> {
+        if !path.starts_with(self.prefix) && !self.prefix.starts_with(path) {
+            return Some(false);
+        }
+        if path.contains(['[', ']', '{', '}']) || path.split('/').count() < self.need {
+            return None;
+        }
+        Some(self.matcher.is_match(path))
+    }
+}
+
+/// Compile a pattern, or say why not. Never panics, whatever the pattern: one over
+/// [`MAX_HOLD_PATTERN_BYTES`] is refused unread, and the matcher is built as a set of one
+/// glob, because globset returns an error from a set when the compiled form passes its own
+/// size limit (10 MiB) where `Glob::compile_matcher` panics.
+fn compile(pattern: &str) -> Result<GlobSet> {
+    crate::queue::within_bytes("hold pattern", pattern, MAX_HOLD_PATTERN_BYTES)?;
+    let glob = GlobBuilder::new(pattern)
         .literal_separator(true)
         .build()
         .map_err(|e| Error::Invalid(format!("invalid glob {pattern:?}: {e}")))?;
-    Ok(glob.compile_matcher())
+    GlobSetBuilder::new().add(glob).build().map_err(|_| {
+        Error::Invalid(format!(
+            "invalid glob {}: it is too large to compile",
+            pattern_brief(pattern)
+        ))
+    })
+}
+
+/// A stored pattern this build cannot use: a glob longer than the limit, or one that does
+/// not compile. A pattern without glob syntax is compared as text and never compiled, so
+/// it is readable whatever it spells and however long it is; the edit hook's holds are
+/// such patterns and are not held to the limit (D99).
+pub(crate) fn pattern_unreadable(pattern: &str) -> bool {
+    literal_pattern(pattern).is_none() && compile(pattern).is_err()
 }
 
 /// Decode an entirely literal pattern, including globset's single-character escapes.
@@ -307,7 +437,20 @@ pub(crate) fn hold_covers(held: &str, path: &str) -> bool {
     }
     match literal_pattern(held) {
         Some(held) => covers(&held, &path),
-        None => held == "**" || glob_touches_literal(held, &path, false),
+        // An own glob that cannot be read covers nothing: the edit takes its own narrow
+        // hold instead of resting on one nobody can check. One too costly to walk covers
+        // only what it matches as a whole, for the same reason.
+        None => {
+            held == "**"
+                || compile(held).is_ok_and(|whole| {
+                    let mut budget = WALK_BUDGET;
+                    match glob_walk(held, &path, false, &mut budget) {
+                        Touch::Yes => true,
+                        Touch::No => false,
+                        Touch::Unknown => whole.is_match(&path),
+                    }
+                })
+        }
     }
 }
 
@@ -328,21 +471,28 @@ fn covers(dir: &str, path: &str) -> bool {
 /// covers everything below it, so holding `src` overlaps `src/main.rs`. False positives
 /// are acceptable for advisory holds; false negatives are not.
 pub fn patterns_overlap(a: &str, b: &str) -> bool {
+    let mut budget = WALK_BUDGET;
+    overlap_within(a, b, &mut budget) != Touch::No
+}
+
+/// [`patterns_overlap`] within `budget` steps, with "ran out" as its own answer.
+fn overlap_within(a: &str, b: &str, budget: &mut usize) -> Touch {
+    let yes = |found: bool| if found { Touch::Yes } else { Touch::No };
     if a == b || a == "**" || b == "**" {
-        return true;
+        return Touch::Yes;
     }
     // Older auto holds stored filenames without escapes. Keep their exact spelling
     // protected while also interpreting any deliberate manual glob conservatively.
     if literal_pattern(a).as_deref() == Some(b) || literal_pattern(b).as_deref() == Some(a) {
-        return true;
+        return Touch::Yes;
     }
     match (literal_pattern(a), literal_pattern(b)) {
-        (Some(a), Some(b)) => covers(&a, &b) || covers(&b, &a),
-        (None, Some(b)) => glob_touches_literal(a, &b, true),
-        (Some(a), None) => glob_touches_literal(b, &a, true),
+        (Some(a), Some(b)) => yes(covers(&a, &b) || covers(&b, &a)),
+        (None, Some(b)) => glob_walk(a, &b, true, budget),
+        (Some(a), None) => glob_walk(b, &a, true, budget),
         (None, None) => {
             let (pa, pb) = (literal_prefix(a), literal_prefix(b));
-            pa.starts_with(pb) || pb.starts_with(pa)
+            yes(pa.starts_with(pb) || pb.starts_with(pa))
         }
     }
 }
@@ -478,6 +628,64 @@ fn outside_classes(pattern: &str) -> Vec<(usize, char)> {
     out
 }
 
+/// The last component keeps the walk when any expansion names an entry without a
+/// wildcard: `{core,*-plugin}` spells out `core`, which the walk treats as a directory
+/// hold covering everything below it. `*.{ts,tsx}` still has a wildcard in every
+/// expansion, so it can use the direct match. Check each part separately rather than
+/// expanding every combination of alternatives.
+fn last_falls_back_to_walk(last: &str) -> bool {
+    let Some((before, alternatives, after)) = first_alternation(last) else {
+        return names_entries(last);
+    };
+    names_entries(before)
+        && last_falls_back_to_walk(after)
+        && alternatives.iter().any(|a| last_falls_back_to_walk(a))
+}
+
+/// Shapes the direct match does not take, so the walk is kept: a backslash, an empty
+/// alternative or `**` inside braces, or a character class that can match `/`.
+fn direct_piece_ok(piece: &str) -> bool {
+    if piece.contains('\\') || class_can_match_slash(piece) {
+        return false;
+    }
+    let Some((_, alts, after)) = first_alternation(piece) else {
+        return true;
+    };
+    if alts.iter().any(|a| a.is_empty() || a.contains("**")) {
+        return false;
+    }
+    alts.iter().all(|a| direct_piece_ok(a)) && direct_piece_ok(after)
+}
+
+/// A class matches `/` when it contains one, or when it is negated (`[!` / `[^`) and so
+/// can. An unclosed `[` is a plain character and does not.
+fn class_can_match_slash(pattern: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    let mut i = 0;
+    while i < pattern.len() {
+        if bytes[i] == b'[' {
+            if let Some(end) = class_end(pattern, i) {
+                let mut inner = i + 1;
+                let negated = matches!(bytes.get(inner), Some(b'!' | b'^'));
+                if negated {
+                    inner += 1;
+                }
+                if negated || pattern[inner..end].contains('/') {
+                    return true;
+                }
+                i = end + 1;
+                continue;
+            }
+        }
+        i += pattern[i..]
+            .chars()
+            .next()
+            .map(|c| c.len_utf8())
+            .unwrap_or(1);
+    }
+    false
+}
+
 /// A glob component that names a directory or a file rather than a set of them: no `*` and
 /// no `?` outside a character class. `[id]`, `{shop,blog}` and the escaped literal names
 /// `[*]` and `[?]` qualify, `*` and `[id]*` do not.
@@ -536,11 +744,54 @@ fn first_alternation(pattern: &str) -> Option<(&str, Vec<String>, &str)> {
     Some((&pattern[..open_at], alternatives, &pattern[close_at + 1..]))
 }
 
-/// Steps one component walk may take. A comparison that runs past it counts as an
-/// overlap: a spurious conflict costs a retry, a missed one lets two agents edit one file.
-/// A realistic pattern takes a few dozen steps; only a pattern that branches at every
-/// component, such as `{**,x}` many times over, gets near this.
-const WALK_BUDGET: usize = 20_000;
+/// Steps one comparison may take. One that runs past it counts as an overlap between
+/// holds of this node: a spurious conflict costs a retry, a missed one lets two agents
+/// edit one file. A step costs about 8 microseconds in a release build (it compiles one
+/// component, twice at most); the longest single comparison measured, over the hostile
+/// shapes of both reviews, took 21 ms, so 25 ms is a bound with some margin. The
+/// patterns in this repository's tests take at most 37 steps and the widest honest one
+/// measured takes 493 (`honest_patterns_stay_far_inside_the_walk_budget`); only a pattern
+/// that branches at every component, such as `{a,b}` fourteen times over, reaches this.
+/// It was 20,000 until the review of Q30 measured 0.2 s for one comparison of an 86 byte
+/// glob.
+const WALK_BUDGET: usize = 2_000;
+
+/// What one command may spend on comparing with the holds of other nodes, all of them
+/// together, in estimated microseconds of a release build. Those holds never block, so
+/// the comparison is best effort: when the budget is spent the rest are not compared and
+/// the command says how many, from which nodes. The estimates, from measurements on this
+/// project's development machine: reading a hold costs 1 and one more for every
+/// [`READ_BYTES_PER_MICRO`] bytes of its pattern, comparing two patterns as text or by a
+/// direct match costs 1 and one more for every [`TEXT_BYTES_PER_MICRO`] bytes, compiling a
+/// glob to learn whether it can be read costs half a microsecond a byte, and a walk costs
+/// [`STEP_MICROS`] a step, [`WALK_BUDGET`] steps at most. What that buys is pinned by
+/// `what_one_command_compares_of_a_peers_holds`: 19,999 holds on plain paths, whether a
+/// path or a glob is asked for, and a few hundred to a few thousand glob holds. Three
+/// globs built to be costly use all of it. Measured against 10,000 holds of each hostile
+/// shape tried, a whole `hold acquire` takes about 50 ms at most (docs/DECISIONS.md, the
+/// Q30 row).
+pub(crate) const FOREIGN_BUDGET: usize = 40_000;
+
+/// The estimated cost of one walk step, in microseconds.
+const STEP_MICROS: usize = 8;
+
+/// Bytes of pattern text compared as text in one estimated microsecond.
+const TEXT_BYTES_PER_MICRO: usize = 128;
+
+/// Bytes of a stored pattern read from the database in one estimated microsecond: a 4 KB
+/// pattern was measured at about 5 microseconds to read and tell a glob from a path.
+const READ_BYTES_PER_MICRO: usize = 1024;
+
+/// Overlapping holds of other nodes one command lists one by one; the rest are counted.
+pub(crate) const FOREIGN_LISTED: usize = 10;
+
+/// Compiling a component is what a step costs, and a long component costs more: every
+/// this many bytes of a compiled component take one more step from the budget. A
+/// component shorter than this (nearly every real file or directory name pattern) costs
+/// nothing extra, so realistic patterns are judged exactly as before. Without it a pattern
+/// inside the size limit, a 4,000 byte component behind a dozen alternations, was compiled
+/// thousands of times in one comparison, which took minutes.
+const COMPILE_BYTES_PER_STEP: usize = 16;
 
 /// Glob components against the components of a literal path. An alternation in the first
 /// component is spelled out one alternative at a time, each respliced into components, so
@@ -581,6 +832,7 @@ fn components_touch(
                 || components_touch(glob, deeper, path_may_be_dir, budget)
         }
         (Some((g, rest)), Some((p, deeper))) => {
+            *budget = budget.saturating_sub(g.len() / COMPILE_BYTES_PER_STEP);
             component_touches(g, p)
                 && if rest.is_empty() {
                     deeper.is_empty() || names_entries(g)
@@ -593,15 +845,36 @@ fn components_touch(
 
 /// A glob against a literal path: component by component with alternations spelled out
 /// as they are reached, and the whole as globset reads it.
-fn glob_touches_literal(glob: &str, literal: &str, path_may_be_dir: bool) -> bool {
+///
+/// The answer is `Unknown` when `budget` ran out. Each caller says what that means: an
+/// overlap where a missed one would let two agents edit one file, "does not cover" for an
+/// agent's own hold, "not compared" for another node's hold.
+fn glob_walk(glob: &str, literal: &str, path_may_be_dir: bool, budget: &mut usize) -> Touch {
+    // A glob over the limit is not walked or compiled at all (a peer or an older build
+    // can have stored megabytes): it overlaps everything, at no cost.
+    if glob.len() > MAX_HOLD_PATTERN_BYTES {
+        return Touch::Yes;
+    }
     let lit: Vec<&str> = literal.split('/').collect();
-    let mut budget = WALK_BUDGET;
-    components_touch(
-        &pattern_components(glob),
-        &lit,
-        path_may_be_dir,
-        &mut budget,
-    ) || matches(glob, literal)
+    let touched = components_touch(&pattern_components(glob), &lit, path_may_be_dir, budget);
+    // The whole-glob reading compiles the glob once more, and pays for it.
+    *budget = budget.saturating_sub(1 + glob.len() / COMPILE_BYTES_PER_STEP);
+    if *budget == 0 {
+        Touch::Unknown
+    } else if touched || matches(glob, literal) {
+        Touch::Yes
+    } else {
+        Touch::No
+    }
+}
+
+/// What a bounded comparison found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Touch {
+    Yes,
+    No,
+    /// The budget ran out before an answer.
+    Unknown,
 }
 
 /// Link local projects that hold live holds but have no current repository link: never
@@ -669,30 +942,87 @@ fn conflicts_for(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let fold = folds_case(Path::new(&project.abs_path));
     let overlaps = |a: &str, b: &str| overlap_on_volume(a, b, fold);
+    // A stored pattern that cannot be read (a row an older build wrote) fails closed: it
+    // stands for every path of the project it is in, and for nothing outside that project.
+    let unreadable: Vec<bool> = others
+        .iter()
+        .map(|(held, _, _)| pattern_unreadable(&held.pattern))
+        .collect();
     let mut conflicts = Vec::new();
     for (requested, pattern) in patterns {
-        for (held, held_project, held_prefix) in &others {
+        for ((held, held_project, held_prefix), unreadable) in others.iter().zip(&unreadable) {
             if !(exclusive || held.exclusive) {
                 continue;
             }
+            let theirs = if *unreadable { "**" } else { &held.pattern };
             let overlap = if *held_project == project.project_id {
-                overlaps(pattern, &held.pattern)
+                overlaps(pattern, theirs)
             } else {
                 // Compare as paths from the top of the checkout.
                 overlaps(
                     &crate::repo::in_repo(&my_prefix, pattern),
-                    &crate::repo::in_repo(held_prefix, &held.pattern),
+                    &crate::repo::in_repo(held_prefix, theirs),
                 )
             };
-            if overlap {
+            if overlap && *unreadable {
+                conflicts.push(unreadable_conflict(tx, tx.node_id, requested, held)?);
+            } else if overlap {
                 conflicts.push(HoldConflict {
                     path: requested.clone(),
                     held: held.clone(),
+                    unreadable: None,
                 });
             }
         }
     }
     Ok(conflicts)
+}
+
+/// The conflict a hold makes when its stored pattern cannot be read. The note names the
+/// holder's node and says how to clear the hold; the pattern is shown as a short prefix
+/// and a length, never whole.
+fn unreadable_conflict(
+    conn: &Connection,
+    local: &str,
+    requested: &str,
+    held: &Hold,
+) -> Result<HoldConflict> {
+    let node: Option<(String, bool)> = conn
+        .query_row(
+            "SELECT n.display_name, n.node_id = ?2 FROM holds h
+             JOIN nodes n ON n.node_id = h.node_id WHERE h.hold_id = ?1",
+            params![held.hold_id, local],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let brief = pattern_brief(&held.pattern);
+    let (id, agent, project) = (&held.hold_id, &held.agent, &held.project);
+    let note = match node {
+        Some((name, false)) => format!(
+            "hold {id} of {agent} on node {name} has a pattern that could not be read \
+             ({brief}), so it counts as overlapping every path in project {project}. It ends \
+             at {} unless that node renews it; to clear it sooner, release hold {id} on node \
+             {name} and sync",
+            held.expires_at
+        ),
+        Some((name, true)) => format!(
+            "hold {id} of {agent} on this node ({name}) has a pattern that could not be read \
+             ({brief}), so it counts as overlapping every path in project {project}. To clear \
+             it: another hold release --agent {agent} {id}"
+        ),
+        None => format!(
+            "hold {id} of {agent} has a pattern that could not be read ({brief}), so it counts \
+             as overlapping every path in project {project}"
+        ),
+    };
+    Ok(HoldConflict {
+        path: requested.to_string(),
+        held: Hold {
+            pattern: brief,
+            ..held.clone()
+        },
+        unreadable: Some(crate::mail::display_line(&note, 700)),
+    })
 }
 
 /// Create a hold, or update and renew the agent's existing hold on the same pattern.
@@ -762,31 +1092,257 @@ fn upsert_hold_tx(
     })
 }
 
-/// Live holds on other nodes, in a project with the same slug, overlapping `patterns`.
-fn remote_clashes(
-    tx: &Tx<'_>,
-    project: &Project,
+/// What one command found when it compared with the holds of other nodes.
+#[derive(Debug, Default)]
+pub(crate) struct ForeignClashes {
+    /// The first [`FOREIGN_LISTED`] overlaps: the index of the local pattern, the clash and
+    /// the name of the node that holds it.
+    pub listed: Vec<(usize, HoldConflict, String)>,
+    /// Overlaps found after those.
+    pub more: u32,
+    /// Holds that were not compared, by node, in node name order.
+    pub not_compared: Vec<NotCompared>,
+}
+
+/// Compare `patterns` with the live holds other nodes have in a project called `slug`,
+/// and add what is found to `found`.
+///
+/// Best effort and bounded, because those holds never block and a peer chooses how many
+/// there are and what they cost: every hold read and every step of every comparison comes
+/// out of `budget`, which the caller sets once for the whole command. When it is spent, or
+/// one comparison runs past [`WALK_BUDGET`], the hold is not compared; such holds are
+/// counted by node from the index alone. The holds are read one at a time, in no promised
+/// order, so nothing a peer sent is loaded that is not compared. Reads only: it runs
+/// outside the write transaction.
+///
+/// A peer's pattern that cannot be read (a row stored before patterns were checked on
+/// arrival) fails closed: it counts as overlapping every path in this project.
+pub(crate) fn foreign_clashes(
+    conn: &Connection,
+    local: &str,
+    now: i64,
+    slug: &str,
     patterns: &[(String, String)],
-) -> Result<Vec<HoldConflict>> {
-    let mut stmt = tx.prepare(&format!(
-        "{HOLD_SELECT} WHERE h.released_at IS NULL AND h.expires_at > ?1 AND h.node_id != ?2
-           AND p.slug = ?3 ORDER BY h.created_at"
-    ))?;
-    let theirs = stmt
-        .query_map(params![tx.now, tx.node_id, project.slug], hold_from_row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut out = Vec::new();
-    for (requested, pattern) in patterns {
-        for held in &theirs {
-            if patterns_overlap(pattern, &held.pattern) {
-                out.push(HoldConflict {
+    budget: &mut usize,
+    found: &mut ForeignClashes,
+) -> Result<()> {
+    // Take `cost` from the budget; false when that spends it.
+    let spend = |budget: &mut usize, cost: usize| {
+        *budget = budget.saturating_sub(cost);
+        *budget > 0
+    };
+    // What can be known about each requested glob before any hold is read: compiled once
+    // here and paid for, it judges a hold on a plain path without a walk.
+    let direct: Vec<Option<DirectMatch>> = patterns
+        .iter()
+        .map(|(_, pattern)| {
+            let glob = literal_pattern(pattern).is_none();
+            (glob && spend(budget, pattern.len().min(MAX_HOLD_PATTERN_BYTES) / 2))
+                .then(|| DirectMatch::of(pattern))
+                .flatten()
+        })
+        .collect();
+    let mut compared: std::collections::BTreeMap<String, u32> = Default::default();
+    let mut all_compared = true;
+    // Judge one hold whose row has been read and paid for. False when the budget, or one
+    // comparison's own limit, ran out before an answer.
+    let mut judge = |held: &Hold,
+                     node: &str,
+                     literal: Option<&str>,
+                     budget: &mut usize,
+                     found: &mut ForeignClashes|
+     -> Result<bool> {
+        let size = held.pattern.len();
+        // A glob is compiled once to learn whether it can be read.
+        let mut known = literal.is_some() || spend(budget, size.min(MAX_HOLD_PATTERN_BYTES) / 2);
+        let unreadable = known && literal.is_none() && compile(&held.pattern).is_err();
+        // The local patterns this hold overlaps, by index.
+        let mut clashes = Vec::new();
+        if unreadable {
+            clashes.extend(0..patterns.len());
+        } else if known {
+            for (i, (_, pattern)) in patterns.iter().enumerate() {
+                // Comparing the two as text.
+                if !spend(budget, 1 + (size + pattern.len()) / TEXT_BYTES_PER_MICRO) {
+                    known = false;
+                    break;
+                }
+                // A requested glob against a hold on a plain path: matched directly where
+                // that is the same answer as the walk, at the cost already paid.
+                let quick = match (&direct[i], literal) {
+                    (Some(direct), Some(path)) => direct.touches(path),
+                    _ => None,
+                };
+                let touch = match quick {
+                    Some(true) => Touch::Yes,
+                    Some(false) => Touch::No,
+                    None => {
+                        let allowed = (*budget / STEP_MICROS).min(WALK_BUDGET);
+                        let mut steps = allowed;
+                        let touch = overlap_within(pattern, &held.pattern, &mut steps);
+                        *budget -= (allowed - steps) * STEP_MICROS;
+                        touch
+                    }
+                };
+                match touch {
+                    Touch::Yes => clashes.push(i),
+                    Touch::No => {}
+                    Touch::Unknown => {
+                        known = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if !known {
+            return Ok(false);
+        }
+        *compared.entry(node.to_string()).or_default() += 1;
+        for i in clashes {
+            // Only a clash that is listed is built: the rest are a number.
+            if found.listed.len() >= FOREIGN_LISTED {
+                found.more += 1;
+                continue;
+            }
+            let requested = &patterns[i].0;
+            let clash = if unreadable {
+                unreadable_conflict(conn, local, requested, held)?
+            } else {
+                let mut held = held.clone();
+                // A long pattern is shown as its start and its length: ten warnings with
+                // a peer's 4 KB patterns whole were 38 KB of output.
+                if held.pattern.chars().nth(PATTERN_BRIEF_CHARS).is_some() {
+                    held.pattern = pattern_brief(&held.pattern);
+                }
+                HoldConflict {
                     path: requested.clone(),
-                    held: held.clone(),
-                });
+                    held,
+                    unreadable: None,
+                }
+            };
+            found.listed.push((i, clash, node.to_string()));
+        }
+        Ok(true)
+    };
+    // Holds on plain paths are compared as they are read; globs are set aside and compared
+    // after them. The plain ones are what an honest peer's edits make and cost next to
+    // nothing, so no glob's compile or walk is paid for before they have been compared.
+    // Reading a hold is itself paid for, so what is set aside is bounded by the budget.
+    let mut globs: Vec<(Hold, String)> = Vec::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT h.hold_id, p.slug, a.address, NULL, h.pattern, h.exclusive, h.reason,
+               h.ttl_seconds, h.created_at, h.expires_at, n.display_name
+             FROM holds h
+             JOIN projects p ON p.project_id = h.project_id
+             JOIN agents a ON a.agent_id = h.agent_id
+             JOIN nodes n ON n.node_id = p.node_id
+             WHERE h.released_at IS NULL AND h.expires_at > ?1 AND p.node_id != ?2
+               AND p.slug = ?3",
+        )?;
+        let mut rows = stmt.query(params![now, local, slug])?;
+        while let Some(row) = rows.next()? {
+            if *budget == 0 {
+                all_compared = false;
+                break;
+            }
+            let held = hold_from_row(row)?;
+            let node: String = row.get(10)?;
+            if !spend(budget, 1 + held.pattern.len() / READ_BYTES_PER_MICRO) {
+                all_compared = false;
+                break;
+            }
+            match literal_pattern(&held.pattern) {
+                Some(path) => all_compared &= judge(&held, &node, Some(&path), budget, found)?,
+                None => globs.push((held, node)),
             }
         }
     }
-    Ok(out)
+    for (held, node) in &globs {
+        all_compared &= *budget > 0 && judge(held, node, None, budget, found)?;
+    }
+    if all_compared {
+        return Ok(());
+    }
+    // How many there are, by node, from the index alone: no pattern is read for this.
+    let mut stmt = conn.prepare(
+        "SELECT n.display_name, count(*) FROM holds h
+         JOIN projects p ON p.project_id = h.project_id
+         JOIN nodes n ON n.node_id = p.node_id
+         WHERE h.released_at IS NULL AND h.expires_at > ?1 AND p.node_id != ?2 AND p.slug = ?3
+         GROUP BY n.node_id ORDER BY n.display_name",
+    )?;
+    let totals = stmt
+        .query_map(params![now, local, slug], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (node, total) in totals {
+        let left = total.saturating_sub(compared.get(&node).copied().unwrap_or(0));
+        if left == 0 {
+            continue;
+        }
+        match found.not_compared.iter_mut().find(|n| n.node == node) {
+            Some(n) => n.holds += left,
+            None => found.not_compared.push(NotCompared { node, holds: left }),
+        }
+    }
+    Ok(())
+}
+
+/// Why a peer's `hold.acquired` or `hold.updated` is not applied as a hold: its pattern is
+/// longer than a local `hold acquire` accepts. None for every other event. The event
+/// itself stays stored and relayed, so sync goes on; the refusal is written to the audit
+/// log with the origin node and the event id, and the returned text is what `another sync`
+/// prints. The pattern is never quoted whole.
+///
+/// Only the length is judged here, and nothing is compiled: this runs inside the ingest
+/// write transaction, once for every event of a batch, and a glob of this size takes 2 ms
+/// to compile. Whether a pattern within the limit compiles is found out when it is first
+/// compared ([`foreign_clashes`]), inside that command's budget and outside any write.
+pub(crate) fn refuse_foreign_pattern(
+    tx: &Tx<'_>,
+    origin: &str,
+    event_id: &str,
+    kind: &str,
+    payload: &Value,
+) -> Result<Option<String>> {
+    if !matches!(kind, "hold.acquired" | "hold.updated") {
+        return Ok(None);
+    }
+    let Some(pattern) = payload.get("pattern").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    if pattern.len() <= MAX_HOLD_PATTERN_BYTES {
+        return Ok(None);
+    }
+    let name: Option<String> = tx
+        .query_row(
+            "SELECT display_name FROM nodes WHERE node_id = ?1",
+            [origin],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let reason = crate::mail::display_line(
+        &format!(
+            "{kind} from node {} ({origin}) was stored and relayed but not applied as a hold: \
+             its pattern {} is longer than the limit of {MAX_HOLD_PATTERN_BYTES} bytes",
+            name.as_deref().unwrap_or("unknown"),
+            pattern_brief(pattern)
+        ),
+        700,
+    );
+    tx.execute(
+        "INSERT INTO audit_log (node_id, ts, token_id, agent, operation, outcome, detail, remote)
+         VALUES (?1, ?2, NULL, ?3, 'federation hold pattern', 'refused', ?4, NULL)",
+        params![
+            tx.node_id,
+            tx.now,
+            format!("node:{origin}"),
+            format!("event {event_id}: {reason}")
+        ],
+    )?;
+    Ok(Some(reason))
 }
 
 /// The blocked paths and, per path, the sorted ids of the holds blocking it. This is the
@@ -1323,7 +1879,13 @@ impl Store {
                  WHERE rh.hold_id = ?1 AND r.created_by = ?2 AND r.status IN ('open', 'claimed', 'stale')",
                 params![hold_id, me.id], |r| r.get(0)).optional()?;
             if let Some(mid) = existing { return load_message(tx, &mid); }
-            let pattern = literal_pattern(&held.pattern).unwrap_or(held.pattern);
+            // A pattern that cannot be read is named by its prefix and length: whole, it can
+            // be megabytes, which no message body takes.
+            let pattern = if pattern_unreadable(&held.pattern) {
+                pattern_brief(&held.pattern)
+            } else {
+                literal_pattern(&held.pattern).unwrap_or(held.pattern)
+            };
             // A held file name may contain a line break; subjects are one line (D75).
             let title = crate::mail::single_line(&pattern, 280);
             let message = send_by_id_tx(tx, &me.id, &holder_id, &SendMessage {
@@ -1370,7 +1932,7 @@ impl Store {
             crate::queue::within_bytes("hold pattern", raw, MAX_HOLD_PATTERN_BYTES)?;
         }
         let ttl = clamp_ttl(input.ttl_seconds)?;
-        self.write(|tx| {
+        let (mut report, slug, patterns) = self.write(|tx| {
             sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, &input.agent)?;
             let project = find_project(tx, tx.node_id, &input.project)?;
@@ -1397,14 +1959,16 @@ impl Store {
                 }
             }
             let conflicts = conflicts_for(tx, &project, &me.id, &patterns, input.exclusive)?;
-            let warnings = remote_clashes(tx, &project, &patterns)?;
+            let report = |granted, conflicts| HoldReport {
+                granted,
+                conflicts,
+                warnings: Vec::new(),
+                warnings_more: 0,
+                not_compared: Vec::new(),
+            };
             if !conflicts.is_empty() {
                 touch(tx, &me.id)?;
-                return Ok(HoldReport {
-                    granted: Vec::new(),
-                    conflicts,
-                    warnings,
-                });
+                return Ok((report(Vec::new(), conflicts), project.slug, patterns));
             }
             let mut granted_ids = Vec::new();
             for (_, pattern) in &patterns {
@@ -1422,12 +1986,29 @@ impl Store {
                 )?);
             }
             touch(tx, &me.id)?;
-            Ok(HoldReport {
-                granted: holds_by_id(tx, &granted_ids)?,
-                conflicts: Vec::new(),
-                warnings,
-            })
-        })
+            let granted = holds_by_id(tx, &granted_ids)?;
+            Ok((report(granted, Vec::new()), project.slug, patterns))
+        })?;
+        // Other nodes' holds only ever add warnings, so they are compared after the write
+        // transaction has committed: comparing with what a peer sent never happens while
+        // this command holds the database's write lock.
+        let mut found = ForeignClashes::default();
+        let mut budget = FOREIGN_BUDGET;
+        self.read(|conn| {
+            foreign_clashes(
+                conn,
+                self.node_id(),
+                self.now(),
+                &slug,
+                &patterns,
+                &mut budget,
+                &mut found,
+            )
+        })?;
+        report.warnings = found.listed.into_iter().map(|(_, c, _)| c).collect();
+        report.warnings_more = found.more;
+        report.not_compared = found.not_compared;
+        Ok(report)
     }
 
     /// Report which of `paths` would conflict for `agent` (no holds are taken).
@@ -2231,6 +2812,212 @@ mod tests {
         assert!(patterns_overlap(&branching, &globset::escape(&deep)));
         assert!(patterns_overlap(&globset::escape(&deep), &branching));
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    /// What honest patterns need, so that the budget can be read against it: globs like
+    /// the ones in this file's tests and in the docs, against a 30 component path, a 3,700
+    /// byte path and ordinary ones. The most any of them takes is 493 steps (the two
+    /// alternations between three `**`); the widest realistic one takes 304. The budget
+    /// is at least four times that, and the hostile shape of the Q30 review (an 86 byte
+    /// glob of fourteen alternations) is cut off by it.
+    #[test]
+    fn honest_patterns_stay_far_inside_the_walk_budget() {
+        let deep = format!("{}file.test.ts", "packages/web/src/components/".repeat(10));
+        let long = format!("src/{}/x.rs", "a-directory-name-of-some-length".repeat(120));
+        let globs = [
+            "**/*.rs",
+            "**/*.test.ts",
+            "src/**/*.rs",
+            "packages/*/src/**/*.test.ts",
+            "packages/**/src/**/components/**/*.test.ts",
+            "**/packages/**/web/**/src/**/components/**/*.ts",
+            "**/node_modules/**",
+            "{src,docs,tests}/**/*.{rs,md,toml}",
+            "{packages,apps}/{web,api,mobile}/src/**/*.{ts,tsx,js,jsx}",
+            "packages/{web,api}/**/{components,hooks,lib}/**/*.{ts,tsx}",
+            "app/[id]/**/page.tsx",
+            "app/(group)/[[...slug]]/*.tsx",
+            "src/{a/b,c}/{d,e}/{f,g}/{h,i}/{j,k}/{l,m}/[id]/page.tsx",
+            "**/{a,b,c,d,e,f,g,h}/**/{i,j,k,l}/**",
+            "*/*/*/*/*/*/*/*/*/*",
+            "**/*/**/*/**/*.ts",
+        ];
+        let paths = [
+            deep.as_str(),
+            long.as_str(),
+            "src/a.rs",
+            "packages/web/src/components/x/y/z/file.test.ts",
+            "README.md",
+        ];
+        let mut most = 0;
+        for glob in globs {
+            for path in paths {
+                let lit: Vec<&str> = path.split('/').collect();
+                let mut budget = usize::MAX;
+                components_touch(&pattern_components(glob), &lit, true, &mut budget);
+                let used = usize::MAX - budget;
+                assert!(used * 4 <= WALK_BUDGET, "{glob} took {used} steps");
+                most = most.max(used);
+            }
+        }
+        assert_eq!(most, 493);
+        let hostile = format!("{}[!a][!b][!c][!d]", "{a,b}".repeat(14));
+        let mut budget = WALK_BUDGET;
+        assert_eq!(
+            glob_walk(&hostile, "src/a.rs", true, &mut budget),
+            Touch::Unknown
+        );
+        assert!(patterns_overlap(&hostile, "src/a.rs"), "fail closed");
+    }
+
+    /// Review R1 of Q30: when the walk runs out, an agent's own costly glob does not count
+    /// as covering the edited file, so the edit guard takes a narrow hold. The same glob
+    /// still covers what globset itself says it matches.
+    #[test]
+    fn an_own_glob_too_costly_to_walk_covers_only_what_it_matches_whole() {
+        let costly = format!("src/{}[!a][!b][!c][!d]", "{a,b}".repeat(14));
+        assert!(!hold_covers(&costly, "src/a.rs"));
+        assert!(
+            patterns_overlap(&costly, "src/a.rs"),
+            "others still conflict"
+        );
+        assert!(hold_covers(&costly, "src/aaaaaaaaaaaaaabcde"));
+    }
+
+    /// Review R2 of Q30: a requested glob is matched directly against another node's hold
+    /// on a plain path, with no walk. Wherever the direct match gives an answer it is the
+    /// walk's answer, over every pair of these globs and paths; where it could differ it
+    /// gives none and the walk is kept.
+    #[test]
+    fn the_direct_match_agrees_with_the_walk() {
+        let globs = [
+            "**",
+            "**/*.rs",
+            "*.md",
+            "*",
+            "src/*",
+            "src/*.rs",
+            "src/**",
+            "src/**/*.rs",
+            "apps/api/src/*.ts",
+            "apps/api/**",
+            "apps/*/src/*.ts",
+            "apps/**/{api,server}/**/*.ts",
+            "{apps,packages}/*/src/**/*.{ts,tsx}",
+            "{apps,packages}/*/src/*.{ts,tsx}",
+            "packages/{web,api}/**/{components,hooks}/**/*.tsx",
+            "app/[id]/*.tsx",
+            "app/[id]*/**",
+            "app/{group}/*",
+            "a?c/*",
+            "src/a*b/?.rs",
+            "*/*/*",
+            "src/{a/b,c}/*",
+            "apps/{web,api}",
+            "docs/**/guide",
+            "sr*/**/x*",
+        ];
+        let paths = [
+            "README.md",
+            "src",
+            "src/a.rs",
+            "src/a/b.rs",
+            "src/a/b/c/d.rs",
+            "src/a*b/x.rs",
+            "srcs/a.rs",
+            "apps",
+            "apps/api",
+            "apps/api/src",
+            "apps/api/src/server.ts",
+            "apps/api/src/deep/server.ts",
+            "apps/api/README.md",
+            "apps/web/src/features/f1/components/table/Row1.tsx",
+            "packages/web/src/hooks/use.tsx",
+            "packages/web",
+            "app/[id]/page.tsx",
+            "app/i/page.tsx",
+            "app/{group}/x",
+            "app/group/x",
+            "abc/x",
+            "a/b/c",
+            "src/a/b/x",
+            "src/c/x",
+            "apps/web/x",
+            "docs/a/guide",
+            "docs/a/guide/b",
+            "srx/q/xy",
+        ];
+        let (mut decided, mut yes) = (0, 0);
+        for glob in globs {
+            let direct = DirectMatch::of(glob);
+            for path in paths {
+                let mut budget = usize::MAX;
+                let walk = overlap_within(glob, &globset::escape(path), &mut budget);
+                assert_ne!(walk, Touch::Unknown);
+                if let Some(quick) = direct.as_ref().and_then(|d| d.touches(path)) {
+                    assert_eq!(quick, walk == Touch::Yes, "{glob} against {path}");
+                    decided += 1;
+                    yes += usize::from(quick);
+                }
+            }
+        }
+        // Of the 700 pairs, 528 are decided without a walk, 113 of them as overlaps.
+        // File-extension alternations stay direct; directory-naming ones keep the walk.
+        assert_eq!((decided, yes), (528, 113));
+        for direct in [
+            "{apps,packages}/*/src/**/*.{ts,tsx}",
+            "{apps,packages}/*/src/*.{ts,tsx}",
+        ] {
+            assert!(DirectMatch::of(direct).is_some(), "{direct}");
+        }
+        // The shapes that keep the walk, including a last-component alternation that
+        // spells a directory name plus a wildcard (review R3 P2-C).
+        for kept in [
+            "apps/{web,api}",
+            "docs/**/guide",
+            "src/{a/b,c}/*",
+            "src/{lib,*.rs}",
+            "packages/{core,*-plugin}",
+        ] {
+            assert!(DirectMatch::of(kept).is_none(), "{kept}");
+        }
+        let d = DirectMatch::of("apps/*/src/*.ts").unwrap();
+        assert_eq!(d.touches("apps/web"), None, "may be a directory above");
+        assert_eq!(
+            d.touches("apps/[w]/src/a.ts"),
+            None,
+            "a bracket in the path"
+        );
+        assert_eq!(d.touches("packages/web/src/a.ts"), Some(false));
+    }
+
+    /// Review R3 of Q30, P2-C: a last-component alternation such as `{core,*-plugin}`
+    /// must not be decided by the direct match, which would miss a path under `core`.
+    #[test]
+    fn a_last_component_alternation_falls_back_to_the_walk() {
+        let cases = [
+            ("packages/{core,*-plugin}", "packages/core/src/index.ts"),
+            ("lib/{util,*-x}", "lib/util/x.rs"),
+            ("src/{a,?}", "src/a/b.rs"),
+            ("src/{*.rs,a}", "src/a/b.rs"),
+            ("src/{lib,*.rs}", "src/lib/mod.rs"),
+            ("src/pre{lib,*}.rs", "src/prelib.rs/mod.rs"),
+            ("src/{lib,*}{core,?}", "src/libcore/mod.rs"),
+        ];
+        for (glob, path) in cases {
+            assert!(
+                DirectMatch::of(glob).is_none(),
+                "direct match should fall back for {glob}"
+            );
+            let mut budget = usize::MAX;
+            let walk = overlap_within(glob, &globset::escape(path), &mut budget);
+            assert_eq!(walk, Touch::Yes, "{glob} should warn on {path}");
+        }
+        // `{,app}/*` has an empty alternative, so it also falls back (P3-G).
+        assert!(DirectMatch::of("{,app}/*").is_none());
+        assert!(DirectMatch::of("packages/core").is_none()); // last component names entries
+        assert!(DirectMatch::of("packages/{core,ui}/**").is_some());
+        assert!(DirectMatch::of("packages/*/src/*.ts").is_some());
     }
 
     #[test]

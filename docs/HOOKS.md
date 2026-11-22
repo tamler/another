@@ -163,14 +163,14 @@ Completed or cancelled requests never represent a fresh ask for dedupe. Cancelli
 
 ## Failing open
 
-Both tool hooks open the database without creating or migrating it and wait at most 50 ms (`post-tool`) or 300 ms (`pre-edit`) for a lock. The rule:
+Both tool hooks open the database without creating or migrating it. `post-tool` waits at most 50 ms for a lock. `pre-edit` waits 300 ms, then up to 2.7 s more if the database is still locked (3 s in all). The rule:
 
 - **Push fails open.** Missing database, old schema, locked database, unknown agent: the hook prints nothing and exits 0.
-- **The edit guard denies only a known conflict.** If it cannot check (the database is missing or locked), it lets the edit through and appends a line to `$ANOTHER_HOME/logs/hooks.log` saying why. That log is capped at 256 KB (one older copy is kept as `hooks.log.1`).
+- **The edit guard denies a known conflict.** If the database stays locked past the 3 s bound, or the hold check fails or panics, it denies the edit and appends a line to `$ANOTHER_HOME/logs/hooks.log` saying why. A missing database or an old schema still lets the edit through and is logged the same way. A large pull can still hold the write lock long enough to reach the bound; the hook then denies rather than allowing the edit. The log is capped at 256 KB (one older copy is kept as `hooks.log.1`).
 
 With nothing new, `post-tool` only reads, and SQLite in WAL mode lets readers past a writer. Announcing needs the claim write: if another writer holds the database for longer than 50 ms, the notice is not shown on that call and arrives on the next one.
 
-The budget is about 100 ms per tool call. Measured on a laptop over 50 runs each, both hooks took about 13 to 16 ms at the 95th percentile, with or without new mail and with the daemon up or down; with the database locked outright they gave up in about 75 ms (`post-tool`) and 350 ms (`pre-edit`). The pull request that added them has the method.
+The first wait is still short: measured on a laptop over 50 runs each when these hooks were added, both took about 13 to 16 ms at the 95th percentile, with or without new mail and with the daemon up or down; with the database locked outright, `post-tool` gave up in about 75 ms and `pre-edit` used its first 300 ms wait. `pre-edit` then waits up to 2.7 s more and denies if the lock remains. The pull request that added the hooks has the original method.
 
 The session start and prompt hooks open the database the normal way: they create it, migrate it when this build may, and wait up to 5 seconds for a lock. The queue lines add reads only (one indexed read of the queue, no database write) and at most one small file. An error in the queue lines does not hold back the mail line, nor the other way round. A stated limit: with the database locked for seconds, a prompt can be delayed by up to 5 seconds and then shows nothing. For a home a newer build wrote, every hook prints nothing and the reason is logged once.
 
@@ -261,5 +261,5 @@ another hook run session-start --client claude < event.json
 
 - stdin may carry the client's JSON event; Another reads `cwd` (or `workspaceRoot` / `workspace_roots[0]`) and `session_id` (or `sessionId` / `conversation_id`) when present. At session start it also reads `source`: `startup`, or no `source`, is a plain start; any other value follows the queue stamp. After a tool call it reads `agent_id`, which marks a call from inside a subagent.
 - `post-tool` and `pre-edit` also read `tool_name` / `toolName` and `tool_input` / `toolInput`. The edit guard takes file names from `file_path`, `filePath`, `notebook_path`, `path` or `target_notebook`, and from the `*** Add File:`, `*** Update File:`, `*** Delete File:` and `*** Move to:` lines of a patch in `command`.
-- Exit status is always 0; on any error nothing is printed.
+- Exit status is always 0. On a `post-tool` error nothing is printed. `pre-edit` prints a deny when it finds a conflict, when the database stays locked for 3 seconds, or when the hold check fails; a missing database or an old schema still prints nothing.
 - Scripts that prefer explicit calls can use `another --json heartbeat --agent NAME --start|--end`, `another --json inbox --agent NAME --unread`, and `another --json activity --summary`.

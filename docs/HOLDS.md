@@ -167,3 +167,43 @@ another: test/another is inside another checkout (/Users/jacob/Projects/test/ano
 ```
 
 That hold then applies to that checkout only, not to its other worktrees or clones.
+
+## Pattern size, and a pattern that cannot be read
+
+A hold pattern is at most 4,096 bytes, the longest path Linux takes in one call (macOS stops at 1,024), so every real path fits. `another hold acquire`, `another hold check` and the MCP tool `hold_paths` refuse a longer one and write nothing:
+
+```text
+another: hold pattern is 4097 bytes; the limit is 4096
+```
+
+`another hold release <path>` refuses a glob over the limit with the same words. A plain path of any length is looked up as text, so a hold the edit guard took on a long path can still be released by path; when nothing matches it answers `nothing of yours is held at <path>` and exits 0.
+
+The edit guard's own holds are not held to the limit. They are file names with `[`, `]`, `{`, `}`, `*` and `?` escaped (three bytes for each), compared as text and never compiled as a glob, so a long path cannot make an edit fail.
+
+The same limit applies to a hold another node sends ([FEDERATION.md](FEDERATION.md#model)). No pattern makes a command panic. What a pattern can cost is bounded as follows; the times are from a release build on the development machine.
+
+- **One comparison** of a glob with a path takes at most 2,000 steps: under 25 ms (the longest measured, over the costly shapes of two reviews, took 21 ms). The widest honest pattern measured takes 493 steps and the patterns in this repository's tests at most 37. Between two holds of this node, a comparison that runs out counts as an overlap, so the result is a conflict that a retry or a narrower pattern clears, never a missed one. For an agent's own hold it counts as "does not cover", so the edit guard takes a narrow hold on the edited file.
+- **Holds of other nodes** never block, so comparing with them is best effort within one budget for the whole command: about 40 ms of estimated work for `another hold acquire`, the MCP tool and the dashboard snapshot, whatever a peer sent. It runs after the command's own write has been committed, so the comparison is never done while the command holds the database's write lock. The budget counts work, not time: measured against 10,000 holds of each costly shape tried, `hold acquire` took about 50 ms at most in all on a quiet machine, and more when the machine was busy. When the budget is spent the remaining holds are not compared, and the command says so in one line. At most ten overlapping holds are listed one by one, a pattern over 40 characters as its start and its length; the rest are a count.
+- **What one command compares.** Holds on plain paths, which is what a peer's edits make, are compared as they are read, and a requested glob is matched against such a path directly. Measured with paths of about 50 bytes: 19,999 of a peer's holds are compared when a path is asked for and 19,991 to 19,995 when a glob is. A peer's glob holds are set aside and compared after the plain ones, and each costs a compile and, against a requested path, a walk: with 10,000 globs of about 30 bytes from a peer, 541 are compared when a path is asked for and 1,769 when a glob is. Reading a hold costs too (40,000 short patterns, or about 8,000 of 4 KB, use the whole budget), so a peer with that many holds stored ahead of another node's can keep the other's from being compared; the line above names the nodes. The dashboard shares one budget among all the holds of this node it shows. The direct match is used where it gives the walk's answer; the walk is kept for a requested glob whose last component has no wildcard or that has a `/` inside braces, for a path with a bracket or a brace in it, and for a path with fewer components than the glob has up to its first `**`.
+
+```text
+warning: 1000 hold(s) on other nodes were not compared with yours (1000 from vps): comparing with other nodes' holds stops at a fixed amount of work, so these may overlap (holds are node-local; they do not block you)
+```
+
+- **Storing a peer's holds.** Nothing is compiled when an event from another node is stored; only the length of its pattern is judged. A `sync` that pulls 10,000 holds with 4 KB globs took 1.25 s here, the same as before this limit existed (1.27 s), in pages of 500 events that each hold the write lock for about 60 ms. Whether a stored pattern compiles is found out when it is first compared, inside the budget above.
+- **Not bounded:** how many holds a peer may send. `hold check` and the edit guard never read another node's holds, but expiring holds and listing them read every stored hold: with 10,000 holds of 4 KiB each from a peer, every command that takes or checks a hold took about 9 ms longer, and the dashboard snapshot about 100 ms in all. A pull stores each page of events under the write lock, and a page of 500 can take longer than the 3 seconds an edit hook waits before it denies the edit. A comparison between two holds of this node is bounded one at a time, not in total: a project with many costly globs held by local agents costs up to 25 ms for each.
+
+A row in the database can still hold a pattern this build cannot read: a glob longer than the limit, written by an earlier build or by hand, or a glob that does not compile, which another node can send. Such a hold counts as overlapping every path in the project it is in, and nothing outside that project. For a hold on this node, `another hold acquire`, `another hold check` and the edit guard refuse what it overlaps, name the holder and the node, and say how to clear it. The pattern is shown as its first 40 characters and its length, never whole:
+
+```text
+nothing acquired
+conflict: src/b.rs: hold 01M7W8JPVH7GWPJQ74323AW5CK of codex@shop on this node (mac) has a pattern that could not be read ("src/*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*…" (2097156 bytes)), so it counts as overlapping every path in project shop. To clear it: another hold release --agent codex@shop 01M7W8JPVH7GWPJQ74323AW5CK
+```
+
+A hold from another node never blocks, so one with such a pattern gives a warning on every `hold acquire` in the project of the same name, until it ends:
+
+```text
+warning: src/b.rs: hold 01M7W7XR88R0RV9HCEERP6EA00 of mal@shop@vps on node vps has a pattern that could not be read ("src/*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*…" (2097156 bytes)), so it counts as overlapping every path in project shop. It ends at 2026-11-20T11:30:00.000Z unless that node renews it; to clear it sooner, release hold 01M7W7XR88R0RV9HCEERP6EA00 on node vps and sync (holds are node-local; this one does not block you)
+```
+
+An agent's own hold with such a pattern covers none of its edits: the edit guard takes a narrow hold on the edited file as usual.
