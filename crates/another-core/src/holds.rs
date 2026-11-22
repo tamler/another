@@ -325,7 +325,7 @@ const PATTERN_BRIEF_CHARS: usize = 40;
 /// the whole glob when it has no `**`, and otherwise the glob cut after its first `**`,
 /// since a path that matches up to there overlaps whatever follows. The shapes it does not
 /// take (`of` returns none, or `touches` does) keep the walk: a glob whose last component
-/// has no wildcard or contains an alternation, a glob with a `/` inside braces or a class,
+/// can name an entry without a wildcard, a glob with a `/` inside braces or a class,
 /// a piece with a `\\`, an empty alternative or `**` inside braces, a class that can match
 /// `/`, a path with a bracket or a brace in it, and a path with fewer components than the
 /// glob has up to its first `**`.
@@ -628,12 +628,18 @@ fn outside_classes(pattern: &str) -> Vec<(usize, char)> {
     out
 }
 
-/// The last component keeps the walk when it names a directory or file (no wildcard), or
-/// when it is an alternation: `{core,*-plugin}` spells out `core`, which the walk treats
-/// as a directory hold covering everything below it, and a direct match of the original
-/// glob does not.
+/// The last component keeps the walk when any expansion names an entry without a
+/// wildcard: `{core,*-plugin}` spells out `core`, which the walk treats as a directory
+/// hold covering everything below it. `*.{ts,tsx}` still has a wildcard in every
+/// expansion, so it can use the direct match. Check each part separately rather than
+/// expanding every combination of alternatives.
 fn last_falls_back_to_walk(last: &str) -> bool {
-    names_entries(last) || first_alternation(last).is_some()
+    let Some((before, alternatives, after)) = first_alternation(last) else {
+        return names_entries(last);
+    };
+    names_entries(before)
+        && last_falls_back_to_walk(after)
+        && alternatives.iter().any(|a| last_falls_back_to_walk(a))
 }
 
 /// Shapes the direct match does not take, so the walk is kept: a backslash, an empty
@@ -2955,9 +2961,15 @@ mod tests {
                 }
             }
         }
-        // Of the 700 pairs, 514 are decided without a walk, 108 of them as overlaps.
-        // Last-component alternations such as `*.{ts,tsx}` now keep the walk (P2-C).
-        assert_eq!((decided, yes), (514, 108));
+        // Of the 700 pairs, 528 are decided without a walk, 113 of them as overlaps.
+        // File-extension alternations stay direct; directory-naming ones keep the walk.
+        assert_eq!((decided, yes), (528, 113));
+        for direct in [
+            "{apps,packages}/*/src/**/*.{ts,tsx}",
+            "{apps,packages}/*/src/*.{ts,tsx}",
+        ] {
+            assert!(DirectMatch::of(direct).is_some(), "{direct}");
+        }
         // The shapes that keep the walk, including a last-component alternation that
         // spells a directory name plus a wildcard (review R3 P2-C).
         for kept in [
@@ -2989,6 +3001,8 @@ mod tests {
             ("src/{a,?}", "src/a/b.rs"),
             ("src/{*.rs,a}", "src/a/b.rs"),
             ("src/{lib,*.rs}", "src/lib/mod.rs"),
+            ("src/pre{lib,*}.rs", "src/prelib.rs/mod.rs"),
+            ("src/{lib,*}{core,?}", "src/libcore/mod.rs"),
         ];
         for (glob, path) in cases {
             assert!(
