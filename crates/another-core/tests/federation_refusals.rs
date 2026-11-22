@@ -1,14 +1,15 @@
-//! Pairing and sync refusals that had no test: a known node presenting a new key, a hub
-//! answering with another identity, a spoke joining a second hub, unusable invite codes, and
-//! mail from a spoke the hub never allowed to send it. Also checks that a spoke's hold
-//! renewals and releases reach its hub, so a released hold does not keep blocking there.
+//! Pairing and sync refusals that still have no equivalent on main: unusable invite
+//! strings and expiry boundaries, mail from a spoke the hub never allowed to send it, and
+//! a spoke's hold renewals and releases reaching the hub. Pairing cases already covered
+//! after #277/#280 (`pairing_rules.rs`, `pairing_attacks.rs`, `answer_signing.rs`) are
+//! omitted: they now fail or duplicate those files.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use another_core::*;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 
 const T0: i64 = 1_800_000_000_000;
 
@@ -55,19 +56,6 @@ impl Node {
     fn advance_ms(&self, ms: i64) {
         self.clock.fetch_add(ms, Ordering::SeqCst);
     }
-
-    /// The public key this node has pinned for `node`.
-    fn pinned_key(&self, node: &str) -> Option<String> {
-        self.sql()
-            .query_row(
-                "SELECT public_key FROM nodes WHERE node_id = ?1",
-                [node],
-                |r| r.get(0),
-            )
-            .optional()
-            .unwrap()
-            .flatten()
-    }
 }
 
 fn pair_with(hub: &Node, spoke: &Node, perms: &[Perm]) {
@@ -95,107 +83,6 @@ fn pull(hub: &Node, spoke: &Node) -> IngestReport {
         .store
         .ingest(&hub.id(), &pulled.events, &pulled.nodes)
         .unwrap()
-}
-
-fn other_key() -> String {
-    crypto::public_of(&crypto::generate_key().unwrap())
-}
-
-/// Keys are pinned on first sight. A node that comes back with another key, whether it
-/// pairs again or appears in a hub's node list, is refused and the pinned key stays.
-#[test]
-fn a_known_node_presenting_a_new_key_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let hub = Node::new(dir.path(), "hub");
-    let alpha = Node::new(dir.path(), "alpha");
-    pair_with(&hub, &alpha, &Perm::ALL);
-    let alpha_key = hub.pinned_key(&alpha.id()).unwrap();
-    let hub_key = alpha.pinned_key(&hub.id()).unwrap();
-
-    // Alpha's id pairs again with a key it never had.
-    let code = hub
-        .store
-        .create_invite("https://hub.example", &Perm::ALL, 3600)
-        .unwrap();
-    let (_, mut req) = alpha.store.prepare_join(&code).unwrap();
-    req.node.public_key = other_key();
-    let err = hub.store.accept_pairing(&req).unwrap_err();
-    assert!(err.to_string().contains("different key"), "{err}");
-    assert_eq!(hub.pinned_key(&alpha.id()).unwrap(), alpha_key);
-
-    // A hub node list that carries another key for the hub itself.
-    let mut forged = hub.store.node_entry().unwrap();
-    forged.public_key = other_key();
-    let err = alpha.store.ingest(&hub.id(), &[], &[forged]).unwrap_err();
-    assert!(err.to_string().contains("different key"), "{err}");
-    assert_eq!(alpha.pinned_key(&hub.id()).unwrap(), hub_key);
-
-    // The same entry with the pinned key is accepted.
-    alpha
-        .store
-        .ingest(&hub.id(), &[], &[hub.store.node_entry().unwrap()])
-        .unwrap();
-}
-
-/// The spoke trusts the hub named in the invite. An answer from any other identity (a
-/// different node id, or the same id with another key) is refused and records no hub.
-#[test]
-fn a_hub_answering_with_another_identity_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let hub = Node::new(dir.path(), "hub");
-    let alpha = Node::new(dir.path(), "alpha");
-    let code = hub
-        .store
-        .create_invite("https://hub.example", &Perm::ALL, 3600)
-        .unwrap();
-    let (invite, req) = alpha.store.prepare_join(&code).unwrap();
-    let resp = hub.store.accept_pairing(&req).unwrap();
-
-    let mut wrong_key = resp.clone();
-    wrong_key.hub.public_key = other_key();
-    let mut wrong_id = resp.clone();
-    wrong_id.hub.node_id = "01IMPOSTORIMPOSTORIMPOSTOR".into();
-    for bad in [wrong_key, wrong_id] {
-        let err = alpha.store.complete_join(&invite, &bad).unwrap_err();
-        assert!(err.to_string().contains("different identity"), "{err}");
-        assert_eq!(alpha.store.hub().unwrap(), None);
-        assert!(alpha.store.peers().unwrap().is_empty());
-    }
-
-    let peer = alpha.store.complete_join(&invite, &resp).unwrap();
-    assert_eq!(peer.node_id, hub.id());
-}
-
-/// A spoke syncs with one hub. Joining a second is refused and keeps the first; joining the
-/// same hub again is allowed.
-#[test]
-fn a_spoke_cannot_join_a_second_hub() {
-    let dir = tempfile::tempdir().unwrap();
-    let hub = Node::new(dir.path(), "hub");
-    let other = Node::new(dir.path(), "other");
-    let alpha = Node::new(dir.path(), "alpha");
-    pair_with(&hub, &alpha, &Perm::ALL);
-
-    let code = other
-        .store
-        .create_invite("https://other.example", &Perm::ALL, 3600)
-        .unwrap();
-    let (invite, req) = alpha.store.prepare_join(&code).unwrap();
-    let resp = other.store.accept_pairing(&req).unwrap();
-    let err = alpha.store.complete_join(&invite, &resp).unwrap_err();
-    assert!(err.to_string().contains("another hub"), "{err}");
-    assert_eq!(
-        alpha.store.hub().unwrap(),
-        Some((hub.id(), "https://hub.example".to_string()))
-    );
-    assert_eq!(
-        alpha.pinned_key(&other.id()),
-        None,
-        "the refused hub was recorded"
-    );
-
-    pair_with(&hub, &alpha, &[Perm::ReadFeed]);
-    assert_eq!(alpha.store.hub().unwrap().unwrap().0, hub.id());
 }
 
 /// Codes that are not invites, invites past their expiry (the expiry instant included),
