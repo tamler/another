@@ -39,6 +39,7 @@ const WAIT: &str = "wait: the session may come back";
 enum Kind {
     ChecksStopped,
     TransportConfig,
+    SkippedEvent,
     DecideNow,
     Blocked,
     Stuck,
@@ -51,7 +52,14 @@ enum Kind {
 
 /// The sections of the list and the kinds of each, in the order they are shown.
 const SECTIONS: [(&str, &[Kind]); 5] = [
-    ("Another", &[Kind::ChecksStopped, Kind::TransportConfig]),
+    (
+        "Another",
+        &[
+            Kind::ChecksStopped,
+            Kind::TransportConfig,
+            Kind::SkippedEvent,
+        ],
+    ),
     ("Decide now", &[Kind::DecideNow]),
     (
         "Agents",
@@ -71,6 +79,7 @@ impl Kind {
         match self {
             Kind::ChecksStopped => "checks_stopped",
             Kind::TransportConfig => "transport_config",
+            Kind::SkippedEvent => "skipped_event",
             Kind::DecideNow => "decide_now",
             Kind::Blocked => "blocked",
             Kind::Stuck => "stuck",
@@ -87,6 +96,7 @@ impl Kind {
         match self {
             Kind::DecideNow | Kind::Proposal => "another queue list --state proposed",
             Kind::QuietClaim | Kind::NoTaker => "another queue list --needs-owner",
+            Kind::SkippedEvent => "another activity --kinds sync",
             _ => "another transport status --attention",
         }
     }
@@ -97,6 +107,7 @@ impl Kind {
         match self {
             Kind::ChecksStopped => "checks stopped".to_string(),
             Kind::TransportConfig => "transports.json refused".to_string(),
+            Kind::SkippedEvent => format!("{n} skipped event{plural}"),
             Kind::DecideNow => format!("{n} decide now"),
             Kind::Blocked => format!("{n} blocked"),
             Kind::Stuck => format!("{n} stuck"),
@@ -113,6 +124,7 @@ impl Kind {
 struct Counts {
     checks_stopped: u32,
     transport_config: u32,
+    skipped_event: u32,
     decide_now: u32,
     blocked: u32,
     stuck: u32,
@@ -128,6 +140,7 @@ impl Counts {
         match kind {
             Kind::ChecksStopped => self.checks_stopped,
             Kind::TransportConfig => self.transport_config,
+            Kind::SkippedEvent => self.skipped_event,
             Kind::DecideNow => self.decide_now,
             Kind::Blocked => self.blocked,
             Kind::Stuck => self.stuck,
@@ -143,6 +156,7 @@ impl Counts {
         let n = match kind {
             Kind::ChecksStopped => &mut self.checks_stopped,
             Kind::TransportConfig => &mut self.transport_config,
+            Kind::SkippedEvent => &mut self.skipped_event,
             Kind::DecideNow => &mut self.decide_now,
             Kind::Blocked => &mut self.blocked,
             Kind::Stuck => &mut self.stuck,
@@ -580,6 +594,26 @@ pub fn report(store: &Store, limit: u32) -> anyhow::Result<Report> {
         )
         .steps(vec!["another doctor".to_string()], false);
         row.reason = Some(refused);
+        rows.push(row);
+    }
+    // Events too large to send, in this node's log or its hub's, until acknowledged. The
+    // values a marker carried are already bounded, safe lines.
+    for (n, skip) in store.unacknowledged_skips()?.iter().enumerate() {
+        let mut row = Row::new(
+            Kind::SkippedEvent,
+            format!(
+                "{}:{}:{}",
+                Kind::SkippedEvent.as_str(),
+                skip.holder,
+                skip.event_id
+            ),
+            skip.needs_line(),
+        )
+        .since(Some(skip.since_ms), now)
+        .steps(skip.needs_steps(), false);
+        row.order.1 = n as i64;
+        row.agent = Some(skip.actor.clone());
+        row.reason = Some(skip.direction.clone());
         rows.push(row);
     }
 

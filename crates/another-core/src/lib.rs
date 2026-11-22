@@ -22,6 +22,7 @@ mod requests;
 mod resources;
 mod stats;
 mod store;
+mod sync_skip;
 mod time;
 mod tokens;
 mod transport;
@@ -97,6 +98,7 @@ pub use store::{
 /// For the workspace's tests only: build a home at an older schema, and open as another build.
 #[cfg(feature = "test-support")]
 pub use store::{apply_schema, Build};
+pub use sync_skip::{sync_skip_lines, Skip, SkipAck, SkippedEvent, SYNC_SKIPS_SHOWN};
 pub use time::{fmt_ts, parse_ts};
 pub use tokens::{AuditEntry, AuditRecord, NewToken, Token, TokenScope};
 pub use transport::{

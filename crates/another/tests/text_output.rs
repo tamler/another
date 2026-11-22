@@ -221,3 +221,163 @@ fn a_hub_error_in_sync_watch_cannot_retitle_the_terminal() {
     assert!(!has_control(got.trim_end().as_bytes()), "{got:?}");
     assert!(got.contains("?]0;pwned?"), "{got:?}");
 }
+
+/// Q26b, 4.8 (D97): a spoke repeats its hub's `sync.skipped` markers after every sync, in
+/// `another needs` and in the activity feed, and a hub chose every text in them. Here the
+/// hub's marker has an id, a kind, an actor and a short name at their full lengths, each
+/// holding escape, control, text-direction and invisible characters. None of those reaches
+/// the terminal, and each value is cut at its shown length: id 40, kind 80, actor 80,
+/// short name 120.
+#[test]
+fn a_peers_marker_text_is_shown_escaped_and_bounded() {
+    use another_core::crypto;
+    use std::net::SocketAddr;
+
+    let dir = tempfile::tempdir().unwrap();
+    let hub_home = dir.path().join("hub");
+    let spoke_home = dir.path().join("spoke");
+    let hub = another_core::Store::open(&hub_home).unwrap();
+    hub.set_node_name("hub").unwrap();
+    let spoke = another_core::Store::open(&spoke_home).unwrap();
+    spoke.set_node_name("spoke").unwrap();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let listener = rt
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = another::fed::router(hub.clone());
+    rt.spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let code = hub
+        .create_invite(&url, &another_core::Perm::ALL, 3600)
+        .unwrap();
+    another::fed::join(&spoke, &code).unwrap();
+
+    let pad = |head: &str, fill: char, chars: usize| -> String {
+        let mut text = head.to_string();
+        while text.chars().count() < chars {
+            text.push(fill);
+        }
+        text
+    };
+    let event_id = pad("01\u{1b}]0;pwned\u{7}", 'I', 128);
+    let kind = pad("agent\u{202e}.registered\u{200b}", 'K', 80);
+    let actor = pad("al\u{2066}ice\u{0}", 'A', 128);
+    let about = pad("agent \u{1b}[2Jwor\u{202e}dy", 'B', 120);
+    let hub_id = hub.node_id().to_string();
+    let payload = serde_json::json!({
+        "event_id": event_id,
+        "event_node": hub_id,
+        "event_kind": kind,
+        "event_actor": actor,
+        "bytes": 9_437_500,
+        "direction": "pull",
+        "about": about,
+        "route": "directory",
+        "route_nodes": [],
+    })
+    .to_string();
+    let db = rusqlite::Connection::open(hub_home.join(another_core::DB_FILE)).unwrap();
+    let secret: String = db
+        .query_row("SELECT secret_key FROM nodes WHERE is_local = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let key = crypto::decode_secret(&secret).unwrap();
+    let ts = hub.now();
+    let sig = crypto::sign(
+        &key,
+        &crypto::event_message(
+            "01HOSTILEMARKER",
+            &hub_id,
+            ts,
+            "system",
+            "sync.skipped",
+            &payload,
+        ),
+    );
+    db.execute(
+        "INSERT INTO events (event_id, node_id, ts, actor, kind, payload, prev_id, sig)
+         VALUES ('01HOSTILEMARKER', ?1, ?2, 'system', 'sync.skipped', ?3, NULL, ?4)",
+        rusqlite::params![hub_id, ts, payload, sig],
+    )
+    .unwrap();
+
+    let synced = another(&spoke_home, dir.path(), &["sync"]);
+    let needs = another(&spoke_home, dir.path(), &["needs"]);
+    let feed = another(&spoke_home, dir.path(), &["activity", "--kinds", "sync"]);
+    rt.shutdown_timeout(std::time::Duration::from_secs(5));
+
+    // Each unsafe character became a space, and each value was cut with `…`.
+    let id = format!("01 ]0;pwned {}…", "I".repeat(27));
+    let kind = format!("agent .registered {}", "K".repeat(62));
+    let actor = format!("al ice {}…", "A".repeat(72));
+    let about = format!("agent  [2Jwor dy{}", "B".repeat(104));
+    assert_eq!(id.chars().count(), 40);
+    assert_eq!(kind.chars().count(), 80);
+    assert_eq!(actor.chars().count(), 80);
+    assert_eq!(about.chars().count(), 120);
+
+    for (what, run) in [("sync", &synced), ("needs", &needs), ("activity", &feed)] {
+        let text = String::from_utf8_lossy(&run.stdout);
+        assert!(run.status.success(), "{what}: {:?}", run.stderr);
+        assert!(!has_control(&run.stdout), "{what}: {text:?}");
+        for raw in [
+            '\u{1b}', '\u{7}', '\u{0}', '\u{202e}', '\u{2066}', '\u{200b}',
+        ] {
+            assert!(!text.contains(raw), "{what}: {raw:?} in {text:?}");
+        }
+        assert!(text.contains(&id), "{what}: {text}");
+        assert!(text.contains(&kind), "{what}: {text}");
+        // Nothing past a cut is printed.
+        assert!(!text.contains(&"I".repeat(28)), "{what}: {text}");
+        assert!(!text.contains(&"A".repeat(73)), "{what}: {text}");
+        assert!(!text.contains(&"K".repeat(63)), "{what}: {text}");
+        assert!(!text.contains(&"B".repeat(105)), "{what}: {text}");
+    }
+    let text = String::from_utf8_lossy(&synced.stdout);
+    assert!(
+        text.contains(&format!(
+            "\nskipped {id} ({kind}, 9437500 bytes, written by {actor}): it is in node hub's \
+             log and is larger than a spoke reads in one pull answer (33554432 bytes), so node \
+             hub did not send it; the events after it were sent\n  about: {about}\n  note: the \
+             event id in this report is not an id this software makes, so <event-id> is left \
+             for you to fill\n  missing on this node: this event and whatever it changed on \
+             other nodes; "
+        )),
+        "{text}"
+    );
+    // The id is not one this software makes, so it is in no printed command.
+    assert!(
+        text.contains("\n  then, on node hub: another sync ack <event-id> --owner\n"),
+        "{text}"
+    );
+    assert!(!text.contains("sync ack 01"), "{text}");
+    let text = String::from_utf8_lossy(&needs.stdout);
+    assert!(
+        text.contains(&format!(
+            "  skipped event  {id} ({kind}, 9437500 bytes) in node hub's log was not sent to \
+             this node: larger than one pull answer\n"
+        )),
+        "{text}"
+    );
+    let text = String::from_utf8_lossy(&feed.stdout);
+    assert!(
+        text.contains(&format!(
+            "[hub] skipped event {id} ({kind}, 9437500 bytes, written by {actor}): too large \
+             to send; {about}"
+        )),
+        "{text}"
+    );
+}

@@ -19,9 +19,10 @@ use serde_json::{json, Value};
 
 const MIN: i64 = 60_000;
 const CANNOT_READ: &str = "needs: cannot read, run another doctor\n";
-const KINDS: [&str; 10] = [
+const KINDS: [&str; 11] = [
     "checks_stopped",
     "transport_config",
+    "skipped_event",
     "decide_now",
     "blocked",
     "stuck",
@@ -136,6 +137,45 @@ impl Fx {
 
     fn id(&self, agent: &str) -> String {
         self.store.agent(agent).unwrap().agent_id
+    }
+
+    /// Write this node's own marker for a skipped registration of agent `wordy` with the
+    /// event id `event_id`, signed with the node's key, as a sync that stepped past the
+    /// event writes it (Q26b).
+    fn skip(&self, event_id: &str) {
+        use another_core::crypto;
+        let db = self.db();
+        let secret: String = db
+            .query_row("SELECT secret_key FROM nodes WHERE is_local = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let key = crypto::decode_secret(&secret).unwrap();
+        let node = self.store.node_id().to_string();
+        let payload = json!({
+            "event_id": event_id,
+            "event_node": node,
+            "event_kind": "agent.registered",
+            "event_actor": "wordy",
+            "bytes": 9_437_500,
+            "direction": "push",
+            "about": "agent wordy",
+            "route": "directory",
+            "route_nodes": [],
+        })
+        .to_string();
+        let id = format!("01MARKER{event_id}");
+        let ts = now_ms() - 5 * MIN;
+        let sig = crypto::sign(
+            &key,
+            &crypto::event_message(&id, &node, ts, "system", "sync.skipped", &payload),
+        );
+        db.execute(
+            "INSERT INTO events (event_id, node_id, ts, actor, kind, payload, prev_id, sig)
+             VALUES (?1, ?2, ?3, 'system', 'sync.skipped', ?4, NULL, ?5)",
+            rusqlite::params![id, node, ts, payload, sig],
+        )
+        .unwrap();
     }
 
     fn run(&self, args: &[&str]) -> Output {
@@ -490,8 +530,9 @@ fn pending_decisions_appear_in_the_one_list() {
 fn sections_are_in_the_fixed_order() {
     let fx = Fx::new();
     fx.everything();
+    fx.skip("01SK1PPED00000000000000000");
     let v = fx.json();
-    assert_eq!(v["total"], 10, "{v:#}");
+    assert_eq!(v["total"], 11, "{v:#}");
     let kinds: Vec<&str> = v["rows"]
         .as_array()
         .unwrap()
@@ -511,10 +552,11 @@ fn sections_are_in_the_fixed_order() {
             .unwrap_or_else(|| panic!("{needle:?} is not in:\n{human}"))
     };
     let order = [
-        at("10 need the owner ("),
-        at("\nAnother (2)\n"),
+        at("11 need the owner ("),
+        at("\nAnother (3)\n"),
         at("  checks stopped  "),
         at("  transports.json refused  "),
+        at("  skipped event  01SK1PPED00000000000000000 (agent.registered, 9437500 bytes) in this node's log "),
         at("\nDecide now (1)\n"),
         at("\nAgents (4)\n"),
         at("  blocked      ann 7f3a..  herdr w1:p2  12m"),
@@ -537,7 +579,78 @@ fn sections_are_in_the_fixed_order() {
         "{human}"
     );
     // Every row has its own next block.
-    assert_eq!(human.matches("    next: ").count(), 10, "{human}");
+    assert_eq!(human.matches("    next: ").count(), 11, "{human}");
+}
+
+/// The steps `another needs` prints under a skipped registration of agent `wordy`, then the
+/// acknowledgement. They are the steps of SPEC Q26b section 4.10 in the wording this list
+/// keeps: a bare entry is a complete command, and every other entry starts with a word and
+/// has its commands in backticks.
+const WORDY_STEPS: [&str; 7] = [
+    "register the agent again: `another agent register wordy --program <program> --model <model> --description \"<4096 bytes or fewer>\"` (add `--project <path>` if it has one; a model left out is cleared)",
+    "each hold it has (`another holds --agent wordy` lists them): `another hold acquire --agent wordy -p <project> <the same paths>`, with --shared, --repo-wide, --reason and --ttl as the hold has them (the same hold is sent again; without -p from another directory it is a different hold, and without --shared a shared hold becomes exclusive or is refused)",
+    "each resource of this node it holds a lease on: `another release <resource id or kind:name> --agent wordy`, then at once `another borrow <the same> --agent wordy` (a borrow without the release only renews, and a renewal brings nothing to a node that never had the lease. Between the two commands the resource has no lease unless another agent holds one. Another agent on this node that borrows it in that moment becomes its owner, and if the resource is exclusive this agent's borrow is then refused. If another agent already holds a lease, that agent becomes the owner at the release and this agent comes back as a borrower)",
+    "each resource of another node it borrowed: `another release <resource id> --agent wordy`, then `another borrow <resource id> --agent wordy` (the id is in brackets in `another resources`; kind:name names only this node's resources. If the borrow is refused, the release has already happened: it is refused when the hub does not grant borrowing, when the resource has no live owner, or when it cannot be reached from this machine)",
+    "mail it sent to other nodes before step 1 is not delivered there and no command delivers it: send it again",
+    "spokes receive it at their next sync",
+    "another sync ack 01SK1PPED00000000000000000 --owner",
+];
+
+/// Q26b, 4.8: an unacknowledged skip is a row of the kind `skipped_event` in the section
+/// `Another`, with its remedy steps and the acknowledgement; the one-line form counts it
+/// and the JSON has it under `counts`. After the acknowledgement all three are gone.
+#[test]
+fn needs_lists_a_skipped_event_until_it_is_acknowledged() {
+    let fx = Fx::new();
+    fx.skip("01SK1PPED00000000000000000");
+
+    let human = fx.text();
+    let mut want = String::from(
+        "\nAnother (1)\n  skipped event  01SK1PPED00000000000000000 (agent.registered, 9437500 bytes) in this \
+         node's log was not sent: larger than one push\n",
+    );
+    for (n, step) in WORDY_STEPS.iter().enumerate() {
+        let lead = if n == 0 { "    next: " } else { "          " };
+        want.push_str(&format!("{lead}{step}\n"));
+    }
+    assert!(human.starts_with("1 needs the owner ("), "{human}");
+    assert!(human.ends_with(&want), "{human}");
+    assert_eq!(fx.brief(), "needs you: 1 (1 skipped event)\n");
+
+    let v = fx.json();
+    assert_eq!(v["total"], 1);
+    assert_eq!(v["counts"]["skipped_event"], 1);
+    let row = one(&v, "skipped_event");
+    assert_eq!(
+        row["key"],
+        format!(
+            "skipped_event:{}:01SK1PPED00000000000000000",
+            fx.store.node_id()
+        )
+    );
+    assert_eq!(row["who"], "owner");
+    assert_eq!(strs(&row["next"]), WORDY_STEPS);
+    assert_eq!(row["next_delegate"], json!([]));
+    assert!(row["since"].is_string(), "{row}");
+    assert!(row["age_seconds"].as_i64().unwrap() >= 5 * 60, "{row}");
+
+    // More rows than the limit: the rest are counted, with the command that lists them.
+    fx.skip("01SEC0ND000000000000000000");
+    let cut = fx.needs(&["--limit", "1"]);
+    assert!(
+        cut.contains("\n  and 1 more: another activity --kinds sync\n"),
+        "{cut}"
+    );
+    assert_eq!(fx.brief(), "needs you: 2 (2 skipped events)\n");
+
+    for id in ["01SK1PPED00000000000000000", "01SEC0ND000000000000000000"] {
+        fx.store.acknowledge_skip(id).unwrap();
+    }
+    assert_eq!(fx.text(), "nothing needs the owner\n");
+    assert_eq!(fx.brief(), "");
+    let v = fx.json();
+    assert_eq!(v["counts"]["skipped_event"], 0);
+    assert_eq!(v["rows"], json!([]));
 }
 
 /// The commands in `entry`: the whole entry when it is one, and the part after the colon
@@ -608,9 +721,14 @@ fn every_printed_command_parses() {
         "UPDATE transport_sessions SET observed_at = {} WHERE session_id != 'dead0001'",
         now_ms() - 6 * MIN
     ));
+    // Two skipped events (Q26b): one as this software writes it, and one whose id is not
+    // an id, so no step of its row may be a bare command with a placeholder in it.
+    fx.skip("01SK1PPED00000000000000000");
+    fx.skip("x; id");
 
     let v = fx.json_with(&["--limit", "200"]);
     let human = fx.needs(&["--limit", "200"]);
+    assert_eq!(rows_of(&v, "skipped_event").len(), 2);
     let mut commands: Vec<String> = Vec::new();
     for row in v["rows"].as_array().unwrap() {
         for key in ["next", "next_delegate"] {
@@ -633,12 +751,25 @@ fn every_printed_command_parses() {
         "another wake prune --dry-run",
         "another queue list --self-admitted",
         "another inbox --agent cy",
+        "another sync ack 01SK1PPED00000000000000000 --owner",
     ] {
         assert!(
             commands.iter().any(|c| c == wanted),
             "{wanted}: {commands:#?}"
         );
     }
+    // This fixture has no hub, so a skip of a local event must not print a bare
+    // `another sync` command (that command exits 1: this node has no hub).
+    assert!(
+        !commands.iter().any(|c| c == "another sync"),
+        "a node with no hub must not print another sync as a command: {commands:#?}"
+    );
+    let skip_text = format!("{human}\n{v}");
+    assert!(
+        skip_text.contains("spokes receive it at their next sync"),
+        "{skip_text}"
+    );
+
     for prefix in [
         "another queue release Q6 --reason \"session gone\" --owner",
         "another queue release Q1 --reason \"<why>\" --owner",

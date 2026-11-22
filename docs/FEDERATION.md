@@ -33,6 +33,7 @@ Several machines, such as a laptop, a remote runner and a GPU box, each run thei
 | Mail (`message.sent`) | only nodes that host a recipient; mail between agents on one node never leaves it |
 | Read and acknowledgement receipts | only the node that sent the message |
 | Activity: sessions, requests, holds, resources | nodes with `read_feed`, plus the owner of a resource being borrowed |
+| `sync.skipped` and `sync.skip_acked` (see "An event that is too large to send") | the nodes the skipped event would have reached. Through a hub on an earlier build, every spoke with `read_feed` (see "With an earlier build" in that section) |
 | Tokens, audit records, pairing records | never |
 
 ## Permissions
@@ -217,7 +218,7 @@ From now on every change to a peer's name, permissions or revoked state is on re
 
 A sync between honest nodes does not stop because of how much is waiting (D99). Three things bound it: the size of one event this build writes, the size of one request or answer, and the size of the batch or page that fills it.
 
-**One event this build writes** is at most 2 MiB (2,097,152 bytes) as it travels: its wire JSON, escaping included, with the sequence number counted as one digit. The largest mail an honest node writes to one recipient is 1,837,191 bytes: a 256 KiB body made only of control characters, which cost seven bytes each on the wire, a 300-character subject and the longest names. This is a rule for local writes only. An event already in a log, or one a peer sends, is not judged by it: it travels if it fits the transport (below).
+**One event this build writes** is at most 2 MiB (2,097,152 bytes) as it travels: its wire JSON, escaping included, with the sequence number counted as one digit. The largest mail an honest node writes to one recipient is 1,837,191 bytes: a 256 KiB body made only of control characters, which cost seven bytes each on the wire, a 300-character subject and the longest names. This is a rule for local writes only. An event already in a log, or one a peer sends, is not judged by it: it travels if it fits the transport (below). One that does not fit the transport even alone is skipped and reported, and the events after it travel (see "An event that is too large to send").
 
 - A local command or tool that would write a larger event is refused as `invalid`, with the kind of event and both sizes, and nothing is written. Mail has no rule on how many agents one message names, so this is what stops a message to thousands of recipients: with the costliest body and the longest names it is refused at roughly 1,500 recipients, with a plain 256 KiB body at roughly 10,000.
 - The fields that had no size rule each have one, so the caller is told which field is too long: an agent's description 4 KiB and model 200 bytes, a hold's reason 1 KiB and each pattern 4,096 bytes, a request's completion or cancellation note 16 KiB. The CLI prints, for example, `another: agent description is 4097 bytes; the limit is 4096` and exits non-zero; the MCP tools answer `invalid` with the same text. These rules apply to what a local caller writes, including a remote caller of `another serve`. The edit hook's holds and a session start are not held to them and write nothing near them.
@@ -244,35 +245,117 @@ A spoke reads a pull answer of at most 32 MiB, and a pairing or push answer of a
 - Whatever a hub took in a push it can relay: the event is at most 8 MiB, a pull answer may be 32 MiB, and the rest of an answer is the node directory, which is about 150 bytes a node. The build fails if the pull limit is ever less than twice the push limit.
 - A hub's own event is pulled, alone if need be, when the answer that carries it is at most 32 MiB.
 - A build before these limits blocked at 2 MiB on a push and 10 MiB on a pull, so nothing it delivered is blocked now, and events between those sizes and the new ones now travel.
+- An event over these sizes is not sent and does not block: the node that holds it steps past it, says so in a small signed event, and sends everything after it (see "An event that is too large to send").
 
 **With a node on an earlier build.**
 
 - *New spoke, older hub.* The older hub reads at most 2 MiB per push and answers `413` to more, without reading the body; the spoke sees that answer or only a failed connection (a broken pipe on Linux, and on macOS sometimes "invalid argument"). On a `413`, or on any I/O error while a push is being sent other than a refused connection, it sends half as many events, down to one, for the rest of that sync. From 500 events that is at most eight cuts, so a network that is simply failing costs at most nine failed requests before its error is reported. The older hub bounds a page by count only; if an answer is over what the spoke reads, the spoke asks again with half the `limit`, down to one event.
 - *Older spoke, new hub.* Nothing changes on the spoke. It gains from the hub's 8 MiB push limit and from pages closed at 8 MiB, under the 10 MiB it reads.
-- When one event alone is over what the other side takes, halving ends and the sync fails with a message that names the cause and says that retrying will not help, for example `the hub at <url> refused event <id> (message.sent) as too large: ...`.
+- When one event alone is over what the other side takes, halving ends and the sync fails with a message that names the cause and says that retrying will not help, for example `the hub at <url> refused event <id> (message.sent) as too large: ...`. Such an event is not skipped: it fits this build's limits, and the message says to update the other side.
 
-## If a sync reports an event that cannot be sent
+## An event that is too large to send
 
-Only an event that does not fit the transport even alone is left behind: in a spoke's log, one over the 8 MiB a hub reads; in a hub's log, one over the 32 MiB a spoke reads. No build from D99 on writes one (it writes at most 2 MiB), but an earlier build could, for example by registering an agent with a description of many megabytes through an MCP tool. The node sends everything before it, then `another sync` fails every time, exits non-zero, and prints
+An event that does not fit the transport even alone is skipped, and the skip is reported until you acknowledge it (D-next). It never blocks the events after it and it is never silent. Nothing is deleted and there is no command that removes an event.
+
+**What is skipped.** In a spoke's log, one of its own events that alone makes a push over the 8 MiB a hub reads (an event of more than 8,388,595 bytes). In a hub's log, an event that alone makes a pull answer, the node directory included, over the 32 MiB a spoke reads. No build from D99 on writes such an event (it writes at most 2 MiB), but an earlier build could, for example by registering an agent with a description of many megabytes through an MCP tool. The node whose log holds the event (the holder) decides, by this build's limits. Everything before and after the event travels in the same sync.
+
+**The marker.** The first time the holder steps past the event it writes one small signed event of its own, `sync.skipped`: the skipped event's id, the node that wrote it, its kind, the agent that wrote it, its size, a short name of the thing (`agent <name>`, `hold <id>`, `<n> holds`, `<n> leases`, `message <id> to <n> recipients`, `request <id>`) and where the event would have gone. It never carries the event's large field. On a spoke it is written in the transaction that moves the push cursor past the event; on a hub, before the pull is answered. There is one marker per holder and event, however often the event is stepped past. The marker travels by the ordinary sync, in the same `another sync`, to the nodes the event would have reached: a marker for a message reaches only the nodes that host a recipient, a marker for a hold the nodes that would have seen the hold. A node may mark its own events; a hub may also mark an event it relays, and a spoke accepts that only from its own hub. Any other marker is refused on import, as is one whose fields are missing, mistyped or over their lengths.
+
+**Where it is reported.** A node reports the unacknowledged skips of its own log and of its hub's log:
+
+- `another sync` prints them after every sync, at most five in full and then `and <n> more skipped event(s): another needs`. The exit status stays 0. `--json` lists the same five at most under `skipped`, oldest first, and gives the number of all of them as `skipped_total`, so a node that writes many markers cannot make this report large. `another needs --json` counts them all and lists up to its row limit (`--limit`, at most 200), and `another activity --kinds sync` lists them, at most 500 per call; page with `--since <time or event id>`. When a sync fails, its error is printed as before and the skips return with the next sync that completes.
+- `another needs` has a `skipped_event` row for each ([NEEDS.md](NEEDS.md)). A hub runs no sync, so this is where a hub reports its own. The row gives the same steps in that list's own wording: a step that is a complete command is printed bare (`another sync` on a spoke, the acknowledgement; a hub names no `another sync` step, because it has no hub to dial), and every other step starts with a word and has its commands in backticks.
+- The holder writes an audit row (`sync skip`, outcome `skipped`), shown by `another audit`.
+- `another activity --kinds sync` lists skips and acknowledgements a node knows, acknowledged or not, at most 500 per call; page with `--since <time or event id>`. Markers written by other spokes show there only; they are not repeated by `another sync` or `another needs`.
+
+For an event in this node's own log, `another sync` prints:
 
 ```text
-another: event <id> (<kind>, <size> bytes on the wire) in this node's log is larger than a hub reads in one push (8388608 bytes), so it cannot be sent and the events after it wait behind it; retrying will not help; the owner must decide whether it is skipped or keeps blocking (docs/FEDERATION.md, "If a sync reports an event that cannot be sent")
+skipped <id> (<kind>, <bytes> bytes, written by <actor>): it is in this node's log and is larger than a hub reads in one push (8388608 bytes), so it was not sent; the events after it were sent
+  about: <about>
+  missing on other nodes: <what other nodes miss>
+  to get it across:
+    <step>
+    <step>
+  then: another sync ack <id> --owner
 ```
 
-A hub that holds such an event answers a spoke's pull with `pull failed (409 Conflict): event <id> ... in the hub's log is larger than a spoke reads in one pull answer (33554432 bytes) ...`, after the page before it. An earlier build stopped in the same place, at 2 MiB and 10 MiB, with a message that named nothing.
+For an event in the hub's log, a spoke prints the same with `it is in node <hub>'s log and is larger than a spoke reads in one pull answer (33554432 bytes), so node <hub> did not send it`, `missing on this node:`, `to get it across, on <this node, or node <name>>:` and `then, on node <hub>: another sync ack <id> --owner`. The steps run on the node that wrote the event; the acknowledgement runs on the holder. Every value a peer wrote is shown as one bounded, safe line.
 
-Whether Another should step past such an event by itself is not decided; it is the owner's decision, and the review of this change recommends skipping with a loud report. Until then the event is neither skipped nor deleted, and Another has no command that removes or steps past an event. What the owner can do today, on the node the message names (for the hub's message, on the hub):
+A value from a marker is put into a printed command only when it is what this software writes there: the agent's name when it is a valid agent name that does not start with `-`, a hold id and the event's id when they are ids this software makes. Anything else leaves the placeholder (`<name>`, `<hold id>`, `<event-id>`), and a `note:` line under `about:` says so, for example `note: the hold id in this report is not an id this software makes, so <hold id> is left for you to fill`. A hub chooses the text of its markers, and these lines are there to be copied.
 
-1. Stop whatever runs Another there (`another serve`, the daemon) and copy the home directory as a backup.
-2. Remove the one event from the log by hand:
+**Getting the information across.** The steps are fixed per kind. No command re-sends the event itself.
 
-   ```sh
-   sqlite3 "$ANOTHER_HOME/another.db" "DELETE FROM events WHERE event_id = '<id>'"
-   ```
+*An agent's registration (`agent.registered`).* Missing: what this registration changed: the agent's description and model. If it was the agent's first registration, other nodes do not know the agent at all: nobody there can address it; mail it sent them is stored and not delivered; they do not see its holds, so an agent there is not warned before it edits the same files; they do not see its leases, so a resource it owns shows no owner there and cannot be borrowed from another node, and a resource it borrowed on another node is not held for it there. Steps:
 
-3. Start Another again and run `another sync`.
+1. `another agent register <name> --program <program> --model <model> --description "<4096 bytes or fewer>"` (add `--project <path>` if it has one; a model left out is cleared).
+2. Each hold it has (`another holds --agent <name>` lists them): `another hold acquire --agent <name> -p <project> <the same paths>`, with `--shared`, `--repo-wide`, `--reason` and `--ttl` as the hold has them. The same hold is sent again; without `-p` from another directory it is a different hold, and without `--shared` a shared hold becomes exclusive or is refused.
+3. Each resource of this node it holds a lease on: `another release <resource id or kind:name> --agent <name>`, then at once `another borrow <the same> --agent <name>`. A borrow without the release only renews, and a renewal brings nothing to a node that never had the lease. Between the two commands the resource has no lease unless another agent holds one: another agent on this node that borrows it in that moment becomes its owner, and if the resource is exclusive this agent's borrow is then refused. If another agent already holds a lease, that agent becomes the owner at the release and this agent comes back as a borrower.
+4. Each resource of another node it borrowed: `another release <resource id> --agent <name>`, then `another borrow <resource id> --agent <name>`. If the borrow is refused, the release has already happened: it is refused when the hub does not grant borrowing, when the resource has no live owner, or when it cannot be reached from this machine.
+5. Mail it sent to other nodes before step 1 is not delivered there and no command delivers it: send it again.
+6. `another sync`.
 
-What that costs: no other node ever receives that event. For an agent's registration, the agent stays unknown on the other nodes, so nobody there can address it and mail it sends is not delivered there, until it registers again with a description inside the limits. The node's own state is unchanged, since the event had already been applied there. The events after it are then sent. This removal on a spoke is run in the tests; it is a hand edit of the database, not a supported command.
+*A hold (`hold.acquired`, `hold.updated`).* Missing: this hold: an agent on another node is not warned before it edits the same files, and renewals of it change nothing there. Steps: `another hold release --agent <agent> <hold id>`; `another hold acquire --agent <agent> -p <project> <paths>`, with `--shared`, `--repo-wide` and `--ttl` as the hold had them, each pattern 4096 bytes or fewer and `--reason` 1024 bytes or fewer; `another sync`.
+
+*A renewal of holds (`hold.renewed`).* Missing: this renewal: other nodes may show these holds as expired, and not warn their agents, until the next one arrives. Steps: `another heartbeat --agent <agent>`, then `another sync`. The next heartbeat does the same by itself, in events of at most 10000 ids.
+
+*A renewal of leases (`resource.renewed`).* Missing: this renewal. A lease on this node's own resource shows as expired on other nodes until the next renewal arrives. A lease borrowed on another node's resource is different: if that node saw no renewal before the lease ran out there, it ended the lease, on every node including this one, and a later renewal does not bring it back. Steps: `another sync`; for each resource of another node the agent borrowed, `another borrow <resource id> --agent <agent>`, which renews a lease that is still live and borrows again one that ended; `another sync`.
+
+*A message (`message.sent`).* Missing: this message: its recipients on other nodes never received it. Steps: `another send` again to fewer recipients in each message (a body is at most 262144 bytes, so only the list of recipients makes a message this large); `another sync`.
+
+*Any other kind.* No command re-sends the event. For most kinds nothing needs doing (a release runs out on other nodes by itself, a request only loses a feed line); if other nodes need what it recorded, do that action again.
+
+**How a resource is named in these steps.** `kind:name` names only a resource of the node the command runs on. Another node's resource is named by its resource id, the value `another resources` prints in brackets at the end of each line; `another borrow port:<name>` for another node's resource answers `no registered resource "port:<name>"`.
+
+**Acknowledging.** On the holder:
+
+```bash
+another sync ack <event-id> --owner
+```
+
+Acknowledging needs `--owner`, a terminal and a typed yes, as the queue's owner actions do. It records that the report was seen; it deletes nothing. One event per call. The id is looked up before anything is asked: an id no marker names is refused, an event in another node's log is refused with the node to run the command on, and an event already acknowledged is said to be so. It writes one `sync.skip_acked` event, which travels where the marker went, and one audit row (`sync ack`, outcome `ok`). `another sync` and `another needs` then stop reporting that skip, on the holder at once and on its spokes when the acknowledgement reaches them. The skipped event, the marker and the audit rows stay, and the event is still not sent. It needs no hub and works on a hub. It has no MCP tool and no remote route.
+
+Past skips are listed by `another activity --kinds sync`, acknowledged or not, and by `another audit` on the node that holds the event. `another events` shows the two events themselves.
+
+After a hub is restored from a copy older than its marker, it writes a new marker at the next pull, and if the copy also predates the acknowledgement it reports the skip again on the hub. Spokes that kept the old acknowledgement stay quiet.
+
+### What other nodes miss
+
+While an event is skipped, a node that would have received it treats later events as it treats any event about something it does not know: it stores them and applies nothing.
+
+| Skipped event | On the other nodes | Later events affected |
+|---|---|---|
+| `agent.registered`, first registration | The agent is unknown | Its mail is stored and not delivered, its holds and leases are not shown, until it registers again. Mail sent before that stays undelivered |
+| `agent.registered`, a later one | Description and model are older | None |
+| `project.ensured` | The project is unknown | The node's agents there have no project in their address and their holds in it are not shown. No build from D99 on can write this event too large |
+| `node.created`, `node.renamed` | The name is older until the next sync's node list | None |
+| `message.sent` | The message is absent | A reply to it arrives without its parent |
+| `delivery.read`, `delivery.acked` | The sender does not see the read or the acknowledgement | None |
+| `hold.acquired`, `hold.updated` | The hold is not seen | Its renewals and its release change nothing there |
+| `hold.renewed` | The holds look expired early | None; the next renewal corrects it |
+| `hold.released` | The holds look held until they run out there, at most 4 hours after the last renewal seen | None |
+| `resource.registered` | The resource is unknown | Adopting and borrowing it create no lease there. No build from D99 on can write this event too large |
+| `resource.adopted`, `resource.borrowed`, `resource.transferred` | The lease or its role is absent | Its renewals and its release change nothing there |
+| `resource.renewed` | The leases look expired early | For a borrow on another node's resource, that node ends the lease when it runs out there, on every node; borrow again. For a lease on the holder's own resource, the next renewal corrects it |
+| `resource.released` | The leases look held until they run out there, at most 24 hours after the last renewal seen | None |
+| `session.*`, the other `hold.*` and `resource.*` kinds, `push.*`, `transport.*` | Presence is older, or a feed line is absent | None |
+| `request.*` | A feed line is absent | None |
+
+### With an earlier build
+
+The wire format, the cursors and the anchors are unchanged. A skip is visible to another node only as the two event kinds.
+
+| Pairing | Holder | What happens |
+|---|---|---|
+| new spoke, new hub | spoke | The spoke skips, its marker is pushed and relayed where the event would have gone, and it is reported as above |
+| new spoke, new hub | hub | The hub skips, the spoke pulls the marker and reports the hub's skip |
+| new spoke, older hub | spoke | The spoke skips. The older hub stores the marker and relays it as an activity event to every spoke with `read_feed`, and reports nothing beyond its own feed line |
+| new spoke, older hub | hub | The older hub does not skip, and what the spoke prints depends on the hub's build. Either way `another sync` exits non-zero on every run and nothing after that event arrives: update the hub, and it then steps past the event and reports it as above. A hub on a build with D99 and without this change names the event and answers 409; the spoke prints `pull failed (409 Conflict): event <id> (<kind>, <bytes> bytes on the wire) in the hub's log is larger than a spoke reads in one pull answer (33554432 bytes), so it cannot be sent and the events after it wait behind it; retrying will not help; the owner must decide whether it is skipped or keeps blocking (docs/FEDERATION.md, "If a sync reports an event that cannot be sent")`. That heading was this section's earlier name; the decision it speaks of is made, and no event needs removing by hand. A hub on a build before D99 sends an answer over what the spoke reads; the spoke halves down to one event and then fails with `... the hub runs an older build or holds an event over the size limit; a hub on this build or later steps past such an event and reports it, so update the hub` |
+| older spoke, new hub | hub | The hub skips for the older spoke too. The older spoke stores the marker as an unknown kind and its feed shows `[hub] system: sync.skipped`. An event between 10 MiB and 32 MiB is not skipped and still blocks that older spoke, which reads 10 MiB: update the spoke |
+| older spoke, new hub | spoke | The older spoke blocks on its own event as it always did. Update it, then it skips |
+| new spoke, older hub, an event of 2 MiB to 8 MiB | spoke | Not skipped: the event fits this build's limits. The sync fails with the message that says to update the hub |
+
+Because an older hub relays both kinds as activity events, a marker for a message then shows every spoke with `read_feed` this, and nothing of the content: that a message existed, its message id and the number of its recipients; the node ids that host its recipients; the sender and the sender's node; the event's id, its size and the time the sync skipped it. Update the hub to keep a marker for mail to the recipients' nodes only.
 
 ## Wire protocol (for implementers)
 
@@ -314,9 +397,12 @@ What that costs: no other node ever receives that event. For an agent's registra
 
   The hub rejects requests from unpaired or revoked nodes, and requests whose clock is more than 5 minutes off.
 - A `WireEvent` is `{seq, event_id, node_id, ts, actor, kind, payload, prev_id, sig}`, where `payload` is the exact signed JSON text. The signature covers `"another-event-v1\n{event_id}\n{node_id}\n{ts}\n{actor}\n{kind}\n{sha256(payload)}"`.
+- Skipping an event that is too large to send changes nothing on the wire: no field, route, cursor or anchor rule. A skip is visible only as two ordinary event kinds. `sync.skipped` has the payload `{event_id, event_node, event_kind, event_actor, bytes, direction, about, route, route_nodes}` (`about` may be absent; `direction` is `push` or `pull`; `route` is `directory`, `feed` or `mail`; `route_nodes` holds at most 1,000 node ids), and `sync.skip_acked` has `{event_id, route, route_nodes}`. A receiver checks no order and no chain of events, and `prev_id` is not signed, so a stream with an event left out is accepted as before.
 
 ## Limits (v2)
 
 - Mail bodies are readable by the hub that relays them. Host the hub yourself; end-to-end encryption is future work.
 - Hub-and-spoke only, with no mesh. A spoke syncs with one hub.
 - Requests and path holds are node-local.
+- A spoke of a node that is itself a spoke refuses that node's hub's `sync.skipped` markers for other nodes' events: it takes a marker for another node's event only from its own hub. Each such marker is listed once in the sync's rejected events and is not stored.
+- Mail a skipped agent sent to other nodes before it registered again is not delivered there (see "An event that is too large to send"). The query behind the skip report is not bounded against a flood of markers from a paired node.
