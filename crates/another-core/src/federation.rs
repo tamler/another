@@ -483,9 +483,10 @@ fn classify(kind: &str, payload: &Value, origin: &str) -> Share {
         // Local-only kinds.
         //
         // - The queue is local to its node: no queue event is ever shared.
-        // - Push records name local terminals (tmux panes, cmux surfaces, Herdr panes) and
-        //   local message ids; they are evidence for this node's `another stats` only.
-        "token" | "peer" | "oauth" | "queue" | "push" => return Share::Never,
+        // - Push records, and the `transport.wake` / `transport.gone` events that replaced
+        //   them, name local terminals (Herdr panes, tmux, cmux) and local message ids;
+        //   they are evidence for this node's `another stats` only.
+        "token" | "peer" | "oauth" | "queue" | "push" | "transport" => return Share::Never,
         _ => {}
     }
     match kind {
@@ -3430,7 +3431,13 @@ mod tests {
         let o = "A";
         assert_eq!(classify("token.created", &json!({}), o), Share::Never);
         assert_eq!(classify("oauth.approved", &json!({}), o), Share::Never);
-        for kind in ["push.woke", "push.notified", "push.suppressed"] {
+        for kind in [
+            "push.woke",
+            "push.notified",
+            "push.suppressed",
+            "transport.wake",
+            "transport.gone",
+        ] {
             assert_eq!(classify(kind, &json!({}), o), Share::Never, "{kind}");
         }
         assert_eq!(

@@ -40,7 +40,7 @@ Several machines, such as a laptop, a remote runner and a GPU box, each run thei
 | Read and acknowledgement receipts | only the node that sent the message |
 | Activity: sessions, requests, holds, resources | nodes with `read_feed`, plus the owner of a resource being borrowed |
 | `sync.skipped` and `sync.skip_acked` (see "An event that is too large to send") | the nodes the skipped event would have reached. Through a hub on an earlier build, every spoke with `read_feed` (see "With an earlier build" in that section) |
-| Tokens, audit records, pairing records, push records (wakes and notices, which name local terminals) | never |
+| Tokens, audit records, pairing records, push records, and transport wake and gone records (which name local terminals) | never |
 
 ## Permissions
 

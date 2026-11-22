@@ -1,11 +1,12 @@
-//! A node's push records (`push.woke`, `push.notified`, `push.suppressed`) name local
-//! terminals (tmux session and pane, cmux surface, Herdr pane), the adapter's detail and local
-//! message ids. They are evidence for that node's `another stats` and never leave it: a spoke
-//! does not offer them, a hub refuses them from a modified spoke, and a hub that stored one
-//! under an older build does not relay it.
+//! A node's wake records name local terminals (Herdr panes, tmux, cmux) and local
+//! message ids. They are evidence for that node's `another stats` and never leave it: a
+//! spoke does not offer them, a hub refuses them from a modified spoke, and a hub that
+//! stored one under an older build does not relay it.
 //!
-//! The first test is claude@another-holdfix-20261116's failing test from
-//! FINDINGS-main-push-records.md, kept as written.
+//! Current builds write `transport.wake` (and `transport.gone`). Older builds wrote
+//! `push.woke`, `push.notified` and `push.suppressed`; those prefixes stay never-shared
+//! as well. The tests below use the current API; classify unit tests in `federation.rs`
+//! pin the legacy kinds.
 
 use another_core::*;
 use rusqlite::Connection;
@@ -26,7 +27,7 @@ fn pair(hub: &Store, spoke: &Store) {
     spoke.complete_join(&invite, &resp).unwrap();
 }
 
-/// Hub, alpha and beta paired with every permission; carol on alpha has woken a tmux pane.
+/// Hub, alpha and beta paired with every permission; carol on alpha has a recorded wake.
 fn woken(dir: &std::path::Path) -> (Store, Store, Store) {
     let hub = node(dir, "hub");
     let alpha = node(dir, "alpha");
@@ -43,25 +44,28 @@ fn woken(dir: &std::path::Path) -> (Store, Store, Store) {
         })
         .unwrap();
     alpha
-        .record_wake(
-            "carol",
-            WakeVia::Tmux,
-            "secret-session:%7",
-            "sent",
-            "tmux send-keys -t secret-session:%7",
-            &[],
-        )
+        .record_transport_wake(&TransportWake {
+            agent: "carol".into(),
+            session_id: None,
+            transport: "herdr".into(),
+            target: "secret-session:%7".into(),
+            outcome: WakeOutcome::Started,
+            detail: "herdr: agent_prompted (working)".into(),
+            kind: WakeKind::Mail,
+            message_ids: Vec::new(),
+            trigger: "daemon".into(),
+        })
         .unwrap();
     (hub, alpha, beta)
 }
 
-/// Alpha's stored `push.woke`, exactly as signed.
+/// Alpha's stored `transport.wake`, exactly as signed.
 fn stored_wake(dir: &std::path::Path) -> WireEvent {
     Connection::open(dir.join("alpha").join(DB_FILE))
         .unwrap()
         .query_row(
             "SELECT seq, event_id, node_id, ts, actor, kind, payload, prev_id, sig
-             FROM events WHERE kind = 'push.woke'",
+             FROM events WHERE kind = 'transport.wake'",
             [],
             |r| {
                 Ok(WireEvent {
@@ -86,7 +90,9 @@ fn gap_a_wake_record_does_not_leave_its_node() {
     let (hub, alpha, beta) = woken(dir.path());
     let (out, _) = alpha.outbound_events(0, 10_000).unwrap();
     assert!(
-        out.iter().all(|e| !e.kind.starts_with("push.")),
+        out.iter().all(|e| !e.kind.starts_with("push.")
+            && e.kind != "transport.wake"
+            && e.kind != "transport.gone"),
         "alpha publishes its wake record: {:?}",
         out.iter().map(|e| &e.kind).collect::<Vec<_>>()
     );
@@ -119,7 +125,7 @@ fn a_hub_refuses_a_pushed_wake_record() {
     assert!(
         report.rejected[0]
             .reason
-            .contains("push.woke events are not shared"),
+            .contains("transport.wake events are not shared"),
         "{report:?}"
     );
 }
