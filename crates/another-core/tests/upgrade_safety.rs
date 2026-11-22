@@ -1189,7 +1189,7 @@ fn upgrade_drops_cross_checkout_blocks() {
     db.pragma_update(None, "user_version", SCOPED - 1).unwrap();
     let current_keys: i64 = db
         .query_row(
-            "SELECT count(*) FROM project_repos WHERE repo_key LIKE 'v3:%'",
+            "SELECT count(*) FROM project_repos WHERE repo_key LIKE 'v4:%'",
             [],
             |r| r.get(0),
         )
@@ -1337,7 +1337,7 @@ fn upgrade_drops_cross_checkout_blocks() {
         .unwrap()
     };
     let (key, checkout) = src_row(&db);
-    assert!(key.starts_with("v3:"), "{key}");
+    assert!(key.starts_with("v4:"), "{key}");
     assert_eq!(checkout, "", "not used yet");
     let stopped = edit(&store, "bob", &pa_src, "a.rs");
     assert_eq!(stopped.conflicts.len(), 1, "src/a.rs is alice's, in wt-a");
