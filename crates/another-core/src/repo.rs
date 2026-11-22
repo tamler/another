@@ -312,7 +312,8 @@ pub fn normalize_remote(url: &str) -> Option<String> {
 /// binary from opening the database.
 ///
 /// v3: the link also carries the project's checkout (D92).
-pub(crate) const KEY_VERSION: &str = "v3:";
+/// v4: relative gitdir resolved from the `.git` file's real location.
+pub(crate) const KEY_VERSION: &str = "v4:";
 
 /// A key as stored in `project_repos` (empty stays empty: "not in a repository").
 pub(crate) fn stored_key(key: &str) -> String {

@@ -140,8 +140,9 @@ fn adv237_a_symlinked_relative_worktree_still_shares_the_checkouts_key() {
     );
 }
 
-/// A worktree whose link was cached under the old key rules (KEY_VERSION v2, from before the
-/// symlink fix) is relinked, not trusted. Holds are scoped to a checkout (D92), so this
+/// A worktree whose link was cached under the previous key rules (KEY_VERSION v3, after
+/// D92 but before the relative-gitdir symlink fix) is relinked, not trusted. A v3 row with
+/// a non-empty checkout would otherwise be kept. Holds are checkout-scoped (D92), so this
 /// pins the cache refresh itself: the stale key is replaced with the shared origin key.
 #[cfg(unix)]
 #[test]
@@ -171,15 +172,27 @@ fn a_link_cached_under_the_old_key_rules_is_recomputed() {
             })
             .unwrap();
     }
-    // What the pre-fix build cached for the symlinked worktree: a key of its own.
-    rusqlite::Connection::open(home.join(DB_FILE))
-        .unwrap()
-        .execute(
-            "UPDATE project_repos SET repo_key = 'v2:git:/nowhere/.git', repo_prefix = ''
-             WHERE project_id = ?1",
+    // What current main (v3) cached for the symlinked worktree: a key of its own, with
+    // the checkout already filled, which `cached()` would trust without a version bump.
+    let db = rusqlite::Connection::open(home.join(DB_FILE)).unwrap();
+    let checkout: String = db
+        .query_row(
+            "SELECT checkout FROM project_repos WHERE project_id = ?1",
             [&wt.project_id],
+            |r| r.get(0),
         )
         .unwrap();
+    assert!(
+        !checkout.is_empty(),
+        "the fixture must leave checkout filled, or v3 staleness is hidden"
+    );
+    db.execute(
+        "UPDATE project_repos SET repo_key = 'v3:git:/x/elsewhere/main/.git/worktrees/wt-a',
+             repo_prefix = ''
+             WHERE project_id = ?1",
+        [&wt.project_id],
+    )
+    .unwrap();
     let hold = |agent: &str, project: &Project| {
         store
             .acquire_holds(AcquireHolds {
@@ -204,7 +217,7 @@ fn a_link_cached_under_the_old_key_rules_is_recomputed() {
         )
         .unwrap();
     assert_eq!(
-        key, "v3:example.com/me/shop",
-        "the stale v2 key was still cached: {key}"
+        key, "v4:example.com/me/shop",
+        "the stale v3 key was still cached: {key}"
     );
 }
