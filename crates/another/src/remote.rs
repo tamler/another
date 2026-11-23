@@ -2,7 +2,8 @@
 //!
 //! With `another serve --auth`, every `/mcp` and `/activity` request needs
 //! `Authorization: Bearer <token>`. A token acts as exactly one agent and may only touch
-//! projects matching its globs. Every remote call is written to the audit log, and reaping
+//! projects matching its globs. Authenticated calls and a bounded sample of rejections
+//! are written to the audit log, and reaping
 //! is never available remotely.
 
 use another_core::{ActivityKind, ActivityQuery, AuditRecord, Error, Since, Store, TokenScope};
@@ -91,6 +92,17 @@ pub async fn audit(store: &Store, record: AuditRecord) {
     .await;
 }
 
+/// Refusals from callers that have not authenticated share one bounded budget.
+pub async fn unauthenticated_audit(store: &Store, record: AuditRecord) {
+    let store = store.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Err(e) = store.record_unauthenticated_audit(record) {
+            tracing::warn!(error = %e, "failed to write rejection audit log");
+        }
+    })
+    .await;
+}
+
 fn unauthorized(message: &str, www: &str) -> Response {
     (
         StatusCode::UNAUTHORIZED,
@@ -111,7 +123,7 @@ pub async fn require_token(
     let operation = format!("{} {}", req.method(), req.uri().path());
     let remote = remote_addr(req.headers(), &req);
     let Some(token) = bearer(req.headers()) else {
-        audit(
+        unauthenticated_audit(
             &store,
             AuditRecord {
                 operation,
@@ -143,7 +155,7 @@ pub async fn require_token(
             next.run(req).await
         }
         _ => {
-            audit(
+            unauthenticated_audit(
                 &store,
                 AuditRecord {
                     operation,

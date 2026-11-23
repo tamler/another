@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -271,6 +272,7 @@ pub struct Store {
 
 struct Inner {
     conn: Mutex<Connection>,
+    unauthenticated_audits: Mutex<std::collections::VecDeque<Instant>>,
     node_id: String,
     key: ed25519_dalek::SigningKey,
     clock: Clock,
@@ -506,6 +508,7 @@ impl Store {
         Ok(Store {
             inner: Arc::new(Inner {
                 conn: Mutex::new(conn),
+                unauthenticated_audits: Mutex::new(std::collections::VecDeque::new()),
                 node_id,
                 key: crate::crypto::decode_secret(&secret)?,
                 clock: Clock::System,
@@ -532,6 +535,7 @@ impl Store {
         Ok(Store {
             inner: Arc::new(Inner {
                 conn: Mutex::new(conn),
+                unauthenticated_audits: Mutex::new(std::collections::VecDeque::new()),
                 node_id,
                 key,
                 clock,
@@ -600,6 +604,32 @@ impl Store {
             })?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
+    }
+
+    /// Record a bounded sample of unauthenticated failures. The budget is shared by Store
+    /// clones and uses monotonic time, so callers cannot multiply it with arbitrary sources.
+    pub fn record_unauthenticated_audit(&self, entry: crate::tokens::AuditRecord) -> Result<()> {
+        const WINDOW: Duration = Duration::from_secs(60);
+        const MAX_ROWS: usize = 32;
+        let now = Instant::now();
+        {
+            let mut recent = self
+                .inner
+                .unauthenticated_audits
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while recent
+                .front()
+                .is_some_and(|at| now.duration_since(*at) >= WINDOW)
+            {
+                recent.pop_front();
+            }
+            if recent.len() >= MAX_ROWS {
+                return Ok(());
+            }
+            recent.push_back(now);
+        }
+        self.record_audit(entry)
     }
 
     /// Run a read-only closure against the connection.

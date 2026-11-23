@@ -58,7 +58,7 @@ pub enum Command {
         /// HTTP bind address. Loopback unless --auth and --allow-remote-bind are both given.
         #[arg(long, default_value = crate::serve::DEFAULT_BIND)]
         bind: String,
-        /// Require bearer tokens (`another token create`) on /mcp and /activity; audit every call.
+        /// Require bearer tokens (`another token create`) on /mcp and /activity; sample rejected-call audits.
         #[arg(long)]
         auth: bool,
         /// Allow a non-loopback --bind (requires --auth). Prefer a tunnel instead.
@@ -72,6 +72,7 @@ pub enum Command {
         #[arg(long, requires = "auth")]
         public_url: Option<String>,
         /// Act as a federation hub: serve /fed/* for paired spokes (node-signed requests).
+        /// Without --auth, serve only /fed/* and /health, with no dashboard.
         #[arg(long)]
         federation: bool,
         /// Serve the local dashboard at /ui.

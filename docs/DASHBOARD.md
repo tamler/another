@@ -57,6 +57,8 @@ Holds and requests that belong to another node are not yours to release or expir
 
 `--dashboard` together with `--auth`, still on loopback, serves a **read-only** page and **omits message bodies**. Actions are not available. The process prints a warning, because a tunnel to that port would expose the redacted view.
 
+A federation-only listener (`--federation` without `--auth`) never mounts the dashboard, even with `--dashboard`. With both `--federation` and `--auth`, dashboard routes require a bearer token as well as the loopback Host check. Use a separate local dashboard listener for browser access.
+
 `--dashboard` with a non-loopback `--bind` is refused, even when `--auth` and `--allow-remote-bind` are set.
 
 `GET /activity` is unchanged: summaries and ids, never message bodies. The audit log still stores the size of a body, not the body.

@@ -74,6 +74,12 @@ On the hub (keep it on loopback and expose it through a tunnel; see [REMOTE.md](
 another serve --federation --bind 127.0.0.1:7468
 ```
 
+Without `--auth`, this listener serves only `/fed/*` and `/health`. MCP, activity and dashboard routes are absent, including when `--dashboard` is passed. Add `--auth` to serve MCP and activity with bearer authentication; an explicitly enabled dashboard on that federation listener also requires a token and remains read-only with bodies omitted. Keep a separate local listener for a browser dashboard.
+
+**Proxy Host rewriting:** a proxy can replace the public `Host` with `127.0.0.1:<port>`. A loopback Host check cannot authenticate traffic behind such a proxy. Never expose a plain local listener through it; use the federation-only listener or `--auth` for remote access. Peer IP is no substitute: a local proxy makes remote callers appear local.
+
+Unauthenticated pairing and signature failures share an in-memory audit budget with rejected bearer requests: at most 32 rows per server store per 60 seconds, across all sources and routes. Excess failures are still refused but leave no row. Restarting the server resets the budget; successful pairing and authenticated operations keep their existing audit records.
+
 ```bash
 another pair invite --url https://studio.my-tailnet.ts.net --perms read_feed,send_mail,borrow_resource --expires 1h
 ```
@@ -204,7 +210,7 @@ Before this change, the holder of one valid invite could pair as a node the hub 
   ```sh
   sqlite3 "$ANOTHER_HOME/another.db" "SELECT node_id, ts, json_extract(payload,'$.display_name') FROM events WHERE kind IN ('node.created','node.renamed') ORDER BY seq"
   ```
-- Which node used each invite: `sqlite3 "$ANOTHER_HOME/another.db" "SELECT invite_id, used_at, used_by FROM invites"`. `another audit` lists every `POST /fed/pair`.
+- Which node used each invite: `sqlite3 "$ANOTHER_HOME/another.db" "SELECT invite_id, used_at, used_by FROM invites"`. `another audit` lists successful pairings and a bounded sample of refused `POST /fed/pair` calls.
 - `another peers`: a node that is not revoked though you revoked it, permissions you did not grant, or a name on the wrong key fingerprint.
 
 To undo it, with commands only:
@@ -220,13 +226,13 @@ To undo it, with commands only:
    sqlite3 "$ANOTHER_HOME/another.db" "SELECT event_id, ts, actor FROM events WHERE kind = 'message.sent' AND ts BETWEEN <T1> AND <T2> AND payload LIKE '%<attacker node id>%'"
    ```
 
-From now on every change to a peer's name, permissions or revoked state is on record with its cause: `peer.paired` (with `again`, `invite_id`, `fingerprint`, and on a second pairing `previous_name` and `previous_perms`), `peer.readmitted`, `peer.name_released`, `peer.revoked`, and an audit row for every refused pairing. The hub answers every failure of the invite check with one text, `invalid, used or expired invite, or the request is not signed for it`; the audit row's detail says which it was (`unknown invite`, `used invite (by <node id>)`, `expired invite` or `bad signature`), so an honest retry on a used invite can be told from a forged request.
+From now on every change to a peer's name, permissions or revoked state is on record with its cause: `peer.paired` (with `again`, `invite_id`, `fingerprint`, and on a second pairing `previous_name` and `previous_perms`), `peer.readmitted`, `peer.name_released`, `peer.revoked`, and a bounded sample of audit rows for refused pairings. The hub answers every failure of the invite check with one text, `invalid, used or expired invite, or the request is not signed for it`; the audit row's detail says which it was (`unknown invite`, `used invite (by <node id>)`, `expired invite` or `bad signature`), so an honest retry on a used invite can be told from a forged request.
 
 ## Cross-node behaviour
 
 - **Mail**: `another send --from bob --to carol@@runner …`. Replies, threads and acknowledgements work across nodes. Requests stay node-local: open them only with agents on the same node.
 - **Merged activity feed**: `another activity` shows other nodes' events prefixed with their node name, e.g. `[hub] alice@shop holds shop:src/**`. Message bodies never appear in the feed.
-- **Resources**: `another resources` lists other nodes' resources with their `node` and whether this machine can **reach** them (a TCP connect to the endpoint). They can be borrowed only when reachable and when `borrow_resource` was granted, and the lease is reported back to the owning node. Loopback endpoints are reachable only from the same machine.
+- **Resources**: `another resources` lists other nodes' resources with their `node` and whether this machine can **reach** them (a TCP connect to an IP-literal endpoint; hostnames are not resolved). A listing checks at most eight live foreign endpoints, with at most 100 ms per connect and a shared 500 ms connect budget. Hostnames, failed probes and entries skipped after either bound show `reachable: false`; that value does not prove an endpoint is down. Borrow checks its endpoint separately, outside the database write transaction, and refuses if the endpoint or owner changed before the lease is recorded. Resources can be borrowed only when reachable and when `borrow_resource` was granted, and the lease is reported back to the owning node. Loopback endpoints are reachable only from the same machine.
 - **Path holds**: holds stay node- and repo-local and are never distributed locks. When an agent acquires a hold that overlaps a live hold on another node, in a project with the **same name**, the result carries a **warning** (`warnings` in JSON, `warning:` lines in the CLI), never a conflict. The comparison with other nodes' holds is best effort: it runs after the acquire has been committed, within one fixed budget of work for the command (about 40 ms), lists at most ten overlapping holds and counts the rest, and when the budget is spent says in one line how many holds of which nodes were not compared (`not_compared` in JSON). A peer decides how many holds it sends and how costly their patterns are to compare, so this is what keeps its holds from slowing a command. A hold from another node whose stored pattern cannot be read (a glob that does not compile, or a row over the limit that an earlier build stored) warns on every acquire in that project until it ends, and the warning names the node and the hold. Details and measurements: [HOLDS.md](HOLDS.md#pattern-size-and-a-pattern-that-cannot-be-read).
 
 ## Restarts, restores and offline spokes
