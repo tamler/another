@@ -268,6 +268,25 @@ impl Store {
             .map(|(id, _)| id.to_string())
             .ok_or_else(denied)?;
         let digest = hash(bearer);
+        // Reject invalid candidates under a read lock. A request with a random token id or
+        // wrong secret must not wait for, or participate in, SQLite's write lock.
+        let valid = self.read(|conn| {
+            let row: Option<(String, Option<i64>, Option<i64>)> = conn
+                .query_row(
+                    "SELECT secret_hash, expires_at, revoked_at FROM tokens WHERE token_id = ?1",
+                    [&token_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            Ok(row.is_some_and(|(stored, expires_at, revoked_at)| {
+                stored == digest
+                    && revoked_at.is_none()
+                    && expires_at.is_none_or(|expires| expires > self.now())
+            }))
+        })?;
+        if !valid {
+            return Err(denied());
+        }
         self.write(|tx| {
             let row: Option<StoredToken> = tx
                 .query_row(

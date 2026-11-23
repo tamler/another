@@ -27,6 +27,10 @@ pub const MAX_RESOURCE_PURPOSE_BYTES: usize = 1024;
 /// Largest resource metadata accepted, measured as serialized JSON. Metadata is stored,
 /// written into the `resource.registered` event and synced to peers, so it stays small.
 pub const MAX_RESOURCE_METADATA_BYTES: usize = 64 * 1024;
+/// A resource listing spends at most this long checking foreign endpoints.
+const RESOURCE_PROBE_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
+/// A listing probes no more than this many foreign endpoints, even when probes fail fast.
+const RESOURCE_PROBE_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -692,6 +696,31 @@ pub(crate) fn session_leases_tx(
     Ok(leases.len() as u32)
 }
 
+fn probe_foreign_resources(
+    resources: &mut [Resource],
+    mut probe: impl FnMut(Option<&str>, Option<u16>, std::time::Duration) -> bool,
+) {
+    let deadline = std::time::Instant::now() + RESOURCE_PROBE_BUDGET;
+    let mut probed = 0;
+    for resource in resources {
+        if resource.node.is_none() || resource.status != "live" {
+            continue;
+        }
+        // A conservative false for entries beyond either cap avoids turning an
+        // incomplete scan into an unbounded wait. The listing itself is complete.
+        resource.reachable = Some(
+            if probed < RESOURCE_PROBE_LIMIT && std::time::Instant::now() < deadline {
+                probed += 1;
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                let timeout = remaining.min(std::time::Duration::from_millis(100));
+                !timeout.is_zero() && probe(resource.endpoint.as_deref(), resource.port, timeout)
+            } else {
+                false
+            },
+        );
+    }
+}
+
 impl Store {
     /// Register a running resource and take the owner lease. If a resource with the same
     /// kind and name is already registered, this fails with `conflict` while it has live
@@ -832,7 +861,7 @@ impl Store {
 
     fn list_resources(&self, filter: ResourceFilter, probe: bool) -> Result<Vec<Resource>> {
         let now = self.now();
-        self.read(|conn| {
+        let mut resources: Vec<Resource> = self.read(|conn| {
             let project_id = match &filter.project {
                 Some(p) => Some(find_project(conn, self.node_id(), p)?.project_id),
                 None => None,
@@ -860,19 +889,12 @@ impl Store {
                     resource_from_row,
                 )?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            rows.into_iter()
-                .map(|r| {
-                    let mut res = hydrate(conn, r, now)?;
-                    if probe && res.node.is_some() && res.status == "live" {
-                        res.reachable = Some(crate::federation::reachable(
-                            res.endpoint.as_deref(),
-                            res.port,
-                        ));
-                    }
-                    Ok(res)
-                })
-                .collect()
-        })
+            rows.into_iter().map(|r| hydrate(conn, r, now)).collect()
+        })?;
+        if probe {
+            probe_foreign_resources(&mut resources, crate::federation::reachable_with_timeout);
+        }
+        Ok(resources)
     }
 
     pub fn resource(&self, target: &ResourceRef) -> Result<Resource> {
@@ -894,7 +916,30 @@ impl Store {
         target: &ResourceRef,
         ttl_seconds: Option<i64>,
     ) -> Result<LeaseOutcome> {
+        self.borrow_resource_with_probe(agent, target, ttl_seconds, crate::federation::reachable)
+    }
+
+    fn borrow_resource_with_probe(
+        &self,
+        agent: &str,
+        target: &ResourceRef,
+        ttl_seconds: Option<i64>,
+        probe: impl FnOnce(Option<&str>, Option<u16>) -> bool,
+    ) -> Result<LeaseOutcome> {
         let ttl = clamp_ttl(ttl_seconds)?;
+        // Reachability is external I/O. Read the candidate first, probe without the
+        // SQLite write transaction/connection mutex, then revalidate its endpoint and
+        // ownership inside the transaction before committing the lease.
+        let candidate = self.read(|conn| {
+            resolve_agent(conn, self.node_id(), agent)?;
+            let rid = resolve(conn, self.node_id(), target)?;
+            get_resource(conn, &rid, self.now())
+        })?;
+        let candidate_node = candidate.node_id.clone();
+        let candidate_endpoint = candidate.endpoint.clone();
+        let candidate_port = candidate.port;
+        let reachable = (candidate_node != self.node_id())
+            .then(|| probe(candidate_endpoint.as_deref(), candidate_port));
         self.write(|tx| {
             crate::holds::sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, agent)?;
@@ -902,6 +947,17 @@ impl Store {
             let owner_node = resource_node(tx, &rid)?;
             let foreign = owner_node != tx.node_id;
             let node_field = foreign.then(|| owner_node.clone());
+            let current = get_resource(tx, &rid, tx.now)?;
+            if foreign
+                && (candidate_node != owner_node
+                    || candidate_endpoint != current.endpoint
+                    || candidate_port != current.port)
+            {
+                return Err(Error::Conflict(
+                    "resource endpoint changed while checking reachability; try borrowing again"
+                        .into(),
+                ));
+            }
             if let Some((lease_id, _)) = my_lease(tx, &rid, &me.id)? {
                 tx.emit(
                     &me.address,
@@ -921,7 +977,6 @@ impl Store {
                 touch(tx, &me.id)?;
                 return outcome(tx, &rid, &me.id, "renewed");
             }
-            let current = get_resource(tx, &rid, tx.now)?;
             if foreign {
                 crate::federation::allowed_towards(
                     tx,
@@ -936,7 +991,7 @@ impl Store {
                         current.name
                     )));
                 }
-                if !crate::federation::reachable(current.endpoint.as_deref(), current.port) {
+                if !reachable.unwrap_or(false) {
                     return Err(Error::Conflict(format!(
                         "{} {} on node {node} is not reachable from this machine",
                         current.kind.as_str(),
@@ -1277,6 +1332,49 @@ mod tests {
         assert_eq!(derive_port("train-job"), None);
     }
 
+    fn foreign_resource(i: usize) -> Resource {
+        Resource {
+            resource_id: format!("foreign-{i}"),
+            node_id: "peer".into(),
+            kind: ResourceKind::Port,
+            name: format!("port-{i}"),
+            endpoint: Some("http://192.0.2.1:80".into()),
+            port: Some(80),
+            pid: None,
+            project: None,
+            purpose: None,
+            mode: LeaseMode::Shared,
+            owner: Some("owner".into()),
+            leases: Vec::new(),
+            refcount: 1,
+            status: "live".into(),
+            lapsed_since: None,
+            metadata: Value::Null,
+            created_at: String::new(),
+            node: Some("peer".into()),
+            reachable: None,
+        }
+    }
+
+    #[test]
+    fn resource_listing_caps_foreign_probes() {
+        let mut resources = (0..RESOURCE_PROBE_LIMIT + 3)
+            .map(foreign_resource)
+            .collect::<Vec<_>>();
+        let mut calls = 0;
+        probe_foreign_resources(&mut resources, |_, _, _| {
+            calls += 1;
+            true
+        });
+        assert_eq!(calls, RESOURCE_PROBE_LIMIT);
+        assert!(resources[..RESOURCE_PROBE_LIMIT]
+            .iter()
+            .all(|resource| resource.reachable == Some(true)));
+        assert!(resources[RESOURCE_PROBE_LIMIT..]
+            .iter()
+            .all(|resource| resource.reachable == Some(false)));
+    }
+
     #[test]
     fn parses_refs() {
         assert!(matches!(
@@ -1287,5 +1385,103 @@ mod tests {
             ResourceRef::parse("01J0000000000000000000000A").unwrap(),
             ResourceRef::Id(_)
         ));
+    }
+
+    fn borrow_fixture() -> (Store, ResourceRef) {
+        let store = Store::open_in_memory(crate::Clock::manual(1_800_000_000_000).0).unwrap();
+        for name in ["alice", "bob"] {
+            store
+                .register_agent(crate::RegisterAgent {
+                    name: name.into(),
+                    program: crate::Program::Codex,
+                    project: None,
+                    model: None,
+                    description: None,
+                })
+                .unwrap();
+        }
+        let registered = store
+            .register_resource(RegisterResource {
+                agent: "alice".into(),
+                kind: ResourceKind::Port,
+                name: "foreign-port".into(),
+                endpoint: Some("http://192.0.2.1:80".into()),
+                port: Some(80),
+                pid: None,
+                project: None,
+                purpose: None,
+                mode: LeaseMode::Shared,
+                ttl_seconds: None,
+                metadata: None,
+            })
+            .unwrap();
+        store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO nodes (node_id, display_name, role, is_local, created_at)
+                     VALUES ('peer', 'peer', 'peer', 0, ?1)",
+                    [tx.now],
+                )?;
+                tx.execute(
+                    "INSERT INTO peers (node_id, role, perms, paired_at)
+                     VALUES ('peer', 'spoke', '[\"borrow_resource\"]', ?1)",
+                    [tx.now],
+                )?;
+                tx.execute(
+                    "UPDATE resources SET node_id = 'peer' WHERE resource_id = ?1",
+                    [&registered.resource.resource_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        (store, ResourceRef::Id(registered.resource.resource_id))
+    }
+
+    #[test]
+    fn borrow_reachability_probe_runs_without_store_write_lock() {
+        let (store, target) = borrow_fixture();
+        let probe_store = store.clone();
+        let borrowed = store
+            .borrow_resource_with_probe("bob", &target, None, move |_, _| {
+                // This write would block on the store connection mutex if the probe ran
+                // inside borrow_resource's transaction.
+                probe_store
+                    .register_agent(crate::RegisterAgent {
+                        name: "probe-writer".into(),
+                        program: crate::Program::Codex,
+                        project: None,
+                        model: None,
+                        description: None,
+                    })
+                    .unwrap();
+                true
+            })
+            .unwrap();
+        assert_eq!(borrowed.outcome, "borrowed");
+    }
+
+    #[test]
+    fn borrow_refuses_if_endpoint_changes_during_probe() {
+        let (store, target) = borrow_fixture();
+        let changed = store.clone();
+        let resource_id = match &target {
+            ResourceRef::Id(id) => id.clone(),
+            ResourceRef::Name(_, _) => unreachable!(),
+        };
+        let result = store.borrow_resource_with_probe("bob", &target, None, move |_, _| {
+            changed
+                .write(|tx| {
+                    tx.execute(
+                        "UPDATE resources SET endpoint = 'http://192.0.2.2:80'
+                         WHERE resource_id = ?1",
+                        [&resource_id],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            true
+        });
+        assert!(result.unwrap_err().to_string().contains("endpoint changed"));
+        assert_eq!(store.resource(&target).unwrap().refcount, 1);
     }
 }

@@ -243,6 +243,12 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
         .nest_service("/mcp", mcp)
         .route("/activity", axum::routing::get(crate::remote::activity))
         .with_state(store.clone());
+    let federation_only = opts.federation && !opts.auth;
+    let protected = if federation_only {
+        axum::Router::new()
+    } else {
+        protected
+    };
     let protected = if opts.auth {
         protected.layer(axum::middleware::from_fn_with_state(
             store.clone(),
@@ -258,7 +264,12 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
     };
     let node_id = store.node_id().to_string();
     let auth = opts.auth;
-    let dashboard = opts.dashboard.as_str().to_string();
+    let dashboard_mode = if federation_only {
+        crate::dashboard::DashboardMode::Off
+    } else {
+        opts.dashboard
+    };
+    let dashboard = dashboard_mode.as_str().to_string();
     let mut app = protected.route(
         "/health",
         axum::routing::get(move || {
@@ -274,25 +285,29 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
             }
         }),
     );
-    if opts.auth {
-        let ctx = crate::oauth_http::AuthContext {
-            oauth: opts.oauth.clone(),
-        };
-        if opts.oauth.is_some() {
-            app = app.merge(crate::oauth_http::router().with_state(store.clone()));
-        }
-        app = app.layer(axum::Extension(ctx));
+    if opts.auth && opts.oauth.is_some() {
+        app = app.merge(crate::oauth_http::router().with_state(store.clone()));
     }
-    // Mounted after the auth layer, same as /health, so a token is never required.
-    // Actions and message bodies are still withheld unless the mode is local.
-    // The edge guard below still applies. The dashboard router adds its own
-    // loopback Host and bound-port Origin checks on top of that.
-    if opts.dashboard.enabled() {
-        app = app.merge(crate::dashboard::router(
-            store,
-            opts.dashboard,
-            opts.dashboard_bound,
-        ));
+    // Federation-only listeners have no dashboard. With federation and auth it
+    // requires a token; other listeners retain the existing dashboard policy.
+    // The dashboard also enforces loopback Host and bound-port Origin checks.
+    if dashboard_mode.enabled() {
+        let dashboard =
+            crate::dashboard::router(store.clone(), dashboard_mode, opts.dashboard_bound);
+        let dashboard = if opts.federation && opts.auth {
+            dashboard.layer(axum::middleware::from_fn_with_state(
+                store,
+                crate::remote::require_token,
+            ))
+        } else {
+            dashboard
+        };
+        app = app.merge(dashboard);
+    }
+    if opts.auth {
+        app = app.layer(axum::Extension(crate::oauth_http::AuthContext {
+            oauth: opts.oauth.clone(),
+        }));
     }
     // DNS-rebinding checks run for unauthenticated loopback too, not only `--auth`.
     let guard = crate::oauth_http::EdgeGuard::from_http(
@@ -316,7 +331,7 @@ async fn enforce_edge(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let path = req.uri().path();
-    if path.starts_with("/fed") {
+    if path.starts_with("/fed/") {
         return next.run(req).await;
     }
     let host_ok = req
@@ -410,6 +425,9 @@ pub async fn serve_http(
         opts.auth,
         opts.dashboard_flag,
     )?;
+    if opts.federation && !opts.auth {
+        opts.dashboard = crate::dashboard::DashboardMode::Off;
+    }
     let ct = CancellationToken::new();
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -438,10 +456,17 @@ pub async fn serve_http(
     } else {
         ""
     };
-    eprintln!(
-        "another: MCP (streamable HTTP) on http://{local}/mcp{auth_note}, node {}",
-        store.node_id()
-    );
+    if opts.federation && !opts.auth {
+        eprintln!(
+            "another: federation-only HTTP on http://{local}, node {}",
+            store.node_id()
+        );
+    } else {
+        eprintln!(
+            "another: MCP (streamable HTTP) on http://{local}/mcp{auth_note}, node {}",
+            store.node_id()
+        );
+    }
     if let Some(oauth) = &opts.oauth {
         eprintln!("another: hosted apps connect to {}", oauth.resource);
         eprintln!(

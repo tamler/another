@@ -819,7 +819,7 @@ impl Transport for CommandTransport {
                 Ok(Bounded::Done(ran)) => {
                     return WakeResult::new(
                         failed,
-                        format!("{} exited with {}", argv.join(" "), ran.status),
+                        format!("{} exited with {}", argv[0], ran.status),
                     )
                 }
                 Ok(Bounded::TimedOut) => {

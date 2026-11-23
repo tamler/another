@@ -180,22 +180,44 @@ async fn record(
     outcome: &str,
     detail: String,
 ) {
-    crate::remote::audit(
-        store,
-        AuditRecord {
-            token_id: None,
-            // The id is whatever the caller sent, so it is written only when it is an id.
-            agent: node.map(|n| match another_core::validate_node_id(&n) {
-                Ok(()) => format!("node:{n}"),
-                Err(_) => "node:(invalid id)".to_string(),
-            }),
-            operation: operation.to_string(),
-            outcome: outcome.to_string(),
-            detail: Some(detail),
-            remote: None,
-        },
-    )
-    .await;
+    record_checked(store, node, operation, outcome, detail, true).await;
+}
+
+async fn record_unauthenticated(
+    store: &Store,
+    node: Option<String>,
+    operation: &str,
+    outcome: &str,
+    detail: String,
+) {
+    record_checked(store, node, operation, outcome, detail, false).await;
+}
+
+async fn record_checked(
+    store: &Store,
+    node: Option<String>,
+    operation: &str,
+    outcome: &str,
+    detail: String,
+    authenticated: bool,
+) {
+    let entry = AuditRecord {
+        token_id: None,
+        // The id is whatever the caller sent, so it is written only when it is an id.
+        agent: node.map(|n| match another_core::validate_node_id(&n) {
+            Ok(()) => format!("node:{n}"),
+            Err(_) => "node:(invalid id)".to_string(),
+        }),
+        operation: operation.to_string(),
+        outcome: outcome.to_string(),
+        detail: Some(detail),
+        remote: None,
+    };
+    if !authenticated {
+        crate::remote::unauthenticated_audit(store, entry).await;
+    } else {
+        crate::remote::audit(store, entry).await;
+    }
 }
 
 /// The body is parsed here, not by an extractor: a body that does not parse is answered and
@@ -206,7 +228,7 @@ async fn pair(State(store): State<Store>, body: Bytes) -> Response {
         Ok(r) => r,
         Err(_) => {
             let e = another_core::Error::Invalid("invalid pairing request".into());
-            record(&store, None, "POST /fed/pair", "denied", e.to_string()).await;
+            record_unauthenticated(&store, None, "POST /fed/pair", "denied", e.to_string()).await;
             return error(StatusCode::BAD_REQUEST, &e);
         }
     };
@@ -229,7 +251,7 @@ async fn pair(State(store): State<Store>, body: Bytes) -> Response {
             // The caller gets one text for every failure of the invite check; which one it
             // was is recorded here only.
             let detail = cause.map_or_else(|| e.to_string(), |c| c.detail());
-            record(&store, Some(node), "POST /fed/pair", "denied", detail).await;
+            record_unauthenticated(&store, Some(node), "POST /fed/pair", "denied", detail).await;
             error(status_for(&e), &e)
         }
     }
@@ -269,7 +291,7 @@ async fn authenticate(
     match blocking(move || s.verify_peer_request(&n, &m, &path, time, &b, &g)).await {
         Ok(_) => Ok((node, sig)),
         Err(e) => {
-            record(
+            record_unauthenticated(
                 store,
                 Some(node),
                 &format!("{method} {}", uri.path()),
@@ -308,7 +330,7 @@ async fn known_sender(
         Ok(false) => {
             let e = another_core::Error::Forbidden("request not signed by a paired node".into());
             let operation = format!("{} {}", req.method(), req.uri().path());
-            record(&store, Some(node), &operation, "denied", e.to_string()).await;
+            record_unauthenticated(&store, Some(node), &operation, "denied", e.to_string()).await;
             error(StatusCode::UNAUTHORIZED, &e)
         }
         Err(e) => error(status_for(&e), &e),

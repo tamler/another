@@ -14,6 +14,8 @@ Claude Code and Codex cannot see each other without something shared. They can e
 
 **Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** The original build milestones (see [Status](#status)) are on `main`; no release is published yet. The v0.1.0 work queue for one node is built ([docs/QUEUE.md](docs/QUEUE.md)), a claim now returns to the queue when the session that made it ends or after a grace period of silence, and `another needs` is the one list of what needs the owner ([docs/NEEDS.md](docs/NEEDS.md)); the [Status](#status) table says what of the scope is built. Work now follows the [v0.1.0 scope](docs/V0.1.0-SCOPE.md), the single-node queue release. Hosted connectors (OAuth for ChatGPT, Claude, and other MCP clients) and the loopback dashboard are present but frozen for v0.1.0 and treated as experimental. See [docs/REMOTE.md](docs/REMOTE.md) and [docs/DASHBOARD.md](docs/DASHBOARD.md).
 
+`another serve --federation` without `--auth` serves only `/fed/*` and `/health`, even when a proxy rewrites `Host` to loopback. Add `--auth` for token-gated MCP and activity routes; an explicitly enabled dashboard on that federation listener also needs a token. Unauthenticated rejection audits are capped at 32 rows per server store per 60 seconds. Wake subjects and edit-denial hold values use the hook quoting rules. Foreign resource checks use IP literals only and a bounded probe budget; see [federation](docs/FEDERATION.md).
+
 ## Why
 
 This is the failure I kept hitting:

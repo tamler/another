@@ -17,6 +17,8 @@ Before an agent starts a model server, dev server, database, container or long j
 
 A resource is addressed by its id or by `kind:name`, e.g. `model_server:ollama@11434`.
 
+Foreign resources need an IP-literal endpoint to be probed or borrowed; hostnames are not resolved. A listing probes at most eight live foreign endpoints with a shared 500 ms connect budget and at most 100 ms per endpoint. `reachable: false` includes endpoints skipped by those bounds, so it does not prove a server is down. Borrow probes its endpoint separately before the write transaction, then checks current resource state again before recording a lease. See [FEDERATION.md](FEDERATION.md) for the cross-node rules.
+
 ## Lifecycle
 
 ```bash

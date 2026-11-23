@@ -1084,6 +1084,47 @@ fn a_borrow_refused_after_the_release_leaves_the_lease_released() {
     );
 }
 
+/// A peer's endpoint data cannot make each resource-list entry spend a fresh 500 ms
+/// timeout. The overall listing has one bounded probe budget and keeps listing resources
+/// whose reachability was not checked within that budget.
+#[test]
+fn listing_many_unroutable_peer_resources_has_one_bounded_probe_budget() {
+    let hub = node("hub");
+    let spoke = node("spokes");
+    pair(&hub, &spoke);
+    hub.register("owner");
+    spoke.register("reader");
+    for i in 0..6 {
+        port_resource(
+            &hub,
+            "owner",
+            &format!("q31-unroutable-{i}"),
+            Some(format!("http://192.0.2.{}:80", i + 1)),
+            LeaseMode::Shared,
+        );
+    }
+    sync(&hub, &spoke);
+
+    let started = std::time::Instant::now();
+    let found = spoke
+        .store
+        .find_resources(ResourceFilter::default())
+        .unwrap();
+    let elapsed = started.elapsed();
+    let foreign = found
+        .iter()
+        .filter(|resource| resource.node.is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(foreign.len(), 6);
+    assert!(foreign
+        .iter()
+        .all(|resource| resource.reachable == Some(false)));
+    assert!(
+        elapsed < std::time::Duration::from_millis(1800),
+        "six unroutable peer endpoints took {elapsed:?}"
+    );
+}
+
 fn live_leases(n: &Node, resource_id: &str, agent_id: &str) -> i64 {
     let now = n.clock.load(Ordering::SeqCst);
     n.count(&format!(

@@ -365,7 +365,7 @@ fn two_agents_in_one_checkout_block_on_the_same_file() {
         reason,
         format!(
             "Another stopped this edit: src/api/routes.rs is held by claude@shop in this \
-             checkout (exclusive hold on shop:src/api/routes.rs, \"editing (taken by the edit \
+             checkout (exclusive hold on shop:\"src/api/routes.rs\", \"editing (taken by the edit \
              hook)\", until {until} unless renewed). Work on other files; one message reaches \
              your Another inbox when it is free. To ask for it now: another hold \
              request-release --agent codex@shop {id}. When you finish with a file yourself, \
@@ -858,7 +858,7 @@ fn texts() {
         reason,
         format!(
             "Another stopped this edit: src/api/routes.rs is held by claude@shop in this \
-             checkout (exclusive hold on shop:src/api/**, \"router refactor\", until {until} \
+             checkout (exclusive hold on shop:\"src/api/**\", \"router refactor\", until {until} \
              unless renewed). Work on other files; one message reaches your Another inbox \
              when it is free. To ask for it now: another hold request-release --agent \
              codex@shop {id}. When you finish with a file yourself, free it: another hold \
@@ -1167,7 +1167,7 @@ fn two_projects_of_one_checkout_block_each_other_through_the_hook() {
     let reason = denial(&env.edit("codex", &src, "a.rs"));
     assert!(
         reason.contains(
-            "a.rs is held by claude@shop in this checkout (exclusive hold on shop:src/a.rs,"
+            "a.rs is held by claude@shop in this checkout (exclusive hold on shop:\"src/a.rs\","
         ),
         "{reason}"
     );
@@ -1175,7 +1175,7 @@ fn two_projects_of_one_checkout_block_each_other_through_the_hook() {
     assert!(
         reason.contains(
             "api/routes.rs is held by claude@shop in this checkout (exclusive hold on \
-             shop:src/api/**,"
+             shop:\"src/api/**\","
         ),
         "{reason}"
     );

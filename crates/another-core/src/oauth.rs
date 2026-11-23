@@ -45,6 +45,15 @@ const ACCESS_PREFIX: &str = "anoat_";
 const REFRESH_PREFIX: &str = "anort_";
 const CODE_PREFIX: &str = "anoac_";
 
+type AccessCandidate = (
+    String,
+    String,
+    i64,
+    Option<i64>,
+    Option<String>,
+    Option<i64>,
+);
+
 /// A client that may start an authorization request.
 #[derive(Debug, Clone)]
 pub struct ClientProfile {
@@ -1878,6 +1887,43 @@ impl Store {
         let token_id = token_id.to_string();
         let digest = hash_secret(bearer);
         let expected = canonical_resource(expected_resource).map_err(|_| denied())?;
+        // Reject malformed, expired, revoked, wrong-secret, and wrong-resource candidates
+        // using a read lock. Only a candidate that matches a stored token needs the write
+        // transaction below, where every property is checked again against current state.
+        let valid = self.read(|conn| {
+            let row: Option<AccessCandidate> = conn
+                .query_row(
+                    "SELECT t.secret_hash, t.resource, t.expires_at, t.revoked_at,
+                            g.grant_id, g.revoked_at
+                     FROM oauth_tokens t LEFT JOIN oauth_grants g ON g.grant_id = t.grant_id
+                     WHERE t.token_id = ?1 AND t.kind = 'access'",
+                    [&token_id],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            Ok(row.is_some_and(
+                |(stored, resource, expires_at, revoked_at, grant_id, grant_revoked_at)| {
+                    secrets_eq(&stored, &digest)
+                        && revoked_at.is_none()
+                        && grant_id.is_some()
+                        && grant_revoked_at.is_none()
+                        && expires_at > self.now()
+                        && canonical_resource(&resource).ok().as_deref() == Some(expected.as_str())
+                },
+            ))
+        })?;
+        if !valid {
+            return Err(denied());
+        }
         self.write(|tx| {
             let row: Option<(String, String, String, i64, Option<i64>)> = tx
                 .query_row(

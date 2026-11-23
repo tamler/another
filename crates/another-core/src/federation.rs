@@ -996,8 +996,19 @@ pub(crate) fn allowed_towards(conn: &Connection, node: &str, perm: Perm) -> Resu
 }
 
 /// TCP reachability of a foreign resource from this machine.
+///
+/// Only literal IP addresses are probed. A peer-controlled hostname would make a
+/// synchronous resource listing wait on system DNS, whose timeout is not bounded here.
 pub fn reachable(endpoint: Option<&str>, port: Option<u16>) -> bool {
-    use std::net::{TcpStream, ToSocketAddrs};
+    reachable_with_timeout(endpoint, port, std::time::Duration::from_millis(100))
+}
+
+pub(crate) fn reachable_with_timeout(
+    endpoint: Option<&str>,
+    port: Option<u16>,
+    timeout: std::time::Duration,
+) -> bool {
+    use std::net::{IpAddr, SocketAddr, TcpStream};
     let host = endpoint
         .map(|e| e.split_once("://").map_or(e, |(_, rest)| rest))
         .map(|e| e.split('/').next().unwrap_or_default().to_string());
@@ -1016,12 +1027,10 @@ pub fn reachable(endpoint: Option<&str>, port: Option<u16>) -> bool {
         None => return false,
     };
     let Some(port) = port else { return false };
-    let Ok(addrs) = (host.as_str(), port).to_socket_addrs() else {
+    let Ok(ip) = host.parse::<IpAddr>() else {
         return false;
     };
-    addrs
-        .into_iter()
-        .any(|a| TcpStream::connect_timeout(&a, std::time::Duration::from_millis(500)).is_ok())
+    TcpStream::connect_timeout(&SocketAddr::new(ip, port), timeout).is_ok()
 }
 
 fn verify_wire(conn: &Connection, ev: &WireEvent) -> Result<()> {
@@ -3476,5 +3485,15 @@ mod tests {
         drop(l);
         assert!(!reachable(None, Some(port)));
         assert!(!reachable(Some("http://127.0.0.1:1"), None));
+    }
+
+    #[test]
+    fn reachability_does_not_resolve_peer_hostnames() {
+        let started = std::time::Instant::now();
+        assert!(!reachable(Some("http://peer-controlled.invalid:80"), None));
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "reachability must not wait for DNS"
+        );
     }
 }

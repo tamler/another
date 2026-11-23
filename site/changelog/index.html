@@ -42,6 +42,10 @@
       <p>Install is still <code>cargo install --locked --git https://github.com/tamler/another another</code> with Rust 1.88 or newer. The release workflow can build macOS and static Linux binaries when a <code>v*</code> tag exists. No tag has been cut yet.</p>
       <p>Remote peers, hosted OAuth connectors and the loopback dashboard are present on <code>main</code> but frozen for v0.1.0 and treated as experimental. Hub-and-spoke federation between the owner's Mac and VPS is in scope as M9 and required for the tag, including a tested hub backup restore.</p>
     </div>
+    <section class="guide-section" aria-labelledby="security-pending-title">
+      <h2 id="security-pending-title">Pending security fixes (unreleased)</h2>
+      <p>Q31: federation without <code>--auth</code> serves only federation and health routes; authenticated federation dashboards require a token. Wake subjects and edit-denial hold values are quoted and cleaned. Unauthenticated rejection audits are bounded, invalid tokens avoid write transactions, and foreign resource probes have a time budget and run outside borrow write transactions. These changes are pending review, not a release.</p>
+    </section>
     <section class="guide-section" aria-labelledby="shipped-title">
       <h2 id="shipped-title">On main</h2>
       <dl class="clients">

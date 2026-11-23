@@ -702,7 +702,7 @@ fn pre_edit_holds_files_and_stops_edits_of_other_agents_in_the_checkout() {
         "paths are project-relative: {reason}"
     );
     assert!(reason.contains("hold request-release"), "{reason}");
-    assert!(reason.contains("shop:src/a.rs"), "{reason}");
+    assert!(reason.contains("shop:\"src/a.rs\""), "{reason}");
     assert!(
         reason.contains("another hold request-release --agent codex@shop"),
         "{reason}"
