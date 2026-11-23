@@ -1993,7 +1993,7 @@ impl Store {
             }
             let mut granted_ids = Vec::new();
             for (_, pattern) in &patterns {
-                // Re-acquiring a pattern you already hold updates and renews that hold.
+                // Reusing a live hold preserves its selected duration and deadline.
                 granted_ids.push(upsert_hold_tx(
                     tx,
                     &me.id,

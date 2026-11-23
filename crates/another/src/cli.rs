@@ -288,7 +288,7 @@ pub enum Command {
         #[arg(long)]
         local: bool,
     },
-    /// Register a resource or renew resource leases.
+    /// Register a resource or explicitly renew selected leases through operator repair.
     #[command(subcommand)]
     Resource(ResourceCmd),
     /// Borrow a shared resource (id or kind:name).
@@ -452,8 +452,7 @@ pub enum Command {
     /// Install, remove or run client hook packs.
     #[command(subcommand)]
     Hook(HookCmd),
-    /// Expire lapsed holds, mark overdue requests stale and release queue claims past the
-    /// grace period now.
+    /// Materialize common lease expiry and process historical repair maintenance.
     Sweep,
     /// Show the most recent event-log records.
     Events {

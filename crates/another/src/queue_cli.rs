@@ -248,7 +248,7 @@ pub enum QueueCmd {
     /// The agents that may admit work items with a key.
     #[command(subcommand)]
     Delegate(QueueDelegateCmd),
-    /// Show the grace period, or set it (2h to 30d; --owner only).
+    /// Historical repair grace only (2h to 30d; --owner to set). Actor claims use common TTL.
     Grace {
         /// For example 24h or 3d.
         duration: Option<String>,

@@ -60,6 +60,8 @@ Legacy records and experimental clients have an explicit operator repair mode:
 `--unguarded-repair`. It explicitly leaves guarded participation and
 cannot act as a minted actor by name. Installed hooks never select it and no
 error falls back to it. Old repair fixtures are not B7 conformance evidence.
+Historical queue grace controls affect repair records only; participating claims
+always use the common lease policy.
 
 ## Install and inspect
 
