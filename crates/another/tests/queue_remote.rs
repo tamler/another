@@ -259,6 +259,7 @@ async fn remote_callers_cannot_act_on_or_read_queue_text() {
     let remote = serve(
         store.clone(),
         HttpOptions {
+            legacy_repair: true,
             auth: true,
             dashboard: DashboardMode::Redacted,
             ..Default::default()
@@ -270,6 +271,7 @@ async fn remote_callers_cannot_act_on_or_read_queue_text() {
     let local = serve(
         store.clone(),
         HttpOptions {
+            legacy_repair: true,
             dashboard: DashboardMode::Local,
             ..Default::default()
         },
@@ -521,6 +523,7 @@ async fn needs_is_not_reachable_remotely() {
     let remote = serve(
         store.clone(),
         HttpOptions {
+            legacy_repair: true,
             auth: true,
             dashboard: DashboardMode::Redacted,
             ..Default::default()
@@ -531,6 +534,7 @@ async fn needs_is_not_reachable_remotely() {
     let local = serve(
         store.clone(),
         HttpOptions {
+            legacy_repair: true,
             dashboard: DashboardMode::Local,
             ..Default::default()
         },

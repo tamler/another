@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 pub struct AnotherMcp {
     store: Store,
     tool_router: ToolRouter<Self>,
+    legacy_repair: bool,
 }
 
 type ToolResult<T> = Result<Json<T>, String>;
@@ -62,9 +63,27 @@ fn tool_error(e: &another_core::Error) -> String {
 
 impl AnotherMcp {
     pub fn new(store: Store) -> Self {
+        Self::with_policy(store, false)
+    }
+
+    /// Explicit operator repair surface for legacy records, outside guarded participation.
+    pub fn legacy_repair(store: Store) -> Self {
+        Self::with_policy(store, true)
+    }
+
+    pub fn with_policy(store: Store, legacy_repair: bool) -> Self {
+        let mut tool_router = Self::tool_router();
+        if !legacy_repair {
+            for tool in tool_router.list_all() {
+                if !matches!(tool.name.as_ref(), "another_identity" | "another_lease") {
+                    tool_router.disable_route(tool.name);
+                }
+            }
+        }
         Self {
             store,
-            tool_router: Self::tool_router(),
+            tool_router,
+            legacy_repair,
         }
     }
 
@@ -226,7 +245,7 @@ pub struct HoldPathsArgs {
     /// Renew/release only these holds (default: all of the agent's holds).
     #[serde(default)]
     pub hold_ids: Vec<String>,
-    /// Lease length in seconds (default 1800, clamped to 60..14400).
+    /// Checkout seconds (default 120, clamped to 30..86400).
     pub ttl_seconds: Option<i64>,
     /// Exclusive holds (default) conflict with any overlapping hold; shared ones only with exclusive.
     pub exclusive: Option<bool>,
@@ -270,7 +289,7 @@ pub struct HeartbeatArgs {
     /// Session is starting: records a session.started event.
     #[serde(default)]
     pub start: bool,
-    /// With end: keep resource leases (for servers meant to outlive the session).
+    /// Deprecated compatibility field. Session end always releases resource leases.
     #[serde(default)]
     pub keep_resources: bool,
     /// Session is ending: release all holds and mark the agent offline.
@@ -330,7 +349,7 @@ pub struct ResourceRegisterArgs {
     /// Exclusive resources cannot be borrowed by others (default: shared).
     #[serde(default)]
     pub exclusive: bool,
-    /// Lease length in seconds (default 1800, clamped to 60..86400); renew with resource_heartbeat.
+    /// Checkout seconds (default 120, clamped to 30..86400); renew exact subjects explicitly.
     pub ttl_seconds: Option<i64>,
     /// Free-form object: model, backend (metal|mlx|cpu|cuda), estimated_bytes, cmdline, ...
     /// At most 64 KiB as JSON.
@@ -484,6 +503,22 @@ fn resource_ref(raw: &str) -> another_core::Result<ResourceRef> {
 
 #[tool_router(router = tool_router)]
 impl AnotherMcp {
+    #[tool(description = "Show this connection's actor coverage. No name can select an actor.")]
+    async fn another_identity(&self) -> ToolResult<serde_json::Value> {
+        Ok(Json(
+            serde_json::json!({"contract":"another.agent/1", "actor":null, "coverage":"NO_ACTOR: this MCP connection has no private per-actor binding; use the authenticated integration channel"}),
+        ))
+    }
+
+    #[tool(
+        description = "Lease operations require an authenticated per-actor connection binding. Refuses without it."
+    )]
+    async fn another_lease(&self) -> ToolResult<serde_json::Value> {
+        Err(tool_error(&another_core::Error::Forbidden(
+            "NO_ACTOR: this MCP connection has no private per-actor binding".into(),
+        )))
+    }
+
     #[tool(description = "Register a project by its absolute path (idempotent). Returns its slug.")]
     async fn ensure_project(
         &self,
@@ -1122,21 +1157,18 @@ impl AnotherMcp {
     }
 }
 
-#[tool_handler(router = self.tool_router, name = "another", instructions = "Another coordinates agents on this node, including hosted chat apps, through messaging, holds and shared resources. \
-Call whats_new first and follow its next field; if nothing is waiting, stop. \
-Send mail with send_message, acknowledge messages you have handled, and claim_request before \
-working a request. hold_paths before editing files another agent in the same directory might touch. Before starting \
-a server or job, call resource_find and borrow what is already running. Local agents take work \
-with queue_next, finish it with queue_update, and record work nobody asked for with \
-queue_propose instead of starting it. A hosted connection \
-acts as exactly one agent: omit the agent field and it is filled in. Reaping is never remote. \
-Errors are {\"error\":{\"code\",\"message\",\"hint\"}}; follow hint.")]
+#[tool_handler(router = self.tool_router, name = "another", instructions = "Default MCP exposes identity and lease diagnostics only. Names are not actor authority. Participating mutations require the private another.agent/1 adapter channel; unsupported carriage refuses NO_ACTOR. Explicit operator repair is outside guarded participation. Reaping is never remote.")]
 impl ServerHandler for AnotherMcp {
     async fn call_tool(
         &self,
         mut request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        if !self.legacy_repair
+            && !matches!(request.name.as_ref(), "another_identity" | "another_lease")
+        {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(tool_error(&another_core::Error::Forbidden("NO_ACTOR: legacy MCP mutations require explicit operator repair mode; names are not actor proof".into())))]).into());
+        }
         let peer = context
             .extensions
             .get::<axum::http::request::Parts>()

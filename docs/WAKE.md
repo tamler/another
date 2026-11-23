@@ -1,5 +1,7 @@
 # Waking agents through a transport
 
+Current participating policy: contract-minted actors authorize actions; names and transport labels are selectors only. All rights use a 120-second default TTL with requested bounds of 30 seconds through 24 hours. Observed session end releases all session and dependent rights immediately. Presence, idle reminders, status and transport observations renew no file leases. Routine hooks are quiet except for conflicts and one idle reminder. Cursor remains unguarded. The older operational examples below describe operator compatibility, not participating authority; see [AGENT-CONTRACT.md](AGENT-CONTRACT.md).
+
 A working agent learns about mail from its hooks: a notice after its next tool call or at its next prompt (see [HOOKS.md](HOOKS.md)). An agent sitting idle at its prompt runs no hook, so something has to type into its session. That is a wake, and it is a core part of Another (D84): the daemon wakes idle agents by itself, and `another wake` does it on demand. Hooks are the fallback everywhere: with no transport and no daemon, mail still arrives at the agent's next turn.
 
 A **transport** is a tool that runs agent sessions. Another talks to every transport through one interface with three operations:

@@ -268,6 +268,7 @@ pub fn default_home() -> Result<PathBuf> {
 #[derive(Clone)]
 pub struct Store {
     inner: Arc<Inner>,
+    io_deadline: Option<Instant>,
 }
 
 struct Inner {
@@ -506,6 +507,7 @@ impl Store {
         let secret = secret
             .ok_or_else(|| Error::Invalid("node key missing; a normal open creates it".into()))?;
         Ok(Store {
+            io_deadline: None,
             inner: Arc::new(Inner {
                 conn: Mutex::new(conn),
                 unauthenticated_audits: Mutex::new(std::collections::VecDeque::new()),
@@ -533,6 +535,7 @@ impl Store {
         migrate(&mut conn, path.as_deref(), &build, clock.now())?;
         let (node_id, key) = ensure_local_node(&mut conn, clock.now())?;
         Ok(Store {
+            io_deadline: None,
             inner: Arc::new(Inner {
                 conn: Mutex::new(conn),
                 unauthenticated_audits: Mutex::new(std::collections::VecDeque::new()),
@@ -635,12 +638,14 @@ impl Store {
     /// Run a read-only closure against the connection.
     pub(crate) fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         let conn = self.lock();
+        self.limit_io_wait(&conn)?;
         f(&conn)
     }
 
     /// Run `f` inside an immediate write transaction; commits on `Ok`.
     pub(crate) fn write<T>(&self, f: impl FnOnce(&Tx<'_>) -> Result<T>) -> Result<T> {
         let mut conn = self.lock();
+        self.limit_io_wait(&conn)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let ctx = Tx {
             tx,
@@ -648,9 +653,25 @@ impl Store {
             now: self.inner.clock.now(),
             key: &self.inner.key,
         };
+        crate::actor_leases::sync_projections(&ctx)?;
         let out = f(&ctx)?;
+        crate::actor_leases::sync_projections(&ctx)?;
         ctx.tx.commit()?;
         Ok(out)
+    }
+
+    /// Bound subsequent connection waits to the remainder of one hook action.
+    /// This is an IO budget, never an ownership duration.
+    pub fn with_io_deadline(mut self, deadline: Instant) -> Self {
+        self.io_deadline = Some(deadline);
+        self
+    }
+
+    fn limit_io_wait(&self, conn: &Connection) -> Result<()> {
+        if let Some(deadline) = self.io_deadline {
+            conn.busy_timeout(deadline.saturating_duration_since(Instant::now()))?;
+        }
+        Ok(())
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -1180,6 +1201,82 @@ CREATE TABLE transport_sessions (
 ALTER TABLE project_repos ADD COLUMN checkout TEXT NOT NULL DEFAULT '';
 UPDATE hold_waits SET blockers = '[]';
 "#,
+    // B7 cutover: legacy names do not adopt minted actors or carry claims across it.
+    // The existing migration runner backs up on disk and commits this as one step.
+    r#"
+CREATE TABLE contract_participants (
+    participant_id TEXT PRIMARY KEY,
+    proof_hash TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE session_scopes (
+    scope_id TEXT PRIMARY KEY,
+    parent_scope_id TEXT REFERENCES session_scopes(scope_id),
+    parent_epoch INTEGER,
+    epoch INTEGER NOT NULL CHECK (epoch > 0),
+    opened_at INTEGER NOT NULL,
+    closed_at INTEGER
+);
+CREATE TABLE contract_actors (
+    actor_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    participant_id TEXT NOT NULL REFERENCES contract_participants(participant_id),
+    native_key TEXT NOT NULL,
+    parent_actor_id TEXT REFERENCES contract_actors(actor_id),
+    session_scope_id TEXT NOT NULL REFERENCES session_scopes(scope_id),
+    proof_hash TEXT NOT NULL,
+    last_actor_activity_at INTEGER NOT NULL,
+    reminded_activity_at INTEGER,
+    retired_at INTEGER,
+    UNIQUE (participant_id, native_key)
+);
+CREATE TABLE right_leases (
+    lease_id TEXT PRIMARY KEY,
+    generation INTEGER NOT NULL CHECK (generation > 0),
+    owner_actor_id TEXT NOT NULL REFERENCES contract_actors(actor_id),
+    subject_kind TEXT NOT NULL CHECK (subject_kind IN ('file', 'presence', 'resource', 'queue', 'request', 'wake', 'delivery')),
+    subject_key TEXT NOT NULL,
+    session_scope_id TEXT NOT NULL REFERENCES session_scopes(scope_id),
+    session_epoch INTEGER NOT NULL,
+    last_update_at INTEGER NOT NULL,
+    ttl_seconds INTEGER NOT NULL CHECK (ttl_seconds BETWEEN 30 AND 86400),
+    expires_at INTEGER NOT NULL,
+    released_at INTEGER,
+    evidence_source TEXT NOT NULL,
+    release_reason TEXT,
+    UNIQUE (subject_kind, subject_key, generation)
+);
+CREATE INDEX right_leases_subject ON right_leases(subject_kind, subject_key, expires_at);
+CREATE INDEX right_leases_scope ON right_leases(session_scope_id, session_epoch);
+CREATE TABLE lease_projections (
+    projection_id TEXT PRIMARY KEY,
+    lease_id TEXT NOT NULL REFERENCES right_leases(lease_id)
+);
+CREATE TABLE contract_receipts (
+    actor_id TEXT NOT NULL REFERENCES contract_actors(actor_id),
+    session_epoch INTEGER NOT NULL,
+    request_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    result TEXT NOT NULL,
+    PRIMARY KEY (actor_id, session_epoch, request_id)
+);
+CREATE TABLE actor_operations (
+    actor_id TEXT NOT NULL REFERENCES contract_actors(actor_id),
+    session_epoch INTEGER NOT NULL,
+    call_id TEXT NOT NULL,
+    targets TEXT NOT NULL,
+    admitted_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    result TEXT,
+    PRIMARY KEY (actor_id, session_epoch, call_id)
+);
+UPDATE holds SET released_at = renewed_at, release_reason = 'contract_cutover' WHERE released_at IS NULL;
+UPDATE resource_leases SET released_at = renewed_at, release_reason = 'contract_cutover' WHERE released_at IS NULL;
+UPDATE queue_items SET state = 'ready', claimer_id = NULL, claimed_at = NULL, claim_session = NULL WHERE state = 'claimed';
+DELETE FROM queue_sessions;
+DELETE FROM hold_waits;
+DELETE FROM queue_settings WHERE key = 'grace_seconds';
+"#,
 ];
 
 /// Switch to WAL. While several connections convert a new database at once, SQLite answers
@@ -1552,6 +1649,7 @@ const CATALOGS: &[&str] = &[
     "b07ccde4e870699aff968c4508b5944ac3cc5ae157acfb336bfdc3a16e5f6325",
     "fce5179014aaff7d53c71882bfe3870e21d1ff697464193ebeb2c1512327a89a",
     "64dbec6f2d3fd1bbe217ca67bfa028fd5d918904278683eefa7032ed96e89c9e",
+    "ab4fd2ae4ad2bc7480556d70d2e5da4440b5485cfcece9b13dd4cd1d32302529",
 ];
 
 /// The digest this build holds for schema `version`.
@@ -1993,7 +2091,14 @@ mod upgrade_tests {
         // Take the home back to exactly main's v8 schema, keeping every v8 row.
         let db = Connection::open(home.join(DB_FILE)).unwrap();
         db.execute_batch(
-            "ALTER TABLE project_repos DROP COLUMN checkout;
+            "DROP TABLE lease_projections;
+             DROP TABLE actor_operations;
+             DROP TABLE contract_receipts;
+             DROP TABLE right_leases;
+             DROP TABLE contract_actors;
+             DROP TABLE session_scopes;
+             DROP TABLE contract_participants;
+             ALTER TABLE project_repos DROP COLUMN checkout;
              DROP TABLE transport_sessions;
              DROP TABLE queue_history;
              DROP TABLE queue_items;
@@ -2054,7 +2159,29 @@ mod upgrade_tests {
             "old claims gain empty columns"
         );
 
-        // The hold survived, and the v9/v10 behaviour works on the upgraded home.
+        // B7 preserves history but never adopts a legacy current claim by name.
+        let reason: String = db
+            .query_row(
+                "SELECT release_reason FROM holds WHERE hold_id = ?1",
+                [&hold.hold_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason, "contract_cutover");
+        let hold = store
+            .acquire_holds(AcquireHolds {
+                agent: "alice".into(),
+                project: project.clone(),
+                paths: vec!["src/a.rs".into()],
+                ttl_seconds: Some(600),
+                exclusive: true,
+                reason: Some("new checkout".into()),
+                repo_wide: false,
+            })
+            .unwrap()
+            .granted
+            .remove(0);
+        // The prior linked-release behaviour still works on a fresh checkout.
         let blocked = store
             .guard_edit("bob", &project, &["src/a.rs".into()], "editing (auto)")
             .unwrap();

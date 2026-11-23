@@ -330,7 +330,7 @@ fn send_inner_tx(tx: &Tx<'_>, input: &SendMessage, touch_sender: bool) -> Result
     if input.to.is_empty() {
         return Err(Error::Invalid("at least one recipient is required".into()));
     }
-    let sender = resolve_agent(tx, tx.node_id, &input.from)?;
+    let sender = crate::identity::resolve_acting_agent(tx, tx.node_id, &input.from)?;
     let to = resolve_all(tx, &input.to)?;
     let cc = resolve_all(tx, &input.cc)?;
     deliver_tx(tx, input, &sender, &to, &cc, touch_sender)
@@ -543,7 +543,7 @@ impl Store {
     pub fn reply(&self, input: Reply) -> Result<Message> {
         self.write(|tx| {
             let original = load_message(tx, &input.message_id)?;
-            let me = resolve_agent(tx, tx.node_id, &input.from)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, &input.from)?;
             let mut to = vec![original.from.clone()];
             let mut cc = Vec::new();
             if input.all {
@@ -577,8 +577,7 @@ impl Store {
 
     /// Messages delivered to `who`, newest first, plus counters and relevant requests.
     pub fn inbox(&self, who: &str, query: InboxQuery) -> Result<Inbox> {
-        // Expire stale requests/holds first so the digest is current even without a daemon.
-        self.sweep()?;
+        // A view must not materialize expiry or claim notifications.
         self.read(|conn| {
             let me = resolve_agent(conn, self.node_id(), who)?;
             let (unread, urgent_unread, awaiting_ack): (u32, u32, u32) = conn.query_row(
@@ -704,7 +703,7 @@ impl Store {
             return Err(Error::Invalid("no message ids given".into()));
         }
         self.write(|tx| {
-            let me = resolve_agent(tx, tx.node_id, who)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, who)?;
             let mut updated = Vec::new();
             let mut unchanged = Vec::new();
             for id in message_ids {

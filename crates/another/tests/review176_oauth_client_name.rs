@@ -31,6 +31,7 @@ async fn a_registered_client_name_cannot_carry_terminal_control_characters() {
     let base = format!("http://{addr}");
     let ct = CancellationToken::new();
     let opts = HttpOptions {
+        legacy_repair: true,
         auth: true,
         bound_port: addr.port(),
         oauth: Some(parse_public_url(&base).unwrap()),
@@ -148,15 +149,19 @@ fn a_stored_client_name_cannot_add_a_row_to_the_oauth_commands() {
     drop(store);
 
     let lines = |args: &[&str]| -> Vec<String> {
-        let out = Command::new(env!("CARGO_BIN_EXE_another"))
-            .args(args)
-            .current_dir(dir.path())
-            .env("ANOTHER_HOME", &home)
-            .env_remove("ANOTHER_AGENT")
-            .env_remove("ANOTHER_LOG")
-            .stdin(Stdio::null())
-            .output()
-            .expect("run another");
+        let out = {
+            let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+            legacy_fixture_command.arg("--unguarded-repair");
+            legacy_fixture_command
+        }
+        .args(args)
+        .current_dir(dir.path())
+        .env("ANOTHER_HOME", &home)
+        .env_remove("ANOTHER_AGENT")
+        .env_remove("ANOTHER_LOG")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run another");
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
         assert!(out.status.success(), "{args:?}: {out:?}");
         assert!(
@@ -334,15 +339,19 @@ fn oauth_pending_shows_a_redirect_host_exactly_or_escaped_behind_a_warning() {
     drop(db);
     drop(store);
 
-    let out = Command::new(env!("CARGO_BIN_EXE_another"))
-        .args(["oauth", "pending"])
-        .current_dir(dir.path())
-        .env("ANOTHER_HOME", &home)
-        .env_remove("ANOTHER_AGENT")
-        .env_remove("ANOTHER_LOG")
-        .stdin(Stdio::null())
-        .output()
-        .expect("run another");
+    let out = {
+        let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+        legacy_fixture_command.arg("--unguarded-repair");
+        legacy_fixture_command
+    }
+    .args(["oauth", "pending"])
+    .current_dir(dir.path())
+    .env("ANOTHER_HOME", &home)
+    .env_remove("ANOTHER_AGENT")
+    .env_remove("ANOTHER_LOG")
+    .stdin(Stdio::null())
+    .output()
+    .expect("run another");
     assert!(out.status.success(), "{out:?}");
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -387,19 +396,12 @@ fn oauth_pending_shows_a_redirect_host_exactly_or_escaped_behind_a_warning() {
     // The audit row of each denial names the host by the same rule. The row of the
     // request itself was written for the plain host the request was made with.
     for code in expected.keys() {
-        let out = Command::new(env!("CARGO_BIN_EXE_another"))
-            .args(["oauth", "deny", code])
-            .current_dir(dir.path())
-            .env("ANOTHER_HOME", &home)
-            .env_remove("ANOTHER_AGENT")
-            .env_remove("ANOTHER_LOG")
-            .stdin(Stdio::null())
-            .output()
-            .expect("run another");
-        assert!(out.status.success(), "{out:?}");
-    }
-    let out = Command::new(env!("CARGO_BIN_EXE_another"))
-        .args(["audit", "--limit", "100"])
+        let out = {
+            let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+            legacy_fixture_command.arg("--unguarded-repair");
+            legacy_fixture_command
+        }
+        .args(["oauth", "deny", code])
         .current_dir(dir.path())
         .env("ANOTHER_HOME", &home)
         .env_remove("ANOTHER_AGENT")
@@ -407,6 +409,21 @@ fn oauth_pending_shows_a_redirect_host_exactly_or_escaped_behind_a_warning() {
         .stdin(Stdio::null())
         .output()
         .expect("run another");
+        assert!(out.status.success(), "{out:?}");
+    }
+    let out = {
+        let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+        legacy_fixture_command.arg("--unguarded-repair");
+        legacy_fixture_command
+    }
+    .args(["audit", "--limit", "100"])
+    .current_dir(dir.path())
+    .env("ANOTHER_HOME", &home)
+    .env_remove("ANOTHER_AGENT")
+    .env_remove("ANOTHER_LOG")
+    .stdin(Stdio::null())
+    .output()
+    .expect("run another");
     assert!(out.status.success(), "{out:?}");
     let audit = String::from_utf8_lossy(&out.stdout);
     for (_, shown) in &cases {

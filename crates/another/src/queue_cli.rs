@@ -19,6 +19,20 @@ use crate::cli::{body_arg, emit, parse_secs, EXIT_CONFLICT};
 use crate::output;
 use crate::templates::UsageError;
 
+pub(crate) fn requires_actor(cmd: &QueueCmd) -> bool {
+    match cmd {
+        QueueCmd::Propose { who, .. }
+        | QueueCmd::Admit { who, .. }
+        | QueueCmd::Reject { who, .. }
+        | QueueCmd::Edit { who, .. }
+        | QueueCmd::Next { who }
+        | QueueCmd::Note { who, .. }
+        | QueueCmd::Release { who, .. }
+        | QueueCmd::Done { who, .. } => !who.owner,
+        _ => false,
+    }
+}
+
 /// Who acts on the queue: an agent, or the owner in person.
 #[derive(Debug, Args)]
 pub struct QueueWho {

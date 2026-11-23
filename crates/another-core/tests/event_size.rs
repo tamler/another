@@ -896,7 +896,14 @@ fn a_heartbeat_and_a_session_end_over_75_000_holds_succeed_in_several_events() {
             .unwrap()
     };
 
-    a.store.heartbeat("alice", false).unwrap();
+    assert!(a
+        .store
+        .heartbeat("alice", false)
+        .unwrap()
+        .renewed_holds
+        .is_empty());
+    let ids: Vec<String> = (0..HOLDS).map(|i| format!("01HOLD{i:020}")).collect();
+    a.store.renew_holds("alice", &ids).unwrap();
     assert_eq!(
         kinds(&a, "hold.renewed"),
         [10_000, 10_000, 10_000, 10_000, 10_000, 10_000, 10_000, 5_000]
@@ -942,7 +949,7 @@ fn a_heartbeat_and_a_session_end_over_75_000_holds_succeed_in_several_events() {
 /// The ordinary case is unchanged: one renewal and one release event, with the payload a
 /// build before D99 wrote.
 #[test]
-fn a_heartbeat_and_a_session_end_over_a_few_holds_write_one_event_each() {
+fn explicit_renew_and_session_end_over_a_few_holds_write_one_event_each() {
     let a = node("solo");
     register(&a.store, "alice");
     let project = a.project("shop");
@@ -961,6 +968,12 @@ fn a_heartbeat_and_a_session_end_over_a_few_holds_write_one_event_each() {
         .unwrap();
     let ids: Vec<&str> = report.granted.iter().map(|h| h.hold_id.as_str()).collect();
     a.store.heartbeat("alice", false).unwrap();
+    a.store
+        .renew_holds(
+            "alice",
+            &ids.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        )
+        .unwrap();
     a.store.heartbeat("alice", true).unwrap();
     let payloads = |kind: &str| -> Vec<String> {
         let c = Connection::open(a.db()).unwrap();

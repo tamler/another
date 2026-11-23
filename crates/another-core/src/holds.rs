@@ -2,7 +2,7 @@
 //!
 //! Holds signal intent; they do not lock files. An exclusive hold conflicts with any
 //! overlapping hold of another agent; shared holds only conflict with exclusive ones.
-//! Holds lapse when their TTL passes without a heartbeat and are then expired by the sweeper.
+//! Holds stop excluding at their deadline. A sweep later records that expiry.
 //!
 //! A hold belongs to a project and blocks only inside that project's checkout: the working
 //! directory it was taken in (see `repo.rs`, D92). Projects registered at different
@@ -19,7 +19,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::error::{Error, Result};
-use crate::identity::{address, find_project, resolve_agent, Project};
+use crate::identity::{address, find_project, Project};
 use crate::mail::{
     load_message, send_by_id_tx, send_notice_tx, touch, Message, NewRequest, SendMessage,
 };
@@ -28,9 +28,9 @@ use crate::store::{new_id, Store, Tx};
 use crate::time::fmt_ts;
 use crate::tokens::TokenScope;
 
-pub const DEFAULT_HOLD_TTL_SECONDS: i64 = 30 * 60;
-pub const MIN_HOLD_TTL_SECONDS: i64 = 60;
-pub const MAX_HOLD_TTL_SECONDS: i64 = 4 * 60 * 60;
+pub const DEFAULT_HOLD_TTL_SECONDS: i64 = crate::DEFAULT_TTL_SECONDS;
+pub const MIN_HOLD_TTL_SECONDS: i64 = crate::MIN_TTL_SECONDS;
+pub const MAX_HOLD_TTL_SECONDS: i64 = crate::MAX_TTL_SECONDS;
 /// Most hold ids one `hold.renewed` or `hold.released` event lists (about 310 KiB). A
 /// heartbeat or a session end over more holds writes several such events in its one
 /// transaction, so neither can meet the size limit for one event (D99). Every reader takes
@@ -142,7 +142,7 @@ pub struct SessionInfo {
     pub client: Option<String>,
     /// The client's own session identifier, if it has one.
     pub session_id: Option<String>,
-    /// At session end, keep resource leases (e.g. a server meant to outlive the session).
+    /// Accepted for source compatibility only. Session end always releases leases.
     pub keep_resources: bool,
 }
 
@@ -238,11 +238,7 @@ fn live_holds(
 }
 
 fn clamp_ttl(ttl: Option<i64>) -> Result<i64> {
-    let ttl = ttl.unwrap_or(DEFAULT_HOLD_TTL_SECONDS);
-    if ttl <= 0 {
-        return Err(Error::Invalid("ttl_seconds must be positive".into()));
-    }
-    Ok(ttl.clamp(MIN_HOLD_TTL_SECONDS, MAX_HOLD_TTL_SECONDS))
+    crate::checkout_ttl(ttl)
 }
 
 /// Normalize a requested path or glob to a project-relative pattern.
@@ -924,6 +920,8 @@ fn conflicts_for(
     let mut stmt = tx.prepare(&format!(
         "{HOLD_SELECT_REPO} WHERE h.released_at IS NULL AND h.expires_at > ?3
            AND h.agent_id != ?2
+           AND (NOT EXISTS (SELECT 1 FROM contract_actors a WHERE a.actor_id = ?2)
+                OR EXISTS (SELECT 1 FROM contract_actors a WHERE a.actor_id = h.agent_id))
            AND (h.project_id = ?1 OR (?4 != '' AND h.project_id IN
                 (SELECT project_id FROM project_repos WHERE checkout = ?4)))
          ORDER BY h.created_at"
@@ -1025,7 +1023,7 @@ fn unreadable_conflict(
     })
 }
 
-/// Create a hold, or update and renew the agent's existing hold on the same pattern.
+/// Create a hold, or return the actor's existing live checkout unchanged.
 /// Returns the hold id.
 #[allow(clippy::too_many_arguments)]
 fn upsert_hold_tx(
@@ -1042,8 +1040,8 @@ fn upsert_hold_tx(
     let existing: Option<String> = tx
         .query_row(
             "SELECT hold_id FROM holds WHERE agent_id = ?1 AND project_id = ?2
-               AND pattern = ?3 AND released_at IS NULL",
-            params![agent_id, project_id, pattern],
+               AND pattern = ?3 AND released_at IS NULL AND expires_at > ?4",
+            params![agent_id, project_id, pattern, tx.now],
             |r| r.get(0),
         )
         .ok();
@@ -1062,19 +1060,40 @@ fn upsert_hold_tx(
         payload["auto"] = json!(true);
     }
     Ok(match existing {
-        Some(id) => {
-            let mut payload = payload;
-            payload["hold_id"] = json!(id);
-            tx.emit(actor, "hold.updated", payload)?;
-            tx.execute(
-                "UPDATE holds SET exclusive = ?2, reason = ?3, ttl_seconds = ?4,
-                   renewed_at = ?5, expires_at = ?6 WHERE hold_id = ?1",
-                params![id, exclusive, reason, ttl, tx.now, expires_at],
-            )?;
-            id
-        }
+        Some(id) => id,
         None => {
             let id = new_id();
+            let root: String = tx.query_row(
+                "SELECT abs_path FROM projects WHERE project_id = ?1",
+                [project_id],
+                |r| r.get(0),
+            )?;
+            let literal = literal_pattern(pattern);
+            if literal.is_none()
+                && tx
+                    .query_row(
+                        "SELECT 1 FROM contract_actors WHERE actor_id = ?1",
+                        [agent_id],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some()
+            {
+                return Err(Error::Invalid(
+                    "contract holds require exact file targets".into(),
+                ));
+            }
+            let target = crate::repo::resolve_existing(
+                &Path::new(&root).join(literal.as_deref().unwrap_or(pattern)),
+            );
+            crate::actor_leases::projection_checkout(
+                tx,
+                agent_id,
+                crate::SubjectKind::File,
+                &target.to_string_lossy(),
+                ttl,
+                &id,
+            )?;
             let mut payload = payload;
             payload["hold_id"] = json!(id);
             tx.emit(actor, "hold.acquired", payload)?;
@@ -1773,6 +1792,7 @@ pub(crate) fn release_tx(
         )?;
     }
     for id in hold_ids {
+        crate::actor_leases::projection_release(tx, id, reason)?;
         tx.execute(
             "UPDATE holds SET released_at = ?2, release_reason = ?3 WHERE hold_id = ?1",
             params![id, tx.now, reason],
@@ -1792,6 +1812,7 @@ fn renew_tx(tx: &Tx<'_>, actor: &str, holds: &[(String, i64)]) -> Result<()> {
         tx.emit(actor, "hold.renewed", json!({ "hold_ids": ids }))?;
     }
     for (id, ttl) in holds {
+        crate::actor_leases::projection_renew(tx, id)?;
         tx.execute(
             "UPDATE holds SET renewed_at = ?2, expires_at = ?2 + ?3 * 1000 WHERE hold_id = ?1",
             params![id, tx.now, ttl],
@@ -1862,7 +1883,7 @@ impl Store {
     /// agent for this hold. The linked request closes automatically when the hold ends.
     pub fn request_hold_release(&self, agent: &str, hold_id: &str) -> Result<Message> {
         self.write(|tx| {
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
             let held = tx.query_row(&format!("{HOLD_SELECT} WHERE h.hold_id = ?1
                 AND h.node_id = ?2 AND h.released_at IS NULL AND h.expires_at > ?3"),
                 params![hold_id, tx.node_id, tx.now], hold_from_row).optional()?
@@ -1934,7 +1955,7 @@ impl Store {
         let ttl = clamp_ttl(input.ttl_seconds)?;
         let (mut report, slug, patterns) = self.write(|tx| {
             sweep_tx(tx)?;
-            let me = resolve_agent(tx, tx.node_id, &input.agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, &input.agent)?;
             let project = find_project(tx, tx.node_id, &input.project)?;
             let mut patterns: Vec<(String, String)> = Vec::new();
             for raw in &input.paths {
@@ -2035,7 +2056,7 @@ impl Store {
     ) -> Result<Vec<HoldConflict>> {
         self.write(|tx| {
             sweep_tx(tx)?;
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
             let project = find_project(tx, tx.node_id, project)?;
             let patterns = paths
                 .iter()
@@ -2060,8 +2081,8 @@ impl Store {
     ///
     /// If another agent holds an overlapping path (in this project or another project of
     /// the same checkout), nothing is taken and the conflicts are returned. Otherwise each
-    /// path already under a live exclusive hold of the agent's own is left alone (that hold
-    /// is renewed once it is past half its TTL), and every other path gets a narrow exclusive
+    /// path already under a live exclusive hold of the agent's own is left alone,
+    /// and every other path gets a narrow exclusive
     /// hold of the default TTL. Writes nothing when every path is already covered.
     pub fn guard_edit(
         &self,
@@ -2074,7 +2095,7 @@ impl Store {
             return Err(Error::Invalid("no paths given".into()));
         }
         self.write(|tx| {
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
             let project = find_project(tx, tx.node_id, project)?;
             let mut patterns: Vec<(String, String)> = Vec::new();
             for raw in paths {
@@ -2183,7 +2204,6 @@ impl Store {
                     ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            let mut renew: Vec<(String, i64)> = Vec::new();
             let mut covered = Vec::new();
             let mut needed = Vec::new();
             for (raw, pattern) in &patterns {
@@ -2191,17 +2211,11 @@ impl Store {
                     .iter()
                     .find(|(_, held, _, _)| hold_covers(held, pattern))
                 {
-                    Some((id, _, ttl, expires_at)) if expires_at - tx.now < ttl * 500 => {
-                        if !renew.iter().any(|(r, _)| r == id) {
-                            renew.push((id.clone(), *ttl));
-                        }
-                    }
                     Some(_) => covered.push(raw.clone()),
                     None => needed.push(pattern.clone()),
                 }
             }
-            renew_tx(tx, &me.address, &renew)?;
-            let mut ids: Vec<String> = renew.into_iter().map(|(id, _)| id).collect();
+            let mut ids = Vec::new();
             for pattern in &needed {
                 ids.push(upsert_hold_tx(
                     tx,
@@ -2243,30 +2257,43 @@ impl Store {
         })
     }
 
-    /// A light heartbeat for hooks that run between tool calls: marks the agent active and
-    /// renews only its own live holds that are past half their TTL. No sweep and no session
-    /// event; a `hold.renewed` event is written only when something was renewed.
+    /// Preflight exact literals with the same target escaping as guard_edit.
+    /// Escaping a literal filename may exceed the operator glob cap.
+    pub fn check_edit_paths(
+        &self,
+        agent: &str,
+        project: &str,
+        paths: &[String],
+    ) -> Result<Vec<HoldConflict>> {
+        self.write(|tx| {
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
+            let project = find_project(tx, tx.node_id, project)?;
+            let patterns = paths
+                .iter()
+                .map(|raw| {
+                    Ok((
+                        raw.clone(),
+                        globset::escape(&normalize_path(&project, raw)?),
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            conflicts_for(tx, &project, &me.id, &patterns, true)
+        })
+    }
+
+    /// A presence observation for hooks between tool calls. It never renews a file.
     /// `info` is the hook's client and session id: the beat is also a sign of that session
     /// for the queue's session binding. Returns how many holds were renewed.
     pub fn keepalive(&self, agent: &str, info: &SessionInfo) -> Result<usize> {
         self.write(|tx| {
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
             touch(tx, &me.id)?;
             crate::queue::session_seen_tx(tx, &me.id, info)?;
-            let mut stmt = tx.prepare(
-                "SELECT hold_id, ttl_seconds FROM holds
-                 WHERE agent_id = ?1 AND released_at IS NULL AND expires_at > ?2
-                   AND expires_at - ?2 < ttl_seconds * 500",
-            )?;
-            let due = stmt
-                .query_map(params![me.id, tx.now], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<Vec<(String, i64)>>>()?;
-            renew_tx(tx, &me.address, &due)?;
-            Ok(due.len())
+            Ok(0)
         })
     }
 
-    /// Extend the agent's live holds (all, or just `hold_ids`) by their TTL from now.
+    /// Renew exactly the named live holds by their stored checkout duration.
     pub fn renew_holds(&self, agent: &str, hold_ids: &[String]) -> Result<Vec<Hold>> {
         self.renew_holds_scoped(agent, hold_ids, None)
     }
@@ -2279,9 +2306,12 @@ impl Store {
         hold_ids: &[String],
         scope: Option<&TokenScope>,
     ) -> Result<Vec<Hold>> {
+        if hold_ids.is_empty() {
+            return Err(Error::Invalid("renew must name exact hold ids".into()));
+        }
         self.write(|tx| {
             sweep_tx(tx)?;
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
             let owned = owned_holds(tx, &me.id, hold_ids, scope)?;
             renew_tx(tx, &me.address, &owned)?;
             touch(tx, &me.id)?;
@@ -2305,7 +2335,7 @@ impl Store {
     ) -> Result<Vec<String>> {
         self.write(|tx| {
             sweep_tx(tx)?;
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
             let ids: Vec<String> = owned_holds(tx, &me.id, hold_ids, scope)?
                 .into_iter()
                 .map(|(id, _)| id)
@@ -2334,7 +2364,7 @@ impl Store {
                 None => (None, String::new()),
             };
             let agent_id = match &filter.agent {
-                Some(a) => Some(resolve_agent(tx, tx.node_id, a)?.id),
+                Some(a) => Some(crate::identity::resolve_acting_agent(tx, tx.node_id, a)?.id),
                 None => None,
             };
             live_holds(
@@ -2347,7 +2377,7 @@ impl Store {
         })
     }
 
-    /// Session heartbeat: touch `last_seen_at` and renew the agent's holds. With `end`,
+    /// Session heartbeat: touch `last_seen_at`. With `end`,
     /// release every hold instead and mark the agent offline.
     pub fn heartbeat(&self, agent: &str, end: bool) -> Result<HeartbeatReport> {
         let phase = if end {
@@ -2359,7 +2389,7 @@ impl Store {
     }
 
     /// Record a session lifecycle step. `Start` and `End` append `session.started` /
-    /// `session.ended` events; a plain `Beat` only updates presence and renews holds.
+    /// `session.ended` events; a plain `Beat` only updates presence.
     pub fn session(
         &self,
         agent: &str,
@@ -2378,9 +2408,52 @@ impl Store {
         info: SessionInfo,
         scope: Option<&TokenScope>,
     ) -> Result<HeartbeatReport> {
+        if let Some(encoded) = agent.strip_prefix("another-private:") {
+            let proof: crate::ActorProof = serde_json::from_slice(&crate::crypto::unb64(encoded)?)
+                .map_err(|_| {
+                    Error::Forbidden("NO_ACTOR: invalid private session context".into())
+                })?;
+            if phase == SessionPhase::End {
+                let released = self.end_actor_session(
+                    &proof,
+                    info.session_id.as_deref().unwrap_or("private-session-end"),
+                )?;
+                let leases = self.right_leases()?;
+                let actor = self
+                    .contract_actors()?
+                    .into_iter()
+                    .find(|a| a.actor_id == proof.actor_id)
+                    .ok_or_else(|| Error::Forbidden("NO_ACTOR".into()))?;
+                return Ok(HeartbeatReport {
+                    agent: actor.name,
+                    status: "offline".into(),
+                    last_seen_at: fmt_ts(self.now()),
+                    renewed_holds: vec![],
+                    released_holds: leases
+                        .iter()
+                        .filter(|l| {
+                            released.contains(&l.lease_id)
+                                && l.subject_kind == crate::SubjectKind::File
+                        })
+                        .map(|l| l.lease_id.clone())
+                        .collect(),
+                    resource_leases: leases
+                        .iter()
+                        .filter(|l| {
+                            released.contains(&l.lease_id)
+                                && l.subject_kind == crate::SubjectKind::Resource
+                        })
+                        .count() as u32,
+                    unread: 0,
+                    urgent_unread: 0,
+                    open_requests: 0,
+                });
+            }
+            self.actor_activity(&proof)?;
+        }
         self.write(|tx| {
             sweep_tx(tx)?;
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
             let owned = owned_holds(tx, &me.id, &[], scope)?;
             let session_payload = || {
                 json!({
@@ -2389,9 +2462,12 @@ impl Store {
                     "session_id": info.session_id,
                 })
             };
-            let release_leases = phase == SessionPhase::End && !info.keep_resources;
-            let resource_leases =
-                crate::resources::session_leases_tx(tx, &me, release_leases, scope)?;
+            let release_leases = phase == SessionPhase::End;
+            let resource_leases = if release_leases {
+                crate::resources::session_leases_tx(tx, &me, true, scope)?
+            } else {
+                0
+            };
             let (renewed, released, status) = if phase == SessionPhase::End {
                 let ids: Vec<String> = owned.into_iter().map(|(id, _)| id).collect();
                 release_tx(tx, &me.address, &ids, "session_end")?;
@@ -2410,13 +2486,11 @@ impl Store {
                 if phase == SessionPhase::Start {
                     tx.emit(&me.address, "session.started", session_payload())?;
                 }
-                renew_tx(tx, &me.address, &owned)?;
                 touch(tx, &me.id)?;
                 if scope.is_none() {
                     crate::queue::session_seen_tx(tx, &me.id, &info)?;
                 }
-                let ids: Vec<String> = owned.into_iter().map(|(id, _)| id).collect();
-                (holds_by_id(tx, &ids)?, Vec::new(), "active")
+                (Vec::new(), Vec::new(), "active")
             };
             // After this agent's own sign of life, and never against its own claims.
             crate::queue::queue_sweep_tx(tx, Some(&me.id))?;

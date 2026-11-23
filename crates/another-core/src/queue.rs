@@ -25,9 +25,9 @@ use crate::time::fmt_ts;
 pub const DEFAULT_QUEUE_LIMIT: i64 = 1;
 /// The highest limit the owner can set. 0 means no seat.
 pub const MAX_QUEUE_LIMIT: i64 = 20;
-/// The grace period until the owner changes it: 24 hours.
+/// Historical operator repair grace only. Participating claims use lease_policy.
 pub const DEFAULT_QUEUE_GRACE_SECONDS: i64 = 86_400;
-/// The shortest grace period: an hour of silence never costs a claim.
+/// Historical operator repair bound; never applied to a projected actor claim.
 pub const MIN_QUEUE_GRACE_SECONDS: i64 = 2 * 3600;
 pub const MAX_QUEUE_GRACE_SECONDS: i64 = 30 * 86_400;
 
@@ -1436,12 +1436,65 @@ fn notify_tx(
 }
 
 /// Return a claim to `ready`, keeping the approval, the admission time and the priority.
+pub(crate) fn actor_ended_tx(tx: &Tx<'_>, actor_id: &str) -> Result<()> {
+    let mut stmt = tx.prepare(&format!(
+        "SELECT {ITEM_COLUMNS} FROM queue_items WHERE claimer_id = ?1 AND state = 'claimed'"
+    ))?;
+    let rows = stmt
+        .query_map([actor_id], row_from)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for row in rows {
+        lapse_tx(
+            tx,
+            &row,
+            "session_end",
+            "the claiming session ended",
+            json!({"actor_id": actor_id}),
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn projection_ended_tx(tx: &Tx<'_>, item: &str) -> Result<()> {
+    let row = find_item(tx, tx.node_id, item)?;
+    if row.state == QueueState::Claimed {
+        lapse_tx(
+            tx,
+            &row,
+            "lease_ended",
+            "the claim lease ended",
+            json!({"item_id": item}),
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn discard_legacy_claims_tx(tx: &Tx<'_>) -> Result<()> {
+    let mut stmt = tx.prepare(&format!("SELECT {ITEM_COLUMNS} FROM queue_items WHERE state = 'claimed' AND NOT EXISTS (SELECT 1 FROM contract_actors a WHERE a.actor_id = queue_items.claimer_id)"))?;
+    let rows = stmt
+        .query_map([], row_from)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for row in rows {
+        lapse_tx(
+            tx,
+            &row,
+            "legacy_informational",
+            "legacy labels are not actor responsibility",
+            json!({"item_id":row.item_id}),
+        )?;
+    }
+    tx.execute("UPDATE queue_items SET for_agent = NULL WHERE for_agent IS NOT NULL AND NOT EXISTS (SELECT 1 FROM contract_actors a WHERE a.actor_id = queue_items.for_agent)", [])?;
+    tx.execute("UPDATE queue_items SET skip_agent = NULL WHERE skip_agent IS NOT NULL AND NOT EXISTS (SELECT 1 FROM contract_actors a WHERE a.actor_id = queue_items.skip_agent)", [])?;
+    Ok(())
+}
+
 fn unclaim_tx(
     tx: &Tx<'_>,
     row: &ItemRow,
     for_agent: Option<&str>,
     skip_agent: Option<&str>,
 ) -> Result<()> {
+    crate::actor_leases::projection_release(tx, &format!("queue:{}", row.item_id), "released")?;
     tx.execute(
         "UPDATE queue_items SET state = 'ready', claimer_id = NULL, claimed_at = NULL,
            claim_session = NULL, for_agent = ?2, skip_agent = ?3, updated_at = ?4
@@ -1589,6 +1642,17 @@ pub(crate) fn queue_sweep_tx(tx: &Tx<'_>, calling_agent: Option<&str>) -> Result
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut released_claims = Vec::new();
     for row in claimed {
+        if tx
+            .query_row(
+                "SELECT 1 FROM lease_projections WHERE projection_id = ?1",
+                [format!("queue:{}", row.item_id)],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some()
+        {
+            continue;
+        }
         let (Some(claimer), Some(claimed_at)) = (&row.claimer_id, row.claimed_at) else {
             continue;
         };
@@ -1647,7 +1711,9 @@ impl Store {
         self.write(|tx| {
             let proposer = match caller {
                 QueueCaller::Owner => None,
-                QueueCaller::Agent { agent, .. } => Some(resolve_agent(tx, tx.node_id, agent)?),
+                QueueCaller::Agent { agent, .. } => Some(crate::identity::resolve_acting_agent(
+                    tx, tx.node_id, agent,
+                )?),
             };
             let actor = proposer.as_ref().map_or("owner", |a| a.address.as_str());
             let proposer_id = proposer.as_ref().map(|a| a.id.as_str());
@@ -2014,8 +2080,14 @@ impl Store {
     /// Hand the first ready item the agent may take to the agent, or say why not. The only
     /// way into `claimed`. One write transaction: two callers never get the same item.
     pub fn queue_next(&self, agent: &str) -> Result<QueueNext> {
+        self.queue_next_with_ttl(agent, None)
+    }
+
+    pub fn queue_next_with_ttl(&self, agent: &str, ttl_seconds: Option<i64>) -> Result<QueueNext> {
+        let ttl = crate::checkout_ttl(ttl_seconds)?;
         self.write(|tx| {
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
+            crate::actor_leases::prepare_business_subject(tx, &me.id, crate::SubjectKind::Queue, "")?;
             touch(tx, &me.id)?;
             // After the caller's own sign of life, and never against the caller's claims.
             queue_sweep_tx(tx, Some(&me.id))?;
@@ -2058,6 +2130,7 @@ impl Store {
                 });
             };
             let session = fresh_session(tx, &me.id, tx.now)?;
+            crate::actor_leases::projection_checkout(tx, &me.id, crate::SubjectKind::Queue, &row.item_id, ttl, &format!("queue:{}", row.item_id))?;
             let changed = tx.execute(
                 "UPDATE queue_items SET state = 'claimed', claimer_id = ?2, claimed_at = ?3,
                    claim_session = ?4, skip_agent = NULL, updated_at = ?3
@@ -2133,7 +2206,7 @@ impl Store {
     pub fn queue_note(&self, agent: &str, item: &str, body: &str) -> Result<QueueItem> {
         check_text("the note", body, MAX_NOTE_CHARS, true)?;
         self.write(|tx| {
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
             let row = find_item(tx, tx.node_id, item)?;
             if row.state == QueueState::Done {
                 return Err(wrong_state(tx, &row, "a finished item takes no notes")?);
@@ -2192,7 +2265,10 @@ impl Store {
             unchanged_since(tx, &row, shown)?;
             let claimer = match caller {
                 QueueCaller::Agent { agent, .. } => {
-                    let me = resolve_agent(tx, tx.node_id, agent)?;
+                    let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
+                    if agent.starts_with("another-private:") {
+                        return Err(Error::Invalid("NO_CALL_CONTEXT: queue handoff requires exact claim generation carriage; use exact lease release".into()));
+                    }
                     (row.claimer_id.as_deref() == Some(me.id.as_str())).then_some(me)
                 }
                 QueueCaller::Owner => None,
@@ -2276,11 +2352,27 @@ impl Store {
     /// Finish a claimed item with its result: a summary and one pointer, stored on the item
     /// and in the event. The claimer's alone.
     pub fn queue_done(&self, agent: &str, item: &str, input: DoneItem) -> Result<QueueItem> {
+        self.queue_done_with_lease(agent, item, input, None)
+    }
+
+    pub fn queue_done_with_lease(
+        &self,
+        agent: &str,
+        item: &str,
+        input: DoneItem,
+        expected: Option<&crate::LeaseRef>,
+    ) -> Result<QueueItem> {
         check_text("the summary", &input.summary, MAX_SUMMARY_CHARS, true)?;
         check_pointer(input.pointer_kind, &input.pointer)?;
         self.write(|tx| {
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
             let row = find_item(tx, tx.node_id, item)?;
+            crate::actor_leases::validate_projection(
+                tx,
+                &me.id,
+                &format!("queue:{}", row.item_id),
+                expected,
+            )?;
             let (Some(claimer), Some(claimed_at)) = (
                 row.claimer_id
                     .as_deref()
@@ -2301,6 +2393,7 @@ impl Store {
                     me.address
                 )));
             }
+            crate::actor_leases::projection_release(tx, &format!("queue:{}", row.item_id), "done")?;
             record_tx(
                 tx,
                 &row,
@@ -2758,7 +2851,7 @@ fn admin_release_tx(
         if row.state != QueueState::Claimed {
             return Err(wrong_state(tx, &row, "only a claimed item is released")?);
         }
-        let me = resolve_agent(tx, tx.node_id, agent)?;
+        let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
         return Err(Error::Forbidden(format!(
             "{} is {}, not by {}; only the claimer or an admitter releases it",
             row.label(),

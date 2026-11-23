@@ -226,16 +226,16 @@ fn leases_expire_lapse_and_can_be_adopted() {
 }
 
 #[test]
-fn session_end_releases_resources_unless_kept() {
+fn session_end_releases_resources_even_with_legacy_keep_flag() {
     let (store, _) = setup();
     ollama(&store, "alice", LeaseMode::Shared, 600).unwrap();
     store.borrow_resource("bob", &name_ref(), None).unwrap();
 
-    // A plain heartbeat renews resource leases too.
+    // Presence never renews resource ownership or borrowing.
     let hb = store.heartbeat("bob", false).unwrap();
-    assert_eq!(hb.resource_leases, 1);
+    assert_eq!(hb.resource_leases, 0);
 
-    // keep_resources leaves the lease in place.
+    // The compatibility keep flag cannot extend a session lease.
     let kept = store
         .session(
             "bob",
@@ -247,12 +247,12 @@ fn session_end_releases_resources_unless_kept() {
         )
         .unwrap();
     assert_eq!(kept.status, "offline");
-    assert_eq!(store.resource(&name_ref()).unwrap().refcount, 2);
+    assert_eq!(store.resource(&name_ref()).unwrap().refcount, 1);
 
     let end = store.heartbeat("alice", true).unwrap();
     assert_eq!(end.resource_leases, 1);
     let r = store.resource(&name_ref()).unwrap();
-    assert_eq!(r.owner.as_deref(), Some("bob"), "ownership passed on");
+    assert_eq!(r.owner, None, "both session leases were released");
     store.heartbeat("bob", true).unwrap();
     assert_eq!(store.resource(&name_ref()).unwrap().status, "lapsed");
 
@@ -271,7 +271,7 @@ fn session_end_releases_resources_unless_kept() {
         "{text}"
     );
     assert!(
-        text.contains("model_server ollama@11434 now owned by bob"),
+        !text.contains("model_server ollama@11434 now owned by bob"),
         "{text}"
     );
     assert!(

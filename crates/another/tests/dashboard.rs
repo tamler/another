@@ -132,6 +132,7 @@ fn raw_status_blocking(authority: &str, request: &str) -> u16 {
 #[tokio::test]
 async fn foreign_host_is_refused_on_every_dashboard_route() {
     let srv = serve(HttpOptions {
+        legacy_repair: true,
         dashboard: DashboardMode::Local,
         ..Default::default()
     })
@@ -195,6 +196,7 @@ async fn foreign_host_is_refused_on_every_dashboard_route() {
 #[tokio::test]
 async fn local_dashboard_shows_bodies_and_requires_confirm() {
     let srv = serve(HttpOptions {
+        legacy_repair: true,
         dashboard: DashboardMode::Local,
         ..Default::default()
     })
@@ -375,6 +377,7 @@ async fn local_dashboard_shows_bodies_and_requires_confirm() {
 #[tokio::test]
 async fn auth_server_hides_the_dashboard_unless_explicit() {
     let off = serve(HttpOptions {
+        legacy_repair: true,
         auth: true,
         ..Default::default()
     })
@@ -439,6 +442,7 @@ async fn auth_server_hides_the_dashboard_unless_explicit() {
     off.ct.cancel();
 
     let redacted = serve(HttpOptions {
+        legacy_repair: true,
         auth: true,
         dashboard: DashboardMode::Redacted,
         ..Default::default()
@@ -511,6 +515,7 @@ async fn auth_server_hides_the_dashboard_unless_explicit() {
 #[tokio::test]
 async fn auth_dashboard_keeps_loopback_host_when_a_tunnel_host_is_allowed() {
     let srv = serve(HttpOptions {
+        legacy_repair: true,
         auth: true,
         dashboard: DashboardMode::Redacted,
         allowed_hosts: vec!["tunnel.example".into()],
@@ -555,6 +560,7 @@ async fn auth_dashboard_keeps_loopback_host_when_a_tunnel_host_is_allowed() {
     // Actions exist only without `--auth`. The public origin still must not
     // pass, even though the edge guard accepts it for the rest of the server.
     let local = serve(HttpOptions {
+        legacy_repair: true,
         dashboard: DashboardMode::Local,
         allowed_hosts: vec!["tunnel.example".into()],
         oauth: Some(another::oauth_http::parse_public_url("https://tunnel.example").unwrap()),
@@ -607,12 +613,16 @@ async fn dashboard_command_refuses_remote_bind_and_serves_loopback() {
     hosted_ci::require_hosted_runner();
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
-    let bad = Command::new(env!("CARGO_BIN_EXE_another"))
-        .args(["dashboard", "--no-open", "--bind", "0.0.0.0:9"])
-        .env("ANOTHER_HOME", home)
-        .env_remove("ANOTHER_LOG")
-        .output()
-        .unwrap();
+    let bad = {
+        let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+        legacy_fixture_command.arg("--unguarded-repair");
+        legacy_fixture_command
+    }
+    .args(["dashboard", "--no-open", "--bind", "0.0.0.0:9"])
+    .env("ANOTHER_HOME", home)
+    .env_remove("ANOTHER_LOG")
+    .output()
+    .unwrap();
     assert!(!bad.status.success());
     let err = String::from_utf8_lossy(&bad.stderr);
     assert!(
@@ -620,14 +630,18 @@ async fn dashboard_command_refuses_remote_bind_and_serves_loopback() {
         "remote bind must be refused: {err}"
     );
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_another"))
-        .args(["--json", "dashboard", "--no-open", "--bind", "127.0.0.1:0"])
-        .env("ANOTHER_HOME", home)
-        .env_remove("ANOTHER_LOG")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = {
+        let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+        legacy_fixture_command.arg("--unguarded-repair");
+        legacy_fixture_command
+    }
+    .args(["--json", "dashboard", "--no-open", "--bind", "127.0.0.1:0"])
+    .env("ANOTHER_HOME", home)
+    .env_remove("ANOTHER_LOG")
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
     let stdout = child.stdout.take().unwrap();
     let line = tokio::task::spawn_blocking(move || {
         let mut reader = BufReader::new(stdout);

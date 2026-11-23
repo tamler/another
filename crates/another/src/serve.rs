@@ -19,6 +19,8 @@ pub const DEFAULT_BIND: &str = "127.0.0.1:7466";
 /// HTTP serving options.
 #[derive(Debug, Clone, Default)]
 pub struct HttpOptions {
+    /// Explicit operator repair of legacy records; false for ordinary participation.
+    pub legacy_repair: bool,
     /// Require bearer tokens on `/mcp` and `/activity`.
     pub auth: bool,
     /// Explicitly allow a non-loopback bind (only together with `auth`).
@@ -202,10 +204,18 @@ async fn shutdown_signal() {
 }
 
 pub async fn serve_stdio(store: Store, sweep_every: Duration) -> Result<()> {
+    serve_stdio_with_policy(store, sweep_every, false).await
+}
+
+pub async fn serve_stdio_with_policy(
+    store: Store,
+    sweep_every: Duration,
+    legacy_repair: bool,
+) -> Result<()> {
     let ct = CancellationToken::new();
     spawn_sweeper(store.clone(), sweep_every, ct.clone());
     tracing::info!(node_id = store.node_id(), "serving MCP on stdio");
-    let service = AnotherMcp::new(store)
+    let service = AnotherMcp::with_policy(store, legacy_repair)
         .serve(rmcp::transport::stdio())
         .await
         .context("starting stdio MCP server")?;
@@ -224,6 +234,7 @@ pub const HTTP_BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 /// `GET /health`. With `auth`, `/mcp` and `/activity` require a bearer token.
 pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> axum::Router {
     let factory_store = store.clone();
+    let legacy_repair = opts.legacy_repair;
     let mut config =
         StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token());
     if opts.auth && (!opts.allowed_hosts.is_empty() || opts.oauth.is_some()) {
@@ -235,7 +246,12 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
         config = config.with_allowed_hosts(hosts);
     }
     let mcp: StreamableHttpService<AnotherMcp, LocalSessionManager> = StreamableHttpService::new(
-        move || Ok(AnotherMcp::new(factory_store.clone())),
+        move || {
+            Ok(AnotherMcp::with_policy(
+                factory_store.clone(),
+                legacy_repair,
+            ))
+        },
         Default::default(),
         config,
     );

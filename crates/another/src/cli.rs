@@ -14,7 +14,7 @@ use another_core::{
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 
-use crate::hooks::{self, Client, HookEnv, HookEvent};
+use crate::hooks::{self, Client, HookEnv, HookEvent, HookInput};
 use crate::output;
 
 #[derive(Debug, Parser)]
@@ -33,6 +33,9 @@ pub struct Cli {
     /// Let a development build migrate a home it did not create. A backup is taken first.
     #[arg(long, global = true)]
     pub dev_migrate: bool,
+    /// Explicitly leave guarded participation to repair legacy records. Does not grant actor rights.
+    #[arg(long, global = true)]
+    pub unguarded_repair: bool,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -46,10 +49,17 @@ pub struct AgentArg {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Use the private another.agent/1 integration channel.
+    #[command(subcommand)]
+    Adapter(AdapterCmd),
     /// Create the data directory and database if needed; show the local node.
     Init,
-    /// Show the local node, database location and registered agents.
-    Status,
+    /// Read actor scopes, exact operations and lease deadlines without changing them.
+    Status {
+        /// Limit to actors with file evidence in this directory and their scope parents.
+        #[arg(long, num_args = 0..=1, default_missing_value = ".")]
+        repo: Option<PathBuf>,
+    },
     /// Run the daemon: MCP over loopback streamable HTTP (default) or stdio.
     Serve {
         /// Serve MCP on stdin/stdout instead of HTTP (for MCP client configs).
@@ -247,7 +257,7 @@ pub enum Command {
         #[arg(long)]
         agent: Option<String>,
     },
-    /// Session heartbeat: renew holds; with --end release them and go offline.
+    /// Observe presence; --end releases session rights immediately.
     Heartbeat {
         #[command(flatten)]
         agent: AgentArg,
@@ -256,7 +266,7 @@ pub enum Command {
         start: bool,
         #[arg(long)]
         end: bool,
-        /// With --end: keep resource leases (servers meant to outlive the session).
+        /// Deprecated compatibility flag. Session end always releases resources.
         #[arg(long, requires = "end")]
         keep: bool,
     },
@@ -286,7 +296,7 @@ pub enum Command {
         target: String,
         #[command(flatten)]
         agent: AgentArg,
-        /// Lease seconds (default 1800).
+        /// Checkout seconds (default 120, clamped to 30..86400).
         #[arg(long)]
         ttl: Option<i64>,
     },
@@ -450,6 +460,16 @@ pub enum Command {
         #[arg(long, default_value_t = 20)]
         limit: u32,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AdapterCmd {
+    /// Enroll a local integration; write its grant privately and print only its location.
+    Enroll,
+    /// Read one proof-bearing another.agent/1 envelope from stdin. Never put proof in argv.
+    Event,
+    /// Read actors, lease history and adapter coverage without updating them.
+    Status,
 }
 
 #[derive(Debug, Args)]
@@ -718,7 +738,7 @@ pub enum ResourceCmd {
         /// Refuse borrowers.
         #[arg(long)]
         exclusive: bool,
-        /// Lease seconds (default 1800, max 86400).
+        /// Checkout seconds (default 120, clamped to 30..86400).
         #[arg(long)]
         ttl: Option<i64>,
         /// Metadata as key=value (repeatable), e.g. --meta model=llama3 --meta backend=metal.
@@ -852,7 +872,7 @@ pub enum HoldCmd {
         /// Files or globs.
         #[arg(required = true)]
         paths: Vec<String>,
-        /// Lease seconds (default 1800).
+        /// Checkout seconds (default 120, clamped to 30..86400).
         #[arg(long)]
         ttl: Option<i64>,
         /// Shared instead of exclusive.
@@ -1369,6 +1389,19 @@ fn client_shown(text: &str) -> String {
 }
 
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
+    let args: Vec<_> = std::env::args_os()
+        .map(|v| v.to_string_lossy().into_owned())
+        .collect();
+    let private_selector = args.windows(2).any(|w| {
+        matches!(w[0].as_str(), "--agent" | "-a" | "--from" | "-f")
+            && w[1].starts_with("another-private:")
+    }) || args.iter().any(|a| {
+        a.starts_with("--agent=another-private:") || a.starts_with("--from=another-private:")
+    }) || std::env::var("ANOTHER_AGENT")
+        .is_ok_and(|a| a.starts_with("another-private:"));
+    if private_selector {
+        anyhow::bail!("NO_ACTOR: private proof must use the private channel, never argv or ordinary environment");
+    }
     let json = cli.json;
     let home = cli.home.as_deref();
     // The template listing needs no sender, recipient or database (FINDINGS-177 T1, T2).
@@ -1420,9 +1453,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         let result = rt.block_on(async {
             if *stdio {
-                crate::serve::serve_stdio(store, every).await
+                crate::serve::serve_stdio_with_policy(store, every, cli.unguarded_repair).await
             } else {
                 let opts = crate::serve::HttpOptions {
+                    legacy_repair: cli.unguarded_repair,
                     auth: *auth,
                     allow_remote_bind: *allow_remote_bind,
                     allowed_hosts: allowed_hosts.clone(),
@@ -1488,7 +1522,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         })
     };
     if let Command::Hook(cmd) = &cli.command {
-        return hook_command(cmd, json, another_home);
+        return hook_command(cmd, json, another_home, cli.unguarded_repair);
     }
     if let Command::Daemon(cmd) = &cli.command {
         return daemon_command(cmd, json, another_home()?);
@@ -1519,8 +1553,72 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         });
     }
 
-    let store = open(home)?;
+    if let Command::Adapter(cmd) = &cli.command {
+        if matches!(cmd, AdapterCmd::Enroll) {
+            let home = another_home()?;
+            println!(
+                "{}",
+                crate::native_hooks::enroll(&open(Some(&home))?, &home)?
+            );
+            return Ok(ExitCode::SUCCESS);
+        }
+        let envelope = match cmd {
+            AdapterCmd::Enroll => unreachable!("handled above"),
+            AdapterCmd::Event => {
+                let mut raw = String::new();
+                std::io::stdin()
+                    .take(1024 * 1024 + 1)
+                    .read_to_string(&mut raw)?;
+                anyhow::ensure!(raw.len() <= 1024 * 1024, "contract envelope exceeds 1 MiB");
+                serde_json::from_str::<another_core::AgentEnvelope>(&raw)?
+            }
+            AdapterCmd::Status => another_core::AgentEnvelope {
+                major: 1,
+                minor: 0,
+                request_id: "status".into(),
+                required_features: Vec::new(),
+                operation: another_core::AgentOperation::Status,
+            },
+        };
+        let store = if matches!(envelope.operation, another_core::AgentOperation::Status) {
+            Store::open_quick(&another_home()?, Duration::from_millis(300))?
+        } else {
+            open(home)?
+        };
+        let response = store.agent_contract(envelope)?;
+        println!("{response}");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let store = if matches!(cli.command, Command::Status { .. }) {
+        Store::open_quick(&another_home()?, Duration::from_millis(300))?
+    } else {
+        open(home)?
+    };
+    let requires_actor = match &cli.command {
+        Command::Send { .. }
+        | Command::Reply { .. }
+        | Command::Ack { .. }
+        | Command::Request { .. }
+        | Command::Heartbeat { .. }
+        | Command::Borrow { .. }
+        | Command::Release { .. }
+        | Command::Resource(_)
+        | Command::Wake { .. }
+        | Command::Hold(
+            HoldCmd::Acquire { .. }
+            | HoldCmd::Renew { .. }
+            | HoldCmd::Release { .. }
+            | HoldCmd::RequestRelease { .. },
+        ) => true,
+        Command::Queue(cmd) => crate::queue_cli::requires_actor(cmd),
+        _ => false,
+    };
+    if requires_actor && !cli.unguarded_repair {
+        return Err(another_core::Error::Forbidden("NO_ACTOR: names and --agent are not authority. Use the private another.agent/1 channel. An operator may explicitly leave guarded participation with --unguarded-repair for legacy records".into()).into());
+    }
     let code = match cli.command {
+        Command::Adapter(_) => unreachable!("handled above"),
         Command::Serve { .. }
         | Command::Dashboard { .. }
         | Command::Hook(_)
@@ -1531,8 +1629,8 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         | Command::Remote(_) => {
             unreachable!("handled above")
         }
-        Command::Init | Command::Status => {
-            let status = output::Status {
+        command @ (Command::Init | Command::Status { .. }) => {
+            let mut status = output::Status {
                 node: store.node()?,
                 db_path: store
                     .db_path()
@@ -1540,7 +1638,14 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     .unwrap_or_default(),
                 projects: store.projects()?,
                 agents: store.agents()?,
+                actors: store.contract_actors()?,
+                leases: store.right_leases()?,
+                operations: store.actor_operations()?,
+                authority_now: store.now(),
             };
+            if let Command::Status { repo: Some(repo) } = command {
+                status.retain_repo(&repo)?;
+            }
             emit(json, &status, output::status)
         }
         Command::Project(ProjectCmd::Ensure { path }) => {
@@ -2499,18 +2604,40 @@ fn hook_command(
     cmd: &HookCmd,
     json: bool,
     another_home: impl Fn() -> anyhow::Result<PathBuf>,
+    unguarded_repair: bool,
 ) -> anyhow::Result<ExitCode> {
     match cmd {
         HookCmd::Run { event, client } => {
-            // Print what we have and exit 0 (the wrapper also exits 0). post-tool and
-            // session hooks fail open. pre-edit may print a deny after a bounded lock wait.
+            if unguarded_repair {
+                eprintln!("Another: UNGUARDED REPAIR of legacy observations; no contract actor rights are granted.");
+                let home = another_home()?;
+                let store = Store::open(&home)?;
+                let env = HookEnv::detect(home)?;
+                let input = HookInput::read_stdin();
+                let text = match crate::legacy_repair::event(&store, &env, *client, *event, &input)
+                {
+                    Err(e) if *event == HookEvent::PreEdit => crate::native_hooks::deny(
+                        *client,
+                        &format!("Another stopped this edit: {e}"),
+                    ),
+                    result => result?,
+                };
+                if !text.is_empty() {
+                    println!("{text}");
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+            // Native JSON carries admission refusal; bookkeeping failures stay quiet.
             let home = another_home().ok();
             // Tool hooks open without migrating, with a short first lock wait, so a missing
             // database costs milliseconds. pre-edit then waits longer if the database is
             // locked, and denies when that bound expires.
             let store = match &home {
                 Some(h) if event.is_tool_event() && *event != HookEvent::PreEdit => {
-                    Store::open_quick(h, event.busy_timeout()).map_err(anyhow::Error::from)
+                    let deadline = std::time::Instant::now() + event.busy_timeout();
+                    Store::open_quick(h, event.busy_timeout())
+                        .map(|store| store.with_io_deadline(deadline))
+                        .map_err(anyhow::Error::from)
                 }
                 Some(h) if *event != HookEvent::PreEdit => {
                     Store::open(h).map_err(anyhow::Error::from)
@@ -2522,7 +2649,7 @@ fn hook_command(
             let text = if *event == HookEvent::PreEdit {
                 hooks::run_pre_edit(home.as_deref(), env, *client)
             } else {
-                hooks::run_fail_open(store, env, home.as_deref(), *event, *client)
+                hooks::run_hook(store, env, home.as_deref(), *event, *client)
             };
             if !text.is_empty() {
                 println!("{text}");

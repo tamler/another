@@ -318,7 +318,11 @@ fn run(home: &Path, args: &[&str]) -> (Option<i32>, String, String) {
 
 fn run_with(home: &Path, args: &[&str], env: &[(&str, &str)]) -> (Option<i32>, String, String) {
     let user = tempfile::tempdir().unwrap();
-    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_another"));
+    let mut command = {
+        let mut legacy_fixture_command = std::process::Command::new(env!("CARGO_BIN_EXE_another"));
+        legacy_fixture_command.arg("--unguarded-repair");
+        legacy_fixture_command
+    };
     command
         .args(args)
         .env("ANOTHER_HOME", home)

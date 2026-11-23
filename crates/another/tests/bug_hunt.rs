@@ -56,6 +56,7 @@ async fn start() -> Server {
         store.clone(),
         ct.clone(),
         &HttpOptions {
+            legacy_repair: true,
             auth: true,
             bound_port: addr.port(),
             ..Default::default()
@@ -340,11 +341,11 @@ async fn bh13_renew_and_release_stay_inside_the_tokens_globs() {
     let untouched = || vec![(outside.clone(), outside_expiry.clone())];
     let inside = hold(&srv.path("sandbox/w/a"), "remote-work.rs");
 
-    // Renew all: only the in-scope hold, and the other one's expiry does not move.
+    // Exact-subject renewal stays in scope and cannot renew the hidden file.
     let renew = call(
         &client,
         "hold_paths",
-        json!({ "action": "renew", "project": srv.path("sandbox/w/a") }),
+        json!({ "action": "renew", "project": srv.path("sandbox/w/a"), "hold_ids": [inside] }),
     )
     .await;
     assert_ne!(renew.is_error, Some(true), "{renew:?}");
@@ -398,13 +399,13 @@ async fn bh13_renew_and_release_stay_inside_the_tokens_globs() {
     assert_eq!(out(&release)["released"], json!([inside]), "{release:?}");
     assert_eq!(live_holds(&srv.store), untouched(), "release");
 
-    // Heartbeat, on its own: renews and then ends only the in-scope hold.
+    // Presence renews no file; an end still releases only the in-scope hold.
     let again = hold(&srv.path("sandbox/w/a"), "remote-work.rs");
     let beat = call(&client, "heartbeat", json!({})).await;
     assert_ne!(beat.is_error, Some(true), "{beat:?}");
     assert_eq!(
         ids(&out(&beat)["renewed_holds"]),
-        vec![again.clone()],
+        Vec::<String>::new(),
         "heartbeat: {beat:?}"
     );
     let end = call(&client, "heartbeat", json!({ "end": true })).await;
@@ -455,7 +456,7 @@ async fn bh13_heartbeat_leases_stay_inside_the_tokens_globs() {
 
     let beat = call(&client, "heartbeat", json!({})).await;
     assert_ne!(beat.is_error, Some(true), "{beat:?}");
-    assert_eq!(out(&beat)["resource_leases"], json!(1), "beat: {beat:?}");
+    assert_eq!(out(&beat)["resource_leases"], json!(0), "beat: {beat:?}");
     assert_eq!(
         leases(&hidden),
         hidden_leases,
@@ -478,7 +479,7 @@ async fn bh13_heartbeat_leases_stay_inside_the_tokens_globs() {
 async fn in_process(store: Store) -> Client {
     let (server_io, client_io) = tokio::io::duplex(64 * 1024);
     tokio::spawn(async move {
-        let server = another::mcp::AnotherMcp::new(store)
+        let server = another::mcp::AnotherMcp::legacy_repair(store)
             .serve(server_io)
             .await
             .unwrap();

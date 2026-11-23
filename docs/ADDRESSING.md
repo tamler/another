@@ -1,5 +1,7 @@
 # Addressing agents: when a bare name is ambiguous
 
+Current participating policy: contract-minted actors authorize actions; names and transport labels are selectors only. All rights use a 120-second default TTL with requested bounds of 30 seconds through 24 hours. Observed session end releases all session and dependent rights immediately. Presence, idle reminders, status and transport observations renew no file leases. Routine hooks are quiet except for conflicts and one idle reminder. Cursor remains unguarded. The older operational examples below describe operator compatibility, not participating authority; see [AGENT-CONTRACT.md](AGENT-CONTRACT.md).
+
 An agent's full address is `name@project`. Names are unique per project, not per machine, so the same name can exist in several projects on one node. A bare `name` resolves only while exactly one agent on this node has it. The moment a second project registers the same name, every command that was passing the bare name stops with an `ambiguous` error, and the fix is to use the full address.
 
 This page is a recorded run, not a sketch. It was captured on 12 Nov 2026 from `another 0.1.0` built from commit `5ec0a58` of this repository, in a temporary `ANOTHER_HOME` and `HOME`, against three throwaway git repositories, with no hooks installed and no `another serve` running. Ids and timestamps are as recorded. The temporary root is shown as `/tmp/demo`; the real path was longer. Nothing here touched a real node.

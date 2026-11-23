@@ -6,15 +6,19 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 fn another(home: &Path, cwd: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_another"))
-        .args(args)
-        .current_dir(cwd)
-        .env("ANOTHER_HOME", home)
-        .env_remove("ANOTHER_AGENT")
-        .env_remove("ANOTHER_LOG")
-        .stdin(Stdio::null())
-        .output()
-        .expect("run another")
+    {
+        let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+        legacy_fixture_command.arg("--unguarded-repair");
+        legacy_fixture_command
+    }
+    .args(args)
+    .current_dir(cwd)
+    .env("ANOTHER_HOME", home)
+    .env_remove("ANOTHER_AGENT")
+    .env_remove("ANOTHER_LOG")
+    .stdin(Stdio::null())
+    .output()
+    .expect("run another")
 }
 
 /// ESC, BEL, CSI and the bidi overrides D75 refuses in subjects.
@@ -192,17 +196,21 @@ fn a_hub_error_in_sync_watch_cannot_retitle_the_terminal() {
     let dir = tempfile::tempdir().unwrap();
     let spoke_home = spoke_of_a_hostile_hub(dir.path());
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_another"))
-        .args(["sync", "--watch"])
-        .current_dir(dir.path())
-        .env("ANOTHER_HOME", &spoke_home)
-        .env_remove("ANOTHER_AGENT")
-        .env_remove("ANOTHER_LOG")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = {
+        let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+        legacy_fixture_command.arg("--unguarded-repair");
+        legacy_fixture_command
+    }
+    .args(["sync", "--watch"])
+    .current_dir(dir.path())
+    .env("ANOTHER_HOME", &spoke_home)
+    .env_remove("ANOTHER_AGENT")
+    .env_remove("ANOTHER_LOG")
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
     let mut err = BufReader::new(child.stderr.take().unwrap());
     let mut line = String::new();
     let mut got = String::new();

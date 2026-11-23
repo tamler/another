@@ -41,7 +41,10 @@ async fn call_err(client: &Client, tool: &str, args: Value) -> String {
 async fn in_process(store: Store) -> Client {
     let (server_io, client_io) = tokio::io::duplex(64 * 1024);
     tokio::spawn(async move {
-        let server = AnotherMcp::new(store).serve(server_io).await.unwrap();
+        let server = AnotherMcp::legacy_repair(store)
+            .serve(server_io)
+            .await
+            .unwrap();
         let _ = server.waiting().await;
     });
     ClientConfig::default().serve(client_io).await.unwrap()
@@ -66,6 +69,8 @@ async fn exposes_the_tool_surface() {
             "acknowledge",
             "activity_feed",
             "activity_summarize",
+            "another_identity",
+            "another_lease",
             "claim_request",
             "ensure_project",
             "fetch_inbox",
@@ -229,7 +234,7 @@ async fn full_flow_over_mcp() {
     assert_eq!(listed["holds"].as_array().unwrap().len(), 1);
 
     let hb = call_ok(&client, "heartbeat", json!({ "agent": "claude-1" })).await;
-    assert_eq!(hb["renewed_holds"].as_array().unwrap().len(), 1);
+    assert!(hb["renewed_holds"].as_array().unwrap().is_empty());
     let end = call_ok(
         &client,
         "heartbeat",
@@ -469,6 +474,7 @@ async fn streamable_http_on_loopback() {
         store.clone(),
         ct.clone(),
         &another::serve::HttpOptions {
+            legacy_repair: true,
             bound_port: addr.port(),
             ..Default::default()
         },

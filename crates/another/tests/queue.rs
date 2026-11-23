@@ -25,7 +25,11 @@ fn text(b: &[u8]) -> String {
 }
 
 fn command(home: &Path, args: &[&str], env: &[(&str, &str)]) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_another"));
+    let mut cmd = {
+        let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+        legacy_fixture_command.arg("--unguarded-repair");
+        legacy_fixture_command
+    };
     cmd.args(args)
         .env("ANOTHER_HOME", home)
         .env_remove("ANOTHER_AGENT")
@@ -188,7 +192,10 @@ impl Fx {
 async fn in_process(store: Store) -> Client {
     let (server_io, client_io) = tokio::io::duplex(64 * 1024);
     tokio::spawn(async move {
-        let server = AnotherMcp::new(store).serve(server_io).await.unwrap();
+        let server = AnotherMcp::legacy_repair(store)
+            .serve(server_io)
+            .await
+            .unwrap();
         let _ = server.waiting().await;
     });
     ClientConfig::default().serve(client_io).await.unwrap()
@@ -1824,13 +1831,14 @@ async fn only_the_claiming_sessions_end_hook_releases_through_the_binary() {
     );
     let state = fx.home.join("hooks").join("state");
     let stamps = std::fs::read_dir(&state)
-        .unwrap()
+        .into_iter()
+        .flatten()
         .filter(|e| {
             let path = e.as_ref().unwrap().path();
             path.is_file() && path.extension().is_some_and(|x| x == "beat")
         })
         .count();
-    assert_eq!(stamps, 3, "one stamp for each session, all in {state:?}");
+    assert_eq!(stamps, 0, "presence does not need file renewal stamps");
     assert!(!fx.home.join("escape").exists());
     assert!(!fx.home.parent().unwrap().join("escape").exists());
 

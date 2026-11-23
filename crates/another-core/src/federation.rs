@@ -3409,7 +3409,7 @@ mod tests {
                 )?)
             })
             .unwrap();
-        assert_eq!(peer_expiry, 2_801_000);
+        assert_eq!(peer_expiry, 2_800_000, "checkout replay does not renew");
     }
 
     #[test]

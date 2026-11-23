@@ -39,15 +39,19 @@ impl Fx {
 
     /// Exit status and stdout.
     fn run(&self, args: &[&str]) -> (i32, String) {
-        let out = Command::new(env!("CARGO_BIN_EXE_another"))
-            .args(args)
-            .current_dir(&self.shop)
-            .env("ANOTHER_HOME", &self.home)
-            .env_remove("ANOTHER_AGENT")
-            .env_remove("ANOTHER_LOG")
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
+        let out = {
+            let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+            legacy_fixture_command.arg("--unguarded-repair");
+            legacy_fixture_command
+        }
+        .args(args)
+        .current_dir(&self.shop)
+        .env("ANOTHER_HOME", &self.home)
+        .env_remove("ANOTHER_AGENT")
+        .env_remove("ANOTHER_LOG")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
         (
             out.status.code().unwrap(),
             String::from_utf8_lossy(&out.stdout).into_owned(),

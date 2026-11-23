@@ -7,14 +7,18 @@ use std::process::{Command, Output, Stdio};
 use serde_json::Value;
 
 fn another(home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_another"))
-        .args(args)
-        .env("ANOTHER_HOME", home)
-        .env_remove("ANOTHER_AGENT")
-        .env_remove("ANOTHER_LOG")
-        .stdin(Stdio::null())
-        .output()
-        .expect("run another")
+    {
+        let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+        legacy_fixture_command.arg("--unguarded-repair");
+        legacy_fixture_command
+    }
+    .args(args)
+    .env("ANOTHER_HOME", home)
+    .env_remove("ANOTHER_AGENT")
+    .env_remove("ANOTHER_LOG")
+    .stdin(Stdio::null())
+    .output()
+    .expect("run another")
 }
 
 fn json(home: &Path, args: &[&str]) -> Value {
@@ -98,13 +102,12 @@ fn hold_renew_renews_own_holds_and_refuses_anothers() {
     assert_eq!(code, 1, "{err}");
     assert!(err.contains("no live hold"), "{err}");
 
-    // No ids: all of the agent's holds; bob has none, which is not an error.
-    let all = json(&home, &["hold", "renew", "--agent", "alice"]);
-    assert_eq!(all.as_array().unwrap().len(), 1);
-    assert!(json(&home, &["hold", "renew", "--agent", "bob"])
-        .as_array()
-        .unwrap()
-        .is_empty());
+    // Renewal always names exact subjects, including for an actor with no holds.
+    for agent in ["alice", "bob"] {
+        let (code, err) = fails(&home, &["hold", "renew", "--agent", agent]);
+        assert_eq!(code, 1);
+        assert!(err.contains("renew must name exact hold ids"), "{err}");
+    }
 }
 
 #[test]

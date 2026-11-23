@@ -345,7 +345,11 @@ impl Fx {
 
     /// The real binary on this home, with the fake Herdr.
     fn cmd(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_another"));
+        let mut c = {
+            let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+            legacy_fixture_command.arg("--unguarded-repair");
+            legacy_fixture_command
+        };
         c.args(args)
             .env("HOME", self.root.join("home"))
             .env("ANOTHER_HOME", &self.home)
@@ -755,11 +759,11 @@ fn a_tool_hook_stamps_only_its_own_session() {
     std::thread::sleep(Duration::from_millis(20));
     hook("post-tool", "s2", "w1:p2");
     assert!(row("s2").hook_seen_at > second);
-    // Inside the minute, a second tool hook of the same session does not stamp again.
+    // Each observed event refreshes transport observation, never file rights.
     let stamped = row("s1").hook_seen_at;
     std::thread::sleep(Duration::from_millis(20));
     hook("post-tool", "s1", "w1:p1");
-    assert_eq!(row("s1").hook_seen_at, stamped);
+    assert!(row("s1").hook_seen_at > stamped);
     // A pre-edit hook that names a file stamps on its own once-a-minute beat.
     let edit = |session: &str, pane: &str| {
         let input = json!({
@@ -775,7 +779,7 @@ fn a_tool_hook_stamps_only_its_own_session() {
     let sibling = row("s2").hook_seen_at;
     std::thread::sleep(Duration::from_millis(20));
     edit("s1", "w1:p1");
-    assert_eq!(row("s1").hook_seen_at, by_edit, "once a minute");
+    assert!(row("s1").hook_seen_at > by_edit, "fresh observation only");
     assert_eq!(row("s2").hook_seen_at, sibling, "and never its sibling");
     // A prompt always stamps.
     hook("prompt", "s1", "w1:p1");
@@ -796,18 +800,15 @@ fn a_tool_hook_stamps_only_its_own_session() {
     let once = row(&wide).hook_seen_at;
     std::thread::sleep(Duration::from_millis(20));
     hook("post-tool", &wide, "w1:p5");
-    assert_eq!(
-        row(&wide).hook_seen_at,
-        once,
-        "the throttle holds for it too"
-    );
+    assert!(row(&wide).hook_seen_at > once);
     let state = fx.home.join("hooks").join("state");
     let names: Vec<String> = std::fs::read_dir(&state)
-        .unwrap()
+        .into_iter()
+        .flatten()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|n| n.ends_with(".beat"))
         .collect();
-    assert_eq!(names.len(), 5, "{names:?}");
+    assert!(names.is_empty(), "no background renewal stamps: {names:?}");
     assert!(
         names
             .iter()
@@ -2828,12 +2829,12 @@ fn pre_edit_stamps_the_session_and_renews_no_hold() {
         .map(|h| h.pattern)
         .collect();
     assert!(held.contains(&"src/z.rs".to_string()), "{held:?}");
-    // The post-tool hook is where holds are renewed, as before.
+    // A generic post-tool observation cannot renew the file either.
     let tool = json!({ "session_id": "s1", "cwd": repo, "tool_name": "Bash", "tool_input": {} });
     fx.hook("post-tool", "claude", &tool, &pane);
     assert!(
-        expiry() > soon,
-        "post-tool renews a hold past half its life"
+        expiry() == soon,
+        "post-tool presence must leave the file deadline unchanged"
     );
 }
 

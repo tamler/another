@@ -45,7 +45,11 @@ fn text(b: &[u8]) -> String {
 }
 
 fn another(home: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_another"));
+    let mut cmd = {
+        let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+        legacy_fixture_command.arg("--unguarded-repair");
+        legacy_fixture_command
+    };
     cmd.args(args)
         .env("ANOTHER_HOME", home)
         .env_remove("ANOTHER_AGENT")
@@ -588,7 +592,7 @@ fn sections_are_in_the_fixed_order() {
 /// has its commands in backticks.
 const WORDY_STEPS: [&str; 7] = [
     "register the agent again: `another agent register wordy --program <program> --model <model> --description \"<4096 bytes or fewer>\"` (add `--project <path>` if it has one; a model left out is cleared)",
-    "each hold it has (`another holds --agent wordy` lists them): `another hold acquire --agent wordy -p <project> <the same paths>`, with --shared, --repo-wide, --reason and --ttl as the hold has them (the same hold is sent again; without -p from another directory it is a different hold, and without --shared a shared hold becomes exclusive or is refused)",
+    "each hold it has (`another holds --agent wordy` lists them): `another hold release --agent wordy <hold id>`, then `another hold acquire --agent wordy -p <project> <the same paths>`, with --shared, --repo-wide, --reason and --ttl as the hold has them (a fresh checkout is sent; without -p from another directory it is a different hold, and without --shared a shared hold becomes exclusive or is refused)",
     "each resource of this node it holds a lease on: `another release <resource id or kind:name> --agent wordy`, then at once `another borrow <the same> --agent wordy` (a borrow without the release only renews, and a renewal brings nothing to a node that never had the lease. Between the two commands the resource has no lease unless another agent holds one. Another agent on this node that borrows it in that moment becomes its owner, and if the resource is exclusive this agent's borrow is then refused. If another agent already holds a lease, that agent becomes the owner at the release and this agent comes back as a borrower)",
     "each resource of another node it borrowed: `another release <resource id> --agent wordy`, then `another borrow <resource id> --agent wordy` (the id is in brackets in `another resources`; kind:name names only this node's resources. If the borrow is refused, the release has already happened: it is refused when the hub does not grant borrowing, when the resource has no live owner, or when it cannot be reached from this machine)",
     "mail it sent to other nodes before step 1 is not delivered there and no command delivers it: send it again",

@@ -15,7 +15,6 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
-use crate::identity::resolve_agent;
 use crate::repo::resolve_existing;
 use crate::store::{Store, Tx};
 
@@ -655,7 +654,7 @@ impl Store {
             )));
         }
         self.write(|tx| {
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
             let existing: Option<(String, String)> = tx
                 .query_row(
                     "SELECT transport, target FROM transport_sessions
@@ -704,7 +703,7 @@ impl Store {
         place: Option<(&str, &str)>,
     ) -> Result<bool> {
         self.write(|tx| {
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
             let n = if session_id.is_empty() {
                 let Some((transport, target)) = place else {
                     return Ok(false);
@@ -727,7 +726,7 @@ impl Store {
     /// `another wake clear`: delete every session row of the agent.
     pub fn clear_transport_sessions(&self, agent: &str) -> Result<usize> {
         self.write(|tx| {
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
             Ok(tx.execute(
                 "DELETE FROM transport_sessions WHERE agent_id = ?1",
                 [&me.id],
@@ -847,7 +846,10 @@ impl Store {
         (gap_ms, slow_gap_ms): (i64, i64),
     ) -> Result<Reservation> {
         self.write(|tx| {
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
+            if tx.query_row("SELECT 1 FROM contract_actors WHERE actor_id = ?1", [&me.id], |_| Ok(())).optional()?.is_some() {
+                return Err(crate::Error::Forbidden("NO_CALL_CONTEXT: this transport has no tested private actor reservation carriage".into()));
+            }
             let rows = load(tx, "s.hook_seen_at IS NOT NULL", &[])?;
             let Some(row) = rows
                 .iter()
@@ -900,7 +902,7 @@ impl Store {
     /// is left alone, and the outcome is then in the event only.
     pub fn record_transport_wake(&self, wake: &TransportWake) -> Result<String> {
         self.write(|tx| {
-            let me = resolve_agent(tx, tx.node_id, &wake.agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, &wake.agent)?;
             let outcome = wake.outcome;
             let event_id = tx.emit(
                 &me.address,

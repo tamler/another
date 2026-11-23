@@ -1,33 +1,15 @@
-//! Hook packs: install a tiny POSIX wrapper into each client's hook config, and the
-//! `another hook run` entry point that the wrapper calls to record sessions and print a
-//! capped digest of the inbox and the queue.
-//!
-//! Every client is treated the same way: session start registers the agent (if needed),
-//! records `session.started` and prints a digest; each prompt renews holds and mentions
-//! only mail that arrived since the last notice; session end releases holds.
-//!
-//! The queue lines (D96) are printed at session start and at a prompt, never after a tool
-//! call: a session is told what it holds itself, and a name the owner gave a seat is told
-//! when `another queue next` would hand it an item. Text another agent wrote comes last in
-//! every output, after a sentence that says who wrote it.
-//!
-//! Two hooks run inside a task, between tool calls, where the client supports them:
-//! `post-tool` mentions new mail mid-task (read only, nothing printed when nothing is new),
-//! and `pre-edit` takes a narrow hold on each file about to be edited, or stops the edit
-//! when another agent holds it. Both open the database without migrating and with a short
-//! lock wait. `post-tool` fails open: an error never blocks the agent. `pre-edit` waits
-//! 300 ms, then up to 2.7 s more (3 s in all) if the database is still locked, and then
-//! denies the edit; a check that fails or panics is also a deny. A missing database or an
-//! old schema still fails open.
+//! Native hook installation and fail-closed participating edit admission.
+//! Private adapter grants bind native sessions to contract-minted actors.
+//! Presence never renews files. Only exact admitted edit operations do so.
+//! Routine events are quiet except conflicts and one idle reminder.
+//! Legacy digest helpers are available only through explicit operator repair.
 
 use std::io::{IsTerminal, Read};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use another_core::{
-    HoldConflict, InboxQuery, Program, QueueOffer, RegisterAgent, SessionInfo, SessionPhase, Store,
-};
+use another_core::{HoldConflict, InboxQuery, Store};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -68,15 +50,6 @@ impl Client {
         }
     }
 
-    fn program(self) -> Program {
-        match self {
-            Client::Claude => Program::Claude,
-            Client::Codex => Program::Codex,
-            Client::Grok => Program::Grok,
-            Client::Cursor => Program::Cursor,
-        }
-    }
-
     /// The user-level config file this client reads hooks from.
     pub fn config_path(self, home: &Path) -> PathBuf {
         match self {
@@ -105,17 +78,14 @@ impl Client {
                 spec("postToolUse", HookEvent::PostTool, 5, None),
             ],
             _ => {
-                let edits = if self == Client::Codex {
-                    CODEX_EDIT_TOOLS
-                } else {
-                    EDIT_TOOLS
-                };
                 vec![
                     spec("SessionStart", HookEvent::SessionStart, 10, None),
+                    spec("SubagentStart", HookEvent::ChildStart, 5, None),
                     spec("UserPromptSubmit", HookEvent::Prompt, 5, None),
                     spec("SessionEnd", HookEvent::SessionEnd, 3, None),
                     spec("PostToolUse", HookEvent::PostTool, 5, None),
-                    spec("PreToolUse", HookEvent::PreEdit, 5, Some(edits)),
+                    spec("PostToolUseFailure", HookEvent::PostTool, 5, None),
+                    spec("PreToolUse", HookEvent::PreEdit, 5, None),
                 ]
             }
         }
@@ -123,9 +93,9 @@ impl Client {
 }
 
 /// Claude Code's file edit tools. Grok maps these names onto its own edit tools.
-const EDIT_TOOLS: &str = "Edit|Write|MultiEdit|NotebookEdit";
+pub const EDIT_TOOLS: &str = "Edit|Write|MultiEdit|NotebookEdit";
 /// Codex edits files with `apply_patch`, which its matchers also accept as `Edit` or `Write`.
-const CODEX_EDIT_TOOLS: &str = "apply_patch|Edit|Write";
+pub const CODEX_EDIT_TOOLS: &str = "apply_patch|Edit|Write";
 
 /// The `statusMessage` for each of our Codex hooks. Codex documents it as text shown while
 /// the hook runs; it gives each hook a clear label next to its command. Whether `/hooks`
@@ -133,8 +103,9 @@ const CODEX_EDIT_TOOLS: &str = "apply_patch|Edit|Write";
 fn codex_status(event: HookEvent) -> &'static str {
     match event {
         HookEvent::SessionStart => "Another: registering this session",
-        HookEvent::Prompt => "Another: checking for new messages",
-        HookEvent::PostTool => "Another: delivering messages mid-task",
+        HookEvent::ChildStart => "Another: registering this child",
+        HookEvent::Prompt => "Another: recording actor presence",
+        HookEvent::PostTool => "Another: recording the tool outcome",
         HookEvent::PreEdit => "Another: checking file holds before an edit",
         HookEvent::SessionEnd => "Another: closing this session",
     }
@@ -165,6 +136,7 @@ struct HookSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum HookEvent {
     SessionStart,
+    ChildStart,
     Prompt,
     SessionEnd,
     /// After each tool call: mention mail that arrived mid-task.
@@ -177,6 +149,7 @@ impl HookEvent {
     fn as_str(self) -> &'static str {
         match self {
             HookEvent::SessionStart => "session-start",
+            HookEvent::ChildStart => "child-start",
             HookEvent::Prompt => "prompt",
             HookEvent::SessionEnd => "session-end",
             HookEvent::PostTool => "post-tool",
@@ -274,23 +247,35 @@ fn sh_quote(s: &str) -> String {
 }
 
 fn script_text(env: &HookEnv) -> String {
+    let deny = crate::native_hooks::deny(Client::Claude, PRE_EDIT_CHECK_DENY);
     format!(
         "#!/bin/sh\n\
          # Another hook wrapper, written by `another hook install`; removed by `another hook uninstall`.\n\
-         # It always exits 0: a missing another never blocks the agent. The pre-edit hook\n\
-         # may still print a deny when it cannot check holds after waiting for a lock.\n\
+         # Admission denies on an unavailable binary or failed check.\n\
          ANOTHER_BIN={exe}\n\
          if [ ! -x \"$ANOTHER_BIN\" ]; then\n\
-         \x20 ANOTHER_BIN=$(command -v another 2>/dev/null) || exit 0\n\
+         \x20 ANOTHER_BIN=$(command -v another 2>/dev/null) || ANOTHER_BIN=\n\
          fi\n\
          if [ -z \"${{ANOTHER_HOME:-}}\" ]; then\n\
          \x20 ANOTHER_HOME={home}\n\
          \x20 export ANOTHER_HOME\n\
          fi\n\
-         \"$ANOTHER_BIN\" hook run \"$@\" 2>/dev/null\n\
+         ANOTHER_OUTPUT=\n\
+         if [ -n \"$ANOTHER_BIN\" ]; then\n\
+         \x20 ANOTHER_OUTPUT=$(\"$ANOTHER_BIN\" hook run \"$@\" 2>/dev/null)\n\
+         \x20 ANOTHER_RESULT=$?\n\
+         else\n\
+         \x20 ANOTHER_RESULT=1\n\
+         fi\n\
+         if [ \"$ANOTHER_RESULT\" = 0 ]; then\n\
+         \x20 [ -z \"$ANOTHER_OUTPUT\" ] || printf '%s\\n' \"$ANOTHER_OUTPUT\"\n\
+         elif [ \"$1\" = pre-edit ]; then\n\
+         \x20 printf '%s\\n' {deny}\n\
+         fi\n\
          exit 0\n",
         exe = sh_quote(&env.exe.to_string_lossy()),
         home = sh_quote(&env.another_home.to_string_lossy()),
+        deny = sh_quote(&deny),
     )
 }
 
@@ -702,6 +687,8 @@ pub fn install(
 /// What the client told us on stdin (all optional; clients differ).
 #[derive(Debug, Default, Clone)]
 pub struct HookInput {
+    pub raw: Value,
+    pub call_id: Option<String>,
     pub cwd: Option<PathBuf>,
     pub session_id: Option<String>,
     /// Tool events: the tool's name (`Edit`, `apply_patch`, `search_replace`, ...).
@@ -740,18 +727,17 @@ impl HookInput {
             .filter(|t| !t.is_null())
             .cloned();
         HookInput {
+            raw: v.clone(),
+            call_id: s("tool_use_id")
+                .or_else(|| s("toolUseId"))
+                .or_else(|| s("tool_call_id")),
             cwd,
             session_id,
             tool_name,
             tool_input,
             source: s("source"),
-            agent_id: s("agent_id"),
+            agent_id: s("agent_id").filter(|id| !id.is_empty()),
         }
-    }
-
-    /// Whether the call comes from inside a subagent, not from the main session.
-    fn in_subagent(&self) -> bool {
-        self.agent_id.as_deref().is_some_and(|id| !id.is_empty())
     }
 
     /// Files an edit tool is about to change, as given (absolute or relative to `cwd`).
@@ -803,7 +789,7 @@ impl HookInput {
         out
     }
 
-    fn read_stdin() -> HookInput {
+    pub(crate) fn read_stdin() -> HookInput {
         let stdin = std::io::stdin();
         if stdin.is_terminal() {
             return HookInput::default();
@@ -815,13 +801,13 @@ impl HookInput {
 }
 
 /// Nearest directory at or above `dir` containing `.git`, else `dir` itself.
-fn project_root(dir: &Path) -> PathBuf {
+pub(crate) fn project_root(dir: &Path) -> PathBuf {
     another_core::git_root(dir, true).unwrap_or_else(|| dir.to_path_buf())
 }
 
 /// Grok also executes Claude/Cursor hook files. When the Grok pack is installed, those
 /// copies stand down so each event runs once; otherwise they act on Grok's behalf.
-fn effective_client(client: Client, env: &HookEnv) -> Option<Client> {
+pub(crate) fn effective_client(client: Client, env: &HookEnv) -> Option<Client> {
     if client == Client::Grok || std::env::var_os("GROK_HOOK_EVENT").is_none() {
         return Some(client);
     }
@@ -844,28 +830,6 @@ fn truncate(mut s: String, max: usize) -> String {
         s.push('…');
     }
     s
-}
-
-/// Resolve (and register on first use) the agent a hook acts for.
-fn hook_agent(store: &Store, client: Client, root: &Path) -> Result<String> {
-    if let Some(agent) = std::env::var("ANOTHER_AGENT")
-        .ok()
-        .filter(|a| !a.trim().is_empty())
-    {
-        return Ok(agent);
-    }
-    let project = store.ensure_project(client.as_str(), &root.to_string_lossy())?;
-    let address = format!("{}@{}", client.as_str(), project.slug);
-    if store.agent(&address).is_err() {
-        store.register_agent(RegisterAgent {
-            name: client.as_str().to_string(),
-            program: client.program(),
-            project: Some(project.abs_path),
-            model: None,
-            description: None,
-        })?;
-    }
-    Ok(address)
 }
 
 /// Whether Another installs an edit guard for this client (see [`Client::specs`]).
@@ -1092,23 +1056,6 @@ fn capped_digest(fixed: &str, mut written: Vec<String>) -> String {
     format!("{fixed}\n{WRITTEN_BY_OTHERS}\n{}", written.join("\n"))
 }
 
-/// A per-agent state file. The name encodes every character outside `[A-Za-z0-9-]` as
-/// `_XX` hex, so distinct agent addresses (`a.b`, `a_b`) never share a file.
-fn state_path(another_home: &Path, agent: &str, ext: &str) -> PathBuf {
-    let mut safe = String::new();
-    for b in agent.bytes() {
-        if b.is_ascii_alphanumeric() || b == b'-' {
-            safe.push(b as char);
-        } else {
-            safe.push_str(&format!("_{b:02x}"));
-        }
-    }
-    another_home
-        .join("hooks")
-        .join("state")
-        .join(format!("{safe}.{ext}"))
-}
-
 /// A notice and the messages it announced.
 #[derive(Debug, Clone)]
 pub struct Notice {
@@ -1202,287 +1149,6 @@ pub fn prompt_notice(
     }))
 }
 
-/// R, the ready line: told to a seated name when `another queue next` would hand it an
-/// item. It names no item, and its words leave the choice with a session that has a task.
-fn ready_line(agent: &str) -> String {
-    format!(
-        "Another queue: an item is ready that {agent} may take. Take it only if working from the queue is your job in this session and you have no task in hand: another queue next --agent {agent}"
-    )
-}
-
-/// H1, the held line: the items whose claim is bound to this very session. A claim of the
-/// name that another session made, or that is bound to no session, is never shown.
-fn held_line(offer: &QueueOffer, session_id: Option<&str>, agent: &str) -> Option<String> {
-    let session = session_id.filter(|id| !id.is_empty())?;
-    let mine: Vec<&str> = offer
-        .held
-        .iter()
-        .filter(|h| h.session.as_deref() == Some(session))
-        .map(|h| h.label.as_str())
-        .collect();
-    let (labels, item) = match mine.as_slice() {
-        [] => return None,
-        [one] => (one.to_string(), *one),
-        many => {
-            let mut labels = many[..many.len().min(3)].join(", ");
-            if many.len() > 3 {
-                labels.push_str(&format!(" and {} more", many.len() - 3));
-            }
-            (labels, "<item>")
-        }
-    };
-    let (shown, finished) = if mine.len() == 1 {
-        ("Its text and history:", "It is")
-    } else {
-        ("Each has its text and history at", "Each is")
-    };
-    Some(format!(
-        "Another queue: this session holds {labels}. {shown} another queue show {item}. {finished} finished with another queue done {item} --agent {agent} --summary TEXT and one of --pr, --commit or --file, or given back with another queue release {item} --agent {agent}"
-    ))
-}
-
-/// When a hook decides its queue lines.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum QueueMoment {
-    /// A session start whose `source` is `startup` or absent.
-    PlainStart,
-    /// A session start after a resume, a clear, a compaction or a fork.
-    LaterStart,
-    Prompt,
-}
-
-/// Replace the session's queue stamp with `stamp`, through a temporary file.
-fn write_queue_stamp(path: &Path, stamp: &str) -> std::io::Result<()> {
-    if let Some(state) = path.parent() {
-        std::fs::create_dir_all(state)?;
-    }
-    let tmp = path.with_extension(format!("{}.queue", std::process::id()));
-    let written = std::fs::write(&tmp, stamp).and_then(|()| std::fs::rename(&tmp, path));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    written
-}
-
-/// The queue lines of one hook call: the held line (session start only), then the ready
-/// line. One read of the queue ([`Store::queue_offer`]) and at most one small file.
-///
-/// The ready line is printed once per session for one ready mark: the session's stamp
-/// file holds the mark it was last told. A plain session start prints it whatever the
-/// stamp says. Where the stamp cannot be written the line is not printed, except at a
-/// plain start: a line that cannot be recorded would repeat at every prompt.
-fn queue_lines(
-    store: &Store,
-    env: &HookEnv,
-    event: HookEvent,
-    client: Client,
-    agent: &str,
-    session_id: Option<&str>,
-    moment: QueueMoment,
-) -> Result<Vec<String>> {
-    let offer = store.queue_offer(agent)?;
-    let me = own_address(&offer.agent)?;
-    let mut lines = Vec::new();
-    if moment != QueueMoment::Prompt {
-        lines.extend(held_line(&offer, session_id, me));
-    }
-    let Some(mark) = offer.announce() else {
-        return Ok(lines);
-    };
-    let stamp = another_core::queue_stamp(mark);
-    let path = beat_path(&env.another_home, agent, session_id, "queue");
-    let told = std::fs::read_to_string(&path).is_ok_and(|was| was.trim() == stamp);
-    let print = if moment == QueueMoment::PlainStart {
-        if !told {
-            let _ = write_queue_stamp(&path, &stamp);
-        }
-        true
-    } else if told {
-        false
-    } else {
-        match write_queue_stamp(&path, &stamp) {
-            Ok(()) => true,
-            Err(e) => {
-                log_refusal_once(
-                    &env.another_home,
-                    event,
-                    client,
-                    &format!(
-                        "the queue stamp could not be written under {} ({e}), so the ready line is printed at a plain session start only",
-                        env.another_home.join("hooks").join("state").display()
-                    ),
-                );
-                false
-            }
-        }
-    };
-    if print {
-        lines.push(ready_line(me));
-    }
-    Ok(lines)
-}
-
-/// The registered agent a hook acts for, without registering anything: `None` when the
-/// project or agent is not known yet (session start registers them).
-fn known_agent(store: &Store, client: Client, root: &Path) -> Result<Option<String>> {
-    Ok(known_agent_as(store, client, root)?.map(|(name, address)| address.unwrap_or(name)))
-}
-
-/// [`known_agent`] in two parts: the name the store finds the agent by, and the address
-/// the store has for it when that was read on the way.
-///
-/// The name is `ANOTHER_AGENT` as given (the store trims it, so a padded value is the
-/// agent it names) or `<client>@<project>`. It keeps working where the stored address
-/// could not be looked up by its own text. With `ANOTHER_AGENT` the address is not read
-/// here; the mail read returns it.
-fn known_agent_as(
-    store: &Store,
-    client: Client,
-    root: &Path,
-) -> Result<Option<(String, Option<String>)>> {
-    if let Some(agent) = std::env::var("ANOTHER_AGENT")
-        .ok()
-        .filter(|a| !a.trim().is_empty())
-    {
-        return Ok(Some((agent, None)));
-    }
-    let project = match store.project(&root.to_string_lossy()) {
-        Ok(p) => p,
-        Err(another_core::Error::NotFound(_)) => return Ok(None),
-        Err(e) => return Err(e.into()),
-    };
-    let name = format!("{}@{}", client.as_str(), project.slug);
-    match store.agent(&name) {
-        Ok(a) => Ok(Some((name, Some(a.address)))),
-        Err(another_core::Error::NotFound(_)) => Ok(None),
-        Err(e) => Err(e.into()),
-    }
-}
-
-/// Seconds between mid-task keepalives for one session.
-const KEEPALIVE_EVERY: Duration = Duration::from_secs(60);
-/// A throttle stamp older than this belongs to a session that is over.
-const STAMP_KEPT: Duration = Duration::from_secs(24 * 3600);
-
-/// The state file of one session of an agent, of one kind: a throttle stamp (`beat` for
-/// the post-tool keepalive, `edit` for the pre-edit stamp) or the ready mark the session
-/// was last told (`queue`). With a session id the name is a
-/// hash of the agent and the id: always short, never the id as given, and a busy session
-/// cannot starve the beats of another session under the same name. With no session id the
-/// stamp is per agent.
-fn beat_path(another_home: &Path, agent: &str, session_id: Option<&str>, kind: &str) -> PathBuf {
-    match session_id.filter(|id| !id.is_empty()) {
-        Some(id) => another_home.join("hooks").join("state").join(format!(
-            "{}.{kind}",
-            another_core::session_file_key(agent, id)
-        )),
-        None => state_path(another_home, agent, kind),
-    }
-}
-
-/// Whether this session's once-a-minute beat of `kind` is due. When it is, the stamp is
-/// written first, so parallel tool calls do not all go on to write.
-fn beat_due(another_home: &Path, agent: &str, session_id: Option<&str>, kind: &str) -> bool {
-    let stamp = beat_path(another_home, agent, session_id, kind);
-    let age = |path: &Path| {
-        std::fs::metadata(path)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-    };
-    if age(&stamp).is_some_and(|age| age < KEEPALIVE_EVERY) {
-        return false;
-    }
-    if let Some(state) = stamp.parent() {
-        let _ = std::fs::create_dir_all(state);
-        // Stamps of sessions that ended long ago would otherwise pile up. A queue stamp is
-        // also deleted by its session's end hook; this covers a session that never ended.
-        for entry in std::fs::read_dir(state).into_iter().flatten().flatten() {
-            let path = entry.path();
-            if path
-                .extension()
-                .is_some_and(|e| e == "beat" || e == "edit" || e == "queue")
-                && age(&path).is_some_and(|age| age > STAMP_KEPT)
-            {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-    }
-    let _ = std::fs::write(&stamp, b"");
-    true
-}
-
-/// Presence, hold renewal and the session's transport stamp while a task runs, at most once
-/// a minute per session, best effort: a busy database just skips this round.
-fn keepalive_throttled(
-    store: &Store,
-    another_home: &Path,
-    agent: &str,
-    session_id: Option<&str>,
-    client: Client,
-    dir: &Path,
-) {
-    if !beat_due(another_home, agent, session_id, "beat") {
-        return;
-    }
-    // The beat is also a sign of this session for the queue's session binding.
-    let info = SessionInfo {
-        client: Some(client.as_str().to_string()),
-        session_id: session_id.map(str::to_string),
-        ..Default::default()
-    };
-    if let Err(e) = store.keepalive(agent, &info) {
-        tracing::debug!(error = %e, "keepalive skipped");
-    }
-    crate::wake::stamp_session(store, agent, session_id, client.as_str(), dir);
-}
-
-/// `post-tool`: mention mail that arrived mid-task, in the client's context format.
-/// Prints nothing when nothing is new or the agent is not registered yet. It never prints
-/// a queue line: a session in the middle of a task is not told that work is ready.
-///
-/// A call from inside a subagent makes the keepalive and stops there. It claims no mail,
-/// so the notice is left for the main session's next hook.
-fn post_tool(
-    store: &Store,
-    env: &HookEnv,
-    client: Client,
-    dir: &Path,
-    input: &HookInput,
-) -> Result<String> {
-    let session_id = input.session_id.as_deref();
-    let root = project_root(dir);
-    let Some((agent, address)) = known_agent_as(store, client, &root)? else {
-        return Ok(String::new());
-    };
-    // The session's bookkeeping comes first and never depends on what may be printed.
-    keepalive_throttled(store, &env.another_home, &agent, session_id, client, dir);
-    // Any hook event that carries `agent_id` is a subagent's, whichever the client.
-    if input.in_subagent() {
-        return Ok(String::new());
-    }
-    // Only the text and the mail claim are withheld for an address that is not plain. The
-    // check is on the address the store has, never on `ANOTHER_AGENT` as typed.
-    if let Some(address) = &address {
-        own_address(address)?;
-    }
-    // The claim and its `push.notified` evidence are one transaction: a notice is shown
-    // only if it was recorded, and only by the one caller that won it.
-    let Some(notice) = prompt_notice(store, &agent, "post_tool", client)? else {
-        return Ok(String::new());
-    };
-    Ok(match client {
-        Client::Cursor => json!({ "additional_context": notice.text }).to_string(),
-        _ => json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PostToolUse",
-                "additionalContext": notice.text,
-            }
-        })
-        .to_string(),
-    })
-}
-
 /// `path` as the filesystem resolves it (symlinks first, then `..`, on-disk letter case).
 /// It lives in the core because a project's checkout is resolved the same way.
 pub use another_core::resolve_existing;
@@ -1491,7 +1157,7 @@ pub use another_core::resolve_existing;
 /// link included), and, when the file is itself a symlink (an operation may replace the
 /// link instead of following it), the link inside its resolved directory. Usually both
 /// are the same path. `..` is never applied before the symlinks it follows are resolved.
-fn edit_targets(file: &Path) -> Vec<PathBuf> {
+pub(crate) fn edit_targets(file: &Path) -> Vec<PathBuf> {
     let mut out = vec![resolve_existing(file)];
     if let (Some(parent), Some(name)) = (file.parent(), file.file_name()) {
         let link = resolve_existing(parent).join(name);
@@ -1571,130 +1237,6 @@ pub fn deny_message(
     truncate(out, 1000)
 }
 
-/// `pre-edit`: hold each file about to be edited, or stop the edit when another agent
-/// holds it. Prints a deny only for a real conflict; nothing otherwise (printing "allow"
-/// would skip the client's own permission prompts).
-fn pre_edit(
-    store: &Store,
-    env: &HookEnv,
-    client: Client,
-    dir: &Path,
-    input: &HookInput,
-) -> Result<String> {
-    let paths = input.edit_paths();
-    if paths.is_empty() {
-        return Ok(String::new());
-    }
-    let root = project_root(dir);
-    let agent = match known_agent(store, client, &root)? {
-        Some(a) => a,
-        None => hook_agent(store, client, &root)?,
-    };
-    // The session's transport stamp only, on its own once-a-minute beat. No presence and
-    // no hold renewal here: an agent whose edit is refused must not keep its own holds
-    // alive by trying again.
-    let session_id = input.session_id.as_deref();
-    if beat_due(&env.another_home, &agent, session_id, "edit") {
-        crate::wake::stamp_session(store, &agent, session_id, client.as_str(), dir);
-    }
-    // Registered projects with their directories resolved, so a project registered under a
-    // symlinked spelling (/tmp vs /private/tmp) is still recognised.
-    let projects: Vec<(String, PathBuf)> = store
-        .projects()?
-        .into_iter()
-        .map(|p| {
-            let real = resolve_existing(Path::new(&p.abs_path));
-            (p.abs_path, real)
-        })
-        .collect();
-    // Group files by the project they belong to: the deeper of their git checkout and the
-    // closest registered project, judged on the resolved path, so an edit through a symlink
-    // is checked against the holds on the file it really reaches. Files in neither (scratch
-    // space, /tmp) are not held.
-    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
-    for raw in &paths {
-        // Not normalized lexically: `..` must apply after symlinks (review N1).
-        for target in edit_targets(&dir.join(raw)) {
-            // Some tool envelopes name a working directory rather than an edited file.
-            // Never widen an automatic hold to that directory.
-            if target.is_dir() || raw.ends_with('/') {
-                continue;
-            }
-            // The file's own entry never counts, only the directories above it.
-            let git = another_core::git_root(&target, false);
-            let registered = projects
-                .iter()
-                .filter(|(_, real)| target.starts_with(real) && target != *real)
-                .max_by_key(|(_, real)| real.components().count());
-            let root = match (git, registered) {
-                (Some(g), Some((_, r))) if r.components().count() > g.components().count() => {
-                    r.clone()
-                }
-                (Some(g), _) => g,
-                (None, Some((_, r))) => r.clone(),
-                (None, None) => continue,
-            };
-            let Ok(rel) = target.strip_prefix(&root) else {
-                continue;
-            };
-            let rel = rel.to_string_lossy().into_owned();
-            // Use the registered spelling of that directory when there is one.
-            let key = projects.iter().find(|(_, real)| *real == root).map_or_else(
-                || root.to_string_lossy().into_owned(),
-                |(abs, _)| abs.clone(),
-            );
-            match groups.iter_mut().find(|(p, _)| *p == key) {
-                Some((_, files)) if files.contains(&rel) => {}
-                Some((_, files)) => files.push(rel),
-                None => groups.push((key, vec![rel])),
-            }
-        }
-    }
-    let mut conflicts = Vec::new();
-    let mut first_notice = false;
-    // A ping is promised only when every blocked project has its wait on record.
-    let mut wait_recorded = true;
-    let mut retry_after = 0;
-    for (project_dir, files) in &groups {
-        let project = match store.project(project_dir) {
-            Ok(p) => p.abs_path,
-            Err(another_core::Error::NotFound(_)) => {
-                store.ensure_project(&agent, project_dir)?.abs_path
-            }
-            Err(e) => return Err(e.into()),
-        };
-        let guard = store.guard_edit(&agent, &project, files, AUTO_HOLD_REASON)?;
-        if !guard.conflicts.is_empty() {
-            first_notice |= guard.first_notice;
-            wait_recorded &= guard.wait_recorded;
-            retry_after = retry_after.max(guard.retry_after_seconds);
-            conflicts.extend(guard.conflicts);
-        }
-    }
-    if conflicts.is_empty() {
-        return Ok(String::new());
-    }
-    let reason = if first_notice {
-        deny_message(&agent, &conflicts, wait_recorded, retry_after)
-    } else {
-        let path = truncate(conflicts[0].path.clone(), 200);
-        let holder = &conflicts[0].held.agent;
-        if wait_recorded {
-            format!("Another: this edit is still blocked. {path} is held by {holder}. Back off for {retry_after} seconds. Wait for the hold-free inbox ping or work on other files.")
-        } else {
-            format!("Another: this edit is still blocked. {path} is held by {holder}. {NO_PING_NOTICE} Retry after {retry_after} seconds, or work on other files.")
-        }
-    };
-    Ok(json!({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason,
-        }
-    })
-    .to_string())
-}
-
 /// Run a hook event. Returns the text to print on stdout (possibly empty).
 ///
 /// For an agent whose own address is not plain ([`NotPlain`]) the hook prints nothing, and
@@ -1729,94 +1271,11 @@ fn run_event(
     client: Client,
     input: HookInput,
 ) -> Result<String> {
-    let dir = match &input.cwd {
-        Some(d) => d.clone(),
-        None => std::env::current_dir()?,
-    };
-    match event {
-        HookEvent::PostTool => return post_tool(store, env, client, &dir, &input),
-        HookEvent::PreEdit => return pre_edit(store, env, client, &dir, &input),
-        _ => {}
-    }
-    let root = project_root(&dir);
-    let agent = hook_agent(store, client, &root)?;
-    let session_id = input.session_id.clone();
-    let session_id = session_id.as_deref();
-    let plain_start = matches!(input.source.as_deref(), None | Some("startup"));
-    let info = SessionInfo {
-        client: Some(client.as_str().to_string()),
-        session_id: input.session_id,
-        ..Default::default()
-    };
-    let queue = |moment| queue_lines(store, env, event, client, &agent, session_id, moment);
-    let text = match event {
-        HookEvent::SessionStart => {
-            store.session(&agent, SessionPhase::Start, info)?;
-            crate::wake::stamp_session(store, &agent, session_id, client.as_str(), &dir);
-            let queue = separately(queue(if plain_start {
-                QueueMoment::PlainStart
-            } else {
-                QueueMoment::LaterStart
-            }))?
-            .unwrap_or_default();
-            let digest = match session_digest(store, &agent, client, &queue) {
-                Ok(digest) => {
-                    // New mail shown here should not be announced again on the next prompt.
-                    let _ = prompt_notice(store, &agent, "session_start", client);
-                    digest
-                }
-                // The inbox could not be read: the queue lines still stand, and the mail,
-                // which was not shown, stays unannounced.
-                Err(e) if !e.is::<NotPlain>() && !queue.is_empty() => queue.join("\n"),
-                Err(e) => return Err(e),
-            };
-            if client == Client::Cursor {
-                json!({ "additional_context": digest }).to_string()
-            } else {
-                digest
-            }
-        }
-        HookEvent::Prompt => {
-            store.session(&agent, SessionPhase::Beat, info)?;
-            crate::wake::stamp_session(store, &agent, session_id, client.as_str(), &dir);
-            if client == Client::Cursor {
-                // Cursor's prompt hook cannot add context; just let the prompt through.
-                json!({ "continue": true }).to_string()
-            } else {
-                // Another's line first, the line that ends in senders' text last.
-                let mut lines = separately(queue(QueueMoment::Prompt))?.unwrap_or_default();
-                match prompt_notice(store, &agent, "prompt", client) {
-                    Ok(notice) => lines.extend(notice.map(|n| n.text)),
-                    Err(e) if !e.is::<NotPlain>() && !lines.is_empty() => {
-                        tracing::debug!(error = %e, "mail line skipped");
-                    }
-                    Err(e) => return Err(e),
-                }
-                lines.join("\n")
-            }
-        }
-        HookEvent::SessionEnd => {
-            store.session(&agent, SessionPhase::End, info)?;
-            crate::wake::release_session(store, &agent, session_id);
-            let _ = std::fs::remove_file(beat_path(&env.another_home, &agent, session_id, "queue"));
-            String::new()
-        }
-        HookEvent::PostTool | HookEvent::PreEdit => unreachable!("handled above"),
-    };
-    Ok(text)
-}
-
-/// The queue lines are worked out apart from the mail: a failure to read the queue leaves
-/// the rest of the hook's text standing. Only an address that is not plain is passed on,
-/// because then nothing at all may be printed.
-fn separately(lines: Result<Vec<String>>) -> Result<Option<Vec<String>>> {
-    match lines {
-        Ok(lines) => Ok(Some(lines)),
-        Err(e) if e.is::<NotPlain>() => Err(e),
-        Err(e) => {
-            tracing::debug!(error = %e, "queue lines skipped");
-            Ok(None)
-        }
+    match crate::native_hooks::event(store, env, event, client, &input) {
+        Err(e) if event == HookEvent::PreEdit && !is_locked_anyhow(&e) => Ok(
+            crate::native_hooks::deny(client, &format!("Another refused this edit: {e}")),
+        ),
+        result => result,
     }
 }
 
@@ -1882,17 +1341,6 @@ fn is_locked_anyhow(err: &anyhow::Error) -> bool {
         .any(|e| e.to_string().contains("database is locked"))
 }
 
-fn pre_edit_deny(reason: &str) -> String {
-    json!({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason,
-        }
-    })
-    .to_string()
-}
-
 /// Append one line for a pre-edit hook that denied because it could not check.
 fn log_hook_denied(another_home: &Path, event: HookEvent, client: Client, error: &str) {
     use std::io::Write;
@@ -1942,8 +1390,9 @@ fn attempt_pre_edit(
     input: HookInput,
     busy: Duration,
 ) -> PreEditAttempt {
+    let deadline = std::time::Instant::now() + busy;
     let store = match Store::open_quick(home, busy) {
-        Ok(store) => store,
+        Ok(store) => store.with_io_deadline(deadline),
         Err(e) if is_db_locked(&e) => return PreEditAttempt::Locked(format!("{e:#}")),
         Err(e) => return PreEditAttempt::OpenFailed(format!("{e:#}")),
     };
@@ -1960,20 +1409,20 @@ fn attempt_pre_edit(
 
 /// Entry point for `pre-edit`: wait [`PRE_EDIT_LOCK_WAIT`], then [`PRE_EDIT_LOCK_RETRY`]
 /// if the database is still locked, and deny when that bound expires. A check that fails
-/// or panics is also a deny. A missing database or an old schema still fails open.
+/// or panics is also a deny, including a missing database or old schema.
 pub fn run_pre_edit(home: Option<&Path>, env: anyhow::Result<HookEnv>, client: Client) -> String {
     let input = HookInput::read_stdin();
     let Some(home) = home else {
-        tracing::warn!("another pre-edit hook failed; continuing");
-        return String::new();
+        tracing::warn!("another pre-edit hook failed; denying");
+        return crate::native_hooks::deny(client, PRE_EDIT_CHECK_DENY);
     };
     let env = match env {
         Ok(env) => env,
         Err(e) => {
             let error = format!("{e:#}");
-            tracing::warn!(error = %error, "another pre-edit hook failed; continuing");
+            tracing::warn!(error = %error, "another pre-edit hook failed; denying");
             log_hook_error(home, HookEvent::PreEdit, client, &error);
-            return String::new();
+            return crate::native_hooks::deny(client, PRE_EDIT_CHECK_DENY);
         }
     };
     match attempt_pre_edit(home, &env, client, input.clone(), PRE_EDIT_LOCK_WAIT) {
@@ -1981,16 +1430,16 @@ pub fn run_pre_edit(home: Option<&Path>, env: anyhow::Result<HookEnv>, client: C
         PreEditAttempt::CheckFailed(error) => {
             tracing::warn!(error = %error, "another pre-edit hook failed; denying");
             log_hook_denied(home, HookEvent::PreEdit, client, &error);
-            pre_edit_deny(PRE_EDIT_CHECK_DENY)
+            crate::native_hooks::deny(client, PRE_EDIT_CHECK_DENY)
         }
         PreEditAttempt::OpenFailed(error) => {
-            tracing::warn!(error = %error, "another pre-edit hook failed; continuing");
+            tracing::warn!(error = %error, "another pre-edit hook failed; denying");
             if let Some(reason) = Store::refusal(home) {
                 log_refusal_once(home, HookEvent::PreEdit, client, &reason);
             } else {
                 log_hook_error(home, HookEvent::PreEdit, client, &error);
             }
-            String::new()
+            crate::native_hooks::deny(client, PRE_EDIT_CHECK_DENY)
         }
         PreEditAttempt::Locked(_) => {
             match attempt_pre_edit(home, &env, client, input, PRE_EDIT_LOCK_RETRY) {
@@ -1998,29 +1447,29 @@ pub fn run_pre_edit(home: Option<&Path>, env: anyhow::Result<HookEnv>, client: C
                 PreEditAttempt::CheckFailed(error) => {
                     tracing::warn!(error = %error, "another pre-edit hook failed; denying");
                     log_hook_denied(home, HookEvent::PreEdit, client, &error);
-                    pre_edit_deny(PRE_EDIT_CHECK_DENY)
+                    crate::native_hooks::deny(client, PRE_EDIT_CHECK_DENY)
                 }
                 PreEditAttempt::OpenFailed(error) => {
-                    tracing::warn!(error = %error, "another pre-edit hook failed; continuing");
+                    tracing::warn!(error = %error, "another pre-edit hook failed; denying");
                     if let Some(reason) = Store::refusal(home) {
                         log_refusal_once(home, HookEvent::PreEdit, client, &reason);
                     } else {
                         log_hook_error(home, HookEvent::PreEdit, client, &error);
                     }
-                    String::new()
+                    crate::native_hooks::deny(client, PRE_EDIT_CHECK_DENY)
                 }
                 PreEditAttempt::Locked(error) => {
                     tracing::warn!(error = %error, "another pre-edit hook locked; denying");
                     log_hook_denied(home, HookEvent::PreEdit, client, &error);
-                    pre_edit_deny(PRE_EDIT_LOCK_DENY)
+                    crate::native_hooks::deny(client, PRE_EDIT_LOCK_DENY)
                 }
             }
         }
     }
 }
 
-/// Entry point used by the CLI: never fails, so hooks always fail open.
-pub fn run_fail_open(
+/// Lifecycle bookkeeping may fail quietly. Participating admission always denies.
+pub fn run_hook(
     store: Result<Store>,
     env: Result<HookEnv>,
     another_home: Option<&Path>,
@@ -2047,6 +1496,7 @@ pub fn run_fail_open(
                 }
             }
             match (event, client) {
+                (HookEvent::PreEdit, _) => crate::native_hooks::deny(client, PRE_EDIT_CHECK_DENY),
                 (HookEvent::Prompt, Client::Cursor) => json!({ "continue": true }).to_string(),
                 _ => String::new(),
             }
@@ -2190,12 +1640,14 @@ mod tests {
     fn reads_the_start_source_and_the_subagent_id() {
         let start = HookInput::parse(r#"{"session_id":"a","source":"compact"}"#);
         assert_eq!(start.source.as_deref(), Some("compact"));
-        assert!(!start.in_subagent());
+        assert!(start.agent_id.is_none());
         let sub = HookInput::parse(r#"{"agent_id":"agent-1","agent_type":"Explore"}"#);
-        assert!(sub.in_subagent());
+        assert!(sub.agent_id.is_some());
         // `agent_type` alone is a main session started with --agent; an empty id is no id.
-        assert!(!HookInput::parse(r#"{"agent_type":"reviewer"}"#).in_subagent());
-        assert!(!HookInput::parse(r#"{"agent_id":""}"#).in_subagent());
+        assert!(HookInput::parse(r#"{"agent_type":"reviewer"}"#)
+            .agent_id
+            .is_none());
+        assert!(HookInput::parse(r#"{"agent_id":""}"#).agent_id.is_none());
     }
 
     #[test]
@@ -2367,8 +1819,8 @@ mod tests {
             let guard = specs.iter().find(|s| s.event == HookEvent::PreEdit);
             match client {
                 Client::Cursor => assert!(guard.is_none()),
-                Client::Codex => assert_eq!(guard.unwrap().matcher, Some(CODEX_EDIT_TOOLS)),
-                _ => assert_eq!(guard.unwrap().matcher, Some(EDIT_TOOLS)),
+                Client::Codex => assert_eq!(guard.unwrap().matcher, None),
+                _ => assert_eq!(guard.unwrap().matcher, None),
             }
         }
     }

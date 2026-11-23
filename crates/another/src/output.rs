@@ -16,6 +16,62 @@ pub struct Status {
     pub db_path: String,
     pub projects: Vec<Project>,
     pub agents: Vec<Agent>,
+    pub actors: Vec<another_core::ActorView>,
+    pub leases: Vec<another_core::RightLease>,
+    pub operations: Vec<another_core::OperationView>,
+    pub authority_now: i64,
+}
+
+impl Status {
+    /// Repository attribution comes from file evidence, never a display name.
+    /// Include parents for lifecycle context and other rights of attributed actors.
+    pub fn retain_repo(&mut self, repo: &std::path::Path) -> anyhow::Result<()> {
+        let root = std::fs::canonicalize(repo)?;
+        anyhow::ensure!(root.is_dir(), "--repo must name a directory");
+        let folded_root = root.to_string_lossy().to_lowercase();
+        let folds = std::fs::canonicalize(&folded_root).is_ok_and(|other| other == root);
+        let under = |key: &str| {
+            let path = std::path::Path::new(key);
+            path.starts_with(&root) || (folds && path.starts_with(&folded_root))
+        };
+        let files: std::collections::BTreeSet<_> = self
+            .leases
+            .iter()
+            .filter(|l| l.subject_kind == another_core::SubjectKind::File && under(&l.subject_key))
+            .map(|l| l.lease_id.clone())
+            .collect();
+        let mut actors: std::collections::BTreeSet<_> = self
+            .leases
+            .iter()
+            .filter(|l| files.contains(&l.lease_id))
+            .map(|l| l.owner_actor_id.clone())
+            .collect();
+        loop {
+            let before = actors.len();
+            for actor in &self.actors {
+                if actors.contains(&actor.actor_id) {
+                    if let Some(parent) = &actor.parent_actor_id {
+                        actors.insert(parent.clone());
+                    }
+                }
+            }
+            if before == actors.len() {
+                break;
+            }
+        }
+        self.actors.retain(|a| actors.contains(&a.actor_id));
+        self.agents.retain(|a| actors.contains(&a.agent_id));
+        self.leases.retain(|l| {
+            files.contains(&l.lease_id)
+                || (l.subject_kind != another_core::SubjectKind::File
+                    && actors.contains(&l.owner_actor_id))
+        });
+        self.operations
+            .retain(|op| op.targets.iter().any(|r| files.contains(&r.lease_id)));
+        self.projects
+            .retain(|p| std::path::Path::new(&p.abs_path).starts_with(&root));
+        Ok(())
+    }
 }
 
 pub fn status(s: &Status) -> String {
@@ -31,6 +87,58 @@ pub fn status(s: &Status) -> String {
     if !s.agents.is_empty() {
         out.push('\n');
         out.push_str(&agents(&s.agents));
+    }
+    for actor in &s.actors {
+        let state = if actor.closed_at.is_some() {
+            "closed"
+        } else if actor.unused_stale {
+            "unused/stale"
+        } else {
+            "live"
+        };
+        let _ = writeln!(
+            out,
+            "actor {} {} scope {} epoch {} {state}",
+            actor.actor_id, actor.name, actor.session_scope_id, actor.session_epoch
+        );
+        if let Some(reminder) = &actor.reminder {
+            let _ = writeln!(out, "{reminder}");
+        }
+    }
+    for lease in &s.leases {
+        let state = if let Some(reason) = &lease.release_reason {
+            format!("released:{reason}")
+        } else if lease.expires_at <= s.authority_now {
+            "expired/nonblocking".into()
+        } else {
+            "live".into()
+        };
+        let _ = writeln!(
+            out,
+            "lease {} generation {} ttl {}s updated {} expires {} {state} subject {}",
+            lease.lease_id,
+            lease.generation,
+            lease.ttl_seconds,
+            lease.last_update_at,
+            lease.expires_at,
+            another_core::display_line(&lease.subject_key, 200)
+        );
+    }
+    let _ = writeln!(out, "Cursor: {}", another_core::CURSOR_COVERAGE);
+    let _ = writeln!(out, "Admission-time structured-edit coverage only; native permission delay may outlast a lease. Shell caller carriage is unavailable.");
+    for operation in &s.operations {
+        let _ = writeln!(
+            out,
+            "operation {} actor {} epoch {} targets {} completed {}",
+            another_core::display_line(&operation.call_id, 100),
+            operation.actor_id,
+            operation.session_epoch,
+            operation.targets.len(),
+            operation.completed_at.map_or_else(
+                || "unknown/nonblocking after lease expiry".into(),
+                |at| at.to_string()
+            )
+        );
     }
     out
 }

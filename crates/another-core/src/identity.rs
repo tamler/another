@@ -313,10 +313,55 @@ pub(crate) fn resolve_agent(conn: &Connection, node_id: &str, who: &str) -> Resu
     Ok(agent)
 }
 
+/// Mutations of minted actors require their private proof. Legacy names remain
+/// confined to the explicit unguarded repair namespace, never contract authority.
+pub(crate) fn resolve_acting_agent(
+    conn: &Connection,
+    node_id: &str,
+    who: &str,
+) -> Result<AgentRef> {
+    if let Some(encoded) = who.strip_prefix("another-private:") {
+        let proof: crate::ActorProof = serde_json::from_slice(&crate::crypto::unb64(encoded)?)
+            .map_err(|_| Error::Forbidden("NO_ACTOR: invalid private actor channel".into()))?;
+        return crate::actor_leases::acting_agent(conn, node_id, &proof);
+    }
+    let agent = resolve_agent(conn, node_id, who)?;
+    let minted = conn
+        .query_row(
+            "SELECT 1 FROM contract_actors WHERE actor_id = ?1",
+            [&agent.id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if minted {
+        return Err(Error::Forbidden(
+            "NO_ACTOR: a public actor name or id is not authority".into(),
+        ));
+    }
+    Ok(agent)
+}
+
 /// Resolve an address on any known node (recipients, filters). See [`resolve_agent`] for
 /// identities that act.
 pub(crate) fn resolve_any(conn: &Connection, node_id: &str, who: &str) -> Result<AgentRef> {
     let who = who.trim();
+    if let Some(found) = conn
+        .query_row(
+        "SELECT a.agent_id, a.address, a.node_id FROM agents a JOIN contract_actors c ON c.actor_id = a.agent_id WHERE a.address = ?1 AND a.node_id = ?2",
+            params![who, node_id],
+            |r| {
+                Ok(AgentRef {
+                    id: r.get(0)?,
+                    address: r.get(1)?,
+                    node_id: r.get(2)?,
+                })
+            },
+        )
+        .optional()?
+    {
+        return Ok(found);
+    }
     let parts: Vec<&str> = who.split('@').collect();
     if parts.len() == 3 {
         return resolve_remote(conn, who, parts[0], Some(parts[1]), parts[2]);
@@ -503,6 +548,19 @@ impl Store {
                 )
                 .optional()?;
             let agent_id = existing.clone().unwrap_or_else(new_id);
+            if tx
+                .query_row(
+                    "SELECT 1 FROM contract_actors WHERE actor_id = ?1",
+                    [&agent_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some()
+            {
+                return Err(Error::Forbidden(
+                    "NO_ACTOR: legacy registration cannot change a contract actor".into(),
+                ));
+            }
             let event_id = tx.emit(
                 &addr,
                 "agent.registered",

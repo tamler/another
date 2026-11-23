@@ -62,6 +62,7 @@ async fn start() -> Server {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let opts = HttpOptions {
+        legacy_repair: true,
         auth: true,
         bound_port: addr.port(),
         ..Default::default()
@@ -536,11 +537,16 @@ async fn work_board_hides_request_participants_outside_the_globs() {
 fn token_cli_and_bind_rules() {
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
-        std::process::Command::new(env!("CARGO_BIN_EXE_another"))
-            .args(args)
-            .env("ANOTHER_HOME", dir.path())
-            .output()
-            .unwrap()
+        {
+            let mut legacy_fixture_command =
+                std::process::Command::new(env!("CARGO_BIN_EXE_another"));
+            legacy_fixture_command.arg("--unguarded-repair");
+            legacy_fixture_command
+        }
+        .args(args)
+        .env("ANOTHER_HOME", dir.path())
+        .output()
+        .unwrap()
     };
     assert!(
         run(&["agent", "register", "grok-bot", "--program", "grok_bot"])

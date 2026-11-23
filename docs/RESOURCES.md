@@ -1,81 +1,65 @@
 # Resource registry
 
-Before an agent starts a model server, dev server, database, container or long job, it asks Another whether one is already running and **borrows** it instead of spawning a duplicate. Resources carry an owner, a purpose and leases that expire unless renewed. Anything left without a lease shows up as an orphan, and only a human can reap it.
+Find a registered model/dev server, port, GPU, container or long job before
+starting a duplicate. Physical resource facts and processes are durable
+observations. Temporary owner/borrower responsibility is a lease.
 
-**Status:** The resource registry is present, but frozen for v0.1.0 and treated as experimental. It stays in the tree and gets only admitted security and data-loss fixes.
+## Lease policy
 
-## Kinds
+Every subject uses checkout, renew and TTL: **120 seconds by default**, with a
+positive requested duration clamped to **30 seconds through 24 hours**. The
+chosen duration is stored and returned and renew uses that duration.
+Repeated checkout is not automatic renewal. There are no resource-specific
+defaults, process keepalives or independent ownership grace periods.
 
-| Kind | Example name | Notes |
-|---|---|---|
-| `model_server` | `ollama@11434`, `llama-server@8080`, `mlx@8081` | Usually shared |
-| `dev_server` | `vite@5173`, `next@3000` | Often exclusive per project |
-| `port` | `tcp:127.0.0.1:5432` | Port derived from the name |
-| `gpu` | `metal:0`, `cuda:0` | Put reserved memory in metadata; on Apple Silicon memory is unified, so use `estimated_bytes` + `backend` |
-| `container` | `docker:3f2a…` | No pid needed; stop it yourself, then `release --stopped` |
-| `long_job` | `eval-run-42` | Register the pid so it can be matched and reaped |
+An authenticated integration uses the private `another.agent/1` compatibility
+operations to register, borrow and release resources, with minted actor proof.
+The compatibility rows project the common lease deadline. Exact release
+references prevent late callbacks from releasing a replacement generation.
+Names and `--agent` are selectors, not authority.
 
-A resource is addressed by its id or by `kind:name`, e.g. `model_server:ollama@11434`.
+Presence, a session heartbeat, working on another file or a live process cannot
+renew resource responsibility. Explicit renewal affirms an exact owned subject.
+At expiry, rights cease without waiting for a sweep or physical process exit.
+An expired resource can be checked out after the ordinary conflict check; orphan
+or recovery status is not another lock.
 
-Foreign resources need an IP-literal endpoint to be probed or borrowed; hostnames are not resolved. A listing probes at most eight live foreign endpoints with a shared 500 ms connect budget and at most 100 ms per endpoint. `reachable: false` includes endpoints skipped by those bounds, so it does not prove a server is down. Borrow probes its endpoint separately before the write transaction, then checks current resource state again before recording a lease. See [FEDERATION.md](FEDERATION.md) for the cross-node rules.
+## Session end
 
-## Lifecycle
+Authenticated session end releases every owner/borrower lease of that session
+and its dependent children immediately, along with file, presence, queue/request
+and reservation subjects. There is no `--keep` exception or dormant countdown.
+A server may physically continue running, but that does not preserve ownership.
+A genuinely independent session needs explicit scoped registration/evidence;
+a background label or different native id is not proof of independence.
 
-```bash
-another resources -q ollama
+## Inspecting resources
+
+```sh
+another resources
+another orphans --no-scan
+another doctor
+another adapter status
 ```
 
-```bash
-another borrow model_server:ollama@11434 --agent codex@shop
-```
+Status distinguishes presence, lease freshness, released/expired responsibility
+and the physical process. Read-only projections must not renew, wake or send mail.
+Actual probe and IO budgets are diagnostics, not ownership clocks.
 
-```bash
-another resource register model_server ollama@11434 --agent claude@shop --endpoint http://127.0.0.1:11434 --pid 4242 --purpose "local llm" --meta backend=metal
-```
+Resource kind/name/id, endpoint, port, PID, purpose, sharing mode and metadata
+remain resource facts. A shared resource can have an owner and borrowers; an
+exclusive resource refuses borrowing. All temporary references use the same
+duration rule. Legacy foreign events are historical/informational and cannot
+adopt a new local actor's rights.
 
-- **Limits**: a name is at most 200 bytes, an endpoint 2 KiB, a purpose 1 KiB, and metadata 64 KiB as JSON. A larger value is refused as `invalid`, naming the field, its size and the limit, and nothing is registered. The same limits apply to a resource another node registered (see [FEDERATION.md](FEDERATION.md#model)).
-- **Leases**: the registering agent holds the **owner** lease; others take **borrower** leases (shared resources only; `--exclusive` refuses borrowers). `refcount` is the number of live leases.
-- **TTL**: default 30 minutes, clamped to 1 minute-24 hours. `another heartbeat` (and the session hooks) renew every lease the agent holds; `another resource heartbeat` renews just resources.
-- **Release**: `another release <target> --agent X`. If the owner leaves while others borrow, the oldest borrower becomes owner. After shutting a resource down, the owner runs `another release <target> --agent X --stopped`.
-- **Session end**: `another heartbeat --end` (and the session-end hook) releases the agent's holds and resource leases. Add `--keep` to keep resource leases for a server meant to outlive the session.
-- **Lapse**: when the last lease expires or is released, the resource becomes `lapsed`. It stays listed, and registering or borrowing it again **adopts** it.
+## Physical cleanup
 
-## Orphans
+Only a human may approve reaping, and never remotely. The existing
+`reap.rs DEFAULT_GRACE_SECONDS = 600` is physical cleanup policy only. It cannot
+extend a lease, postpone session release or block checkout after expiry.
+Do not infer that a lease stops filesystem IO or a server process.
 
-```bash
-another orphans
-```
-
-Two sources:
-
-1. **Lapsed leases**: registered resources with no live lease.
-2. **Unregistered listeners**: listening TCP sockets found by `lsof -nP -iTCP -sTCP:LISTEN` (macOS and Linux), or by `ss -ltnp` when `lsof` is missing, that no registered resource matches by pid or port. `ps` supplies each process's age and command line. System services (launchd, sshd, mDNSResponder, systemd, …) and Another itself are never listed.
-
-Pass `--no-scan` to skip the process scan.
-
-`another doctor` runs the same scan without changing anything and shows the counts: [DOCTOR.md](DOCTOR.md#the-orphan-scan).
-
-## Reaping (human only)
-
-```bash
-another reap model_server:ollama@11434
-```
-
-```bash
-another reap model_server:ollama@11434 --confirm
-```
-
-- Without `--confirm`, `another reap` only prints the plan and its blockers; nothing is signalled.
-- A target is eligible only if:
-  - it has **no live lease** (pid targets must be unregistered listeners);
-  - it has been orphaned for at least the **grace period** (`--grace`, default 600 seconds); for a pid target, the process must be at least that old;
-  - its process is owned by the **current user**;
-  - it is **not** a protected system process.
-- On Linux and macOS, `--confirm` sends SIGTERM and waits up to 5 seconds. Linux sends SIGKILL only with `--force`; macOS never sends SIGKILL. On Windows, `--confirm` terminates the verified process immediately: Windows drops hard. There is no graceful Windows equivalent, and `--force` does not change that behavior.
-- Reaping holds the local database write transaction while rechecking the resource and stopping the process, so local database writers cannot acquire a lease during that operation. A crash or failed database commit after the stop can leave the outcome unknown: inspect the process and resource before retrying. This is not a durable recovery fence, and does not coordinate disconnected nodes or processes that do not use this database.
-- Agents cannot reap. The MCP `resource_reap` tool returns the same plan, records `resource.reap_requested` in the activity feed, and hands back the exact command for a human to run.
-- Another never reaps automatically.
-
-## MCP tools
-
-`resource_register`, `resource_find`, `resource_borrow`, `resource_release`, `resource_heartbeat`, `orphans_list`, `resource_reap` (plan and request only). See the snippet in [AGENTS.md](../AGENTS.md) for wording to give your agents.
+The historical register/borrow/release/MCP catalogue requires explicit
+`--unguarded-repair` and remains outside guarded participation. It prints that
+scope exit. The default MCP identity/lease facade refuses mutation without a
+private per-actor connection binding. [Contract](AGENT-CONTRACT.md).

@@ -1969,7 +1969,14 @@ fn migration_adds_only_queue_tables() {
     }
     // The queue is schema v11. What later schemas added goes too, and comes back with them.
     db.execute_batch(
-        "DROP TABLE transport_sessions;
+        "DROP TABLE lease_projections;
+         DROP TABLE actor_operations;
+         DROP TABLE contract_receipts;
+         DROP TABLE right_leases;
+         DROP TABLE contract_actors;
+         DROP TABLE session_scopes;
+         DROP TABLE contract_participants;
+         DROP TABLE transport_sessions;
          ALTER TABLE project_repos DROP COLUMN checkout;",
     )
     .unwrap();
@@ -1987,10 +1994,25 @@ fn migration_adds_only_queue_tables() {
     let after = table_counts(&db);
     let kept: Vec<_> = after
         .iter()
-        .filter(|(n, _)| !n.starts_with("queue_") && n != "transport_sessions")
+        .filter(|(n, _)| before.iter().any(|(old, _)| old == n))
         .cloned()
         .collect();
     assert_eq!(kept, before, "every existing table keeps every row");
+    for name in [
+        "lease_projections",
+        "actor_operations",
+        "contract_receipts",
+        "right_leases",
+        "contract_actors",
+        "session_scopes",
+        "contract_participants",
+    ] {
+        assert_eq!(
+            after.iter().find(|(n, _)| n == name).unwrap().1,
+            0,
+            "no legacy actors or rights adopted"
+        );
+    }
     let added: Vec<(&str, i64)> = after
         .iter()
         .filter(|(n, _)| n.starts_with("queue_"))

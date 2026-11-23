@@ -5,7 +5,6 @@ use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 
 use crate::error::{Error, Result};
-use crate::identity::resolve_agent;
 use crate::store::Store;
 use crate::time::fmt_ts;
 
@@ -119,7 +118,7 @@ impl Store {
     ) -> Result<Option<WakeTarget>> {
         validate_target(target)?;
         self.write(|tx| {
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
             let manual_exists = tx
                 .query_row(
                     "SELECT 1 FROM wake_targets WHERE agent_id = ?1 AND auto = 0",
@@ -150,7 +149,7 @@ impl Store {
 
     pub fn clear_wake_target(&self, agent: &str) -> Result<bool> {
         self.write(|tx| {
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
             Ok(tx.execute("DELETE FROM wake_targets WHERE agent_id = ?1", [&me.id])? > 0)
         })
     }
@@ -160,7 +159,7 @@ impl Store {
     /// does not drop the capture a newer session made elsewhere.
     pub fn clear_auto_wake_target(&self, agent: &str, only: Option<(&str, &str)>) -> Result<bool> {
         self.write(|tx| {
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
             let (via, target) = only.map_or((None, None), |(v, t)| (Some(v), Some(t)));
             Ok(tx.execute(
                 "DELETE FROM wake_targets WHERE agent_id = ?1 AND auto = 1

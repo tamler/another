@@ -70,6 +70,7 @@ async fn start() -> Server {
     let base = format!("http://{addr}");
     let ct = CancellationToken::new();
     let opts = HttpOptions {
+        legacy_repair: true,
         auth: true,
         bound_port: addr.port(),
         oauth: Some(parse_public_url(&base).unwrap()),
@@ -215,6 +216,7 @@ async fn start_open(allowed_hosts: Vec<String>) -> Server {
     let base = format!("http://{addr}");
     let ct = CancellationToken::new();
     let opts = HttpOptions {
+        legacy_repair: true,
         bound_port: addr.port(),
         allowed_hosts,
         ..Default::default()

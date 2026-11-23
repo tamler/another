@@ -57,6 +57,7 @@ fn start_served(name: &str) -> Hub {
         .unwrap();
     let addr = listener.local_addr().unwrap();
     let opts = HttpOptions {
+        legacy_repair: true,
         federation: true,
         bound_port: addr.port(),
         ..Default::default()
@@ -929,12 +930,17 @@ fn a_planted_pairing_row_for_this_node_itself_is_inert_cli() {
     let trap = start_served("trap");
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
-        let out = std::process::Command::new(env!("CARGO_BIN_EXE_another"))
-            .args(args)
-            .env("ANOTHER_HOME", dir.path())
-            .env_remove("ANOTHER_NODE_NAME")
-            .output()
-            .unwrap();
+        let out = {
+            let mut legacy_fixture_command =
+                std::process::Command::new(env!("CARGO_BIN_EXE_another"));
+            legacy_fixture_command.arg("--unguarded-repair");
+            legacy_fixture_command
+        }
+        .args(args)
+        .env("ANOTHER_HOME", dir.path())
+        .env_remove("ANOTHER_NODE_NAME")
+        .output()
+        .unwrap();
         (
             out.status.success(),
             String::from_utf8_lossy(&out.stdout).to_string(),
@@ -1054,12 +1060,17 @@ fn a_join_that_lifts_a_revoke_says_so_and_pair_commands_refuse_this_node_cli() {
     let hub = start_hub();
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
-        let out = std::process::Command::new(env!("CARGO_BIN_EXE_another"))
-            .args(args)
-            .env("ANOTHER_HOME", dir.path())
-            .env_remove("ANOTHER_NODE_NAME")
-            .output()
-            .unwrap();
+        let out = {
+            let mut legacy_fixture_command =
+                std::process::Command::new(env!("CARGO_BIN_EXE_another"));
+            legacy_fixture_command.arg("--unguarded-repair");
+            legacy_fixture_command
+        }
+        .args(args)
+        .env("ANOTHER_HOME", dir.path())
+        .env_remove("ANOTHER_NODE_NAME")
+        .output()
+        .unwrap();
         (
             out.status.success(),
             String::from_utf8_lossy(&out.stdout).to_string(),
@@ -1138,12 +1149,17 @@ fn a_join_that_lifts_a_revoke_says_so_and_pair_commands_refuse_this_node_cli() {
 fn pair_readmit_and_release_name_cli() {
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
-        let out = std::process::Command::new(env!("CARGO_BIN_EXE_another"))
-            .args(args)
-            .env("ANOTHER_HOME", dir.path())
-            .env_remove("ANOTHER_NODE_NAME")
-            .output()
-            .unwrap();
+        let out = {
+            let mut legacy_fixture_command =
+                std::process::Command::new(env!("CARGO_BIN_EXE_another"));
+            legacy_fixture_command.arg("--unguarded-repair");
+            legacy_fixture_command
+        }
+        .args(args)
+        .env("ANOTHER_HOME", dir.path())
+        .env_remove("ANOTHER_NODE_NAME")
+        .output()
+        .unwrap();
         (
             out.status.success(),
             String::from_utf8_lossy(&out.stdout).to_string(),
@@ -1298,11 +1314,16 @@ fn signatures_authority_and_revocation() {
 fn federation_cli() {
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
-        let out = std::process::Command::new(env!("CARGO_BIN_EXE_another"))
-            .args(args)
-            .env("ANOTHER_HOME", dir.path())
-            .output()
-            .unwrap();
+        let out = {
+            let mut legacy_fixture_command =
+                std::process::Command::new(env!("CARGO_BIN_EXE_another"));
+            legacy_fixture_command.arg("--unguarded-repair");
+            legacy_fixture_command
+        }
+        .args(args)
+        .env("ANOTHER_HOME", dir.path())
+        .output()
+        .unwrap();
         (
             out.status.success(),
             String::from_utf8_lossy(&out.stdout).to_string(),

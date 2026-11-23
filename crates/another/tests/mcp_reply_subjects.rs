@@ -45,7 +45,10 @@ async fn call_err(client: &Client, tool: &str, args: Value) -> (String, String) 
 async fn client(store: Store) -> Client {
     let (server_io, client_io) = tokio::io::duplex(64 * 1024);
     tokio::spawn(async move {
-        let server = AnotherMcp::new(store).serve(server_io).await.unwrap();
+        let server = AnotherMcp::legacy_repair(store)
+            .serve(server_io)
+            .await
+            .unwrap();
         let _ = server.waiting().await;
     });
     ClientConfig::default().serve(client_io).await.unwrap()

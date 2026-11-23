@@ -61,7 +61,11 @@ impl Env {
     }
 
     fn cmd(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_another"));
+        let mut c = {
+            let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+            legacy_fixture_command.arg("--unguarded-repair");
+            legacy_fixture_command
+        };
         c.args(args)
             .env("HOME", &self.home)
             .env("ANOTHER_HOME", &self.another_home)
@@ -261,8 +265,8 @@ fn three_workers_in_three_worktrees_never_block_each_other() {
             assert_eq!(env.edit(client, dir, file), "", "{client} editing {file}");
         }
     }
-    // An hour of work: each session keeps making tool calls, which renews its holds, and
-    // goes back to the shared files now and then.
+    // Intervening tool activity does not renew the old files. Each round checks
+    // out only the file actually edited, after the prior deadlines have passed.
     for round in 0..4 {
         env.pass_minutes(16);
         for (client, dir) in &seats {
@@ -274,19 +278,19 @@ fn three_workers_in_three_worktrees_never_block_each_other() {
     assert!(env.events("hold.blocked").is_empty());
     assert!(env.events("hold.waiting").is_empty());
     let holds = env.holds();
-    assert_eq!(holds.len(), 15, "{holds:?}");
+    assert_eq!(holds.len(), 3, "{holds:?}");
     for (client, dir) in &seats {
         let slug = dir.file_name().unwrap().to_string_lossy().into_owned();
         let own: Vec<&Value> = holds
             .iter()
             .filter(|h| h["agent"] == format!("{client}@{slug}"))
             .collect();
-        assert_eq!(own.len(), 5, "{client}: {holds:?}");
+        assert_eq!(own.len(), 1, "{client}: {holds:?}");
         assert!(own.iter().all(|h| h["project"] == slug.as_str()), "{own:?}");
     }
     assert!(
-        !env.events("hold.renewed").is_empty(),
-        "the sessions' tool calls kept the holds alive, as on main"
+        env.events("hold.renewed").is_empty(),
+        "generic tool activity never renews files"
     );
 }
 
@@ -344,8 +348,7 @@ fn two_clones_on_one_branch_do_not_block() {
     assert_eq!(env.holds().len(), 4);
 }
 
-/// A3. Inside one checkout nothing changed: the second agent is stopped, a hold lasts 1800
-/// seconds, and the holder's tool calls keep renewing it. Only the text is new.
+/// A3. Inside one checkout the second actor is stopped until release or expiry.
 #[test]
 fn two_agents_in_one_checkout_block_on_the_same_file() {
     let env = Env::new();
@@ -355,7 +358,7 @@ fn two_agents_in_one_checkout_block_on_the_same_file() {
     assert_eq!(env.edit("claude", &shop, "src/api/routes.rs"), "");
     let hold = env.holds().remove(0);
     assert_eq!(hold["agent"], "claude@shop");
-    assert_eq!(hold["ttl_seconds"], 1800);
+    assert_eq!(hold["ttl_seconds"], 120);
     let (id, until) = (
         hold["hold_id"].as_str().unwrap(),
         hold["expires_at"].as_str().unwrap(),
@@ -379,10 +382,8 @@ fn two_agents_in_one_checkout_block_on_the_same_file() {
     // A different file passes.
     assert_eq!(env.edit("codex", &shop, "src/api/other.rs"), "");
 
-    // Renewal as on main: nothing before half the hold's life, then every tool call of the
-    // holder's session renews it, so the second agent stays stopped for as long as the
-    // holder works.
-    env.pass_minutes(10);
+    // Presence leaves the original checkout deadline unchanged.
+    env.pass_minutes(1);
     assert_eq!(env.tool_call("claude", &shop), "");
     assert!(env.events("hold.renewed").is_empty());
     let expiry = |env: &Env| -> String {
@@ -394,17 +395,13 @@ fn two_agents_in_one_checkout_block_on_the_same_file() {
             .unwrap()
             .to_string()
     };
-    for _ in 0..4 {
-        env.pass_minutes(16);
-        let before = expiry(&env);
-        assert_eq!(env.tool_call("claude", &shop), "");
-        assert!(expiry(&env) > before, "the keepalive renewed the hold");
-        assert!(env
-            .edit("codex", &shop, "src/api/routes.rs")
-            .contains("still blocked"));
-    }
-    // And it lapses 30 minutes after the holder's last renewal, as on main.
-    env.pass_minutes(31);
+    let before = expiry(&env);
+    assert_eq!(env.tool_call("claude", &shop), "");
+    assert_eq!(expiry(&env), before);
+    assert!(env
+        .edit("codex", &shop, "src/api/routes.rs")
+        .contains("still blocked"));
+    env.pass_minutes(2);
     assert_eq!(env.edit("codex", &shop, "src/api/routes.rs"), "");
 }
 

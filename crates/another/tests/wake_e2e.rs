@@ -84,7 +84,11 @@ impl Env {
 
     /// The binary with the fake adapters first on PATH (or `path` instead, for real tmux).
     fn cmd_with_path(&self, args: &[&str], path: &str) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_another"));
+        let mut c = {
+            let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+            legacy_fixture_command.arg("--unguarded-repair");
+            legacy_fixture_command
+        };
         c.args(args)
             .env("ANOTHER_HOME", &self.home)
             .env("HOME", &self.home)

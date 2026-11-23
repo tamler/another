@@ -95,6 +95,7 @@ impl Hub {
         self.port = listener.local_addr().unwrap().port();
         let ct = CancellationToken::new();
         let opts = HttpOptions {
+            legacy_repair: true,
             federation: true,
             bound_port: self.port,
             ..Default::default()
