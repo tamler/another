@@ -76,7 +76,7 @@ cd ../shop-parser
 another hold check --agent parser --project . 'migrations/001.sql'</code></pre>
       <pre class="code-block shell" tabindex="0" aria-label="Check output"><code>no conflicts</code></pre>
       <p>The check exits with status 0, and the edit hook does not deny an edit based on a hold in another worktree. <code>another holds --project .</code> still lists holds in sibling checkouts and marks them as <q>other checkout</q>:</p>
-      <pre class="code-block shell" tabindex="0" aria-label="Holds listed from the other worktree"><code>exclusive ui@shop-ui-2     shop-ui:migrations/**  until 2026-11-22T19:07:42.197Z  [01M828SFDPEAJS9V2CTBCWH5ZX]  other checkout
+      <pre class="code-block shell" tabindex="0" aria-label="Holds listed from the other worktree"><code>exclusive ui@shop-ui       shop-ui:migrations/**  until 2026-11-22T19:07:42.197Z  [01M828SFDPEAJS9V2CTBCWH5ZX]  other checkout
 other checkout: taken in a different working directory from this one; it does not block edits here</code></pre>
       <p>An edit from a shell command still gets through, and nothing guards a commit. Holds on other machines are matched by project name and reported as warnings, never conflicts.</p>
     </section>

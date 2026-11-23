@@ -4,6 +4,8 @@ No GitHub Release of Another has been published as of 23 Nov 2026. This page des
 
 ## What the workflow publishes
 
+A tag such as `v0.1.0-rc1` is rejected because the crate version is `0.1.0`; the tag must match it exactly.
+
 Pushing a tag `vX.Y.Z` runs [`.github/workflows/release.yml`](../.github/workflows/release.yml). For each target it writes two files and uploads both to the release:
 
 | File | Written by |
@@ -41,7 +43,7 @@ On macOS use `shasum`, not the `sha256sum` that newer macOS versions also ship. 
 
 ## A recorded run against a fixture
 
-This is fixture data, not a release. The archive was built the way the workflow builds one, from a text file standing in for the binary, and its `.sha256` was written with the same `shasum -a 256` command the workflow uses. Run on 12 Nov 2026 on macOS 27.2.1 with `shasum` 6.02 (Perl) and the Darwin `sha256sum` 1.0 in `/sbin`. Exit statuses are as printed by the shell.
+This is fixture data, not a release. The archive predates the workflow's NOTICE inclusion and used a text file standing in for the binary; it does not verify the current archive contents. Its `.sha256` was written with the same `shasum -a 256` command the workflow uses. Run on 12 Nov 2026 on macOS 27.2.1 with `shasum` 6.02 (Perl) and the Darwin `sha256sum` 1.0 in `/sbin`. Exit statuses are as printed by the shell.
 
 ```text
 $ cat another-0.1.0-aarch64-apple-darwin.tar.gz.sha256

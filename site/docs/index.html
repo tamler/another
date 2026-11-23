@@ -124,7 +124,7 @@ would run: tmux <span class="token">send-keys</span> <span class="token">-t</spa
     <section class="guide-section" id="resources" aria-labelledby="resources-title">
       <h2 id="resources-title">Find before starting another</h2>
       <p>The resource registry tracks servers, ports, GPUs, containers and jobs. Agents can find a running resource and borrow it with a lease. Heartbeats renew leases; lapsed resources become orphan candidates.</p>
-      <p>Path holds are expiring leases on project-relative globs, checked across every checkout of one repository on this machine. The edit hook enforces them for client file edits; an edit from a shell command gets past them, and they do not replace git. Across machines, a hold clash is a warning. <a href="https://github.com/tamler/another/blob/main/docs/HOLDS.md">Holds, worktrees and whole-project holds</a>.</p>
+      <p>Path holds are expiring leases on project-relative globs, checked only inside the checkout they were taken in. Other worktrees and clones never block each other. The edit hook enforces them for client file edits; an edit from a shell command gets past them, and they do not replace git. Across machines, a hold clash is a warning. <a href="https://github.com/tamler/another/blob/main/docs/HOLDS.md">Holds, worktrees and whole-project holds</a>.</p>
       <p>Reaping requires human confirmation on the owning node. Remote peers cannot reap resources. <a href="/guides/share-model-server/">Share a model server</a> and <a href="https://github.com/tamler/another/blob/main/docs/RESOURCES.md">resource registration, borrowing and cleanup</a>.</p>
     </section>
     <section class="guide-section" id="remote" aria-labelledby="remote-title">

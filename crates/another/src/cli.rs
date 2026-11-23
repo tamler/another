@@ -163,7 +163,7 @@ pub enum Command {
     },
     /// Reply to a message within its thread.
     Reply {
-        /// Message id to reply to. Must be a message that the recipient received.
+        /// Id of the message to reply to.
         message_id: String,
         /// Reply-from agent name.
         #[arg(long, short = 'f', env = "ANOTHER_AGENT")]
@@ -889,7 +889,7 @@ pub enum HoldCmd {
         /// Files or globs.
         #[arg(required = true)]
         paths: Vec<String>,
-        /// Check for shared holds too.
+        /// Check as a shared hold (conflicts only with exclusive holds).
         #[arg(long)]
         shared: bool,
     },

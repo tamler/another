@@ -2,7 +2,7 @@
 
 Several machines, such as a laptop, a remote runner and a GPU box, each run their own Another **node** and stay aware of each other. Nodes exchange their append-only, signed event logs through a **hub**. The hub is just another free Another node that you host yourself; spokes dial out to it, so spokes need no inbound ports.
 
-**Status:** Federation is present, but frozen for v0.1.0 and treated as experimental. It stays in the tree and gets only admitted security and data-loss fixes.
+**Status:** Hub and spoke between the owner's Mac and VPS is in scope for v0.1.0 (M9) and required for the tag, including a tested hub backup restore. Fixes to this path are admitted case by case. Bearer-token remote peers and hosted OAuth connectors remain frozen and experimental; federation does not depend on them.
 
 ## Model
 
