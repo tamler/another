@@ -52,7 +52,7 @@ for node in hub laptop runner; do
 done
 
 # The hub: loopback only, port chosen by the system, federation on.
-ANOTHER_HOME="$scratch/hub" "$another" serve --federation --no-dashboard \
+ANOTHER_HOME="$scratch/hub" "$another" serve --federation --no-dashboard --no-wake \
     --bind 127.0.0.1:0 2>"$scratch/hub.log" &
 hub_pid=$!
 url=""
@@ -65,7 +65,7 @@ while [ -z "$url" ]; do
         exit 1
     fi
     sleep 0.1
-    url=$(sed -n 's|.*on \(http://127\.0\.0\.1:[0-9]*\)/mcp.*|\1|p' "$scratch/hub.log" | head -n 1)
+    url=$(sed -n 's|.*federation-only HTTP on \(http://127\.0\.0\.1:[0-9]*\), node .*|\1|p' "$scratch/hub.log" | head -n 1)
 done
 printf '\nhub listening on %s\n' "$url"
 

@@ -25,6 +25,6 @@ cargo build -p another
 ANOTHER_BIN=target/debug/another sh examples/federation-hub-two-spokes.sh
 ```
 
-The federation example starts a hub with `another serve --federation` on a loopback port the system picks. It stops that hub, by its process id, when the script exits. On real machines each node runs on its own host, and spokes reach the hub through a tunnel; see [docs/FEDERATION.md](../docs/FEDERATION.md).
+The federation example starts a hub with `another serve --federation` on a loopback port the system picks, with wake delivery off. The listener serves only `/fed/*` and `/health`; the script discovers its port from the federation-only startup line. It stops that hub, by its process id, when the script exits. On real machines each node runs on its own host, and spokes reach the hub through a tunnel; see [docs/FEDERATION.md](../docs/FEDERATION.md).
 
 A group-queue worker-pool example will follow once group queues are on `main`.
