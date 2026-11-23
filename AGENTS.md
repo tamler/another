@@ -23,7 +23,7 @@ The scope page is the source of truth; this is the short form. Every item has an
 - **M9** Today's hub and spoke between the owner's Mac and VPS, with hub backups.
 - **M10** A release people can install.
 
-Nice to have (N1 to N5), frozen and cut lists are on the scope page. Frozen code stays in the tree and gets only admitted security and data-loss fixes.
+Nice to have (N1 to N5), frozen and cut lists are on the scope page. Frozen surfaces stay in the tree, are treated as experimental, and get only admitted security and data-loss fixes.
 
 ## How work is done (mandatory)
 

@@ -91,7 +91,7 @@ A running `another` keeps the code it started with, so after installing a new bi
 
 Hooks start a fresh process on every call and need nothing.
 
-Skipping this is unsafe when a release changes how repository keys are cached (the `project_repos` table, see [HOLDS.md](HOLDS.md#holds-across-worktrees)). The release after #103 does: keys now carry a `v2:` prefix. The new binary treats an old key as never computed and recomputes it. An old process does not understand the new keys, rewrites the ones it touches in the old form, and then compares keys of two formats. They never match, so it misses holds in sibling worktrees and clones and lets those edits through (it fails open). The new binary never misses one: it recomputes the old keys on its next check. Once no old process is left, the keys settle in the new form.
+Skipping this is unsafe when a release changes how repository keys and checkout ids are cached (the `project_repos` table, see [HOLDS.md](HOLDS.md#holds-and-checkouts)). Recent builds do: cached keys carry a `v4:` prefix. The new binary treats an older-format row as never computed and recomputes it. An old process does not understand the new keys, rewrites the rows it touches under the older rules, and then compares keys of two formats. They never match, so it can miss holds inside this checkout (it fails open). Once every long-running `another` is restarted, the keys settle in one format.
 
 ## Elsewhere
 

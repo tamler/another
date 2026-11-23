@@ -1,5 +1,7 @@
 # Remote peers
 
+**Status:** Remote peers and hosted OAuth connectors are present, but frozen for v0.1.0 and treated as experimental. They stay in the tree and get only admitted security and data-loss fixes.
+
 ## ChatGPT desktop app (this Mac): local, no tunnel
 
 The ChatGPT desktop app can run Another **on this computer**. OpenAI's MCP guide says the desktop app, the Codex CLI, and the IDE extension share one local MCP configuration (`~/.codex/config.toml` by default). A server configured there is started or dialed by the app, not by OpenAI's cloud.
@@ -56,7 +58,7 @@ A remote agent joins as a first-class peer through **authenticated streamable HT
 
 Both kinds of credential act as **exactly one agent**, may only touch projects matching their globs, and every call is recorded in the audit log. Reaping is never available remotely. Nothing here is a hosted relay: the server is still your machine, and TLS stops at a tunnel you run.
 
-Local agents stay on stdio or on a separate unauthenticated loopback server. With `--auth`, every request is checked, including ones that arrive from loopback, because a tunnel delivers from loopback.
+Local agents stay on stdio or on a separate unauthenticated loopback server. The unauthenticated loopback server answers every local account in that home: any local process that can connect can act as any agent. Treat it as a same-machine trust boundary. With `--auth`, every request is checked, including ones that arrive from loopback, because a tunnel delivers from loopback.
 
 ## Bearer tokens
 
