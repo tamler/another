@@ -37,7 +37,7 @@ pub use board::{
     BOARD_EVENT_SCAN_CAP, DEFAULT_BOARD_LIMIT, DEFAULT_BOARD_WINDOW_MS, EDIT_HOOK_HOLD_REASON,
     MAX_BOARD_LIMIT,
 };
-pub use checkout::{ListedHold, PathRelease, ReleasePath};
+pub use checkout::{shell_word, ListedHold, PathRelease, ReleasePath};
 pub use dashboard::{
     DashAccess, DashActivityItem, DashActivityPage, DashActivityQuery, DashAgent, DashBlocked,
     DashClash, DashCounts, DashEdit, DashHold, DashMessage, DashProject, DashRequest, DashThread,
@@ -81,7 +81,7 @@ pub use queue::{
     ReleaseItem, SelfAdmitted, DEFAULT_QUEUE_GRACE_SECONDS, DEFAULT_QUEUE_LIMIT,
     MAX_QUEUE_GRACE_SECONDS, MAX_QUEUE_LIMIT, MIN_QUEUE_GRACE_SECONDS, QUEUE_SESSION_CLIENTS,
 };
-pub use repo::{link_for as repo_link_for, normalize_remote, resolve_existing, RepoLink};
+pub use repo::{git_root, link_for as repo_link_for, normalize_remote, resolve_existing, RepoLink};
 pub use requests::{
     Request, RequestAction, RequestFilter, RequestStatus, RequestUpdate, MAX_REQUEST_NOTE_BYTES,
 };

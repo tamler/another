@@ -817,12 +817,9 @@ impl HookInput {
     }
 }
 
-/// Nearest ancestor containing `.git`, else `dir` itself.
-pub fn project_root(dir: &Path) -> PathBuf {
-    dir.ancestors()
-        .find(|d| d.join(".git").exists())
-        .unwrap_or(dir)
-        .to_path_buf()
+/// Nearest directory at or above `dir` containing `.git`, else `dir` itself.
+fn project_root(dir: &Path) -> PathBuf {
+    another_core::git_root(dir, true).unwrap_or_else(|| dir.to_path_buf())
 }
 
 /// Grok also executes Claude/Cursor hook files. When the Grok pack is installed, those
@@ -1508,14 +1505,6 @@ fn edit_targets(file: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Nearest ancestor of `path` (not `path` itself) that contains `.git`.
-fn git_root_above(path: &Path) -> Option<PathBuf> {
-    path.ancestors()
-        .skip(1)
-        .find(|d| d.join(".git").exists())
-        .map(Path::to_path_buf)
-}
-
 /// Reason given on auto-acquired holds.
 pub const AUTO_HOLD_REASON: &str = "editing (taken by the edit hook)";
 
@@ -1634,7 +1623,8 @@ fn pre_edit(
             if target.is_dir() || raw.ends_with('/') {
                 continue;
             }
-            let git = git_root_above(&target);
+            // The file's own entry never counts, only the directories above it.
+            let git = another_core::git_root(&target, false);
             let registered = projects
                 .iter()
                 .filter(|(_, real)| target.starts_with(real) && target != *real)

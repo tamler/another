@@ -20,8 +20,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use another_core::{
-    identify, newest_at_target, Identity, InboxQuery, Reservation, Store, TransportSession,
-    TransportWake, Tri, WakeKind, WakeOutcome, WakeVia, UNDELIVERED_LIMIT,
+    identify, newest_at_target, shell_word, Identity, InboxQuery, Reservation, Store,
+    TransportSession, TransportWake, Tri, WakeKind, WakeOutcome, WakeVia, UNDELIVERED_LIMIT,
 };
 use anyhow::Result;
 use serde::Serialize;
@@ -980,18 +980,6 @@ fn pane_in_doubt(
                 another_core::single_line(&o.agent, 80)
             )
         })
-}
-
-/// `text` as one word of a shell command: as it is when it holds only characters no shell
-/// reads specially, else in single quotes. `=` is not plain: zsh expands a word that
-/// starts with it.
-fn shell_word(text: &str) -> String {
-    let plain = |c: char| c.is_ascii_alphanumeric() || "%:@._/+-".contains(c);
-    if !text.is_empty() && text.chars().all(plain) {
-        text.to_string()
-    } else {
-        format!("'{}'", text.replace('\'', "'\\''"))
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]

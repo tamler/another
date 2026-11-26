@@ -175,16 +175,14 @@ pub(crate) fn normalize_project_path(raw: &str) -> Result<String> {
             "project path must be absolute, got {raw:?}"
         )));
     }
-    let mut parts: Vec<String> = Vec::new();
-    for comp in path.components() {
-        match comp {
-            Component::Normal(s) => parts.push(s.to_string_lossy().into_owned()),
-            Component::ParentDir => {
-                parts.pop();
-            }
-            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
-        }
-    }
+    // `.` and `..` applied as text; the result is rebuilt with `/` whatever the platform.
+    let parts: Vec<String> = crate::repo::lexical(path)
+        .components()
+        .filter_map(|comp| match comp {
+            Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
     let prefix = match path.components().next() {
         Some(Component::Prefix(p)) => format!("{}\\", p.as_os_str().to_string_lossy()),
         _ => "/".to_string(),

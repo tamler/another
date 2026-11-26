@@ -7,7 +7,7 @@
 //! whoever makes a wake call writes its outcome ([`Store::record_transport_wake`]). The CLI
 //! crate owns the adapters; this module only stores and decides.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 use crate::identity::resolve_agent;
+use crate::repo::resolve_existing;
 use crate::store::{Store, Tx};
 
 /// Written for every wake call (replaces `push.woke`).
@@ -341,23 +342,11 @@ pub fn attention_reason(row: &TransportSession, now: i64) -> Option<&'static str
     (row.undelivered_count >= UNDELIVERED_LIMIT).then_some("undelivered")
 }
 
-/// A directory as hooks and sweeps compare it: symlinks resolved when it exists, else
-/// normalised lexically (`.` dropped, `..` applied).
+/// A directory as hooks and sweeps compare it: resolved the way the filesystem does
+/// ([`resolve_existing`]), so a `..` after a symlink applies to where the link points
+/// even when the directory no longer exists.
 pub fn resolve_dir(path: &Path) -> String {
-    if let Ok(real) = std::fs::canonicalize(path) {
-        return real.to_string_lossy().into_owned();
-    }
-    let mut out = PathBuf::new();
-    for comp in path.components() {
-        match comp {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out.to_string_lossy().into_owned()
+    resolve_existing(path).to_string_lossy().into_owned()
 }
 
 /// A file name for one session of an agent: the SHA-256 of both, so it is always 64 hex
@@ -1133,6 +1122,20 @@ mod tests {
             Path::new(&resolve_dir(Path::new("/work/app/./src/.."))),
             Path::new("/work/app")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_directory_past_a_symlink_climbs_from_where_the_link_points() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(real.join("inner")).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(real.join("inner"), &link).unwrap();
+        // `link/../gone` is `real/gone`, not the lexical `<dir>/gone`.
+        let got = resolve_dir(&link.join("..").join("gone"));
+        let want = std::fs::canonicalize(&real).unwrap().join("gone");
+        assert_eq!(Path::new(&got), want);
     }
 
     #[test]
