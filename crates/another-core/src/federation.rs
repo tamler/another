@@ -1888,10 +1888,7 @@ impl Store {
         if expires_in_seconds <= 0 {
             return Err(Error::Invalid("invite expiry must be positive".into()));
         }
-        let mut secret = [0u8; 24];
-        getrandom::fill(&mut secret)
-            .map_err(|e| Error::Invalid(format!("no system randomness available: {e}")))?;
-        let secret = crypto::b64(&secret);
+        let secret = crypto::b64(&crypto::random_bytes(24)?);
         let perms: Vec<Perm> = perms
             .iter()
             .copied()

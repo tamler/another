@@ -21,6 +21,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::crypto::{random_bytes, random_hex, secrets_eq, sha256_hex};
 use crate::error::{Error, Result};
 use crate::identity::resolve_agent;
 use crate::store::{new_id, Store, Tx};
@@ -270,37 +271,7 @@ impl From<Error> for OAuthFail {
 }
 
 fn hash_secret(secret: &str) -> String {
-    Sha256::digest(secret.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-fn secrets_eq(a: &str, b: &str) -> bool {
-    let a = a.as_bytes();
-    let b = b.as_bytes();
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
-fn random_bytes(n: usize) -> Result<Vec<u8>> {
-    let mut buf = vec![0u8; n];
-    getrandom::fill(&mut buf)
-        .map_err(|e| Error::Invalid(format!("no system randomness available: {e}")))?;
-    Ok(buf)
-}
-
-fn random_hex(n: usize) -> Result<String> {
-    Ok(random_bytes(n)?
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+    sha256_hex(secret.as_bytes())
 }
 
 fn user_code() -> Result<String> {
