@@ -8,11 +8,42 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// SHA-256 as lowercase hex. Token, OAuth, delegate-key and invite secrets are stored only
+/// as this digest.
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    hex(&Sha256::digest(bytes))
+}
+
+/// `n` bytes from the system's randomness.
+pub fn random_bytes(n: usize) -> Result<Vec<u8>> {
+    let mut buf = vec![0u8; n];
+    getrandom::fill(&mut buf)
+        .map_err(|e| Error::Invalid(format!("no system randomness available: {e}")))?;
+    Ok(buf)
+}
+
+/// `n` random bytes written as `2 * n` lowercase hex characters.
+pub fn random_hex(n: usize) -> Result<String> {
+    Ok(hex(&random_bytes(n)?))
+}
+
+/// Compare two digests without returning early at the first differing byte. A length
+/// mismatch returns at once; callers compare fixed-length hex digests.
+pub fn secrets_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 pub fn b64(bytes: &[u8]) -> String {
@@ -26,19 +57,16 @@ pub fn unb64(text: &str) -> Result<Vec<u8>> {
 }
 
 pub fn generate_key() -> Result<SigningKey> {
-    let mut seed = [0u8; 32];
-    getrandom::fill(&mut seed)
-        .map_err(|e| Error::Invalid(format!("no system randomness available: {e}")))?;
+    let seed: [u8; 32] = random_bytes(32)?
+        .try_into()
+        .map_err(|_| Error::Invalid("node secret key must be 32 bytes".into()))?;
     Ok(SigningKey::from_bytes(&seed))
 }
 
 /// A nonce for one push or pull request: 16 bytes from the system's randomness, written as
 /// 32 lowercase hex characters. Every request gets a new one, a retry included.
 pub fn request_nonce() -> Result<String> {
-    let mut bytes = [0u8; 16];
-    getrandom::fill(&mut bytes)
-        .map_err(|e| Error::Invalid(format!("no system randomness available: {e}")))?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    random_hex(16)
 }
 
 pub fn decode_secret(text: &str) -> Result<SigningKey> {
@@ -246,6 +274,38 @@ mod tests {
         let round = decode_secret(&b64(key.as_bytes())).unwrap();
         assert_eq!(public_of(&round), public);
         assert_eq!(fingerprint(&public).len(), 19);
+    }
+
+    /// Stored `secret_hash` and `key_hash` rows are this exact lowercase hex, so it must not
+    /// change.
+    #[test]
+    fn sha256_hex_is_lowercase_hex() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn random_values_have_the_requested_size() {
+        assert_eq!(random_bytes(8).unwrap().len(), 8);
+        let hex = random_hex(32).unwrap();
+        assert_eq!(hex.len(), 64);
+        assert!(hex
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+        assert_ne!(random_hex(32).unwrap(), hex);
+        let nonce = request_nonce().unwrap();
+        assert_eq!(nonce.len(), 32);
+    }
+
+    #[test]
+    fn secrets_eq_compares_whole_values() {
+        assert!(secrets_eq("", ""));
+        assert!(secrets_eq("abc", "abc"));
+        assert!(!secrets_eq("abc", "abd"));
+        assert!(!secrets_eq("abc", "ab"));
+        assert!(!secrets_eq("ab", "abc"));
     }
 
     #[test]

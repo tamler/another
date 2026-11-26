@@ -1279,7 +1279,8 @@ fn is_delegate_key(conn: &Connection, agent_id: &str, key: &str) -> Result<bool>
             |r| r.get(0),
         )
         .optional()?;
-    Ok(stored.is_some_and(|h| h == crate::tokens::hash(key)))
+    let digest = crate::crypto::sha256_hex(key.as_bytes());
+    Ok(stored.is_some_and(|h| crate::crypto::secrets_eq(&h, &digest)))
 }
 
 /// The caller as an admitter: the owner, or a delegate that presented its key.
@@ -2394,7 +2395,7 @@ impl Store {
         agent: &str,
     ) -> Result<NewQueueDelegate> {
         owner_only(caller, "naming a delegate")?;
-        let key = format!("adk_{}", crate::tokens::random_hex(32)?);
+        let key = format!("adk_{}", crate::crypto::random_hex(32)?);
         self.write(|tx| {
             let who = resolve_agent(tx, tx.node_id, agent)?;
             let event_id = tx.emit(
@@ -2407,7 +2408,12 @@ impl Store {
                  VALUES (?1, ?2, ?3, NULL, ?4)
                  ON CONFLICT(agent_id) DO UPDATE SET key_hash = ?2, added_at = ?3,
                    removed_at = NULL, event_id = ?4",
-                params![who.id, crate::tokens::hash(&key), tx.now, event_id],
+                params![
+                    who.id,
+                    crate::crypto::sha256_hex(key.as_bytes()),
+                    tx.now,
+                    event_id
+                ],
             )?;
             Ok(NewQueueDelegate {
                 agent: who.address,
