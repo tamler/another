@@ -32,13 +32,12 @@ fn slashed(path: &Path) -> String {
         .join("/")
 }
 
-/// `word` as one shell word: as it is when plainly safe, else in single quotes.
-fn shell_word(word: &str) -> String {
-    let plain = !word.is_empty()
-        && word
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_-./:@+,=".contains(c));
-    if plain {
+/// `word` as one word of a shell command: as it is when it holds only characters no shell
+/// reads specially, else in single quotes. `=` and `,` are not plain: zsh expands a word
+/// that starts with `=`, and a `,` can sit inside a brace expansion.
+pub fn shell_word(word: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "%:@._/+-".contains(c);
+    if !word.is_empty() && word.chars().all(plain) {
         word.to_string()
     } else {
         format!("'{}'", word.replace('\'', r"'\''"))
@@ -601,5 +600,10 @@ mod tests {
         assert_eq!(shell_word("claude@shop"), "claude@shop");
         assert_eq!(shell_word("/Users/j/my app"), "'/Users/j/my app'");
         assert_eq!(shell_word("it's"), r"'it'\''s'");
+        assert_eq!(shell_word("%3"), "%3");
+        // Stricter than before: zsh expands `=word`, and `,` may sit in a brace expansion.
+        assert_eq!(shell_word("=ls"), "'=ls'");
+        assert_eq!(shell_word("a,b"), "'a,b'");
+        assert_eq!(shell_word(""), "''");
     }
 }

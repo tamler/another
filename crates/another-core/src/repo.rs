@@ -118,14 +118,21 @@ fn canonical_prefix(path: &Path) -> PathBuf {
     out
 }
 
-/// The checkout of a physically resolved path (`resolve_existing`): the nearest directory
-/// at or above it that has a `.git` entry, a directory or the file a linked worktree or a
-/// submodule has. None when the path is not inside git.
-pub(crate) fn checkout_of(resolved: &Path) -> Option<PathBuf> {
-    resolved
-        .ancestors()
+/// The nearest directory above `path` (and `path` itself when `include_self`) that has a
+/// `.git` entry: a directory, or the file a linked worktree or a submodule has. None when
+/// there is none. The path is taken as given; resolve it first ([`resolve_existing`]) when
+/// symlinks must count.
+pub fn git_root(path: &Path, include_self: bool) -> Option<PathBuf> {
+    path.ancestors()
+        .skip(usize::from(!include_self))
         .find(|d| d.join(".git").exists())
         .map(Path::to_path_buf)
+}
+
+/// The checkout of a physically resolved path (`resolve_existing`): the nearest directory
+/// at or above it that has a `.git` entry. None when the path is not inside git.
+pub(crate) fn checkout_of(resolved: &Path) -> Option<PathBuf> {
+    git_root(resolved, true)
 }
 
 /// Git metadata files we read are small; anything bigger is not what we expect.
@@ -166,7 +173,8 @@ pub(crate) fn lexical(path: &Path) -> PathBuf {
 
 /// The repository a directory belongs to, if any.
 pub fn link_for(dir: &Path) -> Option<RepoLink> {
-    let top = dir.ancestors().find(|d| d.join(".git").exists())?;
+    let top = git_root(dir, true)?;
+    let top = top.as_path();
     let prefix = dir
         .strip_prefix(top)
         .ok()?

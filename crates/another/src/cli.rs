@@ -1090,6 +1090,11 @@ pub(crate) fn body_arg(body: String) -> anyhow::Result<String> {
     }
 }
 
+/// Whether a `--project` value names a directory rather than a project slug.
+fn looks_like_path(p: &str) -> bool {
+    p.contains('/') || p.contains('\\') || p == "." || p == ".."
+}
+
 fn abs(path: &Path) -> anyhow::Result<String> {
     let p = if path.is_absolute() {
         path.to_path_buf()
@@ -1136,7 +1141,6 @@ fn board_command(
             "board --since takes a duration like 24h or an RFC 3339 time, not an event id"
         ),
     };
-    let looks_like_path = |p: &str| p.contains('/') || p.contains('\\') || p == "." || p == "..";
     let project = match project {
         Some(p) if looks_like_path(p) => Some(abs(Path::new(p))?),
         Some(p) => Some(p.to_string()),
@@ -1153,7 +1157,6 @@ fn board_command(
 
 /// Resolve `--project`: a path (ensured on the fly) or an existing slug; default cwd.
 fn project_key(store: &Store, actor: &str, project: Option<String>) -> anyhow::Result<String> {
-    let looks_like_path = |p: &str| p.contains('/') || p.contains('\\') || p == "." || p == "..";
     match project {
         Some(p) if !looks_like_path(&p) => Ok(p),
         Some(p) => Ok(store
@@ -1247,7 +1250,6 @@ fn release_holds(
     if targets.is_empty() {
         return Ok((store.release_holds(agent, &[])?, Vec::new()));
     }
-    let looks_like_path = |p: &str| p.contains('/') || p.contains('\\') || p == "." || p == "..";
     let base = match project {
         None => std::env::current_dir()?,
         Some(p) if looks_like_path(&p) => PathBuf::from(abs(Path::new(&p))?),

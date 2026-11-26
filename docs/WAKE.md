@@ -87,6 +87,8 @@ One risk remains with a weak match: another agent of the same kind, started in t
 
 After an upgrade to this build, an idle session is not woken by the daemon until it has run one hook, because the hook is what makes its row.
 
+A weak match also compares the session's stored working directory with what the transport reports, after both have been resolved the way the filesystem does. A missing directory is now resolved through its existing physical parent (on Windows that can restore a verbatim prefix and on-disk letter case). A cwd stamped by an older process may therefore miss a weak match until the next hook restamps the row. This is not a schema change.
+
 ## When the daemon wakes an agent
 
 The daemon ([DAEMON.md](DAEMON.md)) asks each transport in use what it can see every 30 seconds and records it per session. Every 2 seconds it looks for agents with mail that no hook has announced yet, and for each one:

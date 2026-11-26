@@ -7,7 +7,7 @@
 //! whoever makes a wake call writes its outcome ([`Store::record_transport_wake`]). The CLI
 //! crate owns the adapters; this module only stores and decides.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 use crate::identity::resolve_agent;
+use crate::repo::resolve_existing;
 use crate::store::{Store, Tx};
 
 /// Written for every wake call (replaces `push.woke`).
@@ -341,23 +342,15 @@ pub fn attention_reason(row: &TransportSession, now: i64) -> Option<&'static str
     (row.undelivered_count >= UNDELIVERED_LIMIT).then_some("undelivered")
 }
 
-/// A directory as hooks and sweeps compare it: symlinks resolved when it exists, else
-/// normalised lexically (`.` dropped, `..` applied).
+/// A directory as hooks and sweeps compare it: an existing path is the same physical
+/// path `canonicalize` returns (including a relative one such as `.`); a missing path
+/// is resolved the way the filesystem does ([`resolve_existing`]), so a `..` after a
+/// symlink applies to where the link points even when the directory no longer exists.
 pub fn resolve_dir(path: &Path) -> String {
     if let Ok(real) = std::fs::canonicalize(path) {
         return real.to_string_lossy().into_owned();
     }
-    let mut out = PathBuf::new();
-    for comp in path.components() {
-        match comp {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out.to_string_lossy().into_owned()
+    resolve_existing(path).to_string_lossy().into_owned()
 }
 
 /// A file name for one session of an agent: the SHA-256 of both, so it is always 64 hex
@@ -1127,12 +1120,73 @@ mod tests {
     }
 
     #[test]
+    fn existing_relative_directory_keeps_its_physical_identity() {
+        // Relative `.` / `..` must not be walked from an empty PathBuf (that
+        // collapses to ""). Probe them in a child whose cwd is a temp directory so
+        // this test does not change the process cwd of sibling tests.
+        if let Ok(rel) = std::env::var("ANOTHER_RESOLVE_DIR_REL") {
+            let got = resolve_dir(Path::new(&rel));
+            let want = std::fs::canonicalize(&rel).unwrap();
+            assert_eq!(got, want.to_string_lossy());
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("child")).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        for rel in [".", "..", "child/.."] {
+            let out = std::process::Command::new(&exe)
+                .args([
+                    "transport::tests::existing_relative_directory_keeps_its_physical_identity",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env("ANOTHER_RESOLVE_DIR_REL", rel)
+                .current_dir(dir.path())
+                .output()
+                .expect("spawn resolve_dir probe");
+            assert!(
+                out.status.success(),
+                "rel={rel}\nstdout={}\nstderr={}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    #[test]
     fn a_directory_that_does_not_exist_is_normalised_lexically() {
-        // Compared through `Path`, so the separator of the platform does not matter.
-        assert_eq!(
-            Path::new(&resolve_dir(Path::new("/work/app/./src/.."))),
-            Path::new("/work/app")
-        );
+        // A missing tail is resolved through the existing physical parent, so this
+        // stays portable on Windows where a rooted `/work/...` path can pick up a
+        // drive and a verbatim prefix. Compared through `Path`, so the separator
+        // of the platform does not matter.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir
+            .path()
+            .join("work")
+            .join("app")
+            .join(".")
+            .join("src")
+            .join("..");
+        let got = resolve_dir(&missing);
+        let want = std::fs::canonicalize(dir.path())
+            .unwrap()
+            .join("work")
+            .join("app");
+        assert_eq!(Path::new(&got), want.as_path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_directory_past_a_symlink_climbs_from_where_the_link_points() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(real.join("inner")).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(real.join("inner"), &link).unwrap();
+        // `link/../gone` is `real/gone`, not the lexical `<dir>/gone`.
+        let got = resolve_dir(&link.join("..").join("gone"));
+        let want = std::fs::canonicalize(&real).unwrap().join("gone");
+        assert_eq!(Path::new(&got), want);
     }
 
     #[test]
