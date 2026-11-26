@@ -10,6 +10,7 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use another_core::test_support::forge_event;
 use another_core::*;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OptionalExtension};
@@ -161,27 +162,21 @@ impl Node {
 
     /// A correctly signed event from this node.
     fn signed_event(&self, kind: &str, payload: Value) -> WireEvent {
-        let key = crypto::decode_secret(&self.secret()).unwrap();
         let n = SEQ.fetch_add(1, Ordering::SeqCst);
-        let payload = payload.to_string();
-        let node_id = self.id();
-        let event_id = format!("forged-{kind}-{n}");
-        let ts = T0 + 1000 + n as i64;
-        let sig = crypto::sign(
-            &key,
-            &crypto::event_message(&event_id, &node_id, ts, "forger", kind, &payload),
-        );
-        WireEvent {
-            seq: 1_000_000 + n as i64,
-            event_id,
-            node_id,
-            ts,
-            actor: "forger".into(),
-            kind: kind.into(),
-            payload,
-            prev_id: None,
-            sig,
-        }
+        forge_event(
+            &self.sql(),
+            WireEvent {
+                seq: 1_000_000 + n as i64,
+                event_id: format!("forged-{kind}-{n}"),
+                node_id: self.id(),
+                ts: T0 + 1000 + n as i64,
+                actor: "forger".into(),
+                kind: kind.into(),
+                payload: payload.to_string(),
+                prev_id: None,
+                sig: String::new(),
+            },
+        )
     }
 }
 

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 
+use another_core::test_support::{forge_event, wire_events_of};
 use another_core::*;
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
@@ -71,94 +72,44 @@ impl Node {
             .unwrap()
     }
 
-    fn key(&self) -> String {
-        self.sql()
-            .query_row("SELECT secret_key FROM nodes WHERE is_local = 1", [], |r| {
-                r.get(0)
-            })
-            .unwrap()
-    }
-
     /// A correctly signed event of this node, as it would travel. It is not in any log.
     fn signed(&self, kind: &str, payload: &Value) -> WireEvent {
         let n = FORGED.fetch_add(1, Ordering::SeqCst);
-        let key = crypto::decode_secret(&self.key()).unwrap();
-        let payload = payload.to_string();
-        let node_id = self.id();
-        let event_id = format!("forged-{n}");
-        let ts = T0 + n as i64;
-        let sig = crypto::sign(
-            &key,
-            &crypto::event_message(&event_id, &node_id, ts, "system", kind, &payload),
-        );
-        WireEvent {
-            seq: 1_000_000 + n as i64,
-            event_id,
-            node_id,
-            ts,
-            actor: "system".into(),
-            kind: kind.into(),
-            payload,
-            prev_id: None,
-            sig,
-        }
+        forge_event(
+            &self.sql(),
+            WireEvent {
+                seq: 1_000_000 + n as i64,
+                event_id: format!("forged-{n}"),
+                node_id: self.id(),
+                ts: T0 + n as i64,
+                actor: "system".into(),
+                kind: kind.into(),
+                payload: payload.to_string(),
+                prev_id: None,
+                sig: String::new(),
+            },
+        )
     }
 
     /// Give the newest local event of `kind` a field of `bytes` bytes, signed with this
     /// node's key, as a build before D99 could have left it. Returns it as it would travel.
     fn grow_last(&self, kind: &str, field: &str, bytes: usize) -> WireEvent {
         let c = self.sql();
-        let (seq, event_id, node_id, ts, actor, payload, prev_id): (
-            i64,
-            String,
-            String,
-            i64,
-            String,
-            String,
-            Option<String>,
-        ) = c
-            .query_row(
-                "SELECT seq, event_id, node_id, ts, actor, payload, prev_id FROM events
-                 WHERE kind = ?1 AND node_id = (SELECT node_id FROM nodes WHERE is_local = 1)
-                 ORDER BY seq DESC LIMIT 1",
-                [kind],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                        r.get(6)?,
-                    ))
-                },
-            )
+        let mut ev = wire_events_of(&c, &self.id())
+            .into_iter()
+            .rev()
+            .find(|e| e.kind == kind)
             .unwrap();
-        let mut p: Value = serde_json::from_str(&payload).unwrap();
+        let mut p: Value = serde_json::from_str(&ev.payload).unwrap();
         p[field] = json!("d".repeat(bytes));
-        let payload = p.to_string();
-        let key = crypto::decode_secret(&self.key()).unwrap();
-        let sig = crypto::sign(
-            &key,
-            &crypto::event_message(&event_id, &node_id, ts, &actor, kind, &payload),
-        );
+        ev.payload = p.to_string();
+        let ev = forge_event(&c, ev);
         c.execute(
             "UPDATE events SET payload = ?2, sig = ?3 WHERE event_id = ?1",
-            params![event_id, payload, sig],
+            params![ev.event_id, ev.payload, ev.sig],
         )
         .unwrap();
-        WireEvent {
-            seq,
-            event_id,
-            node_id,
-            ts,
-            actor,
-            kind: kind.into(),
-            payload,
-            prev_id,
-            sig,
-        }
+        ev
     }
 
     /// The payloads of the `kind` events of `origin` this node stores, oldest first.

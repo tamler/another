@@ -6,6 +6,7 @@
 
 use std::path::Path;
 
+use another_core::test_support::wire_events_of;
 use another_core::*;
 use rusqlite::Connection;
 
@@ -47,30 +48,10 @@ impl Node {
 
     /// This node's own stored events of these kinds, exactly as signed.
     fn signed(&self, kinds: &[&str]) -> Vec<WireEvent> {
-        let c = self.sql();
-        let mut s = c
-            .prepare(
-                "SELECT seq, event_id, node_id, ts, actor, kind, payload, prev_id, sig
-                 FROM events WHERE node_id = ?1 ORDER BY seq",
-            )
-            .unwrap();
-        s.query_map([self.id()], |r| {
-            Ok(WireEvent {
-                seq: r.get(0)?,
-                event_id: r.get(1)?,
-                node_id: r.get(2)?,
-                ts: r.get(3)?,
-                actor: r.get(4)?,
-                kind: r.get(5)?,
-                payload: r.get(6)?,
-                prev_id: r.get(7)?,
-                sig: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
-            })
-        })
-        .unwrap()
-        .map(Result::unwrap)
-        .filter(|e| kinds.contains(&e.kind.as_str()))
-        .collect()
+        wire_events_of(&self.sql(), &self.id())
+            .into_iter()
+            .filter(|e| kinds.contains(&e.kind.as_str()))
+            .collect()
     }
 
     fn has_event(&self, event_id: &str) -> bool {

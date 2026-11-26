@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use another_core::test_support::forge_event;
 use another_core::*;
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -41,13 +42,6 @@ fn pair(hub: &Node, spoke: &Node) {
 
 /// A `resource.registered` signed by `spoke` with the given `port` and `pid`, pushed.
 fn push_registered(hub: &Node, spoke: &Node, n: u64, port: Value, pid: Value) -> IngestReport {
-    let secret: String = Connection::open(&spoke.db)
-        .unwrap()
-        .query_row("SELECT secret_key FROM nodes WHERE is_local = 1", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    let key = crypto::decode_secret(&secret).unwrap();
     let node_id = spoke.store.node_id().to_string();
     let kind = "resource.registered";
     let payload = json!({
@@ -61,22 +55,20 @@ fn push_registered(hub: &Node, spoke: &Node, n: u64, port: Value, pid: Value) ->
         "pid": pid,
     })
     .to_string();
-    let event_id = format!("adv250-ev-{n}");
-    let sig = crypto::sign(
-        &key,
-        &crypto::event_message(&event_id, &node_id, T0, "spoke", kind, &payload),
+    let ev = forge_event(
+        &Connection::open(&spoke.db).unwrap(),
+        WireEvent {
+            seq: 5_000_000 + n as i64,
+            event_id: format!("adv250-ev-{n}"),
+            node_id: node_id.clone(),
+            ts: T0,
+            actor: "spoke".into(),
+            kind: kind.into(),
+            payload,
+            prev_id: None,
+            sig: String::new(),
+        },
     );
-    let ev = WireEvent {
-        seq: 5_000_000 + n as i64,
-        event_id,
-        node_id: node_id.clone(),
-        ts: T0,
-        actor: "spoke".into(),
-        kind: kind.into(),
-        payload,
-        prev_id: None,
-        sig,
-    };
     hub.store.ingest(&node_id, &[ev], &[]).unwrap()
 }
 

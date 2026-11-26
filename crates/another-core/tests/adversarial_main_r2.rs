@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use another_core::test_support::forge_event;
 use another_core::*;
 use rusqlite::Connection;
 use serde_json::Value;
@@ -76,13 +77,7 @@ fn pair(hub: &Node, spoke: &Node) {
 /// Everything `spoke` authored, with `edit` applied to each payload and re-signed with the
 /// spoke's own key: a correctly signed event the spoke really sent.
 fn resigned(spoke: &Node, edit: impl Fn(&str, &mut Value)) -> Vec<WireEvent> {
-    let secret: String = Connection::open(spoke.home.join(DB_FILE))
-        .unwrap()
-        .query_row("SELECT secret_key FROM nodes WHERE is_local = 1", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    let key = crypto::decode_secret(&secret).unwrap();
+    let c = Connection::open(spoke.home.join(DB_FILE)).unwrap();
     let (events, _) = spoke.store.outbound_events(0, 10_000).unwrap();
     events
         .into_iter()
@@ -90,18 +85,7 @@ fn resigned(spoke: &Node, edit: impl Fn(&str, &mut Value)) -> Vec<WireEvent> {
             let mut p: Value = serde_json::from_str(&e.payload).unwrap();
             edit(&e.kind, &mut p);
             e.payload = p.to_string();
-            e.sig = crypto::sign(
-                &key,
-                &crypto::event_message(
-                    &e.event_id,
-                    &e.node_id,
-                    e.ts,
-                    &e.actor,
-                    &e.kind,
-                    &e.payload,
-                ),
-            );
-            e
+            forge_event(&c, e)
         })
         .collect()
 }
