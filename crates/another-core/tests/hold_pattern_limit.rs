@@ -14,6 +14,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use another_core::test_support::forge_event;
 use another_core::*;
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -227,34 +228,21 @@ impl Fed {
 
     /// A correctly signed event from mallory, pushed to the hub. Returns the event too.
     fn forge(&self, kind: &str, payload: Value) -> (WireEvent, IngestReport) {
-        let secret: String = self
-            .mallory
-            .sql()
-            .query_row("SELECT secret_key FROM nodes WHERE is_local = 1", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        let key = crypto::decode_secret(&secret).unwrap();
         let n = self.seq.fetch_add(1, Ordering::SeqCst);
-        let payload = payload.to_string();
-        let node_id = self.mallory.id();
-        let event_id = format!("forged-{n}");
-        let ts = T0 - 1000 + n as i64;
-        let sig = crypto::sign(
-            &key,
-            &crypto::event_message(&event_id, &node_id, ts, "mal", kind, &payload),
+        let ev = forge_event(
+            &self.mallory.sql(),
+            WireEvent {
+                seq: 1_000_000 + n as i64,
+                event_id: format!("forged-{n}"),
+                node_id: self.mallory.id(),
+                ts: T0 - 1000 + n as i64,
+                actor: "mal".into(),
+                kind: kind.into(),
+                payload: payload.to_string(),
+                prev_id: None,
+                sig: String::new(),
+            },
         );
-        let ev = WireEvent {
-            seq: 1_000_000 + n as i64,
-            event_id,
-            node_id,
-            ts,
-            actor: "mal".into(),
-            kind: kind.into(),
-            payload,
-            prev_id: None,
-            sig,
-        };
         let report = self
             .hub
             .store

@@ -8,6 +8,7 @@
 //! as well. The tests below use the current API; classify unit tests in `federation.rs`
 //! pin the legacy kinds.
 
+use another_core::test_support::wire_events_of;
 use another_core::*;
 use rusqlite::Connection;
 
@@ -60,28 +61,16 @@ fn woken(dir: &std::path::Path) -> (Store, Store, Store) {
 }
 
 /// Alpha's stored `transport.wake`, exactly as signed.
-fn stored_wake(dir: &std::path::Path) -> WireEvent {
-    Connection::open(dir.join("alpha").join(DB_FILE))
-        .unwrap()
-        .query_row(
-            "SELECT seq, event_id, node_id, ts, actor, kind, payload, prev_id, sig
-             FROM events WHERE kind = 'transport.wake'",
-            [],
-            |r| {
-                Ok(WireEvent {
-                    seq: r.get(0)?,
-                    event_id: r.get(1)?,
-                    node_id: r.get(2)?,
-                    ts: r.get(3)?,
-                    actor: r.get(4)?,
-                    kind: r.get(5)?,
-                    payload: r.get(6)?,
-                    prev_id: r.get(7)?,
-                    sig: r.get(8)?,
-                })
-            },
-        )
-        .unwrap()
+fn stored_wake(dir: &std::path::Path, alpha: &Store) -> WireEvent {
+    let wake = wire_events_of(
+        &Connection::open(dir.join("alpha").join(DB_FILE)).unwrap(),
+        alpha.node_id(),
+    )
+    .into_iter()
+    .find(|e| e.kind == "transport.wake")
+    .unwrap();
+    assert!(!wake.sig.is_empty(), "alpha signed its wake record");
+    wake
 }
 
 #[test]
@@ -112,7 +101,7 @@ fn gap_a_wake_record_does_not_leave_its_node() {
 fn a_hub_refuses_a_pushed_wake_record() {
     let dir = tempfile::tempdir().unwrap();
     let (hub, alpha, _) = woken(dir.path());
-    let wake = stored_wake(dir.path());
+    let wake = stored_wake(dir.path(), &alpha);
     let report = hub
         .ingest(
             alpha.node_id(),
@@ -139,7 +128,7 @@ fn a_wake_record_stored_by_an_older_hub_is_not_relayed() {
     let (out, _) = alpha.outbound_events(0, 10_000).unwrap();
     hub.ingest(alpha.node_id(), &out, &[alpha.node_entry().unwrap()])
         .unwrap();
-    let wake = stored_wake(dir.path());
+    let wake = stored_wake(dir.path(), &alpha);
     Connection::open(dir.path().join("hub").join(DB_FILE))
         .unwrap()
         .execute(

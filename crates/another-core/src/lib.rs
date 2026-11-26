@@ -23,6 +23,9 @@ mod resources;
 mod stats;
 mod store;
 mod sync_skip;
+/// For the workspace's tests only: forge and read back signed wire events.
+#[cfg(feature = "test-support")]
+pub mod test_support;
 mod time;
 mod tokens;
 mod transport;

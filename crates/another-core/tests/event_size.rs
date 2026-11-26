@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 
+use another_core::test_support::{forge_event, wire_events_of};
 use another_core::*;
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
@@ -532,62 +533,21 @@ fn a_pull_page_is_closed_at_the_byte_budget() {
 /// written it, signed with the node's own key. Returns it as it would travel.
 fn grow_last(n: &Node, kind: &str, field: &str, bytes: usize) -> WireEvent {
     let c = Connection::open(n.db()).unwrap();
-    let (seq, event_id, node_id, ts, actor, payload, prev_id): (
-        i64,
-        String,
-        String,
-        i64,
-        String,
-        String,
-        Option<String>,
-    ) = c
-        .query_row(
-            "SELECT seq, event_id, node_id, ts, actor, payload, prev_id FROM events
-             WHERE kind = ?1 AND node_id = (SELECT node_id FROM nodes WHERE is_local = 1)
-             ORDER BY seq DESC LIMIT 1",
-            [kind],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                ))
-            },
-        )
+    let mut ev = wire_events_of(&c, n.store.node_id())
+        .into_iter()
+        .rev()
+        .find(|e| e.kind == kind)
         .unwrap();
-    let mut p: Value = serde_json::from_str(&payload).unwrap();
+    let mut p: Value = serde_json::from_str(&ev.payload).unwrap();
     p[field] = json!("d".repeat(bytes));
-    let payload = p.to_string();
-    let secret: String = c
-        .query_row("SELECT secret_key FROM nodes WHERE is_local = 1", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    let key = crypto::decode_secret(&secret).unwrap();
-    let sig = crypto::sign(
-        &key,
-        &crypto::event_message(&event_id, &node_id, ts, &actor, kind, &payload),
-    );
+    ev.payload = p.to_string();
+    let ev = forge_event(&c, ev);
     c.execute(
         "UPDATE events SET payload = ?2, sig = ?3 WHERE event_id = ?1",
-        params![event_id, payload, sig],
+        params![ev.event_id, ev.payload, ev.sig],
     )
     .unwrap();
-    WireEvent {
-        seq,
-        event_id,
-        node_id,
-        ts,
-        actor,
-        kind: kind.into(),
-        payload,
-        prev_id,
-        sig,
-    }
+    ev
 }
 
 /// The cap is a rule for what this build writes, not for what is already in a log. An
