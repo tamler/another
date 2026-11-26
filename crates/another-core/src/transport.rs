@@ -342,10 +342,14 @@ pub fn attention_reason(row: &TransportSession, now: i64) -> Option<&'static str
     (row.undelivered_count >= UNDELIVERED_LIMIT).then_some("undelivered")
 }
 
-/// A directory as hooks and sweeps compare it: resolved the way the filesystem does
-/// ([`resolve_existing`]), so a `..` after a symlink applies to where the link points
-/// even when the directory no longer exists.
+/// A directory as hooks and sweeps compare it: an existing path is the same physical
+/// path `canonicalize` returns (including a relative one such as `.`); a missing path
+/// is resolved the way the filesystem does ([`resolve_existing`]), so a `..` after a
+/// symlink applies to where the link points even when the directory no longer exists.
 pub fn resolve_dir(path: &Path) -> String {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real.to_string_lossy().into_owned();
+    }
     resolve_existing(path).to_string_lossy().into_owned()
 }
 
@@ -1112,6 +1116,40 @@ mod tests {
             assert_eq!(outcome.started(), started, "{outcome:?}");
             assert_eq!(outcome.failure(), failure, "{outcome:?}");
             assert_eq!(WakeOutcome::parse(outcome.as_str()), Some(outcome));
+        }
+    }
+
+    #[test]
+    fn existing_relative_directory_keeps_its_physical_identity() {
+        // Relative `.` / `..` must not be walked from an empty PathBuf (that
+        // collapses to ""). Probe them in a child whose cwd is a temp directory so
+        // this test does not change the process cwd of sibling tests.
+        if let Ok(rel) = std::env::var("ANOTHER_RESOLVE_DIR_REL") {
+            let got = resolve_dir(Path::new(&rel));
+            let want = std::fs::canonicalize(&rel).unwrap();
+            assert_eq!(got, want.to_string_lossy());
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("child")).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        for rel in [".", "..", "child/.."] {
+            let out = std::process::Command::new(&exe)
+                .args([
+                    "transport::tests::existing_relative_directory_keeps_its_physical_identity",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env("ANOTHER_RESOLVE_DIR_REL", rel)
+                .current_dir(dir.path())
+                .output()
+                .expect("spawn resolve_dir probe");
+            assert!(
+                out.status.success(),
+                "rel={rel}\nstdout={}\nstderr={}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
     }
 

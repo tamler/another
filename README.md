@@ -68,6 +68,8 @@ On macOS, when replacing an existing `another` with a new build, **remove the ol
 
 After upgrading, restart every `another` process that was already running, since it keeps the old code: run `another daemon restart` (or `another daemon install` from the new binary if it lives at a different path), restart each client that runs `another serve --stdio` (or reconnect its MCP server), and restart any `another remote up`, `another serve --auth` or hand-started `another serve`. This matters most when the upgrade changes how repository keys and checkout ids are cached (`project_repos`). Current builds use `v4:`-prefixed cache keys; an older process may rewrite rows in an older format and then compare keys that never match, which can miss holds in this checkout (fail open). See [docs/DAEMON.md](docs/DAEMON.md#upgrading).
 
+After this build, a missing working directory used in a weak wake match is resolved through its existing physical parent, including on Windows where that can restore a verbatim prefix and on-disk letter case. A cwd value stored by an older process may miss that match until the session's hook runs again and restamps it. There is no schema change and no migration. See [docs/WAKE.md](docs/WAKE.md#sessions).
+
 If the machine is part of a federation, upgrade its hub and all its spokes together. A hub and a spoke on different sides of the build that signs answers do not sync: each `another sync` fails with a text that says which end to update, nothing is lost, and no node pairs again. See [docs/FEDERATION.md](docs/FEDERATION.md#upgrading).
 
 **2. Create the local node** (`~/.another`, or `$ANOTHER_HOME`):
