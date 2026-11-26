@@ -1155,11 +1155,24 @@ mod tests {
 
     #[test]
     fn a_directory_that_does_not_exist_is_normalised_lexically() {
-        // Compared through `Path`, so the separator of the platform does not matter.
-        assert_eq!(
-            Path::new(&resolve_dir(Path::new("/work/app/./src/.."))),
-            Path::new("/work/app")
-        );
+        // A missing tail is resolved through the existing physical parent, so this
+        // stays portable on Windows where a rooted `/work/...` path can pick up a
+        // drive and a verbatim prefix. Compared through `Path`, so the separator
+        // of the platform does not matter.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir
+            .path()
+            .join("work")
+            .join("app")
+            .join(".")
+            .join("src")
+            .join("..");
+        let got = resolve_dir(&missing);
+        let want = std::fs::canonicalize(dir.path())
+            .unwrap()
+            .join("work")
+            .join("app");
+        assert_eq!(Path::new(&got), want.as_path());
     }
 
     #[cfg(unix)]
