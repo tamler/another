@@ -3,10 +3,12 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-/// The path to record at hook and daemon install: `current_exe` as returned,
-/// without following symlinks (a Homebrew Cellar target or rustup shim would
-/// break upgrades when the link is updated). On Windows, the `\\?\` verbatim
-/// prefix is stripped so the path can be written into schtasks XML.
+/// The path to record at hook and daemon install: `current_exe` as returned.
+/// On Windows, the `\\?\` verbatim prefix is stripped so the path can be
+/// written into schtasks XML. This function does not walk the path itself.
+/// On Linux, `current_exe` already reads `/proc/self/exe`, which the kernel
+/// resolves to the final target, so a symlink used to invoke the process
+/// cannot be recovered.
 pub fn resolve_current_exe() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("locating the another binary")?;
     Ok(recorded_exe_path(exe))
@@ -33,7 +35,9 @@ pub fn strip_win32_verbatim(path: &str) -> String {
 pub fn recorded_bin_from_wrapper(script: &str) -> Option<PathBuf> {
     for line in script.lines() {
         let line = line.trim();
-        let rest = line.strip_prefix("ANOTHER_BIN=")?;
+        let Some(rest) = line.strip_prefix("ANOTHER_BIN=") else {
+            continue;
+        };
         let path = unquote_sh(rest);
         if !path.is_empty() {
             return Some(PathBuf::from(path));
