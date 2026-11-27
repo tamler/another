@@ -46,6 +46,10 @@ State is one SQLite database on the machine (`~/.another`, or `$ANOTHER_HOME`). 
 
 OAuth for hosted MCP clients (ChatGPT, Claude.ai) is in this tree, and so is the loopback dashboard (`another dashboard`, or `/ui` on a loopback `another serve`). See the [changelog](https://toanother.one/changelog/) and [how I run the agents on this repo](https://toanother.one/building/).
 
+OAuth URI and HTTP Host/Origin ports must be 1 to 65535 written in ASCII decimal without a sign or leading zero; an empty port after `:` is refused. See [remote access](docs/REMOTE.md) for existing-client and allow-list compatibility.
+Malformed client metadata URLs report client metadata errors; `--public-url` errors retain their operator guidance.
+Stored-client warnings for invalid redirect ports show only the escaped authority, without the URI path or query.
+
 The website source lives in [site/](site/README.md). `sh site/build.sh` checks the pages, and `python3 scripts/check-copy.py` rejects em dashes and a banned-phrase list.
 
 For Rust callers, `another_core` exports `now_ms`, `fmt_ts`, `parse_ts` and
