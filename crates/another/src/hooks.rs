@@ -469,7 +469,8 @@ fn contains_ours(root: &Map<String, Value>) -> bool {
 /// same test `drift` uses, so a pack is never "not installed" and "out of date" at once).
 /// For Grok, a leftover pre-rename `wyres.json` also counts, because install removes it.
 pub fn installed(env: &HookEnv, client: Client) -> bool {
-    if std::fs::read_to_string(client.config_path(&env.home)).is_ok_and(|t| contains_ours_text(&t)) {
+    if std::fs::read_to_string(client.config_path(&env.home)).is_ok_and(|t| contains_ours_text(&t))
+    {
         return true;
     }
     client == Client::Grok && grok_legacy_mentions_ours(env)
@@ -580,7 +581,10 @@ pub fn drift(env: &HookEnv, client: Client) -> Vec<String> {
     // this home would advise a reinstall that silently moves them here (#163 F2).
     let here = env.script_path();
     let used = wrapper_paths(client, &root);
-    let foreign = used.iter().find(|p| **p != here).filter(|_| !used.contains(&here));
+    let foreign = used
+        .iter()
+        .find(|p| **p != here)
+        .filter(|_| !used.contains(&here));
     let foreign_env = foreign.map(|theirs| {
         let home = theirs
             .parent()
@@ -648,28 +652,29 @@ pub fn drift(env: &HookEnv, client: Client) -> Vec<String> {
             "the wrapper {} calls a different another binary or home than this one",
             script.display()
         )),
-        Ok(_) => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if std::fs::metadata(&script).is_ok_and(|m| m.permissions().mode() & 0o111 == 0) {
-                    out.push(format!(
-                        "the wrapper {} is not executable",
-                        script.display()
-                    ));
-                }
-            }
+        Ok(_) => {}
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if script.is_file()
+            && std::fs::metadata(&script).is_ok_and(|m| m.permissions().mode() & 0o111 == 0)
+        {
+            out.push(format!(
+                "the wrapper {} is not executable",
+                script.display()
+            ));
         }
     }
 
-    if !out.is_empty() {
+    if !out.is_empty() && !shape_bad {
         if let Some(foreign_env) = foreign_env.as_ref() {
             out.push(format!(
                 "to keep that home, run `ANOTHER_HOME={} {install}`; `{install}` from here moves the hooks to {}",
                 sh_quote(&foreign_env.another_home.display().to_string()),
                 env.another_home.display()
             ));
-        } else if !shape_bad {
+        } else {
             out.push(format!("run `{install}` to repair"));
         }
     }
