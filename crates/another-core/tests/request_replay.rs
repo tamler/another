@@ -5,6 +5,7 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use another_core::*;
 use rusqlite::{params, Connection};
@@ -135,6 +136,31 @@ fn a_captured_request_is_served_once() {
     hub.set_time(START + 4 * MINUTE);
     refused(submit(&hub.store, &captured), REPLAYED);
     assert_eq!(hub.kept(vic.node_id()), 1);
+}
+
+#[test]
+fn a_bad_v2_signature_does_not_wait_for_the_write_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = Hub::new(dir.path(), "hub");
+    let vic = spoke(dir.path(), "vic");
+    pair(&hub, &vic);
+    let mut bad = sign(&vic, &hub.id(), START);
+    bad.sig.push('x');
+    let db = hub.db();
+    db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let store = hub.store.clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        sender.send(submit(&store, &bad)).unwrap();
+    });
+    let result = receiver.recv_timeout(Duration::from_millis(500));
+    db.execute_batch("ROLLBACK").unwrap();
+    worker.join().unwrap();
+    refused(
+        result.expect("a bad v2 signature waited for a writer"),
+        NOT_SIGNED,
+    );
+    assert_eq!(hub.kept(vic.node_id()), 0);
 }
 
 #[test]

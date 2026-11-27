@@ -1919,6 +1919,20 @@ impl Store {
                 "x-another-nonce must be 32 lowercase hex characters".into(),
             ));
         }
+        // Verify in a read so a bad signature does not take the write lock.
+        let (_perms, key) = self.read(|conn| paired_spoke_key(conn, node_id))?;
+        let msg = crypto::request_message_v2(
+            self.node_id(),
+            node_id,
+            method,
+            path_and_query,
+            time_ms,
+            nonce,
+            body,
+        );
+        if !crypto::verify_strict(&key, &msg, signature) {
+            return Err(request_denied());
+        }
         self.write(|tx| {
             let (perms, key) = paired_spoke_key(tx, node_id)?;
             let msg = crypto::request_message_v2(
@@ -1933,22 +1947,33 @@ impl Store {
             if !crypto::verify_strict(&key, &msg, signature) {
                 return Err(request_denied());
             }
-            let (highest, kept): (Option<i64>, i64) = tx.query_row(
-                "SELECT MAX(request_time), COUNT(*) FROM fed_request_nonces WHERE node_id = ?1",
+            let highest: Option<i64> = tx.query_row(
+                "SELECT MAX(request_time) FROM fed_request_nonces WHERE node_id = ?1",
                 [node_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| r.get(0),
             )?;
             if highest.is_some_and(|h| time_ms < h.saturating_sub(REPLAY_RETAIN_MS)) {
                 return Err(Error::Forbidden(
-                    "request time is older than requests this hub already accepted from this \
-                     node by more than 10 minutes; check the clocks"
+                    "request time is older than requests this hub already accepted from this                      node by more than 10 minutes; check the clocks"
                         .into(),
                 ));
             }
+            let floor = highest
+                .unwrap_or(time_ms)
+                .max(time_ms)
+                .saturating_sub(REPLAY_RETAIN_MS);
+            tx.execute(
+                "DELETE FROM fed_request_nonces WHERE node_id = ?1 AND request_time < ?2",
+                params![node_id, floor],
+            )?;
+            let kept: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM fed_request_nonces WHERE node_id = ?1",
+                [node_id],
+                |r| r.get(0),
+            )?;
             if kept >= REPLAY_ROWS_PER_NODE {
                 return Err(Error::Forbidden(
-                    "too many signed requests from this node in the last 10 minutes; try again \
-                     later"
+                    "too many signed requests from this node in the last 10 minutes; try again                      later"
                         .into(),
                 ));
             }
@@ -1963,14 +1988,6 @@ impl Store {
                         .into(),
                 ));
             }
-            let floor = highest
-                .unwrap_or(time_ms)
-                .max(time_ms)
-                .saturating_sub(REPLAY_RETAIN_MS);
-            tx.execute(
-                "DELETE FROM fed_request_nonces WHERE node_id = ?1 AND request_time < ?2",
-                params![node_id, floor],
-            )?;
             Ok(perms_of(&perms))
         })
     }
