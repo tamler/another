@@ -811,7 +811,8 @@ fn a_remote_boards_history_scan_is_bounded() {
                 "exclusive": true, "auto": true })
     };
     fx.forge("hold.acquired", edit("sub/old.rs"));
-    let rows: u32 = 50_000 + 10;
+    assert_eq!(BOARD_VIEW_SCAN_CAP, 50_000);
+    let rows: u32 = BOARD_VIEW_SCAN_CAP + 10;
     fx.sql()
         .execute(
             "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < ?1)

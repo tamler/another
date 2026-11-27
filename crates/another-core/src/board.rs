@@ -36,6 +36,10 @@ pub const MAX_BOARD_LIMIT: u32 = 200;
 /// The cap applies after the window, project and edit-hook filters; reaching it sets
 /// [`Board::history_truncated`].
 pub const BOARD_EVENT_SCAN_CAP: u32 = 5_000;
+/// On a remote caller's board, events it may not see are skipped without counting toward
+/// [`BOARD_EVENT_SCAN_CAP`], so the read is also bounded in rows read: at most this many,
+/// newest first. Reaching it sets [`Board::history_truncated`].
+pub const BOARD_VIEW_SCAN_CAP: u32 = 50_000;
 
 /// Input for [`Store::board`].
 #[derive(Debug, Clone, Default)]
@@ -356,14 +360,16 @@ impl Store {
                      ORDER BY seq DESC LIMIT ?4",
                 )?;
                 // With a token's view, an event it may not see neither appears nor counts
-                // toward the cap, so the SQL cannot stop at the cap itself (-1: no limit).
+                // toward the cap, so the SQL stops at the bound on rows read instead.
                 let sql_limit: i64 = match view {
-                    Some(_) => -1,
+                    Some(_) => i64::from(BOARD_VIEW_SCAN_CAP),
                     None => i64::from(BOARD_EVENT_SCAN_CAP) + 1,
                 };
                 let mut rows: Vec<(i64, String, String, String)> = Vec::new();
+                let mut read: i64 = 0;
                 let mut found = stmt.query(params![local, since, scope_json, sql_limit])?;
                 while let Some(r) = found.next()? {
+                    read += 1;
                     let (ts, actor, kind) = (r.get(0)?, r.get(1)?, r.get::<_, String>(2)?);
                     let mut payload: String = r.get(3)?;
                     if let Some(view) = &view {
@@ -376,6 +382,9 @@ impl Store {
                     if rows.len() > BOARD_EVENT_SCAN_CAP as usize {
                         break;
                     }
+                }
+                if view.is_some() && read >= sql_limit {
+                    history_truncated = true;
                 }
                 if rows.len() > BOARD_EVENT_SCAN_CAP as usize {
                     history_truncated = true;

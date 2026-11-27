@@ -38,7 +38,7 @@ pub use activity::{
 };
 pub use board::{
     Board, BoardAgent, BoardBlocked, BoardEdit, BoardHold, BoardProject, BoardQuery, BoardRequest,
-    BOARD_EVENT_SCAN_CAP, DEFAULT_BOARD_LIMIT, DEFAULT_BOARD_WINDOW_MS, EDIT_HOOK_HOLD_REASON,
+    BOARD_EVENT_SCAN_CAP, BOARD_VIEW_SCAN_CAP, DEFAULT_BOARD_LIMIT, DEFAULT_BOARD_WINDOW_MS, EDIT_HOOK_HOLD_REASON,
     MAX_BOARD_LIMIT,
 };
 pub use checkout::{shell_word, ListedHold, PathRelease, ReleasePath};

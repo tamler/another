@@ -9,6 +9,11 @@
 //!
 //! Conflict checks never use this: acquire, check and the edit guard compare against every
 //! hold of the checkout, and only what is returned to the remote caller changes.
+//!
+//! Checkout links come from the repository cache (`project_repos`) as it is, never
+//! refreshed here, as on the board. A project no command has linked yet, or one linked
+//! under older key rules, is judged by its own tree only, so a parent's covering hold stays
+//! hidden from it until the project is used (an edit, a hold command). That fails closed.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -43,6 +48,9 @@ pub(crate) struct HoldView {
     trees: Vec<Tree>,
     /// Per project id: `None` when the project is unknown or on another node.
     places: RefCell<HashMap<String, Option<Link>>>,
+    /// [`HoldView::shows_hold`] answers by hold id, for the one request this view serves:
+    /// a feed or board names the same holds many times.
+    shown: RefCell<HashMap<String, bool>>,
 }
 
 /// The cached link of `project_id`, only when it is current and names a checkout. The cache
@@ -75,11 +83,37 @@ impl HoldView {
                 project_id,
             });
         }
-        Ok(HoldView {
+        Ok(HoldView::with(local, trees))
+    }
+
+    /// What a token allowed on the one local project `project_id` would see. Used where no
+    /// token is at hand but the result can reach one: a notice to an agent of that project.
+    pub(crate) fn of_project(conn: &Connection, local: &str, project_id: &str) -> Result<Self> {
+        let abs_path: Option<String> = conn
+            .query_row(
+                "SELECT abs_path FROM projects WHERE project_id = ?1 AND node_id = ?2",
+                [project_id, local],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let trees = match abs_path {
+            Some(abs_path) => vec![Tree {
+                link: cached_link(conn, project_id)?,
+                fold: folds_case(Path::new(&abs_path)),
+                project_id: project_id.to_string(),
+            }],
+            None => Vec::new(),
+        };
+        Ok(HoldView::with(local, trees))
+    }
+
+    fn with(local: &str, trees: Vec<Tree>) -> Self {
+        HoldView {
             local: local.to_string(),
             trees,
             places: RefCell::new(HashMap::new()),
-        })
+            shown: RefCell::new(HashMap::new()),
+        }
     }
 
     /// The link of a local project; `None` for an unknown project or one on another node.
@@ -140,6 +174,15 @@ impl HoldView {
     /// [`HoldView::shows`] for a stored hold, by id. Released and expired rows count, for the
     /// feed; an unknown id and a hold of another node are hidden.
     pub(crate) fn shows_hold(&self, conn: &Connection, hold_id: &str) -> Result<bool> {
+        if let Some(known) = self.shown.borrow().get(hold_id) {
+            return Ok(*known);
+        }
+        let shown = self.judge_hold(conn, hold_id)?;
+        self.shown.borrow_mut().insert(hold_id.to_string(), shown);
+        Ok(shown)
+    }
+
+    fn judge_hold(&self, conn: &Connection, hold_id: &str) -> Result<bool> {
         let row: Option<(String, String, String)> = conn
             .query_row(
                 "SELECT node_id, project_id, pattern FROM holds WHERE hold_id = ?1",
@@ -311,6 +354,9 @@ impl HoldView {
 }
 
 /// `conflict` with every name dropped: only the caller's own requested path and `text`.
+/// `exclusive` is kept on purpose. It names nobody, and it is what the caller needs to
+/// decide its next step: a shared hold of its own can still be taken beside a shared
+/// blocker, never beside an exclusive one.
 pub(crate) fn redact(conflict: HoldConflict, text: &str) -> HoldConflict {
     HoldConflict {
         path: conflict.path,

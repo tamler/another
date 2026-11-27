@@ -1639,9 +1639,18 @@ fn ping_free_waiters_tx(tx: &Tx<'_>) -> Result<()> {
         // Naming the ended holds makes every ping distinct, so the push dedupe never
         // swallows a second ping for the same file within its five-minute window.
         let ended: Vec<String> = serde_json::from_str(&blockers).unwrap_or_default();
+        // The notice can reach a remote reader (the waiter's token reads its inbox), so a
+        // blocker the waiter's project may not see is named nowhere in it: no hold ids, and
+        // the waiter itself as sender instead of the holder (there is no system mailbox).
+        let view = crate::visibility::HoldView::of_project(tx, tx.node_id, &project_id)?;
+        let mut hidden = false;
+        for id in &ended {
+            hidden |= !view.shows_hold(tx, id)?;
+        }
+        let sender = if hidden { &agent_id } else { &holder_id };
         // A wait with no blocker on record has no ended hold to name: one emptied by the
         // migration that scoped holds to a checkout, whose blocker was in another one.
-        let why = if ended.is_empty() {
+        let why = if ended.is_empty() || hidden {
             "no conflicting hold remains in this checkout".to_string()
         } else {
             format!(
@@ -1666,7 +1675,7 @@ fn ping_free_waiters_tx(tx: &Tx<'_>) -> Result<()> {
                     "blockers": ended,
                 }),
             )?;
-            send_notice_tx(tx, &holder_id, &agent_id, &notice)
+            send_notice_tx(tx, sender, &agent_id, &notice)
         });
         if let Err(e) = sent {
             tx.emit(
