@@ -18,6 +18,7 @@ use crate::federation::{hub_of, WireEvent, PULL_BODY_LIMIT_BYTES, PUSH_BODY_LIMI
 use crate::mail::{display_line, single_line};
 use crate::store::{Store, Tx};
 use crate::time::fmt_ts;
+use crate::tokens::{insert_audit_tx, AuditRecord};
 
 pub(crate) const KIND_SKIPPED: &str = "sync.skipped";
 pub(crate) const KIND_ACKED: &str = "sync.skip_acked";
@@ -187,19 +188,16 @@ impl SkippedEvent {
 }
 
 fn insert_audit(tx: &Tx<'_>, operation: &str, outcome: &str, detail: String) -> Result<()> {
-    tx.execute(
-        "INSERT INTO audit_log (node_id, ts, token_id, agent, operation, outcome, detail, remote)
-         VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, NULL)",
-        params![
-            tx.node_id,
-            tx.now,
-            format!("node:{}", tx.node_id),
-            operation,
-            outcome,
-            detail
-        ],
-    )?;
-    Ok(())
+    insert_audit_tx(
+        tx,
+        AuditRecord {
+            agent: Some(format!("node:{}", tx.node_id)),
+            operation: operation.into(),
+            outcome: outcome.into(),
+            detail: Some(detail),
+            ..Default::default()
+        },
+    )
 }
 
 /// The event id a stored marker or acknowledgement names, as SQL over `events.payload`:

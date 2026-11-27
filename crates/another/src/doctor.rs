@@ -96,7 +96,7 @@ pub fn run(inputs: &Inputs) -> Report {
     }
     checks.push(hook_check(&inputs.another_home));
 
-    // launchd and the plist only; the one `/health` call is the server check's, and the
+    // Service manager and definition only; the one `/health` call is the server check's, and the
     // daemon row reuses its answer when both name the same address.
     let daemon = daemon_status(&inputs.another_home);
     let bind = inputs
@@ -562,15 +562,15 @@ fn server(bind: &str, local_node: Option<&str>) -> (Check, bool) {
                 Level::Info,
                 format!("nothing answering on {bind}"),
             )
-            .fix("another daemon install (macOS) or run another serve"),
+            .fix("another daemon install or run another serve"),
             false,
         ),
     }
 }
 
 fn daemon_status(another_home: &Path) -> anyhow::Result<crate::daemon::DaemonStatus> {
-    if !cfg!(target_os = "macos") {
-        anyhow::bail!("not macOS");
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
+        anyhow::bail!("daemon check supports macOS and Linux");
     }
     let env = crate::daemon::DaemonEnv::detect(
         another_home.to_path_buf(),
@@ -599,22 +599,28 @@ fn daemon_check(
     another_home: &Path,
     answered: Option<&str>,
 ) -> Check {
-    if !cfg!(target_os = "macos") {
-        return check("daemon", Level::Skip, "the launchd daemon is macOS only");
-    }
     let s = match status {
         Ok(s) => s,
-        Err(e) => return check("daemon", Level::Skip, format!("could not ask launchd: {e}")),
+        Err(e) => {
+            return check(
+                "daemon",
+                Level::Skip,
+                format!("could not ask service manager: {e}"),
+            )
+        }
     };
     if !s.installed {
         return check("daemon", Level::Info, "not installed")
             .fix("another daemon install, if you want another serve running in the background");
     }
-    // macOS only (`daemon_status`): `file` is the launchd plist.
     let served = std::fs::read_to_string(&s.file)
         .ok()
         .as_deref()
-        .and_then(plist_home);
+        .and_then(|text| match s.manager {
+            crate::daemon::Manager::Launchd => plist_home(text),
+            crate::daemon::Manager::Systemd => crate::daemon::systemd_home(text),
+            crate::daemon::Manager::TaskScheduler => None,
+        });
     if let Some(served) = served.filter(|h| !same_file(h, another_home)) {
         return check(
             "daemon",
@@ -626,6 +632,9 @@ fn daemon_check(
                 another_home.display()
             ),
         );
+    }
+    if let Some(detail) = &s.detail {
+        return check("daemon", Level::Warn, detail.clone());
     }
     if !s.loaded {
         return check(
@@ -640,9 +649,12 @@ fn daemon_check(
         return check(
             "daemon",
             Level::Warn,
-            format!("{} loaded{pid}, but its plist names no --bind", s.label),
+            format!(
+                "{} loaded{pid}, but its definition names no --bind",
+                s.label
+            ),
         )
-        .fix("another daemon install (rewrites the plist)");
+        .fix("another daemon install (rewrites the definition)");
     };
     match answered {
         Some(a) if a == bind => {}
@@ -1033,4 +1045,55 @@ pub fn render(r: &Report) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::{DaemonEnv, DaemonStatus, Manager};
+
+    #[test]
+    fn daemon_check_reads_the_home_from_a_systemd_unit_fixture() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = DaemonEnv {
+            manager: Manager::Systemd,
+            home: dir.path().join("user"),
+            config_home: None,
+            another_home: dir.path().join("other home % with \\\"quotes\""),
+            exe: PathBuf::from("/work/another"),
+            path: None,
+            user: None,
+            label: "one.toanother.fixture".into(),
+            bind: "127.0.0.1:7466".into(),
+        };
+        let unit = dir.path().join("fixture.service");
+        std::fs::write(&unit, crate::daemon::systemd_unit(&env).unwrap()).unwrap();
+        let status = DaemonStatus {
+            manager: Manager::Systemd,
+            label: env.label.clone(),
+            file: unit.display().to_string(),
+            plist: None,
+            installed: true,
+            loaded: true,
+            detail: None,
+            pid: Some(4242),
+            bind: Some(env.bind.clone()),
+            healthy: false,
+            log: "fixture.log".into(),
+        };
+        let current = dir.path().join("current");
+        let row = daemon_check(Ok(status.clone()), &current, Some(&env.bind));
+        assert_eq!(row.status, Level::Info);
+        assert_eq!(
+            row.detail,
+            format!(
+                "{} serves {}, not {}",
+                env.label,
+                env.another_home.display(),
+                current.display()
+            )
+        );
+        let row = daemon_check(Ok(status), &env.another_home, Some(&env.bind));
+        assert_eq!(row.status, Level::Ok);
+    }
 }

@@ -540,6 +540,43 @@ fn audit_rows(hub: &Hub, operation: &str) -> Vec<AuditEntry> {
     rows
 }
 
+#[test]
+fn pairing_and_sync_report_hub_redirect_without_following_it() {
+    let hub = node("hub");
+    let spoke = node("spoke");
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let destination = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    destination.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let location = format!("http://{}/fed/pair", destination.local_addr().unwrap());
+    let redirect = axum::response::Redirect::temporary(&location);
+    let app = axum::Router::new().fallback(move || async move { redirect });
+    rt.spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let code = hub
+        .store
+        .create_invite(&url, &[Perm::ReadFeed], 3600)
+        .unwrap();
+
+    let pair_error = fed::join(&spoke.store, &code).unwrap_err();
+    let (invite, request) = spoke.store.prepare_join(&code).unwrap();
+    let response = hub.store.accept_pairing(&request).unwrap();
+    spoke.store.complete_join(&invite, &response).unwrap();
+    let sync_error = fed::sync(&spoke.store).unwrap_err();
+    assert!(
+        matches!(destination.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "redirect destination received a connection"
+    );
+    for error in [pair_error, sync_error] {
+        assert_eq!(
+            error.to_string(),
+            format!("hub answered 307 redirect to {location}; use the final hub URL in the invite")
+        );
+    }
+}
+
 /// A joiner and a hub of this build pair over HTTP and sync. A request in the shape an
 /// older joiner sends is answered 403 with the upgrade message, and does not use the invite.
 #[test]

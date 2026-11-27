@@ -1524,10 +1524,17 @@ fn tunnel_to(hub_url: &str) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Stri
 
 #[test]
 fn plain_http_off_loopback_warns_at_invite_join_and_doctor() {
-    let warns = ["http://10.0.0.5:7466", "http://localhost.example"];
+    let warns = [
+        "http://10.0.0.5:7466",
+        "http://localhost.example",
+        "http://127.0.0.2:1",
+        "http://[::ffff:127.0.0.1]:1",
+    ];
     let quiet = [
         "http://127.0.0.1:1",
         "http://localhost:1",
+        "http://LOCALHOST:1",
+        "http://LocalHost:1",
         "http://[::1]:1",
         "https://hub.example",
     ];
@@ -1537,6 +1544,8 @@ fn plain_http_off_loopback_warns_at_invite_join_and_doctor() {
     for url in quiet {
         assert!(!fed::plain_http_off_loopback(url), "{url}");
     }
+    assert!(fed::plain_http_off_loopback("HTTP://10.0.0.5:7466"));
+    assert!(!fed::plain_http_off_loopback("HTTP://LocalHost:1"));
 
     // `pair invite`.
     let hub = start_hub();

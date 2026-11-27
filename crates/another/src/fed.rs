@@ -519,7 +519,12 @@ fn agent_for(url: &str) -> ureq::Agent {
 
 fn plain_http_loopback(url: &str) -> Option<bool> {
     let uri = url.parse::<ureq::http::Uri>().ok()?;
-    (uri.scheme_str() == Some("http")).then(|| uri.host().is_some_and(is_loopback_host))
+    uri.scheme_str()
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http"))
+        .then(|| {
+            uri.host()
+                .is_some_and(|host| is_loopback_host(&host.to_ascii_lowercase()))
+        })
 }
 
 #[cfg(test)]
@@ -535,6 +540,19 @@ mod redirect_tests {
             agent_for("http://127.0.0.1:7466").config().max_redirects(),
             0
         );
+    }
+
+    #[test]
+    fn hub_redirect_error_handles_missing_or_blank_location() {
+        let mut headers = HeaderMap::new();
+        let expected = "hub answered 302 redirect without a usable Location header; use the final hub URL in the invite";
+        for location in [None, Some(""), Some("  ")] {
+            if let Some(location) = location {
+                headers.insert(header::LOCATION, HeaderValue::from_static(location));
+            }
+            let err = refuse_redirect(StatusCode::FOUND, &headers).unwrap_err();
+            assert_eq!(err.to_string(), expected);
+        }
     }
 
     #[test]
@@ -626,6 +644,27 @@ fn failure(status: StatusCode, body: &[u8], what: &str, max_chars: usize) -> any
     anyhow!("{what} failed ({status}): {msg}")
 }
 
+fn refuse_redirect(status: StatusCode, headers: &HeaderMap) -> Result<()> {
+    if status.is_redirection() {
+        let location = headers
+            .get(header::LOCATION)
+            .map(|value| {
+                another_core::display_line(
+                    &String::from_utf8_lossy(value.as_bytes()),
+                    ERROR_BODY_CHARS,
+                )
+            })
+            .filter(|location| !location.trim().is_empty());
+        let code = status.as_u16();
+        let target = match location {
+            Some(location) => format!("to {location}"),
+            None => "without a usable Location header".to_string(),
+        };
+        bail!("hub answered {code} redirect {target}; use the final hub URL in the invite");
+    }
+    Ok(())
+}
+
 /// Read a pairing answer of at most `limit` bytes. Its signature is inside the body and is
 /// checked by [`Store::complete_join_reporting`].
 fn read<T: serde::de::DeserializeOwned>(
@@ -634,6 +673,7 @@ fn read<T: serde::de::DeserializeOwned>(
     limit: u64,
 ) -> Result<T> {
     let status = resp.status();
+    refuse_redirect(status, resp.headers())?;
     let body = read_body(&mut resp, what, limit)?;
     if !status.is_success() {
         return Err(failure(status, &body, what, ERROR_BODY_CHARS));
@@ -765,6 +805,7 @@ fn read_answer<T: serde::de::DeserializeOwned>(
         signature,
     } = sent;
     let status = resp.status();
+    refuse_redirect(status, resp.headers())?;
     let answer_signature = resp
         .headers()
         .get(H_SIG)
@@ -838,7 +879,7 @@ fn read_answer<T: serde::de::DeserializeOwned>(
 
 /// Whether a hub address is plain `http://` to a host that is not this machine: anyone on
 /// the network path can then read what a sync carries. Loopback is the parsed host being
-/// exactly `127.0.0.1`, `localhost` or `[::1]`, so `http://localhost.example` is not it.
+/// `127.0.0.1`, `localhost` (case insensitive) or `[::1]`.
 pub fn plain_http_off_loopback(url: &str) -> bool {
     plain_http_loopback(url) == Some(false)
 }
@@ -1202,6 +1243,7 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
+    use std::time::Duration;
 
     #[test]
     fn signed_request_uses_manual_store_clock() {
