@@ -520,6 +520,12 @@ async fn oauth_pkce_then_mcp_client_and_bearer_still_works() {
         .verify_access_token(&access, &resource)
         .expect("access token should verify twice");
     let client = connect(&srv.base, &access).await;
+    let before = srv.store.agent("chatgpt").unwrap();
+    let conflict = call(&client, "heartbeat", json!({ "start": true, "end": true })).await;
+    assert_eq!(error_code(&conflict).as_deref(), Some("invalid"));
+    let after = srv.store.agent("chatgpt").unwrap();
+    assert_eq!(after.status, before.status);
+    assert_eq!(after.last_seen_at, before.last_seen_at);
     let digest = call(&client, "whats_new", json!({})).await;
     assert_eq!(error_code(&digest), None);
     let body = digest.structured_content.unwrap();

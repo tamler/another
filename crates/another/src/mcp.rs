@@ -743,13 +743,7 @@ impl AnotherMcp {
     ) -> ToolResult<HeartbeatReport> {
         let scope = crate::remote::current_scope();
         self.run(move |s| {
-            let phase = if a.end {
-                SessionPhase::End
-            } else if a.start {
-                SessionPhase::Start
-            } else {
-                SessionPhase::Beat
-            };
+            let phase = SessionPhase::from_flags(a.start, a.end)?;
             // Remote callers renew or release only holds and leases inside the token's projects.
             s.session_scoped(
                 &a.agent,
