@@ -17,7 +17,8 @@ use tokio_util::sync::CancellationToken;
 
 pub type Client = RunningService<RoleClient, ClientConfig>;
 
-/// A running loopback HTTP server that cancels its token on drop.
+/// A running loopback HTTP server. Dropping it only cancels its token and does not wait for
+/// the server task to finish; call `stop().await` when a test needs the listener closed.
 pub struct TestServer {
     pub addr: SocketAddr,
     pub base: String,
