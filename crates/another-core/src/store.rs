@@ -81,7 +81,7 @@ fn tighten_owner_only(path: &Path) -> crate::error::Result<()> {
             tracing::warn!(
                 path = %path.display(),
                 error = %e,
-                mode,
+                mode = format!("{mode:04o}"),
                 "could not tighten file mode; continuing because it is not world-readable"
             );
             Ok(())
