@@ -465,6 +465,222 @@ fn contains_ours(root: &Map<String, Value>) -> bool {
     serde_json::to_string(root).is_ok_and(|s| mentions_ours(&s))
 }
 
+/// Whether `client`'s config has Another hooks, current or from a development build (the
+/// same test `drift` uses, so a pack is never "not installed" and "out of date" at once).
+/// For Grok, a leftover pre-rename `wyres.json` also counts, because install removes it.
+pub fn installed(env: &HookEnv, client: Client) -> bool {
+    if std::fs::read_to_string(client.config_path(&env.home)).is_ok_and(|t| contains_ours_text(&t))
+    {
+        return true;
+    }
+    client == Client::Grok && grok_legacy_mentions_ours(env)
+}
+
+fn grok_legacy_path(env: &HookEnv) -> PathBuf {
+    env.home.join(".grok").join("hooks").join(LEGACY_GROK_FILE)
+}
+
+fn grok_legacy_mentions_ours(env: &HookEnv) -> bool {
+    std::fs::read_to_string(grok_legacy_path(env)).is_ok_and(|t| mentions_ours(&t))
+}
+
+/// The wrapper scripts that Another's current-name hook commands in the managed event
+/// entries of `root` run: the first word of each command, undoing the single quoting
+/// `command_for` writes. Command-valued keys outside those events are ignored, matching
+/// what `install_into` inspects.
+fn wrapper_paths(client: Client, root: &Map<String, Value>) -> Vec<PathBuf> {
+    fn walk(v: &Value, out: &mut Vec<PathBuf>) {
+        match v {
+            Value::Object(m) => {
+                if let Some(Value::String(c)) = m.get("command") {
+                    if let Some(p) = first_sh_word(c).filter(|p| p.ends_with(MARKER)) {
+                        let p = PathBuf::from(p);
+                        if !out.contains(&p) {
+                            out.push(p);
+                        }
+                    }
+                }
+                m.values().for_each(|x| walk(x, out));
+            }
+            Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    let Some(hooks) = root.get("hooks").and_then(Value::as_object) else {
+        return out;
+    };
+    for spec in client.specs() {
+        if let Some(v) = hooks.get(spec.key) {
+            walk(v, &mut out);
+        }
+    }
+    out
+}
+
+/// The first word of a shell command: a `'...'` word as `sh_quote` writes it (with `'\''`
+/// for a quote inside), or a plain word up to the first space.
+fn first_sh_word(command: &str) -> Option<String> {
+    let command = command.trim_start();
+    let Some(mut rest) = command.strip_prefix('\'') else {
+        return command.split_whitespace().next().map(str::to_string);
+    };
+    let mut word = String::new();
+    loop {
+        let end = rest.find('\'')?;
+        word.push_str(&rest[..end]);
+        rest = &rest[end + 1..];
+        match rest.strip_prefix("\\''") {
+            Some(after) => {
+                word.push('\'');
+                rest = after;
+            }
+            None => return Some(word),
+        }
+    }
+}
+
+/// How an installed hook pack differs from what `hook install` would write now: missing
+/// events, changed entries (command, timeout, matcher, labels), a missing, stale or
+/// non-executable wrapper, an invalid managed-event shape, and a leftover pre-rename
+/// Grok hook file. Empty when the client has no Another hooks, or none differ.
+/// Compares parsed JSON, so formatting alone is never drift. Reads only.
+pub fn drift(env: &HookEnv, client: Client) -> Vec<String> {
+    let path = client.config_path(&env.home);
+    let text = std::fs::read_to_string(&path).ok();
+    let current_ours = text.as_deref().is_some_and(contains_ours_text);
+    let legacy_ours = client == Client::Grok && grok_legacy_mentions_ours(env);
+    if !current_ours && !legacy_ours {
+        return Vec::new();
+    }
+
+    let install = format!("another hook install --client {}", client.as_str());
+    let mut out = Vec::new();
+    if legacy_ours {
+        out.push(format!(
+            "a pre-rename Grok hook file {} is still present; `{install}` or `another hook uninstall --client grok` removes it",
+            grok_legacy_path(env).display()
+        ));
+    }
+    if !current_ours {
+        return out;
+    }
+
+    let root = match read_json(&path) {
+        Ok(Some((_, root))) => root,
+        _ => {
+            out.push(format!(
+                "{} is not a JSON object; fix it, then run `{install}`",
+                path.display()
+            ));
+            return out;
+        }
+    };
+
+    // Hooks installed for another Another home run that home's wrapper. Comparing them with
+    // this home would advise a reinstall that silently moves them here (#163 F2).
+    let here = env.script_path();
+    let used = wrapper_paths(client, &root);
+    let foreign = used
+        .iter()
+        .find(|p| **p != here)
+        .filter(|_| !used.contains(&here));
+    let foreign_env = foreign.map(|theirs| {
+        let home = theirs
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(theirs.as_path());
+        HookEnv {
+            home: env.home.clone(),
+            another_home: home.to_path_buf(),
+            exe: env.exe.clone(),
+        }
+    });
+    if let (Some(theirs), Some(foreign_env)) = (foreign, foreign_env.as_ref()) {
+        out.push(format!(
+            "these hooks run {} (Another home {}), not this one ({})",
+            theirs.display(),
+            foreign_env.another_home.display(),
+            env.another_home.display()
+        ));
+    }
+    let compare = foreign_env.as_ref().unwrap_or(env);
+
+    let hooks = root.get("hooks");
+    let mut shape_bad = false;
+    if matches!(hooks, Some(value) if !value.is_object()) {
+        shape_bad = true;
+        out.push(format!(
+            "\"hooks\" is not an object; fix the config, then run `{install}`"
+        ));
+    }
+    let hooks_obj = hooks.and_then(Value::as_object);
+    for spec in client.specs() {
+        match hooks_obj.and_then(|h| h.get(spec.key)) {
+            None => out.push(format!("no Another hook for {}", spec.key)),
+            Some(v) if !v.is_array() => {
+                shape_bad = true;
+                out.push(format!(
+                    "hooks.{} is not an array; fix the config, then run `{install}`",
+                    spec.key
+                ));
+            }
+            Some(v) if !mentions_ours(&v.to_string()) => {
+                out.push(format!("no Another hook for {}", spec.key));
+            }
+            Some(_) => {}
+        }
+    }
+
+    let mut wanted = root.clone();
+    match install_into(client, compare, &mut wanted) {
+        Err(error) => {
+            if !shape_bad {
+                out.push(format!("{error}; fix the config, then run `{install}`"));
+            }
+        }
+        Ok(()) if wanted != root => out.push(format!(
+            "Another's entries differ from what `{install}` writes (command, timeout, matcher or label)"
+        )),
+        Ok(()) => {}
+    }
+
+    let script = compare.script_path();
+    match std::fs::read_to_string(&script) {
+        Err(_) => out.push(format!("the wrapper {} is missing", script.display())),
+        Ok(t) if t != script_text(compare) => out.push(format!(
+            "the wrapper {} calls a different another binary or home than this one",
+            script.display()
+        )),
+        Ok(_) => {}
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if script.is_file()
+            && std::fs::metadata(&script).is_ok_and(|m| m.permissions().mode() & 0o111 == 0)
+        {
+            out.push(format!(
+                "the wrapper {} is not executable",
+                script.display()
+            ));
+        }
+    }
+
+    if !out.is_empty() && !shape_bad {
+        if let Some(foreign_env) = foreign_env.as_ref() {
+            out.push(format!(
+                "to keep that home, run `ANOTHER_HOME={} {install}`; `{install}` from here moves the hooks to {}",
+                sh_quote(&foreign_env.another_home.display().to_string()),
+                env.another_home.display()
+            ));
+        } else {
+            out.push(format!("run `{install}` to repair"));
+        }
+    }
+    out
+}
+
 fn render(root: &Map<String, Value>) -> Result<String> {
     Ok(serde_json::to_string_pretty(root)? + "\n")
 }
@@ -2371,5 +2587,31 @@ mod tests {
                 _ => assert_eq!(guard.unwrap().matcher, Some(EDIT_TOOLS)),
             }
         }
+    }
+
+    #[test]
+    fn the_wrapper_path_is_read_back_from_a_quoted_command() {
+        for path in [
+            "/home/a/.another/hooks/another-hook.sh",
+            "/home/o'brien/my home/.another/hooks/another-hook.sh",
+        ] {
+            let command = format!("{} session-start --client claude", sh_quote(path));
+            assert_eq!(first_sh_word(&command).as_deref(), Some(path), "{command}");
+        }
+        assert_eq!(
+            first_sh_word("/usr/bin/fmt.sh --check").as_deref(),
+            Some("/usr/bin/fmt.sh")
+        );
+        assert_eq!(first_sh_word("'unterminated"), None);
+        let config = json!({ "hooks": { "Stop": [{ "hooks": [
+            { "command": "'/x/hooks/another-hook.sh' prompt --client claude" },
+            { "command": "'/x/hooks/wyres-hook.sh' prompt --client claude" },
+            { "command": "notify.sh" },
+        ] }] } });
+        assert_eq!(
+            wrapper_paths(&config),
+            vec![PathBuf::from("/x/hooks/another-hook.sh")],
+            "only current-name wrappers count"
+        );
     }
 }

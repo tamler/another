@@ -39,11 +39,23 @@ Check what is installed, or remove it:
 another hook status
 ```
 
+`hook status` also reports drift: how an installed pack differs from what `hook install` would write now.
+- **What counts as drift:**
+  - an event with no Another hook;
+  - an Another entry whose command, timeout, matcher or label was changed;
+  - a wrapper that is missing, not executable, or calls a different `another` binary or home than the one running `status`;
+  - a managed event whose config value is the wrong shape (for example a string where an array is required);
+  - install-managed top-level defaults that `hook install` would write when they are missing (Cursor `version`, a blank Codex `description`);
+  - a leftover pre-rename Grok hook file that install or uninstall for Grok would remove.
+- **How it shows:** such a client reads `out of date` in text, with one line per difference. JSON gives a `drift` list, empty when current. When `hook install` can repair the pack, the last line is that command; for a pack that belongs to another Another home, the `ANOTHER_HOME` value is shell-quoted. When a managed event has the wrong shape, status names the problem and says to fix the config first: `hook install` will still refuse until the shape is valid.
+- **What does not count:** formatting, other tools' hooks, and other keys the installer does not manage.
+- **Reading only:** status reads the files and writes nothing.
+
 ```bash
 another hook uninstall --client all
 ```
 
-Uninstall removes only entries that reference `another-hook.sh`, and deletes the wrapper once no client uses it. Both install and uninstall also clean up entries left by development builds from before the project was renamed (they referenced `wyres-hook.sh`, and Grok's file was `~/.grok/hooks/wyres.json`): install replaces them with current entries, and uninstall removes them.
+Uninstall removes only entries that reference `another-hook.sh`, and deletes the wrapper once no client uses it. Install and uninstall also remove old wyres hooks left by pre-rename development builds.
 
 ## Per client
 
