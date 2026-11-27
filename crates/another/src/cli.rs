@@ -2535,11 +2535,12 @@ fn hook_command(
             let rows: Vec<output::HookStatus> = Client::ALL
                 .iter()
                 .map(|c| {
-                    let path = c.config_path(&env.home);
+                    let config = c.installed_configs(&env.home).next();
+                    let installed = config.is_some();
+                    let path = config.map_or_else(|| c.config_path(&env.home), |(path, _)| path);
                     output::HookStatus {
                         client: c.as_str().to_string(),
-                        installed: std::fs::read_to_string(&path)
-                            .is_ok_and(|t| t.contains(hooks::MARKER)),
+                        installed,
                         config: path.display().to_string(),
                         trust_note: (*c == Client::Codex).then_some(hooks::CODEX_TRUST_NOTE),
                     }

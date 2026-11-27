@@ -45,6 +45,8 @@ another hook uninstall --client all
 
 Uninstall removes only entries that reference `another-hook.sh`, and deletes the wrapper once no client uses it. Both install and uninstall also clean up entries left by development builds from before the project was renamed (they referenced `wyres-hook.sh`, and Grok's file was `~/.grok/hooks/wyres.json`): install replaces them with current entries, and uninstall removes them.
 
+Status counts those legacy entries as installed. Doctor warns about them and gives the install command for the affected client.
+
 ## Per client
 
 | Client | Config written | Events | Notes |

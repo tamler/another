@@ -384,16 +384,18 @@ fn hook_check(another_home: &Path) -> Check {
     let Ok(env) = HookEnv::detect(another_home.to_path_buf()) else {
         return check("hooks", Level::Skip, "HOME is not set");
     };
-    // Each installed client config names the wrapper it runs, by absolute path.
-    let mut installed: Vec<(Client, Vec<PathBuf>)> = Vec::new();
-    for c in Client::ALL {
-        if let Ok(text) = std::fs::read_to_string(c.config_path(&env.home)) {
-            if text.contains(hooks::MARKER) {
-                installed.push((c, wrapper_paths(&text)));
-            }
-        }
-    }
-    let clients: Vec<Client> = installed.iter().map(|(c, _)| *c).collect();
+    let installed: Vec<_> = Client::ALL
+        .into_iter()
+        .flat_map(|client| {
+            client
+                .installed_configs(&env.home)
+                .map(move |(_, config)| (client, config))
+        })
+        .collect();
+    let clients: Vec<Client> = Client::ALL
+        .into_iter()
+        .filter(|c| installed.iter().any(|(client, _)| client == c))
+        .collect();
     let missing: Vec<&str> = Client::ALL
         .into_iter()
         .filter(|c| !clients.contains(c))
@@ -404,7 +406,8 @@ fn hook_check(another_home: &Path) -> Check {
             .fix("another hook install --client claude (or codex, grok, cursor, all)");
     }
     let ours = env.script_path();
-    for (client, paths) in &installed {
+    for (client, config) in &installed {
+        let paths = wrapper_paths(config);
         if let Some(broken) = paths.iter().find(|p| !runnable(p)) {
             return check(
                 "hooks",
@@ -413,6 +416,18 @@ fn hook_check(another_home: &Path) -> Check {
                     "{} runs {}, which is missing or not executable",
                     client.as_str(),
                     broken.display()
+                ),
+            )
+            .fix(format!("another hook install --client {}", client.as_str()));
+        }
+        if config.contains(hooks::LEGACY_MARKER) {
+            return check(
+                "hooks",
+                Level::Warn,
+                format!(
+                    "{} has legacy {} hooks",
+                    client.as_str(),
+                    hooks::LEGACY_MARKER
                 ),
             )
             .fix(format!("another hook install --client {}", client.as_str()));
@@ -447,17 +462,21 @@ fn hook_check(another_home: &Path) -> Check {
 }
 
 /// The wrapper paths a client config runs. The installer writes each command as the
-/// single-quoted absolute path of `another-hook.sh` followed by its arguments.
+/// single-quoted absolute path of the wrapper followed by its arguments.
 fn wrapper_paths(config: &str) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = Vec::new();
-    for (at, _) in config.match_indices(hooks::MARKER) {
-        let end = at + hooks::MARKER.len();
-        let Some(start) = config[..at].rfind(['\'', '"']) else {
-            continue;
-        };
-        let path = PathBuf::from(&config[start + 1..end]);
-        if path.is_absolute() && !found.contains(&path) {
-            found.push(path);
+    for marker in hooks::WRAPPER_MARKERS {
+        for (at, _) in config.match_indices(marker) {
+            let end = at + marker.len();
+            let Some(start) = config[..at].rfind(['\'', '"']) else {
+                continue;
+            };
+            let escaped = &config[start + 1..end];
+            let decoded = serde_json::from_str::<String>(&format!("\"{escaped}\""));
+            let path = PathBuf::from(decoded.as_deref().unwrap_or(escaped));
+            if path.is_absolute() && !found.contains(&path) {
+                found.push(path);
+            }
         }
     }
     found

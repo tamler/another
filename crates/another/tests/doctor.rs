@@ -620,6 +620,72 @@ fn a_hook_config_whose_wrapper_is_missing_warns() {
 }
 
 #[test]
+fn legacy_hooks_are_detected_and_upgraded() {
+    for (client, config_path) in [
+        ("claude", ".claude/settings.json"),
+        ("grok", ".grok/hooks/wyres.json"),
+    ] {
+        assert_legacy_hook_upgrade(client, config_path);
+    }
+}
+
+fn assert_legacy_hook_upgrade(client: &str, config_path: &str) {
+    let fx = Fx::new();
+    fx.init();
+    let settings = fx.user.join(config_path);
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let wrapper = fx.home.join("hooks").join("wyres-hook.sh");
+    let command = format!("'{}' session-start --client {client}", wrapper.display());
+    let config = serde_json::json!({
+        "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": command}]}]}
+    });
+    std::fs::write(&settings, config.to_string()).unwrap();
+
+    let (_, report) = fx.doctor();
+    assert_eq!(status(&report, "hooks"), "warn", "{report}");
+    let detail = row(&report, "hooks")["detail"].as_str().unwrap();
+    assert!(detail.contains("wyres-hook.sh"), "{detail}");
+    assert!(detail.contains("missing"), "{detail}");
+    assert_eq!(
+        row(&report, "hooks")["fix"],
+        format!("another hook install --client {client}")
+    );
+
+    std::fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
+    std::fs::write(&wrapper, "#!/bin/sh\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let (_, report) = fx.doctor();
+    assert_eq!(status(&report, "hooks"), "warn", "{report}");
+    assert!(row(&report, "hooks")["detail"]
+        .as_str()
+        .unwrap()
+        .contains("legacy"));
+
+    let out = fx.cmd(&["--json", "hook", "status"]);
+    assert!(out.status.success());
+    let rows: Vec<Value> = serde_json::from_slice(&out.stdout).unwrap();
+    let row = rows.iter().find(|row| row["client"] == client).unwrap();
+    assert_eq!(row["installed"], true);
+    assert_eq!(Path::new(row["config"].as_str().unwrap()), settings);
+
+    let out = fx.cmd(&["hook", "install", "--client", client]);
+    assert!(out.status.success(), "{out:?}");
+    if client == "grok" {
+        assert!(!settings.exists());
+    } else {
+        assert!(!std::fs::read_to_string(settings)
+            .unwrap()
+            .contains("wyres-hook.sh"));
+    }
+    let (_, report) = fx.doctor();
+    assert_eq!(status(&report, "hooks"), "ok", "{report}");
+}
+
+#[test]
 fn a_hook_config_for_another_home_warns() {
     let fx = Fx::new();
     fx.init();

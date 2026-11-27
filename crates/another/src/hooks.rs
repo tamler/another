@@ -34,14 +34,25 @@ use serde_json::{json, Map, Value};
 
 /// Substring that identifies hook entries Another owns inside client configs.
 pub const MARKER: &str = "another-hook.sh";
-/// Hook script and Grok file names used before the project was renamed to Another
-/// (see DECISIONS D35). They are recognised only so `hook install` / `hook uninstall`
-/// replace or remove entries left by development builds; nothing new is written with them.
-const LEGACY_MARKERS: &[&str] = &["wyres-hook.sh"];
+/// Pre-rename wrapper and Grok config names (see DECISIONS D35).
+pub(crate) const LEGACY_MARKER: &str = "wyres-hook.sh";
+pub(crate) const WRAPPER_MARKERS: [&str; 2] = [MARKER, LEGACY_MARKER];
 const LEGACY_GROK_FILE: &str = "wyres.json";
 
 fn mentions_ours(text: &str) -> bool {
-    text.contains(MARKER) || LEGACY_MARKERS.iter().any(|m| text.contains(m))
+    WRAPPER_MARKERS
+        .into_iter()
+        .any(|marker| text.contains(marker))
+}
+
+fn read_ours(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .filter(|text| mentions_ours(text))
+}
+
+fn legacy_grok_path(home: &Path) -> PathBuf {
+    home.join(".grok").join("hooks").join(LEGACY_GROK_FILE)
 }
 /// Upper bound on injected digest text.
 pub const MAX_DIGEST_CHARS: usize = 1500;
@@ -85,6 +96,13 @@ impl Client {
             Client::Grok => home.join(".grok").join("hooks").join("another.json"),
             Client::Cursor => home.join(".cursor").join("hooks.json"),
         }
+    }
+
+    /// Configs that reference either Another wrapper, with the current config first.
+    pub(crate) fn installed_configs(self, home: &Path) -> impl Iterator<Item = (PathBuf, String)> {
+        std::iter::once(self.config_path(home))
+            .chain((self == Client::Grok).then(|| legacy_grok_path(home)))
+            .filter_map(|path| read_ours(&path).map(|text| (path, text)))
     }
 
     /// The hook entries Another installs for this client.
@@ -505,7 +523,7 @@ fn plan_config(client: Client, env: &HookEnv, install: bool) -> Result<FileChang
                     (ChangeKind::Delete, None)
                 } else {
                     let after = render(&root)?;
-                    if b.trim() == after.trim() || !contains_ours_text(b) {
+                    if b.trim() == after.trim() || !mentions_ours(b) {
                         (ChangeKind::Unchanged, None)
                     } else {
                         (ChangeKind::Update, Some(after))
@@ -520,10 +538,6 @@ fn plan_config(client: Client, env: &HookEnv, install: bool) -> Result<FileChang
         backup: None,
         after,
     })
-}
-
-fn contains_ours_text(text: &str) -> bool {
-    mentions_ours(text)
 }
 
 fn timestamp() -> String {
@@ -633,15 +647,12 @@ pub fn install(
         && Client::ALL
             .iter()
             .filter(|c| !clients.contains(c))
-            .any(|c| {
-                std::fs::read_to_string(c.config_path(&env.home))
-                    .is_ok_and(|t| contains_ours_text(&t))
-            });
+            .any(|c| c.installed_configs(&env.home).next().is_some());
     let script = plan_script(env, install, still_used);
     // A Grok hook file left by a pre-rename build would run alongside the new one.
     if clients.contains(&Client::Grok) {
-        let legacy = env.home.join(".grok").join("hooks").join(LEGACY_GROK_FILE);
-        if std::fs::read_to_string(&legacy).is_ok_and(|t| mentions_ours(&t)) {
+        let legacy = legacy_grok_path(&env.home);
+        if read_ours(&legacy).is_some() {
             changes.push(FileChange {
                 path: legacy.display().to_string(),
                 change: ChangeKind::Delete,
@@ -825,8 +836,7 @@ fn effective_client(client: Client, env: &HookEnv) -> Option<Client> {
     if client == Client::Grok || std::env::var_os("GROK_HOOK_EVENT").is_none() {
         return Some(client);
     }
-    let grok_pack = std::fs::read_to_string(Client::Grok.config_path(&env.home))
-        .is_ok_and(|t| contains_ours_text(&t));
+    let grok_pack = Client::Grok.installed_configs(&env.home).next().is_some();
     if grok_pack {
         None
     } else {
