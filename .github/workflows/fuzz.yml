@@ -13,16 +13,22 @@ on:
       - ".github/workflows/fuzz.yml"
   push:
     branches: [main]
+    paths:
+      - "crates/**"
+      - "fuzz/**"
+      - "Cargo.lock"
+      - ".github/workflows/fuzz.yml"
   schedule:
-    - cron: "0 18 * * *"
+    - cron: "17 4 * * 1"
   workflow_dispatch:
     inputs:
       seconds:
-        description: "Seconds per target"
-        default: "600"
+        description: "Seconds per target (whole number from 1 to 1800)"
+        type: string
+        default: "300"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -32,9 +38,8 @@ jobs:
   fuzz:
     name: fuzz (${{ matrix.target }})
     runs-on: ubuntu-latest
-    # PR smoke: 60 s of fuzzing per target. main pushes, the nightly run and manual runs: 600 s
-    # by default. Setup, cargo-fuzz install and build take up to about 8 minutes.
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 15 || 45 }}
+    # Allow up to 30 minutes of fuzzing plus setup for manual overrides.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 15 || (github.event_name == 'workflow_dispatch' && inputs.seconds != '300' && 40 || 30) }}
     strategy:
       fail-fast: false
       matrix:
@@ -57,13 +62,20 @@ jobs:
       - name: Run ${{ matrix.target }}
         working-directory: fuzz
         env:
-          SECONDS_INPUT: ${{ github.event_name == 'pull_request' && '60' || inputs.seconds || '600' }}
+          EVENT_NAME: ${{ github.event_name }}
+          SECONDS_INPUT: ${{ inputs.seconds }}
           TARGET: ${{ matrix.target }}
         run: |
-          secs="$SECONDS_INPUT"
-          case "$secs" in
-            ''|*[!0-9]*) echo "seconds must be a whole number" >&2; exit 2 ;;
+          case "$EVENT_NAME" in
+            pull_request) secs=60 ;;
+            workflow_dispatch) secs="$SECONDS_INPUT" ;;
+            *) secs=300 ;;
           esac
+          if [[ ! "$secs" =~ ^0*([1-9][0-9]{0,3})$ ]] || (( BASH_REMATCH[1] > 1800 )); then
+            echo "seconds must be a whole number from 1 to 1800" >&2
+            exit 2
+          fi
+          secs="${BASH_REMATCH[1]}"
           cargo fuzz run "$TARGET" -- -max_total_time="$secs" -rss_limit_mb=4096
 
       - name: Upload crash input

@@ -234,3 +234,9 @@ Agents are addresses, times are RFC 3339, and `proposed_by` and `admitted.by` ar
 ## Upgrading
 
 The queue adds six tables and changes none. After the upgrade, a build that does not know the new schema refuses the database, so the binary, the daemon, MCP servers and hooks on one home are upgraded together ([DOCTOR.md](DOCTOR.md)). With no settings the default limit is 1 and the grace period is 24 hours; nobody is a delegate until the owner names one. The built-in `another queue` takes precedence over an external `another-queue` command.
+
+## Project queue decisions
+
+| Item | Scope | Decision | Admission |
+|---|---|---|---|
+| Q45 | M10 | Run fuzz smoke on pull requests, full fuzzing on pushes to `main` and on the weekly schedule (Monday 04:17 UTC, 12:17 p.m. Asia/Manila), and cancel superseded pull request runs. | PM delegate decision, 27 Nov 2026 at 8:44 p.m. Asia/Manila, as recorded in [PR #322](https://github.com/tamler/another/pull/322). The local queue still lists Q45 as proposed. |
