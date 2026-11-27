@@ -954,6 +954,8 @@ pub fn main() -> ExitCode {
     match run(cli) {
         Ok(code) => code,
         Err(err) => {
+            let open_error = err.downcast_ref::<ReadOnlyOpenError>();
+            let err = open_error.map_or(&err, |error| &error.0);
             let usage = err.is::<crate::templates::UsageError>();
             let body = match err.downcast_ref::<another_core::Error>() {
                 Some(e) => e.body(),
@@ -962,7 +964,11 @@ pub fn main() -> ExitCode {
                     message: format!("{err:#}"),
                 },
             };
-            let hint = cli_hint(body.code, &body.message);
+            let hint = if json && open_error.is_some() {
+                Some("run another doctor")
+            } else {
+                cli_hint(body.code, &body.message)
+            };
             if json {
                 let mut out = serde_json::json!({ "error": body });
                 if let Some(hint) = hint {
@@ -1106,8 +1112,34 @@ fn project_dir(store: &Store, path: &Path) -> anyhow::Result<String> {
     Ok(real)
 }
 
-/// `another board`. Opens the database the way hooks do: nothing is created, migrated or
-/// swept, so reading the board leaves the database as it was.
+/// Marks database open failures so the JSON error can add a doctor hint.
+#[derive(Debug)]
+struct ReadOnlyOpenError(anyhow::Error);
+
+impl std::fmt::Display for ReadOnlyOpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for ReadOnlyOpenError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
+}
+
+/// Open an initialized database for a read-only CLI report without migrating or sweeping.
+pub(crate) fn open_read_only(home: &Path, busy: Duration) -> anyhow::Result<Store> {
+    if !home.join(another_core::DB_FILE).exists() {
+        let error = anyhow::anyhow!(
+            "no Another database in {}; run `another init` first",
+            home.display()
+        );
+        return Err(ReadOnlyOpenError(error).into());
+    }
+    Ok(Store::open_read_only(home, busy).map_err(|error| ReadOnlyOpenError(error.into()))?)
+}
+
 fn board_command(
     home: &Path,
     json: bool,
@@ -1115,13 +1147,7 @@ fn board_command(
     since: &str,
     limit: u32,
 ) -> anyhow::Result<ExitCode> {
-    if !home.join(another_core::DB_FILE).exists() {
-        anyhow::bail!(
-            "no Another database in {}; run `another init` first",
-            home.display()
-        );
-    }
-    let store = Store::open_quick(home, Duration::from_secs(5))?;
+    let store = open_read_only(home, Duration::from_secs(5))?;
     let since_ms = match Since::parse(since, store.now())? {
         Since::Time(t) => t,
         Since::After(_) => anyhow::bail!(
@@ -1505,7 +1531,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     }
     if let Command::Needs { brief, limit } = &cli.command {
         // Before any Store::open, which would create the home and migrate the database.
-        return Ok(crate::needs::run(&another_home()?, json, *brief, *limit));
+        return crate::needs::run(&another_home()?, json, *brief, *limit);
     }
     if let Command::Doctor { bind } = &cli.command {
         // Before any Store::open, which would create the home and migrate the database.

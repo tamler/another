@@ -44,6 +44,20 @@ fn text(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
+fn json_error(out: &Output) -> Value {
+    assert_eq!(out.status.code(), Some(1));
+    let body: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|err| {
+        panic!(
+            "expected JSON error on stdout: {err}; stderr: {}",
+            text(&out.stderr)
+        )
+    });
+    assert!(out.stderr.is_empty(), "{}", text(&out.stderr));
+    assert!(body["error"]["code"].is_string(), "{body}");
+    assert!(body["error"]["message"].is_string(), "{body}");
+    body
+}
+
 fn another(home: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_another"));
     cmd.args(args)
@@ -2024,7 +2038,12 @@ fn brief_says_when_it_cannot_read() {
         ] {
             let out = another(home, args, &[]);
             assert_eq!(out.status.code(), Some(1), "{what} {args:?}");
-            assert_eq!(text(&out.stdout), CANNOT_READ, "{what} {args:?}");
+            if args.contains(&"--json") {
+                assert_eq!(json_error(&out)["error"]["hint"], "run another doctor");
+            } else {
+                assert_eq!(text(&out.stdout), CANNOT_READ, "{what} {args:?}");
+                assert!(text(&out.stderr).contains("run another doctor"));
+            }
         }
     };
 
@@ -2055,8 +2074,7 @@ fn brief_says_when_it_cannot_read() {
     assert_eq!(text(&out.stdout), CANNOT_READ);
     assert!(text(&out.stderr).contains("run another doctor"));
     let out = another(&home, &["--json", "needs", "--brief"], &[]);
-    assert_eq!(out.status.code(), Some(1));
-    assert_eq!(text(&out.stdout), CANNOT_READ);
+    assert_eq!(json_error(&out)["error"]["hint"], "run another doctor");
     db.execute_batch("ROLLBACK").unwrap();
     drop(db);
     let out = another(&home, &["needs", "--brief"], &[]);
@@ -2203,14 +2221,21 @@ fn needs_writes_nothing() {
 fn needs_never_creates_or_migrates_a_home() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("nothing-here");
-    for args in [&["needs"][..], &["--json", "needs"][..]] {
-        let out = another(&missing, args, &[]);
-        assert_eq!(out.status.code(), Some(1), "{args:?}");
-        assert_eq!(text(&out.stdout), "", "{args:?}");
-        let err = text(&out.stderr);
-        assert!(err.contains("run `another init` first"), "{err}");
-        assert!(err.contains("run another doctor"), "{err}");
-    }
+    let out = another(&missing, &["needs"], &[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let err = text(&out.stderr);
+    assert!(err.contains("run `another init` first"), "{err}");
+    assert!(err.contains("run another doctor"), "{err}");
+    let needs = json_error(&another(&missing, &["--json", "needs"], &[]));
+    let board = json_error(&another(&missing, &["--json", "board"], &[]));
+    assert_eq!(needs, board);
+    assert_eq!(needs["error"]["code"], "error");
+    assert_eq!(needs["error"]["hint"], "run another doctor");
+    assert!(needs["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("run `another init` first"));
     assert!(!missing.exists(), "no home was created");
 
     let old = dir.path().join("old");

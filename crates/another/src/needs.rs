@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use another_core::{
     display_line, fmt_ts, parse_ts, QueueClaimed, QueueItem, QueueKind, QuietClaim, Store,
-    WakeOutcome, DB_FILE, GONE_CONFIRM_AFTER_MS,
+    WakeOutcome, GONE_CONFIRM_AFTER_MS,
 };
 use serde::Serialize;
 
@@ -938,47 +938,33 @@ pub fn brief(r: &Report) -> String {
     format!("needs you: {} ({})", r.total, parts.join(", "))
 }
 
-fn read(home: &Path, limit: u32) -> anyhow::Result<Report> {
-    if !home.join(DB_FILE).exists() {
-        anyhow::bail!(
-            "no Another database in {}; run `another init` first",
-            home.display()
-        );
-    }
-    // Read only, as doctor opens it: nothing is created, migrated or swept.
-    let store = Store::open_read_only(home, BUSY)?;
-    report(&store, limit)
-}
-
 /// `another needs`. Rows never change the exit code: 0 when the list was read, 1 when it
-/// could not be. A list that cannot be read is never an empty output: the reason goes to
-/// standard error, and with `--brief` a fixed line goes to standard output.
-pub fn run(home: &Path, json: bool, brief_only: bool, limit: u32) -> ExitCode {
-    let mut report = match read(home, limit) {
+/// could not be. Text failures keep the doctor hint and the brief prompt line.
+/// JSON failures use the CLI error object.
+pub fn run(home: &Path, json: bool, brief_only: bool, limit: u32) -> anyhow::Result<ExitCode> {
+    let read = crate::cli::open_read_only(home, BUSY).and_then(|store| report(&store, limit));
+    let mut report = match read {
         Ok(report) => report,
+        Err(e) if json => return Err(e),
         Err(e) => {
             if brief_only {
                 println!("{BRIEF_CANNOT_READ}");
             }
             eprintln!("another: {}", display_line(&format!("{e:#}"), 500));
             eprintln!("hint: run another doctor");
-            return ExitCode::FAILURE;
+            return Ok(ExitCode::FAILURE);
         }
     };
     if brief_only {
         report.rows.clear();
     }
-    crate::cli::emit(
-        json,
-        &report,
-        |r| {
-            if brief_only {
-                brief(r)
-            } else {
-                render(r)
-            }
-        },
-    )
+    Ok(crate::cli::emit(json, &report, |r| {
+        if brief_only {
+            brief(r)
+        } else {
+            render(r)
+        }
+    }))
 }
 
 #[cfg(test)]

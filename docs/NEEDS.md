@@ -34,10 +34,12 @@ The printed commands are not an authority check. They still need `--owner` at a 
 | Exit | When | Standard output |
 |---|---|---|
 | 0 | The list was read, with rows or without | The list. `--brief` with nothing waiting prints nothing |
-| 1 | It could not be read: no database, a schema this build would refuse or would have to migrate (after an upgrade, until a normal command has run), or the database stayed locked for 2 seconds | Nothing. The reason and `run another doctor` go to standard error. With `--brief`, standard output gets exactly `needs: cannot read, run another doctor`, with or without `--json`. Unlike other commands, `--json` prints no error object here |
+| 1 | It could not be read: no database, a schema this build would refuse or would have to migrate (after an upgrade, until a normal command has run), or the database stayed locked for 2 seconds | In text mode the reason and `run another doctor` go to standard error. In text mode with `--brief`, standard output gets exactly `needs: cannot read, run another doctor`. With `--json`, standard output gets the CLI error object, even with `--brief`. Database open failures include `run another doctor` in `error.hint` |
 | 2 | A bad command line, including `--limit` out of range | |
 
-Rows never change the exit code. A script tests `--brief` for empty output and exit 0. A list that cannot be read is never an empty output, so a blank prompt always means nothing is waiting.
+Rows never change the exit code. A script tests `--brief` for empty output and exit 0.
+
+When the database is missing, `needs` and `board` both say to run `another init` first. JSON callers should check the exit code and read `error.code` and `error.message` on failure, with `error.hint` when present.
 
 ## The list
 

@@ -146,6 +146,57 @@ fn board_needs_an_existing_database_and_creates_nothing() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("run `another init` first"), "{err}");
     assert!(!env.another_home.exists(), "board must not create a home");
+    std::fs::create_dir_all(&env.another_home).unwrap();
+    board_read_error(&env, "error", "run `another init` first");
+    assert!(env.another_home.read_dir().unwrap().next().is_none());
+}
+
+fn board_read_error(env: &Env, code: &str, message: &str) {
+    let out = env.run(&["--json", "board"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stderr.is_empty(), "{:?}", out.stderr);
+    let body: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let error = &body["error"];
+    assert_eq!(error["code"], code);
+    assert!(
+        error["message"].as_str().unwrap().contains(message),
+        "{body}"
+    );
+    assert_eq!(error["hint"], "run another doctor");
+}
+
+#[test]
+fn board_reports_an_exclusive_writer_lock() {
+    let env = Env::new();
+    env.ok(&["init"]);
+    let db = rusqlite::Connection::open(env.another_home.join(another_core::DB_FILE)).unwrap();
+    db.pragma_update(None, "journal_mode", "DELETE").unwrap();
+    db.execute_batch("BEGIN EXCLUSIVE; UPDATE nodes SET display_name = display_name;")
+        .unwrap();
+    board_read_error(&env, "db", "database is locked");
+    db.execute_batch("ROLLBACK").unwrap();
+    env.ok(&["board"]);
+}
+
+#[test]
+fn board_refuses_an_old_schema_without_migrating() {
+    let env = Env::new();
+    let current = Env::new();
+    current.ok(&["init"]);
+    let db_path = |env: &Env| env.another_home.join(another_core::DB_FILE);
+    let db = rusqlite::Connection::open(db_path(&current)).unwrap();
+    let version: i64 = db
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    std::fs::create_dir_all(&env.another_home).unwrap();
+    let db = rusqlite::Connection::open(db_path(&env)).unwrap();
+    another_core::apply_schema(&db, version - 1).unwrap();
+    drop(db);
+    let before = std::fs::read(db_path(&env)).unwrap();
+
+    board_read_error(&env, "invalid", "schema");
+    assert_eq!(std::fs::read(db_path(&env)).unwrap(), before);
+    assert!(!env.another_home.join(another_core::ORIGIN_FILE).exists());
 }
 
 #[test]
@@ -248,4 +299,43 @@ fn an_empty_board_says_so() {
     let human = env.ok(&["board"]);
     assert!(human.contains("No live holds and no edits in this window."));
     assert!(human.contains("none with holds, unread mail, acknowledgements or requests"));
+}
+
+#[test]
+fn board_opens_wal_mode_without_sidecars() {
+    let env = Env::new();
+    env.start("claude", &env.main);
+    assert_eq!(env.edit("claude", &env.main, "src/a.rs"), "");
+    for suffix in ["-wal", "-shm"] {
+        assert!(!env
+            .another_home
+            .join(format!("{}{suffix}", another_core::DB_FILE))
+            .exists());
+    }
+
+    let board = env.json(&["board"]);
+    assert_eq!(board["projects"][0]["holds"][0]["pattern"], "src/a.rs");
+}
+
+#[cfg(unix)]
+#[test]
+fn board_opens_a_read_only_rollback_database() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = Env::new();
+    env.start("claude", &env.main);
+    assert_eq!(env.edit("claude", &env.main, "src/a.rs"), "");
+    let path = env.another_home.join(another_core::DB_FILE);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let mode: String = db
+        .query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "delete");
+    drop(db);
+    let before = std::fs::read(&path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+    let board = env.json(&["board"]);
+    assert_eq!(board["projects"][0]["holds"][0]["pattern"], "src/a.rs");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
