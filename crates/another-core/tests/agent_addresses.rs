@@ -139,12 +139,7 @@ fn name_at_node_reaches_a_projectless_agent_on_a_paired_node() {
     let dir = tempfile::tempdir().unwrap();
     let hub = store(dir.path(), "hub");
     let spoke = store(dir.path(), "spoke");
-    let code = hub
-        .create_invite("https://hub.example", &Perm::ALL, 3600)
-        .unwrap();
-    let (invite, req) = spoke.prepare_join(&code).unwrap();
-    let resp = hub.accept_pairing(&req).unwrap();
-    spoke.complete_join(&invite, &resp).unwrap();
+    test_support::pair(&hub, &spoke, &Perm::ALL);
 
     let remote = register(&spoke, "bob", None).unwrap();
     let local = register(&hub, "bob", None).unwrap();

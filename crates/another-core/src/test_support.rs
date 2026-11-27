@@ -1,11 +1,43 @@
-//! For this workspace's tests only: schema and checkout fixtures, and wire events a test
+//! For this workspace's tests only: schema, checkout and pairing fixtures, and wire events a test
 //! can forge, re-sign or replay. Signing goes through [`crate::crypto`]; nothing here is a
 //! second implementation of the signed bytes.
 
 use rusqlite::Connection;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::{crypto, WireEvent};
+use crate::{crypto, Clock, Perm, Store, WireEvent, DB_FILE};
+
+/// A named test node in a caller-owned temporary home.
+pub struct Node {
+    pub store: Store,
+    pub db: PathBuf,
+}
+
+impl Node {
+    pub fn open(home: &Path, name: &str, clock: Clock) -> Self {
+        let store = Store::open_with_clock(home, clock).unwrap();
+        store.set_node_name(name).unwrap();
+        Self {
+            store,
+            db: home.join(DB_FILE),
+        }
+    }
+}
+
+/// Pair two stores in process and return the consumed invite code for assertions.
+///
+/// The invite always names the fixed hub URL `https://hub.example` and a 3600-second TTL.
+/// Tests that check the hub URL, expiry or a tampered handshake should build the invite
+/// themselves instead of using this helper.
+pub fn pair(hub: &Store, spoke: &Store, perms: &[Perm]) -> String {
+    let code = hub
+        .create_invite("https://hub.example", perms, 3600)
+        .unwrap();
+    let (invite, request) = spoke.prepare_join(&code).unwrap();
+    let response = hub.accept_pairing(&request).unwrap();
+    spoke.complete_join(&invite, &response).unwrap();
+    code
+}
 
 /// Read a fixture database's migration version without creating a missing database.
 pub fn schema_version(db: &Path) -> i64 {

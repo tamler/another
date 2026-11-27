@@ -277,11 +277,7 @@ fn new_key() -> (String, String) {
 }
 
 fn pair_with(hub: &Node, spoke: &Node, perms: &[Perm]) -> Value {
-    let (code, decoded) = invite(hub, perms);
-    let (invite, req) = spoke.store.prepare_join(&code).unwrap();
-    let resp = hub.store.accept_pairing(&req).unwrap();
-    spoke.store.complete_join(&invite, &resp).unwrap();
-    decoded
+    decode(&test_support::pair(&hub.store, &spoke.store, perms))
 }
 
 fn pair(hub: &Node, spoke: &Node) -> Value {

@@ -5,39 +5,20 @@
 
 use std::path::Path;
 
-use another_core::test_support::forge_event;
+use another_core::test_support::{forge_event, Node};
 use another_core::*;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 
 const T0: i64 = 1_800_000_000_000;
 
-struct Node {
-    store: Store,
-    db: std::path::PathBuf,
-}
-
-impl Node {
-    fn new(dir: &Path, name: &str) -> Node {
-        let home = dir.join(name);
-        let (clock, _) = Clock::manual(T0);
-        let store = Store::open_with_clock(&home, clock).unwrap();
-        store.set_node_name(name).unwrap();
-        Node {
-            store,
-            db: home.join(DB_FILE),
-        }
-    }
+fn node(dir: &Path, name: &str) -> Node {
+    let (clock, _) = Clock::manual(T0);
+    Node::open(&dir.join(name), name, clock)
 }
 
 fn pair(hub: &Node, spoke: &Node) {
-    let code = hub
-        .store
-        .create_invite("https://hub.example", &Perm::ALL, 3600)
-        .unwrap();
-    let (invite, req) = spoke.store.prepare_join(&code).unwrap();
-    let resp = hub.store.accept_pairing(&req).unwrap();
-    spoke.store.complete_join(&invite, &resp).unwrap();
+    test_support::pair(&hub.store, &spoke.store, &Perm::ALL);
 }
 
 /// A `resource.registered` signed by `spoke` with the given `port` and `pid`, pushed.
@@ -82,8 +63,8 @@ fn adv250_an_out_of_range_peer_port_or_pid_does_not_break_the_listing() {
         (4, json!(5173), json!(5_000_000_000u64)),
     ] {
         let dir = tempfile::tempdir().unwrap();
-        let hub = Node::new(dir.path(), "hub");
-        let spoke = Node::new(dir.path(), "spoke");
+        let hub = node(dir.path(), "hub");
+        let spoke = node(dir.path(), "spoke");
         pair(&hub, &spoke);
         let report = push_registered(&hub, &spoke, n, port.clone(), pid.clone());
         let listed = hub.store.find_resources(ResourceFilter {
@@ -110,8 +91,8 @@ fn adv250_an_out_of_range_peer_port_or_pid_does_not_break_the_listing() {
 #[test]
 fn an_out_of_range_peer_port_or_pid_is_shown_as_absent_and_a_valid_one_is_kept() {
     let dir = tempfile::tempdir().unwrap();
-    let hub = Node::new(dir.path(), "hub");
-    let spoke = Node::new(dir.path(), "spoke");
+    let hub = node(dir.path(), "hub");
+    let spoke = node(dir.path(), "spoke");
     pair(&hub, &spoke);
     // The import now refuses such values, so the bad row is what a hub stored before it
     // did: written directly, as an older build's import left it.
@@ -149,8 +130,8 @@ fn an_out_of_range_peer_port_or_pid_is_shown_as_absent_and_a_valid_one_is_kept()
 #[test]
 fn a_peer_event_with_an_out_of_range_port_or_pid_is_refused_and_not_stored() {
     let dir = tempfile::tempdir().unwrap();
-    let hub = Node::new(dir.path(), "hub");
-    let spoke = Node::new(dir.path(), "spoke");
+    let hub = node(dir.path(), "hub");
+    let spoke = node(dir.path(), "spoke");
     pair(&hub, &spoke);
     let stored = |n: u64| -> bool {
         Connection::open(&hub.db)
