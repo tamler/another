@@ -394,6 +394,14 @@ impl Store {
     }
 
     pub fn record_audit(&self, entry: AuditRecord) -> Result<()> {
+        // A closed unauthenticated-refusal window is summarized on the next
+        // audit write, not only on the next refusal.
+        if let Err(err) = self.flush_unauthenticated_audit_budget() {
+            tracing::warn!(
+                error = %err,
+                "could not write the unauthenticated audit budget summary; omitted count was kept"
+            );
+        }
         self.write(|tx| insert_audit_tx(tx, entry))
     }
 

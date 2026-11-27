@@ -78,7 +78,7 @@ Without `--auth`, this listener serves only `/fed/*` and `/health`. MCP, activit
 
 **Proxy Host rewriting:** a proxy can replace the public `Host` with `127.0.0.1:<port>`. A loopback Host check cannot authenticate traffic behind such a proxy. Never expose a plain local listener through it; use the federation-only listener or `--auth` for remote access. Peer IP is no substitute: a local proxy makes remote callers appear local.
 
-Unauthenticated pairing and signature failures share an in-memory audit budget with rejected bearer requests: at most 32 rows per server store per 60 seconds, across all sources and routes. Excess failures are still refused and are counted; when the window closes, one summary audit row records how many were omitted. Restarting the server resets the budget; successful pairing and authenticated operations keep their existing audit records.
+Unauthenticated pairing and signature failures share an in-memory audit budget with rejected bearer requests: at most 32 rows per server store per 60 seconds, across all sources and routes (summary rows count toward that 32). Excess failures are still refused and are counted. After the 60-second window has closed, the next audit write — another refusal, a successful authenticated audit, or an explicit flush — records one `audit.budget` summary of how many were omitted in the last 60 seconds. At most one summary is written per 60 seconds. Restarting the server resets the in-memory budget; successful pairing and authenticated operations keep their existing audit records.
 
 ```bash
 another pair invite --url https://studio.my-tailnet.ts.net --perms read_feed,send_mail,borrow_resource --expires 1h

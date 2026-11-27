@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use another_core::{AuditRecord, Program, RegisterAgent, Store};
+use another_core::{AuditEntry, AuditRecord, Program, RegisterAgent, Store};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use rusqlite::Connection;
@@ -122,40 +122,92 @@ fn unauthenticated_audit_rows_are_bounded_across_store_clones() {
 }
 
 #[test]
-fn unauthenticated_audit_budget_writes_a_suppressed_count_when_the_window_closes() {
-    let (_dir, store, _) = setup();
-    for i in 0..40 {
+fn flood_a_store(store: &Store, n: usize, tag: &str) {
+    for i in 0..n {
         store
             .record_unauthenticated_audit(AuditRecord {
                 operation: "POST /fed/pair".into(),
-                detail: Some(format!("flood {i}")),
-                remote: Some(format!("flood-{i}")),
+                detail: Some(format!("{tag} {i}")),
+                remote: Some(format!("{tag}-{i}")),
                 ..Default::default()
             })
             .unwrap();
     }
+}
+
+fn budget_rows(store: &Store) -> Vec<AuditEntry> {
+    store
+        .audit_log(1000)
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.operation == "audit.budget")
+        .collect()
+}
+
+#[test]
+fn unauthenticated_audit_flood_stops_at_32_rows() {
+    let (_dir, store, _) = setup();
+    flood_a_store(&store, 32, "cap");
+    assert_eq!(store.audit_log(1000).unwrap().len(), 32);
+    flood_a_store(&store, 20, "over");
+    let rows = store.audit_log(1000).unwrap();
+    assert_eq!(
+        rows.len(),
+        32,
+        "further refusals in an open window must not write rows"
+    );
+    assert!(
+        budget_rows(&store).is_empty(),
+        "a still-open window must not write a summary"
+    );
+}
+
+#[test]
+fn unauthenticated_audit_budget_writes_a_suppressed_count_when_the_window_closes() {
+    let (_dir, store, _) = setup();
+    flood_a_store(&store, 40, "flood");
     assert_eq!(store.audit_log(1000).unwrap().len(), 32);
 
     another_core::force_unauthenticated_audit_window_elapsed();
-    store
-        .record_unauthenticated_audit(AuditRecord {
-            operation: "POST /fed/pair".into(),
-            detail: Some("after-window".into()),
-            remote: Some("after-window".into()),
-            ..Default::default()
-        })
-        .unwrap();
+    store.flush_unauthenticated_audit_budget().unwrap();
     let rows = store.audit_log(1000).unwrap();
-    let summary = rows
-        .iter()
-        .find(|row| row.operation == "audit.budget")
-        .expect("expected a suppressed-count summary after the window elapsed");
-    assert_eq!(summary.outcome, "omitted");
-    let detail = summary.detail.as_deref().unwrap_or("");
-    assert!(
-        detail.contains("omitted") && detail.contains("8"),
-        "{detail}"
+    assert_eq!(rows.len(), 33, "one summary and the original 32 refusals");
+    let summaries = budget_rows(&store);
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].outcome, "omitted");
+    assert_eq!(
+        summaries[0].detail.as_deref(),
+        Some("8 unauthenticated refusals were omitted in the last 60 seconds")
     );
+}
+
+#[test]
+fn unauthenticated_audit_budget_summarizes_a_sustained_flood_once_per_window() {
+    let (_dir, store, _) = setup();
+    flood_a_store(&store, 40, "w1"); // 32 written, 8 omitted
+    another_core::force_unauthenticated_audit_window_elapsed();
+    store.flush_unauthenticated_audit_budget().unwrap();
+    assert_eq!(store.audit_log(1000).unwrap().len(), 33);
+    assert_eq!(budget_rows(&store).len(), 1);
+
+    // After the summary (1 slot), 31 refusals fit, then 9 are omitted.
+    flood_a_store(&store, 40, "w2");
+    assert_eq!(store.audit_log(1000).unwrap().len(), 64); // 32 + 1 summary + 31
+    another_core::force_unauthenticated_audit_window_elapsed();
+    store.flush_unauthenticated_audit_budget().unwrap();
+    let rows = store.audit_log(1000).unwrap();
+    assert_eq!(rows.len(), 65);
+    let summaries = budget_rows(&store);
+    assert_eq!(summaries.len(), 2, "exactly one summary per closed window");
+    assert_eq!(
+        summaries[1].detail.as_deref(),
+        Some("9 unauthenticated refusals were omitted in the last 60 seconds")
+    );
+
+    // A flush without another elapsed window must not write a third summary.
+    store.flush_unauthenticated_audit_budget().unwrap();
+    assert_eq!(budget_rows(&store).len(), 2);
+    assert_eq!(store.audit_log(1000).unwrap().len(), 65);
 }
 
 #[test]
