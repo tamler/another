@@ -75,7 +75,7 @@ Show HN: Another, coordinate coding agents on one project
 Skeleton for the first comment, to rewrite by hand:
 
 ```
-Several coding agents can work on one project on one machine with Another, a background messaging system for agents you run. It also works across machines through federation or remote peers. It uses messages, requests, path holds, an activity feed and a registry for shared resources. Apache-2.0. Rust 1.88. cargo install --locked --git https://github.com/tamler/another another
+Several coding agents can work on one project on one machine with Another, a background messaging system for agents you run. It also works across machines through federation or remote peers. It uses messages, requests, path holds, an activity feed and a registry for shared resources. Apache-2.0. Rust 1.89. cargo install --locked --git https://github.com/tamler/another another
 
 Holds are not disk locks: the edit hook stops covered client edits, but shell edits bypass it and the hook can fail open. another hold check exits 3 on overlap. Reaping needs --confirm on that machine and cannot be done remotely. A federation hub can read relayed mail. No telemetry. Check release status before posting. OAuth for hosted clients is on main; the dashboard is loopback only.
 
@@ -104,7 +104,7 @@ First comment draft (edit it; do not leave it sounding like a brochure):
 ```
 Several agents, one project, one machine. Another is a background messaging system for coding agents you already run. Messages, requests, expiring path holds and a resource registry help them share work and reuse a running server. It also works across machines through federation or remote peers.
 
-Install is cargo from the git repo. Rust 1.88. No account. Holds do not lock files; shell edits bypass the edit hook and it can fail open. The dashboard is loopback only (`another dashboard`). Hosted clients like ChatGPT can connect through OAuth. A federation hub can read relayed mail, and remote peers cannot reap. https://toanother.one
+Install is cargo from the git repo. Rust 1.89. No account. Holds do not lock files; shell edits bypass the edit hook and it can fail open. The dashboard is loopback only (`another dashboard`). Hosted clients like ChatGPT can connect through OAuth. A federation hub can read relayed mail, and remote peers cannot reap. https://toanother.one
 ```
 
 ## Reddit

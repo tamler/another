@@ -951,7 +951,7 @@ fn pin_public_address(host: &str, port: u16, allow_loopback: bool) -> Result<Soc
     Ok(addrs[0])
 }
 
-/// Carrier-grade NAT, 100.64.0.0/10. Not covered by `Ipv4Addr::is_private` on Rust 1.88.
+/// Carrier-grade NAT, 100.64.0.0/10. Not covered by `Ipv4Addr::is_private` on Rust 1.89.
 fn cgnat(v: std::net::Ipv4Addr) -> bool {
     let [a, b, _, _] = v.octets();
     a == 100 && (64..128).contains(&b)
