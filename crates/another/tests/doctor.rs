@@ -6,6 +6,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use another_core::test_support::{older_home as make_older_home, schema_version as user_version};
 use serde_json::Value;
 
 struct Fx {
@@ -94,12 +95,6 @@ fn sha(path: &Path) -> Vec<u8> {
 fn set_user_version(db: &Path, v: i64) {
     let c = rusqlite::Connection::open(db).unwrap();
     c.pragma_update(None, "user_version", v).unwrap();
-}
-
-fn user_version(db: &Path) -> i64 {
-    let c = rusqlite::Connection::open(db).unwrap();
-    c.pragma_query_value(None, "user_version", |r| r.get(0))
-        .unwrap()
 }
 
 #[test]
@@ -304,13 +299,7 @@ fn a_named_bind_is_skipped_not_resolved() {
 /// A home as an earlier build left it, one schema behind. `created_by` is the build its
 /// record names; `None` is a home from before the record existed.
 fn older_home(fx: &Fx, created_by: Option<&str>) -> i64 {
-    fx.init();
-    let current = user_version(&fx.db());
-    std::fs::remove_dir_all(&fx.home).unwrap();
-    std::fs::create_dir_all(&fx.home).unwrap();
-    let c = rusqlite::Connection::open(fx.db()).unwrap();
-    c.pragma_update(None, "journal_mode", "WAL").unwrap();
-    another_core::apply_schema(&c, current - 1).unwrap();
+    let current = make_older_home(&fx.home, 1) + 1;
     if let Some(build) = created_by {
         std::fs::write(
             fx.home.join("build.json"),

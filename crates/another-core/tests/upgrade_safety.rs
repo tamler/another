@@ -5,6 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
+use another_core::test_support::{
+    current_schema_version as current, fake_checkout, fake_worktree, schema_version as version,
+};
 use another_core::*;
 use rusqlite::Connection;
 
@@ -38,19 +41,6 @@ fn journal_mode(db: &Path) -> String {
         .unwrap()
 }
 
-fn current() -> i64 {
-    let dir = tempfile::tempdir().unwrap();
-    Store::open(dir.path()).unwrap();
-    version(&dir.path().join(DB_FILE))
-}
-
-fn version(db: &Path) -> i64 {
-    Connection::open(db)
-        .unwrap()
-        .pragma_query_value(None, "user_version", |r| r.get(0))
-        .unwrap()
-}
-
 fn peers(db: &Path) -> i64 {
     Connection::open(db)
         .unwrap()
@@ -66,11 +56,8 @@ fn peers(db: &Path) -> i64 {
 /// of which build made it (homes from before the record existed have none).
 fn older_home(dir: &Path) -> PathBuf {
     let home = dir.join("home");
-    std::fs::create_dir_all(&home).unwrap();
+    test_support::older_home(&home, 1);
     let c = Connection::open(home.join(DB_FILE)).unwrap();
-    // Every home a build made is in WAL mode.
-    c.pragma_update(None, "journal_mode", "WAL").unwrap();
-    apply_schema(&c, current() - 1).unwrap();
     c.execute(
         "INSERT INTO nodes (node_id, display_name, role, is_local, created_at)
          VALUES (?1, 'other', 'peer', 0, 0)",
@@ -1079,11 +1066,6 @@ fn a_mismatch_names_the_tables_that_differ() {
     assert_eq!(seen.differs, ["agents", "extra"]);
 }
 
-fn write_file(path: &Path, text: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, text).unwrap();
-}
-
 fn row_counts(db: &Connection) -> Vec<(String, i64)> {
     let names: Vec<String> = db
         .prepare(
@@ -1116,15 +1098,10 @@ fn upgrade_drops_cross_checkout_blocks() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let main = root.join("shop");
-    write_file(
-        &main.join(".git/config"),
-        "[remote \"origin\"]\n\turl = git@example.com:me/shop.git\n",
-    );
+    fake_checkout(&main, Some("git@example.com:me/shop.git"));
     let worktree = |name: &str| -> PathBuf {
         let wt = root.join(name);
-        let wt_git = main.join(".git/worktrees").join(name);
-        write_file(&wt.join(".git"), &format!("gitdir: {}\n", wt_git.display()));
-        write_file(&wt_git.join("commondir"), "../..\n");
+        fake_worktree(&main, &wt);
         std::fs::create_dir_all(wt.join("src")).unwrap();
         wt
     };

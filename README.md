@@ -280,6 +280,11 @@ cargo fmt --all -- --check
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). The minimum supported Rust version is 1.88.
 
+Workspace tests share schema and file-only checkout/worktree fixtures through
+`another_core::test_support` (the `test-support` feature). `older_home(home, behind)`
+returns the older schema version and leaves build records and scenario data to the caller.
+Tests that need the system clock use `another_core::now_ms`.
+
 ## Clean-room
 
 Written from this repository's own spec. Do **not** copy code from MCP Agent Mail or any other project with a non-permissive license or license rider.

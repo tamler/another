@@ -5,14 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
+use another_core::test_support::{fake_checkout, fake_worktree};
 use another_core::*;
 
 const T0: i64 = 1_800_000_000_000;
-
-fn write(path: &Path, text: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, text).unwrap();
-}
 
 fn path(p: &Path) -> String {
     p.to_string_lossy().into_owned()
@@ -53,17 +49,11 @@ impl Fx {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let main = root.join("shop");
-        write(
-            &main.join(".git/config"),
-            "[remote \"origin\"]\n\turl = git@example.com:me/shop.git\n",
-        );
+        fake_checkout(&main, Some("git@example.com:me/shop.git"));
         let twin = root.join("shop-twin");
         link_dir(&main, &twin);
         let blog = root.join("blog");
-        write(
-            &blog.join(".git/config"),
-            "[remote \"origin\"]\n\turl = https://example.com/me/blog\n",
-        );
+        fake_checkout(&blog, Some("https://example.com/me/blog"));
         let (clock, handle) = Clock::manual(T0);
         let store = Store::open_with_clock(&root.join("home"), clock).unwrap();
         for (name, program, project) in [
@@ -262,9 +252,7 @@ fn project_filter_includes_sibling_checkouts_only() {
     // A linked worktree: another checkout of the same repository. Its holds block nothing
     // in `shop` (D92: alice edits the same file there), and it is still listed with it.
     let wt = fx.main.parent().unwrap().join("shop-wt");
-    let wt_git = fx.main.join(".git/worktrees/shop-wt");
-    write(&wt.join(".git"), &format!("gitdir: {}\n", wt_git.display()));
-    write(&wt_git.join("commondir"), "../..\n");
+    fake_worktree(&fx.main, &wt);
     fx.store.ensure_project("test", &path(&wt)).unwrap();
     assert!(fx
         .edit("bob@shop-twin", &wt, "src/a.rs")

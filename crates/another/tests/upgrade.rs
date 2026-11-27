@@ -2,6 +2,7 @@
 //! the one run against the live home on 17 Nov 2026 was: against an existing home at an
 //! older schema it must refuse and write nothing, until `--dev-migrate` says otherwise.
 
+use another_core::test_support::{older_home as make_older_home, schema_version as version};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -16,25 +17,12 @@ fn another(home: &Path, args: &[&str]) -> Output {
         .expect("run another")
 }
 
-fn version(db: &Path) -> i64 {
-    rusqlite::Connection::open(db)
-        .unwrap()
-        .pragma_query_value(None, "user_version", |r| r.get(0))
-        .unwrap()
-}
-
 /// A home one schema behind this build, with no record of the build that made it: what the
 /// installed binary's home looks like to a newer development build.
 fn older_home(dir: &Path) -> (PathBuf, i64) {
-    let fresh = dir.join("fresh");
-    assert!(another(&fresh, &["init"]).status.success());
-    let current = version(&fresh.join("another.db"));
     let home = dir.join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    let c = rusqlite::Connection::open(home.join("another.db")).unwrap();
-    c.pragma_update(None, "journal_mode", "WAL").unwrap();
-    another_core::apply_schema(&c, current - 1).unwrap();
-    (home, current)
+    let older = make_older_home(&home, 1);
+    (home, older + 1)
 }
 
 #[test]

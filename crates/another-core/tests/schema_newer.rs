@@ -5,15 +5,9 @@
 
 use std::path::Path;
 
+use another_core::test_support::schema_version as version;
 use another_core::*;
 use rusqlite::Connection;
-
-fn version(db: &Path) -> i64 {
-    Connection::open(db)
-        .unwrap()
-        .pragma_query_value(None, "user_version", |r| r.get(0))
-        .unwrap()
-}
 
 fn set_version(db: &Path, v: i64) {
     Connection::open(db)

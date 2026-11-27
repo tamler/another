@@ -5,6 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use another_core::test_support::{fake_checkout, fake_worktree};
 use serde_json::{json, Value};
 
 struct Env {
@@ -13,11 +14,6 @@ struct Env {
     another_home: PathBuf,
     main: PathBuf,
     wt: PathBuf,
-}
-
-fn write(path: &Path, text: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, text).unwrap();
 }
 
 /// The temp dir as a client would report it. Canonicalizing resolves macOS's
@@ -37,15 +33,10 @@ impl Env {
         let dir = tempfile::tempdir().unwrap();
         let root = client_path(dir.path());
         let main = root.join("work").join("shop");
-        write(
-            &main.join(".git/config"),
-            "[remote \"origin\"]\n\turl = git@example.com:team/shop.git\n",
-        );
+        fake_checkout(&main, Some("git@example.com:team/shop.git"));
         std::fs::create_dir_all(main.join("src")).unwrap();
         let wt = root.join("work").join("shop-review");
-        let wt_git = main.join(".git/worktrees/shop-review");
-        write(&wt.join(".git"), &format!("gitdir: {}\n", wt_git.display()));
-        write(&wt_git.join("commondir"), "../..\n");
+        fake_worktree(&main, &wt);
         std::fs::create_dir_all(wt.join("src")).unwrap();
         let home = root.join("home");
         Env {
