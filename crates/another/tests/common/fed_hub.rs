@@ -32,9 +32,15 @@ pub enum HubMode {
     FedRoutesWith(fed::Limits),
 }
 
+/// A temporary node with its own SQLite database in a temporary directory.
+///
+/// Field order is significant for [`Drop`]: Rust drops struct fields in declaration order,
+/// so `store` must precede `dir` to close the SQLite connection before [`tempfile::TempDir`]
+/// deletes the directory (on Windows, deleting an open SQLite file fails silently in
+/// `TempDir::drop`).
 pub struct Node {
-    pub dir: tempfile::TempDir,
     pub store: Store,
+    pub dir: tempfile::TempDir,
 }
 
 impl Node {
@@ -60,7 +66,7 @@ pub fn node(name: &str) -> Node {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     store.set_node_name(name).unwrap();
-    Node { dir, store }
+    Node { store, dir }
 }
 
 pub fn register(store: &Store, name: &str) {
@@ -181,9 +187,15 @@ pub fn serve_store_on(
     })
 }
 
+/// A [`Node`] served over loopback HTTP.
+///
+/// Field order is significant for [`Drop`]: Rust drops struct fields in declaration order,
+/// so `served` must precede `node` so the server shuts down its Tokio runtime and drops the
+/// router's cloned [`Store`] before `node` closes its own [`Store`] and removes its
+/// temporary directory.
 pub struct Hub {
-    pub node: Node,
     pub served: Served,
+    pub node: Node,
 }
 
 impl Hub {
@@ -226,7 +238,7 @@ pub fn serve_node_layered(
     wrap: impl FnOnce(axum::Router) -> axum::Router,
 ) -> Hub {
     let served = serve_store_on(node.store.clone(), mode, port, wrap);
-    Hub { node, served }
+    Hub { served, node }
 }
 
 /// A hub named `"hub"` served through [`http_router`] with `federation: true`.

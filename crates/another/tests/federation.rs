@@ -62,10 +62,11 @@ fn summaries(store: &Store) -> Vec<String> {
 #[test]
 fn pairing_rules() {
     let hub = start_http_hub();
+    // Tuple drops in field order: store before dir so SQLite closes before TempDir removes it.
     let unnamed = {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        (dir, store)
+        (store, dir)
     };
     let code = hub
         .node
@@ -73,7 +74,7 @@ fn pairing_rules() {
         .create_invite(hub.url(), &Perm::ALL, 3600)
         .unwrap();
     // A node still called "local" must be named first.
-    let err = fed::join(&unnamed.1, &code).unwrap_err();
+    let err = fed::join(&unnamed.0, &code).unwrap_err();
     assert!(err.to_string().contains("another node name"), "{err}");
 
     let laptop = node("laptop");
@@ -1300,4 +1301,61 @@ fn hub_modes_serve_distinct_routers() {
         .call()
         .unwrap();
     assert_eq!(bare_pull.status().as_u16(), 401);
+}
+
+/// Dropping a [`Hub`] or [`Node`] shuts down the server and closes SQLite handles before
+/// `TempDir` runs, so the temporary directories are removed cleanly (including on Windows,
+/// where SQLite holds files open without delete sharing).
+#[test]
+fn dropping_hub_and_node_removes_temp_dirs() {
+    let http_hub = start_http_hub();
+    let spoke_http = node("spoke-http");
+    join(&http_hub, &spoke_http, &Perm::ALL);
+    register(&http_hub.node.store, "alice", Program::Claude, None);
+    register(&spoke_http.store, "bob", Program::Codex, None);
+    sync(&spoke_http);
+
+    let fed_hub = start_fed_hub();
+    let spoke_fed = node("spoke-fed");
+    join(&fed_hub, &spoke_fed, &Perm::ALL);
+    register(&fed_hub.node.store, "carol", Program::Claude, None);
+    register(&spoke_fed.store, "dave", Program::Codex, None);
+    sync(&spoke_fed);
+
+    let http_hub_dir = http_hub.node.dir.path().to_path_buf();
+    let spoke_http_dir = spoke_http.dir.path().to_path_buf();
+    let fed_hub_dir = fed_hub.node.dir.path().to_path_buf();
+    let spoke_fed_dir = spoke_fed.dir.path().to_path_buf();
+    for dir in [&http_hub_dir, &spoke_http_dir, &fed_hub_dir, &spoke_fed_dir] {
+        assert!(
+            dir.join(DB_FILE).exists(),
+            "db missing in {}",
+            dir.display()
+        );
+    }
+
+    drop(http_hub);
+    assert!(
+        !http_hub_dir.exists(),
+        "http hub temp dir still exists after drop: {}",
+        http_hub_dir.display()
+    );
+    drop(spoke_http);
+    assert!(
+        !spoke_http_dir.exists(),
+        "http spoke temp dir still exists after drop: {}",
+        spoke_http_dir.display()
+    );
+    drop(fed_hub);
+    assert!(
+        !fed_hub_dir.exists(),
+        "fed hub temp dir still exists after drop: {}",
+        fed_hub_dir.display()
+    );
+    drop(spoke_fed);
+    assert!(
+        !spoke_fed_dir.exists(),
+        "fed spoke temp dir still exists after drop: {}",
+        spoke_fed_dir.display()
+    );
 }

@@ -290,6 +290,9 @@ fn a_peers_marker_text_is_shown_escaped_and_bounded() {
         rusqlite::params![hub_id, ts, payload, sig],
     )
     .unwrap();
+    // Close the independent SQLite connection before dropping `hub` so its temp dir can be
+    // removed cleanly on Windows.
+    drop(db);
 
     let synced = another(spoke.dir.path(), spoke.dir.path(), &["sync"]);
     let needs = another(spoke.dir.path(), spoke.dir.path(), &["needs"]);
@@ -298,7 +301,13 @@ fn a_peers_marker_text_is_shown_escaped_and_bounded() {
         spoke.dir.path(),
         &["activity", "--kinds", "sync"],
     );
+    let hub_dir = hub.node.dir.path().to_path_buf();
     drop(hub);
+    assert!(
+        !hub_dir.exists(),
+        "hub temp dir still exists after drop: {}",
+        hub_dir.display()
+    );
 
     // Each unsafe character became a space, and each value was cut with `…`.
     let id = format!("01 ]0;pwned {}…", "I".repeat(27));
