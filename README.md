@@ -216,6 +216,28 @@ seconds or a suffix (`s`, `m`, `h`, `d` or `w`). Federation
 requests use the store's clock, including a manual clock supplied by a caller.
 MCP `since` inputs also accept bare seconds.
 
+Bearer-token creation and OAuth approval reject project globs that cannot compile
+for matching, even when their syntax is valid. Existing stored globs that cannot
+compile continue to grant no project access. Invalid-glob diagnostics show at most
+the first 80 characters of the pattern, followed by its character count when truncated.
+
+OAuth URI and HTTP Host/Origin ports must be 1 to 65535 written in ASCII decimal
+without a sign or leading zero; an empty port after `:` is refused. See
+[remote access](docs/REMOTE.md) for existing-client and allow-list compatibility.
+Malformed client metadata URLs report client metadata errors; `--public-url`
+errors retain their operator guidance. Stored-client warnings for invalid
+redirect ports show only the escaped authority, without the URI path or query.
+
+On macOS, `another daemon status` checks the loaded label's recorded
+`ANOTHER_HOME`; on Linux it reads the installed systemd unit's `ANOTHER_HOME`. If
+it belongs to a different home or cannot be verified, status says so and does not
+report that daemon's PID or health as this home's. Daemon status reports healthy
+only when `/health` identifies this home's node, and distinguishes an address it
+cannot reach, a bind that is not numeric loopback, and a health response that does
+not identify this home's node. On macOS and Linux, `another doctor` reads
+`ANOTHER_HOME` from the installed service definition, flags a different home, and
+checks the service manager.
+
 The website source lives in [site/](site/README.md). `sh site/build.sh` checks
 the pages, and `python3 scripts/check-copy.py` rejects em dashes and a
 banned-phrase list.

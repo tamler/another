@@ -1363,15 +1363,15 @@ pub(crate) fn refuse_foreign_pattern(
         ),
         700,
     );
-    tx.execute(
-        "INSERT INTO audit_log (node_id, ts, token_id, agent, operation, outcome, detail, remote)
-         VALUES (?1, ?2, NULL, ?3, 'federation hold pattern', 'refused', ?4, NULL)",
-        params![
-            tx.node_id,
-            tx.now,
-            format!("node:{origin}"),
-            format!("event {event_id}: {reason}")
-        ],
+    crate::tokens::insert_audit_tx(
+        tx,
+        crate::tokens::AuditRecord {
+            agent: Some(format!("node:{origin}")),
+            operation: "federation hold pattern".into(),
+            outcome: "refused".into(),
+            detail: Some(format!("event {event_id}: {reason}")),
+            ..Default::default()
+        },
     )?;
     Ok(Some(reason))
 }
