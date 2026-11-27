@@ -156,7 +156,7 @@ another stats --since 48h
 another --json stats --since 48h
 ```
 
-`another stats` counts this node's coordination evidence from the event log for a period (a duration such as `30m`, `48h` or `2d`, an RFC 3339 time, or an event id; the default is `24h`):
+`another stats` counts this node's coordination evidence from the event log for a period (bare seconds such as `3600`, a duration such as `30m`, `48h` or `2d`, an RFC 3339 time, or an event id; the default is `24h`):
 
 An event id that is not in this node's log is refused with `unknown event id "<id>"` (exit status 1). With `--json` the error code is `not_found`; before M-P it was `db`, so callers that matched `db` for this case should match `not_found`.
 

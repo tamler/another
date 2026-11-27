@@ -8,6 +8,9 @@ mod hosted_ci;
 #[path = "common/transports.rs"]
 mod transports;
 
+#[path = "common/cli.rs"]
+mod cli;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -115,18 +118,10 @@ impl Env {
     }
 
     fn cmd(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_another"));
+        let mut c = cli::another_cmd(&self.another_home);
         c.args(args)
             .env("HOME", &self.home)
-            .env("ANOTHER_HOME", &self.another_home)
-            .env("HERDR_BIN_PATH", self.herdr_dir.join("herdr"))
-            .env_remove("ANOTHER_AGENT")
-            .env_remove("GROK_HOOK_EVENT")
-            .env_remove("ANOTHER_LOG")
-            .env_remove("HERDR_PANE_ID")
-            .env_remove("TMUX_PANE")
-            .env_remove("CMUX_SURFACE_ID")
-            .env_remove("TERM_PROGRAM");
+            .env("HERDR_BIN_PATH", self.herdr_dir.join("herdr"));
         c
     }
 

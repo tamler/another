@@ -24,6 +24,71 @@ pub const BACKUP_DIR: &str = "backups";
 
 static ALLOW_DEV_MIGRATE: AtomicBool = AtomicBool::new(false);
 
+/// Create with owner-only permissions before any secret bytes are written.
+fn private_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+#[cfg(feature = "test-support")]
+thread_local! {
+    static TIGHTEN_ERROR: std::cell::Cell<Option<std::io::ErrorKind>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Make later tighten attempts fail as this I/O error, so tests can cover a
+/// chmod the owner or the filesystem refuses. Call with `None` to restore
+/// normal tightening.
+#[cfg(feature = "test-support")]
+pub fn force_tighten_error(kind: Option<std::io::ErrorKind>) {
+    TIGHTEN_ERROR.with(|cell| cell.set(kind));
+}
+
+/// Make `path` owner-only (0600). If chmod is refused, continue with a warning
+/// unless the file is already world-readable, in which case opening must fail.
+#[cfg(unix)]
+fn tighten_owner_only(path: &Path) -> crate::error::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let chmod = || {
+        #[cfg(feature = "test-support")]
+        if let Some(kind) = TIGHTEN_ERROR.with(|cell| cell.get()) {
+            return Err(std::io::Error::from(kind));
+        }
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    };
+    match chmod() {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => {
+            let meta = match std::fs::metadata(path) {
+                Ok(meta) => meta,
+                Err(e2) if e2.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(e2) => return Err(e2.into()),
+            };
+            let mode = meta.permissions().mode() & 0o777;
+            if mode & 0o004 != 0 {
+                return Err(crate::error::Error::Invalid(format!(
+                    "{} is world-readable (mode {mode:04o}) and could not be tightened: {e}",
+                    path.display()
+                )));
+            }
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                mode = format!("{mode:04o}"),
+                "could not tighten file mode; continuing because it is not world-readable"
+            );
+            Ok(())
+        }
+    }
+}
+
 /// Let this process, when it is a development build, migrate a home that a development build
 /// did not create. The CLI calls this for `--dev-migrate`.
 pub fn allow_dev_migrate() {
@@ -176,9 +241,10 @@ impl HomeOrigin {
 
     fn write(&self, home: &Path) -> Result<()> {
         let path = home.join(ORIGIN_FILE);
-        let staged = home.join(format!("{ORIGIN_FILE}.{}.tmp", std::process::id()));
+        let staged = home.join(format!("{ORIGIN_FILE}.{}.tmp", ulid::Ulid::new()));
         let bytes = serde_json::to_vec_pretty(self)?;
-        std::fs::write(&staged, bytes)
+        private_file(&staged)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, &bytes))
             .and_then(|()| std::fs::rename(&staged, &path))
             .map_err(|e| {
                 let _ = std::fs::remove_file(&staged);
@@ -356,6 +422,21 @@ impl Store {
             std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700))?;
         }
         let path = home.join(DB_FILE);
+        // SQLite inherits the database's mode for new WAL and shared-memory files.
+        // Set it before opening SQLite, which can create those files immediately.
+        match private_file(&path) {
+            Ok(_) => (),
+            // Do not open and close an existing database file here: on Unix that
+            // would release this process's SQLite locks on its other connections.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
+            Err(e) => return Err(e.into()),
+        }
+        #[cfg(unix)]
+        {
+            for name in [DB_FILE, "another.db-wal", "another.db-shm", ORIGIN_FILE] {
+                tighten_owner_only(&home.join(name))?;
+            }
+        }
         let conn = Connection::open(&path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
