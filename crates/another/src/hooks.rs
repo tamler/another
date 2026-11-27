@@ -255,13 +255,28 @@ impl HookEnv {
         Ok(HookEnv {
             home,
             another_home,
-            exe: std::env::current_exe().context("locating the another binary")?,
+            exe: crate::bin_path::resolve_current_exe()?,
         })
     }
 
     pub fn script_path(&self) -> PathBuf {
         self.another_home.join("hooks").join(MARKER)
     }
+}
+
+/// When the wrapper exists but the recorded `another` path is gone, a short
+/// note for `hook status` (and the same condition doctor reports).
+pub fn missing_recorded_bin_note(env: &HookEnv) -> Option<String> {
+    let path = env.script_path();
+    let text = std::fs::read_to_string(&path).ok()?;
+    let bin = crate::bin_path::recorded_bin_from_wrapper(&text)?;
+    if crate::bin_path::is_runnable_exe(&bin) {
+        return None;
+    }
+    Some(format!(
+        "recorded another binary {} is missing or not executable; run another hook install",
+        bin.display()
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -299,7 +314,7 @@ fn script_text(env: &HookEnv) -> String {
     format!(
         "#!/bin/sh\n\
          # Another hook wrapper, written by `another hook install`; removed by `another hook uninstall`.\n\
-         # It always exits 0: a missing another never blocks the agent. The pre-edit hook\n\
+         # Ordinary hooks always exit 0: a missing another never blocks the agent. The pre-edit hook\n\
          # may still print a deny when it cannot check holds after waiting for a lock.\n\
          # The one exception is Cursor's edit guard (D76): Cursor blocks a tool call whose\n\
          # reply it cannot parse, so a reply is printed only after another exited 0 and\n\
@@ -308,7 +323,13 @@ fn script_text(env: &HookEnv) -> String {
          # temporary file, capped in size, and the exact bytes checked are the bytes printed.\n\
          ANOTHER_BIN={exe}\n\
          if [ ! -x \"$ANOTHER_BIN\" ]; then\n\
-         \x20 ANOTHER_BIN=$(command -v another 2>/dev/null) || ANOTHER_BIN=\n\
+           ANOTHER_BIN=\n\
+           for candidate in \"$HOME/.local/bin/another\" \"$HOME/.cargo/bin/another\" /usr/local/bin/another /usr/bin/another; do\n\
+             if [ -x \"$candidate\" ]; then\n\
+              ANOTHER_BIN=$candidate\n\
+              break\n\
+             fi\n\
+           done\n\
          fi\n\
          if [ -z \"${{ANOTHER_HOME:-}}\" ]; then\n\
          \x20 ANOTHER_HOME={home}\n\
@@ -945,7 +966,10 @@ fn hook_agent(store: &Store, client: Client, root: &Path) -> Result<String> {
 
 /// Whether Another installs an edit guard for this client (see [`Client::specs`]).
 fn has_edit_hook(client: Client) -> bool {
-    client.specs().iter().any(|s| s.event == HookEvent::PreEdit)
+    client
+        .specs(false)
+        .iter()
+        .any(|s| s.event == HookEvent::PreEdit)
 }
 
 /// Longest subject or title a hook shows (the bound D75 set for wake lines).
@@ -2241,6 +2265,29 @@ mod tests {
         assert_eq!(cursor.session_id.as_deref(), Some("c"));
         let junk = HookInput::parse("not json");
         assert!(junk.cwd.is_none() && junk.session_id.is_none());
+    }
+
+    #[test]
+    fn hook_wrapper_falls_back_to_trusted_bindirs_not_path() {
+        let env = HookEnv {
+            home: PathBuf::from("/tmp/home"),
+            another_home: PathBuf::from("/tmp/another"),
+            exe: PathBuf::from("/opt/another/bin/another"),
+        };
+        let text = script_text(&env);
+        assert!(
+            !text.contains("command -v another"),
+            "PATH search can pick a hijacked another: {text}"
+        );
+        assert!(text.contains("'/opt/another/bin/another'"));
+        for dir in [
+            "$HOME/.local/bin/another",
+            "$HOME/.cargo/bin/another",
+            "/usr/local/bin/another",
+            "/usr/bin/another",
+        ] {
+            assert!(text.contains(dir), "missing {dir} in {text}");
+        }
     }
 
     #[test]

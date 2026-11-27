@@ -336,6 +336,9 @@ pub struct HookStatus {
     pub edit_guard: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Set when the wrapper is installed but the recorded `another` binary is missing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 pub fn hook_status(rows: &[HookStatus]) -> String {
@@ -352,6 +355,9 @@ pub fn hook_status(rows: &[HookStatus]) -> String {
                 r.config,
             );
             if let Some(note) = r.trust_note {
+                out.push_str(&format!("  {note}\n"));
+            }
+            if let Some(note) = &r.note {
                 out.push_str(&format!("  {note}\n"));
             }
             if r.edit_guard == Some(true) {

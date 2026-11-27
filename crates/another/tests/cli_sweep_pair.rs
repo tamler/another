@@ -27,13 +27,6 @@ fn run(home: &Path, cwd: &Path, args: &[&str]) -> (bool, String) {
     )
 }
 
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
-}
-
 #[test]
 fn sweep_reports_and_ends_lapsed_holds_and_overdue_requests() {
     let dir = tempfile::tempdir().unwrap();

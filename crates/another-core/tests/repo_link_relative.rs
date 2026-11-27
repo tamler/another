@@ -10,6 +10,7 @@
 use std::path::Path;
 
 use another_core::repo_link_for;
+use another_core::test_support::fake_checkout;
 
 fn write(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -19,11 +20,7 @@ fn write(path: &Path, text: &str) {
 /// `main` (a normal checkout with `origin`) plus `wt-a`, a worktree added with
 /// `--relative-paths`.
 fn relative_worktree(root: &Path, origin: Option<&str>) {
-    let config = match origin {
-        Some(url) => format!("[remote \"origin\"]\n\turl = {url}\n"),
-        None => "[core]\n\tbare = false\n".to_string(),
-    };
-    write(&root.join("main/.git/config"), &config);
+    fake_checkout(&root.join("main"), origin);
     write(
         &root.join("wt-a/.git"),
         "gitdir: ../main/.git/worktrees/wt-a\n",

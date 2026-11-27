@@ -6,6 +6,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use another_core::test_support::{older_home as make_older_home, schema_version as user_version};
 use serde_json::Value;
 
 struct Fx {
@@ -94,12 +95,6 @@ fn sha(path: &Path) -> Vec<u8> {
 fn set_user_version(db: &Path, v: i64) {
     let c = rusqlite::Connection::open(db).unwrap();
     c.pragma_update(None, "user_version", v).unwrap();
-}
-
-fn user_version(db: &Path) -> i64 {
-    let c = rusqlite::Connection::open(db).unwrap();
-    c.pragma_query_value(None, "user_version", |r| r.get(0))
-        .unwrap()
 }
 
 #[test]
@@ -304,13 +299,7 @@ fn a_named_bind_is_skipped_not_resolved() {
 /// A home as an earlier build left it, one schema behind. `created_by` is the build its
 /// record names; `None` is a home from before the record existed.
 fn older_home(fx: &Fx, created_by: Option<&str>) -> i64 {
-    fx.init();
-    let current = user_version(&fx.db());
-    std::fs::remove_dir_all(&fx.home).unwrap();
-    std::fs::create_dir_all(&fx.home).unwrap();
-    let c = rusqlite::Connection::open(fx.db()).unwrap();
-    c.pragma_update(None, "journal_mode", "WAL").unwrap();
-    another_core::apply_schema(&c, current - 1).unwrap();
+    let current = make_older_home(&fx.home, 1) + 1;
     if let Some(build) = created_by {
         std::fs::write(
             fx.home.join("build.json"),
@@ -708,6 +697,48 @@ fn a_hub_not_synced_for_two_days_warns() {
         .as_str()
         .unwrap()
         .contains("hub hub-box: last sync 48 h ago"));
+}
+
+#[test]
+fn doctor_warns_about_inconsistent_holds_without_repair() {
+    let fx = Fx::new();
+    fx.init();
+    let (_, clean) = fx.doctor();
+    assert!(!row(&clean, "peers")["detail"]
+        .as_str()
+        .unwrap()
+        .contains("inconsistent holds"));
+    let store = another_core::Store::open(&fx.home).unwrap();
+    let agent = store
+        .register_agent(another_core::RegisterAgent {
+            name: "alice".into(),
+            program: another_core::Program::Codex,
+            project: None,
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    let project = store
+        .ensure_project("test", fx.user.to_str().unwrap())
+        .unwrap();
+    let c = rusqlite::Connection::open(fx.db()).unwrap();
+    c.execute("INSERT INTO nodes (node_id,display_name,role,is_local,created_at) VALUES ('legacy-peer','legacy','peer',0,1)", []).unwrap();
+    c.execute("INSERT INTO holds (hold_id,node_id,project_id,agent_id,pattern,exclusive,ttl_seconds,created_at,renewed_at,expires_at) VALUES ('legacy-hold','legacy-peer',?1,?2,'file.rs',1,900,1,1,9000000000000)", rusqlite::params![project.project_id,agent.agent_id]).unwrap();
+    drop(c);
+    drop(store);
+    let before = sha(&fx.db());
+    let (code, report) = fx.doctor();
+    assert_eq!(code, Some(0));
+    assert_eq!(status(&report, "peers"), "warn");
+    let detail = row(&report, "peers")["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("1 inconsistent holds")
+            && detail.contains("legacy-hold")
+            && detail.contains("legacy-peer")
+            && detail.contains("inert since this build; not removed"),
+        "{detail}"
+    );
+    assert_eq!(before, sha(&fx.db()));
 }
 
 #[test]

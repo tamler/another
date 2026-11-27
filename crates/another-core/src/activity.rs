@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use crate::identity::address;
 use crate::mail::{Importance, InboxQuery};
 use crate::requests::RequestStatus;
-use crate::store::Store;
+use crate::store::{require_event_seq, Store};
 use crate::time::fmt_ts;
 
 /// Coarse activity categories, derived from event kinds.
@@ -836,13 +836,7 @@ fn read_events(
     limit: u32,
 ) -> Result<Vec<EventRow>> {
     let after_seq: Option<i64> = match since {
-        Some(Since::After(id)) => Some(
-            conn.query_row("SELECT seq FROM events WHERE event_id = ?1", [id], |r| {
-                r.get(0)
-            })
-            .optional()?
-            .ok_or_else(|| Error::NotFound(format!("unknown event id {id:?}")))?,
-        ),
+        Some(Since::After(id)) => Some(require_event_seq(conn, id)?),
         _ => None,
     };
     let since_ts = match since {
