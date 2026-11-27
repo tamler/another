@@ -2,6 +2,8 @@
 
 `another doctor` checks an installation in one read-only pass. It prints one line per check and, under anything that is not `ok`, the command that fixes it.
 
+The `peers` check also warns about unreleased holds whose node differs from their agent's or project's node. It names the count and up to five hold ids and their nodes. These legacy rows are inert since this build: they neither cover nor block edits, and local commands do not adopt, renew or release them. They are not removed; each ends when it expires or its node releases it. There is no repair command.
+
 ```text
 $ another doctor
 ok    binary    another 0.1.0 at /Users/me/.local/bin/another (the one on PATH)

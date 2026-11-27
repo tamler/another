@@ -152,6 +152,8 @@ Or, while `another serve` is running, open <http://127.0.0.1:7466/ui>. The page 
 
 ## Status
 
+Federated holds follow the node that took them. Ownership collisions appear in the audit log and sync report; `another doctor` reports inconsistent legacy holds, which are kept inert. See [federation](docs/FEDERATION.md#model).
+
 Hosted Windows CI runs the workspace tests, including CLI thread exit-status checks,
 and the fresh-install, hook-pack and daemon dry-run checks. The forced small-stack
 test uses Unix `ulimit`; Windows exercises the CLI with its native main-thread stack.

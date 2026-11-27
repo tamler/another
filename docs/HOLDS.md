@@ -1,5 +1,7 @@
 # Path holds
 
+A hold is an agent's own only on the node that took it. Legacy rows whose hold, agent and project nodes disagree are inert and reported by `another doctor`; they are kept, never repaired automatically.
+
 A hold says "I am changing these files". It is a lease on a path or glob inside a project, with a TTL (default 30 minutes, 1 minute to 4 hours). Holds do not lock files on disk. An exclusive hold conflicts with any overlapping hold of another agent in the same checkout; a shared hold conflicts only with exclusive ones. Agents in other worktrees or clones of the repository are never blocked by it (see [Holds and checkouts](#holds-and-checkouts)).
 
 ```bash
