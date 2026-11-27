@@ -552,8 +552,16 @@ fn pairing_and_sync_report_hub_redirect_without_following_it() {
     destination.set_nonblocking(true).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let location = format!("http://{}/fed/pair", destination.local_addr().unwrap());
-    let redirect = axum::response::Redirect::temporary(&location);
-    let app = axum::Router::new().fallback(move || async move { redirect });
+    let redirect = (
+        [
+            (axum::http::header::CONNECTION, "close"),
+            (axum::http::header::CONTENT_LENGTH, "0"),
+        ],
+        axum::response::Redirect::temporary(&location),
+    );
+    // Drain the request body before Hyper flushes the response and closes the write side.
+    // Closing a socket with unread request data can abort the connection on Windows.
+    let app = axum::Router::new().fallback(move |_: axum::body::Bytes| async move { redirect });
     rt.spawn(async move { axum::serve(listener, app).await.unwrap() });
     let code = hub
         .store
