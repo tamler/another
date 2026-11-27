@@ -1,5 +1,7 @@
 [advisories]
 db-urls = ["https://github.com/RustSec/advisory-db"]
+unmaintained = "all"
+unsound = "all"
 yanked = "deny"
 
 [licenses]
@@ -8,12 +10,10 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "BSL-1.0",
-    "CC0-1.0",
     # Mozilla root certificate data in webpki-roots.
     "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
-    "OpenSSL",
     "Unicode-3.0",
     "Zlib",
 ]

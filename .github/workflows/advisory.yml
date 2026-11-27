@@ -58,9 +58,13 @@ jobs:
             exit 1
           fi
 
+      - name: Populate crates.io cache for yanked-crate checks
+        if: matrix.tool == 'audit'
+        run: cargo fetch --locked
+
       - name: cargo audit
         if: matrix.tool == 'audit'
-        run: cargo audit --no-fetch
+        run: cargo audit --no-fetch --deny warnings
 
       - name: Fetch RustSec database for cargo deny
         if: matrix.tool == 'deny'

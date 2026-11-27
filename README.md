@@ -159,10 +159,14 @@ The separate dependency security workflow runs on pull requests, pushes to `main
 daily and on manual dispatch. It uses cargo-audit 0.23.0 and cargo-deny 0.22.1;
 database fetch failures fail the job. To run the same checks locally, install those
 versions with `cargo install --locked --version <version> <cargo-audit|cargo-deny>`,
-then run `cargo audit` and `cargo deny --locked --all-features check`.
+then run `cargo audit update-db`, `cargo fetch --locked`, and
+`cargo audit --no-fetch --deny warnings` for cargo-audit. For cargo-deny, run
+`cargo deny --locked --all-features fetch db` and
+`cargo deny --locked --all-features check`.
 The policy in [deny.toml](deny.toml) checks advisories, licenses, dependency bans
-and sources, rejects yanked crates and unknown sources, and warns about duplicate
-versions. No advisories are ignored.
+and sources. Both scanners reject unsound, unmaintained, and yanked dependencies,
+including transitive ones. Cargo-deny also rejects unknown sources and warns about
+duplicate versions. No advisories are ignored.
 
 Hosted Windows CI runs the workspace tests, including CLI thread exit-status checks,
 and the fresh-install, hook-pack and daemon dry-run checks. The forced small-stack
