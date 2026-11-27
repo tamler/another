@@ -25,6 +25,10 @@ impl Node {
 }
 
 /// Pair two stores in process and return the consumed invite code for assertions.
+///
+/// The invite always names the fixed hub URL `https://hub.example` and a 3600-second TTL.
+/// Tests that check the hub URL, expiry or a tampered handshake should build the invite
+/// themselves instead of using this helper.
 pub fn pair(hub: &Store, spoke: &Store, perms: &[Perm]) -> String {
     let code = hub
         .create_invite("https://hub.example", perms, 3600)
