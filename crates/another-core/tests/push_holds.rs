@@ -2545,7 +2545,6 @@ fn a_waiters_session_end_drops_its_waits() {
     assert_eq!(finished[0].payload["path"], "src/a.rs");
     assert!(finished[0].actor.starts_with("bob"), "{:?}", finished[0]);
 
-    fx.store.release_holds("alice", &[]).unwrap();
     let pinged = |agent: &str| {
         fx.store
             .inbox(agent, InboxQuery::default())
@@ -2555,16 +2554,20 @@ fn a_waiters_session_end_drops_its_waits() {
             .filter(|m| m.message.subject == "Hold free: src/a.rs")
             .count()
     };
-    assert_eq!((pinged("bob"), pinged("carol")), (0, 1));
+    assert_eq!((pinged("bob"), pinged("carol")), (0, 0));
 
-    // Back again, bob's next conflict is a first notice with a new wait.
-    fx.acquire("alice", &fx.repos.main, &["src/a.rs"]).unwrap();
+    // Retry while the original blocker is still live, so a first notice
+    // cannot be blamed on a replacement hold.
     let guard = fx
         .store
         .guard_edit("bob", &main, &["src/a.rs".into()], "auto")
         .unwrap();
     assert!(guard.first_notice && guard.wait_recorded);
-    assert_eq!(waits("bob"), 1);
+    assert_eq!((waits("bob"), waits("carol")), (1, 1));
+    assert_eq!((pinged("bob"), pinged("carol")), (0, 0));
+
+    fx.store.release_holds("alice", &[]).unwrap();
+    assert_eq!((pinged("bob"), pinged("carol")), (1, 1));
 }
 
 /// REVIEW-IMPL P2 on #149: session end sweeps expired holds. A blocker that expired just
