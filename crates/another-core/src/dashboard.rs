@@ -18,7 +18,7 @@ use crate::holds::{self, patterns_overlap};
 use crate::identity::{agent_from_row, AGENT_COLUMNS};
 use crate::requests::{self, Request, RequestStatus};
 use crate::resources::{Resource, ResourceFilter};
-use crate::store::Store;
+use crate::store::{require_event_seq, Store};
 use crate::time::{fmt_ts, parse_ts};
 use crate::Peer;
 
@@ -581,13 +581,7 @@ impl Store {
             let slugs = project_slugs(conn)?;
             let local = self.node_id();
             let before_seq: Option<i64> = match &query.before_id {
-                Some(id) => Some(
-                    conn.query_row("SELECT seq FROM events WHERE event_id = ?1", [id], |r| {
-                        r.get(0)
-                    })
-                    .optional()?
-                    .ok_or_else(|| Error::NotFound(format!("unknown event id {id:?}")))?,
-                ),
+                Some(id) => Some(require_event_seq(conn, id)?),
                 None => None,
             };
             let mut stmt = conn.prepare(

@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use crate::crypto;
 use crate::error::{Error, Result};
-use crate::store::{new_id, Store, Tx};
+use crate::store::{event_seq, new_id, Store, Tx};
 use crate::sync_skip::{self, SkippedEvent};
 use crate::time::{fmt_opt, fmt_ts, later_secs};
 
@@ -2664,15 +2664,8 @@ impl Store {
             }
             let high: i64 =
                 conn.query_row("SELECT coalesce(max(seq), 0) FROM events", [], |r| r.get(0))?;
-            let seq_of = |id: &str| -> Result<Option<i64>> {
-                Ok(conn
-                    .query_row("SELECT seq FROM events WHERE event_id = ?1", [id], |r| {
-                        r.get(0)
-                    })
-                    .optional()?)
-            };
             let received_lost = match anchors.received.as_deref().filter(|_| after_seq > 0) {
-                Some(id) => match (seq_of(id)?, anchors.received_seq) {
+                Some(id) => match (event_seq(conn, id)?, anchors.received_seq) {
                     (None, _) => true,
                     (Some(at), Some(sent_at)) => at != sent_at,
                     (Some(_), None) => false,
@@ -2680,7 +2673,7 @@ impl Store {
                 None => false,
             };
             let pushed_lost = match anchors.pushed.as_deref() {
-                Some(id) => seq_of(id)?.is_none(),
+                Some(id) => event_seq(conn, id)?.is_none(),
                 None => false,
             };
             if after_seq > high || received_lost || pushed_lost {
