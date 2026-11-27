@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 type Client = RunningService<RoleClient, ClientConfig>;
 
 /// Every free text in the run starts with this.
-const MARK: &str = "ZQMARK";
+const MARK: &str = "ZQMARK_";
 
 async fn serve(store: Store, opts: HttpOptions, ct: &CancellationToken) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
