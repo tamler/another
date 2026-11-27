@@ -743,6 +743,11 @@ impl AnotherMcp {
     ) -> ToolResult<HeartbeatReport> {
         let scope = crate::remote::current_scope();
         self.run(move |s| {
+            if a.start && a.end {
+                return Err(another_core::Error::Invalid(
+                    "start and end cannot both be true".into(),
+                ));
+            }
             let phase = if a.end {
                 SessionPhase::End
             } else if a.start {
