@@ -22,6 +22,23 @@ fn text(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
+#[test]
+fn heartbeat_rejects_start_and_end_before_session_mutation() {
+    let fx = Fx::new();
+    fx.ok(&["heartbeat", "--agent", "lead", "--start"]);
+    let store = another_core::Store::open(&fx.home).unwrap();
+    let before = store.agent("lead").unwrap();
+    let (code, message) = fx.fail(&["heartbeat", "--agent", "lead", "--start", "--end"]);
+    assert_eq!(code, Some(2));
+    assert!(
+        message.contains("--start") && message.contains("--end"),
+        "{message}"
+    );
+    let after = store.agent("lead").unwrap();
+    assert_eq!(after.status, before.status);
+    assert_eq!(after.last_seen_at, before.last_seen_at);
+}
+
 struct Fx {
     _dir: tempfile::TempDir,
     home: std::path::PathBuf,

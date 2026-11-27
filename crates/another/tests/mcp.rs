@@ -49,9 +49,11 @@ async fn in_process(store: Store) -> Client {
 
 #[tokio::test]
 async fn heartbeat_rejects_start_and_end_without_releasing_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("app");
     let store = Store::open_in_memory(Clock::System).unwrap();
     let client = in_process(store.clone()).await;
-    call_ok(&client, "ensure_project", json!({ "path": "/work/app" })).await;
+    call_ok(&client, "ensure_project", json!({ "path": project_path })).await;
     call_ok(
         &client,
         "register_agent",
@@ -68,7 +70,7 @@ async fn heartbeat_rejects_start_and_end_without_releasing_holds() {
     let held = call_ok(
         &client,
         "hold_paths",
-        json!({ "agent": "codex-1", "project": "/work/app", "paths": ["src/**"] }),
+        json!({ "agent": "codex-1", "project": project_path, "paths": ["src/**"] }),
     )
     .await;
     assert_eq!(held["granted"].as_array().unwrap().len(), 1);
@@ -545,6 +547,18 @@ async fn streamable_http_on_loopback() {
     assert_eq!(agent["address"], "grok-bot@site");
     // Written through HTTP, visible to any other connection on the same database.
     assert_eq!(store.agent("grok-bot").unwrap().program, "grok_bot");
+
+    let before = store.agent("grok-bot").unwrap();
+    let error = call_error(
+        &client,
+        "heartbeat",
+        json!({ "agent": "grok-bot", "start": true, "end": true }),
+    )
+    .await;
+    assert_eq!(error["code"], "invalid");
+    let after = store.agent("grok-bot").unwrap();
+    assert_eq!(after.status, before.status);
+    assert_eq!(after.last_seen_at, before.last_seen_at);
 
     client.cancel().await.unwrap();
     ct.cancel();
