@@ -14,8 +14,9 @@ use ureq::unversioned::resolver::{ResolvedSocketAddrs, Resolver};
 use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 
 use another_core::{
-    canonical_resource, error_redirect, redirect_matches, validate_cimd, AuthorizeInput,
-    ClientProfile, ClientRegistration, CodeExchange, OAuthFail, RefreshExchange, Store,
+    canonical_resource, error_redirect, format_authority, redirect_matches, split_host_port,
+    validate_cimd, AuthorizeInput, ClientProfile, ClientRegistration, CodeExchange,
+    OAuthAuthorityError, OAuthFail, RefreshExchange, Store,
 };
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -303,7 +304,7 @@ pub fn parse_public_url(raw: &str) -> anyhow::Result<OAuthConfig> {
     if rest.contains('/') || rest.contains('?') || rest.contains('#') || rest.contains('@') {
         anyhow::bail!("--public-url is an origin with no path, query or userinfo");
     }
-    let (host, port) = split_authority(rest)?;
+    let (host, port) = split_host_port(rest).map_err(public_url_authority_error)?;
     let loopback = is_loopback_name(&host);
     if scheme == "http" && !loopback {
         anyhow::bail!("--public-url must be https (http is only allowed for loopback tests)");
@@ -315,7 +316,7 @@ pub fn parse_public_url(raw: &str) -> anyhow::Result<OAuthConfig> {
         ("https", Some(443)) | ("http", Some(80)) => None,
         (_, other) => other,
     };
-    let issuer = format!("{scheme}://{}", format_host(&host, port));
+    let issuer = format!("{scheme}://{}", format_authority(&host, port));
     let resource = canonical_resource(&format!("{issuer}/mcp"))
         .map_err(|e| anyhow::anyhow!("--public-url: {e}"))?;
     Ok(OAuthConfig {
@@ -331,64 +332,14 @@ fn is_loopback_name(host: &str) -> bool {
     host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
-fn format_host(host: &str, port: Option<u16>) -> String {
-    let mut out = String::new();
-    if host.contains(':') {
-        out.push('[');
-        out.push_str(host);
-        out.push(']');
-    } else {
-        out.push_str(host);
-    }
-    if let Some(port) = port {
-        out.push(':');
-        out.push_str(&port.to_string());
-    }
-    out
-}
-
-fn split_authority(authority: &str) -> anyhow::Result<(String, Option<u16>)> {
-    if let Some(rest) = authority.strip_prefix('[') {
-        let (host, after) = rest
-            .split_once(']')
-            .ok_or_else(|| anyhow::anyhow!("invalid host in --public-url"))?;
-        if host.is_empty() {
-            anyhow::bail!("--public-url is missing a host");
-        }
-        let port = if after.is_empty() {
-            None
-        } else {
-            Some(parse_port(after.strip_prefix(':').ok_or_else(|| {
-                anyhow::anyhow!("invalid host in --public-url")
-            })?)?)
-        };
-        return Ok((host.to_ascii_lowercase(), port));
-    }
-    if authority.matches(':').count() > 1 {
-        anyhow::bail!("invalid host in --public-url; wrap IPv6 addresses in brackets");
-    }
-    let (host, port) = match authority.split_once(':') {
-        Some((h, p)) => (h, Some(parse_port(p)?)),
-        None => (authority, None),
-    };
-    if host.is_empty() {
-        anyhow::bail!("--public-url is missing a host");
-    }
-    Ok((host.to_ascii_lowercase(), port))
-}
-
-fn parse_port(raw: &str) -> anyhow::Result<u16> {
-    let port: u16 = raw
-        .parse()
-        .map_err(|_| anyhow::anyhow!("invalid port in --public-url"))?;
-    if port == 0 {
-        anyhow::bail!("invalid port in --public-url");
-    }
-    Ok(port)
-}
-
-fn normalize_host(host: &str) -> String {
-    host.trim_matches(['[', ']']).to_ascii_lowercase()
+fn public_url_authority_error(error: OAuthAuthorityError) -> anyhow::Error {
+    anyhow::anyhow!(match error {
+        OAuthAuthorityError::MissingHost => "--public-url is missing a host",
+        OAuthAuthorityError::InvalidHost => "invalid host in --public-url",
+        OAuthAuthorityError::UnbracketedIpv6 =>
+            "invalid host in --public-url; wrap IPv6 addresses in brackets",
+        OAuthAuthorityError::InvalidPort => "invalid port in --public-url",
+    })
 }
 
 /// Split a `Host` header into a lowercase host and an optional port.
@@ -397,37 +348,11 @@ fn normalize_host(host: &str) -> String {
 /// port 80, which would let a non-canonical port match the bound port.
 pub(crate) fn split_host_header(header: &str) -> Option<(String, Option<u16>)> {
     let header = header.trim();
-    if header.is_empty()
-        || header.len() > 512
-        || header.contains('/')
-        || header.contains(' ')
-        || header.contains(',')
-    {
+    if header.is_empty() || header.len() > 512 || header.contains(['/', ' ', ',', '@', '\\']) {
         return None;
     }
-    if let Ok(authority) = axum::http::uri::Authority::try_from(header) {
-        let host = normalize_host(authority.host());
-        if host.is_empty() {
-            return None;
-        }
-        let port = authority.port_u16();
-        if let Some(port) = port {
-            let raw = header.rsplit_once(':').map_or("", |(_, text)| text);
-            if raw != port.to_string() {
-                return None;
-            }
-        }
-        return Some((host, port));
-    }
-    if header.contains(':') {
-        return None;
-    }
-    let host = normalize_host(header);
-    if host.is_empty() {
-        None
-    } else {
-        Some((host, None))
-    }
+    axum::http::uri::Authority::try_from(header).ok()?;
+    split_host_port(header).ok()
 }
 
 /// Serialize an origin the way the browser does: lowercase scheme and host,
@@ -453,12 +378,12 @@ fn canonical_origin(raw: &str) -> Option<String> {
     {
         return None;
     }
-    let (host, port) = split_authority(rest).ok()?;
+    let (host, port) = split_host_port(rest).ok()?;
     let port = match (scheme.as_str(), port) {
         ("https", Some(443)) | ("http", Some(80)) => None,
         (_, other) => other,
     };
-    Some(format!("{scheme}://{}", format_host(&host, port)))
+    Some(format!("{scheme}://{}", format_authority(&host, port)))
 }
 
 pub fn router() -> Router<Store> {
@@ -927,7 +852,8 @@ fn cimd_target(url: &str, allow_loopback: bool) -> Result<(String, String, u16),
     if path.is_empty() {
         return Err("client_id URL must contain a path".into());
     }
-    let (host, explicit_port) = split_authority(authority).map_err(|e| e.to_string())?;
+    let (host, explicit_port) =
+        split_host_port(authority).map_err(|e| public_url_authority_error(e).to_string())?;
     let https = scheme == "https";
     let loopback_http = scheme == "http" && allow_loopback && is_loopback_name(&host);
     if !https && !loopback_http {
@@ -1606,6 +1532,131 @@ mod tests {
             line,
             "another: \"ChatGPT' wants to connect (redirect host chatgpt.com).\" wants to connect (redirect host attacker.test)."
         );
+    }
+
+    #[test]
+    fn authority_port_grammar_agrees_across_callers() {
+        for (suffix, port, accepted) in [
+            ("", None, true),
+            (":1", Some(1), true),
+            (":80", Some(80), true),
+            (":443", Some(443), true),
+            (":65535", Some(65535), true),
+            (":", None, false),
+            (":0", None, false),
+            (":00", None, false),
+            (":+80", None, false),
+            (":-1", None, false),
+            (":0080", None, false),
+            (":65536", None, false),
+            (":٨٠", None, false),
+            (":８０", None, false),
+        ] {
+            for (scheme, name, host) in [
+                ("https", "Example.COM", "example.com"),
+                ("https", "127.0.0.1", "127.0.0.1"),
+                ("https", "[::1]", "::1"),
+                ("http", "127.0.0.1", "127.0.0.1"),
+                ("http", "[::1]", "::1"),
+            ] {
+                let authority = format!("{name}{suffix}");
+                let origin = format!("{scheme}://{authority}");
+                let uri = format!("{origin}/cb");
+                let resource = canonical_resource(&uri);
+                let redirect = another_core::validate_redirect_uri(&uri, "native");
+                let public = parse_public_url(&origin);
+                let metadata = cimd_target(&uri, true);
+                let header = split_host_header(&authority);
+                let canonical = canonical_origin(&origin);
+                for (caller, actual) in [
+                    ("resource", resource.is_ok()),
+                    ("redirect", redirect.is_ok()),
+                    ("public URL", public.is_ok()),
+                    ("client metadata", metadata.is_ok()),
+                    ("Host", header.is_some()),
+                    ("origin", canonical.is_some()),
+                ] {
+                    assert_eq!(actual, accepted, "{caller}: {authority}");
+                }
+                if accepted {
+                    let canonical_name = name.to_ascii_lowercase();
+                    let default_port = if scheme == "https" { 443 } else { 80 };
+                    let canonical_port = port.filter(|p| *p != default_port);
+                    let expected = match canonical_port {
+                        Some(p) => format!("{scheme}://{canonical_name}:{p}"),
+                        None => format!("{scheme}://{canonical_name}"),
+                    };
+                    assert_eq!(resource.unwrap(), format!("{expected}/cb"));
+                    assert_eq!(another_core::redirect_host(&uri), canonical_name);
+                    let public = public.unwrap();
+                    assert_eq!(public.hostname, host);
+                    assert_eq!(public.issuer, expected);
+                    assert_eq!(
+                        metadata.unwrap(),
+                        (scheme.into(), host.into(), port.unwrap_or(default_port))
+                    );
+                    assert_eq!(header.unwrap(), (host.into(), port));
+                    assert_eq!(canonical.unwrap(), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn host_rejects_userinfo_backslashes_and_empty_ports() {
+        let policy = HostPolicy::for_bind(7468, ["example.com"]);
+        for authority in [
+            "evil@127.0.0.1:7468",
+            "evil@localhost:7468",
+            "evil@[::1]:7468",
+            "evil\\localhost:7468",
+            "example.com:",
+            "127.0.0.1:",
+            "[::1]:",
+        ] {
+            assert!(split_host_header(authority).is_none(), "{authority}");
+            assert!(!policy.allows(authority), "{authority}");
+        }
+    }
+
+    #[test]
+    fn malformed_authorities_are_refused_across_callers() {
+        for authority in ["", "[::1", "[::1]x", "::1"] {
+            let origin = format!("https://{authority}");
+            let uri = format!("{origin}/cb");
+            assert!(canonical_resource(&uri).is_err(), "{authority}");
+            assert!(
+                another_core::validate_redirect_uri(&uri, "native").is_err(),
+                "{authority}"
+            );
+            assert!(parse_public_url(&origin).is_err(), "{authority}");
+            assert!(split_host_header(authority).is_none(), "{authority}");
+            assert!(canonical_origin(&origin).is_none(), "{authority}");
+        }
+    }
+
+    #[test]
+    fn public_url_preserves_authority_errors() {
+        for (authority, message) in [
+            (
+                "",
+                "--public-url must look like https://another.example.com",
+            ),
+            ("[]", "--public-url is missing a host"),
+            ("[::1", "invalid host in --public-url"),
+            ("[::1]x", "invalid host in --public-url"),
+            (
+                "::1",
+                "invalid host in --public-url; wrap IPv6 addresses in brackets",
+            ),
+            ("localhost:0080", "invalid port in --public-url"),
+        ] {
+            let error = match parse_public_url(&format!("https://{authority}")) {
+                Err(error) => error,
+                Ok(_) => panic!("authority must be refused: {authority}"),
+            };
+            assert_eq!(error.to_string(), message);
+        }
     }
 
     #[test]

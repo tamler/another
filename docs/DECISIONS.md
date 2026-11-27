@@ -22,6 +22,7 @@ Design calls not covered by SPEC, recorded as they were made.
 
 | # | Milestone | Decision |
 |---|---|---|
+| Pending (M-N, number at merge) | Hosted connector security, FLE-23 | **One OAuth authority and port helper set.** Resource identifiers, redirect URIs, public URLs, Host headers, origins and client metadata URLs use the same authority splitter and port grammar: one to five ASCII decimal digits starting with 1 to 9, value 1 through 65535. Empty ports, signs and leading zeroes are refused. URI defaults are still omitted when canonicalized; Host checks still require exact ports. Host userinfo and backslashes are refused. Clients stored with now-invalid redirect ports must register again, using the existing stored-client refusal. Stored grant and token resource identifiers already have canonical ports; no migration. Invalid operator allow-list entries do not match and remain silently ignored, documented in REMOTE.md. |
 | D1 | M2 | **Activity feed never carries message bodies.** Items are one-line summaries plus ids, so any peer (including a remote Grok Bot later) can read the feed without seeing mail content. |
 | D2 | M2 | **Plain heartbeats are presence, not events.** `session.started` / `session.ended`, hold renewals and every other mutation are logged; a bare heartbeat only updates `last_seen_at`, so per-prompt hooks do not flood the log. |
 | D3 | M2 | **Default hook identity is `<client>@<project>`** (project = nearest git root of the client's cwd), auto-registered on first use; `$ANOTHER_AGENT` overrides. Same rule for every client. |

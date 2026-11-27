@@ -331,7 +331,7 @@ pub fn canonical_resource(raw: &str) -> std::result::Result<String, String> {
     if authority.is_empty() {
         return Err("resource is missing a host".into());
     }
-    let (host, port) = split_host_port(authority)?;
+    let (host, port) = split_host_port(authority).map_err(|e| e.to_string())?;
     let port = match (scheme.as_str(), port) {
         ("https", Some(443)) | ("http", Some(80)) => None,
         (_, other) => other,
@@ -347,7 +347,9 @@ pub fn canonical_resource(raw: &str) -> std::result::Result<String, String> {
     ))
 }
 
-fn format_authority(host: &str, port: Option<u16>) -> String {
+/// Internal OAuth contract shared with the HTTP surface: format an unbracketed
+/// host returned by [`split_host_port`] and an already validated port.
+pub fn format_authority(host: &str, port: Option<u16>) -> String {
     let mut out = String::new();
     if host.contains(':') {
         out.push('[');
@@ -363,46 +365,72 @@ fn format_authority(host: &str, port: Option<u16>) -> String {
     out
 }
 
-fn split_host_port(authority: &str) -> std::result::Result<(String, Option<u16>), String> {
+/// Structural failures from the internal OAuth authority contract. Callers keep
+/// their own URI/header envelope checks and map these to their existing messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthAuthorityError {
+    MissingHost,
+    InvalidHost,
+    UnbracketedIpv6,
+    InvalidPort,
+}
+
+impl std::fmt::Display for OAuthAuthorityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::MissingHost => "resource is missing a host",
+            Self::InvalidHost | Self::UnbracketedIpv6 => "invalid host",
+            Self::InvalidPort => "invalid port",
+        })
+    }
+}
+
+impl std::error::Error for OAuthAuthorityError {}
+
+/// Internal OAuth contract shared with the HTTP surface: split an authority into
+/// a lowercase, unbracketed host and optional port. This does not validate host
+/// names or the surrounding URI/header; callers must retain those checks.
+/// Ports are one to five ASCII digits starting with 1 to 9, value 1..=65535.
+pub fn split_host_port(
+    authority: &str,
+) -> std::result::Result<(String, Option<u16>), OAuthAuthorityError> {
     if let Some(rest) = authority.strip_prefix('[') {
         let Some((host, after)) = rest.split_once(']') else {
-            return Err("invalid host".into());
+            return Err(OAuthAuthorityError::InvalidHost);
         };
         if host.is_empty() {
-            return Err("resource is missing a host".into());
+            return Err(OAuthAuthorityError::MissingHost);
         }
         let port = if after.is_empty() {
             None
         } else if let Some(p) = after.strip_prefix(':') {
             Some(parse_port(p)?)
         } else {
-            return Err("invalid host".into());
+            return Err(OAuthAuthorityError::InvalidHost);
         };
         return Ok((host.to_ascii_lowercase(), port));
     }
     if authority.matches(':').count() > 1 {
-        return Err("invalid host".into());
+        return Err(OAuthAuthorityError::UnbracketedIpv6);
     }
     let (host, port) = match authority.split_once(':') {
         Some((h, p)) => (h, Some(parse_port(p)?)),
         None => (authority, None),
     };
     if host.is_empty() {
-        return Err("resource is missing a host".into());
+        return Err(OAuthAuthorityError::MissingHost);
     }
     Ok((host.to_ascii_lowercase(), port))
 }
 
-fn parse_port(raw: &str) -> std::result::Result<u16, String> {
-    raw.parse::<u16>()
-        .map_err(|_| "invalid port".to_string())
-        .and_then(|p| {
-            if p == 0 {
-                Err("invalid port".into())
-            } else {
-                Ok(p)
-            }
-        })
+fn parse_port(raw: &str) -> std::result::Result<u16, OAuthAuthorityError> {
+    let port = raw
+        .parse::<u16>()
+        .map_err(|_| OAuthAuthorityError::InvalidPort)?;
+    if port == 0 || raw != port.to_string() {
+        return Err(OAuthAuthorityError::InvalidPort);
+    }
+    Ok(port)
 }
 
 /// A redirect URI's parts. The port is validated by `parse_redirect` but not kept: exact
@@ -492,7 +520,8 @@ pub fn validate_redirect_uri(uri: &str, application_type: &str) -> std::result::
 
 /// The host part of a redirect URI when it is not plain, escaped as
 /// [`shown_redirect_host`] escapes one, port included. `None` for a URI registration
-/// accepts today. A client stored by a build before D100 can hold one that is not.
+/// accepts today. An older build can have stored an unsafe host or a port spelling
+/// that the shared authority grammar now refuses.
 pub fn not_plain_redirect(uri: &str) -> Option<String> {
     match parse_redirect(uri) {
         Some(p) if is_plain_host(&p.authority) => None,
@@ -1188,8 +1217,8 @@ impl Store {
                 "code_challenge is missing or malformed".into(),
             ));
         }
-        // A client stored before registration refused such a host (D100) gets no request
-        // row, whichever of its redirect URIs it asks for.
+        // A client stored before registration refused such a host (D100), or before
+        // strict port spelling, gets no request row for any of its redirect URIs.
         if input
             .client
             .redirect_uris
@@ -2598,6 +2627,7 @@ mod tests {
             "127.0.0.1:+443",
             "[::1]:+443",
             "localhost:+443",
+            "chatgpt.com:00443",
             "chatgpt.com:0",
             "chatgpt.com:65536",
         ]
@@ -2694,7 +2724,7 @@ mod tests {
             ("https://xn--bcher-kva.example/cb", "web"),
             ("https://203.0.113.7/cb", "web"),
             ("https://[2001:db8::1]:8443/cb", "web"),
-            ("https://chatgpt.com:00443/cb", "web"),
+            ("https://chatgpt.com:443/cb", "web"),
             ("http://localhost:8765/callback", "native"),
             ("http://localhost/callback", "native"),
             ("http://127.0.0.1:5173/cb", "native"),
@@ -2994,6 +3024,45 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert!(shown_redirect_host(&listed[0].redirect_host).starts_with(NOT_A_PLAIN_HOST));
         store.deny_oauth(&waiting.user_code).unwrap();
+    }
+
+    #[test]
+    fn stored_noncanonical_redirect_ports_require_registration_again() {
+        let store = Store::open_in_memory(crate::store::Clock::System).unwrap();
+        let client = store
+            .register_oauth_client(ClientRegistration {
+                client_name: "Native client".into(),
+                redirect_uris: vec!["http://127.0.0.1/cb".into()],
+                application_type: Some("native".into()),
+                remote: None,
+            })
+            .unwrap();
+        for uri in ["http://127.0.0.1:0080/cb", "http://127.0.0.1:+80/cb"] {
+            store
+                .write(|tx| {
+                    tx.execute(
+                        "UPDATE oauth_clients SET redirect_uris = ?1 WHERE client_id = ?2",
+                        params![serde_json::to_string(&vec![uri]).unwrap(), client.client_id],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            let refused = store
+                .begin_authorization(AuthorizeInput {
+                    client: store.oauth_client(&client.client_id).unwrap().unwrap(),
+                    redirect_uri: uri.into(),
+                    state: None,
+                    scope: None,
+                    resource: "https://another.example.com/mcp".into(),
+                    code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM".into(),
+                    code_challenge_method: "S256".into(),
+                    remote: None,
+                })
+                .unwrap_err();
+            assert_eq!(refused.code(), "invalid_client", "{uri}");
+            assert_eq!(refused.description(), CLIENT_REDIRECT_NOT_PLAIN, "{uri}");
+        }
+        assert!(store.oauth_pending().unwrap().is_empty());
     }
 
     #[test]
