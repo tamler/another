@@ -9,6 +9,7 @@ const SCRUBBED_ENV: &[&str] = &[
     "GROK_HOOK_EVENT",
     "HERDR_PANE_ID",
     "HERDR_BIN_PATH",
+    // Multiplexer variables must not select the host session's transport in tests.
     "TERM_PROGRAM",
     "TMUX",
     "TMUX_PANE",
