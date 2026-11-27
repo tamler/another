@@ -82,3 +82,34 @@ fn normal_open_tightens_existing_files() {
         assert_eq!(mode, 0o600, "existing {name}");
     }
 }
+
+#[test]
+fn open_continues_when_tighten_is_refused_and_file_is_not_world_readable() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let _store = another_core::Store::open(&home).unwrap();
+    another_core::force_tighten_error(Some(std::io::ErrorKind::PermissionDenied));
+    let opened = another_core::Store::open(&home);
+    another_core::force_tighten_error(None);
+    opened.expect("open should continue when the file is already 0600");
+}
+
+#[test]
+fn open_fails_when_tighten_is_refused_and_file_is_world_readable() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let _store = another_core::Store::open(&home).unwrap();
+    std::fs::set_permissions(
+        home.join("another.db"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    another_core::force_tighten_error(Some(std::io::ErrorKind::PermissionDenied));
+    let opened = another_core::Store::open(&home);
+    another_core::force_tighten_error(None);
+    let message = match opened {
+        Ok(_) => panic!("open should fail when a world-readable file cannot be tightened"),
+        Err(err) => err.to_string(),
+    };
+    assert!(message.contains("world-readable"), "{message}");
+}

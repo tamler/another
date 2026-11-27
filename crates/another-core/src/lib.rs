@@ -101,7 +101,7 @@ pub use store::{
 };
 /// For the workspace's tests only: build a home at an older schema, and open as another build.
 #[cfg(feature = "test-support")]
-pub use store::{apply_schema, Build};
+pub use store::{apply_schema, force_tighten_error, Build};
 pub use sync_skip::{sync_skip_lines, Skip, SkipAck, SkippedEvent, SYNC_SKIPS_SHOWN};
 pub use time::{fmt_ts, now_ms, parse_duration, parse_ts};
 pub use tokens::{AuditEntry, AuditRecord, NewToken, Token, TokenScope};

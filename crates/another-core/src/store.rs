@@ -36,6 +36,59 @@ fn private_file(path: &Path) -> std::io::Result<std::fs::File> {
     options.open(path)
 }
 
+#[cfg(feature = "test-support")]
+thread_local! {
+    static TIGHTEN_ERROR: std::cell::Cell<Option<std::io::ErrorKind>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Make later tighten attempts fail as this I/O error, so tests can cover a
+/// chmod the owner or the filesystem refuses. Call with `None` to restore
+/// normal tightening.
+#[cfg(feature = "test-support")]
+pub fn force_tighten_error(kind: Option<std::io::ErrorKind>) {
+    TIGHTEN_ERROR.with(|cell| cell.set(kind));
+}
+
+/// Make `path` owner-only (0600). If chmod is refused, continue with a warning
+/// unless the file is already world-readable, in which case opening must fail.
+#[cfg(unix)]
+fn tighten_owner_only(path: &Path) -> crate::error::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let chmod = || {
+        #[cfg(feature = "test-support")]
+        if let Some(kind) = TIGHTEN_ERROR.with(|cell| cell.get()) {
+            return Err(std::io::Error::from(kind));
+        }
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    };
+    match chmod() {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => {
+            let meta = match std::fs::metadata(path) {
+                Ok(meta) => meta,
+                Err(e2) if e2.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(e2) => return Err(e2.into()),
+            };
+            let mode = meta.permissions().mode() & 0o777;
+            if mode & 0o004 != 0 {
+                return Err(crate::error::Error::Invalid(format!(
+                    "{} is world-readable (mode {mode:04o}) and could not be tightened: {e}",
+                    path.display()
+                )));
+            }
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                mode,
+                "could not tighten file mode; continuing because it is not world-readable"
+            );
+            Ok(())
+        }
+    }
+}
+
 /// Let this process, when it is a development build, migrate a home that a development build
 /// did not create. The CLI calls this for `--dev-migrate`.
 pub fn allow_dev_migrate() {
@@ -380,14 +433,8 @@ impl Store {
         }
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             for name in [DB_FILE, "another.db-wal", "another.db-shm", ORIGIN_FILE] {
-                let sidecar = home.join(name);
-                match std::fs::set_permissions(sidecar, std::fs::Permissions::from_mode(0o600)) {
-                    Ok(()) => (),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-                    Err(e) => return Err(e.into()),
-                }
+                tighten_owner_only(&home.join(name))?;
             }
         }
         let conn = Connection::open(&path)?;
