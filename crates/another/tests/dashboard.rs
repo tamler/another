@@ -358,8 +358,10 @@ async fn local_dashboard_shows_bodies_and_requires_confirm() {
     for (param, bad) in [
         ("since", "01ARZ3NDEKTSV4RRFFQ69G5FAV"),
         ("since", "nonsense"),
+        ("since", "until"),
         ("until", "01ARZ3NDEKTSV4RRFFQ69G5FAV"),
         ("until", "nonsense"),
+        ("until", "since"),
     ] {
         let resp = http
             .get(format!("{}/api/dash/activity?{param}={bad}", srv.base))
@@ -370,8 +372,32 @@ async fn local_dashboard_shows_bodies_and_requires_confirm() {
         let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
         assert_eq!(body["error"]["code"], "invalid", "{param}={bad}: {body}");
         let msg = body["error"]["message"].as_str().unwrap_or("");
+        assert!(
+            msg.starts_with(&format!("{param}: ")),
+            "diagnostic should name failing parameter {param}: {body}"
+        );
         assert!(msg.contains("bare seconds"), "{param}={bad}: {body}");
         assert!(msg.contains("not an event id"), "{param}={bad}: {body}");
+    }
+    for (query, failing) in [
+        ("since=1d&until=nonsense", "until"),
+        ("since=nonsense&until=1h", "since"),
+    ] {
+        let resp = http
+            .get(format!("{}/api/dash/activity?{query}", srv.base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "{query}");
+        let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+        assert_eq!(body["error"]["code"], "invalid", "{query}: {body}");
+        let msg = body["error"]["message"].as_str().unwrap_or("");
+        assert!(
+            msg.starts_with(&format!("{failing}: ")),
+            "{query} should name {failing}: {body}"
+        );
+        assert!(msg.contains("bare seconds"), "{query}: {body}");
+        assert!(msg.contains("not an event id"), "{query}: {body}");
     }
 
     let denied = http

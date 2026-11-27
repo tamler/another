@@ -346,12 +346,13 @@ async fn activity(
         None | Some("all") => None,
         Some(raw) => match Since::parse_time(raw, now) {
             Ok(t) => Some(t),
-            Err(e) => return invalid(&e.to_string()),
+            Err(e) => return invalid(&format!("since: {e}")),
         },
     };
     // `until` uses the same time grammar as `since` (bare seconds, relative duration
     // from `now`, or RFC 3339 time; event ids refused) so windows like `since=2d&until=1d`
-    // and RFC 3339 cutoffs both work with one parser and one error message.
+    // and RFC 3339 cutoffs both work with one parser, naming the failing parameter in
+    // the diagnostic.
     let until_ms = match params
         .until
         .as_deref()
@@ -361,7 +362,7 @@ async fn activity(
         None => None,
         Some(raw) => match Since::parse_time(raw, now) {
             Ok(t) => Some(t),
-            Err(e) => return invalid(&e.to_string()),
+            Err(e) => return invalid(&format!("until: {e}")),
         },
     };
     let mut kinds = Vec::new();
