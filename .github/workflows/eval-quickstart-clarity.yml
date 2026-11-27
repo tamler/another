@@ -1,0 +1,145 @@
+name: eval quickstart clarity
+
+# Opt-in docs/quickstart clarity eval (M10).
+# Kept out of default CI: manual workflow_dispatch only.
+# Never prints secrets, never dumps env, and never interpolates inputs into shell code.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode: fixture (offline, zero spend) or live (opt-in paid API)"
+        required: true
+        default: "fixture"
+        type: choice
+        options:
+          - fixture
+          - live
+      player_model:
+        description: "OpenAI model for the stranger walkthrough (not gpt-5-mini)"
+        required: true
+        default: "gpt-5.4-nano"
+        type: choice
+        options:
+          - gpt-5.4-nano
+          - gpt-5.4-mini
+      judge:
+        description: "Optional second-pass judge provider"
+        required: true
+        default: "none"
+        type: choice
+        options:
+          - none
+          - openai
+          - anthropic
+      no_auto_recharge_confirmed:
+        description: "Confirm credit-only billing with auto-recharge disabled (required for live mode)"
+        required: true
+        default: false
+        type: boolean
+      anthropic_zero_cash_confirmed:
+        description: "Confirm Anthropic account has $0 cash and auto-recharge disabled (required for live anthropic judge)"
+        required: true
+        default: false
+        type: boolean
+      max_call_usd:
+        description: "Per-call spend reservation cap in USD"
+        required: true
+        default: "0.10"
+        type: string
+      max_run_usd:
+        description: "Total run spend reservation cap in USD"
+        required: true
+        default: "0.25"
+        type: string
+      verify_with_binary:
+        description: "Build and install another into runner temp and test stranger CLI commands in an isolated temp ANOTHER_HOME"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eval-quickstart-clarity-spend
+  cancel-in-progress: false
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  clarity-eval:
+    name: quickstart clarity eval (${{ inputs.mode }})
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run offline unit and fixture tests
+        run: python3 -m unittest discover -s evals/tests -v
+
+      - name: Restore persisted spend ledger (carries forward billing hard stops)
+        if: ${{ inputs.mode == 'live' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/another-eval-ledger
+          key: another-eval-spend-ledger-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            another-eval-spend-ledger-
+
+      - name: Install Rust toolchain (only if sandbox binary verification is requested)
+        if: ${{ inputs.verify_with_binary }}
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build and install another into temp prefix
+        if: ${{ inputs.verify_with_binary }}
+        run: cargo install --locked --path crates/another --root "$RUNNER_TEMP/another-bin"
+
+      - name: Run quickstart clarity eval
+        env:
+          EVAL_MODE: ${{ inputs.mode }}
+          EVAL_PLAYER_MODEL: ${{ inputs.player_model }}
+          EVAL_JUDGE: ${{ inputs.judge }}
+          EVAL_MAX_CALL_USD: ${{ inputs.max_call_usd }}
+          EVAL_MAX_RUN_USD: ${{ inputs.max_run_usd }}
+          EVAL_VERIFY_BIN: ${{ inputs.verify_with_binary }}
+          ANOTHER_EVAL_ALLOW_LIVE: ${{ inputs.mode == 'live' && '1' || '0' }}
+          ANOTHER_EVAL_NO_AUTO_RECHARGE_CONFIRMED: ${{ inputs.no_auto_recharge_confirmed && '1' || '0' }}
+          ANOTHER_EVAL_ANTHROPIC_ZERO_CASH_CONFIRMED: ${{ inputs.anthropic_zero_cash_confirmed && '1' || '0' }}
+          ANOTHER_EVAL_LEDGER: ${{ runner.temp }}/another-eval-ledger/spend.jsonl
+          OPENAI_API_KEY: ${{ inputs.mode == 'live' && secrets.OPENAI_API_KEY || '' }}
+          ANTHROPIC_JUDGE_API_KEY: ${{ inputs.mode == 'live' && inputs.judge == 'anthropic' && secrets.ANTHROPIC_JUDGE_API_KEY || '' }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/another-eval-ledger"
+          args=(
+            --mode "$EVAL_MODE"
+            --ledger "$ANOTHER_EVAL_LEDGER"
+            --player-model "$EVAL_PLAYER_MODEL"
+            --judge "$EVAL_JUDGE"
+            --max-call-usd "$EVAL_MAX_CALL_USD"
+            --max-run-usd "$EVAL_MAX_RUN_USD"
+            --output "$RUNNER_TEMP/quickstart-clarity-report.json"
+            --receipt-out "$RUNNER_TEMP/quickstart-clarity-receipt.json"
+          )
+          if [ "$EVAL_VERIFY_BIN" = "true" ]; then
+            args+=(--verify-bin "$RUNNER_TEMP/another-bin/bin/another")
+          fi
+          python3 evals/quickstart_clarity/runner.py "${args[@]}"
+
+      - name: Persist updated spend ledger (even on billing hard stop)
+        if: ${{ always() && inputs.mode == 'live' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/another-eval-ledger
+          key: another-eval-spend-ledger-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload eval report and spend receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quickstart-clarity-${{ inputs.mode }}
+          path: |
+            ${{ runner.temp }}/quickstart-clarity-report.json
+            ${{ runner.temp }}/quickstart-clarity-receipt.json
+            ${{ runner.temp }}/another-eval-ledger/spend.jsonl
+          if-no-files-found: ignore
