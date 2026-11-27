@@ -336,9 +336,29 @@ pub struct Store {
     inner: Arc<Inner>,
 }
 
+#[cfg(feature = "test-support")]
+thread_local! {
+    static EXPIRE_AUDIT_BUDGET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// In tests, treat every stored refusal timestamp as outside the 60s window
+/// on the next `record_unauthenticated_audit` call, so the suppressed-count
+/// path can be exercised without waiting.
+#[cfg(feature = "test-support")]
+pub fn force_unauthenticated_audit_window_elapsed() {
+    EXPIRE_AUDIT_BUDGET.with(|cell| cell.set(true));
+}
+
+/// Shared 32-row / 60s budget for unauthenticated refusal audits, plus a
+/// count of refusals omitted in the current window.
+struct UnauthenticatedAuditBudget {
+    recent: std::collections::VecDeque<Instant>,
+    suppressed: u64,
+}
+
 struct Inner {
     conn: Mutex<Connection>,
-    unauthenticated_audits: Mutex<std::collections::VecDeque<Instant>>,
+    unauthenticated_audits: Mutex<UnauthenticatedAuditBudget>,
     node_id: String,
     key: ed25519_dalek::SigningKey,
     clock: Clock,
@@ -589,7 +609,10 @@ impl Store {
         Ok(Store {
             inner: Arc::new(Inner {
                 conn: Mutex::new(conn),
-                unauthenticated_audits: Mutex::new(std::collections::VecDeque::new()),
+                unauthenticated_audits: Mutex::new(UnauthenticatedAuditBudget {
+                    recent: std::collections::VecDeque::new(),
+                    suppressed: 0,
+                }),
                 node_id,
                 key: crate::crypto::decode_secret(&secret)?,
                 clock: Clock::System,
@@ -616,7 +639,10 @@ impl Store {
         Ok(Store {
             inner: Arc::new(Inner {
                 conn: Mutex::new(conn),
-                unauthenticated_audits: Mutex::new(std::collections::VecDeque::new()),
+                unauthenticated_audits: Mutex::new(UnauthenticatedAuditBudget {
+                    recent: std::collections::VecDeque::new(),
+                    suppressed: 0,
+                }),
                 node_id,
                 key,
                 clock,
@@ -693,22 +719,58 @@ impl Store {
         const WINDOW: Duration = Duration::from_secs(60);
         const MAX_ROWS: usize = 32;
         let now = Instant::now();
+        let mut summary: Option<u64> = None;
         {
-            let mut recent = self
+            let mut budget = self
                 .inner
                 .unauthenticated_audits
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            while recent
+            let mut expired = false;
+            #[cfg(feature = "test-support")]
+            let force_elapsed = EXPIRE_AUDIT_BUDGET.with(|cell| cell.replace(false));
+            #[cfg(not(feature = "test-support"))]
+            let force_elapsed = false;
+            while budget
+                .recent
                 .front()
-                .is_some_and(|at| now.duration_since(*at) >= WINDOW)
+                .is_some_and(|at| force_elapsed || now.duration_since(*at) >= WINDOW)
             {
-                recent.pop_front();
+                budget.recent.pop_front();
+                expired = true;
             }
-            if recent.len() >= MAX_ROWS {
+            if expired && budget.suppressed > 0 {
+                summary = Some(budget.suppressed);
+                budget.suppressed = 0;
+            }
+            if budget.recent.len() >= MAX_ROWS {
+                budget.suppressed = budget.suppressed.saturating_add(1);
+                if budget.suppressed == 1 {
+                    tracing::warn!(
+                        max_rows = MAX_ROWS,
+                        window_secs = WINDOW.as_secs(),
+                        "unauthenticated refusal audit budget exhausted; further refusals in this window are omitted"
+                    );
+                }
                 return Ok(());
             }
-            recent.push_back(now);
+            budget.recent.push_back(now);
+        }
+        if let Some(omitted) = summary {
+            tracing::warn!(
+                omitted,
+                max_rows = MAX_ROWS,
+                window_secs = WINDOW.as_secs(),
+                "unauthenticated refusal audit window closed; omitted refusals are summarized"
+            );
+            self.record_audit(crate::tokens::AuditRecord {
+                operation: "audit.budget".into(),
+                outcome: "omitted".into(),
+                detail: Some(format!(
+                    "{omitted} unauthenticated refusal(s) were omitted in the previous 60s window"
+                )),
+                ..Default::default()
+            })?;
         }
         self.record_audit(entry)
     }

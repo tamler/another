@@ -324,7 +324,7 @@ Unknown `Host` values are rejected on every HTTP route except `/fed`, including 
 
 **Proxy Host rewriting:** reverse proxies may replace the public `Host` with the loopback upstream address. Host checks cannot identify a remote caller in that setup, nor can a loopback peer IP. Expose only an `--auth` listener for MCP/activity access, or a federation-only listener (`--federation` without `--auth`), which has just `/fed/*` and `/health`. A dashboard explicitly enabled with both `--federation` and `--auth` also requires a token and stays redacted. Plain local listeners must stay private.
 
-Unauthenticated failures on bearer and federation routes share a fixed in-memory audit budget of 32 rows per server store per 60 seconds, including across cloned handles. Excess failures are refused without an audit write. The budget resets on restart. Authenticated operations retain their audit records. Invalid bearer and OAuth token candidates are checked without a SQLite write transaction; a valid candidate is checked again within the transaction that updates its last-use time.
+Unauthenticated failures on bearer and federation routes share a fixed in-memory audit budget of 32 rows per server store per 60 seconds, including across cloned handles. Excess failures are refused and counted; when the window closes, one summary audit row records how many were omitted. The budget resets on restart. Authenticated operations retain their audit records. Invalid bearer and OAuth token candidates are checked without a SQLite write transaction; a valid candidate is checked again within the transaction that updates its last-use time.
 
 ## What still needs a live check
 

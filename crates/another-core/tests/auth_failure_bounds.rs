@@ -115,6 +115,47 @@ fn unauthenticated_audit_rows_are_bounded_across_store_clones() {
     assert!(rows
         .iter()
         .all(|row| row.token_id.is_none() && row.agent.is_none()));
+    assert!(
+        rows.iter().all(|row| row.operation != "audit.budget"),
+        "a still-open window must not write a summary row"
+    );
+}
+
+#[test]
+fn unauthenticated_audit_budget_writes_a_suppressed_count_when_the_window_closes() {
+    let (_dir, store, _) = setup();
+    for i in 0..40 {
+        store
+            .record_unauthenticated_audit(AuditRecord {
+                operation: "POST /fed/pair".into(),
+                detail: Some(format!("flood {i}")),
+                remote: Some(format!("flood-{i}")),
+                ..Default::default()
+            })
+            .unwrap();
+    }
+    assert_eq!(store.audit_log(1000).unwrap().len(), 32);
+
+    another_core::force_unauthenticated_audit_window_elapsed();
+    store
+        .record_unauthenticated_audit(AuditRecord {
+            operation: "POST /fed/pair".into(),
+            detail: Some("after-window".into()),
+            remote: Some("after-window".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let rows = store.audit_log(1000).unwrap();
+    let summary = rows
+        .iter()
+        .find(|row| row.operation == "audit.budget")
+        .expect("expected a suppressed-count summary after the window elapsed");
+    assert_eq!(summary.outcome, "omitted");
+    let detail = summary.detail.as_deref().unwrap_or("");
+    assert!(
+        detail.contains("omitted") && detail.contains("8"),
+        "{detail}"
+    );
 }
 
 #[test]
