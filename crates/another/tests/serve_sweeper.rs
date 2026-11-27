@@ -47,7 +47,7 @@ async fn eventually(mut ok: impl FnMut() -> bool) -> bool {
 async fn the_sweeper_expires_lapsed_work_and_stops_when_cancelled() {
     let dir = tempfile::tempdir().unwrap();
     let (clock, now) = Clock::manual(1_800_000_000_000);
-    let store = Store::open_in_memory(clock).unwrap();
+    let store = Store::open_in_memory(clock).unwrap().unguarded_repair();
     let project = store
         .ensure_project("shop", &dir.path().join("shop").to_string_lossy())
         .unwrap()

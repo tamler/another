@@ -15,7 +15,9 @@ const T0: i64 = 1_800_000_000_000;
 
 fn node(dir: &Path, name: &str) -> Store {
     let (clock, _) = Clock::manual(T0);
-    let store = Store::open_with_clock(&dir.join(name), clock).unwrap();
+    let store = Store::open_with_clock(&dir.join(name), clock)
+        .unwrap()
+        .unguarded_repair();
     store.set_node_name(name).unwrap();
     store
 }

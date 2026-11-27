@@ -10,6 +10,7 @@ mod cli;
 
 fn another(home: &Path, args: &[&str]) -> Output {
     cli::another_cmd(home)
+        .arg("--unguarded-repair")
         .args(args)
         .stdin(Stdio::null())
         .output()
@@ -45,7 +46,7 @@ fn a_development_binary_refuses_an_older_home_until_told_to_migrate_it() {
     let before = std::fs::read(&db).unwrap();
 
     // Any normal command: text and JSON, exit 1, nothing written.
-    let out = another(&home, &["status"]);
+    let out = another(&home, &["init"]);
     assert_eq!(out.status.code(), Some(1));
     let text = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -55,7 +56,7 @@ fn a_development_binary_refuses_an_older_home_until_told_to_migrate_it() {
             && text.contains("--dev-migrate"),
         "{text}"
     );
-    let out = another(&home, &["--json", "status"]);
+    let out = another(&home, &["--json", "init"]);
     assert_eq!(out.status.code(), Some(1));
     let body: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(body["error"]["code"], "invalid", "{body}");
@@ -65,7 +66,7 @@ fn a_development_binary_refuses_an_older_home_until_told_to_migrate_it() {
     assert!(!home.join("build.json").exists());
 
     // The explicit flag migrates it, after a backup of the old schema.
-    let out = another(&home, &["--dev-migrate", "status"]);
+    let out = another(&home, &["--dev-migrate", "init"]);
     assert!(
         out.status.success(),
         "{}",
@@ -87,38 +88,23 @@ fn a_development_binary_refuses_an_older_home_until_told_to_migrate_it() {
     assert!(another(&home, &["status"]).status.success());
 }
 
-/// While a home is refused, hooks still fail open and stay quiet, as hooks must. The reason
-/// a person has to act on goes to `logs/hooks.log`, in the store's own words, once.
+/// Refused schema never admits an edit and never migrates during admission.
 #[test]
-fn a_refused_home_keeps_hooks_quiet_and_logs_the_true_reason_once() {
+fn refused_schema_denies_participating_edits_without_migration() {
     let dir = tempfile::tempdir().unwrap();
     let (home, _) = older_home(dir.path());
     let db = home.join("another.db");
     let before = std::fs::read(&db).unwrap();
-    let user = dir.path().join("user");
-    std::fs::create_dir_all(&user).unwrap();
-
-    for event in ["session-start", "prompt", "pre-edit", "post-tool", "prompt"] {
-        let out = cli::another_cmd(&home)
-            .args(["hook", "run", event, "--client", "claude"])
-            .env("HOME", &user)
-            .env("USERPROFILE", &user)
-            .stdin(Stdio::null())
-            .output()
-            .expect("run another");
-        assert_eq!(out.status.code(), Some(0), "{event}");
-        assert!(out.stdout.is_empty(), "{event}: hooks stay quiet");
-    }
-
-    let log = std::fs::read_to_string(home.join("logs/hooks.log")).unwrap();
-    let reasons: Vec<&str> = log
-        .lines()
-        .filter(|line| line.contains("will not migrate the database"))
-        .collect();
-    assert_eq!(reasons.len(), 1, "{log}");
-    assert!(reasons[0].contains("--dev-migrate"), "{log}");
-    assert!(!log.contains("a normal open migrates it"), "{log}");
-    assert_eq!(std::fs::read(&db).unwrap(), before, "a hook wrote");
+    let out = cli::another_cmd(&home)
+        .args(["hook", "run", "pre-edit", "--client", "claude"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let body: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(body["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert_eq!(std::fs::read(&db).unwrap(), before);
+    assert!(!home.join("backups").exists());
 }
 
 #[test]

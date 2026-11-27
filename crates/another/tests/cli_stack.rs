@@ -40,15 +40,19 @@ fn the_cli_runs_with_a_small_main_thread_stack() {
 fn exit_statuses_pass_through_the_thread() {
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
-        Command::new(BIN)
-            .args(args)
-            .env("ANOTHER_HOME", dir.path())
-            .env_remove("ANOTHER_AGENT")
-            .stdin(Stdio::null())
-            .output()
-            .unwrap()
-            .status
-            .code()
+        {
+            let mut legacy_fixture_command = Command::new(BIN);
+            legacy_fixture_command.arg("--unguarded-repair");
+            legacy_fixture_command
+        }
+        .args(args)
+        .env("ANOTHER_HOME", dir.path())
+        .env_remove("ANOTHER_AGENT")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+        .status
+        .code()
     };
     assert_eq!(run(&["init"]), Some(0));
     assert_eq!(run(&["--no-such-flag"]), Some(2));

@@ -49,7 +49,9 @@ impl Fx {
     fn new() -> Fx {
         let dir = tempfile::tempdir().unwrap();
         let (clock, handle) = Clock::manual(T0);
-        let store = Store::open_with_clock(&dir.path().join("home"), clock).unwrap();
+        let store = Store::open_with_clock(&dir.path().join("home"), clock)
+            .unwrap()
+            .unguarded_repair();
         for name in ["ann", "bob", "cy", "arch"] {
             register(&store, name);
         }
@@ -198,7 +200,7 @@ fn retry<T>(mut f: impl FnMut() -> Result<T>) -> T {
 fn racing_home(items: usize) -> (tempfile::TempDir, Store, Vec<(String, Store)>) {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
-    let store = Store::open(&home).unwrap();
+    let store = Store::open(&home).unwrap().unguarded_repair();
     let names: Vec<String> = (0..50).map(|i| format!("w{i:02}")).collect();
     for name in &names {
         register(&store, name);
@@ -221,7 +223,7 @@ fn racing_home(items: usize) -> (tempfile::TempDir, Store, Vec<(String, Store)>)
     }
     let handles = names
         .into_iter()
-        .map(|n| (n, Store::open(&home).unwrap()))
+        .map(|n| (n, Store::open(&home).unwrap().unguarded_repair()))
         .collect();
     (dir, store, handles)
 }
@@ -341,7 +343,7 @@ fn a_proposed_item_is_never_handed_out() {
     let agents = ["ann", "bob", "cy"];
     for seed in 1..=500u64 {
         let (clock, _) = Clock::manual(T0);
-        let store = Store::open_in_memory(clock).unwrap();
+        let store = Store::open_in_memory(clock).unwrap().unguarded_repair();
         for name in agents {
             register(&store, name);
         }
@@ -1762,7 +1764,9 @@ fn queue_events_never_leave_the_node() {
     let dir = tempfile::tempdir().unwrap();
     let node = |name: &str| {
         let (clock, _) = Clock::manual(T0);
-        let store = Store::open_with_clock(&dir.path().join(name), clock).unwrap();
+        let store = Store::open_with_clock(&dir.path().join(name), clock)
+            .unwrap()
+            .unguarded_repair();
         store.set_node_name(name).unwrap();
         store
     };
@@ -1941,7 +1945,7 @@ fn table_counts(db: &Connection) -> Vec<(String, i64)> {
 fn migration_adds_only_queue_tables() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
-    let store = Store::open(&home).unwrap();
+    let store = Store::open(&home).unwrap().unguarded_repair();
     for name in ["ann", "bob"] {
         register(&store, name);
     }
@@ -1969,7 +1973,14 @@ fn migration_adds_only_queue_tables() {
     }
     // The queue is schema v11. What later schemas added goes too, and comes back with them.
     db.execute_batch(
-        "DROP TABLE transport_sessions;
+        "DROP TABLE lease_projections;
+         DROP TABLE actor_operations;
+         DROP TABLE contract_receipts;
+         DROP TABLE right_leases;
+         DROP TABLE contract_actors;
+         DROP TABLE session_scopes;
+         DROP TABLE contract_participants;
+         DROP TABLE transport_sessions;
          ALTER TABLE project_repos DROP COLUMN checkout;",
     )
     .unwrap();
@@ -1978,7 +1989,8 @@ fn migration_adds_only_queue_tables() {
     assert!(before.iter().all(|(n, _)| !n.starts_with("queue_")));
     drop(db);
 
-    let store = Store::open(&home).unwrap();
+    // The legacy name `ann` below proposes through the explicit repair handle.
+    let store = Store::open(&home).unwrap().unguarded_repair();
     let db = Connection::open(home.join(DB_FILE)).unwrap();
     let version: i64 = db
         .pragma_query_value(None, "user_version", |r| r.get(0))
@@ -1987,10 +1999,25 @@ fn migration_adds_only_queue_tables() {
     let after = table_counts(&db);
     let kept: Vec<_> = after
         .iter()
-        .filter(|(n, _)| !n.starts_with("queue_") && n != "transport_sessions")
+        .filter(|(n, _)| before.iter().any(|(old, _)| old == n))
         .cloned()
         .collect();
     assert_eq!(kept, before, "every existing table keeps every row");
+    for name in [
+        "lease_projections",
+        "actor_operations",
+        "contract_receipts",
+        "right_leases",
+        "contract_actors",
+        "session_scopes",
+        "contract_participants",
+    ] {
+        assert_eq!(
+            after.iter().find(|(n, _)| n == name).unwrap().1,
+            0,
+            "no legacy actors or rights adopted"
+        );
+    }
     let added: Vec<(&str, i64)> = after
         .iter()
         .filter(|(n, _)| n.starts_with("queue_"))

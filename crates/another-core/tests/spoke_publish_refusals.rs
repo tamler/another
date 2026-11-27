@@ -18,7 +18,7 @@ struct Node {
 impl Node {
     fn new(dir: &Path, name: &str) -> Node {
         let home = dir.join(name);
-        let store = Store::open(&home).unwrap();
+        let store = Store::open(&home).unwrap().unguarded_repair();
         store.set_node_name(name).unwrap();
         Node {
             store,

@@ -1,5 +1,7 @@
 #!/bin/sh
-# Two agents on one machine hand a piece of work over through Another:
+# Explicit unguarded operator repair demonstration of historical records.
+# Participating agents require private adapter authority; names below do not supply it.
+# Two operator-selected records hand a piece of work over through Another:
 #
 #   alice holds the file she is changing and asks bob for a review (a claimable request);
 #   bob sees it in his inbox, claims it, replies in the thread and completes it;
@@ -19,7 +21,7 @@ unset ANOTHER_AGENT
 # Print a step, then run it.
 step() {
     printf '\n$ another %s\n' "$*"
-    "$another" "$@"
+    "$another" --unguarded-repair "$@"
 }
 
 # The value of one string field in `another --json ...` output.
@@ -44,7 +46,7 @@ step hold acquire --agent alice@shop src/api.rs --reason "reworking the API"
 
 # alice asks bob for a review. --request makes it claimable, so it is clear who owns it.
 printf '\n$ another --json send --from alice@shop --to bob@shop --request ...\n'
-sent=$("$another" --json send --from alice@shop --to bob@shop --request \
+sent=$("$another" --unguarded-repair --json send --from alice@shop --to bob@shop --request \
     --subject "Review the API change in src/api.rs" \
     --body "The handler now returns 404 for a missing order. Please check the error shape.")
 message=$(printf '%s\n' "$sent" | field message_id)
@@ -57,7 +59,7 @@ step request claim --agent bob@shop "$request"
 # bob marks alice's message read and acknowledged: it leaves his inbox.
 step ack --agent bob@shop "$message"
 printf '\n$ another --json reply --from bob@shop ... %s\n' "$message"
-replied=$("$another" --json reply --from bob@shop \
+replied=$("$another" --unguarded-repair --json reply --from bob@shop \
     --body "Looks right. One nit: say which order id was missing." "$message")
 reply=$(printf '%s\n' "$replied" | field message_id)
 [ -n "$reply" ] || { echo "reply did not return an id: $replied" >&2; exit 1; }

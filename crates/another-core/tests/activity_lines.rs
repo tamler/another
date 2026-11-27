@@ -6,7 +6,7 @@
 use another_core::*;
 
 fn store(dir: &std::path::Path) -> Store {
-    let s = Store::open(&dir.join("home")).unwrap();
+    let s = Store::open(&dir.join("home")).unwrap().unguarded_repair();
     for name in ["lead", "worker"] {
         s.register_agent(RegisterAgent {
             name: name.into(),

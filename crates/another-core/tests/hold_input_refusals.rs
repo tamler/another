@@ -14,7 +14,9 @@ fn fx() -> Fx {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("work").join("shop");
     let project = project.to_string_lossy().into_owned();
-    let store = Store::open_in_memory(Clock::manual(1_800_000_000_000).0).unwrap();
+    let store = Store::open_in_memory(Clock::manual(1_800_000_000_000).0)
+        .unwrap()
+        .unguarded_repair();
     store.ensure_project("t", &project).unwrap();
     store
         .register_agent(RegisterAgent {

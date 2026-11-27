@@ -3155,7 +3155,7 @@ mod tests {
     #[test]
     fn foreign_hold_update_cannot_rewrite_a_local_hold() {
         let (clock, _) = crate::Clock::manual(1_000_000);
-        let store = Store::open_in_memory(clock).unwrap();
+        let store = Store::open_in_memory(clock).unwrap().unguarded_repair();
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().to_str().unwrap().to_owned();
         let actor = store
@@ -3204,7 +3204,7 @@ mod tests {
     #[test]
     fn foreign_stop_cannot_end_local_leases() {
         let (clock, _) = crate::Clock::manual(1_000_000);
-        let store = Store::open_in_memory(clock).unwrap();
+        let store = Store::open_in_memory(clock).unwrap().unguarded_repair();
         store
             .register_agent(crate::RegisterAgent {
                 name: "owner".into(),
@@ -3259,9 +3259,11 @@ mod tests {
     #[test]
     fn signed_peer_collision_cannot_rewrite_local_hold() {
         let (clock, store_now) = crate::Clock::manual(1_000_000);
-        let store = Store::open_in_memory(clock).unwrap();
+        let store = Store::open_in_memory(clock).unwrap().unguarded_repair();
         let (peer_clock, peer_now) = crate::Clock::manual(1_000_000);
-        let peer = Store::open_in_memory(peer_clock).unwrap();
+        let peer = Store::open_in_memory(peer_clock)
+            .unwrap()
+            .unguarded_repair();
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().to_str().unwrap().to_owned();
         let actor = store
@@ -3417,7 +3419,7 @@ mod tests {
                 )?)
             })
             .unwrap();
-        assert_eq!(peer_expiry, 2_801_000);
+        assert_eq!(peer_expiry, 2_800_000, "checkout replay does not renew");
     }
 
     #[test]

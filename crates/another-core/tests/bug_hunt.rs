@@ -16,7 +16,7 @@ fn scope(globs: &[&str]) -> TokenScope {
 #[test]
 fn bh1_project_allowed_judges_the_path_the_store_will_use() {
     let (clock, _) = Clock::manual(1_795_219_200_000);
-    let s = Store::open_in_memory(clock).unwrap();
+    let s = Store::open_in_memory(clock).unwrap().unguarded_repair();
     let dir = tempfile::tempdir().unwrap();
     let path = |relative: &str| dir.path().join(relative).to_string_lossy().into_owned();
     let glob = |relative: &str| path(relative).replace('\\', "/");
@@ -90,7 +90,7 @@ fn bh2_concurrent_first_open_succeeds() {
 #[test]
 fn bh5_absurd_durations_are_refused() {
     let (clock, _) = Clock::manual(1_795_219_200_000);
-    let s = Store::open_in_memory(clock).unwrap();
+    let s = Store::open_in_memory(clock).unwrap().unguarded_repair();
     for name in ["a", "b"] {
         s.register_agent(RegisterAgent {
             name: name.into(),

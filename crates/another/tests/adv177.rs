@@ -5,7 +5,11 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 fn another(home: &Path, agent: Option<&str>, args: &[&str]) -> Output {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_another"));
+    let mut c = {
+        let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+        legacy_fixture_command.arg("--unguarded-repair");
+        legacy_fixture_command
+    };
     c.args(args)
         .env("ANOTHER_HOME", home)
         .env_remove("ANOTHER_AGENT")

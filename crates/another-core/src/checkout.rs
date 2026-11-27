@@ -17,7 +17,7 @@ use crate::holds::{
     folds_case, hold_covers, is_repo_wide, link_unlinked, literal_pattern, literal_prefix,
     normalize_pattern, release_tx, sweep_tx, Hold, HoldFilter,
 };
-use crate::identity::{find_project, resolve_agent, Project};
+use crate::identity::{find_project, Project};
 use crate::mail::touch;
 use crate::repo::{checkout_of, lexical, link_of, resolve_existing};
 use crate::store::{Store, Tx};
@@ -399,7 +399,7 @@ impl Store {
     ) -> Result<PathRelease> {
         self.write(|tx| {
             sweep_tx(tx)?;
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
             let projects = local_projects(tx)?;
             if let Some(scope) = scope {
                 for given in paths {
@@ -529,7 +529,7 @@ impl Store {
     pub fn release_pattern(&self, agent: &str, project: &str, raw: &str) -> Result<PathRelease> {
         self.write(|tx| {
             sweep_tx(tx)?;
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
             let project = find_project(tx, tx.node_id, project)?;
             let pattern = normalize_pattern(&project, raw)?;
             let mut stmt = tx.prepare(

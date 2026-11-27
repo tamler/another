@@ -19,7 +19,9 @@ struct Fx {
 fn fx() -> Fx {
     let dir = tempfile::tempdir().unwrap();
     let (clock, now) = Clock::manual(T0);
-    let store = Store::open_with_clock(&dir.path().join("node"), clock).unwrap();
+    let store = Store::open_with_clock(&dir.path().join("node"), clock)
+        .unwrap()
+        .unguarded_repair();
     for name in ["lead", "worker", "other"] {
         store
             .register_agent(RegisterAgent {

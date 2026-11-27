@@ -14,7 +14,6 @@ use sha2::{Digest, Sha256};
 
 use crate::activity::Since;
 use crate::error::Result;
-use crate::identity::resolve_agent;
 use crate::mail::{load_message, Message};
 use crate::store::{require_event_seq, Store};
 use crate::time::fmt_ts;
@@ -140,7 +139,7 @@ impl Store {
             return Ok(Vec::new());
         }
         self.write(|tx| {
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_delivery_agent(tx, tx.node_id, agent)?;
             claim_announcement_tx(tx, &me, message_ids, channel, client)
         })
     }
@@ -149,7 +148,7 @@ impl Store {
     /// announce those messages.
     pub fn release_announcement(&self, agent: &str, message_ids: &[String]) -> Result<()> {
         self.write(|tx| {
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_delivery_agent(tx, tx.node_id, agent)?;
             release_announcement_tx(tx, &me.id, message_ids)
         })
     }

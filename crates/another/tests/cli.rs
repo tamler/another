@@ -6,14 +6,18 @@ use std::process::{Command, Output, Stdio};
 use serde_json::Value;
 
 fn another(home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_another"))
-        .args(args)
-        .env("ANOTHER_HOME", home)
-        .env_remove("ANOTHER_AGENT")
-        .env_remove("ANOTHER_LOG")
-        .stdin(Stdio::null())
-        .output()
-        .expect("run another")
+    {
+        let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+        legacy_fixture_command.arg("--unguarded-repair");
+        legacy_fixture_command
+    }
+    .args(args)
+    .env("ANOTHER_HOME", home)
+    .env_remove("ANOTHER_AGENT")
+    .env_remove("ANOTHER_LOG")
+    .stdin(Stdio::null())
+    .output()
+    .expect("run another")
 }
 
 fn json(home: &Path, args: &[&str]) -> Value {

@@ -29,7 +29,7 @@ fn requests_filter_by_owner_and_status_newest_first_within_the_limit() {
     let shop = dir.path().join("work").join("shop");
     let shop = shop.to_string_lossy().into_owned();
     let (clock, now) = Clock::manual(T0);
-    let s = Store::open_in_memory(clock).unwrap();
+    let s = Store::open_in_memory(clock).unwrap().unguarded_repair();
     register(&s, "alice", None);
     register(&s, "bob", None);
     register(&s, "carol", Some(&shop));

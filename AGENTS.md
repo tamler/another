@@ -13,11 +13,11 @@ The current work is **v0.1.0, the single-node queue release**, approved by the p
 The scope page is the source of truth; this is the short form. Every item has an id there.
 
 - **M1** Queue with admission: proposed, ready, claimed, done; each admitted item records who admitted it and when; atomic `next`, which refuses an agent at its owner-set limit of claimed, unfinished items.
-- **M2** Durable record of claims, handoffs and results; a claim is released only on a confirmed session end or after a long grace period.
+- **M2** Durable claims, handoffs and results. SPEC-B7 participating claims use the common 120-second default TTL, requested bounds of 30 seconds through 24 hours, and immediate authenticated session-end release including dependent actors.
 - **M3** Upgrade safety: backup before migrate, refuse unknown schemas, doctor flags a build and database mismatch.
 - **M4** Path holds: existing behaviour, admitted fixes only.
 - **M5** Transport adapter interface (`wake`, `status`, `list`), the Herdr adapter and a generic command adapter.
-- **M6** Hook packs for Claude Code and Codex show the inbox and the queue at each turn. The queue lines are printed at session start and at a prompt, never mid-task, and only a name the owner gave its own limit is told that an item is ready (D96, [docs/HOOKS.md](docs/HOOKS.md#queue-lines)).
+- **M6** Native hooks bind contract-minted actors with private adapter grants. Participating edits fail closed; routine output is limited to conflict notices and one idle release reminder. Presence never renews files. Cursor stays installed and unguarded. SPEC-B7 supersedes D96; see [docs/HOOKS.md](docs/HOOKS.md).
 - **M7** One place that lists what needs the owner; the read-only scan for lapsed resources and unregistered listeners in `another doctor`.
 - **M8** Daemon on macOS and Linux.
 - **M9** Today's hub and spoke between the owner's Mac and VPS, with hub backups.

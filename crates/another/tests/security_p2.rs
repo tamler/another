@@ -10,6 +10,7 @@ async fn server(auth: bool) -> (tempfile::TempDir, Store, String, CancellationTo
     let addr = listener.local_addr().unwrap();
     let ct = CancellationToken::new();
     let opts = HttpOptions {
+        legacy_repair: true,
         federation: true,
         auth,
         bound_port: addr.port(),

@@ -1,5 +1,7 @@
 # Another: research and original v1 specification
 
+Historical research: current actor authority, TTL and hook policy is [AGENT-CONTRACT.md](AGENT-CONTRACT.md). Earlier defaults below do not override SPEC-B7.
+
 Another is a background messaging system that helps several coding agents work on the same project on the same machine at the same time, reducing edit conflicts and helping them share resources. It also works across machines today: remote peers use scoped tokens or OAuth, and federation pairs nodes through signed event-log sync and a hub you host. The hub can read relayed mail; end-to-end encryption is future work. Remote peers cannot reap. See [REMOTE.md](REMOTE.md) and [FEDERATION.md](FEDERATION.md) for the shipped behavior. The research and design below are historical and may describe earlier plans.
 
 This is the original clean-room research and v1 specification for **Another**, a free and open product. It records early plans for messaging, activity, path holds, resource coordination and federation. Hooks first; Herdr/cmux/tmux optional.

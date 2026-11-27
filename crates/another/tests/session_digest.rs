@@ -11,7 +11,9 @@ fn session_digest(store: &Store, agent: &str) -> anyhow::Result<String> {
 }
 
 fn store() -> Store {
-    let s = Store::open_in_memory(Clock::manual(1_800_000_000_000).0).unwrap();
+    let s = Store::open_in_memory(Clock::manual(1_800_000_000_000).0)
+        .unwrap()
+        .unguarded_repair();
     for name in ["alice", "bob"] {
         s.register_agent(RegisterAgent {
             name: name.into(),

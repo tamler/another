@@ -6,6 +6,8 @@
 //! breaking migration.
 
 mod activity;
+mod actor_leases;
+mod agent_contract;
 mod board;
 mod checkout;
 pub mod crypto;
@@ -14,7 +16,9 @@ mod error;
 mod federation;
 mod holds;
 mod identity;
+mod lease_policy;
 mod mail;
+mod native_actor;
 mod oauth;
 mod queue;
 mod repo;
@@ -35,6 +39,11 @@ pub use activity::{
     ActivityFeed, ActivityItem, ActivityKind, ActivityQuery, ActivitySummary, AgentPresence,
     DigestMessage, DigestRequest, RequestCounts, Since, WhatsNew,
 };
+pub use actor_leases::{
+    ActorProof, ActorView, CheckoutRight, EditOutcome, EditReceipt, LeaseRef, OperationView,
+    ParticipantProof, RegisteredActor, RightLease, SubjectKind, IDLE_REMINDER,
+};
+pub use agent_contract::{AgentEnvelope, AgentOperation, CompatibilityAction};
 pub use board::{
     Board, BoardAgent, BoardBlocked, BoardEdit, BoardHold, BoardProject, BoardQuery, BoardRequest,
     BOARD_EVENT_SCAN_CAP, DEFAULT_BOARD_LIMIT, DEFAULT_BOARD_WINDOW_MS, EDIT_HOOK_HOLD_REASON,
@@ -62,10 +71,14 @@ pub use holds::{
 pub use identity::{
     Agent, Program, Project, RegisterAgent, MAX_AGENT_DESCRIPTION_BYTES, MAX_AGENT_MODEL_BYTES,
 };
+pub use lease_policy::{checkout_ttl, DEFAULT_TTL_SECONDS, MAX_TTL_SECONDS, MIN_TTL_SECONDS};
 pub use mail::{
     display_line, is_unsafe_text_char, reply_subject, single_line, AckOutcome, Importance, Inbox,
     InboxItem, InboxQuery, Message, NewRequest, Reply, SendMessage, Thread, ThreadSummary,
     UnreadAfter, UnreadItem, MAX_SUBJECT_CHARS,
+};
+pub use native_actor::{
+    cursor_task_child, map_native_actor, NativeBinding, NativeProfile, CURSOR_COVERAGE,
 };
 pub use oauth::{
     canonical_resource, error_redirect, format_authority, not_plain_redirect, redirect_host,

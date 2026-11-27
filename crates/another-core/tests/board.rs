@@ -65,7 +65,9 @@ impl Fx {
             "[remote \"origin\"]\n\turl = https://example.com/me/blog\n",
         );
         let (clock, handle) = Clock::manual(T0);
-        let store = Store::open_with_clock(&root.join("home"), clock).unwrap();
+        let store = Store::open_with_clock(&root.join("home"), clock)
+            .unwrap()
+            .unguarded_repair();
         for (name, program, project) in [
             ("alice", Program::Claude, &main),
             ("bob", Program::Codex, &twin),

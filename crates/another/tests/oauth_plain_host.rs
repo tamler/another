@@ -64,15 +64,19 @@ impl Server {
 
     /// The standard output of the built `another` against this server's home.
     fn cli(&self, args: &[&str]) -> String {
-        let out = Command::new(env!("CARGO_BIN_EXE_another"))
-            .args(args)
-            .current_dir(self.dir.path())
-            .env("ANOTHER_HOME", self.home())
-            .env_remove("ANOTHER_AGENT")
-            .env_remove("ANOTHER_LOG")
-            .stdin(Stdio::null())
-            .output()
-            .expect("run another");
+        let out = {
+            let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+            legacy_fixture_command.arg("--unguarded-repair");
+            legacy_fixture_command
+        }
+        .args(args)
+        .current_dir(self.dir.path())
+        .env("ANOTHER_HOME", self.home())
+        .env_remove("ANOTHER_AGENT")
+        .env_remove("ANOTHER_LOG")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run another");
         assert!(out.status.success(), "{args:?}: {out:?}");
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
@@ -95,6 +99,7 @@ async fn start() -> Server {
     let base = format!("http://{addr}");
     let ct = CancellationToken::new();
     let opts = HttpOptions {
+        legacy_repair: true,
         auth: true,
         bound_port: addr.port(),
         oauth: Some(parse_public_url(&base).unwrap()),

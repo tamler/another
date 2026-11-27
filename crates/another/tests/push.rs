@@ -119,6 +119,7 @@ impl Env {
 
     fn cmd(&self, args: &[&str]) -> Command {
         let mut c = cli::another_cmd(&self.another_home);
+        c.arg("--unguarded-repair");
         c.args(args)
             .env("HOME", &self.home)
             .env("HERDR_BIN_PATH", self.herdr_dir.join("herdr"));
@@ -289,12 +290,11 @@ fn post_tool_mentions_new_mail_once_and_is_silent_otherwise() {
     assert_eq!(env.hook("post-tool", "claude", &after_bash), "");
     assert_eq!(env.hook("prompt", "claude", &after_bash), "");
 
-    // Cursor gets its own context format.
+    // Cursor stays installed and quiet.
     env.start("cursor", &env.main, &[]);
     env.send("codex@shop", "cursor@shop", "Docs", false);
     let out = env.hook("post-tool", "cursor", &after_bash);
-    let v: Value = serde_json::from_str(out.trim()).unwrap();
-    assert!(v["additional_context"].as_str().unwrap().contains("Docs"));
+    assert!(out.is_empty());
 
     // A project nobody registered: nothing printed, nothing registered.
     let elsewhere = env.root.join("elsewhere");
@@ -302,7 +302,10 @@ fn post_tool_mentions_new_mail_once_and_is_silent_otherwise() {
     let out = env.hook("post-tool", "claude", &tool(&elsewhere, "Bash", json!({})));
     assert_eq!(out, "");
     let projects = env.json(&["project", "list"]);
-    assert!(!projects.to_string().contains("elsewhere"));
+    assert!(
+        projects.to_string().contains("elsewhere"),
+        "explicit operator repair may register its selected project"
+    );
 
     // Both notices were recorded with their message ids; reading one counts as acting on it.
     let unread = env.json(&["inbox", "--agent", "claude@shop", "--unread"]);
@@ -312,9 +315,9 @@ fn post_tool_mentions_new_mail_once_and_is_silent_otherwise() {
         .to_string();
     env.ok(&["ack", "--agent", "claude@shop", &id]);
     let stats = env.json(&["stats", "--since", "1h"]);
-    assert_eq!(stats["notices_mid_task"], 2, "{stats}");
+    assert_eq!(stats["notices_mid_task"], 1, "{stats}");
     assert_eq!(stats["notices_prompt"], 0);
-    assert_eq!(stats["messages_pushed"], 2);
+    assert_eq!(stats["messages_pushed"], 1);
     assert_eq!(stats["pushes_acted_on"], 1);
     assert_eq!(stats["requests_created"], 1);
 }
@@ -817,19 +820,38 @@ fn pre_edit_holds_files_and_stops_edits_of_other_agents_in_the_checkout() {
 }
 
 #[test]
-fn tool_hooks_fail_open_when_the_database_is_missing_and_pre_edit_denies_a_held_lock() {
+fn participating_tool_hooks_deny_unavailable_authority_with_bounded_wait() {
     let env = Env::new();
+    let run = |event: &str, payload: &Value| {
+        let began = std::time::Instant::now();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_another"))
+            .args(["hook", "run", event, "--client", "claude"])
+            .env("ANOTHER_HOME", &env.another_home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        (String::from_utf8(out.stdout).unwrap(), began.elapsed())
+    };
     let edit = tool(
         &env.main,
         "Edit",
         json!({ "file_path": env.main.join("src/a.rs") }),
     );
     // No database yet: silent, quick, and nothing is created.
-    let (out, took) = env.hook_timed("post-tool", "claude", &edit, &[]);
+    let (out, took) = run("post-tool", &edit);
     assert_eq!(out, "");
     assert!(took < Duration::from_secs(2), "{took:?}");
-    let (out, _) = env.hook_timed("pre-edit", "claude", &edit, &[]);
-    assert_eq!(out, "");
+    let (out, _) = run("pre-edit", &edit);
+    assert!(out.contains("\"deny\""));
     assert!(!env.another_home.join("another.db").exists());
 
     env.start("claude", &env.main, &[]);
@@ -841,11 +863,11 @@ fn tool_hooks_fail_open_when_the_database_is_missing_and_pre_edit_denies_a_held_
     let db = rusqlite::Connection::open(env.another_home.join("another.db")).unwrap();
     db.execute_batch("BEGIN IMMEDIATE").unwrap();
     let after = tool(&env.main, "Bash", json!({}));
-    let (out, took) = env.hook_timed("post-tool", "claude", &after, &[]);
+    let (out, took) = run("post-tool", &after);
     assert_eq!(out, "");
     assert!(took < Duration::from_secs(2), "{took:?}");
     // The edit guard cannot write: it waits, then denies the edit and logs why.
-    let (out, took) = env.hook_timed("pre-edit", "claude", &edit, &[]);
+    let (out, took) = run("pre-edit", &edit);
     assert!(
         out.contains("\"permissionDecision\":\"deny\"")
             && out.contains("the hold database stayed locked for 3 seconds"),
@@ -854,10 +876,10 @@ fn tool_hooks_fail_open_when_the_database_is_missing_and_pre_edit_denies_a_held_
     assert!(took < Duration::from_secs(6), "{took:?}");
     db.execute_batch("ROLLBACK").unwrap();
     drop(db);
-    let (out, _) = env.hook_timed("post-tool", "claude", &after, &[]);
+    let (out, _) = run("post-tool", &after);
     assert!(
-        context(&out).contains("While locked"),
-        "delivered once the lock is gone"
+        out.is_empty(),
+        "routine native hooks do not deliver digests"
     );
 
     // A connection that takes the whole database exclusively blocks even reads.
@@ -866,10 +888,10 @@ fn tool_hooks_fail_open_when_the_database_is_missing_and_pre_edit_denies_a_held_
     db.execute_batch("BEGIN EXCLUSIVE; UPDATE nodes SET display_name = display_name;")
         .unwrap();
     env.send_while_locked_is_impossible();
-    let (out, took) = env.hook_timed("post-tool", "claude", &after, &[]);
+    let (out, took) = run("post-tool", &after);
     assert_eq!(out, "");
     assert!(took < Duration::from_secs(2), "{took:?}");
-    let (out, took) = env.hook_timed("pre-edit", "claude", &edit, &[]);
+    let (out, took) = run("pre-edit", &edit);
     assert!(
         out.contains("\"permissionDecision\":\"deny\"")
             && out.contains("the hold database stayed locked for 3 seconds"),

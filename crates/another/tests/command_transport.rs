@@ -132,7 +132,9 @@ impl Fx {
         script(&root.join("herdr"), FAKE_HERDR, &root);
         let home = root.join("home");
         let (clock, handle) = Clock::manual(real_now());
-        let store = Store::open_with_clock(&home, clock).unwrap();
+        let store = Store::open_with_clock(&home, clock)
+            .unwrap()
+            .unguarded_repair();
         let fx = Fx {
             _dir: dir,
             root,
@@ -1378,7 +1380,11 @@ impl Bin {
     }
 
     fn cmd(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_another"));
+        let mut c = {
+            let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+            legacy_fixture_command.arg("--unguarded-repair");
+            legacy_fixture_command
+        };
         // The fakes, then the system's own tools: no real tmux, cmux or herdr is on it.
         let path = format!("{}:/usr/bin:/bin", self.root.join("bin").display());
         c.args(args)
@@ -2503,7 +2509,9 @@ fn the_commands_a_refusal_prints_run_as_printed() {
     let paste = |line: &str| {
         let binary = bin.cmd(&[]);
         let mut shell = Command::new("/bin/sh");
-        shell.args(["-c", line]).env_clear().stdin(Stdio::null());
+        // These are explicitly operator repair examples, not actor carriage.
+        let repair = line.replacen("another ", "another --unguarded-repair ", 1);
+        shell.args(["-c", &repair]).env_clear().stdin(Stdio::null());
         shell.current_dir(root.join("cwd"));
         shell.envs(binary.get_envs().filter_map(|(k, v)| Some((k, v?))));
         let out = shell.output().unwrap();

@@ -20,7 +20,7 @@ fn every_transport() -> [WakeVia; 3] {
 fn store(names: &[&str]) -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
     let (clock, _) = Clock::manual(1_800_000_000_000);
-    let store = Store::open_in_memory(clock).unwrap();
+    let store = Store::open_in_memory(clock).unwrap().unguarded_repair();
     for name in names {
         store
             .register_agent(RegisterAgent {
@@ -197,7 +197,7 @@ fn stored_dash_targets_never_reach_the_herdr_probe() {
     let herdr = HerdrTransport::new(fake.to_string_lossy());
 
     let home = dir.path().join("home");
-    let s = Store::open(&home).unwrap();
+    let s = Store::open(&home).unwrap().unguarded_repair();
     let mut ids = Vec::new();
     for name in ["bob", "carol"] {
         ids.push(

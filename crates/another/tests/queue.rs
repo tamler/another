@@ -25,7 +25,11 @@ fn text(b: &[u8]) -> String {
 }
 
 fn command(home: &Path, args: &[&str], env: &[(&str, &str)]) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_another"));
+    let mut cmd = {
+        let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+        legacy_fixture_command.arg("--unguarded-repair");
+        legacy_fixture_command
+    };
     cmd.args(args)
         .env("ANOTHER_HOME", home)
         .env_remove("ANOTHER_AGENT")
@@ -62,7 +66,7 @@ impl Fx {
     fn new() -> Fx {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
-        let store = Store::open(&home).unwrap();
+        let store = Store::open(&home).unwrap().unguarded_repair();
         for name in ["ann", "bob", "cy", "arch"] {
             register(&store, name);
         }
@@ -188,7 +192,10 @@ impl Fx {
 async fn in_process(store: Store) -> Client {
     let (server_io, client_io) = tokio::io::duplex(64 * 1024);
     tokio::spawn(async move {
-        let server = AnotherMcp::new(store).serve(server_io).await.unwrap();
+        let server = AnotherMcp::legacy_repair(store)
+            .serve(server_io)
+            .await
+            .unwrap();
         let _ = server.waiting().await;
     });
     ClientConfig::default().serve(client_io).await.unwrap()
@@ -405,7 +412,7 @@ fn the_owners_yes_applies_only_to_what_was_shown() {
 fn fifty_processes_racing_for_next_never_share_an_item() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
-    let store = Store::open(&home).unwrap();
+    let store = Store::open(&home).unwrap().unguarded_repair();
     let names: Vec<String> = (0..50).map(|i| format!("w{i:02}")).collect();
     for name in &names {
         register(&store, name);
@@ -523,7 +530,7 @@ async fn no_cli_or_mcp_path_claims_a_proposed_item() {
     );
 
     // The MCP tools.
-    let client = in_process(Store::open(&fx.home).unwrap()).await;
+    let client = in_process(Store::open(&fx.home).unwrap().unguarded_repair()).await;
     let next = call_ok(&client, "queue_next", json!({ "agent": "bob" })).await;
     assert_eq!(next, json!({ "claimed": null, "refused": null }));
     for target in [q, id] {
@@ -1302,7 +1309,7 @@ async fn cli_and_mcp_shapes() {
     }
 
     // The MCP tools: the three results of queue_next are results, not tool errors.
-    let client = in_process(Store::open(&fx.home).unwrap()).await;
+    let client = in_process(Store::open(&fx.home).unwrap().unguarded_repair()).await;
     let made = call_ok(
         &client,
         "queue_propose",
@@ -1824,13 +1831,14 @@ async fn only_the_claiming_sessions_end_hook_releases_through_the_binary() {
     );
     let state = fx.home.join("hooks").join("state");
     let stamps = std::fs::read_dir(&state)
-        .unwrap()
+        .into_iter()
+        .flatten()
         .filter(|e| {
             let path = e.as_ref().unwrap().path();
             path.is_file() && path.extension().is_some_and(|x| x == "beat")
         })
         .count();
-    assert_eq!(stamps, 3, "one stamp for each session, all in {state:?}");
+    assert_eq!(stamps, 0, "presence does not need file renewal stamps");
     assert!(!fx.home.join("escape").exists());
     assert!(!fx.home.parent().unwrap().join("escape").exists());
 

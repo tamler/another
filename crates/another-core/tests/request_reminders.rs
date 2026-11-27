@@ -23,7 +23,9 @@ impl Fx {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("work/app").to_string_lossy().into_owned();
         let (clock, handle) = Clock::manual(T0);
-        let store = Store::open_with_clock(&dir.path().join("home"), clock).unwrap();
+        let store = Store::open_with_clock(&dir.path().join("home"), clock)
+            .unwrap()
+            .unguarded_repair();
         store.ensure_project("test", &path).unwrap();
         for name in ["lead", "worker", "other"] {
             store
@@ -105,8 +107,7 @@ impl Fx {
             .count()
     }
 
-    /// Messages in `who`'s inbox whose subject starts with `prefix`. Reading the inbox
-    /// sweeps, as every hook does.
+    /// Pure inbox projection. Maintenance is an explicit sweep.
     fn mail(&self, who: &str, prefix: &str) -> Vec<Message> {
         self.store
             .inbox(
@@ -151,6 +152,7 @@ fn the_owner_is_reminded_once_shortly_before_the_deadline() {
     assert!(fx.mail("worker", "Due soon:").is_empty());
 
     fx.advance_secs(2 * 60);
+    fx.sweep();
     let got = fx.mail("worker", "Due soon:");
     assert_eq!(got.len(), 1, "one reminder 49 min in");
     let m = &got[0];
@@ -249,6 +251,7 @@ fn a_new_deadline_or_a_takeover_rearms_the_reminder() {
     assert_eq!(fx.store.request(&rid).unwrap().status, RequestStatus::Stale);
     fx.act("other", &rid, RequestAction::Claim, Some(1800));
     fx.advance_secs(25 * 60);
+    fx.sweep();
     assert_eq!(fx.mail("other", "Due soon:").len(), 1);
     assert_eq!(fx.kinds(&rid, "due_soon"), 3);
 }
@@ -406,7 +409,7 @@ fn the_window_edges_are_exact() {
 }
 
 /// Review R1 P2-3: reminders run in the full sweep, not on every write. Sending mail does
-/// not sweep; reading an inbox does.
+/// not sweep; reading an inbox does not either.
 #[test]
 fn only_a_sweep_sends_the_due_soon_reminder() {
     let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
@@ -427,9 +430,12 @@ fn only_a_sweep_sends_the_due_soon_reminder() {
     assert_eq!(fx.kinds(&rid, "due_soon"), 0, "sending does not sweep");
     assert_eq!(
         fx.mail("worker", "Due soon:").len(),
-        1,
-        "the inbox read sweeps"
+        0,
+        "the inbox read is pure"
     );
+    assert_eq!(fx.kinds(&rid, "due_soon"), 0);
+    fx.sweep();
+    assert_eq!(fx.mail("worker", "Due soon:").len(), 1);
 }
 
 #[test]
@@ -459,6 +465,7 @@ fn the_requester_is_told_once_when_a_claimed_request_goes_overdue() {
     fx.act("worker", &rid, RequestAction::Claim, None);
     let request_mid = fx.store.request(&rid).unwrap().message_id;
     fx.advance_secs(601);
+    fx.sweep();
     let got = fx.mail("lead", "Overdue:");
     assert_eq!(got.len(), 1);
     let m = &got[0];
@@ -491,6 +498,7 @@ fn an_unclaimed_overdue_request_tells_only_the_requester() {
     let rid = fx.open(Some(600));
     let requests_before = fx.store.requests(RequestFilter::default()).unwrap().len();
     fx.advance_secs(601);
+    fx.sweep();
     let got = fx.mail("lead", "Overdue:");
     assert_eq!(got.len(), 1);
     assert!(

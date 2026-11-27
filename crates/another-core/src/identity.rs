@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::error::{Error, Result};
-use crate::store::{new_id, Store, Tx};
+use crate::store::{new_id, Caller, Store, Tx};
 use crate::time::{fmt_opt, fmt_ts};
 
 /// The coding-agent program behind an identity.
@@ -313,10 +313,75 @@ pub(crate) fn resolve_agent(conn: &Connection, node_id: &str, who: &str) -> Resu
     Ok(agent)
 }
 
+/// The agent a mutation acts as. A minted actor acts only through its typed proof
+/// carried on the store handle; a plain name mutates only on an explicit
+/// [`crate::Store::unguarded_repair`] handle, and never as a minted actor.
+pub(crate) fn resolve_acting_agent(tx: &Tx<'_>, node_id: &str, who: &str) -> Result<AgentRef> {
+    match tx.caller {
+        Caller::Actor(proof) => {
+            // The proof decides who acts. A name may only restate that same actor
+            // (its id, or its own address when core sends on its behalf, such as a
+            // request's completion notice); it never selects another one.
+            let me = crate::actor_leases::acting_agent(tx, tx.now, node_id, proof)?;
+            if who != me.id && who != me.address {
+                return Err(Error::Forbidden(
+                    "NO_ACTOR: this call acts only as its authenticated actor".into(),
+                ));
+            }
+            Ok(me)
+        }
+        Caller::Repair => resolve_delivery_agent(tx, node_id, who),
+        Caller::Guarded => Err(Error::Forbidden(
+            "NO_ACTOR: names and --agent are not authority. Use the private another.agent/1 channel. An operator may explicitly leave guarded participation with --unguarded-repair for legacy records".into(),
+        )),
+    }
+}
+
+/// A plain pre-contract name as a selector: read filters and conflict checks, and wake
+/// and delivery bookkeeping, which has no actor carriage yet (M-M). It grants no right.
+/// A minted actor's name or id is refused here too.
+pub(crate) fn resolve_delivery_agent(
+    conn: &Connection,
+    node_id: &str,
+    who: &str,
+) -> Result<AgentRef> {
+    let agent = resolve_agent(conn, node_id, who)?;
+    let minted = conn
+        .query_row(
+            "SELECT 1 FROM contract_actors WHERE actor_id = ?1",
+            [&agent.id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if minted {
+        return Err(Error::Forbidden(
+            "NO_ACTOR: a public actor name or id is not authority".into(),
+        ));
+    }
+    Ok(agent)
+}
+
 /// Resolve an address on any known node (recipients, filters). See [`resolve_agent`] for
 /// identities that act.
 pub(crate) fn resolve_any(conn: &Connection, node_id: &str, who: &str) -> Result<AgentRef> {
     let who = who.trim();
+    if let Some(found) = conn
+        .query_row(
+        "SELECT a.agent_id, a.address, a.node_id FROM agents a JOIN contract_actors c ON c.actor_id = a.agent_id WHERE a.address = ?1 AND a.node_id = ?2",
+            params![who, node_id],
+            |r| {
+                Ok(AgentRef {
+                    id: r.get(0)?,
+                    address: r.get(1)?,
+                    node_id: r.get(2)?,
+                })
+            },
+        )
+        .optional()?
+    {
+        return Ok(found);
+    }
     let parts: Vec<&str> = who.split('@').collect();
     if parts.len() == 3 {
         return resolve_remote(conn, who, parts[0], Some(parts[1]), parts[2]);
@@ -503,6 +568,19 @@ impl Store {
                 )
                 .optional()?;
             let agent_id = existing.clone().unwrap_or_else(new_id);
+            if tx
+                .query_row(
+                    "SELECT 1 FROM contract_actors WHERE actor_id = ?1",
+                    [&agent_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some()
+            {
+                return Err(Error::Forbidden(
+                    "NO_ACTOR: legacy registration cannot change a contract actor".into(),
+                ));
+            }
             let event_id = tx.emit(
                 &addr,
                 "agent.registered",

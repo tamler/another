@@ -1133,7 +1133,7 @@ fn upgrade_drops_cross_checkout_blocks() {
     let db_path = home.join(DB_FILE);
     let path = |p: &Path| p.to_string_lossy().into_owned();
 
-    let store = Store::open_as(&home, RELEASE).unwrap();
+    let store = Store::open_as(&home, RELEASE).unwrap().unguarded_repair();
     for (name, program) in [
         ("alice", Program::Claude),
         ("bob", Program::Codex),
@@ -1184,8 +1184,17 @@ fn upgrade_drops_cross_checkout_blocks() {
     // Take the home back one schema: no checkout column, the older key rules, and the wait
     // from worktree B that the build of that schema recorded against the hold in A.
     let db = Connection::open(&db_path).unwrap();
-    db.execute_batch("ALTER TABLE project_repos DROP COLUMN checkout")
-        .unwrap();
+    db.execute_batch(
+        "DROP TABLE lease_projections;
+        DROP TABLE actor_operations;
+        DROP TABLE contract_receipts;
+        DROP TABLE right_leases;
+        DROP TABLE contract_actors;
+        DROP TABLE session_scopes;
+        DROP TABLE contract_participants;
+        ALTER TABLE project_repos DROP COLUMN checkout",
+    )
+    .unwrap();
     db.pragma_update(None, "user_version", SCOPED - 1).unwrap();
     let current_keys: i64 = db
         .query_row(
@@ -1238,25 +1247,43 @@ fn upgrade_drops_cross_checkout_blocks() {
     let (hold_before, rows_before) = (hold_row(&db), row_counts(&db));
     drop(db);
 
-    // The upgrade: a backup of the old schema first, then one additive step.
-    let store = Store::open_as(&home, RELEASE).unwrap();
+    // The upgrade: a backup of the old schema first, then one additive step. The legacy
+    // names below act through the explicit operator repair handle.
+    let store = Store::open_as(&home, RELEASE).unwrap().unguarded_repair();
     let db = Connection::open(&db_path).unwrap();
     assert_eq!(version(&db_path), current());
     let saved = backups(&home);
     assert_eq!(saved.len(), 1, "{saved:?}");
     assert_eq!(version(&saved[0]), SCOPED - 1);
-    assert_eq!(
-        row_counts(&db),
-        rows_before,
-        "holds, mail, requests, queue items and waits: every row is still there"
-    );
-    assert_eq!(hold_row(&db), hold_before, "the hold is live and unchanged");
+    for (name, count) in &rows_before {
+        let expected = if name == "hold_waits" { 0 } else { *count };
+        assert_eq!(
+            row_counts(&db).iter().find(|(n, _)| n == name).unwrap().1,
+            expected,
+            "durable rows survive; legacy waits are disposed at contract cutover"
+        );
+    }
     assert_eq!(hold_before.4, None);
-    // Every wait lost its blocker list, so the next sweep rechecks it under the new rule.
+    let migrated_hold = hold_row(&db);
     assert_eq!(
-        blockers(&db),
-        [("bob".into(), "[]".into()), ("carol".into(), "[]".into())]
+        (
+            migrated_hold.0.clone(),
+            migrated_hold.1.clone(),
+            migrated_hold.2,
+            migrated_hold.3
+        ),
+        (
+            hold_before.0.clone(),
+            hold_before.1.clone(),
+            hold_before.2,
+            hold_before.3
+        )
     );
+    assert!(
+        migrated_hold.4.is_some(),
+        "legacy ownership is never adopted by name"
+    );
+    assert!(blockers(&db).is_empty());
     let checkouts = |db: &Connection| -> Vec<(String, String)> {
         db.prepare(
             "SELECT p.slug, r.checkout FROM project_repos r JOIN projects p USING (project_id)
@@ -1273,9 +1300,11 @@ fn upgrade_drops_cross_checkout_blocks() {
         "nothing is computed by the migration itself"
     );
 
-    // The first sweep: bob, in worktree B, is told the file is free without retrying, and
-    // his wait is gone. Carol's blocker is in her own checkout: her wait stays, with its
-    // blocker written back.
+    // A fresh checkout follows the checkout rule immediately. Cutover does not
+    // send notices for disposed legacy waits.
+    let held = edit(&store, "alice", &pa, "src/a.rs").held.remove(0);
+    assert_eq!(edit(&store, "carol", &pa, "src/a.rs").conflicts.len(), 1);
+    let one = format!("[\"{}\"]", held.hold_id);
     let unread = |agent: &str| {
         store
             .inbox(
@@ -1299,20 +1328,14 @@ fn upgrade_drops_cross_checkout_blocks() {
     };
     assert_eq!(pings(&db), 0, "opening the home sends nothing");
     store.sweep().unwrap();
-    assert_eq!(pings(&db), 1);
+    assert_eq!(pings(&db), 0);
     let mail = unread("bob");
-    assert_eq!(mail.len(), 1, "{mail:?}");
-    assert_eq!(mail[0].message.subject, "Hold free: src/a.rs");
-    assert_eq!(
-        mail[0].message.body,
-        "Another automatically checked wt-b:src/a.rs: no conflicting hold remains in this \
-         checkout. The file is not reserved; check again before editing."
-    );
+    assert!(mail.is_empty(), "{mail:?}");
     assert!(unread("carol").is_empty());
     assert_eq!(blockers(&db), [("carol".into(), one)]);
     store.sweep().unwrap();
-    assert_eq!(unread("bob").len(), 1, "one message, not one per sweep");
-    assert_eq!(hold_row(&db), hold_before);
+    assert!(unread("bob").is_empty());
+    assert_eq!(hold_row(&db), migrated_hold);
     // The new rule from the first command: bob edits in B, carol is still stopped in A.
     assert!(edit(&store, "bob", &pb, "src/a.rs").conflicts.is_empty());
     assert_eq!(edit(&store, "carol", &pa, "src/a.rs").conflicts.len(), 1);

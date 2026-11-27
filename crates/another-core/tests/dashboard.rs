@@ -11,7 +11,7 @@ fn setup() -> (Store, std::sync::Arc<std::sync::atomic::AtomicI64>) {
     let shop = dir.path().join("work/shop").to_string_lossy().into_owned();
     let api = dir.path().join("work/api").to_string_lossy().into_owned();
     let (clock, handle) = Clock::manual(T0);
-    let store = Store::open_in_memory(clock).unwrap();
+    let store = Store::open_in_memory(clock).unwrap().unguarded_repair();
     store
         .register_agent(RegisterAgent {
             name: "dave".into(),

@@ -62,7 +62,9 @@ impl Env {
 
     fn cmd(&self, args: &[&str]) -> Command {
         let mut c = cli::another_cmd(&self.another_home);
-        c.args(args).env("HOME", &self.home);
+        c.arg("--unguarded-repair")
+            .args(args)
+            .env("HOME", &self.home);
         c
     }
 

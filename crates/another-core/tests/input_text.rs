@@ -42,7 +42,9 @@ struct Fx {
 
 fn fx() -> Fx {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("home")).unwrap();
+    let store = Store::open(&dir.path().join("home"))
+        .unwrap()
+        .unguarded_repair();
     let project = dir.path().join("shop");
     std::fs::create_dir_all(&project).unwrap();
     let project = project.to_string_lossy().into_owned();

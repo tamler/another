@@ -43,16 +43,20 @@ impl Fx {
 
     /// Exit status and stderr.
     fn code(&self, args: &[&str]) -> (i32, String) {
-        let out = Command::new(env!("CARGO_BIN_EXE_another"))
-            .args(args)
-            .current_dir(&self.shop)
-            .env("ANOTHER_HOME", &self.home)
-            .env_remove("ANOTHER_AGENT")
-            .env_remove("ANOTHER_LOG")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .output()
-            .unwrap();
+        let out = {
+            let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+            legacy_fixture_command.arg("--unguarded-repair");
+            legacy_fixture_command
+        }
+        .args(args)
+        .current_dir(&self.shop)
+        .env("ANOTHER_HOME", &self.home)
+        .env_remove("ANOTHER_AGENT")
+        .env_remove("ANOTHER_LOG")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .output()
+        .unwrap();
         (
             out.status.code().unwrap(),
             String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -60,25 +64,29 @@ impl Fx {
     }
 
     fn request(&self) -> String {
-        let out = Command::new(env!("CARGO_BIN_EXE_another"))
-            .args([
-                "--json",
-                "send",
-                "--from",
-                "lead@shop",
-                "--to",
-                "worker@shop",
-                "--request",
-                "--subject",
-                "Do it",
-                "--body",
-                "b",
-            ])
-            .current_dir(&self.shop)
-            .env("ANOTHER_HOME", &self.home)
-            .env_remove("ANOTHER_AGENT")
-            .output()
-            .unwrap();
+        let out = {
+            let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+            legacy_fixture_command.arg("--unguarded-repair");
+            legacy_fixture_command
+        }
+        .args([
+            "--json",
+            "send",
+            "--from",
+            "lead@shop",
+            "--to",
+            "worker@shop",
+            "--request",
+            "--subject",
+            "Do it",
+            "--body",
+            "b",
+        ])
+        .current_dir(&self.shop)
+        .env("ANOTHER_HOME", &self.home)
+        .env_remove("ANOTHER_AGENT")
+        .output()
+        .unwrap();
         assert!(out.status.success());
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         v["request_id"].as_str().unwrap().to_string()

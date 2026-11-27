@@ -1,5 +1,9 @@
 # Another decisions
 
+## Approved SPEC-B7 supersession (number assigned at merge)
+
+SPEC-B7 replaces earlier identity, hook output, heartbeat, keep-resource and per-kind expiry defaults, including D3, D5, D6, D11, D13 and D96. Entries below are historical. Contract-minted actors and private adapter proofs authorize participating actions; names and environment variables do not. Every right uses a 120-second default TTL with requested bounds of 30 seconds through 24 hours. Exact file renewal changes only that file's deadline. Presence never renews files. Observed session end releases all session and dependent rights immediately, with no keep exception. Routine hooks are quiet except for conflicts and one idle reminder with no lease effect. Cursor remains installed and unguarded. Unconverted shell, MCP and transport carriage refuses authority. See [AGENT-CONTRACT.md](AGENT-CONTRACT.md) for coverage and limits.
+
 Locked defaults for v1 (2026-10-28). See [SPEC.md](SPEC.md) for the full research and design.
 
 | Decision | Choice | Notes |

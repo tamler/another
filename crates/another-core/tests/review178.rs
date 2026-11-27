@@ -25,7 +25,7 @@ struct Node {
 fn node(name: &str) -> Node {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
-    let store = Store::open(&home).unwrap();
+    let store = Store::open(&home).unwrap().unguarded_repair();
     store.set_node_name(name).unwrap();
     let project = dir.path().join("shop");
     std::fs::create_dir_all(&project).unwrap();

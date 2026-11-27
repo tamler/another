@@ -1,6 +1,8 @@
 # Path holds
 
-A hold says "I am changing these files". It is a lease on a path or glob inside a project, with a TTL (default 30 minutes, 1 minute to 4 hours). Holds do not lock files on disk. An exclusive hold conflicts with any overlapping hold of another agent in the same checkout; a shared hold conflicts only with exclusive ones. Agents in other worktrees or clones of the repository are never blocked by it (see [Holds and checkouts](#holds-and-checkouts)).
+Participating holds are exact file leases owned by contract-minted actors. The default TTL is 120 seconds; requested bounds are 30 seconds through 24 hours, retained for the generation. Presence never renews files. Exact operations renew only their admitted files; session end releases all session and dependent rights immediately. The command, glob and wait examples below describe explicit `--unguarded-repair` operator compatibility only, never participating authority. Default name-only mutations refuse `NO_ACTOR`. Cursor remains installed and unguarded.
+
+Holds do not lock files on disk. An exclusive hold conflicts with overlapping holds inside the same checkout. Worktrees and clones do not block each other (see [Holds and checkouts](#holds-and-checkouts)). Operator repair also supports shared and glob holds.
 
 ```bash
 another hold acquire --agent claude@shop src/api/routes.rs
@@ -10,7 +12,7 @@ another hold acquire --agent claude@shop src/api/routes.rs
 another holds --project .
 ```
 
-Conflicts are all-or-nothing: if any requested path overlaps another agent's live hold, nothing is granted and the command exits with status 3. Session hooks renew an agent's holds and release them at session end.
+Conflicts are all-or-nothing: if any requested path overlaps another agent's live hold, nothing is granted and the command exits with status 3. Presence hooks do not renew holds. Session end releases them immediately.
 
 ## The edit guard
 
@@ -26,7 +28,7 @@ To ask an owner to release a hold, use `another hold request-release --agent AGE
 
 ## Releasing a file when you are done
 
-A hold taken by the edit guard lasts while its session keeps working, so a file edited once stays held. When you are done with a file, say so, and another agent in the same checkout can pick it up at once:
+A file expires on its own deadline unless an admitted operation renews that exact file. Explicit release frees it immediately. The following examples belong to operator repair:
 
 ```bash
 another hold release --agent claude@shop src/api/routes.rs

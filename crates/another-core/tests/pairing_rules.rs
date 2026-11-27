@@ -57,7 +57,9 @@ impl Node {
     fn at(dir: &Path, home: &str, name: &str) -> Node {
         let home = dir.join(home);
         let (clock, handle) = Clock::manual(T0);
-        let store = Store::open_with_clock(&home, clock).unwrap();
+        let store = Store::open_with_clock(&home, clock)
+            .unwrap()
+            .unguarded_repair();
         store.set_node_name(name).unwrap();
         Node {
             store,

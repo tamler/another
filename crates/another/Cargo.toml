@@ -44,7 +44,7 @@ another = { path = ".", features = ["test-support"] }
 # Upgrade tests build a home as an earlier build left it.
 another-core = { workspace = true, features = ["test-support"] }
 reqwest = { version = "0.13", default-features = false }
-# Hook tests hold a SQLite write lock to prove the hooks fail open when the database is busy.
+# Hook tests hold a SQLite write lock to verify bounded admission refusal.
 rusqlite.workspace = true
 tempfile.workspace = true
 rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }

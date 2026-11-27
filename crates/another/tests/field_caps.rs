@@ -14,13 +14,17 @@ use rmcp::ServiceExt;
 use serde_json::{json, Value};
 
 fn another(home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_another"))
-        .args(args)
-        .env("ANOTHER_HOME", home)
-        .env_remove("ANOTHER_AGENT")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap()
+    {
+        let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+        legacy_fixture_command.arg("--unguarded-repair");
+        legacy_fixture_command
+    }
+    .args(args)
+    .env("ANOTHER_HOME", home)
+    .env_remove("ANOTHER_AGENT")
+    .stdin(Stdio::null())
+    .output()
+    .unwrap()
 }
 
 fn ok(home: &Path, args: &[&str]) -> Value {
@@ -131,7 +135,10 @@ async fn the_mcp_tools_refuse_each_field_over_its_limit_as_invalid() {
     let (server_io, client_io) = tokio::io::duplex(64 * 1024);
     let served = store.clone();
     tokio::spawn(async move {
-        let server = AnotherMcp::new(served).serve(server_io).await.unwrap();
+        let server = AnotherMcp::legacy_repair(served)
+            .serve(server_io)
+            .await
+            .unwrap();
         let _ = server.waiting().await;
     });
     let client = ClientConfig::default().serve(client_io).await.unwrap();

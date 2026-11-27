@@ -473,7 +473,6 @@ impl Store {
     }
 
     pub fn requests(&self, filter: RequestFilter) -> Result<Vec<Request>> {
-        self.sweep()?;
         self.read(|conn| {
             let owner = match &filter.owner {
                 Some(o) => Some(resolve_agent(conn, self.node_id(), o)?.id),
@@ -510,12 +509,24 @@ impl Store {
         input: RequestUpdate,
         scope: Option<&crate::tokens::TokenScope>,
     ) -> Result<Request> {
+        self.update_request_with_lease(input, scope, None, None)
+    }
+
+    pub fn update_request_with_lease(
+        &self,
+        input: RequestUpdate,
+        scope: Option<&crate::tokens::TokenScope>,
+        ttl_seconds: Option<i64>,
+        expected: Option<&crate::LeaseRef>,
+    ) -> Result<Request> {
+        let ttl = crate::checkout_ttl(ttl_seconds)?;
         if let Some(note) = &input.note {
             crate::queue::within_bytes("request note", note, MAX_REQUEST_NOTE_BYTES)?;
         }
         self.write(|tx| {
             stale_overdue_tx(tx)?;
-            let me = resolve_agent(tx, tx.node_id, &input.agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, &input.agent)?;
+            if input.action == RequestAction::Claim { crate::actor_leases::prepare_business_subject(tx, &me.id, crate::SubjectKind::Request, &input.request_id)?; }
             let unknown = || Error::NotFound(format!("unknown request {:?}", input.request_id));
             let (status, owner_id, creator_id, title, thread_id, message_id): (
                 String,
@@ -567,6 +578,7 @@ impl Store {
             let rid = &input.request_id;
             match input.action {
                 RequestAction::Claim => {
+                    crate::actor_leases::projection_checkout(tx, &me.id, crate::SubjectKind::Request, rid, ttl, &format!("request:{rid}"))?;
                     if status == RequestStatus::Claimed && owned_by_me {
                         if input.due_in_seconds.is_some() {
                             let due_at = due_from(tx.now, input.due_in_seconds)?;
@@ -618,6 +630,7 @@ impl Store {
                     }
                 }
                 RequestAction::Release => {
+                    crate::actor_leases::validate_projection(tx, &me.id, &format!("request:{rid}"), expected)?;
                     if !owned_by_me {
                         return Err(Error::Forbidden(format!(
                             "request {rid} is owned by {}, not {}",
@@ -626,6 +639,7 @@ impl Store {
                         )));
                     }
                     tx.emit(&me.address, "request.released", json!({ "request_id": rid }))?;
+                    crate::actor_leases::projection_release(tx, &format!("request:{rid}"), "released")?;
                     // A due time already past is cleared, as on takeover: otherwise the next
                     // sweep turns the released request stale again with no one acting.
                     tx.execute(
@@ -636,6 +650,8 @@ impl Store {
                     )?;
                 }
                 RequestAction::Complete => {
+                    crate::actor_leases::validate_projection(tx, &me.id, &format!("request:{rid}"), expected)?;
+                    crate::actor_leases::projection_release(tx, &format!("request:{rid}"), "completed")?;
                     if owner_id.is_some() && !owned_by_me && status == RequestStatus::Claimed {
                         return Err(Error::Conflict(format!(
                             "request {rid} is claimed by {}; only the owner can complete it",
@@ -679,6 +695,7 @@ impl Store {
                     }
                 }
                 RequestAction::Cancel => {
+                    crate::actor_leases::projection_release(tx, &format!("request:{rid}"), "cancelled")?;
                     if creator_id != me.id {
                         return Err(Error::Forbidden(format!(
                             "only the creator of request {rid} can cancel it"

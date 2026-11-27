@@ -19,7 +19,7 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("work/app").to_string_lossy().into_owned();
         let (clock, handle) = Clock::manual(T0);
-        let store = Store::open_in_memory(clock).unwrap();
+        let store = Store::open_in_memory(clock).unwrap().unguarded_repair();
         let project = store.ensure_project("test", &path).unwrap();
         for (name, program) in [
             ("alice", Program::Claude),
@@ -798,10 +798,21 @@ fn hold_acquire_conflict_expire() {
         .unwrap();
     assert_eq!(check.len(), 1);
 
-    // Heartbeat renews; without it the hold lapses and the sweeper expires it.
+    // Presence does not renew file rights. Explicit renewal names the live hold.
     fx.advance_secs(500);
     let hb = fx.store.heartbeat("alice", false).unwrap();
-    assert_eq!(hb.renewed_holds.len(), 1);
+    assert!(hb.renewed_holds.is_empty());
+    let ids: Vec<_> = fx
+        .store
+        .holds(HoldFilter {
+            agent: Some("alice".into()),
+            ..Default::default()
+        })
+        .unwrap()
+        .into_iter()
+        .map(|h| h.hold_id)
+        .collect();
+    assert_eq!(fx.store.renew_holds("alice", &ids).unwrap().len(), 1);
     fx.advance_secs(500);
     assert!(fx
         .hold("carol", &["src/api/routes.rs"], false, 600)
@@ -829,9 +840,9 @@ fn shared_holds_coexist_and_release_works() {
     let excl = fx.hold("carol", &["Cargo.toml"], true, 600);
     assert_eq!(excl.conflicts.len(), 2);
 
-    // Re-acquiring your own pattern renews it instead of duplicating.
+    // A live checkout retry returns its stored duration without renewing.
     let again = fx.hold("alice", &["Cargo.toml"], false, 900);
-    assert_eq!(again.granted[0].ttl_seconds, 900);
+    assert_eq!(again.granted[0].ttl_seconds, 600);
     let alice = HoldFilter {
         agent: Some("alice".into()),
         ..Default::default()
@@ -879,8 +890,8 @@ fn heartbeat_end_releases_holds_and_reports_digest() {
 #[test]
 fn concurrent_connections_share_one_database() {
     let dir = tempfile::tempdir().unwrap();
-    let a = Store::open(dir.path()).unwrap();
-    let b = Store::open(dir.path()).unwrap();
+    let a = Store::open(dir.path()).unwrap().unguarded_repair();
+    let b = Store::open(dir.path()).unwrap().unguarded_repair();
     assert_eq!(a.node_id(), b.node_id());
     for name in ["x", "y"] {
         a.register_agent(RegisterAgent {

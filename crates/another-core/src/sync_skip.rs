@@ -467,9 +467,10 @@ const AGENT_STEPS: [&str; 6] = [
     "another agent register <name> --program <program> --model <model> --description \
      \"<4096 bytes or fewer>\" (add --project <path> if it has one; a model left out is \
      cleared)",
-    "each hold it has (another holds --agent <name> lists them): another hold acquire \
+    "each hold it has (another holds --agent <name> lists them): another hold release \
+     --agent <name> <hold id>, then another hold acquire \
      --agent <name> -p <project> <the same paths>, with --shared, --repo-wide, --reason and \
-     --ttl as the hold has them (the same hold is sent again; without -p from another \
+     --ttl as the hold has them (a fresh checkout is sent; without -p from another \
      directory it is a different hold, and without --shared a shared hold becomes exclusive \
      or is refused)",
     "each resource of this node it holds a lease on: another release <resource id or \
@@ -536,9 +537,10 @@ const AGENT_NEEDS: [&str; 6] = [
     "register the agent again: `another agent register <name> --program <program> --model \
      <model> --description \"<4096 bytes or fewer>\"` (add `--project <path>` if it has one; \
      a model left out is cleared)",
-    "each hold it has (`another holds --agent <name>` lists them): `another hold acquire \
+    "each hold it has (`another holds --agent <name>` lists them): `another hold release \
+     --agent <name> <hold id>`, then `another hold acquire \
      --agent <name> -p <project> <the same paths>`, with --shared, --repo-wide, --reason and \
-     --ttl as the hold has them (the same hold is sent again; without -p from another \
+     --ttl as the hold has them (a fresh checkout is sent; without -p from another \
      directory it is a different hold, and without --shared a shared hold becomes exclusive \
      or is refused)",
     "each resource of this node it holds a lease on: `another release <resource id or \
@@ -1142,7 +1144,8 @@ mod tests {
              is cleared)"
         );
         assert!(steps[1].starts_with(
-            "each hold it has (another holds --agent wordy lists them): another hold acquire \
+            "each hold it has (another holds --agent wordy lists them): another hold release \
+             --agent wordy <hold id>, then another hold acquire \
              --agent wordy -p <project> <the same paths>, with --shared, --repo-wide, --reason \
              and --ttl as the hold has them "
         ));

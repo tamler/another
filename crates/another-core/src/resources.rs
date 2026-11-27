@@ -14,9 +14,9 @@ use crate::mail::touch;
 use crate::store::{new_id, Store, Tx};
 use crate::time::{fmt_opt, fmt_ts};
 
-pub const DEFAULT_LEASE_TTL_SECONDS: i64 = 30 * 60;
-pub const MIN_LEASE_TTL_SECONDS: i64 = 60;
-pub const MAX_LEASE_TTL_SECONDS: i64 = 24 * 60 * 60;
+pub const DEFAULT_LEASE_TTL_SECONDS: i64 = crate::DEFAULT_TTL_SECONDS;
+pub const MIN_LEASE_TTL_SECONDS: i64 = crate::MIN_TTL_SECONDS;
+pub const MAX_LEASE_TTL_SECONDS: i64 = crate::MAX_TTL_SECONDS;
 /// Most lease ids one `resource.renewed` or `resource.released` event of a heartbeat or a
 /// session end lists.
 const LEASE_IDS_PER_EVENT: usize = 10_000;
@@ -201,11 +201,7 @@ pub struct LeaseOutcome {
 }
 
 fn clamp_ttl(ttl: Option<i64>) -> Result<i64> {
-    let ttl = ttl.unwrap_or(DEFAULT_LEASE_TTL_SECONDS);
-    if ttl <= 0 {
-        return Err(Error::Invalid("ttl_seconds must be positive".into()));
-    }
-    Ok(ttl.clamp(MIN_LEASE_TTL_SECONDS, MAX_LEASE_TTL_SECONDS))
+    crate::checkout_ttl(ttl)
 }
 
 /// The trailing port in `ollama@11434`, `tcp:0.0.0.0:5432` or `http://127.0.0.1:5173/x`.
@@ -433,6 +429,19 @@ fn add_lease(
     role: &str,
     ttl: i64,
 ) -> Result<()> {
+    let key = if role == "owner" {
+        format!("owner:{resource_id}")
+    } else {
+        format!("borrow:{resource_id}:{}", agent.id)
+    };
+    crate::actor_leases::projection_checkout(
+        tx,
+        &agent.id,
+        crate::SubjectKind::Resource,
+        &key,
+        ttl,
+        lease_id,
+    )?;
     tx.execute(
         "INSERT INTO resource_leases (lease_id, resource_id, node_id, agent_id, role, ttl_seconds,
            created_at, renewed_at, expires_at)
@@ -513,6 +522,20 @@ fn settle(tx: &Tx<'_>, resource_id: &str, actor: &str, when: i64) -> Result<Opti
         [lease_id],
     )?;
     Ok(Some(lease.agent.clone()))
+}
+
+/// Settle resources with an ended projected lease. A lapsed resource is skipped: settle
+/// would find no live lease and change nothing, and a new lease clears `lapsed_at`, so
+/// the work is bounded by resources still in use, not by ended history.
+pub(crate) fn settle_contract_projections(tx: &Tx<'_>) -> Result<()> {
+    let mut stmt = tx.prepare("SELECT DISTINCT res.resource_id FROM resources res JOIN resource_leases r ON r.resource_id = res.resource_id JOIN lease_projections p ON p.projection_id = r.lease_id JOIN right_leases l ON l.lease_id = p.lease_id WHERE res.lapsed_at IS NULL AND (l.released_at IS NOT NULL OR l.expires_at <= ?1)")?;
+    let ids = stmt
+        .query_map([tx.now], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for id in ids {
+        settle(tx, &id, "system", tx.now)?;
+    }
+    Ok(())
 }
 
 fn my_lease(tx: &Tx<'_>, resource_id: &str, agent_id: &str) -> Result<Option<(String, String)>> {
@@ -744,7 +767,7 @@ impl Store {
         check_metadata(&metadata)?;
         self.write(|tx| {
             crate::holds::sweep_tx(tx)?;
-            let me = resolve_agent(tx, tx.node_id, &input.agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, &input.agent)?;
             let project_id = match &input.project {
                 Some(p) => Some(find_project(tx, tx.node_id, p)?.project_id),
                 None => None,
@@ -756,6 +779,7 @@ impl Store {
             let target = ResourceRef::Name(input.kind, input.name.clone());
             let lease_id = new_id();
             if let Ok(existing) = resolve(tx, tx.node_id, &target) {
+                crate::actor_leases::prepare_business_subject(tx, &me.id, crate::SubjectKind::Resource, &existing)?;
                 let current = get_resource(tx, &existing, tx.now)?;
                 if current.refcount > 0 {
                     return Err(Error::Conflict(format!(
@@ -931,7 +955,11 @@ impl Store {
         // SQLite write transaction/connection mutex, then revalidate its endpoint and
         // ownership inside the transaction before committing the lease.
         let candidate = self.read(|conn| {
-            resolve_agent(conn, self.node_id(), agent)?;
+            // An actor handle is authenticated inside the write below; a name lookup
+            // here would refuse it and is not authority anyway.
+            if !matches!(self.caller(), crate::store::Caller::Actor(_)) {
+                resolve_agent(conn, self.node_id(), agent)?;
+            }
             let rid = resolve(conn, self.node_id(), target)?;
             get_resource(conn, &rid, self.now())
         })?;
@@ -942,8 +970,9 @@ impl Store {
             .then(|| probe(candidate_endpoint.as_deref(), candidate_port));
         self.write(|tx| {
             crate::holds::sweep_tx(tx)?;
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
             let rid = resolve(tx, tx.node_id, target)?;
+            crate::actor_leases::prepare_business_subject(tx, &me.id, crate::SubjectKind::Resource, &rid)?;
             let owner_node = resource_node(tx, &rid)?;
             let foreign = owner_node != tx.node_id;
             let node_field = foreign.then(|| owner_node.clone());
@@ -959,6 +988,9 @@ impl Store {
                 ));
             }
             if let Some((lease_id, _)) = my_lease(tx, &rid, &me.id)? {
+                if tx.query_row("SELECT 1 FROM contract_actors WHERE actor_id = ?1", [&me.id], |_| Ok(())).optional()?.is_some() {
+                    return outcome(tx, &rid, &me.id, "unchanged");
+                }
                 tx.emit(
                     &me.address,
                     "resource.renewed",
@@ -1044,11 +1076,24 @@ impl Store {
         target: &ResourceRef,
         stopped: bool,
     ) -> Result<LeaseOutcome> {
+        self.release_resource_with_lease(agent, target, stopped, None)
+    }
+
+    pub fn release_resource_with_lease(
+        &self,
+        agent: &str,
+        target: &ResourceRef,
+        stopped: bool,
+        expected: Option<&crate::LeaseRef>,
+    ) -> Result<LeaseOutcome> {
         self.write(|tx| {
             crate::holds::sweep_tx(tx)?;
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
             let rid = resolve(tx, tx.node_id, target)?;
             let mine = my_lease(tx, &rid, &me.id)?;
+            if let Some((lease, _)) = &mine {
+                crate::actor_leases::validate_projection(tx, &me.id, lease, expected)?;
+            }
             let current = get_resource(tx, &rid, tx.now)?;
             let owner_node = resource_node(tx, &rid)?;
             let node_field = (owner_node != tx.node_id).then(|| owner_node.clone());
@@ -1093,6 +1138,7 @@ impl Store {
                     me.address, current.name
                 )));
             };
+            crate::actor_leases::projection_release(tx, &lease_id, "explicit")?;
             tx.emit(
                 &me.address,
                 "resource.released",
@@ -1127,7 +1173,20 @@ impl Store {
     ) -> Result<Vec<Resource>> {
         self.write(|tx| {
             crate::holds::sweep_tx(tx)?;
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
+            if tx
+                .query_row(
+                    "SELECT 1 FROM contract_actors WHERE actor_id = ?1",
+                    [&me.id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some()
+            {
+                return Err(Error::Forbidden(
+                    "NO_CALL_CONTEXT: renew an exact common lease reference instead".into(),
+                ));
+            }
             let mut stmt = tx.prepare(
                 "SELECT lease_id, resource_id, ttl_seconds FROM resource_leases
                  WHERE agent_id = ?1 AND released_at IS NULL",
@@ -1168,6 +1227,7 @@ impl Store {
                 )?;
             }
             for (lease_id, _, ttl) in &selected {
+                crate::actor_leases::projection_renew(tx, lease_id)?;
                 tx.execute(
                     "UPDATE resource_leases SET renewed_at = ?2, expires_at = ?2 + ?3 * 1000
                      WHERE lease_id = ?1",
@@ -1215,7 +1275,7 @@ impl Store {
     /// Log that an agent asked for a reap (it is never executed from MCP).
     pub fn note_reap_request(&self, agent: &str, target: &str, reason: &str) -> Result<()> {
         self.write(|tx| {
-            let me = resolve_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
             tx.emit(
                 &me.address,
                 "resource.reap_requested",
@@ -1388,7 +1448,9 @@ mod tests {
     }
 
     fn borrow_fixture() -> (Store, ResourceRef) {
-        let store = Store::open_in_memory(crate::Clock::manual(1_800_000_000_000).0).unwrap();
+        let store = Store::open_in_memory(crate::Clock::manual(1_800_000_000_000).0)
+            .unwrap()
+            .unguarded_repair();
         for name in ["alice", "bob"] {
             store
                 .register_agent(crate::RegisterAgent {

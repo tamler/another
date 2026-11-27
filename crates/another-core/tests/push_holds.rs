@@ -96,7 +96,9 @@ impl Fx {
     fn new() -> Fx {
         let repos = Repos::new();
         let (clock, handle) = Clock::manual(T0);
-        let store = Store::open_with_clock(&repos.home, clock).unwrap();
+        let store = Store::open_with_clock(&repos.home, clock)
+            .unwrap()
+            .unguarded_repair();
         for (name, program) in [
             ("alice", Program::Claude),
             ("bob", Program::Codex),
@@ -968,7 +970,9 @@ fn blocked_retries_are_deduplicated_and_ping_once_after_release() {
         1
     );
     // The subscription survives opening another store connection.
-    let store = Store::open_with_clock(&fx.repos.home, Clock::Manual(fx.clock.clone())).unwrap();
+    let store = Store::open_with_clock(&fx.repos.home, Clock::Manual(fx.clock.clone()))
+        .unwrap()
+        .unguarded_repair();
     store.release_holds("alice", &[]).unwrap();
     store.sweep().unwrap();
     store.sweep().unwrap();
@@ -1474,15 +1478,15 @@ fn edit_guard_takes_narrow_holds_and_names_the_holder() {
         .unwrap();
     assert_eq!(ok.held.len(), 1);
 
-    // Past half its TTL, the covering hold is renewed instead.
-    fx.advance_secs(16 * 60);
+    // Admission on an existing live file does not renew it.
+    fx.advance_secs(70);
     let renewed = fx
         .store
         .guard_edit("alice", &main, &["src/a.rs".into()], "editing (auto)")
         .unwrap();
-    assert_eq!(renewed.held.len(), 1);
-    assert_eq!(renewed.held[0].pattern, "src/a.rs");
-    assert!(fx.kinds().iter().any(|k| k == "hold.renewed"));
+    assert!(renewed.held.is_empty());
+    assert_eq!(renewed.covered, vec!["src/a.rs"]);
+    assert!(!fx.kinds().iter().any(|k| k == "hold.renewed"));
 
     // A shared hold of one's own does not cover an edit; a narrow exclusive one is taken.
     fx.store
@@ -1511,7 +1515,7 @@ fn edit_guard_takes_narrow_holds_and_names_the_holder() {
 }
 
 #[test]
-fn keepalive_renews_only_aging_holds() {
+fn keepalive_never_renews_file_holds() {
     let fx = Fx::new();
     let main = fx.repos.main.clone();
     fx.acquire("alice", &main, &["src/**"]).unwrap();
@@ -1524,8 +1528,8 @@ fn keepalive_renews_only_aging_holds() {
     assert_eq!(beat(&fx), 0);
     assert_eq!(renewed_events(&fx), 0, "nothing logged when nothing is due");
     fx.advance_secs(301);
-    assert_eq!(beat(&fx), 1);
-    assert_eq!(renewed_events(&fx), 1);
+    assert_eq!(beat(&fx), 0);
+    assert_eq!(renewed_events(&fx), 0);
     let hold = &fx
         .store
         .holds(HoldFilter {
@@ -1533,7 +1537,7 @@ fn keepalive_renews_only_aging_holds() {
             agent: Some("alice".into()),
         })
         .unwrap()[0];
-    assert_eq!(hold.expires_at, fmt_ts(T0 + 301_000 + 600_000));
+    assert_eq!(hold.expires_at, fmt_ts(T0 + 600_000));
     // A hold that already lapsed is left for the sweeper, not revived.
     fx.advance_secs(700);
     assert_eq!(beat(&fx), 0);

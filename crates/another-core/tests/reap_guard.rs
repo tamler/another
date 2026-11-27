@@ -1,7 +1,9 @@
 use another_core::*;
 
 fn setup() -> (Store, ResourceRef, String) {
-    let store = Store::open_in_memory(Clock::System).unwrap();
+    let store = Store::open_in_memory(Clock::System)
+        .unwrap()
+        .unguarded_repair();
     for name in ["alice", "bob"] {
         store
             .register_agent(RegisterAgent {
@@ -63,7 +65,7 @@ fn guarded_reap_serializes_borrow_until_after_release() {
     use std::sync::mpsc;
     use std::time::Duration;
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open(dir.path()).unwrap().unguarded_repair();
     for name in ["alice", "bob"] {
         store
             .register_agent(RegisterAgent {
@@ -94,7 +96,7 @@ fn guarded_reap_serializes_borrow_until_after_release() {
     let id = resource.resource_id;
     let target = ResourceRef::Id(id.clone());
     store.release_resource("alice", &target, false).unwrap();
-    let second = Store::open(dir.path()).unwrap();
+    let second = Store::open(dir.path()).unwrap().unguarded_repair();
     let (entered_tx, entered_rx) = mpsc::channel();
     let (continue_tx, continue_rx) = mpsc::channel();
     let stop = std::thread::spawn(move || {
@@ -175,7 +177,7 @@ fn guarded_reap_serializes_new_pid_alias_registration() {
     use std::sync::mpsc;
     use std::time::Duration;
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open(dir.path()).unwrap().unguarded_repair();
     store
         .register_agent(RegisterAgent {
             name: "alice".into(),
@@ -185,7 +187,7 @@ fn guarded_reap_serializes_new_pid_alias_registration() {
             description: None,
         })
         .unwrap();
-    let second = Store::open(dir.path()).unwrap();
+    let second = Store::open(dir.path()).unwrap().unguarded_repair();
     let (entered_tx, entered_rx) = mpsc::channel();
     let (continue_tx, continue_rx) = mpsc::channel();
     let stop = std::thread::spawn(move || {

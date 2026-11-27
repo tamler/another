@@ -57,7 +57,11 @@ impl Env {
     }
 
     fn cmd(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_another"));
+        let mut c = {
+            let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+            legacy_fixture_command.arg("--unguarded-repair");
+            legacy_fixture_command
+        };
         let path = format!(
             "{}:{}",
             self.bin.display(),

@@ -1,5 +1,7 @@
 # The background daemon
 
+Current participating policy: contract-minted actors authorize actions; names and transport labels are selectors only. All rights use a 120-second default TTL with requested bounds of 30 seconds through 24 hours. Observed session end releases all session and dependent rights immediately. Presence, idle reminders, status and transport observations renew no file leases. Routine hooks are quiet except for conflicts and one idle reminder. Cursor remains unguarded. The older operational examples below describe operator compatibility, not participating authority; see [AGENT-CONTRACT.md](AGENT-CONTRACT.md).
+
 `another serve` is the local daemon. Besides serving MCP and the dashboard on loopback, it does the work nobody else is around to do:
 
 - sweeps expired holds and overdue requests every 30 seconds, and releases queue claims with no sign of life for the grace period ([QUEUE.md](QUEUE.md#when-a-claim-is-released-automatically));

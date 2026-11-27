@@ -7,7 +7,9 @@
 use another_core::*;
 
 fn store() -> Store {
-    let store = Store::open_in_memory(Clock::manual(1_800_000_000_000).0).unwrap();
+    let store = Store::open_in_memory(Clock::manual(1_800_000_000_000).0)
+        .unwrap()
+        .unguarded_repair();
     store
         .register_agent(RegisterAgent {
             name: "alice".into(),

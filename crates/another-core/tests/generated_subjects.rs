@@ -6,7 +6,9 @@ use another_core::*;
 
 fn store(dir: &std::path::Path) -> (Store, String) {
     let (clock, _) = Clock::manual(1_800_000_000_000);
-    let store = Store::open_with_clock(&dir.join("home"), clock).unwrap();
+    let store = Store::open_with_clock(&dir.join("home"), clock)
+        .unwrap()
+        .unguarded_repair();
     let project = dir.join("shop");
     std::fs::create_dir_all(&project).unwrap();
     let project = project.to_string_lossy().into_owned();

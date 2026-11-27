@@ -25,6 +25,7 @@ async fn start() -> Server {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let opts = HttpOptions {
+        legacy_repair: true,
         auth: true,
         bound_port: addr.port(),
         ..Default::default()

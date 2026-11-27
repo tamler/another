@@ -229,7 +229,7 @@ fn queue_items(v: &Value, out: &mut Vec<Value>) {
 #[tokio::test]
 async fn remote_callers_cannot_act_on_or_read_queue_text() {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open(dir.path()).unwrap().unguarded_repair();
     let work = dir.path().join("work/shop").to_string_lossy().into_owned();
     let work_glob = dir
         .path()
@@ -259,6 +259,7 @@ async fn remote_callers_cannot_act_on_or_read_queue_text() {
     let remote = serve(
         store.clone(),
         HttpOptions {
+            legacy_repair: true,
             auth: true,
             dashboard: DashboardMode::Redacted,
             ..Default::default()
@@ -270,6 +271,7 @@ async fn remote_callers_cannot_act_on_or_read_queue_text() {
     let local = serve(
         store.clone(),
         HttpOptions {
+            legacy_repair: true,
             dashboard: DashboardMode::Local,
             ..Default::default()
         },
@@ -492,7 +494,7 @@ async fn remote_callers_cannot_act_on_or_read_queue_text() {
 #[tokio::test]
 async fn needs_is_not_reachable_remotely() {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open(dir.path()).unwrap().unguarded_repair();
     let work_glob = dir
         .path()
         .join("work/*")
@@ -521,6 +523,7 @@ async fn needs_is_not_reachable_remotely() {
     let remote = serve(
         store.clone(),
         HttpOptions {
+            legacy_repair: true,
             auth: true,
             dashboard: DashboardMode::Redacted,
             ..Default::default()
@@ -531,6 +534,7 @@ async fn needs_is_not_reachable_remotely() {
     let local = serve(
         store.clone(),
         HttpOptions {
+            legacy_repair: true,
             dashboard: DashboardMode::Local,
             ..Default::default()
         },

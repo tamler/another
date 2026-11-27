@@ -33,7 +33,11 @@ impl Env {
     }
 
     fn cmd(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_another"));
+        let mut c = {
+            let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+            legacy_fixture_command.arg("--unguarded-repair");
+            legacy_fixture_command
+        };
         c.args(args)
             .current_dir(&self.repo)
             .env("HOME", &self.home)
@@ -273,7 +277,7 @@ mod over_http {
 
     fn node(name: &str) -> Node {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path()).unwrap();
+        let store = Store::open(dir.path()).unwrap().unguarded_repair();
         store.set_node_name(name).unwrap();
         Node { dir, store }
     }
@@ -340,6 +344,7 @@ mod over_http {
             .unwrap();
         let addr = listener.local_addr().unwrap();
         let opts = HttpOptions {
+            legacy_repair: true,
             federation: true,
             bound_port: addr.port(),
             ..Default::default()
@@ -479,15 +484,19 @@ mod over_http {
     }
 
     fn another(home: &Node, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_another"))
-            .arg("--home")
-            .arg(home.dir.path())
-            .args(args)
-            .env_remove("ANOTHER_AGENT")
-            .env_remove("ANOTHER_LOG")
-            .stdin(Stdio::null())
-            .output()
-            .unwrap()
+        {
+            let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+            legacy_fixture_command.arg("--unguarded-repair");
+            legacy_fixture_command
+        }
+        .arg("--home")
+        .arg(home.dir.path())
+        .args(args)
+        .env_remove("ANOTHER_AGENT")
+        .env_remove("ANOTHER_LOG")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
     }
 
     fn text(bytes: &[u8]) -> String {
@@ -576,23 +585,27 @@ mod over_http {
             stdin["tool_name"] = json!("Edit");
             stdin["tool_input"] = json!({ "file_path": repo.join(file) });
         }
-        let mut child = Command::new(env!("CARGO_BIN_EXE_another"))
-            .args(["hook", "run", event, "--client", client])
-            .current_dir(repo)
-            .env("HOME", victim.dir.path().join("home"))
-            .env("ANOTHER_HOME", victim.dir.path())
-            .env_remove("ANOTHER_AGENT")
-            .env_remove("GROK_HOOK_EVENT")
-            .env_remove("ANOTHER_LOG")
-            .env_remove("HERDR_PANE_ID")
-            .env_remove("TMUX_PANE")
-            .env_remove("CMUX_SURFACE_ID")
-            .env_remove("TERM_PROGRAM")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child = {
+            let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+            legacy_fixture_command.arg("--unguarded-repair");
+            legacy_fixture_command
+        }
+        .args(["hook", "run", event, "--client", client])
+        .current_dir(repo)
+        .env("HOME", victim.dir.path().join("home"))
+        .env("ANOTHER_HOME", victim.dir.path())
+        .env_remove("ANOTHER_AGENT")
+        .env_remove("GROK_HOOK_EVENT")
+        .env_remove("ANOTHER_LOG")
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("TMUX_PANE")
+        .env_remove("CMUX_SURFACE_ID")
+        .env_remove("TERM_PROGRAM")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
         child
             .stdin
             .take()
@@ -723,17 +736,21 @@ mod over_http {
     impl Running {
         fn start(home: &Node, args: &[&str]) -> Running {
             Running(Some(
-                Command::new(env!("CARGO_BIN_EXE_another"))
-                    .arg("--home")
-                    .arg(home.dir.path())
-                    .args(args)
-                    .env_remove("ANOTHER_AGENT")
-                    .env_remove("ANOTHER_LOG")
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .unwrap(),
+                {
+                    let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+                    legacy_fixture_command.arg("--unguarded-repair");
+                    legacy_fixture_command
+                }
+                .arg("--home")
+                .arg(home.dir.path())
+                .args(args)
+                .env_remove("ANOTHER_AGENT")
+                .env_remove("ANOTHER_LOG")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
             ))
         }
 

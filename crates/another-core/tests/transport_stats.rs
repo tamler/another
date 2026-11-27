@@ -6,7 +6,9 @@ use another_core::*;
 fn store() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
     let (clock, _) = Clock::manual(1_800_000_000_000);
-    let store = Store::open_with_clock(&dir.path().join("home"), clock).unwrap();
+    let store = Store::open_with_clock(&dir.path().join("home"), clock)
+        .unwrap()
+        .unguarded_repair();
     for name in ["alice", "bob"] {
         store
             .register_agent(RegisterAgent {

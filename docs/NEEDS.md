@@ -1,5 +1,7 @@
 # What needs the owner
 
+Current participating policy: contract-minted actors authorize actions; names and transport labels are selectors only. All rights use a 120-second default TTL with requested bounds of 30 seconds through 24 hours. Observed session end releases all session and dependent rights immediately. Presence, idle reminders, status and transport observations renew no file leases. Routine hooks are quiet except for conflicts and one idle reminder. Cursor remains unguarded. The older operational examples below describe operator compatibility, not participating authority; see [AGENT-CONTRACT.md](AGENT-CONTRACT.md).
+
 `another needs` is the one list of what will not move without you: decisions that wait, agent sessions that are blocked, stuck or unreachable, claims that have gone quiet, and ready work nobody can take. Each row prints its next step. It is scope item M7 of [v0.1.0](V0.1.0-SCOPE.md), with C2; the decision is D94 in [DECISIONS.md](DECISIONS.md).
 
 ```bash

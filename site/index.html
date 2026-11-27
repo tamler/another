@@ -83,11 +83,11 @@ another init</code></pre>
           <pre class="shell" tabindex="0" aria-label="MCP server config"><code>{ "mcpServers": { "another": { "command": "another", "args": ["serve", "--stdio"] } } }</code></pre>
         </li>
         <li>
-          <p>Register two agents in this checkout, send a request, and take a hold. <code>--ttl</code> is seconds. Exclusive is the default.</p>
-          <pre class="shell" tabindex="0" aria-label="Send mail and take a hold"><code>another agent register alice <span class="token">--program</span> claude <span class="token">--project</span> .
+          <p>Participating agents act through their hooks, never by name. To try mail and holds by hand with plain names, use the explicit operator repair mode. <code>--ttl</code> is seconds. Exclusive is the default.</p>
+          <pre class="shell" tabindex="0" aria-label="Send mail and take a hold in repair mode"><code>another agent register alice <span class="token">--program</span> claude <span class="token">--project</span> .
 another agent register bob <span class="token">--program</span> codex <span class="token">--project</span> .
-another send <span class="token">--from</span> alice <span class="token">--to</span> bob <span class="token">--subject</span> "Review the parser" <span class="token">--body</span> "Error paths look wrong." <span class="token">--request</span>
-another hold acquire <span class="token">--agent</span> alice src/parser.rs <span class="token">--ttl</span> 1800
+another <span class="token">--unguarded-repair</span> send <span class="token">--from</span> alice <span class="token">--to</span> bob <span class="token">--subject</span> "Review the parser" <span class="token">--body</span> "Error paths look wrong." <span class="token">--request</span>
+another <span class="token">--unguarded-repair</span> hold acquire <span class="token">--agent</span> alice src/parser.rs <span class="token">--ttl</span> 1800
 another inbox <span class="token">--agent</span> bob</code></pre>
         </li>
       </ol>

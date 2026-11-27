@@ -7,7 +7,7 @@ const T0: i64 = 1_800_000_000_000;
 
 fn store() -> Store {
     let (clock, _handle) = Clock::manual(T0);
-    let store = Store::open_in_memory(clock).unwrap();
+    let store = Store::open_in_memory(clock).unwrap().unguarded_repair();
     store
         .register_agent(RegisterAgent {
             name: "alice".into(),

@@ -20,7 +20,7 @@ fn store_with_mail(subject: &str) -> (tempfile::TempDir, Store, Arc<AtomicI64>) 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("work/app").to_string_lossy().into_owned();
     let (clock, handle) = Clock::manual(1_800_000_000_000);
-    let store = Store::open_in_memory(clock).unwrap();
+    let store = Store::open_in_memory(clock).unwrap().unguarded_repair();
     store.ensure_project("test", &path).unwrap();
     for name in ["mallory", "codex"] {
         store
@@ -95,7 +95,7 @@ fn send_refuses_a_subject_with_control_characters() {
 fn a_wake_types_no_control_characters_from_a_stored_subject() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
-    let store = Store::open(&home).unwrap();
+    let store = Store::open(&home).unwrap().unguarded_repair();
     for name in ["mallory", "codex"] {
         store
             .register_agent(RegisterAgent {

@@ -29,16 +29,20 @@ impl Fx {
     }
 
     fn cmd(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_another"))
-            .args(args)
-            .env("HOME", &self.user)
-            .env("USERPROFILE", &self.user)
-            .env("ANOTHER_HOME", &self.home)
-            .env_remove("ANOTHER_AGENT")
-            .env_remove("ANOTHER_LOG")
-            .stdin(Stdio::null())
-            .output()
-            .expect("run another")
+        {
+            let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+            legacy_fixture_command.arg("--unguarded-repair");
+            legacy_fixture_command
+        }
+        .args(args)
+        .env("HOME", &self.user)
+        .env("USERPROFILE", &self.user)
+        .env("ANOTHER_HOME", &self.home)
+        .env_remove("ANOTHER_AGENT")
+        .env_remove("ANOTHER_LOG")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run another")
     }
 
     fn init(&self) {
@@ -412,7 +416,7 @@ fn a_schema_another_build_changed_fails() {
 fn a_newer_schema_names_the_build_that_migrated_it_and_the_backup() {
     let fx = Fx::new();
     let current = older_home(&fx, None);
-    let out = fx.cmd(&["--dev-migrate", "status"]);
+    let out = fx.cmd(&["--dev-migrate", "init"]);
     assert!(
         out.status.success(),
         "{}",
@@ -456,7 +460,7 @@ fn a_newer_schema_names_the_build_that_migrated_it_and_the_backup() {
 fn the_backup_hint_names_only_a_real_backup() {
     let fx = Fx::new();
     let current = older_home(&fx, None);
-    assert!(fx.cmd(&["--dev-migrate", "status"]).status.success());
+    assert!(fx.cmd(&["--dev-migrate", "init"]).status.success());
     let dir = fx.home.join("backups");
     let real = std::fs::read_dir(&dir)
         .unwrap()
@@ -504,7 +508,7 @@ fn an_empty_database_is_not_called_unmigratable() {
     assert!(detail.contains("empty database"), "{detail}");
     assert!(!detail.contains("will not migrate"), "{detail}");
     assert_eq!(row(&r, "database")["fix"], "another init");
-    assert!(fx.cmd(&["status"]).status.success());
+    assert!(fx.cmd(&["init"]).status.success());
     assert!(user_version(&fx.db()) > 0);
 }
 
@@ -804,16 +808,20 @@ mod orphan_scan {
 
         /// Any command with `PATH` set to `path`.
         fn on_path(&self, path: &str, args: &[&str]) -> Output {
-            Command::new(env!("CARGO_BIN_EXE_another"))
-                .args(args)
-                .env("HOME", &self.user)
-                .env("ANOTHER_HOME", &self.home)
-                .env("PATH", path)
-                .env_remove("ANOTHER_AGENT")
-                .env_remove("ANOTHER_LOG")
-                .stdin(Stdio::null())
-                .output()
-                .expect("run another")
+            {
+                let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+                legacy_fixture_command.arg("--unguarded-repair");
+                legacy_fixture_command
+            }
+            .args(args)
+            .env("HOME", &self.user)
+            .env("ANOTHER_HOME", &self.home)
+            .env("PATH", path)
+            .env_remove("ANOTHER_AGENT")
+            .env_remove("ANOTHER_LOG")
+            .stdin(Stdio::null())
+            .output()
+            .expect("run another")
         }
 
         fn doctor_json_on_path(&self, path: &str) -> (Option<i32>, Value) {

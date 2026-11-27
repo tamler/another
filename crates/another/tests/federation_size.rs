@@ -28,7 +28,7 @@ impl Node {
 
 fn node(name: &str) -> Node {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open(dir.path()).unwrap().unguarded_repair();
     store.set_node_name(name).unwrap();
     Node { dir, store }
 }
@@ -133,6 +133,7 @@ fn serve(node: Node, limits: Option<Limits>, port: u16, recording: Option<Record
         Some(limits) => fed::router_with(node.store.clone(), limits),
         None => {
             let opts = HttpOptions {
+                legacy_repair: true,
                 federation: true,
                 bound_port: addr.port(),
                 ..Default::default()
@@ -688,15 +689,19 @@ fn keys(v: &Value) -> Vec<String> {
 
 /// Run the built binary on `n`'s home, with no terminal.
 fn cli(n: &Node, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_another"))
-        .args(args)
-        .env("ANOTHER_HOME", n.dir.path())
-        .env_remove("ANOTHER_AGENT")
-        .env_remove("ANOTHER_ADMIT_KEY")
-        .env_remove("ANOTHER_LOG")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap()
+    {
+        let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+        legacy_fixture_command.arg("--unguarded-repair");
+        legacy_fixture_command
+    }
+    .args(args)
+    .env("ANOTHER_HOME", n.dir.path())
+    .env_remove("ANOTHER_AGENT")
+    .env_remove("ANOTHER_ADMIT_KEY")
+    .env_remove("ANOTHER_LOG")
+    .stdin(Stdio::null())
+    .output()
+    .unwrap()
 }
 
 fn out(o: &std::process::Output) -> String {
@@ -751,7 +756,7 @@ fn marker_for(event_id: &str, event_node: &str, direction: &str) -> Value {
 /// each as its own line, as SPEC Q26b section 4.10 gives them.
 const WORDY_STEPS: [&str; 6] = [
     "another agent register wordy --program <program> --model <model> --description \"<4096 bytes or fewer>\" (add --project <path> if it has one; a model left out is cleared)",
-    "each hold it has (another holds --agent wordy lists them): another hold acquire --agent wordy -p <project> <the same paths>, with --shared, --repo-wide, --reason and --ttl as the hold has them (the same hold is sent again; without -p from another directory it is a different hold, and without --shared a shared hold becomes exclusive or is refused)",
+    "each hold it has (another holds --agent wordy lists them): another hold release --agent wordy <hold id>, then another hold acquire --agent wordy -p <project> <the same paths>, with --shared, --repo-wide, --reason and --ttl as the hold has them (a fresh checkout is sent; without -p from another directory it is a different hold, and without --shared a shared hold becomes exclusive or is refused)",
     "each resource of this node it holds a lease on: another release <resource id or kind:name> --agent wordy, then at once another borrow <the same> --agent wordy (a borrow without the release only renews, and a renewal brings nothing to a node that never had the lease. Between the two commands the resource has no lease unless another agent holds one: another agent on this node that borrows it in that moment becomes its owner, and if the resource is exclusive this agent's borrow is then refused. If another agent already holds a lease, that agent becomes the owner at the release and this agent comes back as a borrower)",
     "each resource of another node it borrowed: another release <resource id> --agent wordy, then another borrow <resource id> --agent wordy (the id is in brackets in another resources; kind:name names only this node's resources. If the borrow is refused, the release has already happened: it is refused when the hub does not grant borrowing, when the resource has no live owner, or when it cannot be reached from this machine)",
     "mail it sent to other nodes before step 1 is not delivered there and no command delivers it: send it again",
@@ -1282,7 +1287,7 @@ fn a_hub_reset_does_not_report_a_skip_twice() {
         }
     }
     std::fs::copy(&backup, dir.path().join(DB_FILE)).unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open(dir.path()).unwrap().unguarded_repair();
     let hub = serve(Node { dir, store }, None, port, None);
     assert_eq!(markers(&hub.node, &a_id).len(), 0, "restored");
 
@@ -3028,16 +3033,20 @@ fn hub_resource(hub: &Hub) -> (String, std::net::TcpListener) {
 
 /// Run the binary with `--json` in `cwd` on `n`'s home; the command must succeed.
 fn run_json(n: &Node, cwd: &std::path::Path, args: &[&str]) -> Value {
-    let o = Command::new(env!("CARGO_BIN_EXE_another"))
-        .arg("--json")
-        .args(args)
-        .current_dir(cwd)
-        .env("ANOTHER_HOME", n.dir.path())
-        .env_remove("ANOTHER_AGENT")
-        .env_remove("ANOTHER_LOG")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+    let o = {
+        let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+        legacy_fixture_command.arg("--unguarded-repair");
+        legacy_fixture_command
+    }
+    .arg("--json")
+    .args(args)
+    .current_dir(cwd)
+    .env("ANOTHER_HOME", n.dir.path())
+    .env_remove("ANOTHER_AGENT")
+    .env_remove("ANOTHER_LOG")
+    .stdin(Stdio::null())
+    .output()
+    .unwrap();
     assert!(o.status.success(), "{args:?}: {}{}", out(&o), err(&o));
     serde_json::from_str(&out(&o)).unwrap()
 }
@@ -3254,11 +3263,22 @@ fn the_steps_for_a_skipped_first_registration_restore_all_but_the_mail() {
     assert!(hold_id(&hub.node).is_empty());
     assert!(leases(&hub.node).is_empty());
 
-    // Step 2, as written, from another directory: the same hold, shared, with its reason.
+    // Step 2: release and check out again. A replay cannot resend or renew a right.
+    run_json(
+        &s,
+        &elsewhere,
+        &["hold", "release", "--agent", "wordy", &the_hold[0].0],
+    );
     run_json(&s, &elsewhere, &hold);
     run_json(&s, &elsewhere, &["sync"]);
-    assert_eq!(hold_id(&s), the_hold);
-    assert_eq!(hold_id(&hub.node), the_hold);
+    let fresh_hold = hold_id(&s);
+    assert_eq!(fresh_hold.len(), 1);
+    assert_ne!(fresh_hold[0].0, the_hold[0].0);
+    assert_eq!(
+        (fresh_hold[0].1, &fresh_hold[0].2),
+        (the_hold[0].1, &the_hold[0].2)
+    );
+    assert_eq!(hold_id(&hub.node), fresh_hold);
 
     // A borrow without the release only renews: still no lease on the hub.
     for target in ["port:ownsvc", hub_resource_id.as_str()] {

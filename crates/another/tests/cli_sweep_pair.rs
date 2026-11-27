@@ -8,15 +8,19 @@ use std::process::{Command, Stdio};
 use another_core::*;
 
 fn run(home: &Path, cwd: &Path, args: &[&str]) -> (bool, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_another"))
-        .args(args)
-        .current_dir(cwd)
-        .env("ANOTHER_HOME", home)
-        .env_remove("ANOTHER_AGENT")
-        .env_remove("ANOTHER_LOG")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+    let out = {
+        let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
+        legacy_fixture_command.arg("--unguarded-repair");
+        legacy_fixture_command
+    }
+    .args(args)
+    .current_dir(cwd)
+    .env("ANOTHER_HOME", home)
+    .env_remove("ANOTHER_AGENT")
+    .env_remove("ANOTHER_LOG")
+    .stdin(Stdio::null())
+    .output()
+    .unwrap();
     (
         out.status.success(),
         format!(
@@ -43,7 +47,9 @@ fn sweep_reports_and_ends_lapsed_holds_and_overdue_requests() {
     {
         // An hour ago: a one-minute hold and a request due in a minute.
         let (clock, _) = Clock::manual(now_ms() - 3_600_000);
-        let store = Store::open_with_clock(&home, clock).unwrap();
+        let store = Store::open_with_clock(&home, clock)
+            .unwrap()
+            .unguarded_repair();
         for name in ["lead", "worker"] {
             store
                 .register_agent(RegisterAgent {
