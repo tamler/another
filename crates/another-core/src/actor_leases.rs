@@ -232,9 +232,11 @@ pub(crate) fn projection_release(tx: &Tx<'_>, projection: &str, reason: &str) ->
 /// requests, unlapsed resources) and reaches a projection by its key. Ended history is
 /// never joined or rewritten again.
 pub(crate) fn sync_projections(tx: &Tx<'_>) -> Result<()> {
+    // Only a contract actor's rows are ever projected, so other live rows (legacy names,
+    // peers' holds) are skipped before any projection lookup.
     for (table, id) in [("holds", "hold_id"), ("resource_leases", "lease_id")] {
-        tx.execute(&format!("UPDATE {table} SET ttl_seconds = (SELECT l.ttl_seconds FROM right_leases l JOIN lease_projections p ON p.lease_id = l.lease_id WHERE p.projection_id = {table}.{id}), renewed_at = (SELECT l.last_update_at FROM right_leases l JOIN lease_projections p ON p.lease_id = l.lease_id WHERE p.projection_id = {table}.{id}), expires_at = (SELECT l.expires_at FROM right_leases l JOIN lease_projections p ON p.lease_id = l.lease_id WHERE p.projection_id = {table}.{id}) WHERE released_at IS NULL AND EXISTS (SELECT 1 FROM lease_projections p WHERE p.projection_id = {table}.{id})"), [])?;
-        tx.execute(&format!("UPDATE {table} SET released_at = ?1, release_reason = 'lease_ended' WHERE released_at IS NULL AND EXISTS (SELECT 1 FROM lease_projections p JOIN right_leases l ON l.lease_id = p.lease_id WHERE p.projection_id = {table}.{id} AND (l.released_at IS NOT NULL OR l.expires_at <= ?1))"), [tx.now])?;
+        tx.execute(&format!("UPDATE {table} SET ttl_seconds = (SELECT l.ttl_seconds FROM right_leases l JOIN lease_projections p ON p.lease_id = l.lease_id WHERE p.projection_id = {table}.{id}), renewed_at = (SELECT l.last_update_at FROM right_leases l JOIN lease_projections p ON p.lease_id = l.lease_id WHERE p.projection_id = {table}.{id}), expires_at = (SELECT l.expires_at FROM right_leases l JOIN lease_projections p ON p.lease_id = l.lease_id WHERE p.projection_id = {table}.{id}) WHERE released_at IS NULL AND agent_id IN (SELECT actor_id FROM contract_actors) AND EXISTS (SELECT 1 FROM lease_projections p WHERE p.projection_id = {table}.{id})"), [])?;
+        tx.execute(&format!("UPDATE {table} SET released_at = ?1, release_reason = 'lease_ended' WHERE released_at IS NULL AND agent_id IN (SELECT actor_id FROM contract_actors) AND EXISTS (SELECT 1 FROM lease_projections p JOIN right_leases l ON l.lease_id = p.lease_id WHERE p.projection_id = {table}.{id} AND (l.released_at IS NOT NULL OR l.expires_at <= ?1))"), [tx.now])?;
     }
     let mut stmt = tx.prepare("SELECT p.projection_id FROM queue_items q JOIN lease_projections p ON p.projection_id = 'queue:' || q.item_id JOIN right_leases l ON l.lease_id = p.lease_id WHERE q.state = 'claimed' AND (l.released_at IS NOT NULL OR l.expires_at <= ?1)
         UNION ALL
