@@ -346,9 +346,15 @@ fn the_nonces_kept_are_bounded_by_time_and_by_count() {
     }
     assert_eq!(hub.kept(vic.node_id()), 11);
 
-    // At the count bound, a new request is refused and nothing is written.
+    // At the count bound, every kept nonce is still inside the window, so prune
+    // frees none and a new request is refused and nothing is written.
     let now = START + 60 * MINUTE;
     let mut db = hub.db();
+    db.execute(
+        "DELETE FROM fed_request_nonces WHERE node_id = ?1",
+        [vic.node_id()],
+    )
+    .unwrap();
     let tx = db.transaction().unwrap();
     {
         let mut insert = tx
@@ -357,7 +363,7 @@ fn the_nonces_kept_are_bounded_by_time_and_by_count() {
                  VALUES (?1, ?2, ?3, ?3)",
             )
             .unwrap();
-        for i in 11..REPLAY_ROWS_PER_NODE {
+        for i in 0..REPLAY_ROWS_PER_NODE {
             insert
                 .execute(params![vic.node_id(), format!("{i:032x}"), now])
                 .unwrap();
