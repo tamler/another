@@ -1,6 +1,6 @@
 name: release
 
-# Builds another for macOS (arm64, x86_64) and Linux (static musl: x86_64, arm64).
+# Builds another for macOS, static musl Linux, and Windows.
 # - Tag `vX.Y.Z` pushes build and publish a GitHub Release with archives + SHA-256 sums.
 # - Pull requests that touch this workflow, and manual runs, build only (artifacts kept 7 days).
 
@@ -29,12 +29,16 @@ jobs:
             os: macos-latest
             smoke: true
           - target: x86_64-apple-darwin
-            os: macos-latest
-            smoke: false
+            os: macos-15-intel
+            smoke: true
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             smoke: true
             musl: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            smoke: true
+            exe: .exe
           - target: aarch64-unknown-linux-musl
             os: ubuntu-24.04-arm
             smoke: true
@@ -69,11 +73,17 @@ jobs:
         if: matrix.smoke
         shell: bash
         run: |
-          bin=target/${{ matrix.target }}/release/another
+          bin=target/${{ matrix.target }}/release/another${{ matrix.exe }}
           "$bin" --version
           home=$(mktemp -d)
-          ANOTHER_HOME="$home" "$bin" --json init > /dev/null
-          ANOTHER_HOME="$home" "$bin" agent register smoke --program other > /dev/null
+          trap 'rm -rf "$home"' EXIT
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            home_for_binary=$(cygpath -aw "$home")
+          else
+            home_for_binary="$home"
+          fi
+          ANOTHER_HOME="$home_for_binary" "$bin" --json init > /dev/null
+          ANOTHER_HOME="$home_for_binary" "$bin" agent register smoke --program other > /dev/null
 
       - name: Check the Linux binary is static
         if: matrix.musl
@@ -84,6 +94,7 @@ jobs:
           grep -Eq 'statically linked|static-pie linked' <<< "$info"
 
       - name: Package
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
@@ -108,19 +119,56 @@ jobs:
           fi
           ls -l dist
 
+      - name: Package Windows zip
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          $version = 'dev'
+          if ($env:GITHUB_REF.StartsWith('refs/tags/v')) {
+            $version = $env:GITHUB_REF_NAME.Substring(1)
+          }
+          $name = "another-$version-$env:TARGET"
+          $archive = "$name.zip"
+          New-Item -ItemType Directory -Path "dist/$name" | Out-Null
+          Copy-Item "target/$env:TARGET/release/another.exe", LICENSE, NOTICE, README.md "dist/$name/"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$archive"
+          $digest = (Get-FileHash -Algorithm SHA256 "dist/$archive").Hash.ToLowerInvariant()
+          Set-Content -LiteralPath "dist/$archive.sha256" -Value "${digest}  ${archive}`n" -Encoding ascii -NoNewline
+          $zip = [IO.Compression.ZipFile]::OpenRead("dist/$archive")
+          try {
+            $expected = @('LICENSE', 'NOTICE', 'README.md', 'another.exe') | ForEach-Object { "$name/$_" }
+            $actual = $zip.Entries.FullName | Where-Object { $_ -ne "$name/" }
+            if (Compare-Object $expected $actual -CaseSensitive) {
+              throw "Unexpected archive contents: $actual"
+            }
+          } finally {
+            $zip.Dispose()
+          }
+
+      - name: Package the install script
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        shell: bash
+        run: |
+          sh -n scripts/install.sh
+          cp scripts/install.sh dist/install.sh
+
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: another-${{ matrix.target }}
           path: |
             dist/*.tar.gz
+            dist/*.zip
             dist/*.sha256
+            dist/install.sh
           retention-days: 7
           if-no-files-found: error
 
   publish:
     name: publish GitHub Release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -134,8 +182,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          test -s dist/install.sh
           ls -l dist
           gh release create "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --title "Another $GITHUB_REF_NAME" \
+            --notes 'See the [Another changelog](https://toanother.one/changelog/).' \
             --generate-notes

@@ -37,6 +37,10 @@
   </header>
   <main class="wrap" id="main" tabindex="-1">
     <div class="guide-hero"><h1>Another on Linux</h1><p class="definition">A C compiler, a current Rust from rustup, and one Cargo command.</p><nav class="guide-nav" aria-label="Install by system"><a href="/docs/install/macos/">macOS</a> <a href="/docs/install/linux/" aria-current="page">Linux</a> <a href="/docs/install/windows/">Windows</a> <a href="/docs/install/">All install options</a></nav></div>
+    <section class="guide-section" aria-labelledby="archive-title">
+      <h2 id="archive-title">Install a prebuilt binary</h2>
+      <p>Once a release is published, use the <a href="/docs/install/#binaries-title">prebuilt installer</a> or verify and unpack a static musl archive for <code>x86_64</code> or <code>aarch64</code>. No release has been published yet. Use Cargo below until one is available.</p>
+    </section>
     <section class="guide-section" aria-labelledby="prereq-title">
       <h2 id="prereq-title">1. Install a compiler, and Rust from rustup</h2>
       <p>Another needs Rust 1.88 or newer. Your distribution's package may be older: on Ubuntu 24.04, <code>apt</code> offered <code>rustc</code> 1.75 when we checked. Use rustup unless <code>rustc --version</code> already prints 1.88 or newer.</p>
@@ -72,10 +76,6 @@ command -v another</code></pre>
       <p><strong>Orphan scanning needs <code>lsof</code> or <code>ss</code>.</strong> <code>another orphans</code> uses them to find listening processes that nothing registered. Minimal images and containers may have neither. It then prints <code>scan unavailable</code> along with any lapsed registered resources, and a line saying no orphans were found does not mean the machine is clean. Install <code>lsof</code> or <code>iproute2</code> if you want the scan.</p>
       <p><strong>Wake is optional.</strong> <a href="/guides/wake-idle-agents/">Waking an idle agent</a> needs tmux, cmux or Herdr; nothing else in Another uses them.</p>
       <p><strong>Containers keep their own state.</strong> Each container has its own <code>~/.another</code> unless you mount one. To coordinate agents in different containers or machines, see <a href="/guides/agents-on-two-machines/">agents on two machines</a>.</p>
-    </section>
-    <section class="guide-section" aria-labelledby="archive-title">
-      <h2 id="archive-title">When a release exists</h2>
-      <p>No release has been published. The release workflow is set up to build static musl binaries, <code>x86_64-unknown-linux-musl</code> and <code>aarch64-unknown-linux-musl</code>, which need no Rust or compiler. <code>uname -m</code> prints <code>x86_64</code> or <code>aarch64</code>. <a href="/docs/install/#verify">Verify the checksum</a> before you unpack one.</p>
     </section>
     <section class="guide-section" aria-labelledby="tested-title">
       <h2 id="tested-title">What this page rests on</h2>

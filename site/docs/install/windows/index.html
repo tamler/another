@@ -36,17 +36,18 @@
     <nav aria-label="Main"><a href="/docs/getting-started/">Get started</a> <a href="/docs/">Docs</a> <a href="/guides/">Guides</a> <a href="/compare/">Compare</a> <a href="/changelog/">Changelog</a></nav>
   </header>
   <main class="wrap" id="main" tabindex="-1">
-    <div class="guide-hero"><h1>Another on Windows</h1><p class="definition">There is no native Windows build. WSL 2 is the route to try, and we have not run it yet.</p><nav class="guide-nav" aria-label="Install by system"><a href="/docs/install/macos/">macOS</a> <a href="/docs/install/linux/">Linux</a> <a href="/docs/install/windows/" aria-current="page">Windows</a> <a href="/docs/install/">All install options</a></nav></div>
+    <div class="guide-hero"><h1>Another on Windows</h1><p class="definition">The release workflow packages a Windows x86_64 zip. Native Windows features remain experimental.</p><nav class="guide-nav" aria-label="Install by system"><a href="/docs/install/macos/">macOS</a> <a href="/docs/install/linux/">Linux</a> <a href="/docs/install/windows/" aria-current="page">Windows</a> <a href="/docs/install/">All install options</a></nav></div>
     <section class="guide-section" aria-labelledby="native-title">
-      <h2 id="native-title">Why not native Windows</h2>
-      <p>Nothing in the project builds or tests on Windows. The planned release targets are macOS and Linux, and CI does not run on Windows. Parts of the product also assume a Unix system:</p>
+      <h2 id="native-title">Install the Windows zip</h2>
+      <p>No GitHub Release has been published yet. Once one is available, download the <code>x86_64-pc-windows-msvc.zip</code> archive and its <code>.sha256</code> sidecar from <a href="https://github.com/tamler/another/releases">GitHub Releases</a>. <a href="https://github.com/tamler/another/blob/main/docs/VERIFY.md#windows">Verify the checksum in PowerShell</a> before unpacking and putting <code>another.exe</code> on your <code>PATH</code>.</p>
+      <p>Some features still assume a Unix system:</p>
       <dl class="clients">
         <div class="client"><dt>Hooks</dt><dd>The client hook wrapper is a <code>/bin/sh</code> script.</dd></div>
         <div class="client"><dt>Orphan scan</dt><dd>Finding listening processes uses <code>lsof</code> or <code>ss</code>.</dd></div>
         <div class="client"><dt>Reaping</dt><dd>Stopping an orphan calls <code>kill</code>.</dd></div>
         <div class="client"><dt>Wake</dt><dd>The adapters drive tmux, cmux or Herdr.</dd></div>
       </dl>
-      <p>Whether the mail and MCP parts compile on Windows is unknown, because no one has tried. Treat native Windows as unsupported, and if you test it, <a href="https://github.com/tamler/another/issues/new/choose">open an issue</a> with what happened.</p>
+      <p>The release smoke test covers the version, node initialization and agent registration. For a full setup, try WSL 2.</p>
     </section>
     <section class="guide-section" aria-labelledby="wsl-title">
       <h2 id="wsl-title">The WSL 2 route</h2>

@@ -37,6 +37,10 @@
   </header>
   <main class="wrap" id="main" tabindex="-1">
     <div class="guide-hero"><h1>Another on macOS</h1><p class="definition">Command line tools, Rust, one Cargo command, and a PATH your coding client can see.</p><nav class="guide-nav" aria-label="Install by system"><a href="/docs/install/macos/" aria-current="page">macOS</a> <a href="/docs/install/linux/">Linux</a> <a href="/docs/install/windows/">Windows</a> <a href="/docs/install/">All install options</a></nav></div>
+    <section class="guide-section" aria-labelledby="archive-title">
+      <h2 id="archive-title">Install a prebuilt binary</h2>
+      <p>Once a release is published, use the <a href="/docs/install/#binaries-title">prebuilt installer</a> or verify and unpack an archive for Apple Silicon (<code>aarch64-apple-darwin</code>) or Intel (<code>x86_64-apple-darwin</code>). The install page covers quarantine and replacing an existing binary. Use Cargo below until a release is available.</p>
+    </section>
     <section class="guide-section" aria-labelledby="prereq-title">
       <h2 id="prereq-title">1. Get a compiler and Rust</h2>
       <p>Another builds from source today, and there is no published release yet. Cargo needs a C toolchain to link, and Another's SQLite is compiled from bundled C source. Apple's command line tools provide it:</p>
@@ -70,11 +74,6 @@ another --version</code></pre>
   another inbox --agent bob
 )</code></pre>
       <p>Bob's inbox should show one unread message and one open request. Then <a href="/docs/getting-started/">connect hooks and MCP</a> using your real <code>~/.another</code>.</p>
-    </section>
-    <section class="guide-section" aria-labelledby="archive-title">
-      <h2 id="archive-title">When a release exists</h2>
-      <p>No release has been published. The release workflow is set up to build <code>aarch64-apple-darwin</code> for Apple Silicon and <code>x86_64-apple-darwin</code> for Intel; <code>uname -m</code> prints <code>arm64</code> or <code>x86_64</code> to tell you which applies. Planned binaries are unsigned, so after <a href="/docs/install/#verify">verifying the checksum</a> macOS may need the quarantine attribute removed from that binary:</p>
-      <pre class="code-block shell" tabindex="0" aria-label="Remove quarantine on a verified binary"><code>xattr -d com.apple.quarantine ./another</code></pre>
     </section>
     <section class="guide-section" aria-labelledby="tested-title">
       <h2 id="tested-title">What this page rests on</h2>

@@ -12,12 +12,14 @@ Pushing a tag `vX.Y.Z` runs [`.github/workflows/release.yml`](../.github/workflo
 |---|---|
 | `another-VERSION-TARGET.tar.gz` | `tar -czf` of a folder named `another-VERSION-TARGET` holding the `another` binary, `LICENSE`, `NOTICE`, and `README.md` |
 | `another-VERSION-TARGET.tar.gz.sha256` | `shasum -a 256 another-VERSION-TARGET.tar.gz` |
+| `another-VERSION-x86_64-pc-windows-msvc.zip` | PowerShell `Compress-Archive` of the same folder layout, with `another.exe` in place of `another` |
+| `another-VERSION-x86_64-pc-windows-msvc.zip.sha256` | PowerShell `Get-FileHash -Algorithm SHA256`, written in the same format |
 
 `TARGET` is `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl`. The checksum file is one line in the format both `shasum` and `sha256sum` write and read: the hex digest, two spaces, the archive's file name. The workflow does not publish a combined `SHA256SUMS` file; if one appears on a release page later, the same commands below read it, and `--ignore-missing` skips the archives you did not download.
 
 Download the archive and its `.sha256` from the same release page, put them in one folder, and run the check from that folder. The file name in the checksum line must match the archive's name on disk, so do not rename the download.
 
-## The commands
+## macOS and Linux
 
 macOS ships `shasum`:
 
@@ -40,6 +42,22 @@ tar -xzf another-0.1.0-aarch64-apple-darwin.tar.gz
 ```
 
 On macOS use `shasum`, not the `sha256sum` that newer macOS versions also ship. The Darwin `sha256sum -c` exits 0 when the checksum file has no line it can read, so an empty or damaged `.sha256` passes with only a warning. `shasum -a 256 -c` exits 1 in that case. The run below shows both. The install page has a [paste-in snippet](https://toanother.one/docs/install/#verify) that avoids `-c` altogether and compares the digests itself.
+
+## Windows
+
+In PowerShell, set `$archive` to the name of your download and run these lines in the download folder:
+
+```powershell
+$archive = 'another-0.1.0-x86_64-pc-windows-msvc.zip'
+& {
+    $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive -ErrorAction Stop).Hash.ToLowerInvariant()
+    $expected = (Get-Content -Raw -LiteralPath "${archive}.sha256" -ErrorAction Stop).TrimEnd()
+    if ($expected -cne "${digest}  ${archive}") { throw 'SHA-256 verification failed' }
+    Expand-Archive -LiteralPath $archive -DestinationPath .
+}
+```
+
+You can also run `certutil -hashfile <archive> SHA256` and compare the full digest to the one in the sidecar before extracting. Put the directory containing `another.exe` on your `PATH`.
 
 ## A recorded run against a fixture
 
