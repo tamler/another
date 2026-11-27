@@ -146,6 +146,20 @@ pub enum Exchange {
     Unsigned,
 }
 
+// Enforced by `cargo check -p another` (CI: "cargo check (default features)").
+// Unit and integration tests enable `test` or the `test-support` dev-dependency,
+// so they cannot prove a release build lacks the legacy variants.
+#[cfg(not(any(test, feature = "test-support")))]
+const _: () = {
+    #[allow(dead_code)]
+    fn production_builds_expose_only_signed_exchange(exchange: Exchange) {
+        match exchange {
+            Exchange::Signed => {}
+        }
+    }
+    let _ = production_builds_expose_only_signed_exchange;
+};
+
 /// Routes a hub serves when started with `another serve --federation`.
 pub fn router(store: Store) -> axum::Router {
     router_with(store, Limits::CURRENT)
