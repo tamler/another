@@ -8,6 +8,8 @@
 //! directory it was taken in (see `repo.rs`, D92). Projects registered at different
 //! directories of one checkout share it, compared by paths from its top; worktrees, clones
 //! and nested checkouts of one repository are separate and never see each other's holds.
+//! Registered directories that are both outside git and nest on disk are compared as paths
+//! from the outer folder, and still never cross a Git checkout boundary.
 //! What follows from that for a pattern that points into another checkout, and release by
 //! path, is in `checkout.rs`.
 
@@ -988,6 +990,13 @@ fn conflicts_for(
         if same_checkout {
             continue;
         }
+        // Worktrees, clones, submodules and a git checkout inside a registered
+        // folder are other checkouts and are never nested candidates (D92), even
+        // when one directory lies inside the other. Nested comparison is only
+        // for registered directories that are both outside git.
+        if !checkout.is_empty() || !their_checkout.is_empty() {
+            continue;
+        }
         if dir_below(&dir, &project.abs_path, fold).is_some()
             || dir_below(&project.abs_path, &dir, fold).is_some()
         {
@@ -1046,16 +1055,20 @@ fn conflicts_for(
                     &crate::repo::in_repo(&my_prefix, pattern),
                     &crate::repo::in_repo(held_prefix, theirs),
                 )
-            } else if let Some(below) = dir_below(held_dir, &project.abs_path, fold) {
-                overlaps(
-                    &crate::repo::in_repo(&glob_literal(&below), pattern),
-                    theirs,
-                )
-            } else if let Some(below) = dir_below(&project.abs_path, held_dir, fold) {
-                overlaps(
-                    pattern,
-                    &crate::repo::in_repo(&glob_literal(&below), theirs),
-                )
+            } else if checkout.is_empty() && held_checkout.is_empty() {
+                if let Some(below) = dir_below(held_dir, &project.abs_path, fold) {
+                    overlaps(
+                        &crate::repo::in_repo(&glob_literal(&below), pattern),
+                        theirs,
+                    )
+                } else if let Some(below) = dir_below(&project.abs_path, held_dir, fold) {
+                    overlaps(
+                        pattern,
+                        &crate::repo::in_repo(&glob_literal(&below), theirs),
+                    )
+                } else {
+                    false
+                }
             } else {
                 false
             };

@@ -1,7 +1,7 @@
 //! A file inside a project nested in another project (outside git) is one file, so an
-//! exclusive hold taken through either project must stop the other. Inside a git repository
-//! the repo key already relates the two projects; this covers plain directories such as a
-//! shared notes or lanes folder.
+//! exclusive hold taken through either project must stop the other. Inside a git
+//! repository, checkout identity already relates projects of that checkout (D92); this
+//! covers plain directories such as a shared notes or lanes folder.
 
 use another_core::{AcquireHolds, Clock, Program, RegisterAgent, Store};
 
@@ -165,8 +165,8 @@ fn nested_projects_compare_case_insensitively_where_the_volume_folds_case() {
 
 /// Nesting compares directories, and a directory names a place only on its own machine: a
 /// paired node's project at a path below (or above) a local project is not the same files,
-/// so its holds do not stop local work there. (Projects that share a git repository key
-/// are related across nodes, which the repo-key tests cover.)
+/// so its holds do not stop local work there. Local Git conflicts use checkout identity;
+/// holds on other machines that share a project slug are warnings, never conflicts.
 #[test]
 fn a_paired_nodes_project_at_a_nested_path_is_not_related() {
     use another_core::{Perm, DB_FILE};
