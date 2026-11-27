@@ -24,6 +24,18 @@ pub const BACKUP_DIR: &str = "backups";
 
 static ALLOW_DEV_MIGRATE: AtomicBool = AtomicBool::new(false);
 
+/// Create with owner-only permissions before any secret bytes are written.
+fn private_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
 /// Let this process, when it is a development build, migrate a home that a development build
 /// did not create. The CLI calls this for `--dev-migrate`.
 pub fn allow_dev_migrate() {
@@ -176,9 +188,10 @@ impl HomeOrigin {
 
     fn write(&self, home: &Path) -> Result<()> {
         let path = home.join(ORIGIN_FILE);
-        let staged = home.join(format!("{ORIGIN_FILE}.{}.tmp", std::process::id()));
+        let staged = home.join(format!("{ORIGIN_FILE}.{}.tmp", ulid::Ulid::new()));
         let bytes = serde_json::to_vec_pretty(self)?;
-        std::fs::write(&staged, bytes)
+        private_file(&staged)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, &bytes))
             .and_then(|()| std::fs::rename(&staged, &path))
             .map_err(|e| {
                 let _ = std::fs::remove_file(&staged);
@@ -356,6 +369,27 @@ impl Store {
             std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700))?;
         }
         let path = home.join(DB_FILE);
+        // SQLite inherits the database's mode for new WAL and shared-memory files.
+        // Set it before opening SQLite, which can create those files immediately.
+        match private_file(&path) {
+            Ok(_) => (),
+            // Do not open and close an existing database file here: on Unix that
+            // would release this process's SQLite locks on its other connections.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
+            Err(e) => return Err(e.into()),
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for name in [DB_FILE, "another.db-wal", "another.db-shm", ORIGIN_FILE] {
+                let sidecar = home.join(name);
+                match std::fs::set_permissions(sidecar, std::fs::Permissions::from_mode(0o600)) {
+                    Ok(()) => (),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
         let conn = Connection::open(&path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
