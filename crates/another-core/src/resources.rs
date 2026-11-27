@@ -955,7 +955,11 @@ impl Store {
         // SQLite write transaction/connection mutex, then revalidate its endpoint and
         // ownership inside the transaction before committing the lease.
         let candidate = self.read(|conn| {
-            resolve_agent(conn, self.node_id(), agent)?;
+            // An actor handle is authenticated inside the write below; a name lookup
+            // here would refuse it and is not authority anyway.
+            if !matches!(self.caller(), crate::store::Caller::Actor(_)) {
+                resolve_agent(conn, self.node_id(), agent)?;
+            }
             let rid = resolve(conn, self.node_id(), target)?;
             get_resource(conn, &rid, self.now())
         })?;

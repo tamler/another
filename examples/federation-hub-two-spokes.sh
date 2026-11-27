@@ -10,6 +10,10 @@
 # stand in for the three hosts; your own ~/.another is never touched.
 # Run it from anywhere: sh examples/federation-hub-two-spokes.sh
 # ANOTHER_BIN picks the binary (default: `another` on PATH).
+#
+# alice and bob are plain names, not minted actors, so their send and reply use the
+# explicit operator repair mode (--unguarded-repair). Participating agents send through
+# the private another.agent/1 channel instead (docs/AGENT-CONTRACT.md).
 set -eu
 
 another="${ANOTHER_BIN:-another}"
@@ -86,15 +90,15 @@ on runner sync
 on laptop sync
 
 # alice mails bob on another node: name@@node (no project) or name@project@node.
-printf '\n[laptop] $ another --json send --from alice --to bob@@runner ...\n'
-sent=$(quiet laptop --json send --from alice --to bob@@runner \
+printf '\n[laptop] $ another --unguarded-repair --json send --from alice --to bob@@runner ...\n'
+sent=$(quiet laptop --unguarded-repair --json send --from alice --to bob@@runner \
     --subject "GPU box free after 18:00?" --body "I need it for a two-hour eval run.")
 message=$(printf '%s\n' "$sent" | field message_id)
 [ -n "$message" ] || { echo "send failed: $sent" >&2; exit 1; }
 on laptop sync
 on runner sync
 on runner inbox --agent bob
-on runner reply --from bob --body "Yes, it is yours from 18:00 to 20:00." "$message"
+on runner --unguarded-repair reply --from bob --body "Yes, it is yours from 18:00 to 20:00." "$message"
 on runner sync
 on laptop sync
 on laptop inbox --agent alice

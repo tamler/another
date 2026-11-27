@@ -856,6 +856,10 @@ impl Store {
                 // Compatibility projections use the minted id, never a public name
                 // lookup that could adopt an earlier agent's claims.
                 tx.execute("INSERT INTO agents (agent_id, node_id, name, address, program, status, created_at, updated_at, last_seen_at, event_id) VALUES (?1, ?2, ?1, ?3, 'other', 'active', ?4, ?4, ?4, ?5)", params![actor_id, tx.node_id, name, tx.now, event])?;
+                // Public directory entry for peers, in the shape federation already
+                // projects, so mail from this actor is delivered on other nodes. It
+                // carries the public id only; grants and lease authority stay local.
+                tx.emit(&name, "agent.registered", json!({"agent_id": actor_id, "name": actor_id, "project_id": null, "program": "other", "model": null, "description": null, "new": true}))?;
             }
             let actor = actor_view(tx, &actor_id, tx.now)?;
             if actor.parent_actor_id.as_deref() != parent.as_ref().map(|p| p.actor_id.as_str()) {

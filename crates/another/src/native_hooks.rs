@@ -261,6 +261,23 @@ pub fn deny(client: Client, reason: &str) -> String {
     }
 }
 
+/// Write tools whose every target is one of the fields `HookInput::edit_paths` reads:
+/// a single file path (Claude, Grok, Cursor edit tools) or the file headers of an
+/// `apply_patch` patch (Codex).
+fn known_write_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "Edit"
+            | "Write"
+            | "MultiEdit"
+            | "NotebookEdit"
+            | "apply_patch"
+            | "search_replace"
+            | "StrReplace"
+            | "EditNotebook"
+    )
+}
+
 fn shell(tool: &str) -> bool {
     matches!(
         tool,
@@ -334,7 +351,10 @@ pub fn event(
             return Ok(deny(client, "NO_CALL_CONTEXT: guarded shell execution needs an authenticated exact-target call declaration; no native shell carriage is implemented"));
         }
         let paths = input.edit_paths();
-        if !paths.is_empty() {
+        // Only a tool whose whole write set `edit_paths` is known to parse is admitted
+        // from its extracted paths. Any other tool that happens to carry a familiar
+        // path key may write elsewhere too, so it is refused, never guessed.
+        if !paths.is_empty() && known_write_tool(tool) {
             let call_id = input
                 .call_id
                 .as_deref()

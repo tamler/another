@@ -319,12 +319,16 @@ pub(crate) fn resolve_agent(conn: &Connection, node_id: &str, who: &str) -> Resu
 pub(crate) fn resolve_acting_agent(tx: &Tx<'_>, node_id: &str, who: &str) -> Result<AgentRef> {
     match tx.caller {
         Caller::Actor(proof) => {
-            if who != proof.actor_id {
+            // The proof decides who acts. A name may only restate that same actor
+            // (its id, or its own address when core sends on its behalf, such as a
+            // request's completion notice); it never selects another one.
+            let me = crate::actor_leases::acting_agent(tx, tx.now, node_id, proof)?;
+            if who != me.id && who != me.address {
                 return Err(Error::Forbidden(
                     "NO_ACTOR: this call acts only as its authenticated actor".into(),
                 ));
             }
-            crate::actor_leases::acting_agent(tx, tx.now, node_id, proof)
+            Ok(me)
         }
         Caller::Repair => resolve_delivery_agent(tx, node_id, who),
         Caller::Guarded => Err(Error::Forbidden(

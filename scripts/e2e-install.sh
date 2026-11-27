@@ -9,7 +9,8 @@
 # fresh:   a first run on an empty home, messages and holds, client hook packs installed,
 #          reinstalled (no change) and removed, the daemon definition in dry-run.
 # upgrade: a home written by OLD_BIN (an older schema) is opened by NEW_BIN, which must
-#          migrate it and keep its agents, mail and holds; OLD_BIN must then refuse it.
+#          migrate it and keep its agents and mail; a legacy current hold is disposed
+#          at the one-lease cutover, never adopted by name. OLD_BIN must then refuse it.
 # build-directory: a home written by OLD_BIN is refused by BUILT_BIN, a release build run
 #          straight from its Cargo build directory (a development build, docs/DOCTOR.md),
 #          which must name the ways out and write nothing; NEW_BIN, the installed copy of
@@ -73,28 +74,56 @@ configs_digest() {
   done
 }
 
-# Agents, a message and a hold, written by $1.
+# The flag a build needs for name-selected writes. A build with one lease model
+# (SPEC-B7) refuses them with NO_ACTOR unless the operator selects legacy repair; older
+# builds have no such flag and accept names.
+repair() {
+  if "$1" --help 2>/dev/null | grep -qF -- "--unguarded-repair"; then
+    printf '%s\n' "--unguarded-repair"
+  fi
+}
+
+# Agents, a message and a hold, written by $1 with plain names (legacy records).
 seed() {
-  local bin=$1
+  local bin=$1 r
+  r=$(repair "$bin")
   "$bin" init >/dev/null
   "$bin" agent register --program claude --project "$shop" alice >/dev/null
   "$bin" agent register --program codex --project "$shop" bob >/dev/null
-  "$bin" send -f alice@shop -t bob@shop -s "e2e hello" -b "seeded" >/dev/null
-  "$bin" hold acquire -a alice@shop --project "$shop" src/a.rs >/dev/null
+  "$bin" $r send -f alice@shop -t bob@shop -s "e2e hello" -b "seeded" >/dev/null
+  "$bin" $r hold acquire -a alice@shop --project "$shop" src/a.rs >/dev/null
 }
 
 # What seed wrote, read back by $1, and the hold still enforced.
 verify() {
-  local bin=$1 out
+  local bin=$1 out r
+  r=$(repair "$bin")
   out=$("$bin" --json inbox --agent bob@shop)
   expect "bob's inbox ($bin)" '"subject": "e2e hello"' "$out"
   out=$("$bin" --json holds)
   expect "live holds ($bin)" '"pattern": "src/a.rs"' "$out"
   expect "live holds ($bin)" '"agent": "alice@shop"' "$out"
-  if out=$("$bin" hold acquire -a bob@shop --project "$shop" src/a.rs 2>&1); then
+  if out=$("$bin" $r hold acquire -a bob@shop --project "$shop" src/a.rs 2>&1); then
     fail "bob took alice's hold ($bin): $out"
   fi
   expect "conflicting hold ($bin)" "held by alice@shop" "$out"
+}
+
+# A home seeded by a build before one lease model, opened by $1 (a B7 build): mail and
+# agents are kept, the legacy current hold is disposed at cutover and never adopted by
+# name, and a plain name cannot write without explicit repair.
+verify_cutover() {
+  local bin=$1 out
+  out=$("$bin" --json inbox --agent bob@shop)
+  expect "bob's inbox after cutover ($bin)" '"subject": "e2e hello"' "$out"
+  out=$("$bin" --json holds)
+  reject "live holds after cutover ($bin)" '"pattern": "src/a.rs"' "$out"
+  if out=$("$bin" hold acquire -a bob@shop --project "$shop" src/a.rs 2>&1); then
+    fail "a plain name took a hold without repair ($bin): $out"
+  fi
+  expect "guarded name refusal ($bin)" "NO_ACTOR" "$out"
+  out=$("$bin" --unguarded-repair --json hold acquire -a bob@shop --project "$shop" src/a.rs)
+  expect "repair hold after cutover ($bin)" '"pattern": "src/a.rs"' "$out"
 }
 
 fresh() {
@@ -107,6 +136,10 @@ fresh() {
   seed "$new"
   verify "$new"
   "$new" --json board >/dev/null || fail "board on a fresh home"
+  if out=$("$new" send -f alice@shop -t bob@shop -s "no repair" -b "refused" 2>&1); then
+    fail "a plain name sent mail without repair: $out"
+  fi
+  expect "guarded name refusal" "NO_ACTOR" "$out"
 
   step "hook packs: install"
   local out
@@ -163,13 +196,13 @@ upgrade() {
   seed "$old"
   verify "$old"
 
-  step "opened by the new build: migrated, nothing lost"
-  verify "$new"
+  step "opened by the new build: migrated, mail kept, legacy hold disposed at cutover"
+  verify_cutover "$new"
   "$new" --json board >/dev/null || fail "board after the upgrade (schema not current)"
   local id
   id=$("$new" --json inbox --agent bob@shop | sed -n 's/.*"message_id": "\([0-9A-Z]*\)".*/\1/p' | head -1)
   [ -n "$id" ] || fail "no message id after the upgrade"
-  "$new" reply -f bob@shop -b "after upgrade" "$id" >/dev/null
+  "$new" --unguarded-repair reply -f bob@shop -b "after upgrade" "$id" >/dev/null
   out=$("$new" --json inbox --agent alice@shop)
   expect "reply written by the new build" "after upgrade" "$out"
 
@@ -206,7 +239,7 @@ $(ls -a "$(dirname "$built")" 2>&1)"
   verify "$old"
 
   step "the installed copy of the same build migrates it"
-  verify "$new"
+  verify_cutover "$new"
   ls "$work/data/backups"/another-v*.db >/dev/null 2>&1 || fail "the migration left no backup"
   [ -s "$work/data/build.json" ] || fail "the migration left no build.json"
 
