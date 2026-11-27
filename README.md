@@ -52,6 +52,10 @@ whether to accept bare numbers. CLI durations still accept bare seconds; activit
 `--since` durations still require a suffix (`s`, `m`, `h`, `d` or `w`). Federation
 requests use the store's clock, including a manual clock supplied by a caller.
 
+Bearer-token creation and OAuth approval reject project globs that cannot compile
+for matching, even when their syntax is valid. Existing stored globs that cannot
+compile continue to grant no project access.
+
 ## Quickstart
 
 **1. Install** with Rust 1.88 or newer:

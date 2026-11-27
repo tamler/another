@@ -3,7 +3,7 @@
 //! A token acts as exactly one agent and may only touch projects matching its globs. Only a
 //! SHA-256 hash of the secret is stored; the full token is shown once, at creation.
 
-use globset::GlobBuilder;
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use serde_json::json;
@@ -11,7 +11,7 @@ use serde_json::json;
 use crate::crypto::{random_hex, secrets_eq, sha256_hex};
 use crate::error::{Error, Result};
 use crate::identity::{address, normalize_project_path, resolve_agent};
-use crate::store::{new_id, Store};
+use crate::store::{new_id, Store, Tx};
 use crate::time::{fmt_opt, fmt_ts, later_secs};
 
 const TOKEN_PREFIX: &str = "ano_";
@@ -76,6 +76,35 @@ pub struct AuditRecord {
     pub remote: Option<String>,
 }
 
+/// Write a node-local audit row in the caller's transaction.
+pub(crate) fn insert_audit_tx(tx: &Tx<'_>, entry: AuditRecord) -> Result<()> {
+    tx.execute(
+        "INSERT INTO audit_log (node_id, ts, token_id, agent, operation, outcome, detail, remote)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            tx.node_id,
+            tx.now,
+            entry.token_id,
+            entry.agent,
+            entry.operation,
+            entry.outcome,
+            entry.detail,
+            entry.remote
+        ],
+    )?;
+    Ok(())
+}
+
+/// Parse and compile with the same options and limits used for project matching.
+pub(crate) fn compile_project_glob(pattern: &str) -> Result<GlobSet> {
+    let compile = || {
+        let glob = GlobBuilder::new(pattern).literal_separator(true).build()?;
+        // Unlike compile_matcher, building a set reports compilation errors without panic.
+        GlobSetBuilder::new().add(glob).build()
+    };
+    compile().map_err(|e| Error::Invalid(format!("invalid project glob {pattern:?}: {e}")))
+}
+
 /// Whether a token's project globs cover the project `project_id` (by path or slug).
 pub(crate) fn scope_allows_project(
     conn: &Connection,
@@ -113,12 +142,7 @@ fn in_thread(conn: &Connection, agent_id: &str, thread_id: &str) -> Result<bool>
 /// Whether `candidate` matches any of the token's project globs.
 fn glob_allows(globs: &[String], candidates: &[String]) -> bool {
     globs.iter().any(|g| {
-        let Ok(glob) = GlobBuilder::new(g).literal_separator(true).build() else {
-            return false;
-        };
-        // A set of one glob: it returns an error where `compile_matcher` panics on a glob
-        // too large to compile. A glob that cannot be compiled allows nothing.
-        let Ok(m) = globset::GlobSetBuilder::new().add(glob).build() else {
+        let Ok(m) = compile_project_glob(g) else {
             return false;
         };
         candidates.iter().any(|c| m.is_match(c))
@@ -167,10 +191,7 @@ impl Store {
         expires_in_seconds: Option<i64>,
     ) -> Result<NewToken> {
         for g in project_globs {
-            GlobBuilder::new(g)
-                .literal_separator(true)
-                .build()
-                .map_err(|e| Error::Invalid(format!("invalid project glob {g:?}: {e}")))?;
+            compile_project_glob(g)?;
         }
         if expires_in_seconds.is_some_and(|s| s <= 0) {
             return Err(Error::Invalid("expiry must be positive".into()));
@@ -361,23 +382,7 @@ impl Store {
     }
 
     pub fn record_audit(&self, entry: AuditRecord) -> Result<()> {
-        self.write(|tx| {
-            tx.execute(
-                "INSERT INTO audit_log (node_id, ts, token_id, agent, operation, outcome, detail, remote)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    tx.node_id,
-                    tx.now,
-                    entry.token_id,
-                    entry.agent,
-                    entry.operation,
-                    entry.outcome,
-                    entry.detail,
-                    entry.remote
-                ],
-            )?;
-            Ok(())
-        })
+        self.write(|tx| insert_audit_tx(tx, entry))
     }
 
     /// Most recent audit entries, newest last.
@@ -410,6 +415,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn audit_insert_preserves_fields_and_rolls_back_with_its_transaction() {
+        let store = Store::open_in_memory(crate::Clock::manual(1_800_000_000_000).0).unwrap();
+        let entry = AuditRecord {
+            token_id: Some("token-id".into()),
+            agent: Some("agent@project".into()),
+            operation: "test operation".into(),
+            outcome: "denied".into(),
+            detail: Some("redacted detail".into()),
+            remote: Some("127.0.0.1".into()),
+        };
+        let result: Result<()> = store.write(|tx| {
+            insert_audit_tx(tx, entry.clone())?;
+            Err(Error::Invalid("roll back".into()))
+        });
+        assert!(matches!(result, Err(Error::Invalid(_))));
+        assert!(store.audit_log(10).unwrap().is_empty());
+
+        store.record_audit(entry.clone()).unwrap();
+        let rows = store.audit_log(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.ts, fmt_ts(1_800_000_000_000));
+        assert_eq!(row.token_id, entry.token_id);
+        assert_eq!(row.agent, entry.agent);
+        assert_eq!(row.operation, entry.operation);
+        assert_eq!(row.outcome, entry.outcome);
+        assert_eq!(row.detail, entry.detail);
+        assert_eq!(row.remote, entry.remote);
+    }
+
+    #[test]
     fn globs() {
         let g = vec!["/work/*".to_string(), "docs-site".to_string()];
         assert!(glob_allows(&g, &["/work/shop".into()]));
@@ -425,5 +461,21 @@ mod tests {
     fn a_project_glob_too_large_to_compile_allows_nothing() {
         let huge = format!("/work/{}", "*a".repeat(1 << 20));
         assert!(!glob_allows(&[huge], &["/work/a".into()]));
+    }
+
+    #[test]
+    fn token_validation_rejects_a_project_glob_that_cannot_compile() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let huge = format!("/work/{}", "*a".repeat(1 << 20));
+        // Parsing succeeds, but compiling the matcher exceeds globset's limit.
+        assert!(GlobBuilder::new(&huge)
+            .literal_separator(true)
+            .build()
+            .is_ok());
+        assert!(matches!(
+            store.create_token("missing-agent", &[huge], None, None),
+            Err(Error::Invalid(message)) if message.starts_with("invalid project glob")
+        ));
     }
 }
