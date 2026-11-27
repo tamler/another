@@ -31,7 +31,7 @@ No message bodies are included.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--project`, `-p` | all projects | A slug or a path. Sibling checkouts of the same repository (see [HOLDS.md](HOLDS.md)) are included, because their holds conflict |
+| `--project`, `-p` | all projects | A slug or a path. Sibling checkouts of the same repository (see [HOLDS.md](HOLDS.md)) are included: they are other work on the repository, though their holds do not block this checkout (D92) |
 | `--since` | `24h` | Window for recent and stopped edits: a duration (`30m`, `2h`, `2d`) or an RFC 3339 time. Holds and requests are always current |
 | `--limit` | `20` | Items per list, at most 200. Holds are never cut. A cut list says so. A separate cap on how much edit history is scanned is described under Limits |
 

@@ -2,7 +2,8 @@
 //!
 //! With `another serve --auth`, every `/mcp` and `/activity` request needs
 //! `Authorization: Bearer <token>`. A token acts as exactly one agent and may only touch
-//! projects matching its globs. Every remote call is written to the audit log, and reaping
+//! projects matching its globs. Authenticated calls and a bounded sample of rejections
+//! are written to the audit log, and reaping
 //! is never available remotely.
 
 use another_core::{ActivityKind, ActivityQuery, AuditRecord, Error, Since, Store, TokenScope};
@@ -38,15 +39,39 @@ pub struct RemotePeer {
     pub remote: Option<String>,
 }
 
+/// Longest proxy claim kept in an audit row; an address needs far less.
+const MAX_CLAIM_CHARS: usize = 64;
+
+/// Where a remote call came from, for the audit log. A proxy header is the client's (or a
+/// proxy's) claim, so it is labelled with its header and recorded next to the socket address,
+/// never instead of it: `x-forwarded-for: 203.0.113.9 via 127.0.0.1:54321`. Only the first
+/// hop is kept, cut to [`MAX_CLAIM_CHARS`]; an empty claim counts as no header.
 fn remote_addr(headers: &HeaderMap, req: &Request) -> Option<String> {
-    for h in ["cf-connecting-ip", "x-forwarded-for", "x-real-ip"] {
-        if let Some(v) = headers.get(h).and_then(|v| v.to_str().ok()) {
-            return Some(format!("{h}: {}", v.split(',').next().unwrap_or(v).trim()));
-        }
-    }
-    req.extensions()
+    let socket = req
+        .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|c| c.0.to_string())
+        .map(|c| c.0.to_string());
+    for h in ["cf-connecting-ip", "x-forwarded-for", "x-real-ip"] {
+        let Some(v) = headers.get(h).and_then(|v| v.to_str().ok()) else {
+            continue;
+        };
+        let hop: String = v
+            .split(',')
+            .next()
+            .unwrap_or(v)
+            .trim()
+            .chars()
+            .take(MAX_CLAIM_CHARS)
+            .collect();
+        if hop.is_empty() {
+            continue;
+        }
+        return Some(match &socket {
+            Some(s) => format!("{h}: {hop} via {s}"),
+            None => format!("{h}: {hop}"),
+        });
+    }
+    socket
 }
 
 fn bearer(headers: &HeaderMap) -> Option<String> {
@@ -62,6 +87,17 @@ pub async fn audit(store: &Store, record: AuditRecord) {
     let _ = tokio::task::spawn_blocking(move || {
         if let Err(e) = store.record_audit(record) {
             tracing::warn!(error = %e, "failed to write audit log");
+        }
+    })
+    .await;
+}
+
+/// Refusals from callers that have not authenticated share one bounded budget.
+pub async fn unauthenticated_audit(store: &Store, record: AuditRecord) {
+    let store = store.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Err(e) = store.record_unauthenticated_audit(record) {
+            tracing::warn!(error = %e, "failed to write rejection audit log");
         }
     })
     .await;
@@ -87,7 +123,7 @@ pub async fn require_token(
     let operation = format!("{} {}", req.method(), req.uri().path());
     let remote = remote_addr(req.headers(), &req);
     let Some(token) = bearer(req.headers()) else {
-        audit(
+        unauthenticated_audit(
             &store,
             AuditRecord {
                 operation,
@@ -119,7 +155,7 @@ pub async fn require_token(
             next.run(req).await
         }
         _ => {
-            audit(
+            unauthenticated_audit(
                 &store,
                 AuditRecord {
                     operation,

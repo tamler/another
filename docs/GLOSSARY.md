@@ -18,9 +18,29 @@ Short definitions of the words Another uses, with the places that explain each o
 - **Owner**: the agent that claimed a request. Only the owner can release or complete a claimed request; only the creator can cancel it.
 - **Due time**: an optional deadline set in seconds with `--due`. Past it, an open or claimed request becomes `stale` on its own and anyone may claim it, including from its owner. A request without a due time never goes stale by itself; only a human confirming Expire in the local dashboard can mark it stale (D42).
 
+## Work queue
+
+- **Queue item**: a piece of agreed work on one node, shown as `Q12`. It is `proposed`, `ready`, `claimed` or `done`. It is not a request: a request is a direct ask between agents and is never admitted. [QUEUE.md](QUEUE.md).
+- **Propose**: file an item with `another queue propose` or the `queue_propose` tool. Any local agent may. A proposed item cannot be taken.
+- **Admit**, **admitter**: move a proposed item to `ready`, giving it a scope id and a done condition and recording who admitted it and when. The admitter is the owner, or a delegate.
+- **The owner (of the queue)**: the person the node belongs to, acting with `--owner` at a terminal and a typed yes. Not the same word as the owner of a request.
+- **Delegate**: an agent the owner named to admit, reject, edit and release `work` items, acting with its key in `ANOTHER_ADMIT_KEY`. **Self-admitted** marks an item a delegate admitted after proposing it itself.
+- **Scope id**: the id of the scope item the work belongs to, such as `M1`. The admitter checks it against the scope document; Another does not.
+- **Done condition**: what must be true for an item to be finished, set by the time it is admitted.
+- **Fast lane**: items of kind `security` or `data-loss`. Only the owner decides them, and they are first in the owner list.
+- **`next`**: `another queue next` or the `queue_next` tool. It hands one ready item to one agent, and is the only way an item becomes claimed.
+- **Limit**, **seat**: how many claimed, unfinished items one agent name may hold, set by the owner; 1 by default. A limit of 0 is no seat. A name is **seated** when the owner set a limit above 0 for it by name: only then do the hook packs, `queue done` and `queue release` tell its sessions that an item is ready (D96).
+- **Reservation**, **skip**: an item reserved with `--for` is offered to that agent first; the agent that gave an item up is skipped. Both end as [QUEUE.md](QUEUE.md) describes.
+- **Handoff**: the claimer gives its item to a named agent with `another queue release --to`. The item returns to `ready`, reserved for that agent.
+- **Result**: the short summary and one pointer (pull request, commit or file) stored on an item by `another queue done`.
+- **Owner list**: `another needs`: what will not move without the owner, each row with its next step. Decisions waiting, sessions that are blocked, stuck or unreachable, quiet claims and ready items nobody can take. `another queue list --needs-owner` is the queue's part of it. [NEEDS.md](NEEDS.md).
+- **Quiet claim**: a claimed item listed for the owner because its claimer's name has been quiet for an hour, because its own session has, or because it is bound to no session and is a grace period old.
+- **Grace period**: the owner-set length of silence after which a claim may be released automatically (24 hours by default). The setting exists; automatic release is scope item M2.
+- **Queue audit**: `another queue audit`, a read-only check of the queue's events against themselves and the tables for duplicated, lost, unadmitted or over-limit claims.
+
 ## Coordination
 
-- **Path hold**: an expiring claim on project-relative files or globs, with a TTL. "I am changing these files." An exclusive hold conflicts with any overlapping hold of another agent; a shared hold conflicts only with exclusive ones. Conflicts are checked across every checkout of the same repository on this machine (D48). [HOLDS.md](HOLDS.md).
+- **Path hold**: an expiring claim on project-relative files or globs, with a TTL. "I am changing these files." An exclusive hold conflicts with any overlapping hold of another agent; a shared hold conflicts only with exclusive ones. A hold blocks only inside the checkout (working directory) it was taken in; other worktrees and clones of the repository are separate (D92). [HOLDS.md](HOLDS.md).
 - **Edit guard**: the `pre-edit` hook, installed with `another hook install` for Claude Code, Codex CLI and Grok CLI. Before an edit through one of those clients' edit tools it takes a narrow hold on that file for the editing agent, or stops the edit and names the holder when another agent holds it. Cursor has no edit guard (D46), and a write made from a shell command is not checked in any client. The guard stops only a conflict it actually found. With no hook installed, or a Codex hook not yet trusted, nothing runs and the edit goes ahead unrecorded. When the hook runs but cannot check (no database, a lock, an old schema) it lets the edit through and tries to append a line to the hooks log; that logging is best effort (D47). [HOOKS.md](HOOKS.md).
 - **Resource**: a registered model server, dev server, port, GPU, container or long job, addressed by id or `kind:name`. Another lists it so a second agent borrows it instead of starting a duplicate. [RESOURCES.md](RESOURCES.md).
 - **Lease**: a time-limited claim on a resource, held as **owner** (the agent that registered it) or **borrower** (shared resources only). `refcount` is the number of live leases. If the owner releases while others still borrow, the oldest borrower becomes owner (D10). [RESOURCES.md](RESOURCES.md).
@@ -29,12 +49,15 @@ Short definitions of the words Another uses, with the places that explain each o
 
 ## Awareness
 
-- **Hook**: a user-global entry in a coding client's config that runs Another at session start, on each prompt, after each tool call and at session end, and before each file edit in Claude Code, Codex CLI and Grok CLI (Cursor has no edit hook). [HOOKS.md](HOOKS.md).
-- **Digest**: the short inbox and activity summary a hook gives a session. Never message bodies.
+- **Hook**: a user-global entry in a coding client's config that runs Another at session start, on each prompt, after each tool call and at session end, and before each file edit in Claude Code, Codex CLI and Grok CLI (Cursor has no edit hook). Hooks tell a session about new mail at each of the first three, and about the queue at session start and on a prompt, with no transport. [HOOKS.md](HOOKS.md).
+- **Digest**: the short text a hook gives a session at its start: the inbox counts, the queue lines (an item the session holds; for a seated name, that an item is ready), then unread subjects and requests under a sentence that says other agents wrote them. No activity summary. Never message bodies or queue item titles.
 - **Activity feed**: who did what: sessions, mail subjects, requests, holds and resources. `another activity`.
 - **Event log**: the signed, append-only record behind everything. Query tables are projections of it, and it is what federation syncs. [SPEC.md](SPEC.md).
-- **Sweep**: the pass that records expired holds, marks overdue requests stale and expires lapsed leases. `another sweep` runs it once; `another serve` runs it every 30 seconds; `another requests` and `another inbox` run it before they list.
-- **Wake**: an optional nudge typed into an idle agent's terminal through tmux, cmux or Herdr. [WAKE.md](WAKE.md), [DAEMON.md](DAEMON.md).
+- **Sweep**: the pass that records expired holds, marks overdue requests stale and expires lapsed leases. `another sweep` runs it once; `another serve` runs it every 30 seconds; `another requests` and `another inbox` run it before they list. The **queue sweep** is a separate pass that releases queue claims with no sign of life for the grace period; it runs in `another sweep`, in `another serve` and in other agents' hooks, heartbeats and `queue next`, and never before a read ([QUEUE.md](QUEUE.md)).
+- **Transport**: a tool that runs agent sessions, reached through one interface with three operations: `wake`, `status` and `list`. This build has the Herdr transport. [WAKE.md](WAKE.md).
+- **Wake**: one line delivered into an idle agent's session through a transport, with an answer on whether it was delivered and whether the agent started working. The daemon wakes idle Herdr sessions that have unannounced mail; `another wake` does it on demand, also through a command transport (tmux, cmux or any tool with a CLI, configured in `transports.json`). Hooks are the fallback everywhere. [WAKE.md](WAKE.md), [DAEMON.md](DAEMON.md).
+- **Session row**: what Another knows about one agent session inside a transport: where it runs, its state, its last wake, and whether it needs the owner. `another transport status`. [WAKE.md](WAKE.md).
+- **Stuck**: shown for a session whose last wake was delivered but did not start work. It is not typed into again until it is seen working, one of its hooks runs, or the owner clears it. [WAKE.md](WAKE.md).
 
 ## Other machines
 

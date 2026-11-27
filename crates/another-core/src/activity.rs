@@ -27,10 +27,13 @@ pub enum ActivityKind {
     Session,
     System,
     Federation,
+    Queue,
+    /// Events a sync skipped as too large to send, and their acknowledgements.
+    Sync,
 }
 
 impl ActivityKind {
-    pub const ALL: [ActivityKind; 7] = [
+    pub const ALL: [ActivityKind; 9] = [
         ActivityKind::Mail,
         ActivityKind::Request,
         ActivityKind::Hold,
@@ -38,6 +41,8 @@ impl ActivityKind {
         ActivityKind::Session,
         ActivityKind::System,
         ActivityKind::Federation,
+        ActivityKind::Queue,
+        ActivityKind::Sync,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -49,6 +54,8 @@ impl ActivityKind {
             ActivityKind::Session => "session",
             ActivityKind::System => "system",
             ActivityKind::Federation => "federation",
+            ActivityKind::Queue => "queue",
+            ActivityKind::Sync => "sync",
         }
     }
 
@@ -60,7 +67,9 @@ impl ActivityKind {
             "hold" => ActivityKind::Hold,
             "resource" | "orphan" => ActivityKind::Resource,
             "session" | "agent" => ActivityKind::Session,
-            "peer" | "sync" | "pair" | "federation" => ActivityKind::Federation,
+            "peer" | "pair" | "federation" => ActivityKind::Federation,
+            "queue" => ActivityKind::Queue,
+            "sync" => ActivityKind::Sync,
             _ => ActivityKind::System,
         }
     }
@@ -74,7 +83,7 @@ impl std::str::FromStr for ActivityKind {
             .find(|k| k.as_str() == s)
             .ok_or_else(|| {
                 Error::Invalid(format!(
-                    "unknown activity kind {s:?}; expected mail, request, hold, resource, session, system or federation"
+                    "unknown activity kind {s:?}; expected mail, request, hold, resource, session, system, federation, queue or sync"
                 ))
             })
     }
@@ -93,11 +102,14 @@ impl Since {
     /// Parse `15m` / `2h` / `1d` / `90s` (relative to `now`), an RFC 3339 time, or an event id.
     pub fn parse(raw: &str, now: i64) -> Result<Since> {
         let raw = raw.trim();
-        if let Some(ms) = parse_duration_ms(raw) {
+        if let Some(ms) = crate::time::parse_duration(raw, false)
+            .ok()
+            .and_then(|secs| secs.checked_mul(1000))
+        {
             return Ok(Since::Time(now - ms));
         }
-        if let Ok(t) = chrono::DateTime::parse_from_rfc3339(raw) {
-            return Ok(Since::Time(t.timestamp_millis()));
+        if let Some(ms) = crate::time::parse_ts(raw) {
+            return Ok(Since::Time(ms));
         }
         if raw.len() == 26 && ulid::Ulid::from_string(raw).is_ok() {
             return Ok(Since::After(raw.to_ascii_uppercase()));
@@ -106,20 +118,6 @@ impl Since {
             "invalid since {raw:?}: use a duration like 30m or 2h, an RFC 3339 time, or an event id"
         )))
     }
-}
-
-fn parse_duration_ms(raw: &str) -> Option<i64> {
-    let (num, unit) = raw.split_at(raw.find(|c: char| !c.is_ascii_digit())?);
-    let n: i64 = num.parse().ok()?;
-    let secs = match unit {
-        "s" => 1,
-        "m" => 60,
-        "h" => 3600,
-        "d" => 86_400,
-        "w" => 604_800,
-        _ => return None,
-    };
-    n.checked_mul(secs * 1000)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -334,6 +332,20 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             };
             (text, json!({ "request_id": rid }))
         }
+        "request.reminded" => {
+            let rid = s("request_id");
+            let title = request_title(conn, &rid)?;
+            let to = agent_address(conn, &s("to"))?;
+            let text = if s("kind") == "due_soon" {
+                format!("reminded {to} that a request is due soon: {title}")
+            } else {
+                format!("told {to} that a request is overdue: {title}")
+            };
+            (
+                text,
+                json!({ "request_id": rid, "message_id": s("message_id") }),
+            )
+        }
         "hold.acquired" | "hold.updated" => {
             let mode = if p.get("exclusive").and_then(Value::as_bool) == Some(true) {
                 "exclusive"
@@ -421,6 +433,21 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
                 json!({ "message_ids": p.get("message_ids") }),
             )
         }
+        "transport.wake" => {
+            let text = match s("outcome").as_str() {
+                "started" => format!("woke {actor}"),
+                "not_started" => format!("woke {actor} but it did not start working"),
+                "unconfirmed" => format!("sent a wake to {actor}; not confirmed"),
+                "refused_blocked" => format!("did not wake {actor}: waiting on a person"),
+                "gone" => format!("did not wake {actor}: no such session"),
+                _ => format!("could not wake {actor}"),
+            };
+            (text, json!({ "message_ids": p.get("message_ids") }))
+        }
+        "transport.gone" => (
+            format!("{actor}'s session in {} is gone", s("transport")),
+            json!({ "session_id": s("session_id") }),
+        ),
         "hold.expired" => {
             let who = agent_address(conn, &s("agent_id"))?;
             (
@@ -524,14 +551,146 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             format!("node renamed to {}", s("display_name")),
             json!({ "node_id": s("node_id") }),
         ),
-        "peer.paired" => (
-            format!("paired with node {} ({})", s("display_name"), s("role")),
+        "peer.paired" => {
+            let again = p.get("again").and_then(Value::as_bool) == Some(true);
+            let verb = if again { "paired again" } else { "paired" };
+            (
+                format!("{verb} with node {} ({})", s("display_name"), s("role")),
+                json!({ "node_id": s("node_id") }),
+            )
+        }
+        "peer.readmitted" => (
+            format!("re-admitted node {}", s("display_name")),
+            json!({ "node_id": s("node_id") }),
+        ),
+        "peer.name_released" => (
+            format!(
+                "released the name {} of node {}",
+                s("previous_name"),
+                s("node_id")
+            ),
             json!({ "node_id": s("node_id") }),
         ),
         "peer.revoked" => (
             format!("unpaired node {}", s("node_id")),
             json!({ "node_id": s("node_id") }),
         ),
+        // Queue events. A line names the actor, the verb, the item's number, its scope id
+        // and a reason code. The title, body, done condition, notes, result text, reason
+        // text and error text are never shown, and `refs` is the item's id and number.
+        "queue.proposed"
+        | "queue.admitted"
+        | "queue.rejected"
+        | "queue.updated"
+        | "queue.claimed"
+        | "queue.noted"
+        | "queue.released"
+        | "queue.handoff"
+        | "queue.completed"
+        | "queue.notify_failed" => {
+            let (item, refs) = queue_item_ref(conn, &p)?;
+            let text = match row.kind.as_str() {
+                "queue.proposed" => match s("kind").as_str() {
+                    "security" => format!("{actor} proposed {item} [security]"),
+                    "data_loss" => format!("{actor} proposed {item} [data loss]"),
+                    _ => format!("{actor} proposed {item}"),
+                },
+                "queue.admitted" if p.get("self_admitted") == Some(&Value::Bool(true)) => {
+                    format!("{actor} admitted {item}, its own proposal")
+                }
+                "queue.admitted" => format!("{actor} admitted {item}"),
+                "queue.rejected" => format!("{actor} rejected {item}"),
+                "queue.updated" => format!("{actor} edited {item}"),
+                "queue.claimed" => format!("{actor} claimed {item}"),
+                "queue.noted" => format!("{actor} added a note to {item}"),
+                "queue.released" => {
+                    // The reason code `owner` covers any admitter; the line says which
+                    // authority acted, so a delegate's release does not read as the owner's.
+                    let reason = match s("reason").as_str() {
+                        "agent" => "agent",
+                        "owner" if s("authority") == "delegate" => "delegate",
+                        "owner" => "owner",
+                        "session_end" => "session_end",
+                        "grace" => "grace",
+                        "transport_gone" => "transport_gone",
+                        _ => "other",
+                    };
+                    format!("{actor} released {item}: {reason}")
+                }
+                "queue.handoff" => format!(
+                    "{actor} handed {item} to {}",
+                    agent_address(conn, &s("to"))?
+                ),
+                "queue.completed" => format!("{actor} completed {item}"),
+                _ => format!("a notice about {item} could not be sent"),
+            };
+            (text, refs)
+        }
+        "queue.limit_set" => {
+            let to = p.get("to").and_then(Value::as_i64).unwrap_or_default();
+            let text = if p.get("default") == Some(&Value::Bool(true)) {
+                format!("{actor} set the default queue limit to {to}")
+            } else {
+                format!(
+                    "{actor} set the queue limit of {} to {to}",
+                    agent_address(conn, &s("agent_id"))?
+                )
+            };
+            (text, json!({}))
+        }
+        "queue.delegate_added" | "queue.delegate_removed" => {
+            let verb = if row.kind == "queue.delegate_added" {
+                "named"
+            } else {
+                "removed"
+            };
+            (
+                format!(
+                    "{actor} {verb} a queue delegate: {}",
+                    agent_address(conn, &s("agent_id"))?
+                ),
+                json!({}),
+            )
+        }
+        "queue.setting_changed" => {
+            let text = match (s("key").as_str(), p.get("to").and_then(Value::as_i64)) {
+                ("grace_seconds", Some(to)) => {
+                    format!("{actor} set the queue grace period to {to} seconds")
+                }
+                _ => format!("{actor} changed a queue setting"),
+            };
+            (text, json!({}))
+        }
+        // A peer wrote these values: each is shown as one bounded line (D97).
+        "sync.skipped" => {
+            let shown = |k: &str, max: usize| crate::mail::display_line(&s(k), max);
+            let mut text = format!(
+                "skipped event {} ({}, {} bytes, written by {}): too large to send",
+                shown("event_id", 40),
+                shown("event_kind", 80),
+                p.get("bytes").and_then(Value::as_u64).unwrap_or_default(),
+                shown("event_actor", 80),
+            );
+            if p.get("about").and_then(Value::as_str).is_some() {
+                text.push_str(&format!("; {}", shown("about", 120)));
+            }
+            (
+                text,
+                json!({ "event_id": shown("event_id", 128), "event_node": shown("event_node", 128) }),
+            )
+        }
+        "sync.skip_acked" => {
+            let shown = |max: usize| crate::mail::display_line(&s("event_id"), max);
+            (
+                format!(
+                    "acknowledged the skip of event {}; it stays in the log and is not sent",
+                    shown(40)
+                ),
+                json!({ "event_id": shown(128) }),
+            )
+        }
+        // A queue kind this build does not know must never fall through to the payload.
+        other if other.starts_with("queue.") => (format!("{actor}: {other}"), json!({})),
         other => (format!("{actor}: {other}"), p.clone()),
     };
     // Merged feed: events from other nodes carry their node's name.
@@ -546,6 +705,9 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
         Some(node) => format!("[{node}] {summary}"),
         None => summary,
     };
+    // A summary quotes event payloads as recorded, a peer's included, and is printed by
+    // `another activity`, the dashboard and the MCP `whats_new` tool: keep it one line.
+    let summary = crate::mail::display_line(&summary, usize::MAX);
     Ok(ActivityItem {
         category: ActivityKind::of_event(&row.kind),
         event_id: row.event_id,
@@ -555,6 +717,34 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
         kind: row.kind,
         summary,
         refs,
+    })
+}
+
+/// How a queue event names its item, `Q12 (M1)`, and its `refs`: the id and the number, both
+/// taken from the item's row, never copied from the payload. An item this node has no row
+/// for is named by its number alone, or `an item`, with empty `refs`.
+fn queue_item_ref(conn: &Connection, payload: &Value) -> Result<(String, Value)> {
+    let item_id = payload
+        .get("item_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let row: Option<(i64, Option<String>)> = conn
+        .query_row(
+            "SELECT seq, scope FROM queue_items WHERE item_id = ?1",
+            [item_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(match row {
+        Some((seq, Some(scope))) => (
+            format!("Q{seq} ({scope})"),
+            json!({ "item_id": item_id, "seq": seq }),
+        ),
+        Some((seq, None)) => (format!("Q{seq}"), json!({ "item_id": item_id, "seq": seq })),
+        None => match payload.get("seq").and_then(Value::as_i64) {
+            Some(seq) => (format!("Q{seq}"), json!({})),
+            None => ("an item".to_string(), json!({})),
+        },
     })
 }
 

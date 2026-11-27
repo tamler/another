@@ -112,7 +112,14 @@ fn unknown_ids_and_names_say_where_to_find_the_real_ones() {
             "another threads",
         ),
         (
-            &["hold", "release", "--agent", "worker", "01NOSUCHHOLD"],
+            // Shaped like a hold id (26 characters), so it is read as one and not as a path.
+            &[
+                "hold",
+                "release",
+                "--agent",
+                "worker",
+                "01N0SVCHH01D0000000000000X",
+            ],
             "no live hold",
             "another holds",
         ),

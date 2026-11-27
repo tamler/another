@@ -14,8 +14,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use another_core::{
-    ActivityQuery, BoardQuery, Importance, InboxQuery, NewRequest, Program, RegisterAgent,
-    RequestAction, RequestFilter, RequestUpdate, SendMessage, Store, DB_FILE,
+    ActivityQuery, AdmitItem, BoardQuery, DoneItem, Importance, InboxQuery, NewRequest,
+    PointerKind, Program, ProposeItem, QueueCaller, QueueKind, RegisterAgent, RequestAction,
+    RequestFilter, RequestUpdate, SendMessage, Store, DB_FILE,
 };
 
 const PROJECTS: usize = 5;
@@ -354,5 +355,183 @@ fn hot_paths_stay_fast_at_ten_thousand_events() {
             took <= ceiling,
             "{name}: median {took:?} over the {ceiling:?} ceiling"
         );
+    }
+}
+
+/// The core reads `another needs` makes, on the home above with a queue of 1,000 items
+/// (200 proposed, 100 ready, 50 claimed, the rest done) and one session row per agent.
+/// The command itself (the process, the open, the printing) is measured by hand on a
+/// release build; the number is in docs/NEEDS.md.
+#[test]
+fn needs_cost() {
+    const DONE: usize = 650;
+    const READY: usize = 100;
+    const PROPOSED: usize = 200;
+    let started = Instant::now();
+    let h = seed();
+    let owner = QueueCaller::Owner;
+    let propose = |n: usize, kind: QueueKind| {
+        h.store
+            .queue_propose(
+                &owner,
+                ProposeItem {
+                    title: format!("seeded item {n}"),
+                    scope: Some("M7".into()),
+                    done_when: Some("the tests pass".into()),
+                    kind,
+                    ..ProposeItem::default()
+                },
+            )
+            .unwrap()
+    };
+    let ready = |n: usize| {
+        let item = propose(n, QueueKind::Work);
+        h.store
+            .queue_admit(&owner, &item.label, AdmitItem::default())
+            .unwrap();
+    };
+    for n in 0..DONE {
+        ready(n);
+        let worker = &h.agents[n % AGENTS];
+        let item = h.store.queue_next(worker).unwrap().claimed.unwrap();
+        h.store
+            .queue_done(
+                worker,
+                &item.label,
+                DoneItem {
+                    summary: "done".into(),
+                    pointer_kind: PointerKind::Commit,
+                    pointer: "abc1234".into(),
+                },
+            )
+            .unwrap();
+    }
+    // One claim per agent, and one session row per agent that the transport has lost.
+    for (n, agent) in h.agents.iter().enumerate() {
+        ready(DONE + n);
+        h.store.queue_next(agent).unwrap().claimed.unwrap();
+        h.store
+            .stamp_transport_session(
+                agent,
+                &format!("session-{n}"),
+                "herdr",
+                &format!("w1:p{n}"),
+                "claude",
+                "/work/app",
+            )
+            .unwrap();
+    }
+    h.store
+        .observe_transport_sessions("herdr", Ok(&[]), None)
+        .unwrap();
+    // Gone for an hour, so every row needs attention and the command asks, for each
+    // agent, whether mail is waiting.
+    rusqlite::Connection::open(h.home.join(DB_FILE))
+        .unwrap()
+        .execute(
+            "UPDATE transport_sessions SET state_since = state_since - 3600000,
+               attention = 'gone', attention_since = state_since - 3600000",
+            [],
+        )
+        .unwrap();
+    for n in 0..READY {
+        ready(DONE + AGENTS + n);
+    }
+    for n in 0..PROPOSED {
+        let kind = if n % 10 == 0 {
+            QueueKind::Security
+        } else {
+            QueueKind::Work
+        };
+        propose(DONE + AGENTS + READY + n, kind);
+    }
+    let seeded = started.elapsed();
+    let items = h.count("SELECT count(*) FROM queue_items");
+    let events = h.events();
+    assert_eq!(items as usize, DONE + AGENTS + READY + PROPOSED);
+    assert_eq!(
+        h.count("SELECT count(*) FROM queue_items WHERE state = 'claimed'") as usize,
+        AGENTS
+    );
+    assert_eq!(
+        h.count("SELECT count(*) FROM transport_sessions") as usize,
+        AGENTS
+    );
+    assert!(events >= TARGET_EVENTS, "only {events} events seeded");
+
+    let cases: Vec<(&str, Duration, Duration)> = vec![
+        (
+            "queue_needs_owner",
+            median(|| {
+                let list = h.store.queue_needs_owner().unwrap();
+                assert_eq!(list.decide_now.len() + list.awaiting.len(), PROPOSED);
+            }),
+            Duration::from_secs(1),
+        ),
+        (
+            "queue_claims",
+            median(|| {
+                assert_eq!(h.store.queue_claims().unwrap().len(), AGENTS);
+            }),
+            Duration::from_millis(250),
+        ),
+        (
+            "transport_sessions",
+            median(|| {
+                assert_eq!(h.store.transport_sessions().unwrap().len(), AGENTS);
+            }),
+            Duration::from_millis(250),
+        ),
+        (
+            "wake_targets",
+            median(|| {
+                h.store.wake_targets().unwrap();
+            }),
+            Duration::from_millis(250),
+        ),
+        (
+            // Everything the command reads, in one go.
+            "needs (all reads)",
+            median(|| {
+                h.store.queue_needs_owner().unwrap();
+                h.store.queue_claims().unwrap();
+                h.store.transport_sessions().unwrap();
+                h.store.wake_targets().unwrap();
+                h.store.queue_limits().unwrap();
+                h.store.agents().unwrap();
+                h.store.node().unwrap();
+                for agent in &h.agents {
+                    h.store.unannounced(agent, "", 1).unwrap();
+                }
+            }),
+            Duration::from_secs(1),
+        ),
+    ];
+    println!("seeded {items} queue items, {events} events, {AGENTS} agents in {seeded:.1?}");
+    println!("{:<24} {:>12} {:>12}", "call", "median", "ceiling");
+    for (name, took, ceiling) in &cases {
+        println!("{name:<24} {took:>12.2?} {ceiling:>12.0?}");
+    }
+    for (name, took, ceiling) in &cases {
+        assert!(
+            took <= ceiling,
+            "{name}: median {took:?} over the {ceiling:?} ceiling"
+        );
+    }
+    // For the hand measurement: with ANOTHER_KEEP_NEEDS_HOME set to a directory, the
+    // seeded home is copied there once its last connection has closed.
+    if let Some(keep) = std::env::var_os("ANOTHER_KEEP_NEEDS_HOME") {
+        let Home {
+            _dir, home, store, ..
+        } = h;
+        drop(store);
+        let keep = PathBuf::from(keep);
+        std::fs::create_dir_all(&keep).unwrap();
+        for entry in std::fs::read_dir(&home).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_file() {
+                std::fs::copy(entry.path(), keep.join(entry.file_name())).unwrap();
+            }
+        }
     }
 }

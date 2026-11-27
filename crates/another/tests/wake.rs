@@ -1,8 +1,11 @@
-//! `another wake` adapters, exercised with fake tmux / cmux / herdr binaries on PATH.
+//! `another wake` through Herdr and through the tmux and cmux command transports of the
+//! documented example, exercised with fake tmux / cmux / herdr binaries on PATH.
 #![cfg(unix)]
 
 #[path = "common/hosted_ci.rs"]
 mod hosted_ci;
+#[path = "common/transports.rs"]
+mod transports;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -28,16 +31,25 @@ impl Env {
             std::fs::write(
                 &script,
                 format!(
-                    "#!/bin/sh\nprintf '%s' \"{tool}\" >> '{log}'\nfor a in \"$@\"; do printf ' [%s]' \"$a\" >> '{log}'; done\necho >> '{log}'\n",
-                    log = log.display()
+                    "#!/bin/sh\nprintf '%s' \"{tool}\" >> '{log}'\nfor a in \"$@\"; do printf ' [%s]' \"$a\" >> '{log}'; done\necho >> '{log}'\n{answer}",
+                    log = log.display(),
+                    // Herdr answers a prompt on stdout; tmux and cmux print nothing.
+                    answer = if tool == "herdr" {
+                        "printf '{\"id\":\"cli:agent:prompt\",\"result\":{\"agent\":{\"agent_status\":\"working\"},\"type\":\"agent_prompted\"}}\\n'\n"
+                    } else {
+                        ""
+                    }
                 ),
             )
             .unwrap();
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+        let home = dir.path().join("home");
+        // tmux, cmux and cmux-notify, as docs/WAKE.md gives them.
+        transports::write_example(&home);
         Env {
-            home: dir.path().join("home"),
+            home,
             _dir: dir,
             bin,
             log,
@@ -159,7 +171,8 @@ fn adapters_and_targets() {
         "hello",
     ]);
 
-    // Herdr defaults to the agent's name; cmux sends to a surface or notifies.
+    // Herdr defaults to the agent's name; cmux sends to a surface; a notification is a
+    // transport of its own.
     env.json(&["wake", "--agent", "bob", "--via", "herdr"]);
     env.json(&[
         "wake",
@@ -177,7 +190,7 @@ fn adapters_and_targets() {
         "--agent",
         "bob",
         "--via",
-        "cmux",
+        "cmux-notify",
         "--target",
         "notify",
         "--message",
@@ -194,7 +207,30 @@ fn adapters_and_targets() {
         "cmux [notify] [--title] [Another] [--body] [ping]"
     );
 
-    // A session-start hook inside tmux records the pane automatically...
+    // The old cmux target `notify` is refused with what to use, and nothing runs.
+    let old = env
+        .cmd(&[
+            "wake",
+            "--agent",
+            "bob",
+            "--via",
+            "cmux",
+            "--target",
+            "notify",
+            "--message",
+            "ping",
+        ])
+        .output()
+        .unwrap();
+    assert!(!old.status.success());
+    assert!(
+        String::from_utf8_lossy(&old.stderr).contains("cmux-notify"),
+        "{old:?}"
+    );
+    assert_eq!(env.calls().len(), 3);
+
+    // A session-start hook inside tmux gives the session a row, and stores no wake
+    // target...
     let mut hook = env
         .cmd(&["hook", "run", "session-start", "--client", "codex"])
         .env("TMUX_PANE", "%9")
@@ -205,10 +241,14 @@ fn adapters_and_targets() {
         .unwrap();
     drop(hook.stdin.take());
     assert!(hook.wait().unwrap().success());
-    let targets = env.json(&["wake", "list"]);
-    assert_eq!(targets[0]["target"], "%9");
-    assert_eq!(targets[0]["auto"], true);
-    // ...but never replaces a target set by hand.
+    assert_eq!(env.json(&["wake", "list"]).as_array().unwrap().len(), 0);
+    let status = env.json(&["transport", "status"]);
+    let row = &status["sessions"][0];
+    assert_eq!(row["transport"], "tmux", "{status}");
+    assert_eq!(row["target"], "%9");
+    assert_eq!(row["hook_made"], true);
+    assert_eq!(row["transport_configured"], true);
+    // ...and a target set by hand is the owner's alone: no hook changes it.
     env.json(&[
         "wake", "set", "--agent", "bob", "--via", "tmux", "--target", "work:1.0",
     ]);
@@ -223,11 +263,25 @@ fn adapters_and_targets() {
     assert!(hook.wait().unwrap().success());
     assert_eq!(env.json(&["wake", "list"])[0]["target"], "work:1.0");
 
-    // --all wakes agents with targets and something waiting (alice has neither).
+    // --all lists agents with a session or a target (alice has neither), and leaves a
+    // tmux session and a target set by hand to a wake by name.
+    let before = env.calls().len();
     let all = env.json(&["wake", "--all"]);
     assert_eq!(all.as_array().unwrap().len(), 1);
     assert_eq!(all[0]["agent"], "bob");
-    assert_eq!(all[0]["sent"], true);
+    assert_eq!(all[0]["sent"], false);
+    // The session-start digest above already announced bob's mail.
+    assert_eq!(all[0]["skipped"], "no unannounced mail");
+    let forced = env.json(&["wake", "--all", "--force"]);
+    assert_eq!(forced[0]["sent"], false);
+    assert!(
+        forced[0]["skipped"]
+            .as_str()
+            .unwrap()
+            .contains("is a tmux session, which is not woken automatically"),
+        "{forced}"
+    );
+    assert_eq!(env.calls().len(), before, "nothing was typed");
 
     // Missing target is reported, not guessed (except Herdr).
     let none = env.json(&["wake", "--agent", "alice", "--force"]);

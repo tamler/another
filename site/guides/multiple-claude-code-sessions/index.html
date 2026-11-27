@@ -69,7 +69,7 @@ another hold check --agent ui@shop --project . 'src/parser/lex.rs'</code></pre>
     </section>
     <section class="guide-section" aria-labelledby="worktrees">
       <h2 id="worktrees">Or use a worktree per session</h2>
-      <p>Sessions in separate <a href="/guides/git-worktrees/">git worktrees</a> get separate names without <code>ANOTHER_AGENT</code>, such as <code>claude@shop</code> and <code>claude@shop-ui</code>, because each worktree is its own project. They also get separate files, and holds still conflict across worktrees of one repository, so the two find out before both edit the same path.</p>
+      <p>Sessions in separate <a href="/guides/git-worktrees/">git worktrees</a> get separate names without <code>ANOTHER_AGENT</code>, such as <code>claude@shop</code> and <code>claude@shop-ui</code>, because each worktree is its own project. They also get separate files, and holds do not block across worktrees: each worktree is its own checkout. Use this when you want isolation. <code>another holds</code> still lists holds from other worktrees and marks them as <q>other checkout</q>.</p>
     </section>
     <section class="guide-section" aria-labelledby="ambiguous">
       <h2 id="ambiguous">When a bare name stops resolving</h2>

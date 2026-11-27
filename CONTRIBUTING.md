@@ -35,7 +35,7 @@ The workspace has two crates:
 | `crates/another-core` | SQLite store, event log and signatures, agents, mail, requests, holds, activity, resources, tokens, federation logic. No async, no networking beyond reachability checks. |
 | `crates/another` | The `another` binary and library: CLI, MCP server (`rmcp`), HTTP serving and auth, the loopback dashboard, hook packs, orphan scanner and reaping, federation transport, wake adapters. |
 
-Schema changes are new entries at the end of `MIGRATIONS` in `crates/another-core/src/store.rs`; never edit an existing migration. Every mutation appends an event first, then updates projections in the same transaction.
+Schema changes are new entries at the end of `MIGRATIONS` in `crates/another-core/src/store.rs`; never edit an existing migration. Each new migration also appends its digest to `CATALOGS` in the same file (the test `every_schema_version_has_its_frozen_catalog` prints it). The digest covers columns, indexes and foreign keys; it does not cover CHECK constraints, partial-index predicates, collations, generated columns, triggers or views. No schema has one today, so a migration that adds one must widen `SHAPE` first. Every mutation appends an event first, then updates projections in the same transaction.
 
 ## Before you open a PR
 

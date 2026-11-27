@@ -4,8 +4,9 @@ use std::fmt::Write;
 
 use another_core::{
     ActivityFeed, Agent, AuditEntry, Event, HeartbeatReport, Hold, HoldConflict, HoldReport, Inbox,
-    LeaseOutcome, Message, NodeInfo, Peer, Project, Request, Resource, Thread, ThreadSummary,
-    Token, WakeTarget,
+    LeaseOutcome, ListedHold, Message, NodeInfo, Peer, Project, QueueAudit, QueueDelegate,
+    QueueGrace, QueueItem, QueueLimits, QueueNeedsOwner, QueueNext, QuietClaim, Request, Resource,
+    Thread, ThreadSummary, Token, WakeTarget,
 };
 use serde::Serialize;
 
@@ -162,30 +163,59 @@ pub fn requests(rs: &[Request]) -> String {
         .collect()
 }
 
+fn hold_row(h: &Hold) -> String {
+    format!(
+        "{:<9} {:<16} {}:{}  until {}{}  [{}]",
+        if h.exclusive { "exclusive" } else { "shared" },
+        h.agent,
+        h.project,
+        h.pattern,
+        h.expires_at,
+        h.reason
+            .as_deref()
+            .map(|r| format!("  ({r})"))
+            .unwrap_or_default(),
+        h.hold_id
+    )
+}
+
 pub fn holds(hs: &[Hold]) -> String {
-    hs.iter()
+    hs.iter().map(|h| hold_row(h) + "\n").collect()
+}
+
+/// `another holds`: the rows of [`holds`], with the holds of other checkouts marked and one
+/// line saying what the mark means when any row carries it.
+pub fn listed_holds(hs: &[ListedHold]) -> String {
+    let mut out: String = hs
+        .iter()
         .map(|h| {
-            format!(
-                "{:<9} {:<16} {}:{}  until {}{}  [{}]\n",
-                if h.exclusive { "exclusive" } else { "shared" },
-                h.agent,
-                h.project,
-                h.pattern,
-                h.expires_at,
-                h.reason
-                    .as_deref()
-                    .map(|r| format!("  ({r})"))
-                    .unwrap_or_default(),
-                h.hold_id
-            )
+            let mark = if h.other_checkout {
+                "  other checkout"
+            } else {
+                ""
+            };
+            format!("{}{mark}\n", hold_row(&h.hold))
         })
-        .collect()
+        .collect();
+    if hs.iter().any(|h| h.other_checkout) {
+        out.push_str(
+            "other checkout: taken in a different working directory from this one; it does \
+             not block edits here\n",
+        );
+    }
+    out
 }
 
 pub fn conflicts(cs: &[HoldConflict]) -> String {
     cs.iter()
         .map(|c| {
-            // The project matters: the holder may be in a sibling checkout of the repository.
+            // A hold whose pattern could not be read: the note says whose it is, on which
+            // node, and how to clear it.
+            if let Some(note) = &c.unreadable {
+                return format!("conflict: {}: {note}\n", c.path);
+            }
+            // The project matters: the holder may be in another project of the checkout,
+            // one registered at a subdirectory of it.
             format!(
                 "conflict: {} is held by {} ({}:{}, {} until {})\n",
                 c.path,
@@ -210,10 +240,54 @@ pub fn hold_report(r: &HoldReport) -> String {
         format!("nothing acquired\n{}", conflicts(&r.conflicts))
     };
     for w in &r.warnings {
+        if let Some(note) = &w.unreadable {
+            let _ = writeln!(
+                out,
+                "warning: {}: {note} (holds are node-local; this one does not block you)",
+                w.path
+            );
+            continue;
+        }
         let _ = writeln!(
             out,
             "warning: {} overlaps {} held on another node by {} (holds are node-local; coordinate)",
             w.path, w.held.pattern, w.held.agent
+        );
+    }
+    if r.warnings_more > 0 {
+        let _ = writeln!(
+            out,
+            "warning: {} more hold(s) on other nodes overlap and are not listed",
+            r.warnings_more
+        );
+    }
+    if !r.not_compared.is_empty() {
+        // One line however many holds and nodes there are: a peer chooses both.
+        let total: u64 = r.not_compared.iter().map(|n| u64::from(n.holds)).sum();
+        let mut from: Vec<String> = r
+            .not_compared
+            .iter()
+            .take(5)
+            .map(|n| {
+                format!(
+                    "{} from {}",
+                    n.holds,
+                    another_core::display_line(&n.node, 64)
+                )
+            })
+            .collect();
+        if r.not_compared.len() > 5 {
+            from.push(format!(
+                "the rest from {} more nodes",
+                r.not_compared.len() - 5
+            ));
+        }
+        let _ = writeln!(
+            out,
+            "warning: {total} hold(s) on other nodes were not compared with yours ({}): \
+             comparing with other nodes' holds stops at a fixed amount of work, so these may \
+             overlap (holds are node-local; they do not block you)",
+            from.join(", ")
         );
     }
     out
@@ -435,7 +509,9 @@ pub fn audit(es: &[AuditEntry]) -> String {
                 e.outcome,
                 e.agent.as_deref().unwrap_or("-"),
                 e.operation,
-                e.detail.as_deref().unwrap_or(""),
+                // A detail can quote stored text, such as an OAuth client's name: one row
+                // is one line. Nothing is cut: a detail can end with a redirect host.
+                another_core::display_line(e.detail.as_deref().unwrap_or(""), usize::MAX),
                 e.remote
                     .as_deref()
                     .map(|r| format!("  [{r}]"))
@@ -445,7 +521,10 @@ pub fn audit(es: &[AuditEntry]) -> String {
         .collect()
 }
 
-pub fn peers(ps: &[Peer]) -> String {
+/// `own_id` is this node's id: a pairing row for the node itself, which an older build
+/// could write, is shown marked, because nothing acts on it. `unchecked_hub` is the id of
+/// this node's hub when it was joined before invites were signed: its row is marked too.
+pub fn peers(ps: &[Peer], own_id: &str, unchecked_hub: Option<&str>) -> String {
     if ps.is_empty() {
         return "not paired with any node".to_string();
     }
@@ -453,7 +532,7 @@ pub fn peers(ps: &[Peer]) -> String {
         .map(|p| {
             let perms: Vec<&str> = p.perms.iter().map(|x| x.as_str()).collect();
             format!(
-                "{:<6} {:<16} {}  key {}  perms [{}]  last sync {}{}\n",
+                "{:<6} {:<16} {}  key {}  perms [{}]  last sync {}{}{}{}\n",
                 p.role,
                 p.display_name,
                 p.url.as_deref().unwrap_or("-"),
@@ -462,6 +541,16 @@ pub fn peers(ps: &[Peer]) -> String {
                 p.last_sync_at.as_deref().unwrap_or("never"),
                 if p.revoked_at.is_some() {
                     "  (revoked)"
+                } else {
+                    ""
+                },
+                if unchecked_hub == Some(p.node_id.as_str()) {
+                    "  (joined before invites were signed; address not checked)"
+                } else {
+                    ""
+                },
+                if p.node_id == own_id {
+                    "  (this node itself; ignored)"
                 } else {
                     ""
                 }
@@ -478,66 +567,138 @@ pub fn sync_report(r: &crate::fed::SyncReport) -> String {
     for x in r.push_rejected.iter().chain(&r.pull_rejected) {
         let _ = write!(out, "\nrejected {}: {}", x.event_id, x.reason);
     }
+    for x in &r.not_applied {
+        let _ = write!(out, "\nnot applied {}: {}", x.event_id, x.reason);
+    }
+    // Every unacknowledged skip, after every sync, until `another sync ack`.
+    if !r.skipped.is_empty() {
+        let lines = another_core::sync_skip_lines(&r.skipped, r.skipped_total);
+        let _ = write!(out, "\n{lines}");
+    }
     out
 }
 
-pub fn wake_targets(ts: &[WakeTarget]) -> String {
+/// One stored wake target as `another wake list` shows it.
+#[derive(Debug, Clone, Serialize)]
+pub struct WakeTargetRow {
+    #[serde(flatten)]
+    pub target: WakeTarget,
+    /// Whether a transport of that name exists now: `herdr`, or one in `transports.json`.
+    pub configured: bool,
+    /// What is wrong with the target, if anything, and what to set.
+    pub note: Option<String>,
+}
+
+impl WakeTargetRow {
+    pub fn new(target: WakeTarget, config: &crate::transport::Config) -> WakeTargetRow {
+        let via = target.via.as_str();
+        let configured = config.provides(via);
+        let note = if !configured {
+            Some(config.why_missing(via))
+        } else if crate::wake::is_old_cmux_notify(via, &target.target) {
+            Some(
+                "the target `notify` no longer means a notification: set it again with a \
+                 transport of its own (docs/WAKE.md has `cmux-notify`)"
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        WakeTargetRow {
+            target,
+            configured,
+            note,
+        }
+    }
+}
+
+pub fn wake_targets(ts: &[WakeTargetRow]) -> String {
     if ts.is_empty() {
-        return "no wake targets (hooks record Herdr, tmux and cmux panes automatically)"
+        return "no wake targets set by hand (sessions that hooks recorded are listed by `another transport status`)"
             .to_string();
     }
     ts.iter()
-        .map(|t| {
-            format!(
+        .map(|row| {
+            let t = &row.target;
+            let mut line = format!(
                 "{:<24} {:<6} {}{}\n",
                 t.agent,
                 t.via.as_str(),
                 t.target,
                 if t.auto { "  (auto)" } else { "" }
-            )
+            );
+            if let Some(note) = &row.note {
+                let _ = writeln!(line, "  not usable: {note}");
+            }
+            line
         })
         .collect()
 }
 
 pub fn wake_plans(ps: &[crate::wake::WakePlan]) -> String {
     ps.iter()
-        .map(|p| match (&p.skipped, p.sent) {
-            _ if p.error.is_some() => format!(
-                "failed {}: {}\n",
-                p.agent,
-                p.error.as_deref().unwrap_or_default()
-            ),
-            (_, true) => format!(
-                "woke {} via {} ({})\n",
-                p.agent,
-                p.via.map_or("-", |v| v.as_str()),
+        .map(|p| {
+            let at = format!(
+                "via {} ({})",
+                p.via.as_ref().map_or("-", |v| v.as_str()),
                 p.target.as_deref().unwrap_or("-")
-            ),
-            (Some(why), _) if why == "dry run" => p
-                .commands
-                .iter()
-                .map(|c| format!("would run: {}\n", c.join(" ")))
-                .collect(),
-            (Some(why), _) => format!("skipped {}: {why}\n", p.agent),
-            (None, false) => format!("skipped {}\n", p.agent),
+            );
+            let hint = p
+                .hint
+                .as_deref()
+                .map(|h| format!("  {h}\n"))
+                .unwrap_or_default();
+            let line = match (&p.skipped, p.outcome) {
+                _ if p.error.is_some() => format!(
+                    "failed {}: {}\n",
+                    p.agent,
+                    p.error.as_deref().unwrap_or_default()
+                ),
+                (_, Some(outcome)) => {
+                    // What happened, in the words of the outcome table, then the
+                    // transport's own answer.
+                    let verb = match outcome {
+                        another_core::WakeOutcome::Started => "woke",
+                        _ if p.failure => "failed",
+                        _ if p.sent => "sent a wake to",
+                        _ => "did not wake",
+                    };
+                    format!(
+                        "{verb} {} {at}: {} ({})\n",
+                        p.agent,
+                        outcome.meaning(),
+                        p.detail.as_deref().unwrap_or_default()
+                    )
+                }
+                (Some(why), _) if why == "dry run" => p
+                    .commands
+                    .iter()
+                    .map(|c| format!("would run: {}\n", c.join(" ")))
+                    .collect(),
+                (Some(why), _) => format!("skipped {}: {why}\n", p.agent),
+                (None, None) => format!("skipped {}\n", p.agent),
+            };
+            line + &hint
         })
         .collect()
 }
 
 pub fn prune_rows(rows: &[crate::wake::PruneRow], dry_run: bool) -> String {
     if rows.is_empty() {
-        return "no wake targets".to_string();
+        return "no wake targets or transport sessions".to_string();
     }
     let verb = if dry_run { "would drop" } else { "dropped" };
     rows.iter()
         .map(|r| {
             let what = if r.pruned { verb } else { "kept" };
+            let session = match r.session_id.as_deref() {
+                Some("") => "  session without an id".to_string(),
+                Some(id) => format!("  session {id}"),
+                None => String::new(),
+            };
             format!(
-                "{what:<10} {:<24} {:<6} {}  ({})\n",
-                r.agent,
-                r.via.as_str(),
-                r.target,
-                r.reason
+                "{what:<10} {:<24} {:<6} {}{session}  ({})\n",
+                r.agent, r.via, r.target, r.reason
             )
         })
         .collect()
@@ -546,7 +707,7 @@ pub fn prune_rows(rows: &[crate::wake::PruneRow], dry_run: bool) -> String {
 pub fn daemon_report(r: &crate::daemon::DaemonReport) -> String {
     let mut out = String::new();
     let prefix = if r.dry_run { "would " } else { "" };
-    let _ = writeln!(out, "{prefix}{} {}", r.change, r.plist);
+    let _ = writeln!(out, "{prefix}{} {}", r.change, r.file);
     for c in &r.commands {
         let _ = writeln!(out, "{prefix}run: {}", c.join(" "));
     }
@@ -795,14 +956,269 @@ pub fn board(b: &another_core::Board) -> String {
 pub fn daemon_status(s: &crate::daemon::DaemonStatus) -> String {
     let yes = |b: bool| if b { "yes" } else { "no" };
     format!(
-        "label     {}\nplist     {} (installed: {})\nloaded    {}\npid       {}\nbind      {}\nhealthy   {}\nlog       {}",
+        "manager   {}\nlabel     {}\nfile      {} (installed: {})\nloaded    {}\npid       {}\nbind      {}\nhealthy   {}\nlog       {}",
+        match s.manager {
+            crate::daemon::Manager::Launchd => "launchd",
+            crate::daemon::Manager::Systemd => "systemd (user)",
+            crate::daemon::Manager::TaskScheduler => "Task Scheduler",
+        },
         s.label,
-        s.plist,
+        s.file,
         yes(s.installed),
         yes(s.loaded),
         s.pid.map_or("-".to_string(), |p| p.to_string()),
         s.bind.as_deref().unwrap_or("-"),
         yes(s.healthy),
         s.log
+    )
+}
+
+/// One line per queue item: number, state, priority, kind, scope, title, then who holds it
+/// or who it waits for, and its result when it is done.
+pub fn queue_items(items: &[QueueItem]) -> String {
+    if items.is_empty() {
+        return "no items".to_string();
+    }
+    items.iter().map(queue_line).collect()
+}
+
+fn queue_line(i: &QueueItem) -> String {
+    let mut out = format!(
+        "{:<5} {:<8} {:<6} {:<9} {:<6} {}",
+        i.label,
+        i.state.as_str(),
+        i.priority.as_str(),
+        i.kind.flag(),
+        i.scope.as_deref().unwrap_or("-"),
+        i.title
+    );
+    if let Some(c) = &i.claim {
+        let _ = write!(out, "  (claimed by {})", c.agent);
+    }
+    if let Some(a) = &i.for_agent {
+        let _ = write!(out, "  (for {a})");
+    }
+    if i.admitted.as_ref().is_some_and(|a| a.self_admitted) {
+        out.push_str("  (self-admitted)");
+    }
+    if let Some(r) = &i.result {
+        let _ = write!(out, "  -> {}", r.outcome);
+        if let Some(summary) = &r.summary {
+            let _ = write!(out, ": {}", summary.replace('\n', " "));
+        }
+        if let (Some(kind), Some(pointer)) = (&r.pointer_kind, &r.pointer) {
+            let _ = write!(out, " ({kind} {pointer})");
+        }
+    }
+    out.push('\n');
+    out
+}
+
+fn indented(out: &mut String, text: &str) {
+    for line in text.lines() {
+        let _ = writeln!(out, "  {line}");
+    }
+}
+
+/// Every field of one item, its approval line and its history.
+pub fn queue_item(i: &QueueItem) -> String {
+    let mut out = format!("{}  {}\n", i.label, i.title);
+    let _ = writeln!(out, "state          {}", i.state.as_str());
+    let _ = writeln!(out, "kind           {}", i.kind.flag());
+    let _ = writeln!(out, "priority       {}", i.priority.as_str());
+    let _ = writeln!(out, "scope          {}", i.scope.as_deref().unwrap_or("-"));
+    let _ = writeln!(out, "proposed by    {} at {}", i.proposed_by, i.proposed_at);
+    if let Some(a) = &i.for_agent {
+        let _ = writeln!(out, "reserved for   {a}");
+    }
+    if let Some(a) = &i.skip_agent {
+        let _ = writeln!(out, "not offered to {a}");
+    }
+    if let Some(c) = &i.claim {
+        let bound = if c.session_bound {
+            "bound to its session"
+        } else {
+            "not bound to a session"
+        };
+        let _ = writeln!(out, "claimed by     {} at {} ({bound})", c.agent, c.at);
+    }
+    let _ = writeln!(out, "id             {}", i.item_id);
+    if let Some(line) = i.approval_line() {
+        let _ = writeln!(out, "{line}");
+    }
+    out.push_str("done when\n");
+    indented(&mut out, i.done_condition.as_deref().unwrap_or("(not set)"));
+    if !i.body.trim().is_empty() {
+        out.push_str("body\n");
+        indented(&mut out, &i.body);
+    }
+    if let Some(r) = &i.result {
+        let _ = writeln!(out, "result         {} by {} at {}", r.outcome, r.by, r.at);
+        if let Some(summary) = &r.summary {
+            indented(&mut out, summary);
+        }
+        if let (Some(kind), Some(pointer)) = (&r.pointer_kind, &r.pointer) {
+            let _ = writeln!(out, "  {kind}: {pointer}");
+        }
+    }
+    if let Some(history) = &i.history {
+        out.push_str("history\n");
+        for h in history {
+            let _ = writeln!(
+                out,
+                "  {}  {:<16} {}",
+                h.at,
+                h.kind.trim_start_matches("queue."),
+                h.actor
+            );
+            if let Some(note) = &h.note {
+                for line in note.lines() {
+                    let _ = writeln!(out, "      {line}");
+                }
+            }
+        }
+    }
+    out
+}
+
+/// What `queue next` says: the item and how to finish or give it back, that nothing is
+/// ready, or why the agent was refused.
+pub fn queue_next(n: &QueueNext) -> String {
+    if let Some(r) = &n.refused {
+        return r.message.clone();
+    }
+    match &n.claimed {
+        Some(i) => format!(
+            "{}\nYou hold {label}. When its done condition is met:\n  another queue done {label} --summary TEXT (--pr N_OR_URL | --commit SHA | --file PATH)\nTo give it back:\n  another queue release {label} [--note TEXT] [--to AGENT]",
+            queue_item(i).trim_end(),
+            label = i.label
+        ),
+        None => "Nothing is ready. Wait; do not start work that is not in the queue.".to_string(),
+    }
+}
+
+/// The owner list: what waits for the owner, section by section.
+/// Why a quiet claim is listed, in the words `another needs` and
+/// `another queue list --needs-owner` both print.
+pub fn quiet_claim_words(q: &QuietClaim) -> String {
+    let session = match &q.session_last_seen_at {
+        Some(seen) if !q.unbound => format!("its session last seen {seen}"),
+        _ => "not bound to a session".to_string(),
+    };
+    match q.reason.as_str() {
+        "session_quiet" => format!(
+            "name active, its session quiet for {} min, {session}, grace ends {}",
+            q.session_quiet_for_seconds.unwrap_or(0) / 60,
+            q.grace_ends_at
+        ),
+        "old_unbound" => format!(
+            "name active, claimed {} ago, {session}",
+            crate::transport::span(q.claimed_for_seconds.saturating_mul(1000))
+        ),
+        _ => format!(
+            "quiet for {} min, {session}, grace ends {}",
+            q.quiet_for_seconds / 60,
+            q.grace_ends_at
+        ),
+    }
+}
+
+pub fn queue_needs_owner(n: &QueueNeedsOwner) -> String {
+    let mut out = String::new();
+    let mut section = |title: &str, lines: Vec<String>| {
+        let _ = writeln!(out, "{title} ({})", lines.len());
+        for line in lines {
+            let _ = writeln!(out, "  {}", line.trim_end());
+        }
+    };
+    section(
+        "Decide now: security and data-loss proposals",
+        n.decide_now.iter().map(queue_line).collect(),
+    );
+    section(
+        "Awaiting a decision",
+        n.awaiting.iter().map(queue_line).collect(),
+    );
+    section(
+        "Quiet claims",
+        n.quiet_claims
+            .iter()
+            .map(|q| {
+                format!(
+                    "{}  {}",
+                    queue_line(&q.item).trim_end(),
+                    quiet_claim_words(q)
+                )
+            })
+            .collect(),
+    );
+    section(
+        "Ready with nobody to take them",
+        n.nobody_can_take.iter().map(queue_line).collect(),
+    );
+    section(
+        "Failed notices, last 24 hours",
+        n.failed_notices
+            .iter()
+            .map(|f| format!("{}  to {} at {}", f.item, f.to, f.at))
+            .collect(),
+    );
+    section(
+        "Self-admitted, last 7 days",
+        n.self_admitted.recent.iter().map(queue_line).collect(),
+    );
+    let _ = writeln!(
+        out,
+        "{} self-admitted item(s) in all: another queue list --self-admitted",
+        n.self_admitted.total
+    );
+    out
+}
+
+pub fn queue_audit(a: &QueueAudit) -> String {
+    let releases = if a.releases.is_empty() {
+        "0".to_string()
+    } else {
+        a.releases
+            .iter()
+            .map(|(reason, n)| format!("{n} {reason}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut out = format!(
+        "{} item(s), {} claim(s) by {} agent(s), releases: {releases}, {} completion(s)\n",
+        a.items, a.claims, a.claimers, a.completions
+    );
+    if a.ok {
+        out.push_str("no findings\n");
+    }
+    for f in &a.findings {
+        let _ = writeln!(out, "{:<9} {:<6} {}  {}", f.kind, f.item, f.at, f.detail);
+    }
+    out
+}
+
+pub fn queue_limits(l: &QueueLimits) -> String {
+    let mut out = format!("default  {}\n", l.default_limit);
+    for a in &l.agents {
+        let _ = writeln!(out, "{:<24} {}", a.agent, a.limit);
+    }
+    out
+}
+
+pub fn queue_delegates(ds: &[QueueDelegate]) -> String {
+    if ds.is_empty() {
+        return "no delegates".to_string();
+    }
+    ds.iter()
+        .map(|d| format!("{:<24} since {}\n", d.agent, d.added_at))
+        .collect()
+}
+
+pub fn queue_grace(g: &QueueGrace) -> String {
+    format!(
+        "grace period: {} seconds ({} hours)",
+        g.grace_seconds,
+        g.grace_seconds / 3600
     )
 }

@@ -359,39 +359,43 @@ async fn work_board_is_one_project_inside_the_globs() {
     srv.ct.cancel();
 }
 
-/// Review round 1, P1: the holder of a stopped edit in a sibling checkout outside the
-/// token's globs is not named, though the stopped edit itself is in view.
+/// Review round 1, P1: the holder of a stopped edit in a project outside the token's globs
+/// is not named, though the stopped edit itself is in view. Since D92 a hold blocks only
+/// inside its checkout, so the holder's project is the top of the checkout that
+/// `work/shop` is a subdirectory project of.
 #[tokio::test]
-async fn work_board_hides_a_sibling_holder_outside_the_globs() {
+async fn work_board_hides_a_holder_outside_the_globs() {
     let srv = start().await;
-    let sibling = srv._dir.path().join("secret/shop-wt");
-    for p in [Path::new(&srv.work), sibling.as_path()] {
-        std::fs::create_dir_all(p.join(".git")).unwrap();
-        std::fs::write(
-            p.join(".git/config"),
-            "[remote \"origin\"]\nurl = https://example.com/team/shop.git\n",
-        )
-        .unwrap();
-    }
-    // `start` registered shop before it was a git checkout; ensure it again so its
-    // repository link is recorded and the sibling's hold conflicts with it.
+    let top = srv._dir.path();
+    std::fs::create_dir_all(top.join(".git")).unwrap();
+    std::fs::write(
+        top.join(".git/config"),
+        "[remote \"origin\"]\nurl = https://example.com/team/shop.git\n",
+    )
+    .unwrap();
+    // `start` registered shop before it was inside a git checkout; ensure it again so its
+    // link is recorded and the hold taken through the top-level project conflicts with it.
     srv.store.ensure_project("t", &srv.work).unwrap();
-    srv.store
+    let holder = srv
+        .store
         .register_agent(RegisterAgent {
             name: "private-holder".into(),
             program: Program::Claude,
-            project: Some(sibling.to_string_lossy().into_owned()),
+            project: Some(top.to_string_lossy().into_owned()),
             model: None,
             description: None,
         })
         .unwrap();
-    let file = |dir: &Path| dir.join("src/internal.rs").to_string_lossy().into_owned();
+    let file = Path::new(&srv.work)
+        .join("src/internal.rs")
+        .to_string_lossy()
+        .into_owned();
     let held = srv
         .store
         .guard_edit(
-            "private-holder@shop-wt",
-            sibling.to_str().unwrap(),
-            &[file(&sibling)],
+            &holder.address,
+            top.to_str().unwrap(),
+            std::slice::from_ref(&file),
             another_core::EDIT_HOOK_HOLD_REASON,
         )
         .unwrap();
@@ -401,14 +405,14 @@ async fn work_board_hides_a_sibling_holder_outside_the_globs() {
         .guard_edit(
             "alice@shop",
             &srv.work,
-            &[file(Path::new(&srv.work))],
+            std::slice::from_ref(&file),
             another_core::EDIT_HOOK_HOLD_REASON,
         )
         .unwrap();
     assert_eq!(
         stopped.conflicts.len(),
         1,
-        "the sibling hold must stop alice"
+        "the hold in the top-level project must stop alice"
     );
 
     let token = srv
@@ -426,7 +430,19 @@ async fn work_board_hides_a_sibling_holder_outside_the_globs() {
     assert!(blocked["pattern"].is_null());
     let text = board.to_string();
     assert!(!text.contains("private-holder"), "{text}");
-    assert!(!text.contains("shop-wt"), "{text}");
+    assert!(!text.contains("work/shop/src/internal.rs"), "{text}");
+    // Nor is the holder's project named, as a project, in an address or in a hold key: it
+    // lies outside the token's globs. The slug is looked for as a whole value, since the
+    // board's own project path runs through that directory.
+    let slug = srv.store.project(top.to_str().unwrap()).unwrap().slug;
+    assert_eq!(holder.address, format!("private-holder@{slug}"));
+    for named in [
+        format!("\"{slug}\""),
+        format!("@{slug}"),
+        format!("\"{slug}:"),
+    ] {
+        assert!(!text.contains(&named), "{named} in {text}");
+    }
     client.cancel().await.unwrap();
     srv.ct.cancel();
 }

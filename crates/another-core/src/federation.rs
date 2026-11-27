@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 use crate::crypto;
 use crate::error::{Error, Result};
 use crate::store::{new_id, Store, Tx};
+use crate::sync_skip::{self, SkippedEvent};
 use crate::time::{fmt_opt, fmt_ts, later_secs};
 
 /// What a paired node may do through the hub.
@@ -75,6 +76,104 @@ pub struct WireEvent {
     pub sig: String,
 }
 
+/// Largest single event this build writes, in bytes of its wire JSON (a [`WireEvent`],
+/// escaping included, with the sequence number counted as one digit). A local write over it
+/// is refused (D99). It is a rule for local writes only: an event already in a log, or one
+/// a peer sends, is not judged by it. It travels if it fits the transport, and is skipped
+/// and reported if it does not fit even alone (`sync_skip`).
+pub const MAX_EVENT_WIRE_BYTES: usize = 2 * 1024 * 1024;
+/// A push batch is closed before its request body would pass this; it always holds one event.
+pub const PUSH_BATCH_BUDGET_BYTES: usize = 4 * 1024 * 1024;
+/// Largest `/fed/push` request body a hub reads. A spoke's own event that alone makes a
+/// push over it is skipped and reported.
+pub const PUSH_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+/// A pull page is closed before its response body, the node directory included, would pass
+/// this; it always holds one event.
+pub const PULL_PAGE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+/// Largest `/fed/pull` response body a spoke reads. An event in a hub's log that alone
+/// makes an answer over it is skipped and reported.
+pub const PULL_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
+/// Bytes of a push request body around its events: `{"events":[]}`.
+pub const PUSH_ENVELOPE_BYTES: usize = 13;
+
+// One event at the cap fits a batch and a page, and each budget fits under its limit. An
+// event that arrived by push is at most the push limit, so a pull answer that carries it
+// alone has at least as much room again for the node directory: whatever a hub accepted,
+// it can relay. The build fails when a change breaks one of these.
+const _: () = {
+    // The most a real sequence number adds to the one digit MAX_EVENT_WIRE_BYTES counts.
+    let seq_extra_bytes = 19;
+    let one_event = MAX_EVENT_WIRE_BYTES + seq_extra_bytes + PUSH_ENVELOPE_BYTES;
+    assert!(one_event <= PUSH_BATCH_BUDGET_BYTES);
+    assert!(one_event <= PULL_PAGE_BUDGET_BYTES);
+    assert!(PUSH_BATCH_BUDGET_BYTES <= PUSH_BODY_LIMIT_BYTES);
+    assert!(PULL_PAGE_BUDGET_BYTES <= PULL_BODY_LIMIT_BYTES);
+    assert!(2 * PUSH_BODY_LIMIT_BYTES <= PULL_BODY_LIMIT_BYTES);
+};
+
+/// Counts the bytes written to it.
+struct ByteCount(usize);
+
+impl std::io::Write for ByteCount {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn json_bytes(value: &impl Serialize) -> usize {
+    let mut count = ByteCount(0);
+    // Writing to the counter cannot fail, and these types always serialise.
+    let _ = serde_json::to_writer(&mut count, value);
+    count.0
+}
+
+impl WireEvent {
+    /// The bytes of this event's JSON as sync sends it.
+    pub fn wire_bytes(&self) -> usize {
+        json_bytes(self)
+    }
+
+    /// [`WireEvent::wire_bytes`] with the sequence number counted as one digit: the size
+    /// [`MAX_EVENT_WIRE_BYTES`] is compared with.
+    pub fn capped_bytes(&self) -> usize {
+        self.wire_bytes() + 1 - self.seq.to_string().len()
+    }
+}
+
+/// The fields of an event about to be written, in [`WireEvent`]'s order, for measuring it
+/// before it has a sequence number.
+#[derive(Serialize)]
+pub(crate) struct NewEvent<'a> {
+    pub seq: i64,
+    pub event_id: &'a str,
+    pub node_id: &'a str,
+    pub ts: i64,
+    pub actor: &'a str,
+    pub kind: &'a str,
+    pub payload: &'a str,
+    pub prev_id: Option<&'a str>,
+    pub sig: &'a str,
+}
+
+/// Refuse a local event over [`MAX_EVENT_WIRE_BYTES`] before it is written. Each field that
+/// can grow has its own smaller rule; this is the backstop for what they do not cover, such
+/// as a message to thousands of recipients.
+pub(crate) fn check_new_event(event: &NewEvent<'_>) -> Result<()> {
+    let bytes = json_bytes(event);
+    if bytes > MAX_EVENT_WIRE_BYTES {
+        return Err(Error::Invalid(format!(
+            "this {} event would be {bytes} bytes when sent to another node; the limit for \
+             one event is {MAX_EVENT_WIRE_BYTES}",
+            event.kind
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NodeEntry {
     pub node_id: String,
@@ -82,8 +181,11 @@ pub struct NodeEntry {
     pub public_key: String,
 }
 
-/// Contents of an invite code (`another pair invite`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Contents of an invite code (`another pair invite`). `sig` is the hub's signature over
+/// [`crypto::invite_message`], which covers every other field; a joiner checks it against
+/// the hub key the invite names before it sends anything. An invite from a build that did
+/// not sign has no `sig` and is refused.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Invite {
     pub v: u8,
     pub hub_url: String,
@@ -92,19 +194,192 @@ pub struct Invite {
     pub secret: String,
     pub perms: Vec<Perm>,
     pub expires_at: i64,
+    #[serde(default)]
+    pub sig: String,
 }
 
+/// What is wrong with an invite's signature.
+enum InviteSignature {
+    Missing,
+    /// A signed field holds a line break, so the signed bytes would be ambiguous.
+    LineBreak,
+    Wrong,
+}
+
+impl Invite {
+    /// The bytes the hub signed for this invite.
+    fn signed_message(&self) -> Vec<u8> {
+        crypto::invite_message(
+            self.v,
+            &self.hub.node_id,
+            &self.hub.public_key,
+            &self.hub.display_name,
+            &self.hub_url,
+            &self.invite_id,
+            &crypto::sha256_hex(self.secret.as_bytes()),
+            &perms_text(&self.perms),
+            self.expires_at,
+        )
+    }
+
+    /// Check `sig` against the hub key this invite names. A key that does not decode, or a
+    /// weak one, fails as a wrong signature.
+    fn check_signature(&self) -> std::result::Result<(), InviteSignature> {
+        if self.sig.is_empty() {
+            return Err(InviteSignature::Missing);
+        }
+        let texts = [
+            &self.hub.node_id,
+            &self.hub.public_key,
+            &self.hub.display_name,
+            &self.hub_url,
+            &self.invite_id,
+        ];
+        if texts.iter().any(|t| t.contains(['\n', '\r'])) {
+            return Err(InviteSignature::LineBreak);
+        }
+        if crypto::verify_strict(&self.hub.public_key, &self.signed_message(), &self.sig) {
+            Ok(())
+        } else {
+            Err(InviteSignature::Wrong)
+        }
+    }
+}
+
+/// Whether `url` can be a hub's address: an `http://` or `https://` URL with a host. The
+/// hub applies it to the address it signs into an invite and the joiner to the address it
+/// is about to dial, so both sides share one rule. It checks the form only.
+pub fn hub_url_is_http(url: &str) -> bool {
+    url.parse::<http::Uri>().is_ok_and(|uri| {
+        matches!(uri.scheme_str(), Some("http" | "https"))
+            && uri.host().is_some_and(|h| !h.is_empty())
+    })
+}
+
+/// A node that a hub's signed list names with another key than the one this node pinned
+/// for it. Both keys are shown as fingerprints, computed here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyConflict {
+    pub node_id: String,
+    pub listed_fingerprint: String,
+    pub pinned_fingerprint: String,
+}
+
+impl KeyConflict {
+    /// The audit detail for this refusal.
+    pub fn detail(&self) -> String {
+        format!(
+            "node list names {} with key {}; pinned {}",
+            self.node_id, self.listed_fingerprint, self.pinned_fingerprint
+        )
+    }
+
+    /// The error a sync fails with for this conflict.
+    pub fn refusal(&self) -> Error {
+        Error::Conflict(format!(
+            "the hub's signed node list gives node {} the key {}, but this node pinned the \
+             key {} for it earlier; the answer is refused and this node cannot sync. A \
+             node's key never changes, so one of the two is wrong. Compare both with the \
+             fingerprint that `another node show` prints on that node. If the pinned key is \
+             the wrong one, this home must be replaced; if the hub's is, the hub's home \
+             must be: see \"A pinned key that is wrong\" in docs/FEDERATION.md",
+            self.node_id, self.listed_fingerprint, self.pinned_fingerprint
+        ))
+    }
+}
+
+/// `listed` against the key pinned here for its id: the conflict when a different key is
+/// stored. This node's own id, and an id with no key stored, never conflict.
+fn key_conflict(
+    conn: &Connection,
+    own_id: &str,
+    listed: &NodeEntry,
+) -> Result<Option<KeyConflict>> {
+    if listed.node_id == own_id {
+        return Ok(None);
+    }
+    let pinned: Option<String> = conn
+        .query_row(
+            "SELECT public_key FROM nodes WHERE node_id = ?1",
+            [&listed.node_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(pinned
+        .filter(|key| *key != listed.public_key)
+        .map(|key| KeyConflict {
+            node_id: listed.node_id.clone(),
+            listed_fingerprint: crypto::fingerprint(&listed.public_key),
+            pinned_fingerprint: crypto::fingerprint(&key),
+        }))
+}
+
+/// The pairing secret lets a node join until the invite expires, so `Debug` never prints
+/// it. `Serialize` keeps it: the invite code is built from it.
+impl std::fmt::Debug for Invite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Invite")
+            .field("v", &self.v)
+            .field("hub_url", &self.hub_url)
+            .field("hub", &self.hub)
+            .field("invite_id", &self.invite_id)
+            .field("secret", &"<redacted>")
+            .field("perms", &self.perms)
+            .field("expires_at", &self.expires_at)
+            .field("sig", &self.sig)
+            .finish()
+    }
+}
+
+/// What a joining node sends to `/fed/pair`. It holds no secret: the invite's secret never
+/// leaves the joiner. `sig` is the joiner's signature over [`crypto::pair_message`], which
+/// includes the hash of the secret, so only a holder of the invite and of the node key can
+/// make it. A request from a build before signed pairing has no `sig` and is refused; its
+/// `secret` field is not a field here, so it is never read.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairRequest {
     pub invite_id: String,
-    pub secret: String,
     pub node: NodeEntry,
+    #[serde(default)]
+    pub time_ms: i64,
+    #[serde(default)]
+    pub sig: String,
 }
 
+/// The hub's answer to a pairing request. `sig` is the hub's signature over
+/// [`crypto::pair_accept_message`]; the joiner checks it against the hub key in the invite.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairResponse {
     pub hub: NodeEntry,
     pub perms: Vec<Perm>,
+    #[serde(default)]
+    pub sig: String,
+}
+
+/// Why a pairing request failed the invite check. The caller is told one text for all four;
+/// the hub's audit row records which one it was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PairRefusal {
+    UnknownInvite,
+    /// `used_by` is the node id stored with the invite, or empty.
+    UsedInvite {
+        used_by: String,
+    },
+    ExpiredInvite,
+    BadSignature,
+}
+
+impl PairRefusal {
+    /// The audit detail for this cause.
+    pub fn detail(&self) -> String {
+        match self {
+            PairRefusal::UnknownInvite => "unknown invite".into(),
+            PairRefusal::UsedInvite { used_by } => format!("used invite (by {used_by})"),
+            PairRefusal::ExpiredInvite => "expired invite".into(),
+            PairRefusal::BadSignature => "bad signature".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +398,11 @@ pub struct IngestReport {
     pub accepted: usize,
     pub duplicates: usize,
     pub rejected: Vec<Rejected>,
+    /// Events that were accepted, stored and relayed, but not applied to this node's read
+    /// models: a hold whose pattern is over the limit or does not compile. Counted in
+    /// `accepted`. Absent when empty, and from older builds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_applied: Vec<Rejected>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +413,25 @@ pub struct PullResponse {
     pub more: bool,
     /// Every node the hub knows (including itself), for addressing and signature checks.
     pub nodes: Vec<NodeEntry>,
+    /// The hub's log no longer contains what this spoke already received: the hub was
+    /// restored from an older copy, or replaced. No events are sent; the spoke rewinds both
+    /// cursors to zero and syncs again (ingest skips duplicates). Absent from older hubs.
+    #[serde(default)]
+    pub reset: bool,
+}
+
+/// What a spoke tells its hub on a pull so the hub can tell whether it was restored from an
+/// older copy (see [`Store::pull_for_from`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PullAnchors {
+    /// The last event the hub sent this spoke.
+    pub received: Option<String>,
+    /// The hub's `seq` for `received`, as sent. A restored hub can hold that event again,
+    /// pushed back by its author, but then at another `seq`.
+    pub received_seq: Option<i64>,
+    /// The last event of this spoke's own that the hub accepted. Only this spoke pushes its
+    /// own events, so no other spoke can put it back on a restored hub.
+    pub pushed: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -181,7 +480,13 @@ fn classify(kind: &str, payload: &Value, origin: &str) -> Share {
     let not_origin =
         |nodes: Vec<String>| -> Vec<String> { nodes.into_iter().filter(|n| n != origin).collect() };
     match kind.split('.').next().unwrap_or_default() {
-        "token" | "peer" | "oauth" => return Share::Never,
+        // Local-only kinds.
+        //
+        // - The queue is local to its node: no queue event is ever shared.
+        // - Push records, and the `transport.wake` / `transport.gone` events that replaced
+        //   them, name local terminals (Herdr panes, tmux, cmux) and local message ids;
+        //   they are evidence for this node's `another stats` only.
+        "token" | "peer" | "oauth" | "queue" | "push" | "transport" => return Share::Never,
         _ => {}
     }
     match kind {
@@ -202,6 +507,17 @@ fn classify(kind: &str, payload: &Value, origin: &str) -> Share {
                 _ => Share::Never,
             }
         }
+        // A marker and its acknowledgement go where the skipped event would have gone.
+        sync_skip::KIND_SKIPPED | sync_skip::KIND_ACKED => {
+            let (route, nodes) = sync_skip::route_of(payload);
+            let nodes = not_origin(nodes);
+            match route {
+                "directory" => Share::Directory,
+                "mail" if nodes.is_empty() => Share::Never,
+                "mail" => Share::Mail(nodes),
+                _ => Share::Feed(nodes),
+            }
+        }
         _ => {
             let mut also = strings(payload, "resource_nodes");
             if let Some(n) = payload.get("resource_node").and_then(Value::as_str) {
@@ -216,7 +532,53 @@ fn perms_of(text: &str) -> Vec<Perm> {
     serde_json::from_str(text).unwrap_or_default()
 }
 
-fn validate_node_name(name: &str) -> Result<()> {
+/// A node id is a ULID as `ulid::Ulid::new().to_string()` writes it, which is how every
+/// build has made node ids: exactly 26 ASCII characters from `0123456789ABCDEFGHJKMNPQRSTVWXYZ`,
+/// the first one `0` to `7`. Anything else is not an id, whoever sends it.
+pub fn validate_node_id(node_id: &str) -> Result<()> {
+    const ALPHABET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let bytes = node_id.as_bytes();
+    let ok = bytes.len() == 26
+        && (b'0'..=b'7').contains(&bytes[0])
+        && bytes.iter().all(|b| ALPHABET.contains(b));
+    if ok {
+        Ok(())
+    } else {
+        let shown: String = node_id.chars().take(40).collect();
+        Err(Error::Invalid(format!(
+            "invalid node id {:?}: a node id is 26 characters from \
+             0123456789ABCDEFGHJKMNPQRSTVWXYZ, the first one 0 to 7",
+            crate::mail::single_line(&shown, usize::MAX)
+        )))
+    }
+}
+
+/// [`crypto::decode_peer_public`], and the text must be the one form `crypto::b64` writes:
+/// decoding trims, so without this two texts would name one key.
+fn canonical_peer_public(text: &str) -> Result<()> {
+    let key = crypto::decode_peer_public(text)?;
+    if crypto::b64(key.as_bytes()) != text {
+        return Err(Error::Invalid(
+            "node public key is not in its canonical text form".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The name rule, and not the `local` placeholder: what a node must be called to pair.
+fn validate_pairing_name(name: &str) -> Result<()> {
+    validate_node_name(name)?;
+    if name == "local" {
+        return Err(Error::Invalid(
+            "a node named `local` is not named yet and cannot pair; name it first: \
+             `another node name <name>`"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_node_name(name: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name.len() <= 40
         && name
@@ -251,15 +613,111 @@ fn require_named(entry: &NodeEntry) -> Result<()> {
             "give this node a unique name before pairing: `another node name <name>`".into(),
         ));
     }
+    // A home made by an older build with an unchecked ANOTHER_NODE_NAME can hold a name a
+    // rename would refuse. The name is not quoted: it is exactly the text that is not safe.
+    if validate_node_name(&entry.display_name).is_err() {
+        return Err(Error::Invalid(
+            "this node's name is not valid (use 1-40 ASCII letters, digits, '-', '_' or '.'); \
+             rename it with `another node name <name>`"
+                .into(),
+        ));
+    }
     Ok(())
 }
 
-/// Record (or confirm) another node. Keys are pinned on first sight.
+/// Whether `name` already names a node other than `node_id`. A node is addressed by its
+/// display name or its id (`identity.rs` `resolve_remote`), so another node's id is taken
+/// too: otherwise `name@project@<node id>`, the form that resolves an ambiguity, is ambiguous.
+/// Case is ignored: `Alpha` and `alpha` are one name, since a person reads them as one.
+fn node_name_taken(conn: &Connection, name: &str, node_id: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM nodes
+             WHERE (display_name = ?1 COLLATE NOCASE OR node_id = ?1 COLLATE NOCASE)
+               AND node_id != ?2",
+            params![name, node_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// Whether `node_id` is already another node's display name. Checked before a node is first
+/// recorded, the inverse of [`node_name_taken`]: a new node whose id is someone's name would
+/// make that identifier match two nodes.
+fn node_id_is_a_name(conn: &Connection, node_id: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM nodes WHERE display_name = ?1 COLLATE NOCASE AND node_id != ?1",
+            [node_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// The refusal for a node that is new here and whose id is already another node's name.
+fn id_is_a_name(node_id: &str) -> Error {
+    Error::Conflict(format!(
+        "node {node_id}'s id is already another node's name; rename that node first"
+    ))
+}
+
+/// Permissions as a pairing answer's signature covers them: each name, joined by `,`.
+fn perms_text(perms: &[Perm]) -> String {
+    perms
+        .iter()
+        .map(|p| p.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// `listed` as a peer's node list may apply it, or `None` to skip it. The name is used only
+/// when a local rename would accept it: valid, not the `local` placeholder, and not another
+/// node's. Otherwise a known node keeps its name, and an unknown one is recorded under its
+/// id, so its key is still learned and its signed events still verify. An unknown node whose
+/// id is already another node's name is skipped: recording it would make that identifier
+/// match two nodes, and skipping one entry keeps the rest of the sync going. An entry whose
+/// id is not a node id is skipped the same way.
+fn listed_entry(tx: &Tx<'_>, listed: &NodeEntry) -> Result<Option<NodeEntry>> {
+    if validate_node_id(&listed.node_id).is_err() {
+        return Ok(None);
+    }
+    let known = tx
+        .query_row(
+            "SELECT display_name FROM nodes WHERE node_id = ?1",
+            [&listed.node_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?;
+    if known.is_none() && node_id_is_a_name(tx, &listed.node_id)? {
+        return Ok(None);
+    }
+    let usable = validate_node_name(&listed.display_name).is_ok()
+        && listed.display_name != "local"
+        && !node_name_taken(tx, &listed.display_name, &listed.node_id)?;
+    let display_name = if usable {
+        listed.display_name.clone()
+    } else {
+        known.unwrap_or_else(|| listed.node_id.clone())
+    };
+    Ok(Some(NodeEntry {
+        display_name,
+        ..listed.clone()
+    }))
+}
+
+/// Record (or confirm) another node from a hub's list or a hub's signed answer to a join.
+/// Keys are pinned on first sight. The hub side of pairing does not come through here: it
+/// never writes a key on a node it already knows (see [`Store::accept_pairing`]).
 fn upsert_node(tx: &Tx<'_>, node: &NodeEntry) -> Result<()> {
     if node.node_id == tx.node_id {
         return Ok(());
     }
-    crypto::decode_public(&node.public_key)?;
+    crypto::decode_peer_public(&node.public_key)?;
+    // The name prefixes every feed line from that node and is listed by `another node`.
+    // Callers pass it through `listed_entry` first; this keeps it one safe line regardless.
+    let display_name = crate::mail::single_line(&node.display_name, usize::MAX);
     let known: Option<(String, Option<String>)> = tx
         .query_row(
             "SELECT display_name, public_key FROM nodes WHERE node_id = ?1",
@@ -273,10 +731,10 @@ fn upsert_node(tx: &Tx<'_>, node: &NodeEntry) -> Result<()> {
             node.node_id
         ))),
         Some((name, _)) => {
-            if name != node.display_name {
+            if name != display_name {
                 tx.execute(
                     "UPDATE nodes SET display_name = ?2 WHERE node_id = ?1",
-                    params![node.node_id, node.display_name],
+                    params![node.node_id, display_name],
                 )?;
             }
             tx.execute(
@@ -286,10 +744,13 @@ fn upsert_node(tx: &Tx<'_>, node: &NodeEntry) -> Result<()> {
             Ok(())
         }
         None => {
+            if node_id_is_a_name(tx, &node.node_id)? {
+                return Err(id_is_a_name(&node.node_id));
+            }
             tx.execute(
                 "INSERT INTO nodes (node_id, display_name, role, is_local, created_at, public_key)
                  VALUES (?1, ?2, 'peer', 0, ?3, ?4)",
-                params![node.node_id, node.display_name, tx.now, node.public_key],
+                params![node.node_id, display_name, tx.now, node.public_key],
             )?;
             Ok(())
         }
@@ -313,13 +774,87 @@ fn wire_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<WireEvent> {
 const WIRE_SELECT: &str =
     "SELECT seq, event_id, node_id, ts, actor, kind, payload, prev_id, sig FROM events";
 
+/// The anchor for a spoke's next pull and the hub `seq` it was sent at: the newest stored
+/// foreign event (no `seq` known), or the `anchor` and `seq` of a newer local
+/// `peer.anchored` / `peer.resynced` record. See [`Store::last_relayed_event_id`].
+fn relayed_anchor(conn: &Connection, local: &str) -> Result<Option<(String, Option<i64>)>> {
+    let newest: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT kind, event_id, payload FROM events
+             WHERE node_id != ?1
+                OR (node_id = ?1 AND kind IN ('peer.resynced', 'peer.anchored'))
+             ORDER BY seq DESC LIMIT 1",
+            [local],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    Ok(match newest {
+        Some((kind, _, payload)) if kind == "peer.resynced" || kind == "peer.anchored" => {
+            let p = serde_json::from_str::<Value>(&payload).unwrap_or(Value::Null);
+            p.get("anchor")
+                .and_then(Value::as_str)
+                .map(|id| (id.to_string(), p.get("seq").and_then(Value::as_i64)))
+        }
+        Some((_, event_id, _)) => Some((event_id, None)),
+        None => None,
+    })
+}
+
+/// The newest of this spoke's own events its hub accepted: the `anchor` of the newest local
+/// `peer.pushed` or `peer.resynced` record. A resync records it again, or `null` when the
+/// restored hub accepted nothing, so an event the hub later refuses cannot stay the anchor.
+fn pushed_anchor(conn: &Connection, local: &str) -> Result<Option<String>> {
+    let newest: Option<(String, String)> = conn
+        .query_row(
+            "SELECT kind, payload FROM events
+             WHERE node_id = ?1 AND kind IN ('peer.pushed', 'peer.resynced')
+             ORDER BY seq DESC LIMIT 1",
+            [local],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(newest.and_then(|(kind, payload)| {
+        let p = serde_json::from_str::<Value>(&payload).ok()?;
+        let key = if kind == "peer.pushed" {
+            "anchor"
+        } else {
+            "pushed"
+        };
+        p.get(key)?.as_str().map(str::to_string)
+    }))
+}
+
+/// Every node with a key, for a pull response's addressing and signature checks.
+fn known_nodes(conn: &Connection) -> Result<Vec<NodeEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT node_id, display_name, public_key FROM nodes WHERE public_key IS NOT NULL",
+    )?;
+    let nodes = stmt
+        .query_map([], |r| {
+            Ok(NodeEntry {
+                node_id: r.get(0)?,
+                display_name: r.get(1)?,
+                public_key: r.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(nodes)
+}
+
 /// (role, perms, revoked_at)
 type PeerRow = (String, Vec<Perm>, Option<i64>);
+
+/// A `peers` row for this node itself is never acted on. No command of this build writes
+/// one; a build before the joiner checked the hub id could, from an invite that named the
+/// node's own id. Every reader that decides something from a `peers` row (this node's hub,
+/// who is a paired spoke, whose signed requests are accepted) carries this condition, so
+/// such a row is inert: it is only shown, marked, by `another peers` and `another doctor`.
+const NOT_SELF: &str = "node_id NOT IN (SELECT node_id FROM nodes WHERE is_local = 1)";
 
 fn peer_row(conn: &Connection, node_id: &str) -> Result<Option<PeerRow>> {
     Ok(conn
         .query_row(
-            "SELECT role, perms, revoked_at FROM peers WHERE node_id = ?1",
+            &format!("SELECT role, perms, revoked_at FROM peers WHERE node_id = ?1 AND {NOT_SELF}"),
             [node_id],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get(2)?)),
         )
@@ -327,13 +862,114 @@ fn peer_row(conn: &Connection, node_id: &str) -> Result<Option<PeerRow>> {
         .map(|(role, perms, revoked)| (role, perms_of(&perms), revoked)))
 }
 
+/// Refuses to join `node_id` as a hub when this node already has it paired in another role.
+/// A join writes only a `hub` row: otherwise an invite made by one of this node's spokes
+/// would give that spoke the permissions it named and clear its revoke.
+fn not_paired_as_spoke(conn: &Connection, node_id: &str) -> Result<()> {
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT p.role, n.display_name FROM peers p JOIN nodes n ON n.node_id = p.node_id
+             WHERE p.node_id = ?1",
+            [node_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match row {
+        Some((role, name)) if role != "hub" => Err(Error::Conflict(format!(
+            "node {name} is paired here as a spoke; it cannot also be this node's hub"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// The refusal for a join while this node syncs with another hub.
+fn second_hub() -> Error {
+    Error::Conflict(
+        "this node already syncs with another hub; revoke it first: `another pair revoke <hub>`"
+            .into(),
+    )
+}
+
+/// The joiner's identity rule, for the node an invite names as the hub. Everything here is
+/// decided by what this node already stores, so it is checked before anything is sent and
+/// again before anything is written:
+///
+/// - the id is not this node's own;
+/// - a row stored for the id has a key (a keyless row is never given one by a join, as on
+///   the hub's side), and the invite carries that key;
+/// - the id is not paired here in a role other than `hub`;
+/// - this node does not sync with a different hub.
+fn may_join_as_hub(conn: &Connection, own_id: &str, hub: &NodeEntry) -> Result<()> {
+    if hub.node_id == own_id {
+        return Err(Error::Conflict(
+            "this invite names this node itself as its hub; a node cannot join itself".into(),
+        ));
+    }
+    let stored: Option<Option<String>> = conn
+        .query_row(
+            "SELECT public_key FROM nodes WHERE node_id = ?1",
+            [&hub.node_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match stored {
+        Some(None) => {
+            return Err(Error::Conflict(format!(
+                "node {} is known here without a key; it cannot be joined",
+                hub.node_id
+            )));
+        }
+        Some(Some(key)) if key != hub.public_key => {
+            return Err(Error::Conflict(format!(
+                "node {} presented a different key than before; refusing",
+                hub.node_id
+            )));
+        }
+        _ => {}
+    }
+    not_paired_as_spoke(conn, &hub.node_id)?;
+    match hub_of(conn)? {
+        Some((existing, _, _)) if existing != hub.node_id => Err(second_hub()),
+        _ => Ok(()),
+    }
+}
+
+/// An invite id is a ULID, as the hub makes it (the same form as a node id). It goes into
+/// both signed messages, so it is checked before either is built. The refusal is the fixed
+/// text for an invite that does not decode: the id is part of the code.
+fn validate_invite_id(invite_id: &str) -> Result<()> {
+    validate_node_id(invite_id).map_err(|_| Error::Invalid("invalid invite code".into()))
+}
+
+/// The refusal of `pair revoke`, `pair readmit` and `pair release-name` for this node's own
+/// id. No command makes a pairing row for the node itself; a home that has one from an
+/// older build must not end its own leases or rename itself through these commands.
+fn not_this_node(tx: &Tx<'_>, node_id: &str) -> Result<()> {
+    if node_id == tx.node_id {
+        return Err(Error::Invalid(format!(
+            "node {node_id} is this node itself; `another pair revoke`, `readmit` and \
+             `release-name` act on other nodes only"
+        )));
+    }
+    Ok(())
+}
+
 /// The hub this node syncs with, if it is a spoke: (node_id, url, granted perms).
 pub(crate) fn hub_of(conn: &Connection) -> Result<Option<(String, String, Vec<Perm>)>> {
     Ok(conn
         .query_row(
-            "SELECT node_id, url, perms FROM peers WHERE role = 'hub' AND revoked_at IS NULL LIMIT 1",
+            &format!(
+                "SELECT node_id, url, perms FROM peers
+                 WHERE role = 'hub' AND revoked_at IS NULL AND {NOT_SELF} LIMIT 1"
+            ),
             [],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
         )
         .optional()?
         .map(|(n, u, p)| (n, u, perms_of(&p))))
@@ -360,8 +996,19 @@ pub(crate) fn allowed_towards(conn: &Connection, node: &str, perm: Perm) -> Resu
 }
 
 /// TCP reachability of a foreign resource from this machine.
+///
+/// Only literal IP addresses are probed. A peer-controlled hostname would make a
+/// synchronous resource listing wait on system DNS, whose timeout is not bounded here.
 pub fn reachable(endpoint: Option<&str>, port: Option<u16>) -> bool {
-    use std::net::{TcpStream, ToSocketAddrs};
+    reachable_with_timeout(endpoint, port, std::time::Duration::from_millis(100))
+}
+
+pub(crate) fn reachable_with_timeout(
+    endpoint: Option<&str>,
+    port: Option<u16>,
+    timeout: std::time::Duration,
+) -> bool {
+    use std::net::{IpAddr, SocketAddr, TcpStream};
     let host = endpoint
         .map(|e| e.split_once("://").map_or(e, |(_, rest)| rest))
         .map(|e| e.split('/').next().unwrap_or_default().to_string());
@@ -380,12 +1027,10 @@ pub fn reachable(endpoint: Option<&str>, port: Option<u16>) -> bool {
         None => return false,
     };
     let Some(port) = port else { return false };
-    let Ok(addrs) = (host.as_str(), port).to_socket_addrs() else {
+    let Ok(ip) = host.parse::<IpAddr>() else {
         return false;
     };
-    addrs
-        .into_iter()
-        .any(|a| TcpStream::connect_timeout(&a, std::time::Duration::from_millis(500)).is_ok())
+    TcpStream::connect_timeout(&SocketAddr::new(ip, port), timeout).is_ok()
 }
 
 fn verify_wire(conn: &Connection, ev: &WireEvent) -> Result<()> {
@@ -411,7 +1056,9 @@ fn verify_wire(conn: &Connection, ev: &WireEvent) -> Result<()> {
         &ev.kind,
         &ev.payload,
     );
-    if crypto::verify(&key, &msg, &ev.sig) {
+    // Strict: a weak key pinned before keys were checked cannot verify the degenerate
+    // signature (FINDINGS-main-weak-keys).
+    if crypto::verify_strict(&key, &msg, &ev.sig) {
         Ok(())
     } else {
         Err(Error::Forbidden("bad event signature".into()))
@@ -508,15 +1155,11 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
             else {
                 return Ok(());
             };
-            let taken = conn
-                .query_row(
-                    "SELECT 1 FROM nodes WHERE display_name = ?1 AND node_id != ?2",
-                    params![name, origin],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some();
-            if taken {
+            // The local rename rule. `set_node_name` always applies it; a `node.created`
+            // whose name came unchecked from ANOTHER_NODE_NAME is refused once, and pairing
+            // needs a valid rename first anyway.
+            validate_node_name(name)?;
+            if node_name_taken(conn, name, origin)? {
                 return Err(Error::Forbidden(format!(
                     "{kind} names {name:?}, which another node already has"
                 )));
@@ -525,6 +1168,10 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
         }
         "agent.registered" => {
             agent("agent_id")?;
+            // The local name rule, so a peer without it (a changed build or a forged event)
+            // cannot add an agent whose name is oversized, look-alike or not addressable.
+            // A missing name counts as empty and is refused.
+            crate::identity::validate_name(p.get("name").and_then(Value::as_str).unwrap_or(""))?;
             project()
         }
         "session.started" | "session.ended" | "delivery.read" | "delivery.acked" => {
@@ -532,6 +1179,16 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
         }
         "message.sent" => {
             agent("sender_id")?;
+            // The same body limit as a local send, so a peer without it (a changed build or
+            // a forged event) cannot store or relay an oversized body. A body that is not
+            // text is refused too: it would skip the limit and still be kept in the event.
+            // The subject is not checked here: the projection cuts it and stores it (D75),
+            // so an over-long subject never costs the recipient the message.
+            match p.get("body") {
+                None | Some(Value::Null) => {}
+                Some(Value::String(body)) => crate::mail::check_body(body)?,
+                Some(_) => return Err(Error::Invalid("message body must be text".into())),
+            }
             owned("message", "messages", "message_id", "message_id")
         }
         "hold.acquired" | "hold.updated" => {
@@ -542,6 +1199,29 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
         "resource.registered" => {
             agent("owner_id")?;
             project()?;
+            // The local resource-name rule. A missing name counts as empty and is refused.
+            crate::resources::validate_name(p.get("name").and_then(Value::as_str).unwrap_or(""))?;
+            // The local size limits. Control characters in these two are cleaned by the
+            // projection (D97); a size over the limit cannot be cleaned, so it is refused.
+            crate::resources::check_text_sizes(
+                p.get("endpoint").and_then(Value::as_str),
+                p.get("purpose").and_then(Value::as_str),
+            )?;
+            // The same metadata rule as a local registration: an object of at most 64 KiB.
+            // An event without metadata is stored with `{}`.
+            if let Some(metadata) = p.get("metadata") {
+                crate::resources::check_metadata(metadata)?;
+            }
+            // A local registration types these as u16 / u32; refuse what no build sends.
+            for (field, max) in [("port", u64::from(u16::MAX)), ("pid", u64::from(u32::MAX))] {
+                if let Some(v) = p.get(field).filter(|v| !v.is_null()) {
+                    if v.as_u64().is_none_or(|n| n > max) {
+                        return Err(Error::Invalid(format!(
+                            "resource {field} {v} is not a valid {field}"
+                        )));
+                    }
+                }
+            }
             resource()
         }
         "resource.adopted" => {
@@ -571,7 +1251,18 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
             }
         }
         "resource.stopped" | "resource.reaped" => resource(),
+        sync_skip::KIND_SKIPPED => sync_skip::check_marker(conn, origin, p),
+        sync_skip::KIND_ACKED => sync_skip::check_ack(p),
         _ => Ok(()),
+    }
+}
+
+/// The class and the node ids `classify` gives an event that is sent, for its marker.
+fn route_of_share(share: Share) -> (&'static str, Vec<String>) {
+    match share {
+        Share::Directory | Share::Never => ("directory", Vec::new()),
+        Share::Feed(also) => ("feed", also),
+        Share::Mail(nodes) => ("mail", nodes),
     }
 }
 
@@ -599,11 +1290,21 @@ fn project_exists(conn: &Connection, id: &str) -> Result<bool> {
 /// mail, presence or receipts in the future).
 fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
     let s = |k: &str| p.get(k).and_then(Value::as_str).map(str::to_string);
+    // A peer's free text skips the local checks: hold reasons, programs, models,
+    // descriptions and a resource's endpoint and purpose are stored as one safe line, like a
+    // subject (D75); the signed event keeps the original. The name of an agent or a resource
+    // is not cleaned: `foreign_authority` holds it to the local name rule, so it is stored
+    // as sent. Held patterns, project paths and slugs name real files and are matched
+    // across nodes, so they are kept as sent.
+    let line = |k: &str| s(k).map(|t| crate::mail::single_line(&t, usize::MAX));
     let ts = ev.ts.min(tx.now);
     let origin = ev.node_id.as_str();
     match ev.kind.as_str() {
         "node.created" | "node.renamed" => {
-            if let Some(name) = s("display_name") {
+            // `local` means "not named yet" and names no one, so it is never applied: the
+            // event is stored and relayed (an honest node's first `node.created` carries
+            // it), and the node keeps the name pairing or a hub's list gave it.
+            if let Some(name) = s("display_name").filter(|n| n != "local") {
                 tx.execute(
                     "UPDATE nodes SET display_name = ?2 WHERE node_id = ?1",
                     params![origin, name],
@@ -638,7 +1339,12 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                 [origin],
                 |r| r.get(0),
             )?;
-            let address = format!("{name}@{}@{node_name}", slug.unwrap_or_default());
+            // The stored slug stays as sent, since it is matched against local slugs; in an
+            // address, which is printed and typed, it is one safe line.
+            let address = format!(
+                "{name}@{}@{node_name}",
+                crate::mail::single_line(&slug.unwrap_or_default(), usize::MAX)
+            );
             tx.execute(
                 "INSERT INTO agents (agent_id, node_id, project_id, name, program, model, description,
                    status, created_at, updated_at, last_seen_at, event_id, address)
@@ -652,9 +1358,9 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                     origin,
                     project_id,
                     name,
-                    s("program").unwrap_or_else(|| "other".into()),
-                    s("model"),
-                    s("description"),
+                    line("program").unwrap_or_else(|| "other".into()),
+                    line("model"),
+                    line("description"),
                     ts,
                     ev.event_id,
                     address
@@ -779,7 +1485,7 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                    reason = excluded.reason, ttl_seconds = excluded.ttl_seconds,
                    renewed_at = excluded.renewed_at, expires_at = excluded.expires_at
                  WHERE holds.node_id = excluded.node_id",
-                params![hold_id, origin, project, agent, s("pattern"), exclusive, s("reason"), ttl, ts, expires],
+                params![hold_id, origin, project, agent, s("pattern"), exclusive, line("reason"), ttl, ts, expires],
             )?;
         }
         "hold.renewed" => {
@@ -821,11 +1527,11 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
                     origin,
                     s("kind"),
                     s("name"),
-                    s("endpoint"),
+                    line("endpoint"),
                     p.get("port").and_then(Value::as_i64),
                     p.get("pid").and_then(Value::as_i64),
                     project,
-                    s("purpose"),
+                    line("purpose"),
                     s("mode").unwrap_or_else(|| "shared".into()),
                     p.get("metadata").cloned().unwrap_or(json!({})).to_string(),
                     ts,
@@ -1031,20 +1737,28 @@ const PEER_SELECT: &str = "SELECT p.node_id, n.display_name, p.role, p.url, p.pe
        p.paired_at, p.last_sync_at, p.revoked_at, p.push_cursor, p.pull_cursor
      FROM peers p JOIN nodes n ON n.node_id = p.node_id";
 
+/// A paired node by id or name, with the lookup `another pair revoke` uses.
+fn find_peer(conn: &Connection, node: &str) -> Result<Peer> {
+    conn.query_row(
+        &format!("{PEER_SELECT} WHERE p.node_id = ?1 OR n.display_name = ?1"),
+        [node],
+        peer_from_row,
+    )
+    .optional()?
+    .ok_or_else(|| Error::NotFound(format!("no paired node {node:?}")))
+}
+
 impl Store {
     /// Rename this node (do it before pairing: other nodes address agents by node name).
     pub fn set_node_name(&self, name: &str) -> Result<NodeEntry> {
         validate_node_name(name)?;
+        if name == "local" {
+            return Err(Error::Invalid(
+                "`local` means a node that is not named yet; choose another name".into(),
+            ));
+        }
         self.write(|tx| {
-            let taken = tx
-                .query_row(
-                    "SELECT 1 FROM nodes WHERE display_name = ?1 AND is_local = 0",
-                    [name],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some();
-            if taken {
+            if node_name_taken(tx, name, tx.node_id)? {
                 return Err(Error::Conflict(format!(
                     "another known node is already named {name:?}"
                 )));
@@ -1080,6 +1794,18 @@ impl Store {
         )
     }
 
+    /// Hub side: whether `node_id` names a spoke that is paired and not revoked. A hub asks
+    /// this of a request's node header before it reads the body, so a caller that names no
+    /// paired node makes it buffer nothing; the signature is still checked after the body.
+    pub fn is_paired_spoke(&self, node_id: &str) -> Result<bool> {
+        self.read(|conn| {
+            Ok(matches!(
+                peer_row(conn, node_id)?,
+                Some((role, _, None)) if role == "spoke"
+            ))
+        })
+    }
+
     /// Hub side: check a signed request from a paired node. Returns its granted perms.
     pub fn verify_peer_request(
         &self,
@@ -1091,7 +1817,9 @@ impl Store {
         signature: &str,
     ) -> Result<Vec<Perm>> {
         let denied = || Error::Forbidden("request not signed by a paired node".into());
-        if (self.now() - time_ms).abs() > 5 * 60 * 1000 {
+        // `time_ms` comes from an unauthenticated header: compare without overflow, so an
+        // extreme value can neither panic nor wrap past the window.
+        if self.now().abs_diff(time_ms) > 5 * 60 * 1000 {
             return Err(Error::Forbidden(
                 "request time is more than 5 minutes off; check the clocks".into(),
             ));
@@ -1101,7 +1829,7 @@ impl Store {
                 .query_row(
                     "SELECT p.perms, p.revoked_at, n.public_key FROM peers p
                      JOIN nodes n ON n.node_id = p.node_id
-                     WHERE p.node_id = ?1 AND p.role = 'spoke'",
+                     WHERE p.node_id = ?1 AND p.role = 'spoke' AND n.is_local = 0",
                     [node_id],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
@@ -1110,7 +1838,7 @@ impl Store {
                 return Err(denied());
             };
             let msg = crypto::request_message(method, path_and_query, time_ms, body);
-            if crypto::verify(&key, &msg, signature) {
+            if crypto::verify_strict(&key, &msg, signature) {
                 Ok(perms_of(&perms))
             } else {
                 Err(denied())
@@ -1118,25 +1846,49 @@ impl Store {
         })
     }
 
-    /// Hub side: create a single-use invite code for a spoke.
+    /// Hub side: create a single-use invite code for a spoke, signed with this node's key
+    /// over all of its fields, the address included.
     pub fn create_invite(
         &self,
         hub_url: &str,
         perms: &[Perm],
         expires_in_seconds: i64,
     ) -> Result<String> {
-        if !(hub_url.starts_with("http://") || hub_url.starts_with("https://")) {
+        self.create_invite_as(hub_url, perms, expires_in_seconds, true)
+    }
+
+    /// [`Store::create_invite`] as a build before invites were signed made it: no `sig`.
+    #[cfg(feature = "test-support")]
+    pub fn create_invite_before_signed_invites(
+        &self,
+        hub_url: &str,
+        perms: &[Perm],
+        expires_in_seconds: i64,
+    ) -> Result<String> {
+        self.create_invite_as(hub_url, perms, expires_in_seconds, false)
+    }
+
+    fn create_invite_as(
+        &self,
+        hub_url: &str,
+        perms: &[Perm],
+        expires_in_seconds: i64,
+        signed: bool,
+    ) -> Result<String> {
+        // The address is signed into the invite as text and dialled by the joiner: it must
+        // be one the joiner accepts, and hold nothing that makes the signed bytes ambiguous.
+        let hub_url = hub_url.trim_end_matches('/');
+        if !hub_url_is_http(hub_url)
+            || hub_url.contains(|c: char| c.is_whitespace() || c.is_control())
+        {
             return Err(Error::Invalid(
-                "hub url must start with http:// or https://".into(),
+                "hub url must be an http:// or https:// URL with a host".into(),
             ));
         }
         if expires_in_seconds <= 0 {
             return Err(Error::Invalid("invite expiry must be positive".into()));
         }
-        let mut secret = [0u8; 24];
-        getrandom::fill(&mut secret)
-            .map_err(|e| Error::Invalid(format!("no system randomness available: {e}")))?;
-        let secret = crypto::b64(&secret);
+        let secret = crypto::b64(&crypto::random_bytes(24)?);
         let perms: Vec<Perm> = perms
             .iter()
             .copied()
@@ -1159,15 +1911,19 @@ impl Store {
                     expires_at
                 ],
             )?;
-            let invite = Invite {
-                v: 1,
-                hub_url: hub_url.trim_end_matches('/').to_string(),
+            let mut invite = Invite {
+                v: 2,
+                hub_url: hub_url.to_string(),
                 hub,
                 invite_id,
                 secret,
                 perms,
                 expires_at,
+                sig: String::new(),
             };
+            if signed {
+                invite.sig = crypto::sign(self.signing_key(), &invite.signed_message());
+            }
             Ok(format!(
                 "another-invite:{}",
                 crypto::b64(serde_json::to_string(&invite)?.as_bytes())
@@ -1175,18 +1931,78 @@ impl Store {
         })
     }
 
-    /// Spoke side: decode an invite and build the pairing request for it.
+    /// Spoke side: decode an invite and build the signed pairing request for it. Everything
+    /// that can be refused here is, so that nothing is sent and the invite is not used up.
+    ///
+    /// The hub's signature on the invite is checked first, right after the code decodes,
+    /// against the hub key the invite names: an invite without one, or one whose contents
+    /// were changed after the hub made it, is refused before any other field is judged.
     pub fn prepare_join(&self, code: &str) -> Result<(Invite, PairRequest)> {
+        self.prepare_join_as(code, true)
+    }
+
+    /// [`Store::prepare_join`] as a build before invites were signed did it: `sig` is not
+    /// a field that build knows, so it is neither checked nor kept.
+    #[cfg(feature = "test-support")]
+    pub fn prepare_join_before_signed_invites(&self, code: &str) -> Result<(Invite, PairRequest)> {
+        self.prepare_join_as(code, false)
+    }
+
+    fn prepare_join_as(&self, code: &str, signed: bool) -> Result<(Invite, PairRequest)> {
         let raw = code.trim().strip_prefix("another-invite:").ok_or_else(|| {
             Error::Invalid("not an Another invite code (expected another-invite:...)".into())
         })?;
-        let invite: Invite = serde_json::from_slice(&crypto::unb64(raw)?)
-            .map_err(|e| Error::Invalid(format!("invalid invite code: {e}")))?;
+        // One fixed text for every decode failure: the base64 and JSON errors can quote
+        // the code, and the code holds the secret.
+        let invalid_code = || Error::Invalid("invalid invite code".into());
+        let mut invite: Invite = crypto::unb64(raw)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .ok_or_else(invalid_code)?;
+        if signed {
+            match invite.check_signature() {
+                Ok(()) => {}
+                Err(InviteSignature::Missing) => {
+                    return Err(Error::Invalid(
+                        "this invite is not signed by its hub: an older build made it, or its \
+                         signature was removed; not joined. Make a new invite on a hub that \
+                         runs this build or a newer one"
+                            .into(),
+                    ))
+                }
+                Err(InviteSignature::LineBreak) => return Err(invalid_code()),
+                Err(InviteSignature::Wrong) => {
+                    return Err(Error::Forbidden(
+                        "this invite's signature does not match its contents: the code was \
+                         changed after the hub made it, or a newer build made it in a form \
+                         this build cannot check; not joined. Ask the hub's owner for a new \
+                         invite over a channel you trust, and update this node if the hub \
+                         runs a newer build"
+                            .into(),
+                    ))
+                }
+            }
+        } else {
+            invite.sig.clear();
+        }
+        if invite.v != 2 {
+            return Err(Error::Invalid(format!(
+                "this invite is signed but in a format this build does not know (v {}); not \
+                 joined. Update this node to the hub's build",
+                invite.v
+            )));
+        }
         if invite.expires_at <= self.now() {
             return Err(Error::Invalid(
                 "this invite has expired; ask for a new one".into(),
             ));
         }
+        validate_invite_id(&invite.invite_id)?;
+        // Only the shape of the hub entry is checked here. Whether its name is taken on
+        // this node is decided when the hub is recorded (`complete_join`).
+        validate_node_id(&invite.hub.node_id)?;
+        canonical_peer_public(&invite.hub.public_key)?;
+        validate_pairing_name(&invite.hub.display_name)?;
         let me = self.node_entry()?;
         require_named(&me)?;
         if me.display_name == invite.hub.display_name {
@@ -1195,103 +2011,365 @@ impl Store {
                 me.display_name
             )));
         }
-        let req = PairRequest {
-            invite_id: invite.invite_id.clone(),
-            secret: invite.secret.clone(),
-            node: me,
-        };
-        Ok((invite, req))
-    }
-
-    /// Hub side: accept a pairing request carrying a valid, unused invite.
-    pub fn accept_pairing(&self, req: &PairRequest) -> Result<PairResponse> {
-        validate_node_name(&req.node.display_name)?;
-        crypto::decode_public(&req.node.public_key)?;
-        self.write(|tx| {
-            let denied = || Error::Forbidden("invalid, used or expired invite".into());
-            let row: Option<(String, String, i64, Option<i64>)> = tx
+        self.read(|conn| {
+            let known = conn
                 .query_row(
-                    "SELECT secret_hash, perms, expires_at, used_at FROM invites WHERE invite_id = ?1",
-                    [&req.invite_id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                )
-                .optional()?;
-            let Some((hash, perms, expires_at, None)) = row else {
-                return Err(denied());
-            };
-            if hash != crypto::sha256_hex(req.secret.as_bytes()) || expires_at <= tx.now {
-                return Err(denied());
-            }
-            let hub = local_entry(tx)?;
-            let clash = tx
-                .query_row(
-                    "SELECT 1 FROM nodes WHERE display_name = ?1 AND node_id != ?2",
-                    params![req.node.display_name, req.node.node_id],
+                    "SELECT 1 FROM nodes WHERE node_id = ?1",
+                    [&invite.hub.node_id],
                     |_| Ok(()),
                 )
                 .optional()?
                 .is_some();
-            if clash || req.node.node_id == hub.node_id {
-                return Err(Error::Conflict(format!(
-                    "a node named {:?} is already known; rename the joining node",
-                    req.node.display_name
-                )));
+            if !known && node_id_is_a_name(conn, &invite.hub.node_id)? {
+                return Err(id_is_a_name(&invite.hub.node_id));
             }
-            upsert_node(tx, &req.node)?;
+            // The invite and this node's own rows show all of this, so it is refused before
+            // anything is sent, and a refused join does not use up an honest hub's invite.
+            may_join_as_hub(conn, &me.node_id, &invite.hub)
+        })?;
+        let time_ms = self.now();
+        let sig = crypto::sign(
+            self.signing_key(),
+            &crypto::pair_message(
+                &invite.hub.node_id,
+                &invite.hub.public_key,
+                &invite.invite_id,
+                &crypto::sha256_hex(invite.secret.as_bytes()),
+                &me.node_id,
+                &me.public_key,
+                &me.display_name,
+                time_ms,
+            ),
+        );
+        let req = PairRequest {
+            invite_id: invite.invite_id.clone(),
+            node: me,
+            time_ms,
+            sig,
+        };
+        Ok((invite, req))
+    }
+
+    /// Hub side: accept a signed pairing request for a valid, unused invite.
+    pub fn accept_pairing(&self, req: &PairRequest) -> Result<PairResponse> {
+        self.accept_pairing_with_cause(req).0
+    }
+
+    /// [`Store::accept_pairing`], and beside the result the cause when the request failed
+    /// the invite check. The error text for those four causes is one and the same, so a
+    /// caller learns nothing about an invite it does not hold; the cause is for this hub's
+    /// audit log only.
+    ///
+    /// Everything is checked before anything is written, and the writes share one
+    /// transaction, so a refused request never uses up the invite.
+    pub fn accept_pairing_with_cause(
+        &self,
+        req: &PairRequest,
+    ) -> (Result<PairResponse>, Option<PairRefusal>) {
+        let cause = std::cell::RefCell::new(None);
+        let result = self.accept_pairing_inner(req, &cause);
+        (result, cause.into_inner())
+    }
+
+    fn accept_pairing_inner(
+        &self,
+        req: &PairRequest,
+        cause: &std::cell::RefCell<Option<PairRefusal>>,
+    ) -> Result<PairResponse> {
+        let node = &req.node;
+        validate_node_id(&node.node_id)?;
+        validate_pairing_name(&node.display_name)?;
+        canonical_peer_public(&node.public_key)?;
+        if req.sig.is_empty() {
+            return Err(Error::Forbidden(
+                "this hub accepts only signed pairing requests; upgrade the joining node; \
+                 an invite made before the hub was upgraded must be made again"
+                    .into(),
+            ));
+        }
+        // `time_ms` comes from the request: compare without overflow, as for a signed
+        // request between paired nodes.
+        if self.now().abs_diff(req.time_ms) > 5 * 60 * 1000 {
+            return Err(Error::Forbidden(
+                "pairing request time is more than 5 minutes off; check the clocks".into(),
+            ));
+        }
+        self.write(|tx| {
+            let denied = |why: PairRefusal| {
+                *cause.borrow_mut() = Some(why);
+                Error::Forbidden(
+                    "invalid, used or expired invite, or the request is not signed for it".into(),
+                )
+            };
+            type InviteRow = (String, String, i64, Option<i64>, Option<String>);
+            let row: Option<InviteRow> = tx
+                .query_row(
+                    "SELECT secret_hash, perms, expires_at, used_at, used_by FROM invites
+                     WHERE invite_id = ?1",
+                    [&req.invite_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+                .optional()?;
+            let Some((secret_hash, perms, expires_at, used_at, used_by)) = row else {
+                return Err(denied(PairRefusal::UnknownInvite));
+            };
+            if used_at.is_some() {
+                // An older build stored whatever id the request carried.
+                let used_by = used_by
+                    .filter(|id| validate_node_id(id).is_ok())
+                    .unwrap_or_default();
+                return Err(denied(PairRefusal::UsedInvite { used_by }));
+            }
+            if expires_at <= tx.now {
+                return Err(denied(PairRefusal::ExpiredInvite));
+            }
+            let hub = local_entry(tx)?;
+            // Built from this hub's own id and key and the stored hash, never from the
+            // request: the signature is the proof of the node key, of the invite and of
+            // the hub it was meant for.
+            let message = crypto::pair_message(
+                &hub.node_id,
+                &hub.public_key,
+                &req.invite_id,
+                &secret_hash,
+                &node.node_id,
+                &node.public_key,
+                &node.display_name,
+                req.time_ms,
+            );
+            if !crypto::verify_strict(&node.public_key, &message, &req.sig) {
+                return Err(denied(PairRefusal::BadSignature));
+            }
+
+            // The identity rules. The request is from the holder of `node.public_key`.
+            let name_taken = || {
+                Error::Conflict(format!(
+                    "a node named {:?} is already known; rename the joining node",
+                    node.display_name
+                ))
+            };
+            if node.node_id == hub.node_id {
+                return Err(name_taken());
+            }
+            let known: Option<(String, Option<String>)> = tx
+                .query_row(
+                    "SELECT display_name, public_key FROM nodes WHERE node_id = ?1",
+                    [&node.node_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let peer: Option<(String, Option<i64>, String)> = tx
+                .query_row(
+                    "SELECT role, revoked_at, perms FROM peers WHERE node_id = ?1",
+                    [&node.node_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            let mut previous = None;
+            match &known {
+                None => {
+                    if node_id_is_a_name(tx, &node.node_id)? {
+                        return Err(id_is_a_name(&node.node_id));
+                    }
+                    if node_name_taken(tx, &node.display_name, &node.node_id)? {
+                        return Err(name_taken());
+                    }
+                    tx.execute(
+                        "INSERT INTO nodes (node_id, display_name, role, is_local, created_at, public_key)
+                         VALUES (?1, ?2, 'peer', 0, ?3, ?4)",
+                        params![node.node_id, node.display_name, tx.now, node.public_key],
+                    )?;
+                }
+                Some((_, None)) => {
+                    return Err(Error::Conflict(format!(
+                        "node {} is known here without a key; it cannot be paired",
+                        node.node_id
+                    )));
+                }
+                Some((_, Some(key))) if *key != node.public_key => {
+                    return Err(Error::Conflict(format!(
+                        "node {} presented a different key than before; refusing",
+                        node.node_id
+                    )));
+                }
+                Some((name, Some(_))) => {
+                    match &peer {
+                        Some((role, _, _)) if role == "hub" => {
+                            return Err(Error::Conflict(format!(
+                                "this node syncs with {name} as its hub; it cannot also be its hub"
+                            )));
+                        }
+                        Some((_, Some(_), _)) => {
+                            return Err(Error::Forbidden(format!(
+                                "node {name} was revoked on this hub; the hub's owner can let \
+                                 it back in with `another pair readmit {name}`"
+                            )));
+                        }
+                        Some((_, None, old_perms)) => {
+                            previous = Some((name.clone(), perms_of(old_perms)));
+                        }
+                        None => {}
+                    }
+                    // The rename rule, only when the name changes: a node keeps a name
+                    // that predates a rule.
+                    if *name != node.display_name {
+                        if node_name_taken(tx, &node.display_name, &node.node_id)? {
+                            return Err(name_taken());
+                        }
+                        tx.execute(
+                            "UPDATE nodes SET display_name = ?2 WHERE node_id = ?1",
+                            params![node.node_id, node.display_name],
+                        )?;
+                    }
+                }
+            }
+            // Pairing never writes `revoked_at`: a revoked row was refused above.
             tx.execute(
                 "INSERT INTO peers (node_id, role, perms, paired_at) VALUES (?1, 'spoke', ?2, ?3)
                  ON CONFLICT(node_id) DO UPDATE SET perms = excluded.perms,
-                   paired_at = excluded.paired_at, revoked_at = NULL",
-                params![req.node.node_id, perms, tx.now],
+                   paired_at = excluded.paired_at",
+                params![node.node_id, perms, tx.now],
             )?;
             tx.execute(
                 "UPDATE invites SET used_at = ?2, used_by = ?3 WHERE invite_id = ?1",
-                params![req.invite_id, tx.now, req.node.node_id],
+                params![req.invite_id, tx.now, node.node_id],
             )?;
-            tx.emit(
-                "human (another pair)",
-                "peer.paired",
-                json!({ "node_id": req.node.node_id, "display_name": req.node.display_name, "role": "spoke", "perms": perms_of(&perms) }),
-            )?;
-            Ok(PairResponse {
-                hub,
-                perms: perms_of(&perms),
-            })
+            let perms = perms_of(&perms);
+            let mut record = json!({
+                "node_id": node.node_id,
+                "display_name": node.display_name,
+                "role": "spoke",
+                "perms": perms,
+                "again": peer.is_some(),
+                "invite_id": req.invite_id,
+                "fingerprint": crypto::fingerprint(&node.public_key),
+            });
+            if let Some((previous_name, previous_perms)) = previous {
+                record["previous_name"] = json!(previous_name);
+                record["previous_perms"] = json!(previous_perms);
+            }
+            tx.emit("human (another pair)", "peer.paired", record)?;
+            let sig = crypto::sign(
+                tx.key,
+                &crypto::pair_accept_message(
+                    &req.invite_id,
+                    &secret_hash,
+                    &node.node_id,
+                    &node.public_key,
+                    &hub.display_name,
+                    &perms_text(&perms),
+                ),
+            );
+            Ok(PairResponse { hub, perms, sig })
         })
     }
 
-    /// Spoke side: record the hub after it accepted the pairing.
+    /// Spoke side: record the hub after it accepted the pairing. The answer must be signed
+    /// by the hub key the invite carries, for this node, with the name and permissions it
+    /// states; otherwise nothing is recorded.
     pub fn complete_join(&self, invite: &Invite, resp: &PairResponse) -> Result<Peer> {
+        self.complete_join_reporting(invite, resp)
+            .map(|(peer, _)| peer)
+    }
+
+    /// [`Store::complete_join`], and beside the peer the name this node had stored for the
+    /// hub when the join lifted this node's own revoke of it (`None` for any other join).
+    /// A join to a hub this node revoked makes it sync with that hub again, whatever name
+    /// the invite gives it, so the caller says so.
+    pub fn complete_join_reporting(
+        &self,
+        invite: &Invite,
+        resp: &PairResponse,
+    ) -> Result<(Peer, Option<String>)> {
         if resp.hub.node_id != invite.hub.node_id || resp.hub.public_key != invite.hub.public_key {
             return Err(Error::Forbidden(
                 "the hub answered with a different identity than the invite".into(),
             ));
         }
+        validate_invite_id(&invite.invite_id)?;
+        // The fields of the signed bytes are joined by line breaks, so none may hold one
+        // when the signature is checked. The invite id was checked above; the other fields
+        // are this node's own id and key, a hash and the permission names; the hub's name
+        // is the one that arrives with the answer. Whether it is a usable name is decided
+        // after the check, by the rule for a hub's list.
+        if resp.hub.display_name.contains(['\n', '\r']) {
+            return Err(Error::Invalid(
+                "the hub's answer carries a name with a line break; not paired".into(),
+            ));
+        }
+        let me = self.node_entry()?;
+        let message = crypto::pair_accept_message(
+            &invite.invite_id,
+            &crypto::sha256_hex(invite.secret.as_bytes()),
+            &me.node_id,
+            &me.public_key,
+            &resp.hub.display_name,
+            &perms_text(&resp.perms),
+        );
+        if !crypto::verify_strict(&invite.hub.public_key, &message, &resp.sig) {
+            return Err(Error::Forbidden(
+                "the hub's answer is not signed with the hub key in the invite; not paired".into(),
+            ));
+        }
+        let invite_signed = invite.check_signature().is_ok();
         self.write(|tx| {
-            if let Some((existing, _, _)) = hub_of(tx)? {
-                if existing != resp.hub.node_id {
-                    return Err(Error::Conflict(
-                        "this node already syncs with another hub; unpair it first".into(),
-                    ));
-                }
-            }
-            upsert_node(tx, &resp.hub)?;
+            // A join writes the `hub` row of another node and nothing else: never a row for
+            // this node itself, never the row of a node paired here as a spoke, never under
+            // a key other than the one stored for the id. The same rule ran before the
+            // request was sent; the rows may have changed since.
+            may_join_as_hub(tx, tx.node_id, &resp.hub)?;
+            // The hub's name is applied by the rule for a name in a hub's list: used when
+            // valid, not `local` and not another node's, otherwise the known name or the id.
+            let Some(hub) = listed_entry(tx, &resp.hub)? else {
+                return Err(id_is_a_name(&resp.hub.node_id));
+            };
+            let before = peer_row(tx, &hub.node_id)?;
+            let again = before.is_some();
+            // This node's own revoke of the hub is lifted by this join: remember the name
+            // it was stored under, which the invite may not repeat.
+            let lifted: Option<String> = match before {
+                Some((_, _, Some(_))) => tx
+                    .query_row(
+                        "SELECT display_name FROM nodes WHERE node_id = ?1",
+                        [&hub.node_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?,
+                _ => None,
+            };
+            upsert_node(tx, &hub)?;
             tx.execute(
                 "INSERT INTO peers (node_id, role, url, perms, paired_at) VALUES (?1, 'hub', ?2, ?3, ?4)
                  ON CONFLICT(node_id) DO UPDATE SET url = excluded.url, perms = excluded.perms,
-                   revoked_at = NULL",
-                params![resp.hub.node_id, invite.hub_url, serde_json::to_string(&resp.perms)?, tx.now],
+                   revoked_at = NULL
+                 WHERE peers.role = 'hub'",
+                params![hub.node_id, invite.hub_url, serde_json::to_string(&resp.perms)?, tx.now],
             )?;
-            tx.emit(
-                "human (another pair)",
-                "peer.paired",
-                json!({ "node_id": resp.hub.node_id, "display_name": resp.hub.display_name, "role": "hub", "perms": resp.perms }),
-            )?;
-            Ok(tx.query_row(
+            let mut record = json!({
+                "node_id": hub.node_id,
+                "display_name": hub.display_name,
+                "role": "hub",
+                "perms": resp.perms,
+                "again": again,
+                "invite_id": invite.invite_id,
+                "fingerprint": crypto::fingerprint(&hub.public_key),
+            });
+            // The stored address is one the hub's key signed. A join without this mark is
+            // one an older build made, on an invite whose address nothing checked.
+            if invite_signed {
+                record["invite_signed"] = json!(true);
+            }
+            if let Some(previous_name) = &lifted {
+                record["revoke_lifted"] = json!(true);
+                record["previous_name"] = json!(previous_name);
+            }
+            tx.emit("human (another pair)", "peer.paired", record)?;
+            let peer = tx.query_row(
                 &format!("{PEER_SELECT} WHERE p.node_id = ?1"),
-                [&resp.hub.node_id],
+                [&hub.node_id],
                 peer_from_row,
-            )?)
+            )?;
+            Ok((peer, lifted))
         })
     }
 
@@ -1320,6 +2398,7 @@ impl Store {
                 )
                 .optional()?
                 .ok_or_else(|| Error::NotFound(format!("no paired node {node:?}")))?;
+            not_this_node(tx, &id)?;
             tx.execute(
                 "UPDATE peers SET revoked_at = ?2 WHERE node_id = ?1",
                 params![id, tx.now],
@@ -1340,46 +2419,176 @@ impl Store {
         })
     }
 
+    /// Hub side: let a spoke this hub revoked sync again, with the permissions it had.
+    /// This is the only way a revoked node returns; an invite never does it. Leases the
+    /// revoke ended are not restored.
+    pub fn readmit_peer(&self, node: &str) -> Result<Peer> {
+        self.write(|tx| {
+            let peer = find_peer(tx, node)?;
+            not_this_node(tx, &peer.node_id)?;
+            if peer.role == "hub" {
+                return Err(Error::Invalid(format!(
+                    "{} is this node's hub; join it again with a fresh invite",
+                    peer.display_name
+                )));
+            }
+            if peer.revoked_at.is_none() {
+                return Err(Error::Conflict(format!(
+                    "node {} is not revoked",
+                    peer.display_name
+                )));
+            }
+            tx.execute(
+                "UPDATE peers SET revoked_at = NULL WHERE node_id = ?1",
+                [&peer.node_id],
+            )?;
+            tx.emit(
+                "human (another pair readmit)",
+                "peer.readmitted",
+                json!({
+                    "node_id": peer.node_id,
+                    "display_name": peer.display_name,
+                    "perms": peer.perms,
+                    "fingerprint": peer.fingerprint,
+                }),
+            )?;
+            find_peer(tx, &peer.node_id)
+        })
+    }
+
+    /// Free the name a revoked node holds: the node is listed by its id from now on. Its
+    /// row, key, revoked state and agents stay. Returns the peer and the name it had. The
+    /// name is free for any node at once.
+    pub fn release_peer_name(&self, node: &str) -> Result<(Peer, String)> {
+        self.write(|tx| {
+            let peer = find_peer(tx, node)?;
+            not_this_node(tx, &peer.node_id)?;
+            if peer.revoked_at.is_none() {
+                return Err(Error::Conflict(format!(
+                    "node {} is not revoked; revoke it first",
+                    peer.display_name
+                )));
+            }
+            if peer.display_name == peer.node_id {
+                return Err(Error::Conflict(format!(
+                    "node {} has no name to release",
+                    peer.node_id
+                )));
+            }
+            tx.execute(
+                "UPDATE nodes SET display_name = node_id WHERE node_id = ?1",
+                [&peer.node_id],
+            )?;
+            tx.emit(
+                "human (another pair release-name)",
+                "peer.name_released",
+                json!({
+                    "node_id": peer.node_id,
+                    "previous_name": peer.display_name,
+                    "fingerprint": peer.fingerprint,
+                }),
+            )?;
+            Ok((find_peer(tx, &peer.node_id)?, peer.display_name))
+        })
+    }
+
     /// Spoke side: events this node authored that may leave it, after `after_seq`.
     /// Returns them and the highest sequence scanned (to advance the cursor past skips).
     pub fn outbound_events(&self, after_seq: i64, limit: u32) -> Result<(Vec<WireEvent>, i64)> {
+        let (events, high, _) =
+            self.outbound_events_within(after_seq, limit, PUSH_BATCH_BUDGET_BYTES)?;
+        Ok((events, high))
+    }
+
+    /// [`Store::outbound_events`] with the byte budget given: the batch is closed before
+    /// the push request body carrying it would pass `budget` bytes, and always holds one
+    /// event when there is one to send, so an event larger than the budget travels alone.
+    /// `usize::MAX` bounds it by count only, as builds before D99 did. An event that would
+    /// alone make a push over [`PUSH_BODY_LIMIT_BYTES`] is stepped past: the scan goes on,
+    /// and the event is returned third, for [`Store::advance_push_past`] to mark. A read.
+    pub fn outbound_events_within(
+        &self,
+        after_seq: i64,
+        limit: u32,
+        budget: usize,
+    ) -> Result<(Vec<WireEvent>, i64, Vec<SkippedEvent>)> {
         self.read(|conn| {
             let mut stmt = conn.prepare(&format!(
                 "{WIRE_SELECT} WHERE node_id = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3"
             ))?;
-            let rows = stmt
-                .query_map(params![self.node_id(), after_seq, limit], wire_from_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let high = rows.last().map_or(after_seq, |e| e.seq);
-            let out = rows
-                .into_iter()
-                .filter(|e| {
-                    let p: Value = serde_json::from_str(&e.payload).unwrap_or(Value::Null);
-                    classify(&e.kind, &p, &e.node_id) != Share::Never
-                })
-                .collect();
-            Ok((out, high))
+            let mut rows = stmt.query(params![self.node_id(), after_seq, limit])?;
+            let mut high = after_seq;
+            let mut out: Vec<WireEvent> = Vec::new();
+            let mut skipped: Vec<SkippedEvent> = Vec::new();
+            // The body is the envelope, the events and a comma between each two.
+            let mut bytes = PUSH_ENVELOPE_BYTES - 1;
+            while let Some(row) = rows.next()? {
+                let e = wire_from_row(row)?;
+                let seq = e.seq;
+                let p: Value = serde_json::from_str(&e.payload).unwrap_or(Value::Null);
+                let share = classify(&e.kind, &p, &e.node_id);
+                if share != Share::Never {
+                    let len = e.wire_bytes() + 1;
+                    // Alone it would still be over what a hub reads: stepped past.
+                    if PUSH_ENVELOPE_BYTES - 1 + len > PUSH_BODY_LIMIT_BYTES {
+                        let (route, nodes) = route_of_share(share);
+                        skipped.push(SkippedEvent::of(&e, &p, route, nodes));
+                        high = seq;
+                        continue;
+                    }
+                    if !out.is_empty() && bytes.saturating_add(len) > budget {
+                        break;
+                    }
+                    bytes += len;
+                    out.push(e);
+                }
+                high = seq;
+            }
+            Ok((out, high, skipped))
         })
     }
 
-    pub fn set_push_cursor(&self, peer: &str, seq: i64) -> Result<()> {
+    /// Spoke side: after a push batch to `peer`, commit the push cursor and, in the same
+    /// transaction, the pushed anchor: `last_accepted`, the batch's last event the hub
+    /// accepted or already held. A node-local `peer.pushed` records it when it changes.
+    pub fn advance_push(&self, peer: &str, seq: i64, last_accepted: Option<&str>) -> Result<()> {
+        self.advance_push_past(peer, seq, last_accepted, &[])
+    }
+
+    /// [`Store::advance_push`] for a batch whose scan stepped past `skipped`: the marker of
+    /// each, and its audit row, is written in the transaction that moves the cursor past
+    /// it, unless this node already has one. So the cursor is never past an event that has
+    /// no marker, and a push that failed leaves neither.
+    pub fn advance_push_past(
+        &self,
+        peer: &str,
+        seq: i64,
+        last_accepted: Option<&str>,
+        skipped: &[SkippedEvent],
+    ) -> Result<()> {
         self.write(|tx| {
             tx.execute(
-                "UPDATE peers SET push_cursor = max(push_cursor, ?2), last_sync_at = ?3 WHERE node_id = ?1",
-                params![peer, seq, tx.now],
+                "UPDATE peers SET push_cursor = max(push_cursor, ?2) WHERE node_id = ?1",
+                params![peer, seq],
             )?;
+            sync_skip::mark_tx(tx, skipped, sync_skip::Direction::Push)?;
+            if let Some(id) = last_accepted {
+                if pushed_anchor(tx, tx.node_id)?.as_deref() != Some(id) {
+                    tx.emit(
+                        "system",
+                        "peer.pushed",
+                        json!({ "peer": peer, "anchor": id }),
+                    )?;
+                }
+            }
             Ok(())
         })
     }
 
-    pub fn set_pull_cursor(&self, peer: &str, seq: i64) -> Result<()> {
-        self.write(|tx| {
-            tx.execute(
-                "UPDATE peers SET pull_cursor = max(pull_cursor, ?2), last_sync_at = ?3 WHERE node_id = ?1",
-                params![peer, seq, tx.now],
-            )?;
-            Ok(())
-        })
+    /// Spoke side: the newest of this node's own events its hub accepted, the pushed anchor
+    /// for [`Store::pull_for_from`].
+    pub fn last_pushed_event_id(&self) -> Result<Option<String>> {
+        self.read(|conn| pushed_anchor(conn, self.node_id()))
     }
 
     pub fn push_cursor(&self, peer: &str) -> Result<(i64, i64)> {
@@ -1394,6 +2603,58 @@ impl Store {
 
     /// Hub side: what a spoke receives after `after_seq` (its own events excluded).
     pub fn pull_for(&self, peer: &str, after_seq: i64, limit: u32) -> Result<PullResponse> {
+        self.pull_for_from(peer, after_seq, &PullAnchors::default(), limit)
+    }
+
+    /// [`Store::pull_for`] with the spoke's [`PullAnchors`]. The response is `reset`, with no
+    /// events, when this hub's log no longer reaches `after_seq`, no longer holds the received
+    /// anchor at the `seq` it was sent at, or no longer holds the spoke's last pushed event.
+    /// Each means the hub was restored from an older copy or replaced, so its sequence
+    /// numbers no longer match the spoke's cursors. The received anchor is checked only when
+    /// `after_seq > 0`.
+    pub fn pull_for_from(
+        &self,
+        peer: &str,
+        after_seq: i64,
+        anchors: &PullAnchors,
+        limit: u32,
+    ) -> Result<PullResponse> {
+        self.pull_answer(peer, after_seq, anchors, limit, PULL_PAGE_BUDGET_BYTES)
+    }
+
+    /// Hub side: the answer to a pull. [`Store::pull_page`] builds the page; then, before
+    /// the page is answered, one write transaction writes the missing markers for the
+    /// events the page stepped past. If that write fails so does the answer, and the
+    /// spoke's cursor has not moved.
+    pub fn pull_answer(
+        &self,
+        peer: &str,
+        after_seq: i64,
+        anchors: &PullAnchors,
+        limit: u32,
+        budget: usize,
+    ) -> Result<PullResponse> {
+        let (page, skipped) = self.pull_page(peer, after_seq, anchors, limit, budget)?;
+        self.mark_pull_skips(&skipped)?;
+        Ok(page)
+    }
+
+    /// [`Store::pull_for_from`] with the byte budget given: the page is closed, with `more`
+    /// set, before its response body (the node directory included) would pass `budget`
+    /// bytes, and always holds one event when there is one to send, so an event larger than
+    /// the budget travels alone. `usize::MAX` bounds it by count only, as builds before D99
+    /// did. An event meant for this spoke that would alone make an answer over
+    /// [`PULL_BODY_LIMIT_BYTES`] is stepped past: the page goes on, has `more` set so the
+    /// spoke asks again and receives the marker, and the event is returned beside the page
+    /// for [`Store::mark_pull_skips`]. A read.
+    pub fn pull_page(
+        &self,
+        peer: &str,
+        after_seq: i64,
+        anchors: &PullAnchors,
+        limit: u32,
+        budget: usize,
+    ) -> Result<(PullResponse, Vec<SkippedEvent>)> {
         self.read(|conn| {
             let Some((role, perms, None)) = peer_row(conn, peer)? else {
                 return Err(Error::Forbidden("not a paired node".into()));
@@ -1401,20 +2662,64 @@ impl Store {
             if role != "spoke" {
                 return Err(Error::Forbidden("only spokes pull from a hub".into()));
             }
+            let high: i64 =
+                conn.query_row("SELECT coalesce(max(seq), 0) FROM events", [], |r| r.get(0))?;
+            let seq_of = |id: &str| -> Result<Option<i64>> {
+                Ok(conn
+                    .query_row("SELECT seq FROM events WHERE event_id = ?1", [id], |r| {
+                        r.get(0)
+                    })
+                    .optional()?)
+            };
+            let received_lost = match anchors.received.as_deref().filter(|_| after_seq > 0) {
+                Some(id) => match (seq_of(id)?, anchors.received_seq) {
+                    (None, _) => true,
+                    (Some(at), Some(sent_at)) => at != sent_at,
+                    (Some(_), None) => false,
+                },
+                None => false,
+            };
+            let pushed_lost = match anchors.pushed.as_deref() {
+                Some(id) => seq_of(id)?.is_none(),
+                None => false,
+            };
+            if after_seq > high || received_lost || pushed_lost {
+                let reset = PullResponse {
+                    events: Vec::new(),
+                    cursor: 0,
+                    more: false,
+                    nodes: known_nodes(conn)?,
+                    reset: true,
+                };
+                return Ok((reset, Vec::new()));
+            }
             let scan = limit.saturating_mul(4).max(limit);
             let mut stmt = conn.prepare(&format!(
                 "{WIRE_SELECT} WHERE seq > ?1 AND node_id != ?2 ORDER BY seq LIMIT ?3"
             ))?;
-            let rows = stmt
-                .query_map(params![after_seq, peer, scan], wire_from_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let more = rows.len() as u32 == scan;
+            let mut rows = stmt.query(params![after_seq, peer, scan])?;
+            let mut page = PullResponse {
+                events: Vec::new(),
+                cursor: i64::MAX,
+                more: false,
+                nodes: known_nodes(conn)?,
+                reset: false,
+            };
+            // The body with no events and the widest cursor, then the events and a comma
+            // between each two.
+            let envelope = json_bytes(&page) - 1;
+            let mut bytes = envelope;
+            let mut scanned = 0u32;
+            // The page was closed with an event still to send.
+            let mut closed = false;
             let mut cursor = after_seq;
-            let mut events = Vec::new();
-            for e in rows {
-                cursor = e.seq;
+            let mut skipped: Vec<SkippedEvent> = Vec::new();
+            while let Some(row) = rows.next()? {
+                let e = wire_from_row(row)?;
+                scanned += 1;
                 let p: Value = serde_json::from_str(&e.payload).unwrap_or(Value::Null);
-                let send = match classify(&e.kind, &p, &e.node_id) {
+                let share = classify(&e.kind, &p, &e.node_id);
+                let send = match &share {
                     Share::Never => false,
                     Share::Directory => true,
                     Share::Feed(also) => {
@@ -1422,32 +2727,248 @@ impl Store {
                     }
                     Share::Mail(nodes) => nodes.iter().any(|n| n == peer),
                 };
-                if send {
-                    events.push(e);
-                    if events.len() as u32 >= limit {
-                        break;
-                    }
+                if !send {
+                    cursor = e.seq;
+                    continue;
+                }
+                let len = e.wire_bytes() + 1;
+                // Alone it would still be over what a spoke reads: stepped past.
+                if envelope + len > PULL_BODY_LIMIT_BYTES {
+                    let (route, nodes) = route_of_share(share);
+                    skipped.push(SkippedEvent::of(&e, &p, route, nodes));
+                    cursor = e.seq;
+                    continue;
+                }
+                if !page.events.is_empty() && bytes.saturating_add(len) > budget {
+                    closed = true;
+                    break;
+                }
+                bytes += len;
+                cursor = e.seq;
+                page.events.push(e);
+                if page.events.len() as u32 >= limit {
+                    break;
                 }
             }
-            let more = more || events.len() as u32 >= limit;
-            let mut stmt = conn.prepare(
-                "SELECT node_id, display_name, public_key FROM nodes WHERE public_key IS NOT NULL",
-            )?;
-            let nodes = stmt
-                .query_map([], |r| {
-                    Ok(NodeEntry {
-                        node_id: r.get(0)?,
-                        display_name: r.get(1)?,
-                        public_key: r.get(2)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(PullResponse {
-                events,
-                cursor,
-                more,
-                nodes,
+            // After a skip the spoke asks again, and that answer carries the marker.
+            page.more = closed
+                || !skipped.is_empty()
+                || scanned == scan
+                || page.events.len() as u32 >= limit;
+            page.cursor = cursor;
+            Ok((page, skipped))
+        })
+    }
+
+    /// Spoke side: the last event this node received from its hub, the anchor for
+    /// [`Store::pull_for_from`]. Events from other nodes reach a spoke only through its hub
+    /// and are stored in the order the hub sent them. When the last event the hub sent was
+    /// not stored (a duplicate or a rejected event), or after a resync, the newest record
+    /// is a local `peer.anchored` or `peer.resynced` event naming it (`anchor`).
+    pub fn last_relayed_event_id(&self) -> Result<Option<String>> {
+        Ok(self
+            .read(|conn| relayed_anchor(conn, self.node_id()))?
+            .map(|(id, _)| id))
+    }
+
+    /// Spoke side: every anchor for the next pull from the hub (see [`PullAnchors`]).
+    pub fn pull_anchors(&self) -> Result<PullAnchors> {
+        self.read(|conn| {
+            let local = self.node_id();
+            let (received, received_seq) = relayed_anchor(conn, local)?.unzip();
+            Ok(PullAnchors {
+                received,
+                received_seq: received_seq.flatten(),
+                pushed: pushed_anchor(conn, local)?,
             })
+        })
+    }
+
+    /// Spoke side: after a pull page from `peer` is ingested, commit its cursor and the
+    /// anchor that goes with it **in one transaction**, so a failure or crash can never
+    /// leave an advanced cursor beside an older anchor (REVIEW-R2). `last_received` is the
+    /// last event the page carried, with the hub `seq` it was sent at. A node-local
+    /// `peer.anchored` records both whenever they change. A page with no events moves the
+    /// cursor and keeps the anchor.
+    pub fn advance_pull(
+        &self,
+        peer: &str,
+        seq: i64,
+        last_received: Option<(&str, i64)>,
+    ) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE peers SET pull_cursor = max(pull_cursor, ?2) WHERE node_id = ?1",
+                params![peer, seq],
+            )?;
+            if let Some((id, at)) = last_received {
+                if relayed_anchor(tx, tx.node_id)? != Some((id.to_string(), Some(at))) {
+                    tx.emit(
+                        "system",
+                        "peer.anchored",
+                        json!({ "peer": peer, "anchor": id, "seq": at }),
+                    )?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Spoke side: a sync with `hub` ran to its end. This is the only write of the hub's
+    /// `last_sync_at`: a push batch or a pull page by itself does not count, so a sync that
+    /// keeps failing part way shows as stale.
+    pub fn record_sync_complete(&self, hub: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE peers SET last_sync_at = ?2 WHERE node_id = ?1 AND role = 'hub'",
+                params![hub, tx.now],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Hub side: a push or a pull of `spoke` was answered with a signed `200`. Writes that
+    /// spoke's `last_sync_at`, so the hub can tell a spoke that stopped syncing.
+    pub fn record_peer_contact(&self, spoke: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE peers SET last_sync_at = ?2 WHERE node_id = ?1 AND role = 'spoke'",
+                params![spoke, tx.now],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Hub side: sign a `200` answer to a push or a pull of `spoke_node_id`. `nonce` and
+    /// `request_signature` are the header texts of the request being answered, and `body`
+    /// the exact bytes that are sent.
+    pub fn sign_answer(
+        &self,
+        spoke_node_id: &str,
+        nonce: &str,
+        request_signature: &str,
+        body: &[u8],
+    ) -> String {
+        crypto::sign(
+            self.signing_key(),
+            &crypto::answer_message(
+                self.node_id(),
+                spoke_node_id,
+                nonce,
+                request_signature,
+                body,
+            ),
+        )
+    }
+
+    /// Spoke side: check the hub's signature on an answer to a push or a pull, under the
+    /// key pinned for `hub_id` at pairing. `nonce` and `request_signature` are what this
+    /// node sent with the request, and `body` the answer body as received, after content
+    /// decoding. Nothing of the body may be read before this returns `Ok`.
+    pub fn verify_hub_answer(
+        &self,
+        hub_id: &str,
+        nonce: &str,
+        request_signature: &str,
+        body: &[u8],
+        signature: &str,
+    ) -> Result<()> {
+        let key: Option<String> = self.read(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT public_key FROM nodes WHERE node_id = ?1 AND is_local = 0",
+                    [hub_id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten())
+        })?;
+        let message =
+            crypto::answer_message(hub_id, self.node_id(), nonce, request_signature, body);
+        match key {
+            Some(key) if crypto::verify_strict(&key, &message, signature) => Ok(()),
+            _ => Err(Error::Forbidden(
+                "answer signature is not the hub's for this request".into(),
+            )),
+        }
+    }
+
+    /// Spoke side: the first entry of a hub's list that names a node with another key than
+    /// the one pinned here, as [`Store::ingest`] refuses it. Read after such a refusal, to
+    /// record it: the refusal itself rolled back with its transaction.
+    pub fn listed_key_conflict(&self, nodes: &[NodeEntry]) -> Result<Option<KeyConflict>> {
+        self.read(|conn| {
+            for n in nodes {
+                if crypto::decode_peer_public(&n.public_key).is_err()
+                    || validate_node_id(&n.node_id).is_err()
+                {
+                    continue;
+                }
+                if let Some(conflict) = key_conflict(conn, self.node_id(), n)? {
+                    return Ok(Some(conflict));
+                }
+            }
+            Ok(None)
+        })
+    }
+
+    /// Spoke side: this node's hub, when the newest local `peer.paired` record of it does
+    /// not say the invite was signed. Its stored address is then one nothing checked: the
+    /// join was made by a build before invites were signed. `None` for a hub joined on a
+    /// signed invite, and for a node with no hub.
+    pub fn hub_joined_before_signed_invites(&self) -> Result<Option<String>> {
+        self.read(|conn| {
+            let Some((hub, _, _)) = hub_of(conn)? else {
+                return Ok(None);
+            };
+            let newest: Option<rusqlite::types::Value> = conn
+                .query_row(
+                    "SELECT json_extract(payload, '$.invite_signed') FROM events
+                     WHERE node_id = ?1 AND kind = 'peer.paired'
+                       AND json_extract(payload, '$.node_id') = ?2
+                       AND json_extract(payload, '$.role') = 'hub'
+                     ORDER BY seq DESC LIMIT 1",
+                    params![self.node_id(), hub],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            Ok(match newest {
+                Some(rusqlite::types::Value::Integer(1)) | None => None,
+                Some(_) => Some(hub),
+            })
+        })
+    }
+
+    /// Spoke side: start over with `peer` from zero in both directions, after the hub
+    /// reported `reset`. Duplicates are skipped on both sides, so this is safe to repeat.
+    pub fn reset_sync_cursors(&self, peer: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE peers SET push_cursor = 0, pull_cursor = 0 WHERE node_id = ?1",
+                [peer],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Spoke side: record a completed resync with `peer`: the last event it sent and the
+    /// `seq` it was sent at (the received anchor), and the last of this node's events it
+    /// accepted (the pushed anchor), each `null` when there was none. A `peer.*` event never
+    /// leaves this node.
+    pub fn record_resync(
+        &self,
+        peer: &str,
+        anchor: Option<(&str, i64)>,
+        pushed: Option<&str>,
+    ) -> Result<()> {
+        let (id, seq) = anchor.unzip();
+        self.write(|tx| {
+            tx.emit(
+                "system",
+                "peer.resynced",
+                json!({ "peer": peer, "anchor": id, "seq": seq, "pushed": pushed }),
+            )?;
+            Ok(())
         })
     }
 
@@ -1464,7 +2985,29 @@ impl Store {
                 return Err(Error::Forbidden("not a paired node".into()));
             };
             for n in nodes {
-                upsert_node(tx, n)?;
+                // A key in the directory that is weak (a hub may have pinned one before keys
+                // were checked) or does not decode is never pinned here, but it does not
+                // stop the rest of the page from syncing: events from that node then fail
+                // as from an unknown origin (FINDINGS-197 adv197).
+                if crypto::decode_peer_public(&n.public_key).is_err() {
+                    continue;
+                }
+                // A spoke speaks only for itself (public keys prove nothing about the
+                // sender); for its spokes, the hub's list is the directory.
+                if role == "spoke" && n.node_id != from {
+                    continue;
+                }
+                if let Some(entry) = listed_entry(tx, n)? {
+                    // A hub's list reaches here only from an answer the hub signed. A key
+                    // in it that differs from the pinned one is refused with both
+                    // fingerprints: one of the two is wrong, and the owner must see which.
+                    if role == "hub" {
+                        if let Some(conflict) = key_conflict(tx, tx.node_id, &entry)? {
+                            return Err(conflict.refusal());
+                        }
+                    }
+                    upsert_node(tx, &entry)?;
+                }
             }
             let mut report = IngestReport::default();
             for ev in events {
@@ -1506,7 +3049,16 @@ impl Store {
                     report.duplicates += 1;
                     continue;
                 }
-                if let Err(e) = project_foreign(tx, ev, &payload) {
+                if let Some(reason) = crate::holds::refuse_foreign_pattern(
+                    tx,
+                    &ev.node_id,
+                    &ev.event_id,
+                    &ev.kind,
+                    &payload,
+                )? {
+                    tracing::warn!(event = %ev.event_id, node = %ev.node_id, %reason, "foreign hold not applied");
+                    report.not_applied.push(reject(reason));
+                } else if let Err(e) = project_foreign(tx, ev, &payload) {
                     tracing::warn!(event = %ev.event_id, kind = %ev.kind, error = %e, "could not project foreign event");
                 }
                 report.accepted += 1;
@@ -1861,10 +3413,39 @@ mod tests {
     }
 
     #[test]
+    fn extreme_request_times_are_refused_without_overflow() {
+        // `x-another-time` is read from an unauthenticated header before any signature
+        // check; found by the peer_request fuzz harness.
+        let (clock, _) = crate::Clock::manual(1_800_000_000_000);
+        let store = Store::open_in_memory(clock).unwrap();
+        // The last value made the old wrapping difference exactly i64::MIN, whose wrapping
+        // `abs` stays negative: it slipped past the window in a release build.
+        let wrap_to_min = 1_800_000_000_000i64.wrapping_add(i64::MIN);
+        for time in [i64::MIN, i64::MIN + 1, i64::MAX, wrap_to_min] {
+            let err = store
+                .verify_peer_request("node", "GET", "/fed/pull", time, b"", "sig")
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("more than 5 minutes off"),
+                "{time}: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn classification() {
         let o = "A";
         assert_eq!(classify("token.created", &json!({}), o), Share::Never);
         assert_eq!(classify("oauth.approved", &json!({}), o), Share::Never);
+        for kind in [
+            "push.woke",
+            "push.notified",
+            "push.suppressed",
+            "transport.wake",
+            "transport.gone",
+        ] {
+            assert_eq!(classify(kind, &json!({}), o), Share::Never, "{kind}");
+        }
         assert_eq!(
             classify("agent.registered", &json!({}), o),
             Share::Directory
@@ -1901,5 +3482,15 @@ mod tests {
         drop(l);
         assert!(!reachable(None, Some(port)));
         assert!(!reachable(Some("http://127.0.0.1:1"), None));
+    }
+
+    #[test]
+    fn reachability_does_not_resolve_peer_hostnames() {
+        let started = std::time::Instant::now();
+        assert!(!reachable(Some("http://peer-controlled.invalid:80"), None));
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "reachability must not wait for DNS"
+        );
     }
 }

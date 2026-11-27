@@ -17,6 +17,20 @@ use crate::time::{fmt_opt, fmt_ts};
 pub const DEFAULT_LEASE_TTL_SECONDS: i64 = 30 * 60;
 pub const MIN_LEASE_TTL_SECONDS: i64 = 60;
 pub const MAX_LEASE_TTL_SECONDS: i64 = 24 * 60 * 60;
+/// Most lease ids one `resource.renewed` or `resource.released` event of a heartbeat or a
+/// session end lists.
+const LEASE_IDS_PER_EVENT: usize = 10_000;
+/// Longest resource endpoint accepted, in bytes: room for any real URL.
+pub const MAX_RESOURCE_ENDPOINT_BYTES: usize = 2 * 1024;
+/// Longest resource purpose accepted, in bytes: one line of prose.
+pub const MAX_RESOURCE_PURPOSE_BYTES: usize = 1024;
+/// Largest resource metadata accepted, measured as serialized JSON. Metadata is stored,
+/// written into the `resource.registered` event and synced to peers, so it stays small.
+pub const MAX_RESOURCE_METADATA_BYTES: usize = 64 * 1024;
+/// A resource listing spends at most this long checking foreign endpoints.
+const RESOURCE_PROBE_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
+/// A listing probes no more than this many foreign endpoints, even when probes fail fast.
+const RESOURCE_PROBE_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -105,6 +119,7 @@ pub struct RegisterResource {
     pub mode: LeaseMode,
     pub ttl_seconds: Option<i64>,
     /// Free-form details: model, backend (`metal|mlx|cpu|cuda`), estimated_bytes, cmdline, ...
+    /// At most 64 KiB as JSON.
     pub metadata: Option<Value>,
 }
 
@@ -208,11 +223,44 @@ pub fn derive_port(text: &str) -> Option<u16> {
         .filter(|p| *p > 0)
 }
 
-fn validate_name(name: &str) -> Result<()> {
-    if name.trim().is_empty() || name.len() > 200 || name.chars().any(char::is_control) {
+/// The resource name rule, for a local registration and for a peer's `resource.registered`
+/// (see `federation::foreign_authority`).
+pub(crate) fn validate_name(name: &str) -> Result<()> {
+    if name.trim().is_empty() || name.len() > 200 {
         return Err(Error::Invalid(
             "resource name must be 1-200 printable characters".into(),
         ));
+    }
+    crate::queue::no_unsafe("a resource name", name, false)
+}
+
+/// A resource's endpoint and purpose are stored, written into `resource.registered` and
+/// synced to peers, so both stay small. Shared by a local registration and a peer's event.
+pub(crate) fn check_text_sizes(endpoint: Option<&str>, purpose: Option<&str>) -> Result<()> {
+    for (field, value, max) in [
+        ("endpoint", endpoint, MAX_RESOURCE_ENDPOINT_BYTES),
+        ("purpose", purpose, MAX_RESOURCE_PURPOSE_BYTES),
+    ] {
+        if let Some(len) = value.map(str::len).filter(|len| *len > max) {
+            return Err(Error::Invalid(format!(
+                "resource {field} is {len} bytes; the limit is {max}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Resource metadata must be a JSON object of at most [`MAX_RESOURCE_METADATA_BYTES`] as
+/// serialized JSON. Local registration and a peer's `resource.registered` both apply it.
+pub(crate) fn check_metadata(metadata: &Value) -> Result<()> {
+    if !metadata.is_object() {
+        return Err(Error::Invalid("metadata must be a JSON object".into()));
+    }
+    let bytes = metadata.to_string().len();
+    if bytes > MAX_RESOURCE_METADATA_BYTES {
+        return Err(Error::Invalid(format!(
+            "metadata is {bytes} bytes as JSON; the limit is {MAX_RESOURCE_METADATA_BYTES}"
+        )));
     }
     Ok(())
 }
@@ -242,8 +290,14 @@ fn resource_from_row(r: &Row<'_>) -> rusqlite::Result<Row0> {
             kind: kind.parse().unwrap_or(ResourceKind::LongJob),
             name: r.get(3)?,
             endpoint: r.get(4)?,
-            port: r.get(5)?,
-            pid: r.get(6)?,
+            // A peer's event can carry any integer here (a local registration cannot). One
+            // that does not fit is shown as absent instead of failing every listing.
+            port: r
+                .get::<_, Option<i64>>(5)?
+                .and_then(|v| u16::try_from(v).ok()),
+            pid: r
+                .get::<_, Option<i64>>(6)?
+                .and_then(|v| u32::try_from(v).ok()),
             project: r.get(7)?,
             purpose: r.get(8)?,
             mode: if mode == "exclusive" {
@@ -604,14 +658,24 @@ pub(crate) fn session_leases_tx(
     if leases.is_empty() {
         return Ok(0);
     }
-    let ids: Vec<&String> = leases.iter().map(|(id, _, _)| id).collect();
-    let nodes = foreign_nodes_for(tx, &ids)?;
+    // One event lists at most `LEASE_IDS_PER_EVENT` leases, so a heartbeat or a session end
+    // cannot meet the size limit for one event (D99); readers take the ids event by event.
+    for chunk in leases.chunks(LEASE_IDS_PER_EVENT) {
+        let ids: Vec<&String> = chunk.iter().map(|(id, _, _)| id).collect();
+        let nodes = foreign_nodes_for(tx, &ids)?;
+        let payload = if release {
+            json!({ "lease_ids": ids, "reason": "session_end", "resource_nodes": nodes })
+        } else {
+            json!({ "lease_ids": ids, "resource_nodes": nodes })
+        };
+        let kind = if release {
+            "resource.released"
+        } else {
+            "resource.renewed"
+        };
+        tx.emit(&agent.address, kind, payload)?;
+    }
     if release {
-        tx.emit(
-            &agent.address,
-            "resource.released",
-            json!({ "lease_ids": ids, "reason": "session_end", "resource_nodes": nodes }),
-        )?;
         for (lease_id, resource_id, _) in &leases {
             tx.execute(
                 "UPDATE resource_leases SET released_at = ?2, release_reason = 'session_end'
@@ -621,11 +685,6 @@ pub(crate) fn session_leases_tx(
             settle(tx, resource_id, &agent.address, tx.now)?;
         }
     } else {
-        tx.emit(
-            &agent.address,
-            "resource.renewed",
-            json!({ "lease_ids": ids, "resource_nodes": nodes }),
-        )?;
         for (lease_id, _, ttl) in &leases {
             tx.execute(
                 "UPDATE resource_leases SET renewed_at = ?2, expires_at = ?2 + ?3 * 1000
@@ -637,20 +696,52 @@ pub(crate) fn session_leases_tx(
     Ok(leases.len() as u32)
 }
 
+fn probe_foreign_resources(
+    resources: &mut [Resource],
+    mut probe: impl FnMut(Option<&str>, Option<u16>, std::time::Duration) -> bool,
+) {
+    let deadline = std::time::Instant::now() + RESOURCE_PROBE_BUDGET;
+    let mut probed = 0;
+    for resource in resources {
+        if resource.node.is_none() || resource.status != "live" {
+            continue;
+        }
+        // A conservative false for entries beyond either cap avoids turning an
+        // incomplete scan into an unbounded wait. The listing itself is complete.
+        resource.reachable = Some(
+            if probed < RESOURCE_PROBE_LIMIT && std::time::Instant::now() < deadline {
+                probed += 1;
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                let timeout = remaining.min(std::time::Duration::from_millis(100));
+                !timeout.is_zero() && probe(resource.endpoint.as_deref(), resource.port, timeout)
+            } else {
+                false
+            },
+        );
+    }
+}
+
 impl Store {
     /// Register a running resource and take the owner lease. If a resource with the same
     /// kind and name is already registered, this fails with `conflict` while it has live
     /// leases (borrow it instead), and adopts it when it has lapsed.
     pub fn register_resource(&self, input: RegisterResource) -> Result<LeaseOutcome> {
         validate_name(&input.name)?;
+        check_text_sizes(input.endpoint.as_deref(), input.purpose.as_deref())?;
+        for (what, text) in [
+            ("a resource endpoint", &input.endpoint),
+            ("a resource purpose", &input.purpose),
+        ] {
+            if let Some(text) = text {
+                crate::queue::no_unsafe(what, text, false)?;
+            }
+        }
         let ttl = clamp_ttl(input.ttl_seconds)?;
         let metadata = input
             .metadata
             .clone()
             .unwrap_or(Value::Object(Default::default()));
-        if !metadata.is_object() {
-            return Err(Error::Invalid("metadata must be a JSON object".into()));
-        }
+        check_metadata(&metadata)?;
         self.write(|tx| {
             crate::holds::sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, &input.agent)?;
@@ -755,8 +846,22 @@ impl Store {
     /// Find registered resources (live and lapsed by default), newest first.
     pub fn find_resources(&self, filter: ResourceFilter) -> Result<Vec<Resource>> {
         self.sweep()?;
+        self.list_resources(filter, true)
+    }
+
+    /// What [`Store::find_resources`] lists, for a caller that must change nothing and
+    /// contact nothing (`another doctor`): no sweep runs first, and no connection is tried
+    /// to another node's resource, so `reachable` stays `None`. This node's lease that ran
+    /// out by the clock still counts until a sweep expires it, so its resource reads as
+    /// `live` here; another node's counts only until its expiry, and a resource it leaves
+    /// with no lease reads as `lapsed` with no `lapsed_since` until a sweep records that.
+    pub fn resources_unswept(&self, filter: ResourceFilter) -> Result<Vec<Resource>> {
+        self.list_resources(filter, false)
+    }
+
+    fn list_resources(&self, filter: ResourceFilter, probe: bool) -> Result<Vec<Resource>> {
         let now = self.now();
-        self.read(|conn| {
+        let mut resources: Vec<Resource> = self.read(|conn| {
             let project_id = match &filter.project {
                 Some(p) => Some(find_project(conn, self.node_id(), p)?.project_id),
                 None => None,
@@ -784,19 +889,12 @@ impl Store {
                     resource_from_row,
                 )?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            rows.into_iter()
-                .map(|r| {
-                    let mut res = hydrate(conn, r, now)?;
-                    if res.node.is_some() && res.status == "live" {
-                        res.reachable = Some(crate::federation::reachable(
-                            res.endpoint.as_deref(),
-                            res.port,
-                        ));
-                    }
-                    Ok(res)
-                })
-                .collect()
-        })
+            rows.into_iter().map(|r| hydrate(conn, r, now)).collect()
+        })?;
+        if probe {
+            probe_foreign_resources(&mut resources, crate::federation::reachable_with_timeout);
+        }
+        Ok(resources)
     }
 
     pub fn resource(&self, target: &ResourceRef) -> Result<Resource> {
@@ -818,7 +916,30 @@ impl Store {
         target: &ResourceRef,
         ttl_seconds: Option<i64>,
     ) -> Result<LeaseOutcome> {
+        self.borrow_resource_with_probe(agent, target, ttl_seconds, crate::federation::reachable)
+    }
+
+    fn borrow_resource_with_probe(
+        &self,
+        agent: &str,
+        target: &ResourceRef,
+        ttl_seconds: Option<i64>,
+        probe: impl FnOnce(Option<&str>, Option<u16>) -> bool,
+    ) -> Result<LeaseOutcome> {
         let ttl = clamp_ttl(ttl_seconds)?;
+        // Reachability is external I/O. Read the candidate first, probe without the
+        // SQLite write transaction/connection mutex, then revalidate its endpoint and
+        // ownership inside the transaction before committing the lease.
+        let candidate = self.read(|conn| {
+            resolve_agent(conn, self.node_id(), agent)?;
+            let rid = resolve(conn, self.node_id(), target)?;
+            get_resource(conn, &rid, self.now())
+        })?;
+        let candidate_node = candidate.node_id.clone();
+        let candidate_endpoint = candidate.endpoint.clone();
+        let candidate_port = candidate.port;
+        let reachable = (candidate_node != self.node_id())
+            .then(|| probe(candidate_endpoint.as_deref(), candidate_port));
         self.write(|tx| {
             crate::holds::sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, agent)?;
@@ -826,6 +947,17 @@ impl Store {
             let owner_node = resource_node(tx, &rid)?;
             let foreign = owner_node != tx.node_id;
             let node_field = foreign.then(|| owner_node.clone());
+            let current = get_resource(tx, &rid, tx.now)?;
+            if foreign
+                && (candidate_node != owner_node
+                    || candidate_endpoint != current.endpoint
+                    || candidate_port != current.port)
+            {
+                return Err(Error::Conflict(
+                    "resource endpoint changed while checking reachability; try borrowing again"
+                        .into(),
+                ));
+            }
             if let Some((lease_id, _)) = my_lease(tx, &rid, &me.id)? {
                 tx.emit(
                     &me.address,
@@ -845,7 +977,6 @@ impl Store {
                 touch(tx, &me.id)?;
                 return outcome(tx, &rid, &me.id, "renewed");
             }
-            let current = get_resource(tx, &rid, tx.now)?;
             if foreign {
                 crate::federation::allowed_towards(
                     tx,
@@ -860,7 +991,7 @@ impl Store {
                         current.name
                     )));
                 }
-                if !crate::federation::reachable(current.endpoint.as_deref(), current.port) {
+                if !reachable.unwrap_or(false) {
                     return Err(Error::Conflict(format!(
                         "{} {} on node {node} is not reachable from this machine",
                         current.kind.as_str(),
@@ -1201,6 +1332,49 @@ mod tests {
         assert_eq!(derive_port("train-job"), None);
     }
 
+    fn foreign_resource(i: usize) -> Resource {
+        Resource {
+            resource_id: format!("foreign-{i}"),
+            node_id: "peer".into(),
+            kind: ResourceKind::Port,
+            name: format!("port-{i}"),
+            endpoint: Some("http://192.0.2.1:80".into()),
+            port: Some(80),
+            pid: None,
+            project: None,
+            purpose: None,
+            mode: LeaseMode::Shared,
+            owner: Some("owner".into()),
+            leases: Vec::new(),
+            refcount: 1,
+            status: "live".into(),
+            lapsed_since: None,
+            metadata: Value::Null,
+            created_at: String::new(),
+            node: Some("peer".into()),
+            reachable: None,
+        }
+    }
+
+    #[test]
+    fn resource_listing_caps_foreign_probes() {
+        let mut resources = (0..RESOURCE_PROBE_LIMIT + 3)
+            .map(foreign_resource)
+            .collect::<Vec<_>>();
+        let mut calls = 0;
+        probe_foreign_resources(&mut resources, |_, _, _| {
+            calls += 1;
+            true
+        });
+        assert_eq!(calls, RESOURCE_PROBE_LIMIT);
+        assert!(resources[..RESOURCE_PROBE_LIMIT]
+            .iter()
+            .all(|resource| resource.reachable == Some(true)));
+        assert!(resources[RESOURCE_PROBE_LIMIT..]
+            .iter()
+            .all(|resource| resource.reachable == Some(false)));
+    }
+
     #[test]
     fn parses_refs() {
         assert!(matches!(
@@ -1211,5 +1385,103 @@ mod tests {
             ResourceRef::parse("01J0000000000000000000000A").unwrap(),
             ResourceRef::Id(_)
         ));
+    }
+
+    fn borrow_fixture() -> (Store, ResourceRef) {
+        let store = Store::open_in_memory(crate::Clock::manual(1_800_000_000_000).0).unwrap();
+        for name in ["alice", "bob"] {
+            store
+                .register_agent(crate::RegisterAgent {
+                    name: name.into(),
+                    program: crate::Program::Codex,
+                    project: None,
+                    model: None,
+                    description: None,
+                })
+                .unwrap();
+        }
+        let registered = store
+            .register_resource(RegisterResource {
+                agent: "alice".into(),
+                kind: ResourceKind::Port,
+                name: "foreign-port".into(),
+                endpoint: Some("http://192.0.2.1:80".into()),
+                port: Some(80),
+                pid: None,
+                project: None,
+                purpose: None,
+                mode: LeaseMode::Shared,
+                ttl_seconds: None,
+                metadata: None,
+            })
+            .unwrap();
+        store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO nodes (node_id, display_name, role, is_local, created_at)
+                     VALUES ('peer', 'peer', 'peer', 0, ?1)",
+                    [tx.now],
+                )?;
+                tx.execute(
+                    "INSERT INTO peers (node_id, role, perms, paired_at)
+                     VALUES ('peer', 'spoke', '[\"borrow_resource\"]', ?1)",
+                    [tx.now],
+                )?;
+                tx.execute(
+                    "UPDATE resources SET node_id = 'peer' WHERE resource_id = ?1",
+                    [&registered.resource.resource_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        (store, ResourceRef::Id(registered.resource.resource_id))
+    }
+
+    #[test]
+    fn borrow_reachability_probe_runs_without_store_write_lock() {
+        let (store, target) = borrow_fixture();
+        let probe_store = store.clone();
+        let borrowed = store
+            .borrow_resource_with_probe("bob", &target, None, move |_, _| {
+                // This write would block on the store connection mutex if the probe ran
+                // inside borrow_resource's transaction.
+                probe_store
+                    .register_agent(crate::RegisterAgent {
+                        name: "probe-writer".into(),
+                        program: crate::Program::Codex,
+                        project: None,
+                        model: None,
+                        description: None,
+                    })
+                    .unwrap();
+                true
+            })
+            .unwrap();
+        assert_eq!(borrowed.outcome, "borrowed");
+    }
+
+    #[test]
+    fn borrow_refuses_if_endpoint_changes_during_probe() {
+        let (store, target) = borrow_fixture();
+        let changed = store.clone();
+        let resource_id = match &target {
+            ResourceRef::Id(id) => id.clone(),
+            ResourceRef::Name(_, _) => unreachable!(),
+        };
+        let result = store.borrow_resource_with_probe("bob", &target, None, move |_, _| {
+            changed
+                .write(|tx| {
+                    tx.execute(
+                        "UPDATE resources SET endpoint = 'http://192.0.2.2:80'
+                         WHERE resource_id = ?1",
+                        [&resource_id],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            true
+        });
+        assert!(result.unwrap_err().to_string().contains("endpoint changed"));
+        assert_eq!(store.resource(&target).unwrap().refcount, 1);
     }
 }

@@ -371,6 +371,22 @@ async fn bh13_renew_and_release_stay_inside_the_tokens_globs() {
         );
     }
 
+    // The path form of release (D92) stays inside the globs too: naming the hidden hold's
+    // file is refused, and nothing is released.
+    let by_path = call(
+        &client,
+        "hold_paths",
+        json!({ "action": "release", "project": srv.path("sandbox/w/a"),
+                "paths": [srv.path("private/data/local-work.rs")] }),
+    )
+    .await;
+    assert_eq!(by_path.is_error, Some(true), "{by_path:?}");
+    assert!(
+        text(&by_path).contains("outside your projects"),
+        "{by_path:?}"
+    );
+    assert_eq!(live_holds(&srv.store).len(), 2, "release by path");
+
     // Release all: only the in-scope hold.
     let release = call(
         &client,
@@ -455,6 +471,216 @@ async fn bh13_heartbeat_leases_stay_inside_the_tokens_globs() {
         hidden_leases,
         "end released a hidden lease"
     );
+    srv.ct.cancel();
+}
+
+/// A local MCP caller: the server in process, with no token.
+async fn in_process(store: Store) -> Client {
+    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(async move {
+        let server = another::mcp::AnotherMcp::new(store)
+            .serve(server_io)
+            .await
+            .unwrap();
+        let _ = server.waiting().await;
+    });
+    ClientConfig::default().serve(client_io).await.unwrap()
+}
+
+/// A8 (D92). `hold_paths` with `action: "release"` and `paths` frees the files an agent is
+/// done with. A remote caller stays inside its token: a path outside its projects is
+/// refused before the disk is read, and nothing it is told names a checkout directory.
+#[tokio::test]
+async fn mcp_release_with_paths() {
+    let srv = start().await;
+    let (inside, outside) = (srv.path("sandbox/w/a"), srv.path("private/data"));
+    let hold = |project: &str, path: &str| acquire(&srv.store, "worker@a", project, path);
+    let reasons = || -> Vec<String> {
+        srv.store
+            .events(1000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "hold.released")
+            .map(|e| e.payload["reason"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // A local caller: relative paths start at `project`, an absolute path may lie anywhere.
+    let local = in_process(srv.store.clone()).await;
+    let a = hold(&inside, "src/a.rs");
+    let b = hold(&outside, "notes.rs");
+    let kept = hold(&inside, "src/kept.rs");
+    let elsewhere = std::path::Path::new(&outside).join("notes.rs");
+    let freed = call(
+        &local,
+        "hold_paths",
+        json!({ "agent": "worker@a", "action": "release", "project": inside,
+                "paths": ["src/a.rs", elsewhere] }),
+    )
+    .await;
+    assert_ne!(freed.is_error, Some(true), "{freed:?}");
+    assert_eq!(out(&freed)["released"], json!([a, b]), "{freed:?}");
+    assert_eq!(out(&freed)["notes"], json!([]));
+    assert_eq!(reasons(), ["done"]);
+    assert_eq!(
+        live_holds(&srv.store)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        vec![kept.clone()]
+    );
+    // Paths need the project they start from; nothing is released without it.
+    let no_base = call(
+        &local,
+        "hold_paths",
+        json!({ "agent": "worker@a", "action": "release", "paths": ["src/kept.rs"] }),
+    )
+    .await;
+    assert_eq!(no_base.is_error, Some(true), "{no_base:?}");
+    assert!(
+        text(&no_base).contains("project is required"),
+        "{no_base:?}"
+    );
+    // Ids still work beside paths, and nothing held is said, not an error.
+    let again = hold(&inside, "src/a.rs");
+    let both = call(
+        &local,
+        "hold_paths",
+        json!({ "agent": "worker@a", "action": "release", "project": inside,
+                "hold_ids": [kept], "paths": ["src/a.rs", "src/none.rs"] }),
+    )
+    .await;
+    assert_eq!(out(&both)["released"], json!([kept, again]), "{both:?}");
+    let notes = out(&both)["notes"].clone();
+    assert_eq!(notes.as_array().unwrap().len(), 1, "{notes}");
+    assert!(
+        notes[0]
+            .as_str()
+            .unwrap()
+            .starts_with("nothing of yours is held at "),
+        "{notes}"
+    );
+    assert!(live_holds(&srv.store).is_empty());
+
+    // A remote caller. `private` is a git checkout it has no business learning about.
+    std::fs::create_dir_all(srv._dir.path().join("private/.git")).unwrap();
+    let client = connect(&srv.base, &srv.token().secret).await;
+    let hidden = hold(&outside, "local-work.rs");
+    let visible = hold(&inside, "remote-work.rs");
+    let release = |paths: Value| {
+        call(
+            &client,
+            "hold_paths",
+            json!({ "action": "release", "project": inside, "paths": paths }),
+        )
+    };
+    // Outside its projects: refused, and an existing file reads exactly like a missing one.
+    let mut refusals = Vec::new();
+    for (name, path) in [
+        ("local-work.rs", srv.path("private/data/local-work.rs")),
+        ("no-such.rs", srv.path("private/data/no-such.rs")),
+        (
+            "local-work.rs",
+            "../../../private/data/local-work.rs".to_string(),
+        ),
+    ] {
+        let refused = release(json!([path])).await;
+        assert_eq!(refused.is_error, Some(true), "{path}: {refused:?}");
+        let said = text(&refused);
+        assert!(said.contains("outside your projects"), "{said}");
+        assert!(!said.contains("checkout"), "{said}");
+        refusals.push(said.replace(name, "NAME"));
+    }
+    assert_eq!(refusals[0], refusals[1], "no probing of the disk");
+    assert_eq!(live_holds(&srv.store).len(), 2, "nothing was released");
+    // Inside its projects with nothing held: the path as given, and no directory.
+    let nothing = release(json!(["src/none.rs"])).await;
+    assert_ne!(nothing.is_error, Some(true), "{nothing:?}");
+    assert_eq!(out(&nothing)["released"], json!([]));
+    assert_eq!(
+        out(&nothing)["notes"],
+        json!(["nothing of yours is held at src/none.rs"])
+    );
+    // Its own hold in its project goes; the one outside its token stays.
+    let done = release(json!(["remote-work.rs"])).await;
+    assert_eq!(out(&done)["released"], json!([visible]), "{done:?}");
+    assert_eq!(
+        live_holds(&srv.store)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        vec![hidden.clone()]
+    );
+    // A link inside its project that leads to a file outside it: the path as written is
+    // inside, so it is looked at, but the hold on that file is in a project the token does
+    // not cover and stays.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(
+            srv._dir.path().join("private/data/local-work.rs"),
+            std::path::Path::new(&inside).join("link.rs"),
+        )
+        .unwrap();
+        let through = release(json!(["link.rs"])).await;
+        assert_ne!(through.is_error, Some(true), "{through:?}");
+        assert_eq!(out(&through)["released"], json!([]));
+        assert_eq!(
+            out(&through)["notes"],
+            json!(["nothing of yours is held at link.rs"])
+        );
+        assert_eq!(live_holds(&srv.store).len(), 1);
+    }
+
+    // A6, for a remote caller: a pattern that points into another checkout is refused
+    // without the absolute path or the command a local caller is given.
+    std::fs::create_dir_all(std::path::Path::new(&inside).join("nested/.git")).unwrap();
+    for action in ["acquire", "check"] {
+        let refused = call(
+            &client,
+            "hold_paths",
+            json!({ "action": action, "project": inside, "paths": ["nested/src/**"] }),
+        )
+        .await;
+        assert_eq!(refused.is_error, Some(true), "{action}: {refused:?}");
+        let said = text(&refused);
+        assert!(
+            said.contains(
+                "nested/src/** is inside another checkout; a hold taken here would not apply \
+                 to its files. Take it in that checkout's project."
+            ),
+            "{said}"
+        );
+        assert!(!said.contains("another hold acquire"), "{said}");
+        assert!(!said.contains("sandbox"), "{said}");
+    }
+    // The same for a pattern that a link leads out of every checkout: where it leads is
+    // not said.
+    #[cfg(unix)]
+    {
+        std::fs::create_dir_all(srv._dir.path().join("loose/data")).unwrap();
+        std::os::unix::fs::symlink(
+            srv._dir.path().join("loose"),
+            std::path::Path::new(&inside).join("out"),
+        )
+        .unwrap();
+        let refused = call(
+            &client,
+            "hold_paths",
+            json!({ "action": "acquire", "project": inside, "paths": ["out/data/**"] }),
+        )
+        .await;
+        assert_eq!(refused.is_error, Some(true), "{refused:?}");
+        let said = text(&refused);
+        assert!(
+            said.contains(
+                "out/data/** points outside any checkout; a hold taken here would apply to \
+                 nothing"
+            ),
+            "{said}"
+        );
+        assert!(!said.contains("loose"), "{said}");
+    }
+    assert_eq!(live_holds(&srv.store).len(), 1);
     srv.ct.cancel();
 }
 
