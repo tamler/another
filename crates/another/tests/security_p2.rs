@@ -68,7 +68,8 @@ async fn federation_only_has_no_local_routes_even_with_rewritten_host() {
             .status(),
         401
     );
-    srv.ct.cancel();
+    drop(client);
+    srv.stop().await;
 }
 
 #[tokio::test]
@@ -111,7 +112,8 @@ async fn authenticated_federation_keeps_local_routes_token_gated() {
             "{path}"
         );
     }
-    srv.ct.cancel();
+    drop(client);
+    srv.stop().await;
 }
 
 #[tokio::test]
@@ -156,5 +158,6 @@ async fn unauthenticated_failure_burst_has_a_bounded_audit_log() {
         }
     }
     assert!(store.audit_log(1000).unwrap().len() <= 32);
-    srv.ct.cancel();
+    drop(client);
+    srv.stop().await;
 }

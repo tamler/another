@@ -451,7 +451,10 @@ async fn oauth_pkce_then_mcp_client_and_bearer_still_works() {
     assert!(!audit.contains(VERIFIER));
     assert!(!audit.contains("secret body"));
 
-    srv.cancel();
+    let _ = client.cancel().await;
+    bot.cancel().await.unwrap();
+    drop(http);
+    srv.stop().await;
 }
 
 #[tokio::test]
@@ -528,7 +531,8 @@ async fn cimd_and_loopback_redirect_and_error_iss() {
     assert!(loc.contains("iss="));
     assert!(loc.contains("state=s2"));
 
-    srv.cancel();
+    drop(http);
+    srv.stop().await;
 }
 
 #[tokio::test]
@@ -663,8 +667,8 @@ async fn rebinding_host_and_origin_are_rejected() {
         403
     );
 
-    open.server.ct.cancel();
-    srv.cancel();
+    open.server.stop().await;
+    srv.stop().await;
 }
 
 #[tokio::test]
@@ -755,5 +759,6 @@ async fn oauth_endpoints_rate_limit_after_a_burst() {
             >= 1
     );
 
-    srv.cancel();
+    drop(http);
+    srv.stop().await;
 }

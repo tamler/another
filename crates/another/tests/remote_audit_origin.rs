@@ -103,6 +103,7 @@ async fn a_proxy_header_is_recorded_as_a_labelled_claim() {
         empty.starts_with("127.0.0.1:") && !empty.contains(": "),
         "{empty}"
     );
+    srv.server.stop().await;
 }
 
 /// adv231 (FINDINGS-231-w9W, applied as-is apart from this comment): a proxy header is a
@@ -123,4 +124,5 @@ async fn adv231_gap_a_proxy_claim_keeps_the_socket_address() {
         kept.is_empty(),
         "the socket address is replaced by the client's claim: {kept:?}"
     );
+    srv.server.stop().await;
 }

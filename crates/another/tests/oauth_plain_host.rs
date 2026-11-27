@@ -34,8 +34,8 @@ impl Server {
         &self.server.base
     }
 
-    fn cancel(&self) {
-        self.server.ct.cancel();
+    async fn stop(self) {
+        self.server.stop().await;
     }
 
     fn home(&self) -> PathBuf {
@@ -299,7 +299,7 @@ async fn registration_over_http_refuses_a_redirect_host_that_is_not_plain() {
         }
         assert_eq!(srv.client_rows(), 0);
         assert!(srv.store.audit_log(100).unwrap().is_empty());
-        srv.cancel();
+        srv.stop().await;
     }
 }
 
@@ -416,7 +416,7 @@ async fn ordinary_clients_register_and_complete_a_flow() {
             .unwrap();
         assert_eq!(revoked.status(), 200);
         assert_eq!(mcp_agent(&srv, &access).await, Err(401), "{requested}");
-        srv.cancel();
+        srv.stop().await;
     }
 }
 
@@ -508,7 +508,7 @@ async fn a_stored_client_with_a_host_that_is_not_plain_is_refused_at_authorize()
                 "client \"{client_id}\"  \"ChatGPT\"  redirect host {escaped}  is not a plain host name or IP address: it can no longer be approved and must register again"
             )
         );
-        srv.cancel();
+        srv.stop().await;
     }
 }
 
@@ -601,7 +601,7 @@ async fn a_grant_issued_before_the_rule_keeps_working_and_is_marked() {
         )
         .unwrap();
     assert_eq!(stored, serde_json::to_string(&[hostile]).unwrap());
-    srv.cancel();
+    srv.stop().await;
 }
 
 /// A client metadata document is held to the same rule: one hostile redirect URI in it
@@ -647,6 +647,6 @@ async fn a_client_metadata_document_is_held_to_the_same_rule() {
         .await;
         assert_eq!(res.status(), 303);
         assert_eq!(srv.request_rows(), 1);
-        srv.cancel();
+        srv.stop().await;
     }
 }

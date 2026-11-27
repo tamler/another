@@ -29,7 +29,7 @@ async fn federated_listener_rejects_conflicting_mcp_heartbeat() {
     assert_eq!(after.status, before.status);
     assert_eq!(after.last_seen_at, before.last_seen_at);
     client.cancel().await.unwrap();
-    srv.cancel();
+    srv.stop().await;
 }
 
 #[tokio::test]
@@ -202,7 +202,9 @@ async fn bearer_tokens_scope_and_audit_remote_calls() {
         .call_tool(CallToolRequestParams::new("fetch_inbox").with_arguments(Default::default()))
         .await;
     assert!(after.is_err() || after.unwrap().is_error == Some(true));
-    srv.cancel();
+    let _ = client.cancel().await;
+    drop(http);
+    srv.stop().await;
 }
 
 #[tokio::test]
@@ -251,7 +253,8 @@ async fn expired_and_unscoped_tokens() {
     assert!(srv.store.verify_token("not-a-token").is_err());
     let tampered = format!("{}x", token.secret);
     assert!(srv.store.verify_token(&tampered).is_err());
-    srv.cancel();
+    client.cancel().await.unwrap();
+    srv.stop().await;
 }
 
 /// A remote peer reads the work board for one project inside its globs, never node-wide.
@@ -278,7 +281,8 @@ async fn work_board_is_one_project_inside_the_globs() {
         .collect();
     assert_eq!(slugs, ["shop"]);
     assert_eq!(board["confined"], true);
-    srv.cancel();
+    client.cancel().await.unwrap();
+    srv.stop().await;
 }
 
 /// Review round 1, P1: the holder of a stopped edit in a project outside the token's globs
@@ -366,7 +370,7 @@ async fn work_board_hides_a_holder_outside_the_globs() {
         assert!(!text.contains(&named), "{named} in {text}");
     }
     client.cancel().await.unwrap();
-    srv.cancel();
+    srv.stop().await;
 }
 
 /// Review round 1, P1: request participants registered outside the token's globs are not
@@ -451,7 +455,7 @@ async fn work_board_hides_request_participants_outside_the_globs() {
     assert!(owned["owner"].is_null());
     assert_eq!(owned["owner_hidden"], true);
     client.cancel().await.unwrap();
-    srv.cancel();
+    srv.stop().await;
 }
 
 #[test]

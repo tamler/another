@@ -96,7 +96,9 @@ pub async fn start_oauth_http(store: Store) -> TestServer {
 /// Shared remote/OAuth workspace fixture with two projects (`work/shop`, `secret/vault`) and
 /// standard agents (`grok-bot`, `alice@shop`, plus any `extra_agents`).
 ///
-/// Field declaration order ensures `server` cancels and shuts down before `store` and `dir` drop.
+/// Dropping `RemoteServer` only signals cancellation on `server` before `store` and `dir` drop;
+/// the background server task may still hold a `Store` clone until it exits. Call
+/// [`RemoteServer::stop`] when deterministic shutdown before `store` and `dir` cleanup matters.
 pub struct RemoteServer {
     pub server: TestServer,
     pub store: Store,
@@ -119,6 +121,7 @@ impl RemoteServer {
         self.server.ct.cancel();
     }
 
+    /// Cancel the server and wait for its task to exit before `store` and `dir` drop.
     pub async fn stop(self) {
         self.server.stop().await;
     }
@@ -248,21 +251,41 @@ pub async fn call_ok(client: &Client, tool: &str, args: Value) -> Value {
 }
 
 /// Extract the `{"code", "message", ...}` error object from a failed `CallToolResult`.
+///
+/// Panics with the full response when `is_error == Some(true)` does not carry a JSON payload
+/// with an `"error"` object.
 pub fn error_body(res: &CallToolResult) -> Option<Value> {
     if res.is_error != Some(true) {
         return None;
     }
-    let text = serde_json::to_value(&res.content).unwrap()[0]["text"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let v: Value = serde_json::from_str(&text).unwrap();
-    Some(v["error"].clone())
+    let content = serde_json::to_value(&res.content)
+        .unwrap_or_else(|err| panic!("failed to serialize MCP error content ({err}): {res:?}"));
+    let text = content
+        .get(0)
+        .and_then(|item| item.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("MCP error result missing text content: {res:?}"));
+    let v: Value = serde_json::from_str(text)
+        .unwrap_or_else(|err| panic!("MCP error result content is not JSON ({err}): {res:?}"));
+    let error = v
+        .get("error")
+        .filter(|e| e.is_object())
+        .unwrap_or_else(|| panic!("MCP error result missing error object: {res:?}"));
+    Some(error.clone())
 }
 
 /// Extract `error.code` from a failed `CallToolResult`, or `None` when `is_error != Some(true)`.
+///
+/// Panics with the full response when `is_error == Some(true)` does not carry a non-empty string
+/// `error.code`, so `assert_eq!(error_code(&res), None)` can never pass on a failed call.
 pub fn error_code(res: &CallToolResult) -> Option<String> {
-    error_body(res).and_then(|e| e["code"].as_str().map(str::to_string))
+    let error = error_body(res)?;
+    let code = error
+        .get("code")
+        .and_then(Value::as_str)
+        .filter(|code| !code.is_empty())
+        .unwrap_or_else(|| panic!("MCP error result missing string error.code: {res:?}"));
+    Some(code.to_string())
 }
 
 /// Call an MCP tool, assert it failed, and return its `error` JSON object.
@@ -274,8 +297,74 @@ pub async fn call_error(client: &Client, tool: &str, args: Value) -> Value {
 
 /// Call an MCP tool, assert it failed, and return `error.code`.
 pub async fn call_err(client: &Client, tool: &str, args: Value) -> String {
-    call_error(client, tool, args).await["code"]
-        .as_str()
-        .unwrap()
-        .to_string()
+    let res = call(client, tool, args).await;
+    assert_eq!(res.is_error, Some(true), "{tool} should fail: {res:?}");
+    error_code(&res).expect("error_code must return Some when is_error is Some(true)")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::model::ContentBlock;
+
+    fn panic_message(f: impl FnOnce() + std::panic::UnwindSafe) -> String {
+        let payload = std::panic::catch_unwind(f).expect_err("expected panic");
+        if let Some(msg) = payload.downcast_ref::<String>() {
+            msg.clone()
+        } else if let Some(msg) = payload.downcast_ref::<&str>() {
+            (*msg).to_string()
+        } else {
+            panic!("unexpected non-string panic payload");
+        }
+    }
+
+    #[test]
+    fn error_code_returns_none_for_success_and_code_for_valid_error() {
+        let ok_none = CallToolResult::success(vec![]);
+        assert_eq!(error_code(&ok_none), None);
+
+        let mut ok_false = CallToolResult::success(vec![]);
+        ok_false.is_error = Some(false);
+        assert_eq!(error_code(&ok_false), None);
+
+        let err = CallToolResult::error(vec![ContentBlock::text(
+            r#"{"error":{"code":"forbidden","message":"denied"}}"#,
+        )]);
+        assert_eq!(error_code(&err).as_deref(), Some("forbidden"));
+    }
+
+    #[test]
+    fn error_code_panics_with_payload_when_is_error_lacks_string_code() {
+        for (body, marker) in [
+            (
+                r#"{"error":{"message":"missing-code-marker"}}"#,
+                "missing-code-marker",
+            ),
+            (
+                r#"{"error":{"code":403,"message":"numeric-code-marker"}}"#,
+                "numeric-code-marker",
+            ),
+            (
+                r#"{"error":{"code":null,"message":"null-code-marker"}}"#,
+                "null-code-marker",
+            ),
+            (
+                r#"{"error":{"code":"","message":"empty-code-marker"}}"#,
+                "empty-code-marker",
+            ),
+            (
+                r#"{"message":"missing-error-object-marker"}"#,
+                "missing-error-object-marker",
+            ),
+        ] {
+            let res = CallToolResult::error(vec![ContentBlock::text(body)]);
+            let msg = panic_message(std::panic::AssertUnwindSafe(|| {
+                let _ = error_code(&res);
+            }));
+            assert!(
+                msg.contains(marker),
+                "panic message should include response payload ({marker}): {msg}"
+            );
+        }
+    }
 }
