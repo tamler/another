@@ -115,7 +115,7 @@ impl Since {
             return Ok(Since::After(raw.to_ascii_uppercase()));
         }
         Err(Error::Invalid(format!(
-            "invalid since {raw:?}: use a duration like 30m or 2h, an RFC 3339 time, or an event id"
+            "invalid since {raw:?}: use a duration like 3600 (bare seconds), 90m or 2h, an RFC 3339 time, or an event id"
         )))
     }
 }

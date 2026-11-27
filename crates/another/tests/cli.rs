@@ -30,7 +30,7 @@ fn json(home: &Path, args: &[&str]) -> Value {
 }
 
 #[test]
-fn since_accepts_bare_seconds_and_keeps_invalid_input_diagnostic() {
+fn since_accepts_bare_seconds_and_describes_them_in_invalid_input_diagnostic() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("h");
     json(&home, &["init"]);
@@ -43,7 +43,7 @@ fn since_accepts_bare_seconds_and_keeps_invalid_input_diagnostic() {
     let out = another(&home, &["activity", "--since", "nonsense"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains(
-        "invalid since \"nonsense\": use a duration like 30m or 2h, an RFC 3339 time, or an event id"
+        "invalid since \"nonsense\": use a duration like 3600 (bare seconds), 90m or 2h, an RFC 3339 time, or an event id"
     ));
 }
 

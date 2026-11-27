@@ -1123,7 +1123,7 @@ fn board_command(
     let since_ms = match Since::parse(since, store.now())? {
         Since::Time(t) => t,
         Since::After(_) => anyhow::bail!(
-            "board --since takes a duration like 24h or an RFC 3339 time, not an event id"
+            "board --since takes bare seconds like 3600, a duration like 24h or an RFC 3339 time, not an event id"
         ),
     };
     let project = match project {

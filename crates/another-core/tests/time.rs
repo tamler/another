@@ -40,6 +40,9 @@ fn duration_units_and_bare_seconds_policy() {
 
 #[test]
 fn duration_validation_and_overflow_keep_seconds_and_milliseconds_distinct() {
+    assert!(Since::parse("nonsense", 0).unwrap_err().to_string().contains(
+        "invalid since \"nonsense\": use a duration like 3600 (bare seconds), 90m or 2h, an RFC 3339 time, or an event id"
+    ));
     for text in ["", "-1s", "+1s", "1.5h", "1H", "1ms", "s", "1 s", "💡"] {
         assert!(parse_duration(text, true).is_err(), "{text:?}");
         assert!(parse_duration(text, false).is_err(), "{text:?}");
