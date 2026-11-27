@@ -203,7 +203,7 @@ Hub backups are secret material: they contain the node's private signing key, ma
 
 Current brief: [AGENTS.md](AGENTS.md). Every change merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88, copy lint.
 
-Superseded pull request CI runs are canceled. The fuzz workflow gives each of its five pull request targets five minutes of fuzzing within a 20-minute job limit. Fuzzing also runs on pushes to `main`, nightly at 18:00 UTC, and on manual dispatch.
+Superseded pull request CI runs are canceled. On pull requests the fuzz workflow runs a 60-second smoke per target within a 15-minute job limit. Pushes to `main`, the nightly run at 18:00 UTC and manual runs fuzz each target for 600 seconds by default within a 45-minute limit.
 
 ## Guides
 

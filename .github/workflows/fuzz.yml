@@ -19,7 +19,7 @@ on:
     inputs:
       seconds:
         description: "Seconds per target"
-        default: "60"
+        default: "600"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -32,7 +32,9 @@ jobs:
   fuzz:
     name: fuzz (${{ matrix.target }})
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # PR smoke: 60 s of fuzzing per target. main pushes, the nightly run and manual runs: 600 s
+    # by default. Setup, cargo-fuzz install and build take up to about 8 minutes.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 15 || 45 }}
     strategy:
       fail-fast: false
       matrix:
@@ -55,7 +57,7 @@ jobs:
       - name: Run ${{ matrix.target }}
         working-directory: fuzz
         env:
-          SECONDS_INPUT: ${{ github.event_name == 'pull_request' && '300' || inputs.seconds || '60' }}
+          SECONDS_INPUT: ${{ github.event_name == 'pull_request' && '60' || inputs.seconds || '600' }}
           TARGET: ${{ matrix.target }}
         run: |
           secs="$SECONDS_INPUT"
