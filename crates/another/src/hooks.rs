@@ -557,41 +557,42 @@ fn apply(change: &mut FileChange) -> Result<()> {
 
 /// Atomically replace `path` with `text`, keeping the existing file's permissions (and, on
 /// unix, its owner where allowed). New files are created private (0600). A symlinked config
-/// is written through to its target so dotfile links survive.
+/// is written through to its target so dotfile links survive. Temp names are unique per
+/// write and stale sibling temp files are swept after rename; concurrent installs are not
+/// supported.
 fn write_preserving(path: &Path, text: &str) -> Result<()> {
     let path = match std::fs::symlink_metadata(path) {
         Ok(m) if m.file_type().is_symlink() => std::fs::canonicalize(path)?,
         _ => path.to_path_buf(),
     };
     let existing = std::fs::metadata(&path).ok();
-    let tmp = path.with_extension("another-tmp");
-    // A stale temp file would keep its old mode; start from a fresh one.
-    let _ = std::fs::remove_file(&tmp);
-    {
-        use std::io::Write;
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
+    crate::atomic_write::write_file(&path, text.as_bytes(), Some(0o600), |tmp| {
+        if let Some(meta) = &existing {
+            std::fs::set_permissions(tmp, meta.permissions())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                // Only succeeds when allowed (e.g. same owner, or root); otherwise the new file
+                // keeps the current user's ownership, as before.
+                let _ = std::os::unix::fs::chown(tmp, Some(meta.uid()), Some(meta.gid()));
+            }
         }
-        let mut file = opts.open(&tmp)?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
-    }
-    if let Some(meta) = &existing {
-        std::fs::set_permissions(&tmp, meta.permissions())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            // Only succeeds when allowed (e.g. same owner, or root); otherwise the new file
-            // keeps the current user's ownership, as before.
-            let _ = std::os::unix::fs::chown(&tmp, Some(meta.uid()), Some(meta.gid()));
+        Ok(())
+    })
+}
+
+/// Sweep stale sibling temp files for a hook config or wrapper script on uninstall.
+/// When `path` is a symlink to an existing target, also sweep siblings of the target where
+/// `write_preserving` creates its temp files.
+fn sweep_hook_temps(path: &Path) {
+    crate::atomic_write::sweep_stale_temps(path);
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        if let Ok(resolved) = std::fs::canonicalize(path) {
+            if resolved != path {
+                crate::atomic_write::sweep_stale_temps(&resolved);
+            }
         }
     }
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
 }
 
 fn plan_script(env: &HookEnv, install: bool, still_used: bool) -> FileChange {
@@ -659,6 +660,9 @@ pub fn install(
     if !dry_run {
         for change in &mut changes {
             apply(change)?;
+            if !install && !matches!(change.change, ChangeKind::Create | ChangeKind::Update) {
+                sweep_hook_temps(Path::new(&change.path));
+            }
         }
         if install {
             #[cfg(unix)]
@@ -2371,5 +2375,233 @@ mod tests {
                 _ => assert_eq!(guard.unwrap().matcher, Some(EDIT_TOOLS)),
             }
         }
+    }
+
+    // Temp names are unique per write so low-level writers do not collide on temp paths;
+    // concurrent hook installs are not supported.
+    #[test]
+    fn write_preserving_handles_concurrent_writers() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, "{\"seed\":true}").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        }
+
+        let threads = 8;
+        let iters = 40;
+        let barrier = Arc::new(Barrier::new(threads));
+        let mut handles = Vec::with_capacity(threads);
+        for t in 0..threads {
+            let barrier = Arc::clone(&barrier);
+            let path = path.clone();
+            handles.push(std::thread::spawn(move || {
+                let pad = "x".repeat(8192);
+                barrier.wait();
+                let mut errors = Vec::new();
+                for i in 0..iters {
+                    let payload = format!(r#"{{"thread":{t},"iter":{i},"pad":"{pad}"}}"#);
+                    if let Err(err) = write_preserving(&path, &payload) {
+                        errors.push(format!("t={t} i={i}: {err:#}"));
+                    }
+                }
+                errors
+            }));
+        }
+
+        let mut all_errors = Vec::new();
+        for h in handles {
+            all_errors.extend(h.join().unwrap());
+        }
+        assert!(
+            all_errors.is_empty(),
+            "concurrent write_preserving failed ({} errors), first: {}",
+            all_errors.len(),
+            all_errors.first().map(String::as_str).unwrap_or("")
+        );
+
+        let final_text = std::fs::read_to_string(&path).unwrap();
+        let parsed: Value = serde_json::from_str(&final_text).unwrap();
+        assert!(parsed["thread"].is_u64());
+        assert!(parsed["iter"].is_u64());
+        assert_eq!(parsed["pad"].as_str().unwrap().len(), 8192);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+        }
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("another-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+    }
+
+    #[test]
+    fn write_preserving_cleans_up_temp_file_on_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory at the target path makes the final rename fail after the temp file is created.
+        let target = dir.path().join("settings.json");
+        std::fs::create_dir(&target).unwrap();
+
+        assert!(write_preserving(&target, "{\"a\":1}").is_err());
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("another-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+    }
+
+    #[test]
+    fn write_preserving_sweeps_stale_temp_siblings_and_leaves_unrelated_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("settings.json");
+        std::fs::write(&target, "{\"seed\":true}\n").unwrap();
+
+        let stale_a = dir
+            .path()
+            .join("settings.json.another-tmp.99999.0.deadbeef");
+        let stale_b = dir
+            .path()
+            .join("settings.json.another-tmp.88888.12.cafebabe");
+        std::fs::write(&stale_a, "crashed-1").unwrap();
+        std::fs::write(&stale_b, "crashed-2").unwrap();
+
+        let other_target_tmp = dir.path().join("other.json.another-tmp.99999.0.deadbeef");
+        let malformed_backup = dir.path().join("settings.json.another-tmp.backup");
+        let malformed_stale = dir.path().join("settings.json.another-tmp.stale");
+        let backup = dir.path().join("settings.json.another-backup-20261127");
+        let bare_suffix = dir.path().join("settings.json.another-tmp");
+        let old_ext = dir.path().join("settings.another-tmp");
+        let unrelated = dir.path().join("notes.txt");
+        for p in [
+            &other_target_tmp,
+            &malformed_backup,
+            &malformed_stale,
+            &backup,
+            &bare_suffix,
+            &old_ext,
+            &unrelated,
+        ] {
+            std::fs::write(p, "keep").unwrap();
+        }
+
+        let stale_dir = dir
+            .path()
+            .join("settings.json.another-tmp.77777.0.feedface");
+        std::fs::create_dir(&stale_dir).unwrap();
+
+        #[cfg(unix)]
+        let (victim, stale_link) = {
+            let victim = dir.path().join("victim.txt");
+            std::fs::write(&victim, "do-not-touch").unwrap();
+            let link = dir
+                .path()
+                .join("settings.json.another-tmp.66666.0.badc0ffe");
+            std::os::unix::fs::symlink(&victim, &link).unwrap();
+            (victim, link)
+        };
+
+        write_preserving(&target, "{\"updated\":true}\n").unwrap();
+
+        assert!(!stale_a.exists(), "stale sibling temp file should be swept");
+        assert!(!stale_b.exists(), "stale sibling temp file should be swept");
+        for p in [
+            &other_target_tmp,
+            &malformed_backup,
+            &malformed_stale,
+            &backup,
+            &bare_suffix,
+            &old_ext,
+            &unrelated,
+        ] {
+            assert!(p.exists(), "unrelated file must remain: {}", p.display());
+        }
+        assert!(stale_dir.is_dir(), "directory matching prefix must remain");
+
+        #[cfg(unix)]
+        {
+            assert!(
+                std::fs::symlink_metadata(&stale_link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "symlink matching prefix must not be followed or removed"
+            );
+            assert_eq!(std::fs::read_to_string(&victim).unwrap(), "do-not-touch");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_preserving_handles_250_byte_symlink_target() {
+        use std::ffi::OsStr;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dotfiles = dir.path().join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+
+        let long_name = format!("{}.json", "a".repeat(245));
+        let other_long_name = format!("{}b.json", "a".repeat(244));
+        assert_eq!(long_name.len(), 250);
+        assert_eq!(other_long_name.len(), 250);
+        let real = dotfiles.join(&long_name);
+        std::fs::write(&real, "{\"seed\":true}\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        let mut stale_name = crate::atomic_write::temp_prefix(OsStr::new(&long_name));
+        stale_name.push("99999.0.deadbeef");
+        let stale = dotfiles.join(&stale_name);
+
+        let mut other_stale_name = crate::atomic_write::temp_prefix(OsStr::new(&other_long_name));
+        other_stale_name.push("99999.0.deadbeef");
+        let other_stale = dotfiles.join(&other_stale_name);
+
+        let unrelated = dotfiles.join("keep.txt");
+        for p in [&stale, &other_stale, &unrelated] {
+            std::fs::write(p, "keep-or-sweep").unwrap();
+        }
+
+        let link = dir.path().join("settings.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        write_preserving(&link, "{\"updated\":true}\n").unwrap();
+
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(&real).unwrap(),
+            "{\"updated\":true}\n"
+        );
+        assert_eq!(
+            std::fs::metadata(&real).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert!(
+            !stale.exists(),
+            "stale temp for 250-byte target should be swept"
+        );
+        assert!(
+            other_stale.exists(),
+            "stale temp for distinct 250-byte target must remain"
+        );
+        assert!(unrelated.exists(), "unrelated file must remain");
     }
 }

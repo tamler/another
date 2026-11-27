@@ -505,21 +505,24 @@ fn wait_unloaded(target: &str) {
     }
 }
 
+/// Atomically write a daemon definition file. Temp names are unique per write, synced before
+/// rename, and stale sibling temp files are swept after rename; concurrent installs are not
+/// supported.
 fn write_definition(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("another-tmp");
-    let _ = std::fs::remove_file(&tmp);
-    std::fs::write(&tmp, bytes)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // launchd refuses a plist that others can write; systemd warns about one.
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
-    }
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    crate::atomic_write::write_file(path, bytes, None, |tmp| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // launchd refuses a plist that others can write; systemd warns about one.
+            std::fs::set_permissions(tmp, std::fs::Permissions::from_mode(0o644))?;
+        }
+        #[cfg(not(unix))]
+        let _ = tmp;
+        Ok(())
+    })
 }
 
 /// The commands that load (or reload) an installed definition.
@@ -747,6 +750,7 @@ fn remove(path: &Path, exists: bool) -> Result<()> {
     if exists {
         std::fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
     }
+    crate::atomic_write::sweep_stale_temps(path);
     Ok(())
 }
 
@@ -1503,5 +1507,237 @@ mod tests {
         assert!(validate_label("one.toanother.another-test_2").is_ok());
         assert!(validate_label("../evil").is_err());
         assert!(validate_label("").is_err());
+    }
+
+    // Temp names are unique per write so low-level writers do not collide on temp paths;
+    // concurrent daemon installs are not supported.
+    #[test]
+    fn write_definition_handles_concurrent_writers() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("one.toanother.another.plist");
+
+        let threads = 8;
+        let iters = 40;
+        let barrier = Arc::new(Barrier::new(threads));
+        let mut handles = Vec::with_capacity(threads);
+        for t in 0..threads {
+            let barrier = Arc::clone(&barrier);
+            let path = path.clone();
+            handles.push(std::thread::spawn(move || {
+                let pad = "a".repeat(8192);
+                barrier.wait();
+                let mut errors = Vec::new();
+                for i in 0..iters {
+                    let payload = format!("<plist t=\"{t}\" i=\"{i}\">{pad}</plist>");
+                    if let Err(err) = write_definition(&path, payload.as_bytes()) {
+                        errors.push(format!("t={t} i={i}: {err:#}"));
+                    }
+                }
+                errors
+            }));
+        }
+
+        let mut all_errors = Vec::new();
+        for h in handles {
+            all_errors.extend(h.join().unwrap());
+        }
+        assert!(
+            all_errors.is_empty(),
+            "concurrent write_definition failed ({} errors), first: {}",
+            all_errors.len(),
+            all_errors.first().map(String::as_str).unwrap_or("")
+        );
+
+        let final_text = std::fs::read_to_string(&path).unwrap();
+        assert!(final_text.starts_with("<plist "));
+        assert!(final_text.ends_with("</plist>"));
+        assert!(final_text.contains(&"a".repeat(8192)));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
+        }
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("another-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+    }
+
+    #[test]
+    fn write_definition_cleans_up_temp_file_on_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory at the target path makes the final rename fail after the temp file is created.
+        let target = dir.path().join("one.toanother.another.plist");
+        std::fs::create_dir(&target).unwrap();
+
+        assert!(write_definition(&target, b"<plist/>").is_err());
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("another-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+    }
+
+    #[test]
+    fn write_definition_sweeps_stale_temp_siblings_and_leaves_unrelated_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("one.toanother.another.plist");
+
+        let stale_a = dir
+            .path()
+            .join("one.toanother.another.plist.another-tmp.99999.0.deadbeef");
+        let stale_b = dir
+            .path()
+            .join("one.toanother.another.plist.another-tmp.88888.12.cafebabe");
+        std::fs::write(&stale_a, "crashed-1").unwrap();
+        std::fs::write(&stale_b, "crashed-2").unwrap();
+
+        let other_target_tmp = dir.path().join("other.plist.another-tmp.99999.0.deadbeef");
+        let malformed_backup = dir
+            .path()
+            .join("one.toanother.another.plist.another-tmp.backup");
+        let malformed_stale = dir
+            .path()
+            .join("one.toanother.another.plist.another-tmp.stale");
+        let bare_suffix = dir.path().join("one.toanother.another.plist.another-tmp");
+        let old_ext = dir.path().join("one.toanother.another.another-tmp");
+        let unrelated = dir.path().join("notes.txt");
+        for p in [
+            &other_target_tmp,
+            &malformed_backup,
+            &malformed_stale,
+            &bare_suffix,
+            &old_ext,
+            &unrelated,
+        ] {
+            std::fs::write(p, "keep").unwrap();
+        }
+
+        let stale_dir = dir
+            .path()
+            .join("one.toanother.another.plist.another-tmp.77777.0.feedface");
+        std::fs::create_dir(&stale_dir).unwrap();
+
+        #[cfg(unix)]
+        let (victim, stale_link) = {
+            let victim = dir.path().join("victim.txt");
+            std::fs::write(&victim, "do-not-touch").unwrap();
+            let link = dir
+                .path()
+                .join("one.toanother.another.plist.another-tmp.66666.0.badc0ffe");
+            std::os::unix::fs::symlink(&victim, &link).unwrap();
+            (victim, link)
+        };
+
+        write_definition(&target, b"<plist/>").unwrap();
+
+        assert!(!stale_a.exists(), "stale sibling temp file should be swept");
+        assert!(!stale_b.exists(), "stale sibling temp file should be swept");
+        for p in [
+            &other_target_tmp,
+            &malformed_backup,
+            &malformed_stale,
+            &bare_suffix,
+            &old_ext,
+            &unrelated,
+        ] {
+            assert!(p.exists(), "unrelated file must remain: {}", p.display());
+        }
+        assert!(stale_dir.is_dir(), "directory matching prefix must remain");
+
+        #[cfg(unix)]
+        {
+            assert!(
+                std::fs::symlink_metadata(&stale_link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "symlink matching prefix must not be followed or removed"
+            );
+            assert_eq!(std::fs::read_to_string(&victim).unwrap(), "do-not-touch");
+        }
+    }
+
+    #[test]
+    fn remove_sweeps_stale_temp_siblings_even_when_target_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("one.toanother.another.service");
+        let stale = dir
+            .path()
+            .join("one.toanother.another.service.another-tmp.99999.0.deadbeef");
+        let other = dir
+            .path()
+            .join("other.service.another-tmp.99999.0.deadbeef");
+        let keep = dir.path().join("unrelated.txt");
+        std::fs::write(&stale, "crashed").unwrap();
+        std::fs::write(&other, "other").unwrap();
+        std::fs::write(&keep, "keep").unwrap();
+
+        remove(&target, false).unwrap();
+
+        assert!(!stale.exists(), "stale sibling temp file should be swept");
+        assert!(other.exists(), "sibling for another target must remain");
+        assert!(keep.exists(), "unrelated file must remain");
+    }
+
+    #[test]
+    fn write_definition_handles_250_byte_target_name() {
+        use std::ffi::OsStr;
+
+        let dir = tempfile::tempdir().unwrap();
+        let long_name = format!("{}.service", "d".repeat(242));
+        let other_long_name = format!("{}e.service", "d".repeat(241));
+        assert_eq!(long_name.len(), 250);
+        assert_eq!(other_long_name.len(), 250);
+        let target = dir.path().join(&long_name);
+
+        let mut stale_name = crate::atomic_write::temp_prefix(OsStr::new(&long_name));
+        stale_name.push("99999.0.deadbeef");
+        let stale = dir.path().join(&stale_name);
+
+        let mut other_stale_name = crate::atomic_write::temp_prefix(OsStr::new(&other_long_name));
+        other_stale_name.push("99999.0.deadbeef");
+        let other_stale = dir.path().join(&other_stale_name);
+
+        let unrelated = dir.path().join("keep.txt");
+        for p in [&stale, &other_stale, &unrelated] {
+            std::fs::write(p, "data").unwrap();
+        }
+
+        write_definition(&target, b"[Unit]\nDescription=another\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "[Unit]\nDescription=another\n"
+        );
+        assert!(
+            !stale.exists(),
+            "stale temp for 250-byte target should be swept"
+        );
+        assert!(
+            other_stale.exists(),
+            "stale temp for distinct 250-byte target must remain"
+        );
+        assert!(unrelated.exists(), "unrelated file must remain");
+
+        // Uninstall (`remove`) also sweeps stale temps for 250-byte names without touching others.
+        std::fs::write(&stale, "crashed-again").unwrap();
+        remove(&target, true).unwrap();
+        assert!(!target.exists());
+        assert!(!stale.exists(), "remove must sweep 250-byte stale temp");
+        assert!(other_stale.exists(), "distinct 250-byte temp must remain");
+        assert!(unrelated.exists(), "unrelated file must remain");
     }
 }

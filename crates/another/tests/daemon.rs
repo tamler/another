@@ -378,6 +378,60 @@ fn linux_install_explains_an_unreachable_user_manager() {
     assert!(err.contains("loginctl enable-linger"), "{err}");
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_uninstall_sweeps_stale_temp_siblings_and_leaves_unrelated_files() {
+    let env = Env::new();
+    fake_systemctl(&env, None);
+    let label = test_label("sweep");
+    let unit_name = format!("{label}.service");
+    let unit_dir = env.home.join(".config/systemd/user");
+    let unit = unit_dir.join(&unit_name);
+
+    env.json(&[
+        "daemon",
+        "install",
+        "--label",
+        &label,
+        "--bind",
+        "127.0.0.1:7499",
+        "--no-load",
+    ]);
+    assert!(unit.exists());
+
+    let stale = unit_dir.join(format!("{unit_name}.another-tmp.99999.0.deadbeef"));
+    let malformed_backup = unit_dir.join(format!("{unit_name}.another-tmp.backup"));
+    let other_tmp = unit_dir.join("other.service.another-tmp.99999.0.deadbeef");
+    let unrelated = unit_dir.join("keep.txt");
+    let victim = unit_dir.join("victim.txt");
+    let stale_link = unit_dir.join(format!("{unit_name}.another-tmp.66666.0.badc0ffe"));
+    std::fs::write(&stale, "stale").unwrap();
+    std::fs::write(&malformed_backup, "backup").unwrap();
+    std::fs::write(&other_tmp, "other").unwrap();
+    std::fs::write(&unrelated, "keep").unwrap();
+    std::fs::write(&victim, "do-not-touch").unwrap();
+    std::os::unix::fs::symlink(&victim, &stale_link).unwrap();
+
+    // Dry run must leave stale temps alone.
+    env.json(&["daemon", "uninstall", "--label", &label, "--dry-run"]);
+    assert!(stale.exists(), "dry-run must not sweep stale temp");
+
+    env.json(&["daemon", "uninstall", "--label", &label]);
+    assert!(!unit.exists());
+    assert!(!stale.exists(), "daemon uninstall must sweep stale temp");
+    assert!(
+        malformed_backup.exists(),
+        "non-writer suffix backup must remain"
+    );
+    assert!(other_tmp.exists(), "other unit temp must remain");
+    assert!(unrelated.exists(), "unrelated file must remain");
+    assert!(std::fs::symlink_metadata(&stale_link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "do-not-touch");
+}
+
 /// Decode the UTF-16 task definition written for Task Scheduler.
 #[cfg(windows)]
 fn read_task(path: &std::path::Path) -> String {
