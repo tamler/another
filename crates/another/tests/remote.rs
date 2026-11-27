@@ -1,121 +1,18 @@
 //! Authenticated remote access: bearer tokens, scoping, audit log, GET /activity.
 
-use std::net::SocketAddr;
 use std::path::Path;
 
-use another::serve::{http_router, HttpOptions};
+#[path = "common/cli.rs"]
+mod cli;
+#[path = "common/mcp_http.rs"]
+mod mcp_http;
+
 use another_core::{
     NewRequest, Program, RegisterAgent, RequestAction, RequestFilter, RequestUpdate, SendMessage,
-    Store,
 };
-use rmcp::model::{CallToolRequestParams, CallToolResult, ClientConfig};
-use rmcp::service::RunningService;
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::{RoleClient, ServiceExt};
+use mcp_http::{call, connect, error_code, start_remote as start};
+use rmcp::model::CallToolRequestParams;
 use serde_json::{json, Value};
-use tokio_util::sync::CancellationToken;
-
-type Client = RunningService<RoleClient, ClientConfig>;
-
-struct Server {
-    _dir: tempfile::TempDir,
-    store: Store,
-    base: String,
-    ct: CancellationToken,
-    work: String,
-    secret: String,
-    work_glob: String,
-}
-
-async fn start() -> Server {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let work = dir.path().join("work/shop").to_string_lossy().into_owned();
-    let secret = dir
-        .path()
-        .join("secret/vault")
-        .to_string_lossy()
-        .into_owned();
-    let work_glob = dir
-        .path()
-        .join("work/*")
-        .to_string_lossy()
-        .replace('\\', "/");
-    store.ensure_project("t", &work).unwrap();
-    store.ensure_project("t", &secret).unwrap();
-    for (name, program, project) in [
-        ("grok-bot", Program::GrokBot, None),
-        ("alice", Program::Claude, Some(work.as_str())),
-    ] {
-        store
-            .register_agent(RegisterAgent {
-                name: name.into(),
-                program,
-                project: project.map(Into::into),
-                model: None,
-                description: None,
-            })
-            .unwrap();
-    }
-    let ct = CancellationToken::new();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let opts = HttpOptions {
-        auth: true,
-        bound_port: addr.port(),
-        ..Default::default()
-    };
-    let app = http_router(store.clone(), ct.clone(), &opts);
-    let stop = ct.clone();
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move { stop.cancelled_owned().await })
-        .await
-        .unwrap();
-    });
-    Server {
-        _dir: dir,
-        store,
-        base: format!("http://{addr}"),
-        work,
-        secret,
-        work_glob,
-        ct,
-    }
-}
-
-async fn connect(base: &str, token: &str) -> Client {
-    let transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(format!("{base}/mcp")).auth_header(token),
-    );
-    ClientConfig::default().serve(transport).await.unwrap()
-}
-
-async fn call(client: &Client, tool: &str, args: Value) -> CallToolResult {
-    client
-        .call_tool(
-            CallToolRequestParams::new(tool.to_string())
-                .with_arguments(args.as_object().cloned().unwrap()),
-        )
-        .await
-        .unwrap()
-}
-
-fn error_code(res: &CallToolResult) -> Option<String> {
-    if res.is_error != Some(true) {
-        return None;
-    }
-    let text = serde_json::to_value(&res.content).unwrap()[0]["text"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let v: Value = serde_json::from_str(&text).unwrap();
-    v["error"]["code"].as_str().map(str::to_string)
-}
 
 #[tokio::test]
 async fn bearer_tokens_scope_and_audit_remote_calls() {
@@ -124,13 +21,13 @@ async fn bearer_tokens_scope_and_audit_remote_calls() {
 
     // No or bad token: 401 on /mcp and /activity; /health stays open.
     let r = http
-        .get(format!("{}/activity", srv.base))
+        .get(format!("{}/activity", srv.base()))
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), 401);
     let r = http
-        .post(format!("{}/mcp", srv.base))
+        .post(format!("{}/mcp", srv.base()))
         .header("authorization", "Bearer ano_nope_nope")
         .header("content-type", "application/json")
         .body("{}")
@@ -140,7 +37,7 @@ async fn bearer_tokens_scope_and_audit_remote_calls() {
     assert_eq!(r.status(), 401);
     let health: Value = serde_json::from_str(
         &http
-            .get(format!("{}/health", srv.base))
+            .get(format!("{}/health", srv.base()))
             .send()
             .await
             .unwrap()
@@ -160,7 +57,7 @@ async fn bearer_tokens_scope_and_audit_remote_calls() {
             None,
         )
         .unwrap();
-    let client = connect(&srv.base, &token.secret).await;
+    let client = connect(srv.base(), &token.secret).await;
 
     // Acting agent is filled in, and only the token's agent is allowed.
     let inbox = call(&client, "fetch_inbox", json!({})).await;
@@ -203,7 +100,7 @@ async fn bearer_tokens_scope_and_audit_remote_calls() {
     let denied = call(
         &client,
         "ensure_project",
-        json!({ "path": srv._dir.path().join("elsewhere/x") }),
+        json!({ "path": srv.dir.path().join("elsewhere/x") }),
     )
     .await;
     assert_eq!(error_code(&denied).as_deref(), Some("forbidden"));
@@ -237,7 +134,7 @@ async fn bearer_tokens_scope_and_audit_remote_calls() {
     let feed = call(&client, "activity_feed", json!({ "kinds": ["mail"] })).await;
     assert_eq!(error_code(&feed), None);
     let r = http
-        .get(format!("{}/activity?since=1h&kinds=mail,hold", srv.base))
+        .get(format!("{}/activity?since=1h&kinds=mail,hold", srv.base()))
         .header("authorization", format!("Bearer {}", token.secret))
         .send()
         .await
@@ -270,7 +167,7 @@ async fn bearer_tokens_scope_and_audit_remote_calls() {
     // Revocation takes effect on the next request.
     srv.store.revoke_token(&token.token.token_id).unwrap();
     let r = http
-        .get(format!("{}/activity", srv.base))
+        .get(format!("{}/activity", srv.base()))
         .header("authorization", format!("Bearer {}", token.secret))
         .send()
         .await
@@ -280,7 +177,7 @@ async fn bearer_tokens_scope_and_audit_remote_calls() {
         .call_tool(CallToolRequestParams::new("fetch_inbox").with_arguments(Default::default()))
         .await;
     assert!(after.is_err() || after.unwrap().is_error == Some(true));
-    srv.ct.cancel();
+    srv.cancel();
 }
 
 #[tokio::test]
@@ -288,7 +185,7 @@ async fn expired_and_unscoped_tokens() {
     let srv = start().await;
     // No project globs: project-scoped calls are denied, mailbox calls work.
     let token = srv.store.create_token("grok-bot", &[], None, None).unwrap();
-    let client = connect(&srv.base, &token.secret).await;
+    let client = connect(srv.base(), &token.secret).await;
     let hold = call(
         &client,
         "hold_paths",
@@ -329,7 +226,7 @@ async fn expired_and_unscoped_tokens() {
     assert!(srv.store.verify_token("not-a-token").is_err());
     let tampered = format!("{}x", token.secret);
     assert!(srv.store.verify_token(&tampered).is_err());
-    srv.ct.cancel();
+    srv.cancel();
 }
 
 /// A remote peer reads the work board for one project inside its globs, never node-wide.
@@ -340,7 +237,7 @@ async fn work_board_is_one_project_inside_the_globs() {
         .store
         .create_token("grok-bot", std::slice::from_ref(&srv.work_glob), None, None)
         .unwrap();
-    let client = connect(&srv.base, &token.secret).await;
+    let client = connect(srv.base(), &token.secret).await;
     let all = call(&client, "work_board", json!({})).await;
     assert_eq!(error_code(&all).as_deref(), Some("forbidden"));
     let secret = call(&client, "work_board", json!({ "project": srv.secret })).await;
@@ -356,7 +253,7 @@ async fn work_board_is_one_project_inside_the_globs() {
         .collect();
     assert_eq!(slugs, ["shop"]);
     assert_eq!(board["confined"], true);
-    srv.ct.cancel();
+    srv.cancel();
 }
 
 /// Review round 1, P1: the holder of a stopped edit in a project outside the token's globs
@@ -366,7 +263,7 @@ async fn work_board_is_one_project_inside_the_globs() {
 #[tokio::test]
 async fn work_board_hides_a_holder_outside_the_globs() {
     let srv = start().await;
-    let top = srv._dir.path();
+    let top = srv.dir.path();
     std::fs::create_dir_all(top.join(".git")).unwrap();
     std::fs::write(
         top.join(".git/config"),
@@ -419,7 +316,7 @@ async fn work_board_hides_a_holder_outside_the_globs() {
         .store
         .create_token("grok-bot", std::slice::from_ref(&srv.work_glob), None, None)
         .unwrap();
-    let client = connect(&srv.base, &token.secret).await;
+    let client = connect(srv.base(), &token.secret).await;
     let res = call(&client, "work_board", json!({ "project": srv.work })).await;
     assert_eq!(error_code(&res), None);
     let board = res.structured_content.unwrap();
@@ -444,7 +341,7 @@ async fn work_board_hides_a_holder_outside_the_globs() {
         assert!(!text.contains(&named), "{named} in {text}");
     }
     client.cancel().await.unwrap();
-    srv.ct.cancel();
+    srv.cancel();
 }
 
 /// Review round 1, P1: request participants registered outside the token's globs are not
@@ -497,7 +394,7 @@ async fn work_board_hides_request_participants_outside_the_globs() {
         .store
         .create_token("grok-bot", std::slice::from_ref(&srv.work_glob), None, None)
         .unwrap();
-    let client = connect(&srv.base, &token.secret).await;
+    let client = connect(srv.base(), &token.secret).await;
     let res = call(&client, "work_board", json!({ "project": "shop" })).await;
     assert_eq!(error_code(&res), None);
     let board = res.structured_content.unwrap();
@@ -529,19 +426,13 @@ async fn work_board_hides_request_participants_outside_the_globs() {
     assert!(owned["owner"].is_null());
     assert_eq!(owned["owner_hidden"], true);
     client.cancel().await.unwrap();
-    srv.ct.cancel();
+    srv.cancel();
 }
 
 #[test]
 fn token_cli_and_bind_rules() {
     let dir = tempfile::tempdir().unwrap();
-    let run = |args: &[&str]| {
-        std::process::Command::new(env!("CARGO_BIN_EXE_another"))
-            .args(args)
-            .env("ANOTHER_HOME", dir.path())
-            .output()
-            .unwrap()
-    };
+    let run = |args: &[&str]| cli::another_cmd(dir.path()).args(args).output().unwrap();
     assert!(
         run(&["agent", "register", "grok-bot", "--program", "grok_bot"])
             .status
