@@ -379,7 +379,7 @@ pub enum Command {
     },
     /// Show the activity feed (who is doing what), or a summary of it.
     Activity {
-        /// Start point: a duration (30m, 2h, 1d), an RFC 3339 time, or an event id cursor.
+        /// Start point: a duration (bare seconds, 30m, 2h, 1d), an RFC 3339 time, or an event id cursor.
         #[arg(long)]
         since: Option<String>,
         #[arg(long, default_value_t = 50)]
@@ -395,7 +395,7 @@ pub enum Command {
     /// Count coordination evidence: edits stopped by a hold, holds the edit hook took, mail
     /// pushed into running sessions and whether it was acted on, requests claimed and done.
     Stats {
-        /// Start point: a duration (30m, 48h, 2d), an RFC 3339 time, or an event id.
+        /// Start point: a duration (bare seconds, 30m, 48h, 2d), an RFC 3339 time, or an event id.
         #[arg(long, default_value = "24h")]
         since: String,
     },
@@ -414,7 +414,7 @@ pub enum Command {
         /// Only this project (slug or path) and sibling checkouts of the same repository.
         #[arg(long, short = 'p')]
         project: Option<String>,
-        /// Window for recent and stopped edits: a duration (30m, 24h, 2d) or an RFC 3339 time.
+        /// Window for recent and stopped edits: a duration (bare seconds, 30m, 24h, 2d) or an RFC 3339 time.
         #[arg(long, default_value = "24h")]
         since: String,
         /// Items per list (at most 200).
@@ -1123,7 +1123,7 @@ fn board_command(
     let since_ms = match Since::parse(since, store.now())? {
         Since::Time(t) => t,
         Since::After(_) => anyhow::bail!(
-            "board --since takes a duration like 24h or an RFC 3339 time, not an event id"
+            "board --since takes bare seconds like 3600, a duration like 24h or an RFC 3339 time, not an event id"
         ),
     };
     let project = match project {

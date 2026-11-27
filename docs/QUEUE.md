@@ -174,7 +174,7 @@ Limits, all of which follow from binding by name and are avoided by giving each 
 
 ### The audit
 
-`another queue audit [--since <duration|time>]` only reads. It checks this node's `queue.*` events against themselves and against the tables, and exits 1 on any finding:
+`another queue audit [--since <duration|time>]` only reads. Durations accept bare seconds such as `3600` or a suffix such as `2d`. It checks this node's `queue.*` events against themselves and against the tables, and exits 1 on any finding:
 
 - **duplicate:** an item claimed twice with no release or handoff between;
 - **loss:** an item the log proposed that has no row; a row whose state or claimer differs from its last state-changing event; an item whose history rows differ from its events;
