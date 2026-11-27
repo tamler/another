@@ -77,7 +77,7 @@ another --version</code></pre>
     </section>
     <section class="guide-section" aria-labelledby="tested-title">
       <h2 id="tested-title">What this page rests on</h2>
-      <p>The Cargo install and the exchange above ran on Apple Silicon with Rust already present. Installing the command line tools and Rust on a clean Mac has not been run for this page; those two steps follow Apple's and Rust's own instructions. CI builds the Intel target, but no one has executed that binary.</p>
+      <p>The Cargo install and the exchange above ran on Apple Silicon with Rust already present. Installing the command line tools and Rust on a clean Mac has not been run for this page; those two steps follow Apple's and Rust's own instructions. The release workflow builds the Intel binary on an Intel runner and smoke-tests the version, node initialization and agent registration.</p>
     </section>
   </main>
   <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="/docs/faq/">FAQ</a> <a href="/docs/concepts/">Concepts</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>

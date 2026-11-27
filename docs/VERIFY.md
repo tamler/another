@@ -6,7 +6,7 @@ No GitHub Release of Another has been published as of 27 Nov 2026. This page des
 
 A tag such as `v0.1.0-rc1` is rejected because the crate version is `0.1.0`; the tag must match it exactly.
 
-Pushing a tag `vX.Y.Z` runs [`.github/workflows/release.yml`](../.github/workflows/release.yml). For each target it writes two files and uploads both to the release:
+Pushing a tag `vX.Y.Z` runs [`.github/workflows/release.yml`](../.github/workflows/release.yml). The release links to the [site changelog](https://toanother.one/changelog/). For each target the workflow uploads an archive and its checksum:
 
 | File | Written by |
 |---|---|
