@@ -16,7 +16,6 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use std::fmt::Write as _;
 
 use base64::Engine;
-use globset::GlobBuilder;
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -26,7 +25,9 @@ use crate::error::{Error, Result};
 use crate::identity::resolve_agent;
 use crate::store::{new_id, Store, Tx};
 use crate::time::{fmt_opt, fmt_ts};
-use crate::tokens::{AuditRecord, TokenScope};
+use crate::tokens::{
+    compile_project_glob, insert_audit_tx as insert_audit, AuditRecord, TokenScope,
+};
 
 const CLIENT_NAME_ONE_LINE: &str =
     "client_name must be one line of text: no line breaks, tabs, escape, other control characters or text-direction characters";
@@ -287,24 +288,6 @@ fn user_code() -> Result<String> {
 
 fn normalize_user_code(raw: &str) -> String {
     raw.trim().to_ascii_lowercase().replace([' ', '_'], "-")
-}
-
-fn insert_audit(tx: &Tx<'_>, entry: AuditRecord) -> Result<()> {
-    tx.execute(
-        "INSERT INTO audit_log (node_id, ts, token_id, agent, operation, outcome, detail, remote)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![
-            tx.node_id,
-            tx.now,
-            entry.token_id,
-            entry.agent,
-            entry.operation,
-            entry.outcome,
-            entry.detail,
-            entry.remote
-        ],
-    )?;
-    Ok(())
 }
 
 /// Canonical resource identifier (RFC 8707): lowercase scheme and host, no fragment,
@@ -900,10 +883,7 @@ fn load_grant(tx: &Tx<'_>, grant_id: &str) -> Result<OauthGrant> {
 
 fn check_globs(globs: &[String]) -> Result<()> {
     for g in globs {
-        GlobBuilder::new(g)
-            .literal_separator(true)
-            .build()
-            .map_err(|e| Error::Invalid(format!("invalid project glob {g:?}: {e}")))?;
+        compile_project_glob(g)?;
     }
     Ok(())
 }
@@ -1947,6 +1927,99 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_validation_rejects_a_project_glob_that_cannot_compile() {
+        let huge = format!("/work/{}", "*a".repeat(1 << 20));
+        assert!(matches!(
+            check_globs(&[huge]),
+            Err(Error::Invalid(message)) if message.starts_with("invalid project glob")
+        ));
+    }
+
+    #[test]
+    fn oauth_approval_rejects_an_uncompileable_glob_without_storing_changes() {
+        use crate::identity::{Program, RegisterAgent};
+        use crate::store::Clock;
+
+        let (clock, _) = Clock::manual(1_700_000_000_000);
+        let store = Store::open_in_memory(clock).unwrap();
+        store
+            .register_agent(RegisterAgent {
+                name: "helper".into(),
+                program: Program::Other,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+        let client = store
+            .register_oauth_client(ClientRegistration {
+                client_name: "Helper".into(),
+                redirect_uris: vec!["https://client.example/callback".into()],
+                application_type: Some("web".into()),
+                remote: None,
+            })
+            .unwrap();
+        let pending = store
+            .begin_authorization(AuthorizeInput {
+                client: ClientProfile {
+                    client_id: client.client_id,
+                    client_name: client.client_name,
+                    redirect_uris: client.redirect_uris.clone(),
+                },
+                redirect_uri: client.redirect_uris[0].clone(),
+                state: None,
+                scope: None,
+                resource: "https://another.example/mcp".into(),
+                code_challenge: pkce_s256("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk").unwrap(),
+                code_challenge_method: "S256".into(),
+                remote: None,
+            })
+            .unwrap();
+        let snapshot = || {
+            store
+                .read(|conn| {
+                    let request: (String, Option<String>, Option<String>, Option<i64>) = conn
+                        .query_row(
+                            "SELECT status, grant_id, code_hash, code_expires_at
+                         FROM oauth_requests WHERE request_id = ?1",
+                            [&pending.request_id],
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                        )?;
+                    let audit: i64 =
+                        conn.query_row("SELECT count(*) FROM audit_log", [], |r| r.get(0))?;
+                    let events: i64 =
+                        conn.query_row("SELECT count(*) FROM events", [], |r| r.get(0))?;
+                    let tokens: i64 =
+                        conn.query_row("SELECT count(*) FROM oauth_tokens", [], |r| r.get(0))?;
+                    Ok((request, audit, events, tokens))
+                })
+                .unwrap()
+        };
+        let before = snapshot();
+        let huge = format!("/work/{}", "*a".repeat(1 << 20));
+        assert!(globset::GlobBuilder::new(&huge).build().is_ok());
+        assert!(matches!(
+            store.approve_oauth(Approval {
+                user_code: pending.user_code.clone(),
+                agent: "helper".into(),
+                project_globs: vec![huge],
+                label: None,
+            }),
+            Err(Error::Invalid(message)) if message.starts_with("invalid project glob")
+        ));
+        assert!(store.oauth_grants().unwrap().is_empty());
+        assert_eq!(snapshot(), before);
+        store
+            .approve_oauth(Approval {
+                user_code: pending.user_code,
+                agent: "helper".into(),
+                project_globs: vec!["/work/*".into()],
+                label: None,
+            })
+            .unwrap();
+    }
 
     /// The part of a shown host after Another's warning. It must hold nothing but ASCII
     /// letters, digits, `.`, `-` and whole `\u{XXXX}` escapes.
