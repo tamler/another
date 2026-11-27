@@ -1104,8 +1104,17 @@ fn project_dir(store: &Store, path: &Path) -> anyhow::Result<String> {
     Ok(real)
 }
 
-/// `another board`. Opens the database the way hooks do: nothing is created, migrated or
-/// swept, so reading the board leaves the database as it was.
+/// Open an initialized database for a read-only CLI report without migrating or sweeping.
+pub(crate) fn open_read_only(home: &Path, busy: Duration) -> anyhow::Result<Store> {
+    if !home.join(another_core::DB_FILE).exists() {
+        anyhow::bail!(
+            "no Another database in {}; run `another init` first",
+            home.display()
+        );
+    }
+    Ok(Store::open_read_only(home, busy)?)
+}
+
 fn board_command(
     home: &Path,
     json: bool,
@@ -1113,13 +1122,7 @@ fn board_command(
     since: &str,
     limit: u32,
 ) -> anyhow::Result<ExitCode> {
-    if !home.join(another_core::DB_FILE).exists() {
-        anyhow::bail!(
-            "no Another database in {}; run `another init` first",
-            home.display()
-        );
-    }
-    let store = Store::open_quick(home, Duration::from_secs(5))?;
+    let store = open_read_only(home, Duration::from_secs(5))?;
     let since_ms = match Since::parse(since, store.now())? {
         Since::Time(t) => t,
         Since::After(_) => anyhow::bail!(
@@ -1503,7 +1506,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     }
     if let Command::Needs { brief, limit } = &cli.command {
         // Before any Store::open, which would create the home and migrate the database.
-        return Ok(crate::needs::run(&another_home()?, json, *brief, *limit));
+        return crate::needs::run(&another_home()?, json, *brief, *limit);
     }
     if let Command::Doctor { bind } = &cli.command {
         // Before any Store::open, which would create the home and migrate the database.

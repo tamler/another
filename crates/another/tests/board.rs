@@ -249,3 +249,42 @@ fn an_empty_board_says_so() {
     assert!(human.contains("No live holds and no edits in this window."));
     assert!(human.contains("none with holds, unread mail, acknowledgements or requests"));
 }
+
+#[test]
+fn board_opens_wal_mode_without_sidecars() {
+    let env = Env::new();
+    env.start("claude", &env.main);
+    assert_eq!(env.edit("claude", &env.main, "src/a.rs"), "");
+    for suffix in ["-wal", "-shm"] {
+        assert!(!env
+            .another_home
+            .join(format!("{}{suffix}", another_core::DB_FILE))
+            .exists());
+    }
+
+    let board = env.json(&["board"]);
+    assert_eq!(board["projects"][0]["holds"][0]["pattern"], "src/a.rs");
+}
+
+#[cfg(unix)]
+#[test]
+fn board_opens_a_read_only_rollback_database() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = Env::new();
+    env.start("claude", &env.main);
+    assert_eq!(env.edit("claude", &env.main, "src/a.rs"), "");
+    let path = env.another_home.join(another_core::DB_FILE);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let mode: String = db
+        .query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "delete");
+    drop(db);
+    let before = std::fs::read(&path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+    let board = env.json(&["board"]);
+    assert_eq!(board["projects"][0]["holds"][0]["pattern"], "src/a.rs");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
