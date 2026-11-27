@@ -227,14 +227,18 @@ pub(crate) fn projection_release(tx: &Tx<'_>, projection: &str, reason: &str) ->
 
 /// Compatibility rows are projections of the common deadline, never another clock.
 /// Reads of contract state remain pure; writes materialize expired responsibility.
-/// Runs twice in every write transaction, so it touches only projections whose business
-/// record is still open: an ended projection is history and is never rewritten again.
+/// Runs twice in every write transaction, so every statement starts from the open
+/// business rows (unreleased holds and resource leases, claimed queue items and
+/// requests, unlapsed resources) and reaches a projection by its key. Ended history is
+/// never joined or rewritten again.
 pub(crate) fn sync_projections(tx: &Tx<'_>) -> Result<()> {
     for (table, id) in [("holds", "hold_id"), ("resource_leases", "lease_id")] {
-        tx.execute(&format!("UPDATE {table} SET ttl_seconds = (SELECT l.ttl_seconds FROM right_leases l JOIN lease_projections p ON p.lease_id = l.lease_id WHERE p.projection_id = {table}.{id}), renewed_at = (SELECT l.last_update_at FROM right_leases l JOIN lease_projections p ON p.lease_id = l.lease_id WHERE p.projection_id = {table}.{id}), expires_at = (SELECT l.expires_at FROM right_leases l JOIN lease_projections p ON p.lease_id = l.lease_id WHERE p.projection_id = {table}.{id}) WHERE released_at IS NULL AND {id} IN (SELECT projection_id FROM lease_projections)"), [])?;
-        tx.execute(&format!("UPDATE {table} SET released_at = ?1, release_reason = 'lease_ended' WHERE released_at IS NULL AND {id} IN (SELECT p.projection_id FROM lease_projections p JOIN right_leases l ON l.lease_id = p.lease_id WHERE l.released_at IS NOT NULL OR l.expires_at <= ?1)"), [tx.now])?;
+        tx.execute(&format!("UPDATE {table} SET ttl_seconds = (SELECT l.ttl_seconds FROM right_leases l JOIN lease_projections p ON p.lease_id = l.lease_id WHERE p.projection_id = {table}.{id}), renewed_at = (SELECT l.last_update_at FROM right_leases l JOIN lease_projections p ON p.lease_id = l.lease_id WHERE p.projection_id = {table}.{id}), expires_at = (SELECT l.expires_at FROM right_leases l JOIN lease_projections p ON p.lease_id = l.lease_id WHERE p.projection_id = {table}.{id}) WHERE released_at IS NULL AND EXISTS (SELECT 1 FROM lease_projections p WHERE p.projection_id = {table}.{id})"), [])?;
+        tx.execute(&format!("UPDATE {table} SET released_at = ?1, release_reason = 'lease_ended' WHERE released_at IS NULL AND EXISTS (SELECT 1 FROM lease_projections p JOIN right_leases l ON l.lease_id = p.lease_id WHERE p.projection_id = {table}.{id} AND (l.released_at IS NOT NULL OR l.expires_at <= ?1))"), [tx.now])?;
     }
-    let mut stmt = tx.prepare("SELECT p.projection_id FROM lease_projections p JOIN right_leases l ON l.lease_id = p.lease_id WHERE (l.released_at IS NOT NULL OR l.expires_at <= ?1) AND ((l.subject_kind = 'queue' AND EXISTS (SELECT 1 FROM queue_items q WHERE q.item_id = substr(p.projection_id, 7) AND q.state = 'claimed')) OR (l.subject_kind = 'request' AND EXISTS (SELECT 1 FROM requests r WHERE r.request_id = substr(p.projection_id, 9) AND r.status = 'claimed')))")?;
+    let mut stmt = tx.prepare("SELECT p.projection_id FROM queue_items q JOIN lease_projections p ON p.projection_id = 'queue:' || q.item_id JOIN right_leases l ON l.lease_id = p.lease_id WHERE q.state = 'claimed' AND (l.released_at IS NOT NULL OR l.expires_at <= ?1)
+        UNION ALL
+        SELECT p.projection_id FROM requests r JOIN lease_projections p ON p.projection_id = 'request:' || r.request_id JOIN right_leases l ON l.lease_id = p.lease_id WHERE r.status = 'claimed' AND (l.released_at IS NOT NULL OR l.expires_at <= ?1)")?;
     let ended = stmt
         .query_map([tx.now], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1096,6 +1100,22 @@ impl Store {
 
     /// Includes released and expired history; effectiveness is computed at authority
     /// time, independently of maintenance, transport observations, or physical cleanup.
+    /// One actor's live leases, through the session-scope index rather than every lease.
+    pub(crate) fn live_leases_of(&self, actor_id: &str) -> Result<Vec<RightLease>> {
+        let now = self.now();
+        self.read(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "{LEASE_SELECT} WHERE session_scope_id = (SELECT session_scope_id FROM contract_actors WHERE actor_id = ?1)
+                   AND owner_actor_id = ?1 AND released_at IS NULL AND expires_at > ?2
+                 ORDER BY last_update_at, lease_id"
+            ))?;
+            let leases = stmt
+                .query_map(params![actor_id, now], lease_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(leases)
+        })
+    }
+
     pub fn right_leases(&self) -> Result<Vec<RightLease>> {
         self.read(|conn| {
             let mut stmt =

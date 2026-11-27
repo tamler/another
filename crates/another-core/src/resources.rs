@@ -528,7 +528,7 @@ fn settle(tx: &Tx<'_>, resource_id: &str, actor: &str, when: i64) -> Result<Opti
 /// would find no live lease and change nothing, and a new lease clears `lapsed_at`, so
 /// the work is bounded by resources still in use, not by ended history.
 pub(crate) fn settle_contract_projections(tx: &Tx<'_>) -> Result<()> {
-    let mut stmt = tx.prepare("SELECT DISTINCT r.resource_id FROM resource_leases r JOIN resources res ON res.resource_id = r.resource_id AND res.lapsed_at IS NULL JOIN lease_projections p ON p.projection_id = r.lease_id JOIN right_leases l ON l.lease_id = p.lease_id WHERE l.released_at IS NOT NULL OR l.expires_at <= ?1")?;
+    let mut stmt = tx.prepare("SELECT DISTINCT res.resource_id FROM resources res JOIN resource_leases r ON r.resource_id = res.resource_id JOIN lease_projections p ON p.projection_id = r.lease_id JOIN right_leases l ON l.lease_id = p.lease_id WHERE res.lapsed_at IS NULL AND (l.released_at IS NOT NULL OR l.expires_at <= ?1)")?;
     let ids = stmt
         .query_map([tx.now], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
