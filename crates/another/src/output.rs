@@ -952,7 +952,7 @@ pub fn board(b: &another_core::Board) -> String {
 
 pub fn daemon_status(s: &crate::daemon::DaemonStatus) -> String {
     let yes = |b: bool| if b { "yes" } else { "no" };
-    format!(
+    let mut out = format!(
         "manager   {}\nlabel     {}\nfile      {} (installed: {})\nloaded    {}\npid       {}\nbind      {}\nhealthy   {}\nlog       {}",
         match s.manager {
             crate::daemon::Manager::Launchd => "launchd",
@@ -967,7 +967,11 @@ pub fn daemon_status(s: &crate::daemon::DaemonStatus) -> String {
         s.bind.as_deref().unwrap_or("-"),
         yes(s.healthy),
         s.log
-    )
+    );
+    if let Some(detail) = &s.detail {
+        out.push_str(&format!("\ndetail    {detail}"));
+    }
+    out
 }
 
 /// One line per queue item: number, state, priority, kind, scope, title, then who holds it
