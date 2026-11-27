@@ -244,9 +244,9 @@ impl Env {
                 &QueueCaller::Owner,
                 ProposeItem {
                     title: title.into(),
-                    body: "BODY-MARK".into(),
+                    body: "BODY-MARK_".into(),
                     scope: Some("M6".into()),
-                    done_when: Some("DONE-MARK".into()),
+                    done_when: Some("DONE-MARK_".into()),
                     ..Default::default()
                 },
             )
@@ -273,7 +273,7 @@ impl Env {
             "--subject",
             subject,
             "--body",
-            "MAILBODY-MARK",
+            "MAILBODY-MARK_",
         ];
         if request {
             args.push("--request");
@@ -1388,13 +1388,15 @@ fn stored_addresses_cannot_pass_as_another() {
 // T15
 #[test]
 fn nothing_private_in_hook_text() {
+    // This valid ULID matched the old privacy assertion.
+    const REQUEST_ID: &str = "01M8EKQ3GTMARK20CW00000000";
     let (env, agent) = seated("claude");
     env.seat(&agent, 2);
     let mut outputs = Vec::new();
-    for title in ["TITLE-MARK one", "TITLE-MARK two", "TITLE-MARK three"] {
+    for title in ["TITLE-MARK_ one", "TITLE-MARK_ two", "TITLE-MARK_ three"] {
         let item = env.ready(title);
         env.store()
-            .queue_note("rev@shop", &item.label, "NOTE-MARK")
+            .queue_note("rev@shop", &item.label, "NOTE-MARK_")
             .unwrap();
     }
     env.ok(&[
@@ -1405,12 +1407,15 @@ fn nothing_private_in_hook_text() {
         "--project",
         env.repo.to_str().unwrap(),
         "--reason",
-        "HOLDREASON-MARK",
-        "src/HOLDPATTERN-MARK/**",
+        "HOLDREASON-MARK_",
+        "src/HOLDPATTERN-MARK_/**",
     ]);
     env.send("rev@shop", &agent, "A plain subject", true);
+    env.db()
+        .execute("UPDATE requests SET request_id = ?1", [REQUEST_ID])
+        .unwrap();
 
-    let session = "SESSION-MARK-1";
+    let session = "SESSION-MARK_1";
     outputs.push(env.start("claude", session, "startup"));
     outputs.push(env.prompt("claude", session));
     env.take(&agent);
@@ -1427,7 +1432,7 @@ fn nothing_private_in_hook_text() {
             "--agent",
             &agent,
             "--summary",
-            "RESULT-MARK",
+            "RESULT-MARK_",
             "--commit",
             "abcdef1",
         ],
@@ -1436,12 +1441,13 @@ fn nothing_private_in_hook_text() {
     outputs.push(out.trim_end().lines().last().unwrap().to_string());
     env.take(&agent);
     let (_, out, _) = env.queue(
-        &["release", "Q2", "--agent", &agent, "--note", "NOTE-MARK"],
+        &["release", "Q2", "--agent", &agent, "--note", "NOTE-MARK_"],
         &[],
     );
     outputs.push(out.trim_end().lines().last().unwrap().to_string());
 
     assert!(outputs[0].contains(&ready_line(&agent)), "{}", outputs[0]);
+    assert!(outputs[0].contains(REQUEST_ID), "{}", outputs[0]);
     assert!(
         outputs[2].contains("this session holds Q1"),
         "{}",
@@ -1455,7 +1461,7 @@ fn nothing_private_in_hook_text() {
     assert_eq!(outputs[5], next_line(&agent));
     assert_eq!(outputs[6], next_line(&agent));
     for out in &outputs {
-        assert!(!out.contains("MARK"), "private text in hook output: {out}");
+        assert!(!out.contains("MARK_"), "private text in hook output: {out}");
         assert!(!out.contains("Last hour"), "{out}");
     }
 }
