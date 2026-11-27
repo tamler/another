@@ -203,6 +203,8 @@ Hub backups are secret material: they contain the node's private signing key, ma
 
 Current brief: [AGENTS.md](AGENTS.md). Every change merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88, copy lint.
 
+Superseded pull request CI runs are canceled. The fuzz workflow gives each of its five pull request targets five minutes of fuzzing within a 20-minute job limit. Fuzzing also runs on pushes to `main`, nightly at 18:00 UTC, and on manual dispatch.
+
 ## Guides
 
 Task guides, all listed on the [guides hub](site/guides/index.html) (website source): [Claude Code + Codex](site/guides/claude-code-codex/index.html), [coordinate local agents](site/guides/coordinate-local-agents/index.html), [multiple Claude Code sessions](site/guides/multiple-claude-code-sessions/index.html), [MCP messaging](site/guides/mcp-agent-messaging/index.html), [file holds](site/guides/avoid-agent-file-conflicts/index.html), [git worktrees](site/guides/git-worktrees/index.html), [hand off a task](site/guides/hand-off-tasks/index.html), [share a model server](site/guides/share-model-server/index.html), [wake idle agents](site/guides/wake-idle-agents/index.html) and [agents on two machines](site/guides/agents-on-two-machines/index.html).
