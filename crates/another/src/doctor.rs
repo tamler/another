@@ -698,6 +698,11 @@ fn daemon_check(
 }
 
 fn peers(store: &Store) -> Check {
+    let inconsistent = match store.inconsistent_holds(5) {
+        Ok((0, _)) => None,
+        Ok((count, sample)) => Some(format!("{count} inconsistent holds: {}; inert since this build; not removed; ends when it expires or its node releases it", sample.join("; "))),
+        Err(e) => Some(format!("could not check inconsistent holds: {e}")),
+    };
     let peers = match store.peers() {
         Ok(p) => p,
         Err(e) => return check("peers", Level::Warn, format!("could not list peers: {e}")),
@@ -713,9 +718,15 @@ fn peers(store: &Store) -> Check {
         .filter(|p| p.revoked_at.is_none() && p.node_id != store.node_id())
         .collect();
     if live.is_empty() {
-        return match own_row {
-            Some(text) => check("peers", Level::Warn, text),
-            None => check("peers", Level::Info, "no paired nodes"),
+        let warnings: Vec<_> = own_row
+            .map(str::to_owned)
+            .into_iter()
+            .chain(inconsistent)
+            .collect();
+        return if warnings.is_empty() {
+            check("peers", Level::Info, "no paired nodes")
+        } else {
+            check("peers", Level::Warn, warnings.join("; "))
         };
     }
     let now = std::time::SystemTime::now()
@@ -756,6 +767,7 @@ fn peers(store: &Store) -> Check {
     }
     // What is known about how this node reaches its hub. Neither stops a sync.
     let mut warnings = Vec::new();
+    warnings.extend(inconsistent);
     let unchecked = crate::fed::hub_with_unchecked_address(store).map(|p| p.node_id);
     for p in live.iter().filter(|p| p.role == "hub") {
         let Some(url) = p.url.as_deref() else {

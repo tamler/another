@@ -398,9 +398,13 @@ pub struct IngestReport {
     pub accepted: usize,
     pub duplicates: usize,
     pub rejected: Vec<Rejected>,
+    /// Refused hold events that named an object owned by another node.
+    #[serde(default)]
+    pub hold_refused: u32,
     /// Events that were accepted, stored and relayed, but not applied to this node's read
-    /// models: a hold whose pattern is over the limit or does not compile. Counted in
-    /// `accepted`. Absent when empty, and from older builds.
+    /// models: an oversized hold pattern, or lifecycle ids owned by another node.
+    /// A mixed lifecycle event still applies its owned ids. Counted in `accepted`.
+    /// Absent when empty, and from older builds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub not_applied: Vec<Rejected>,
 }
@@ -1121,13 +1125,119 @@ fn owner_of(conn: &Connection, table: &str, column: &str, id: &str) -> Result<Op
         .optional()?)
 }
 
-/// A signature proves only who sent an event. Before a foreign event is stored, check that
-/// every agent, project, message, hold and resource it would create or change belongs to
-/// its origin node. An object this node does not know yet cannot be rewritten, so it
-/// passes; the projection then records it under the origin. Mail may name recipients and
-/// a borrow may name a resource on any node: those are the cross-node operations
-/// federation exists for, and the permission checks in `spoke_may_publish` cover them.
-fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> Result<()> {
+/// Lifecycle events can mix owned and foreign ids. Apply the owned subset and report
+/// the ignored subset without refusing legitimate renewals from an older build.
+fn foreign_hold_ids(
+    conn: &Connection,
+    origin: &str,
+    kind: &str,
+    p: &Value,
+) -> Result<Option<String>> {
+    let mut ids = match kind {
+        "hold.renewed" | "hold.released" => strings(p, "hold_ids"),
+        "hold.expired" => p
+            .get("hold_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .into_iter()
+            .collect(),
+        _ => return Ok(None),
+    };
+    ids.sort();
+    ids.dedup();
+    let mut count = 0;
+    let mut sample = Vec::new();
+    for chunk in ids.chunks(900) {
+        let marks = vec!["?"; chunk.len()].join(",");
+        let mut stmt = conn.prepare(&format!("SELECT h.hold_id, h.node_id, coalesce(n.display_name, 'unknown') FROM holds h LEFT JOIN nodes n ON n.node_id = h.node_id WHERE h.node_id != ? AND h.hold_id IN ({marks}) ORDER BY h.hold_id"))?;
+        let args = std::iter::once(origin).chain(chunk.iter().map(String::as_str));
+        let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, node, name) = row?;
+            count += 1;
+            if sample.len() < 5 {
+                sample.push(format!("{id} owned by node {name} ({node})"));
+            }
+        }
+    }
+    Ok((count > 0).then(|| {
+        crate::mail::display_line(
+            &format!(
+                "{kind} ignored {count} hold ids owned by other nodes: {}; owned ids still applied",
+                sample.join(", ")
+            ),
+            700,
+        )
+    }))
+}
+
+struct HoldCollision {
+    object: &'static str,
+    id: String,
+    owner: String,
+}
+
+impl HoldCollision {
+    fn reason(&self, conn: &Connection, origin: &str, kind: &str) -> Result<String> {
+        let name = |id: &str| -> Result<String> {
+            Ok(conn
+                .query_row(
+                    "SELECT display_name FROM nodes WHERE node_id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or_else(|| "unknown".into()))
+        };
+        Ok(format!(
+            "{kind} from node {} ({origin}) names {} {} owned by node {} ({})",
+            name(origin)?,
+            self.object,
+            self.id,
+            name(&self.owner)?,
+            self.owner
+        ))
+    }
+}
+
+/// A signature proves only who sent an event. Before storage, check the ownership of
+/// every object it would change. Unknown objects pass; mail recipients and borrowed
+/// resources may belong to other nodes, within `spoke_may_publish` permissions.
+fn foreign_authority(
+    conn: &Connection,
+    origin: &str,
+    kind: &str,
+    p: &Value,
+) -> Result<Option<HoldCollision>> {
+    if matches!(kind, "hold.acquired" | "hold.updated") {
+        for (object, table, key) in [
+            ("agent", "agents", "agent_id"),
+            ("project", "projects", "project_id"),
+            ("hold", "holds", "hold_id"),
+        ] {
+            if let Some(id) = p.get(key).and_then(Value::as_str) {
+                if let Some(owner) = owner_of(conn, table, key, id)?.filter(|n| n != origin) {
+                    return Ok(Some(HoldCollision {
+                        object,
+                        id: id.into(),
+                        owner,
+                    }));
+                }
+            }
+        }
+        return Ok(None);
+    }
+    check_foreign_authority(conn, origin, kind, p)?;
+    Ok(None)
+}
+
+fn check_foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> Result<()> {
     let owned = |what: &str, table: &str, column: &str, key: &str| -> Result<()> {
         let Some(id) = p.get(key).and_then(Value::as_str) else {
             return Ok(());
@@ -1190,11 +1300,6 @@ fn foreign_authority(conn: &Connection, origin: &str, kind: &str, p: &Value) -> 
                 Some(_) => return Err(Error::Invalid("message body must be text".into())),
             }
             owned("message", "messages", "message_id", "message_id")
-        }
-        "hold.acquired" | "hold.updated" => {
-            agent("agent_id")?;
-            project()?;
-            owned("hold", "holds", "hold_id", "hold_id")
         }
         "resource.registered" => {
             agent("owner_id")?;
@@ -1459,7 +1564,10 @@ fn project_foreign(tx: &Tx<'_>, ev: &WireEvent, p: &Value) -> Result<()> {
             else {
                 return Ok(());
             };
-            if !project_exists(tx, &project)? || !agent_exists(tx, &agent)? {
+            if owner_of(tx, "projects", "project_id", &project)?.as_deref() != Some(origin)
+                || owner_of(tx, "agents", "agent_id", &agent)?.as_deref() != Some(origin)
+            {
+                tracing::warn!(event = %ev.event_id, node = %origin, "foreign hold projection ownership mismatch");
                 return Ok(());
             }
             let ttl = p
@@ -3018,6 +3126,7 @@ impl Store {
                 }
             }
             let mut report = IngestReport::default();
+            let mut ownership_events = 0usize;
             for ev in events {
                 let reject = |reason: String| Rejected {
                     event_id: ev.event_id.clone(),
@@ -3044,9 +3153,23 @@ impl Store {
                     report.rejected.push(reject(e.to_string()));
                     continue;
                 }
-                if let Err(e) = foreign_authority(tx, &ev.node_id, &ev.kind, &payload) {
-                    report.rejected.push(reject(e.to_string()));
-                    continue;
+                match foreign_authority(tx, &ev.node_id, &ev.kind, &payload) {
+                    Ok(Some(collision)) => {
+                        let reason = collision.reason(tx, &ev.node_id, &ev.kind)?;
+                        ownership_events += 1;
+                        report.hold_refused += 1;
+                        if ownership_events <= 20 {
+                            crate::holds::audit_foreign_ownership(tx, &ev.node_id, "refused", &format!("event {}: {reason}", ev.event_id))?;
+                        }
+                        tracing::warn!(event = %ev.event_id, node = %ev.node_id, %reason, "foreign hold refused");
+                        report.rejected.push(reject(reason));
+                        continue;
+                    }
+                    Err(e) => {
+                        report.rejected.push(reject(e.to_string()));
+                        continue;
+                    }
+                    Ok(None) => {}
                 }
                 let inserted = tx.execute(
                     "INSERT OR IGNORE INTO events (event_id, node_id, ts, actor, kind, payload, prev_id, sig)
@@ -3056,6 +3179,13 @@ impl Store {
                 if inserted == 0 {
                     report.duplicates += 1;
                     continue;
+                }
+                if let Some(reason) = foreign_hold_ids(tx, &ev.node_id, &ev.kind, &payload)? {
+                    ownership_events += 1;
+                    if ownership_events <= 20 {
+                        crate::holds::audit_foreign_ownership(tx, &ev.node_id, "ignored", &format!("event {}: {reason}", ev.event_id))?;
+                    }
+                    report.not_applied.push(reject(reason));
                 }
                 if let Some(reason) = crate::holds::refuse_foreign_pattern(
                     tx,
@@ -3070,6 +3200,9 @@ impl Store {
                     tracing::warn!(event = %ev.event_id, kind = %ev.kind, error = %e, "could not project foreign event");
                 }
                 report.accepted += 1;
+            }
+            if ownership_events > 20 {
+                crate::holds::audit_foreign_ownership(tx, from, "summary", &format!("batch received via peer {from}: and {} more refused or ignored hold events in this batch; event origins are recorded in the individual event rows", ownership_events - 20))?;
             }
             Ok(report)
         })
@@ -3195,6 +3328,15 @@ mod tests {
             let actual: (i64, bool) = tx.query_row("SELECT expires_at, exclusive FROM holds WHERE hold_id=?1",
                 [&hold_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
             assert_eq!(actual, (expiry, true));
+            // Bypass ingest entirely with a fresh id and a local agent/project.
+            // The projection must refuse to create this inconsistent legacy shape.
+            let mut payload = payload;
+            payload["hold_id"] = json!("fresh-foreign");
+            let mut acquired = event;
+            acquired.kind = "hold.acquired".into();
+            project_foreign(tx, &acquired, &payload)?;
+            let count: i64 = tx.query_row("SELECT count(*) FROM holds WHERE hold_id = 'fresh-foreign'", [], |r| r.get(0))?;
+            assert_eq!(count, 0);
             Ok(())
         }).unwrap();
     }

@@ -534,13 +534,14 @@ impl Store {
             let pattern = normalize_pattern(&project, raw)?;
             let mut stmt = tx.prepare(
                 "SELECT hold_id FROM holds WHERE agent_id = ?1 AND project_id = ?2
-                   AND pattern = ?3 AND released_at IS NULL AND expires_at > ?4
+                   AND pattern = ?3 AND released_at IS NULL AND expires_at > ?4 AND node_id = ?5
                  ORDER BY created_at, hold_id",
             )?;
             let released = stmt
-                .query_map(params![me.id, project.project_id, pattern, tx.now], |r| {
-                    r.get(0)
-                })?
+                .query_map(
+                    params![me.id, project.project_id, pattern, tx.now, tx.node_id],
+                    |r| r.get(0),
+                )?
                 .collect::<rusqlite::Result<Vec<String>>>()?;
             let mut out = PathRelease {
                 released,

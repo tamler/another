@@ -411,10 +411,11 @@ async fn push(
     match blocking(move || s.ingest(&n, &req.events, &[])).await {
         Ok(report) => {
             let detail = format!(
-                "accepted {}, duplicates {}, rejected {}",
+                "accepted {}, duplicates {}, rejected {} (hold ownership {})",
                 report.accepted,
                 report.duplicates,
-                report.rejected.len()
+                report.rejected.len(),
+                report.hold_refused
             );
             record(&store, Some(node.clone()), "POST /fed/push", "ok", detail).await;
             answer(&store, node, nonce, signature, &report).await

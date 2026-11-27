@@ -935,14 +935,14 @@ fn conflicts_for(
     // other checkouts and are never candidates (D92).
     let mut stmt = tx.prepare(&format!(
         "{HOLD_SELECT_REPO} WHERE h.released_at IS NULL AND h.expires_at > ?3
-           AND h.agent_id != ?2
+           AND h.agent_id != ?2 AND h.node_id = ?5
            AND (h.project_id = ?1 OR (?4 != '' AND h.project_id IN
                 (SELECT project_id FROM project_repos WHERE checkout = ?4)))
          ORDER BY h.created_at"
     ))?;
     let others = stmt
         .query_map(
-            params![project.project_id, agent_id, tx.now, checkout],
+            params![project.project_id, agent_id, tx.now, checkout, tx.node_id],
             |r| {
                 Ok((
                     hold_from_row(r)?,
@@ -1054,8 +1054,8 @@ fn upsert_hold_tx(
     let existing: Option<String> = tx
         .query_row(
             "SELECT hold_id FROM holds WHERE agent_id = ?1 AND project_id = ?2
-               AND pattern = ?3 AND released_at IS NULL",
-            params![agent_id, project_id, pattern],
+               AND pattern = ?3 AND released_at IS NULL AND node_id = ?4 AND expires_at > ?5",
+            params![agent_id, project_id, pattern, tx.node_id, tx.now],
             |r| r.get(0),
         )
         .ok();
@@ -1078,11 +1078,14 @@ fn upsert_hold_tx(
             let mut payload = payload;
             payload["hold_id"] = json!(id);
             tx.emit(actor, "hold.updated", payload)?;
-            tx.execute(
+            let changed = tx.execute(
                 "UPDATE holds SET exclusive = ?2, reason = ?3, ttl_seconds = ?4,
-                   renewed_at = ?5, expires_at = ?6 WHERE hold_id = ?1",
-                params![id, exclusive, reason, ttl, tx.now, expires_at],
+                   renewed_at = ?5, expires_at = ?6 WHERE hold_id = ?1 AND node_id = ?7",
+                params![id, exclusive, reason, ttl, tx.now, expires_at, tx.node_id],
             )?;
+            if changed != 1 {
+                return Err(rusqlite::Error::StatementChangedRows(changed).into());
+            }
             id
         }
         None => {
@@ -1355,6 +1358,29 @@ pub(crate) fn refuse_foreign_pattern(
         },
     )?;
     Ok(Some(reason))
+}
+
+pub(crate) fn audit_foreign_ownership(
+    tx: &Tx<'_>,
+    origin: &str,
+    outcome: &str,
+    detail: &str,
+) -> Result<()> {
+    // Event rows name the signer. A summary covers a batch from the immediate peer,
+    // which can relay events signed by several other nodes.
+    let source = if outcome == "summary" { "peer" } else { "node" };
+    tx.execute(
+        "INSERT INTO audit_log (node_id, ts, token_id, agent, operation, outcome, detail, remote)
+         VALUES (?1, ?2, NULL, ?3, 'federation hold ownership', ?4, ?5, NULL)",
+        params![
+            tx.node_id,
+            tx.now,
+            format!("{source}:{origin}"),
+            outcome,
+            crate::mail::display_line(detail, 700)
+        ],
+    )?;
+    Ok(())
 }
 
 /// The blocked paths and, per path, the sorted ids of the holds blocking it. This is the
@@ -1786,8 +1812,8 @@ pub(crate) fn release_tx(
     }
     for id in hold_ids {
         tx.execute(
-            "UPDATE holds SET released_at = ?2, release_reason = ?3 WHERE hold_id = ?1",
-            params![id, tx.now, reason],
+            "UPDATE holds SET released_at = ?2, release_reason = ?3 WHERE hold_id = ?1 AND node_id = ?4",
+            params![id, tx.now, reason, tx.node_id],
         )?;
     }
     complete_hold_requests_tx(tx)?;
@@ -1805,8 +1831,8 @@ fn renew_tx(tx: &Tx<'_>, actor: &str, holds: &[(String, i64)]) -> Result<()> {
     }
     for (id, ttl) in holds {
         tx.execute(
-            "UPDATE holds SET renewed_at = ?2, expires_at = ?2 + ?3 * 1000 WHERE hold_id = ?1",
-            params![id, tx.now, ttl],
+            "UPDATE holds SET renewed_at = ?2, expires_at = ?2 + ?3 * 1000 WHERE hold_id = ?1 AND node_id = ?4",
+            params![id, tx.now, ttl, tx.node_id],
         )?;
     }
     Ok(())
@@ -1822,10 +1848,10 @@ fn owned_holds(
 ) -> Result<Vec<(String, i64)>> {
     let mut stmt = tx.prepare(
         "SELECT hold_id, ttl_seconds, project_id FROM holds
-         WHERE agent_id = ?1 AND released_at IS NULL ORDER BY created_at",
+         WHERE agent_id = ?1 AND node_id = ?2 AND released_at IS NULL ORDER BY created_at",
     )?;
     let rows = stmt
-        .query_map([agent_id], |r| {
+        .query_map(params![agent_id, tx.node_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, i64>(1)?,
@@ -1870,6 +1896,46 @@ fn holds_by_id(conn: &Connection, ids: &[String]) -> Result<Vec<Hold>> {
 }
 
 impl Store {
+    /// Unreleased holds with inconsistent ownership or missing agent/project/node rows.
+    /// Returns the total and at most `limit` diagnostic lines. Reads only; no repair.
+    pub fn inconsistent_holds(&self, limit: usize) -> Result<(usize, Vec<String>)> {
+        self.read(|conn| {
+            let from = "FROM holds h
+                LEFT JOIN agents a ON a.agent_id = h.agent_id
+                LEFT JOIN projects p ON p.project_id = h.project_id
+                LEFT JOIN nodes hn ON hn.node_id = h.node_id
+                LEFT JOIN nodes an ON an.node_id = a.node_id
+                LEFT JOIN nodes pn ON pn.node_id = p.node_id
+                WHERE h.released_at IS NULL AND (
+                    a.agent_id IS NULL OR p.project_id IS NULL OR hn.node_id IS NULL
+                    OR an.node_id IS NULL OR pn.node_id IS NULL
+                    OR h.node_id != a.node_id OR h.node_id != p.node_id)";
+            let count: i64 =
+                conn.query_row(&format!("SELECT count(*) {from}"), [], |r| r.get(0))?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT h.hold_id,
+                h.node_id || CASE WHEN hn.node_id IS NULL THEN ' (missing node)' ELSE '' END,
+                CASE WHEN a.agent_id IS NULL THEN 'missing agent'
+                     WHEN an.node_id IS NULL THEN a.node_id || ' (missing node)' ELSE a.node_id END,
+                CASE WHEN p.project_id IS NULL THEN 'missing project'
+                     WHEN pn.node_id IS NULL THEN p.node_id || ' (missing node)' ELSE p.node_id END
+                {from} ORDER BY h.hold_id LIMIT ?1"
+            ))?;
+            let lines = stmt
+                .query_map([limit.min(i64::MAX as usize) as i64], |r| {
+                    Ok(format!(
+                        "hold {} (node {}, agent node {}, project node {})",
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok((count as usize, lines))
+        })
+    }
+
     /// Ask a live local hold's owner to release it. Reuse an outstanding ask from this
     /// agent for this hold. The linked request closes automatically when the hold ends.
     pub fn request_hold_release(&self, agent: &str, hold_id: &str) -> Result<Message> {
@@ -2182,11 +2248,11 @@ impl Store {
             let mut stmt = tx.prepare(
                 "SELECT hold_id, pattern, ttl_seconds, expires_at FROM holds
                  WHERE agent_id = ?1 AND project_id = ?2 AND exclusive = 1
-                   AND released_at IS NULL AND expires_at > ?3
+                   AND released_at IS NULL AND expires_at > ?3 AND node_id = ?4
                  ORDER BY created_at",
             )?;
             let own = stmt
-                .query_map(params![me.id, project.project_id, tx.now], |r| {
+                .query_map(params![me.id, project.project_id, tx.now, tx.node_id], |r| {
                     Ok((
                         r.get::<_, String>(0)?,
                         r.get::<_, String>(1)?,
@@ -2268,10 +2334,12 @@ impl Store {
             let mut stmt = tx.prepare(
                 "SELECT hold_id, ttl_seconds FROM holds
                  WHERE agent_id = ?1 AND released_at IS NULL AND expires_at > ?2
-                   AND expires_at - ?2 < ttl_seconds * 500",
+                   AND expires_at - ?2 < ttl_seconds * 500 AND node_id = ?3",
             )?;
             let due = stmt
-                .query_map(params![me.id, tx.now], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .query_map(params![me.id, tx.now, tx.node_id], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?
                 .collect::<rusqlite::Result<Vec<(String, i64)>>>()?;
             renew_tx(tx, &me.address, &due)?;
             Ok(due.len())

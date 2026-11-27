@@ -700,6 +700,48 @@ fn a_hub_not_synced_for_two_days_warns() {
 }
 
 #[test]
+fn doctor_warns_about_inconsistent_holds_without_repair() {
+    let fx = Fx::new();
+    fx.init();
+    let (_, clean) = fx.doctor();
+    assert!(!row(&clean, "peers")["detail"]
+        .as_str()
+        .unwrap()
+        .contains("inconsistent holds"));
+    let store = another_core::Store::open(&fx.home).unwrap();
+    let agent = store
+        .register_agent(another_core::RegisterAgent {
+            name: "alice".into(),
+            program: another_core::Program::Codex,
+            project: None,
+            model: None,
+            description: None,
+        })
+        .unwrap();
+    let project = store
+        .ensure_project("test", fx.user.to_str().unwrap())
+        .unwrap();
+    let c = rusqlite::Connection::open(fx.db()).unwrap();
+    c.execute("INSERT INTO nodes (node_id,display_name,role,is_local,created_at) VALUES ('legacy-peer','legacy','peer',0,1)", []).unwrap();
+    c.execute("INSERT INTO holds (hold_id,node_id,project_id,agent_id,pattern,exclusive,ttl_seconds,created_at,renewed_at,expires_at) VALUES ('legacy-hold','legacy-peer',?1,?2,'file.rs',1,900,1,1,9000000000000)", rusqlite::params![project.project_id,agent.agent_id]).unwrap();
+    drop(c);
+    drop(store);
+    let before = sha(&fx.db());
+    let (code, report) = fx.doctor();
+    assert_eq!(code, Some(0));
+    assert_eq!(status(&report, "peers"), "warn");
+    let detail = row(&report, "peers")["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("1 inconsistent holds")
+            && detail.contains("legacy-hold")
+            && detail.contains("legacy-peer")
+            && detail.contains("inert since this build; not removed"),
+        "{detail}"
+    );
+    assert_eq!(before, sha(&fx.db()));
+}
+
+#[test]
 fn human_output_has_a_fix_line_under_problems() {
     let fx = Fx::new();
     let out = fx.cmd(&["doctor", "--bind", &closed_port()]);
