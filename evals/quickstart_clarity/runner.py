@@ -86,6 +86,7 @@ def run_eval(
     judge_model: str | None = None,
     max_call_usd: float = DEFAULT_PER_CALL_CAP_USD,
     max_run_usd: float = DEFAULT_RUN_CAP_USD,
+    max_ledger_usd: float | None = None,
     extra_docs: tuple[str, ...] = (),
     verify_bin: Path | None = None,
     no_auto_recharge_confirmed: bool = False,
@@ -127,6 +128,7 @@ def run_eval(
         eval_name="quickstart-clarity",
         max_call_usd=max_call_usd,
         max_run_usd=max_run_usd,
+        max_ledger_usd=max_ledger_usd,
         simulated=(mode == "fixture"),
         require_existing=(mode == "live"),
     )
@@ -290,6 +292,12 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Total run spend reservation cap in USD (default: {DEFAULT_RUN_CAP_USD}).",
     )
     parser.add_argument(
+        "--max-ledger-usd",
+        type=float,
+        default=None,
+        help="Optional cumulative durable ledger cap in USD (or set ANOTHER_EVAL_MAX_LEDGER_USD).",
+    )
+    parser.add_argument(
         "--extra-doc",
         action="append",
         default=[],
@@ -349,6 +357,19 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 2
 
+        resolved_max_ledger_usd = args.max_ledger_usd
+        if resolved_max_ledger_usd is None:
+            env_max_ledger = os.environ.get("ANOTHER_EVAL_MAX_LEDGER_USD", "").strip()
+            if env_max_ledger:
+                try:
+                    resolved_max_ledger_usd = float(env_max_ledger)
+                except ValueError:
+                    print(
+                        "error (invalid_cap): ANOTHER_EVAL_MAX_LEDGER_USD must be a valid number",
+                        file=sys.stderr,
+                    )
+                    return 2
+
         report = run_eval(
             repo_root=args.repo_root,
             ledger_path=ledger_path,
@@ -359,6 +380,7 @@ def main(argv: list[str] | None = None) -> int:
             judge_model=args.judge_model,
             max_call_usd=args.max_call_usd,
             max_run_usd=args.max_run_usd,
+            max_ledger_usd=resolved_max_ledger_usd,
             extra_docs=tuple(args.extra_doc),
             verify_bin=args.verify_bin,
             no_auto_recharge_confirmed=args.confirm_no_auto_recharge,

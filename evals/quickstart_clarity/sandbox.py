@@ -89,10 +89,21 @@ def _check_safe_command(command: str) -> tuple[list[str] | None, str | None]:
         if action not in ("install", "uninstall") or "--dry-run" not in argv[sub_idx + 2 :]:
             return None, "daemon_command_requires_install_or_uninstall_dry_run"
     if sub == "hook":
-        # Strictly require positional `hook status|install|uninstall` (safe under temp HOME).
+        # Allow read-only `hook status`, or `hook install|uninstall` ONLY with `--dry-run`.
         action = argv[sub_idx + 1] if sub_idx + 1 < len(argv) else ""
-        if action not in ("status", "install", "uninstall"):
+        if action == "status":
+            pass
+        elif action in ("install", "uninstall"):
+            if "--dry-run" not in argv[sub_idx + 2 :]:
+                return None, "hook_mutating_command_requires_dry_run"
+        else:
             return None, "unsupported_hook_action"
+    if sub == "node":
+        # `another node` is the local-only Another CLI subcommand (never Node.js; argv[0] is
+        # always replaced with the `another` binary). Restrict strictly to local `show` / `name`.
+        action = argv[sub_idx + 1] if sub_idx + 1 < len(argv) else ""
+        if action not in ("show", "name"):
+            return None, "unsupported_node_action"
     return argv, None
 
 

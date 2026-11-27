@@ -475,8 +475,13 @@ def classify_http_error(provider: str, status: int, body: str) -> tuple[bool, bo
         # Ambiguous 429 fails closed with zero retries to prevent retrying into billing.
         return False, False, f"http_429_ambiguous_{provider}"
 
-    if status in (500, 502, 503, 529):
+    # Only retry explicit pre-execution non-billing rejections (502, 503, 529).
+    # HTTP 500 and 504 may occur after upstream execution/billing, so fail closed without retry.
+    if status in (502, 503, 529):
         return False, True, f"transient_http_{status}"
+
+    if status == 500:
+        return False, False, "http_500_no_retry"
 
     if status == 504:
         # Gateway timeout may have already executed upstream; fail closed without retry.
@@ -565,6 +570,7 @@ class SpendLedger:
         max_ledger_usd: float | None = None,
         simulated: bool = False,
         require_existing: bool = False,
+        reserve_lock_wait_s: float = 1.0,
         outcome_lock_wait_s: float = 5.0,
         lock_sleep_fn: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -587,6 +593,7 @@ class SpendLedger:
         self.eval_name = eval_name
         self.simulated = bool(simulated)
         self.require_existing = bool(require_existing)
+        self.reserve_lock_wait_s = max(0.0, float(reserve_lock_wait_s))
         self.outcome_lock_wait_s = max(0.0, float(outcome_lock_wait_s))
         self._lock_sleep_fn = lock_sleep_fn
         self.max_call_micros = math.floor(max_call_usd * MICROS_PER_USD)
@@ -806,7 +813,7 @@ class SpendLedger:
                 error_class="run_cap_exceeded",
             )
 
-        self._acquire_lock(wait_timeout_s=0.0)
+        self._acquire_lock(wait_timeout_s=self.reserve_lock_wait_s)
         try:
             self._check_hard_stop_sentinel(provider)
             rows = self._read_rows_unlocked()
@@ -1016,9 +1023,16 @@ def metered_chat_json(
 ) -> CallResult:
     """Execute one metered JSON completion against OpenAI or Anthropic (judge only).
 
-    Reserves spend before any HTTP call. Never retries on billing errors or ambiguous 429s.
-    Transient non-billing errors retry at most `max_transient_retries` times under the
-    same unchanged reservation.
+    Reserves spend before any HTTP call. Never retries on billing errors, ambiguous 429s,
+    HTTP 500, HTTP 504, timeouts, or dropped connections.
+
+    Retry / reservation policy (SPEND-RULES.md rule 4):
+    Transient non-billing retries intentionally reuse the SINGLE unchanged reservation rather
+    than reserving again per attempt. Retries are restricted strictly to explicit pre-execution
+    server rejections (HTTP 502, 503, 529, or parsed non-billing rate_limit_exceeded 429) where
+    the provider rejected the request before executing or billing it. Any failure where upstream
+    execution could have occurred (timeout, connection drop, HTTP 500, HTTP 504) fails closed
+    with zero retries and keeps the conservative reservation permanent.
     """
     spec = get_model_spec(model, require_provider=provider, role=role)
     raw_key = api_key if api_key is not None else load_provider_key(

@@ -58,6 +58,11 @@ on:
         required: true
         default: "0.25"
         type: string
+      max_ledger_usd:
+        description: "Optional cumulative durable ledger cap in USD (empty for no extra ledger ceiling)"
+        required: false
+        default: ""
+        type: string
       verify_with_binary:
         description: "Build and install another into runner temp and test stranger CLI commands in an isolated temp ANOTHER_HOME"
         required: true
@@ -126,6 +131,7 @@ jobs:
           EVAL_JUDGE: ${{ inputs.judge }}
           EVAL_MAX_CALL_USD: ${{ inputs.max_call_usd }}
           EVAL_MAX_RUN_USD: ${{ inputs.max_run_usd }}
+          EVAL_MAX_LEDGER_USD: ${{ inputs.max_ledger_usd }}
           EVAL_VERIFY_BIN: ${{ inputs.verify_with_binary }}
           ANOTHER_EVAL_ALLOW_LIVE: ${{ inputs.mode == 'live' && '1' || '0' }}
           ANOTHER_EVAL_NO_AUTO_RECHARGE_CONFIRMED: ${{ inputs.no_auto_recharge_confirmed && '1' || '0' }}
@@ -143,6 +149,9 @@ jobs:
             --output "$RUNNER_TEMP/quickstart-clarity-report.json"
             --receipt-out "$RUNNER_TEMP/quickstart-clarity-receipt.json"
           )
+          if [ -n "$EVAL_MAX_LEDGER_USD" ]; then
+            args+=(--max-ledger-usd "$EVAL_MAX_LEDGER_USD")
+          fi
           if [ "$EVAL_MODE" = "live" ]; then
             args+=(--ledger "$ANOTHER_EVAL_LEDGER")
           fi

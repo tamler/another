@@ -266,6 +266,13 @@ class QuickstartClarityTests(unittest.TestCase):
             {"step_id": "s9", "command": "another daemon status", "expected_exit_code": 0},
             {"step_id": "s10", "command": "another daemon install --dry-run", "expected_exit_code": 0},
             {"step_id": "s11", "command": "another doctor", "expected_exit_code": 0},
+            {"step_id": "s12", "command": "another hook install --client all", "expected_exit_code": 0},
+            {"step_id": "s13", "command": "another hook uninstall --client all", "expected_exit_code": 0},
+            {"step_id": "s14", "command": "another hook install --client all --dry-run", "expected_exit_code": 0},
+            {"step_id": "s15", "command": "another hook status", "expected_exit_code": 0},
+            {"step_id": "s16", "command": "node -e 'fetch(\"https://example.com\")'", "expected_exit_code": 0},
+            {"step_id": "s17", "command": "another node show", "expected_exit_code": 0},
+            {"step_id": "s18", "command": "another node unknown", "expected_exit_code": 0},
         ]
         results = verify_commands_in_sandbox(fake_bin, commands)
         by_id = {r["step_id"]: r for r in results}
@@ -304,6 +311,27 @@ class QuickstartClarityTests(unittest.TestCase):
 
         self.assertFalse(by_id["s11"]["executed"])
         self.assertEqual(by_id["s11"]["skip_reason"], "subcommand_not_in_sandbox_allowlist:doctor")
+
+        self.assertFalse(by_id["s12"]["executed"])
+        self.assertEqual(by_id["s12"]["skip_reason"], "hook_mutating_command_requires_dry_run")
+
+        self.assertFalse(by_id["s13"]["executed"])
+        self.assertEqual(by_id["s13"]["skip_reason"], "hook_mutating_command_requires_dry_run")
+
+        self.assertTrue(by_id["s14"]["executed"])
+        self.assertTrue(by_id["s14"]["matched_expected_exit"])
+
+        self.assertTrue(by_id["s15"]["executed"])
+        self.assertTrue(by_id["s15"]["matched_expected_exit"])
+
+        self.assertFalse(by_id["s16"]["executed"])
+        self.assertEqual(by_id["s16"]["skip_reason"], "non_another_command")
+
+        self.assertTrue(by_id["s17"]["executed"])
+        self.assertTrue(by_id["s17"]["matched_expected_exit"])
+
+        self.assertFalse(by_id["s18"]["executed"])
+        self.assertEqual(by_id["s18"]["skip_reason"], "unsupported_node_action")
 
     def test_cli_fixture_mode_ignores_live_ledger_env_and_refuses_ledger_flag(self) -> None:
         live_ledger = self.root / "shared-live.jsonl"
@@ -421,10 +449,71 @@ class QuickstartClarityTests(unittest.TestCase):
         self.assertNotIn("Traceback", proc_bad_key.stderr)
         self.assertEqual(missing_ledger.read_bytes(), before_bytes)
 
+    def test_cli_max_ledger_usd_flag_and_env_enforce_cumulative_cap(self) -> None:
+        ledger_path = self.root / "max-ledger-cli.jsonl"
+        init_ledger(ledger_path)
+        before_bytes = ledger_path.read_bytes()
+
+        base_env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "ANOTHER_EVAL_ALLOW_LIVE": "1",
+            "ANOTHER_EVAL_NO_AUTO_RECHARGE_CONFIRMED": "1",
+            "OPENAI_API_KEY": "sk-valid-key-never-reaches-network",
+        }
+
+        # Flag --max-ledger-usd 0.0001 must fail closed pre-call with ledger_cap_exceeded.
+        proc_flag = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "evals/quickstart_clarity/runner.py"),
+                "--mode",
+                "live",
+                "--ledger",
+                str(ledger_path),
+                "--max-ledger-usd",
+                "0.0001",
+            ],
+            cwd=str(REPO_ROOT),
+            env=base_env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(proc_flag.returncode, 1)
+        self.assertIn("ledger_cap_exceeded", proc_flag.stderr)
+        self.assertEqual(ledger_path.read_bytes(), before_bytes)
+
+        # Env ANOTHER_EVAL_MAX_LEDGER_USD=0.0001 must also enforce the cumulative ledger cap.
+        env_cap = dict(base_env)
+        env_cap["ANOTHER_EVAL_MAX_LEDGER_USD"] = "0.0001"
+        proc_env = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "evals/quickstart_clarity/runner.py"),
+                "--mode",
+                "live",
+                "--ledger",
+                str(ledger_path),
+            ],
+            cwd=str(REPO_ROOT),
+            env=env_cap,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(proc_env.returncode, 1)
+        self.assertIn("ledger_cap_exceeded", proc_env.stderr)
+        self.assertEqual(ledger_path.read_bytes(), before_bytes)
+
     def test_workflow_and_root_readme_enforce_durable_ledger_and_document_eval(self) -> None:
         workflow = (REPO_ROOT / ".github/workflows/eval-quickstart-clarity.yml").read_text(encoding="utf-8")
+        # Never cache or upload stale *.lock files or ephemeral Actions caches as spend ledgers.
         self.assertNotIn("actions/cache", workflow)
+        self.assertNotIn(".lock", workflow)
+        self.assertNotIn("another-eval-ledger", workflow)
         self.assertIn("ANOTHER_EVAL_DURABLE_LEDGER", workflow)
+        self.assertIn("EVAL_MAX_LEDGER_USD", workflow)
         self.assertIn("workflow_dispatch:", workflow)
 
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")

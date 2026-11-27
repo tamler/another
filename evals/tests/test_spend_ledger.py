@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -371,7 +372,7 @@ class SpendLedgerTests(unittest.TestCase):
         self.assertEqual(ctx_redir.exception.code, 302)
 
     def test_stuck_lock_and_corrupt_ledger_fail_closed(self) -> None:
-        ledger = SpendLedger(self.ledger_path)
+        ledger = SpendLedger(self.ledger_path, reserve_lock_wait_s=0.0)
         os.mkdir(f"{self.ledger_path}.lock", 0o700)
         try:
             with self.assertRaises(LedgerError) as ctx:
@@ -382,6 +383,8 @@ class SpendLedgerTests(unittest.TestCase):
                     max_output_tokens=100,
                 )
             self.assertEqual(ctx.exception.error_class, "ledger_locked")
+            # Stuck lock must never be auto-deleted.
+            self.assertTrue(Path(f"{self.ledger_path}.lock").exists())
         finally:
             os.rmdir(f"{self.ledger_path}.lock")
 
@@ -724,6 +727,117 @@ class SpendLedgerTests(unittest.TestCase):
         self.assertEqual(receipt["totals"]["reservations"], 0)
         self.assertGreater(receipt["simulated_totals"]["spent_usd"], 0.0)
         self.assertEqual(receipt["simulated_totals"]["reservations"], 1)
+
+    def test_http_500_does_not_retry_to_prevent_double_billing(self) -> None:
+        ledger = SpendLedger(self.ledger_path)
+        calls = 0
+
+        def server_err_transport(*_args):
+            nonlocal calls
+            calls += 1
+            return HttpResponse(500, '{"error":{"message":"internal server error"}}', {})
+
+        with self.assertRaises(ProviderRequestError) as ctx:
+            metered_chat_json(
+                ledger=ledger,
+                provider="openai",
+                model="gpt-5.4-nano",
+                system_prompt="sys",
+                user_prompt="usr",
+                max_output_tokens=200,
+                api_key="mock-key",
+                transport=server_err_transport,
+                max_transient_retries=3,
+                sleep_fn=lambda _s: None,
+            )
+        self.assertEqual(calls, 1)
+        self.assertFalse(ctx.exception.retryable)
+        self.assertEqual(ctx.exception.error_class, "http_500_no_retry")
+
+    def test_concurrent_lanes_never_drop_completed_or_hard_stop_rows(self) -> None:
+        shared_path = self.root / "concurrent-shared.jsonl"
+        init_ledger(shared_path)
+
+        # Pre-reserve 6 calls (5 normal completions + 1 billing hard stop), then write all
+        # outcomes simultaneously from 6 threads to exercise real lock contention.
+        lanes: list[tuple[SpendLedger, object, str]] = []
+        for idx in range(6):
+            lgr = SpendLedger(shared_path, reserve_lock_wait_s=2.0, outcome_lock_wait_s=5.0)
+            res = lgr.reserve(
+                provider="openai",
+                model="gpt-5.4-nano",
+                body_str=f'{{"worker":{idx}}}',
+                max_output_tokens=100,
+            )
+            outcome = "billing_hard_stop" if idx == 5 else "completed"
+            lanes.append((lgr, res, outcome))
+
+        barrier = threading.Barrier(len(lanes))
+        errors: list[Exception] = []
+
+        def worker(lgr: SpendLedger, res, outcome: str) -> None:
+            try:
+                barrier.wait(timeout=5.0)
+                if outcome == "billing_hard_stop":
+                    lgr.record_outcome(
+                        res,
+                        status="billing_hard_stop",
+                        spent_micros=0,
+                        error_class="billing_payment_required",
+                    )
+                else:
+                    lgr.record_outcome(res, status="completed", spent_micros=50)
+            except Exception as exc:  # pragma: no cover - captured for assertion
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=item) for item in lanes]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10.0)
+            self.assertFalse(t.is_alive())
+
+        self.assertEqual(errors, [], f"Concurrent outcome writes failed: {errors}")
+        self.assertFalse(Path(f"{shared_path}.lock").exists())
+
+        receipt = summarize_ledger(shared_path)
+        self.assertEqual(receipt["totals"]["reservations"], 6)
+        self.assertEqual(receipt["totals"]["completed"], 5)
+        self.assertEqual(receipt["totals"]["billing_hard_stops"], 1)
+        self.assertEqual(receipt["hard_stop_sentinels"], 1)
+
+        # Fresh lane must see the persisted billing hard stop and refuse new calls.
+        fresh = SpendLedger(shared_path)
+        with self.assertRaises(BillingHardStopError):
+            fresh.reserve(
+                provider="openai",
+                model="gpt-5.4-nano",
+                body_str='{"after":true}',
+                max_output_tokens=100,
+            )
+
+    def test_max_ledger_usd_enforces_cumulative_cap_across_runs(self) -> None:
+        shared_path = self.root / "capped-ledger.jsonl"
+        init_ledger(shared_path)
+        run1 = SpendLedger(shared_path, max_call_usd=0.05, max_run_usd=0.05, max_ledger_usd=0.002)
+        res1 = run1.reserve(
+            provider="openai",
+            model="gpt-5.4-nano",
+            body_str='{"first":true}',
+            max_output_tokens=200,
+        )
+        run1.record_outcome(res1, status="completed", spent_micros=50)
+
+        # Separate SpendLedger instance with same max_ledger_usd must reject second reservation.
+        run2 = SpendLedger(shared_path, max_call_usd=0.05, max_run_usd=0.05, max_ledger_usd=0.002)
+        with self.assertRaises(BudgetExceededError) as ctx:
+            run2.reserve(
+                provider="openai",
+                model="gpt-5.4-nano",
+                body_str='{"second":true}',
+                max_output_tokens=200,
+            )
+        self.assertEqual(ctx.exception.error_class, "ledger_cap_exceeded")
 
 
 if __name__ == "__main__":
