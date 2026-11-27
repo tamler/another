@@ -904,15 +904,10 @@ pub(crate) fn link_unlinked(tx: &Tx<'_>) -> Result<()> {
                                            OR pr.checkout = '')))",
     )?;
     let projects = stmt
-        .query_map(params![tx.now, tx.node_id, crate::repo::KEY_VERSION], |r| {
-            Ok(Project {
-                project_id: r.get(0)?,
-                node_id: r.get(1)?,
-                abs_path: r.get(2)?,
-                slug: r.get(3)?,
-                created_at: fmt_ts(r.get(4)?),
-            })
-        })?
+        .query_map(
+            params![tx.now, tx.node_id, crate::repo::KEY_VERSION],
+            crate::identity::project_from_row,
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for p in &projects {
         crate::repo::refresh_link(tx, p)?;

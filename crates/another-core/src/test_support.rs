@@ -4,6 +4,7 @@
 
 use rusqlite::Connection;
 
+use crate::federation::wire_from_row;
 use crate::{crypto, WireEvent};
 
 /// `ev`, signed with the secret key of the local node of the home `conn` is open on. The
@@ -39,20 +40,8 @@ pub fn wire_events_of(conn: &Connection, node_id: &str) -> Vec<WireEvent> {
              FROM events WHERE node_id = ?1 ORDER BY seq",
         )
         .expect("the events table reads");
-    stmt.query_map([node_id], |r| {
-        Ok(WireEvent {
-            seq: r.get(0)?,
-            event_id: r.get(1)?,
-            node_id: r.get(2)?,
-            ts: r.get(3)?,
-            actor: r.get(4)?,
-            kind: r.get(5)?,
-            payload: r.get(6)?,
-            prev_id: r.get(7)?,
-            sig: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
-        })
-    })
-    .expect("the events table reads")
-    .collect::<rusqlite::Result<_>>()
-    .expect("every event row maps to a wire event")
+    stmt.query_map([node_id], wire_from_row)
+        .expect("the events table reads")
+        .collect::<rusqlite::Result<_>>()
+        .expect("every event row maps to a wire event")
 }

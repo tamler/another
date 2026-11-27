@@ -757,7 +757,7 @@ fn upsert_node(tx: &Tx<'_>, node: &NodeEntry) -> Result<()> {
     }
 }
 
-fn wire_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<WireEvent> {
+pub(crate) fn wire_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<WireEvent> {
     Ok(WireEvent {
         seq: r.get(0)?,
         event_id: r.get(1)?,
