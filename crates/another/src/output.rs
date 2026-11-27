@@ -1122,19 +1122,24 @@ pub fn quiet_claim_words(q: &QuietClaim) -> String {
 
 pub fn queue_needs_owner(n: &QueueNeedsOwner) -> String {
     let mut out = String::new();
-    let mut section = |title: &str, lines: Vec<String>| {
+    let mut section = |title: &str, lines: Vec<String>, footer: Option<String>| {
         let _ = writeln!(out, "{title} ({})", lines.len());
         for line in lines {
             let _ = writeln!(out, "  {}", line.trim_end());
+        }
+        if let Some(footer) = footer {
+            let _ = writeln!(out, "{footer}");
         }
     };
     section(
         "Decide now: security and data-loss proposals",
         n.decide_now.iter().map(queue_line).collect(),
+        None,
     );
     section(
         "Awaiting a decision",
         n.awaiting.iter().map(queue_line).collect(),
+        None,
     );
     section(
         "Quiet claims",
@@ -1148,10 +1153,12 @@ pub fn queue_needs_owner(n: &QueueNeedsOwner) -> String {
                 )
             })
             .collect(),
+        None,
     );
     section(
         "Ready with nobody to take them",
         n.nobody_can_take.iter().map(queue_line).collect(),
+        None,
     );
     section(
         "Failed notices, last 24 hours",
@@ -1159,6 +1166,7 @@ pub fn queue_needs_owner(n: &QueueNeedsOwner) -> String {
             .iter()
             .map(|f| format!("{}  to {} at {}", f.item, f.to, f.at))
             .collect(),
+        None,
     );
     section(
         "Admitted by delegate",
@@ -1167,20 +1175,18 @@ pub fn queue_needs_owner(n: &QueueNeedsOwner) -> String {
             .iter()
             .map(queue_line)
             .collect(),
-    );
-    let _ = writeln!(
-        out,
-        "{} security or data-loss item(s) admitted by a delegate in all",
-        n.admitted_by_delegate.total
+        Some(format!(
+            "{} security or data-loss item(s) admitted by a delegate in all",
+            n.admitted_by_delegate.total
+        )),
     );
     section(
         "Self-admitted, last 7 days",
         n.self_admitted.recent.iter().map(queue_line).collect(),
-    );
-    let _ = writeln!(
-        out,
-        "{} self-admitted item(s) in all: another queue list --self-admitted",
-        n.self_admitted.total
+        Some(format!(
+            "{} self-admitted item(s) in all: another queue list --self-admitted",
+            n.self_admitted.total
+        )),
     );
     out
 }

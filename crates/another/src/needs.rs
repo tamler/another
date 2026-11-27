@@ -191,6 +191,8 @@ struct Closing {
     gone_idle: u32,
     failed_notices: Vec<FailedNotice>,
     self_admitted: SelfAdmitted,
+    /// Security and data-loss items a keyed delegate admitted, last seven days and total.
+    admitted_by_delegate: SelfAdmitted,
 }
 
 /// One thing that needs the owner. Every key is always present in the JSON.
