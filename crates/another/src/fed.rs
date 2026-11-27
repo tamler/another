@@ -126,7 +126,8 @@ impl Limits {
 
 /// Whether one side of a sync speaks the signed exchange. Every build from this one on
 /// does, and nothing in the program chooses otherwise. Tests and the `test-support`
-/// feature also allow unsigned exchange to simulate an older build.
+/// feature also allow unsigned exchange and the signed-answers-only compatibility mode
+/// to simulate an older build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exchange {
     /// A spoke sends a nonce, signs its request for its hub and that nonce, and applies
@@ -136,6 +137,8 @@ pub enum Exchange {
     /// What a build after signed answers and before replay-proof requests did: a spoke
     /// sends a nonce and only the older request signature, and checks the answer; a hub
     /// checks only the older signature, records no nonce, and signs every `200` answer.
+    /// Tests and `test-support` only; production builds expose only [`Exchange::Signed`].
+    #[cfg(any(test, feature = "test-support"))]
     SignedAnswersOnly,
     /// What a build before signed answers did: a spoke sends no nonce and checks no
     /// answer; a hub asks for no nonce, signs no answer and records no contact.
@@ -370,35 +373,36 @@ async fn authenticate(
     if let Err(e) = blocking(move || s.verify_peer_request(&n, &m, &path, time, &b, &g)).await {
         return Err(denied(e).await);
     }
-    let nonce = match exchange {
-        #[cfg(any(test, feature = "test-support"))]
-        Exchange::Unsigned => None,
-        Exchange::SignedAnswersOnly => {
-            Some(nonce_of(store, &node, &operation, headers, true).await?)
-        }
-        Exchange::Signed => {
-            // No nonce: `426` for the build before signed answers; a malformed one: `400`.
-            // A well-formed nonce without a version 2 signature: the build before this one.
-            nonce_of(store, &node, &operation, headers, false).await?;
-            // `401`, not `426`: a spoke of the build before shows its own fixed text for a
-            // `426` (that a header was removed on the way), and quotes the hub's text for
-            // any other refusal, so this is how it learns to update. A spoke of this build
-            // knows the refusal by its `Upgrade` header.
-            let e = another_core::Error::Forbidden(NO_SIG_V2.into());
-            let detail = NO_SIG_V2_AUDIT.to_string();
-            record_unauthenticated(store, Some(node.clone()), &operation, "denied", detail).await;
-            let mut refusal = error(StatusCode::UNAUTHORIZED, &e);
-            refusal
-                .headers_mut()
-                .insert(header::UPGRADE, HeaderValue::from_static(SIGNED_REQUEST));
-            return Err(Box::new(refusal));
-        }
-    };
-    Ok(Authed {
-        node: node.clone(),
-        signature: sig,
-        nonce,
-    })
+    #[cfg(any(test, feature = "test-support"))]
+    if exchange != Exchange::Signed {
+        let nonce = match exchange {
+            Exchange::Unsigned => None,
+            Exchange::SignedAnswersOnly => {
+                Some(nonce_of(store, &node, &operation, headers, true).await?)
+            }
+            Exchange::Signed => unreachable!("Signed is handled below"),
+        };
+        return Ok(Authed {
+            node: node.clone(),
+            signature: sig,
+            nonce,
+        });
+    }
+    // No nonce: `426` for the build before signed answers; a malformed one: `400`.
+    // A well-formed nonce without a version 2 signature: the build before this one.
+    nonce_of(store, &node, &operation, headers, false).await?;
+    // `401`, not `426`: a spoke of the build before shows its own fixed text for a
+    // `426` (that a header was removed on the way), and quotes the hub's text for
+    // any other refusal, so this is how it learns to update. A spoke of this build
+    // knows the refusal by its `Upgrade` header.
+    let e = another_core::Error::Forbidden(NO_SIG_V2.into());
+    let detail = NO_SIG_V2_AUDIT.to_string();
+    record_unauthenticated(store, Some(node.clone()), &operation, "denied", detail).await;
+    let mut refusal = error(StatusCode::UNAUTHORIZED, &e);
+    refusal
+        .headers_mut()
+        .insert(header::UPGRADE, HeaderValue::from_static(SIGNED_REQUEST));
+    Err(Box::new(refusal))
 }
 
 /// Refuse a push before its body is read when the node header names no paired, unrevoked
@@ -761,9 +765,9 @@ fn signed(
     // covers neither, is still sent for a hub of the build before; a hub of this build
     // serves nothing on it.
     let nonce = match to.exchange {
-        Exchange::Signed | Exchange::SignedAnswersOnly => {
-            Some(another_core::crypto::request_nonce()?)
-        }
+        Exchange::Signed => Some(another_core::crypto::request_nonce()?),
+        #[cfg(any(test, feature = "test-support"))]
+        Exchange::SignedAnswersOnly => Some(another_core::crypto::request_nonce()?),
         #[cfg(any(test, feature = "test-support"))]
         Exchange::Unsigned => None,
     };
