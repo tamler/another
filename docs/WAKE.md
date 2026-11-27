@@ -183,7 +183,7 @@ another wake --agent codex@shop --dry-run
 - `--dry-run` prints the transport's commands and runs nothing. A wake to a command transport that would be refused because the pane may not hold the agent is reported as refused, with no command printed and a non-zero exit, as the wake itself would end. A refusal that needs an answer from the transport (Herdr's check of who is in the pane, a `status` that says `blocked` or `gone`) is not foreseen by a dry run.
 - The command exits non-zero when a wake failed (see the table of outcomes) or could not be attempted. For each wake it prints what happened in the words of that table, and what the transport answered.
 
-**Nothing a sender chose is typed as a key press.** Before a line reaches any transport, control characters in it (line breaks, tabs, escape) become spaces, each subject is cut to 80 characters and the line to 1,000. `send` refuses a subject with control characters, and subjects arriving from another node are stored without them (D75). `--message` text is cleaned the same way.
+**Nothing a sender chose is typed as a key press.** Before a line reaches any transport, control characters in it (line breaks, tabs, escape) become spaces, each subject is cut to 80 characters and the line to 1,000. Default wake subjects also use the hook quoting and invisible-character cleaning rules, preceded by the sentence identifying text written by other agents ([HOOKS.md](HOOKS.md#the-digest)). `send` refuses a subject with control characters, and subjects arriving from another node are stored without them (D75). `--message` text is cleaned the same way.
 
 Agents take custom text literally, so name commands that exist. There is no `another mail` command. For example:
 
