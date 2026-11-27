@@ -229,10 +229,14 @@ pub async fn serve_standalone(
     if open {
         open_browser(&url);
     }
-    let app = router(store, DashboardMode::Local, Some(local)).route(
-        "/health",
-        get(|| async { Json(json!({ "ok": true, "dashboard": "local" })) }),
-    );
+    let app = router(store, DashboardMode::Local, Some(local))
+        .route(
+            "/health",
+            get(|| async { Json(json!({ "ok": true, "dashboard": "local" })) }),
+        )
+        .layer(axum::extract::DefaultBodyLimit::max(
+            crate::serve::HTTP_BODY_LIMIT_BYTES,
+        ));
     axum::serve(listener, app.into_make_service())
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
@@ -343,7 +347,7 @@ async fn activity(
         Some(raw) => match Since::parse(raw, now) {
             Ok(Since::Time(t)) => Some(t),
             Ok(Since::After(_)) => {
-                return invalid("since must be a duration like 1d or an RFC 3339 time");
+                return invalid("since must be bare seconds (3600), 1d or an RFC 3339 time");
             }
             Err(e) => return invalid(&e.to_string()),
         },
@@ -418,8 +422,8 @@ async fn stream(
                 }
             }
             tokio::select! {
-                _ = tx.closed() => break,
-                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                () = tx.closed() => break,
+                () = tokio::time::sleep(Duration::from_secs(2)) => {}
             }
         }
     });

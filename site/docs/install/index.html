@@ -50,8 +50,10 @@ another --help</code></pre>
       <pre class="code-block shell" tabindex="0" aria-label="Build from source"><code>git clone https://github.com/tamler/another
 cd another
 cargo build --release --locked
-./target/release/another --version</code></pre>
-      <p>The binary is <code>target/release/another</code>. Put it in a directory on your <code>PATH</code>, or configure your MCP client with its absolute path. A source build is a way to inspect and edit the same code you run.</p>
+# Install the binary somewhere outside the Cargo build directory:
+cargo install --locked --path crates/another --force
+another --version</code></pre>
+      <p>The build output is <code>target/release/another</code>, but treat that as a development build: do not point an MCP client at it or run it against a live <code>~/.another</code>. Install the binary (for example with <code>cargo install --path crates/another</code>, as above, or by copying it to a directory on your <code>PATH</code>) and configure MCP clients to run the installed <code>another</code> command.</p>
     </section>
     <section class="guide-section" aria-labelledby="binaries-title">
       <h2 id="binaries-title">Release archives</h2>

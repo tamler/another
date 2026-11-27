@@ -227,7 +227,7 @@ The hub in hub-and-spoke is simply one more Another node, free like the rest (al
 
 ## Mail-checking strategy per client
 
-> **Hooks first - not tied to Herdr.** v1 delivery guarantee is lifecycle hooks that inject a tiny inbox + activity digest. Do not rely on MCP resources/subscribe (Codex does not act on those notifications - [openai/codex#16159](https://github.com/openai/codex/issues/16159)).
+> **Hooks first - not tied to Herdr.** v1 delivery guarantee is lifecycle hooks that inject a tiny digest of the inbox and the queue (D96; the digest no longer carries an activity summary). Do not rely on MCP resources/subscribe (Codex does not act on those notifications - [openai/codex#16159](https://github.com/openai/codex/issues/16159)).
 
 | Client | Mechanism | Verified? | Recipe |
 |---|---|---|---|

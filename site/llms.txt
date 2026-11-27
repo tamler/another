@@ -27,7 +27,7 @@ Another lets independently run coding agents exchange messages, coordinate file 
 - [Multiple Claude Code sessions](https://toanother.one/guides/multiple-claude-code-sessions/): One client twice in one checkout; shared identity and how to split it.
 - [MCP agent messaging](https://toanother.one/guides/mcp-agent-messaging/): Send, fetch, acknowledge and claim with distinct state transitions.
 - [Avoid file conflicts](https://toanother.one/guides/avoid-agent-file-conflicts/): Path holds, the edit guard, conflict exit status and what a shell edit gets past.
-- [Agents in git worktrees](https://toanother.one/guides/git-worktrees/): Each worktree is a project; mail and holds both cross them.
+- [Agents in git worktrees](https://toanother.one/guides/git-worktrees/): Each worktree is a project; mail crosses them, but holds never block across worktrees (holds are per checkout).
 - [Hand off a task](https://toanother.one/guides/hand-off-tasks/): Request ownership, completion, release and stale takeover, with a recorded run showing that an ack is receipt, not completion.
 - [Share a model server](https://toanother.one/guides/share-model-server/): Register, borrow, release and human-confirmed cleanup.
 - [Wake idle agents](https://toanother.one/guides/wake-idle-agents/): Nudge a tmux pane, and what can go wrong.
@@ -39,13 +39,13 @@ Another lets independently run coding agents exchange messages, coordinate file 
 - [Source and CLI reference](https://github.com/tamler/another/blob/main/README.md): Commands, concepts and safe defaults.
 - [Inbox](https://github.com/tamler/another/blob/main/docs/INBOX.md): Recorded run of fetch, read, ack and reply, and what each one records.
 - [Hooks](https://github.com/tamler/another/blob/main/docs/HOOKS.md): User-global lifecycle hooks, mid-task notices, the edit guard and client trust steps.
-- [Path holds](https://github.com/tamler/another/blob/main/docs/HOLDS.md): Holds across worktrees of one repository, symlinks, letter case and whole-project holds.
+- [Path holds](https://github.com/tamler/another/blob/main/docs/HOLDS.md): Holds within one checkout, symlinks, letter case and whole-project holds.
 - [Daemon](https://github.com/tamler/another/blob/main/docs/DAEMON.md): The launchd daemon, waking idle Herdr agents, upgrading and another stats.
 - [Dashboard](https://github.com/tamler/another/blob/main/docs/DASHBOARD.md): The loopback web view of one node.
 - [Resources](https://github.com/tamler/another/blob/main/docs/RESOURCES.md): Leases, borrowing and human-approved cleanup.
 - [Remote peers](https://github.com/tamler/another/blob/main/docs/REMOTE.md): Scoped tokens, OAuth for ChatGPT and Claude, loopback auth and TLS tunnels.
 - [Federation](https://github.com/tamler/another/blob/main/docs/FEDERATION.md): Pairing, signed events and trust boundaries.
-- [Wake adapters](https://github.com/tamler/another/blob/main/docs/WAKE.md): Optional tmux, cmux and Herdr nudges.
+- [Wake adapters](https://github.com/tamler/another/blob/main/docs/WAKE.md): Wake adapter interface (Herdr and a generic command adapter; tmux/cmux by configuration).
 
 ## Optional
 

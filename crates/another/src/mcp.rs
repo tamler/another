@@ -4,11 +4,12 @@ use crate::reap::{self, OrphanReport, ReapPlan};
 use crate::remote::{self, RemotePeer};
 use another_core::{
     AckOutcome, AcquireHolds, ActivityFeed, ActivityKind, ActivityQuery, ActivitySummary, Agent,
-    AuditRecord, HeartbeatReport, Hold, HoldConflict, HoldFilter, Importance, Inbox, InboxQuery,
-    LeaseMode, LeaseOutcome, Message, NewRequest, Program, Project, RegisterAgent,
-    RegisterResource, Reply, Request, RequestAction, RequestUpdate, Resource, ResourceFilter,
-    ResourceKind, ResourceRef, SendMessage, SessionInfo, SessionPhase, Since, Store, Thread,
-    ThreadSummary,
+    AuditRecord, DoneItem, HeartbeatReport, Hold, HoldConflict, HoldFilter, Importance, Inbox,
+    InboxQuery, LeaseMode, LeaseOutcome, Message, NewRequest, PointerKind, Program, Project,
+    ProposeItem, QueueCaller, QueueFilter, QueueItem, QueueKind, QueueNext, QueueState,
+    RegisterAgent, RegisterResource, ReleaseItem, Reply, Request, RequestAction, RequestUpdate,
+    Resource, ResourceFilter, ResourceKind, ResourceRef, SendMessage, SessionInfo, SessionPhase,
+    Since, Store, Thread, ThreadSummary,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -37,7 +38,13 @@ fn tool_error(e: &another_core::Error) -> String {
             Some("Register the agent with register_agent, or check the name. Hosted grants are approved with `another oauth approve`.")
         }
         another_core::Error::Invalid(m) if m.contains("since") => {
-            Some("Pass since as a duration like 1h or 1d, an RFC 3339 time, or an event id from next_since.")
+            Some("Pass since as bare seconds like 3600, a duration like 1h or 1d, an RFC 3339 time, or an event id from next_since.")
+        }
+        // Before the agent hint: "an agent description must be one line" names no address.
+        another_core::Error::Invalid(m)
+            if m.contains("must be one line of text") || m.contains("text-direction") =>
+        {
+            Some("Send this field as one line: no line breaks, tabs, other control characters or text-direction characters.")
         }
         another_core::Error::Invalid(m) if m.contains("agent") => {
             Some("Pass agent as name or name@project. On a hosted connection, omit agent.")
@@ -93,9 +100,11 @@ pub struct RegisterAgentArgs {
     pub program: Program,
     /// Absolute project path; lets the same name exist per project as `name@project`.
     pub project: Option<String>,
-    /// Model identifier, if known.
+    /// Model identifier, if known. One line of at most 200 bytes: no line breaks, tabs or
+    /// control characters.
     pub model: Option<String>,
-    /// Short description of what this agent is working on.
+    /// Short description of what this agent is working on. One line of at most 4096 bytes:
+    /// no line breaks, tabs or control characters.
     pub description: Option<String>,
 }
 
@@ -132,7 +141,7 @@ pub struct SendMessageArgs {
 pub struct WhatsNewArgs {
     /// Agent to catch up as (`name` or `name@project`). On a hosted connection, omit this.
     pub agent: Option<String>,
-    /// Activity window: a duration like `1d`, an RFC 3339 time, or an event id. Default: the last day. Unread mail is included either way.
+    /// Activity window: bare seconds like `3600`, a duration like `1d`, an RFC 3339 time, or an event id. Default: the last day. Unread mail is included either way.
     pub since: Option<String>,
     /// Maximum items in each section (default 10, at most 20).
     pub limit: Option<u32>,
@@ -182,7 +191,8 @@ pub struct ClaimRequestArgs {
     pub request_id: String,
     /// claim (default) | release | complete | cancel.
     pub action: Option<RequestAction>,
-    /// Completion or cancellation note; on completion it is mailed to the requester.
+    /// Completion or cancellation note of at most 16384 bytes; on completion it is mailed
+    /// to the requester.
     pub note: Option<String>,
     /// On claim: new due time, in seconds from now.
     pub due_in_seconds: Option<i64>,
@@ -205,9 +215,12 @@ pub struct HoldPathsArgs {
     /// acquire (default) | check | renew | release | list.
     #[serde(default)]
     pub action: HoldAction,
-    /// Project absolute path or slug (required for acquire/check; filters list).
+    /// Project absolute path or slug (required for acquire/check and for release with
+    /// paths, where it is the directory relative paths start from; filters list).
     pub project: Option<String>,
-    /// Paths or globs relative to the project root (acquire/check).
+    /// Paths or globs relative to the project root (acquire/check). With release: the files
+    /// or directories you are done with; your holds on them are released. Each is at most
+    /// 4096 bytes on acquire.
     #[serde(default)]
     pub paths: Vec<String>,
     /// Renew/release only these holds (default: all of the agent's holds).
@@ -217,11 +230,17 @@ pub struct HoldPathsArgs {
     pub ttl_seconds: Option<i64>,
     /// Exclusive holds (default) conflict with any overlapping hold; shared ones only with exclusive.
     pub exclusive: Option<bool>,
+    /// Why you hold these paths (acquire), shown to other agents. One line of at most 1024
+    /// bytes: no line breaks, tabs or control characters.
     pub reason: Option<String>,
     /// Allow a pattern covering the whole project (`**`, the project root, `**/*.rs`).
-    /// Refused by default because it blocks every other agent in the repository.
+    /// Refused by default because it blocks every other agent in the checkout.
     #[serde(default)]
     pub repo_wide: bool,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Default, Serialize, JsonSchema)]
@@ -230,9 +249,19 @@ pub struct HoldPathsOut {
     pub conflicts: Vec<HoldConflict>,
     /// Overlapping holds on other nodes (same project name): warnings, never blocking.
     pub warnings: Vec<HoldConflict>,
+    /// Overlapping holds on other nodes found but not listed in `warnings` (it lists ten).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub warnings_more: u32,
+    /// Holds on other nodes that were not compared, by node: that comparison stops at a
+    /// fixed amount of work. They may overlap; they never block.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub not_compared: Vec<another_core::NotCompared>,
     pub renewed: Vec<Hold>,
     pub released: Vec<String>,
     pub holds: Vec<Hold>,
+    /// Release with paths: why a path released nothing (nothing of yours is held there, or
+    /// it lies inside a wider hold of yours).
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -251,7 +280,7 @@ pub struct HeartbeatArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ActivityFeedArgs {
-    /// Start point: duration (30m, 2h, 1d), RFC 3339 time, or an event id cursor.
+    /// Start point: duration (bare seconds, 30m, 2h, 1d), RFC 3339 time, or an event id cursor.
     /// Omit for the most recent items.
     pub since: Option<String>,
     /// Maximum items (default 50, max 500).
@@ -263,7 +292,7 @@ pub struct ActivityFeedArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ActivitySummarizeArgs {
-    /// Window start: duration (30m, 2h, 1d), RFC 3339 time, or event id. Default 1h.
+    /// Window start: duration (bare seconds, 30m, 2h, 1d), RFC 3339 time, or event id. Default 1h.
     pub since: Option<String>,
 }
 
@@ -272,7 +301,7 @@ pub struct WorkBoardArgs {
     /// Only this project (slug or absolute path) and sibling checkouts of its repository.
     /// Required on a remote or hosted connection, and must be inside its project globs.
     pub project: Option<String>,
-    /// Window for recent and stopped edits: a duration like `24h` or an RFC 3339 time.
+    /// Window for recent and stopped edits: bare seconds like `3600`, a duration like `24h` or an RFC 3339 time.
     /// Default: the last 24 hours.
     pub since: Option<String>,
     /// Items per list (default 20, at most 200).
@@ -283,9 +312,11 @@ pub struct WorkBoardArgs {
 pub struct ResourceRegisterArgs {
     pub agent: String,
     pub kind: ResourceKind,
-    /// Identity on this machine, e.g. `ollama@11434`, `vite@5173`, `tcp:127.0.0.1:5432`, `metal:0`.
+    /// Identity on this machine, e.g. `ollama@11434`, `vite@5173`, `tcp:127.0.0.1:5432`,
+    /// `metal:0`. One line: no line breaks, tabs or control characters.
     pub name: String,
-    /// How to reach it, e.g. `http://127.0.0.1:11434`.
+    /// How to reach it, e.g. `http://127.0.0.1:11434`. One line: no line breaks, tabs or
+    /// control characters. At most 2 KiB.
     pub endpoint: Option<String>,
     /// Listening port (derived from name/endpoint when omitted).
     pub port: Option<u16>,
@@ -293,6 +324,8 @@ pub struct ResourceRegisterArgs {
     pub pid: Option<u32>,
     /// Project absolute path or slug.
     pub project: Option<String>,
+    /// What it is for, shown to other agents. One line: no line breaks, tabs or control
+    /// characters. At most 1 KiB.
     pub purpose: Option<String>,
     /// Exclusive resources cannot be borrowed by others (default: shared).
     #[serde(default)]
@@ -300,6 +333,7 @@ pub struct ResourceRegisterArgs {
     /// Lease length in seconds (default 1800, clamped to 60..86400); renew with resource_heartbeat.
     pub ttl_seconds: Option<i64>,
     /// Free-form object: model, backend (metal|mlx|cpu|cuda), estimated_bytes, cmdline, ...
+    /// At most 64 KiB as JSON.
     pub metadata: Option<serde_json::Value>,
 }
 
@@ -373,6 +407,77 @@ pub struct ReapRequestOut {
     pub human_command: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct QueueProposeArgs {
+    /// The proposing agent (`name` or `name@project`).
+    pub agent: String,
+    /// One line, up to 200 characters.
+    pub title: String,
+    /// Details, up to 10,000 bytes.
+    pub body: Option<String>,
+    /// The scope id the work belongs to, for example `M1`.
+    pub scope: Option<String>,
+    /// The done condition: what must be true for the item to be finished.
+    pub done_when: Option<String>,
+    /// work (default) | security | data_loss. The last two are decided by the owner personally.
+    pub kind: Option<QueueKind>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct QueueNextArgs {
+    pub agent: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueUpdateAction {
+    Note,
+    Release,
+    Handoff,
+    Done,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct QueueUpdateArgs {
+    pub agent: String,
+    /// The item: its number (`Q12`) or its id.
+    pub item: String,
+    /// note | release | handoff | done. release, handoff and done are the claimer's.
+    pub action: QueueUpdateAction,
+    /// The note (required for note; optional for release and handoff).
+    pub note: Option<String>,
+    /// handoff: the agent the item goes to; it takes it with queue_next.
+    pub to: Option<String>,
+    /// done: what was done, up to 500 characters.
+    pub summary: Option<String>,
+    /// done: pr | commit | file.
+    pub pointer_kind: Option<PointerKind>,
+    /// done: the pull request number or https URL, the commit hash, or the file path.
+    pub pointer: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct QueueListArgs {
+    /// The agent `mine` refers to.
+    pub agent: Option<String>,
+    /// Only items the agent proposed or holds.
+    #[serde(default)]
+    pub mine: bool,
+    /// proposed | ready | claimed | done. Default: ready and claimed.
+    pub state: Option<QueueState>,
+    /// Only items with this scope id.
+    pub scope: Option<String>,
+    /// Return this one item (its number or id) with its history.
+    pub item: Option<String>,
+    /// Maximum items (default 100).
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct QueueListOut {
+    pub items: Vec<QueueItem>,
+}
+
 fn resource_ref(raw: &str) -> another_core::Result<ResourceRef> {
     ResourceRef::parse(raw)
 }
@@ -433,16 +538,9 @@ impl AnotherMcp {
                 _ => {
                     let subject = match (a.subject, &a.reply_to) {
                         (Some(sub), _) => sub,
+                        // The same rule as a plain reply (`Store::reply`).
                         (None, Some(parent)) => {
-                            let original = s.message(parent)?;
-                            // The original may predate D75; keep the reply one line.
-                            format!(
-                                "Re: {}",
-                                another_core::single_line(
-                                    original.subject.trim_start_matches("Re: "),
-                                    another_core::MAX_SUBJECT_CHARS - 4
-                                )
-                            )
+                            another_core::reply_subject(&s.message(parent)?.subject)
                         }
                         (None, None) => {
                             return Err(another_core::Error::Invalid("subject is required".into()))
@@ -543,7 +641,9 @@ impl AnotherMcp {
     #[tool(
         description = "Advisory path holds (leases on files/globs within a project). acquire is \
         all-or-nothing and reports conflicts; check reports conflicts without acquiring; renew, \
-        release and list manage your holds."
+        release and list manage your holds. A hold blocks other agents in the same working \
+        directory only; release with paths when you are done with a file so another agent can \
+        pick it up."
     )]
     async fn hold_paths(
         &self,
@@ -558,34 +658,68 @@ impl AnotherMcp {
             };
             let mut out = HoldPathsOut::default();
             match a.action {
+                // A remote caller's refusals name no directory outside its own request.
                 HoldAction::Acquire => {
-                    let report = s.acquire_holds(AcquireHolds {
-                        agent: a.agent.clone(),
-                        project: need_project()?,
-                        paths: a.paths.clone(),
-                        ttl_seconds: a.ttl_seconds,
-                        exclusive: a.exclusive.unwrap_or(true),
-                        reason: a.reason.clone(),
-                        repo_wide: a.repo_wide,
-                    })?;
+                    let report = s.acquire_holds_scoped(
+                        AcquireHolds {
+                            agent: a.agent.clone(),
+                            project: need_project()?,
+                            paths: a.paths.clone(),
+                            ttl_seconds: a.ttl_seconds,
+                            exclusive: a.exclusive.unwrap_or(true),
+                            reason: a.reason.clone(),
+                            repo_wide: a.repo_wide,
+                        },
+                        scope.as_ref(),
+                    )?;
                     out.granted = report.granted;
                     out.conflicts = report.conflicts;
                     out.warnings = report.warnings;
+                    out.warnings_more = report.warnings_more;
+                    out.not_compared = report.not_compared;
                 }
                 HoldAction::Check => {
-                    out.conflicts = s.check_holds(
+                    out.conflicts = s.check_holds_scoped(
                         &a.agent,
                         &need_project()?,
                         &a.paths,
                         a.exclusive.unwrap_or(true),
+                        scope.as_ref(),
                     )?;
                 }
                 // Remote callers: only holds inside the token's projects.
                 HoldAction::Renew => {
                     out.renewed = s.renew_holds_scoped(&a.agent, &a.hold_ids, scope.as_ref())?
                 }
-                HoldAction::Release => {
+                HoldAction::Release if a.paths.is_empty() => {
                     out.released = s.release_holds_scoped(&a.agent, &a.hold_ids, scope.as_ref())?
+                }
+                HoldAction::Release => {
+                    // The project is only where relative paths start; nothing is registered.
+                    // A path is used as a directory whether registered or not, a slug must
+                    // exist. A remote caller's project was checked against its token.
+                    let project = need_project()?;
+                    let base = if std::path::Path::new(&project).is_absolute() {
+                        std::path::PathBuf::from(&project)
+                    } else {
+                        std::path::PathBuf::from(s.project(&project)?.abs_path)
+                    };
+                    let paths: Vec<another_core::ReleasePath> = a
+                        .paths
+                        .iter()
+                        .map(|p| another_core::ReleasePath {
+                            shown: p.clone(),
+                            path: base.join(p),
+                            maybe_id: false,
+                        })
+                        .collect();
+                    if !a.hold_ids.is_empty() {
+                        out.released =
+                            s.release_holds_scoped(&a.agent, &a.hold_ids, scope.as_ref())?;
+                    }
+                    let done = s.release_paths(&a.agent, &paths, scope.as_ref())?;
+                    out.released.extend(done.released);
+                    out.notes = done.notes;
                 }
                 HoldAction::List => {
                     out.holds = s.holds(HoldFilter {
@@ -845,7 +979,7 @@ impl AnotherMcp {
                     Since::Time(t) => Some(t),
                     Since::After(_) => {
                         return Err(another_core::Error::Invalid(
-                            "work_board since takes a duration like 24h or an RFC 3339 time".into(),
+                            "work_board since takes bare seconds like 3600, a duration like 24h or an RFC 3339 time".into(),
                         ))
                     }
                 },
@@ -859,13 +993,142 @@ impl AnotherMcp {
         })
         .await
     }
+
+    #[tool(
+        description = "Propose an item for the work queue. Anyone may propose; the item waits \
+        until the owner or a delegate admits it, and cannot be taken before that. Use this for \
+        work you found that nobody asked for, instead of starting it."
+    )]
+    async fn queue_propose(
+        &self,
+        Parameters(a): Parameters<QueueProposeArgs>,
+    ) -> ToolResult<QueueItem> {
+        self.run(move |s| {
+            s.queue_propose(
+                &QueueCaller::agent(&a.agent),
+                ProposeItem {
+                    title: a.title,
+                    body: a.body.unwrap_or_default(),
+                    scope: a.scope,
+                    done_when: a.done_when,
+                    kind: a.kind.unwrap_or_default(),
+                },
+            )
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Take the next ready item from the work queue. Returns {claimed, refused}: \
+        claimed is the item with its done condition and history; both null means nothing is \
+        ready, so wait and do not start work that is not in the queue; refused says why the \
+        agent got nothing (at its limit, or no seat) and what to do."
+    )]
+    async fn queue_next(&self, Parameters(a): Parameters<QueueNextArgs>) -> ToolResult<QueueNext> {
+        self.run(move |s| s.queue_next(&a.agent)).await
+    }
+
+    #[tool(
+        description = "Act on a queue item: note adds a note; release gives your claimed item \
+        back; handoff gives it to another agent (to); done finishes it with a summary and one \
+        pointer (pointer_kind pr, commit or file). Admitting, rejecting and editing items are \
+        not available here."
+    )]
+    async fn queue_update(
+        &self,
+        Parameters(a): Parameters<QueueUpdateArgs>,
+    ) -> ToolResult<QueueItem> {
+        self.run(move |s| {
+            let missing = |what: &str| {
+                another_core::Error::Invalid(format!("{what} is required for this action"))
+            };
+            // An MCP caller presents no delegate key: it releases only its own claim.
+            let me = QueueCaller::agent(&a.agent);
+            match a.action {
+                QueueUpdateAction::Note => {
+                    s.queue_note(&a.agent, &a.item, &a.note.ok_or_else(|| missing("note"))?)
+                }
+                QueueUpdateAction::Release => {
+                    if a.to.is_some() {
+                        return Err(another_core::Error::Invalid(
+                            "release takes no to; use action handoff".into(),
+                        ));
+                    }
+                    s.queue_release(
+                        &me,
+                        &a.item,
+                        ReleaseItem {
+                            note: a.note,
+                            ..Default::default()
+                        },
+                    )
+                }
+                QueueUpdateAction::Handoff => s.queue_release(
+                    &me,
+                    &a.item,
+                    ReleaseItem {
+                        note: a.note,
+                        to: Some(a.to.ok_or_else(|| missing("to"))?),
+                        reason: None,
+                    },
+                ),
+                QueueUpdateAction::Done => s.queue_done(
+                    &a.agent,
+                    &a.item,
+                    DoneItem {
+                        summary: a.summary.ok_or_else(|| missing("summary"))?,
+                        pointer_kind: a.pointer_kind.ok_or_else(|| missing("pointer_kind"))?,
+                        pointer: a.pointer.ok_or_else(|| missing("pointer"))?,
+                    },
+                ),
+            }
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Read the work queue: ready and claimed items by default; filter by \
+        state, scope or mine (with agent); or pass item for one item with its history. Read \
+        only."
+    )]
+    async fn queue_list(
+        &self,
+        Parameters(a): Parameters<QueueListArgs>,
+    ) -> ToolResult<QueueListOut> {
+        self.run(move |s| {
+            if let Some(item) = &a.item {
+                return Ok(QueueListOut {
+                    items: vec![s.queue_item(item)?],
+                });
+            }
+            let mine = match (a.mine, a.agent) {
+                (false, _) => None,
+                (true, Some(agent)) => Some(agent),
+                (true, None) => {
+                    return Err(another_core::Error::Invalid("mine needs agent".into()))
+                }
+            };
+            Ok(QueueListOut {
+                items: s.queue_list(QueueFilter {
+                    state: a.state,
+                    scope: a.scope,
+                    mine,
+                    self_admitted: false,
+                    limit: a.limit.unwrap_or(0),
+                })?,
+            })
+        })
+        .await
+    }
 }
 
 #[tool_handler(router = self.tool_router, name = "another", instructions = "Another coordinates agents on this node, including hosted chat apps, through messaging, holds and shared resources. \
 Call whats_new first and follow its next field; if nothing is waiting, stop. \
 Send mail with send_message, acknowledge messages you have handled, and claim_request before \
-working a request. hold_paths before editing files another agent might touch. Before starting \
-a server or job, call resource_find and borrow what is already running. A hosted connection \
+working a request. hold_paths before editing files another agent in the same directory might touch. Before starting \
+a server or job, call resource_find and borrow what is already running. Local agents take work \
+with queue_next, finish it with queue_update, and record work nobody asked for with \
+queue_propose instead of starting it. A hosted connection \
 acts as exactly one agent: omit the agent field and it is filled in. Reaping is never remote. \
 Errors are {\"error\":{\"code\",\"message\",\"hint\"}}; follow hint.")]
 impl ServerHandler for AnotherMcp {

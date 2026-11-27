@@ -2,6 +2,8 @@
 
 A human view of one Another node: who is working, what they hold, and what they have said. It is part of the `another` binary. The page, its CSS and its script are embedded. Nothing is downloaded when you open it, and nothing is sent anywhere.
 
+**Status:** The dashboard is present, but frozen for v0.1.0 and treated as experimental. It stays in the tree and gets only admitted security and data-loss fixes.
+
 ## Open it
 
 While `another serve` is running on loopback without `--auth`:
@@ -29,7 +31,7 @@ That listens on `127.0.0.1:7468` and opens a browser. `--no-open` only prints th
 - **Edits.** The last day of the edit hook's record: files it held for an agent before an edit, and edits it stopped because another agent held the file. Later edits under the same hold write nothing, so they are not listed. `another board` shows the same record per project from the command line; see [BOARD.md](BOARD.md).
 - **Mail.** Threads, oldest message first inside a thread. Bodies of messages written on this node are shown. Messages that arrived from another node stay redacted.
 - **Resources.** Live and lapsed leases: model servers, dev servers, ports, GPUs, containers, jobs.
-- **Timeline.** Filter by text, agent, project, kind (`mail`, `request`, `hold`, `resource`, `session`, `federation`, `system`) and a time range. The same body rule as mail.
+- **Timeline.** Filter by text, agent, project, kind (`mail`, `request`, `hold`, `resource`, `session`, `federation`, `sync`, `system`) and a time range. The same body rule as mail.
 - **Peers.** Paired nodes, if you federate. An empty list is a normal single machine.
 
 The page keeps itself current with a server-sent event stream and falls back to polling.
@@ -54,6 +56,8 @@ Holds and requests that belong to another node are not yours to release or expir
 `another serve --auth` does not mount `/ui`. A tunnel in front of that port would otherwise publish the whole node, and loopback is not proof of a local human once a tunnel is involved.
 
 `--dashboard` together with `--auth`, still on loopback, serves a **read-only** page and **omits message bodies**. Actions are not available. The process prints a warning, because a tunnel to that port would expose the redacted view.
+
+A federation-only listener (`--federation` without `--auth`) never mounts the dashboard, even with `--dashboard`. With both `--federation` and `--auth`, dashboard routes require a bearer token as well as the loopback Host check. Use a separate local dashboard listener for browser access.
 
 `--dashboard` with a non-loopback `--bind` is refused, even when `--auth` and `--allow-remote-bind` are set.
 

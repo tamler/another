@@ -30,6 +30,9 @@ pub struct Cli {
     /// Print machine-readable JSON.
     #[arg(long, global = true)]
     pub json: bool,
+    /// Let a development build migrate a home it did not create. A backup is taken first.
+    #[arg(long, global = true)]
+    pub dev_migrate: bool,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -55,7 +58,7 @@ pub enum Command {
         /// HTTP bind address. Loopback unless --auth and --allow-remote-bind are both given.
         #[arg(long, default_value = crate::serve::DEFAULT_BIND)]
         bind: String,
-        /// Require bearer tokens (`another token create`) on /mcp and /activity; audit every call.
+        /// Require bearer tokens (`another token create`) on /mcp and /activity; sample rejected-call audits.
         #[arg(long)]
         auth: bool,
         /// Allow a non-loopback --bind (requires --auth). Prefer a tunnel instead.
@@ -69,6 +72,7 @@ pub enum Command {
         #[arg(long, requires = "auth")]
         public_url: Option<String>,
         /// Act as a federation hub: serve /fed/* for paired spokes (node-signed requests).
+        /// Without --auth, serve only /fed/* and /health, with no dashboard.
         #[arg(long)]
         federation: bool,
         /// Serve the local dashboard at /ui.
@@ -82,15 +86,20 @@ pub enum Command {
         /// Seconds between sweeps that expire holds and stale requests.
         #[arg(long, default_value_t = 30)]
         sweep_secs: u64,
-        /// Do not wake idle Herdr agents when new mail arrives.
-        /// (Push delivery runs only on a loopback server without --auth.)
+        /// Make no transport call: no sweep of sessions and no wake of idle agents.
+        /// (Both run only on a loopback server without --auth.)
         #[arg(long)]
         no_wake: bool,
-        /// Seconds between checks for new mail to push to idle Herdr agents.
+        /// Seconds between checks for new mail to wake idle Herdr agents for.
         #[arg(long, default_value_t = 2)]
         wake_secs: u64,
+        /// Append log records to this file instead of stderr (the Windows daemon uses this;
+        /// Task Scheduler keeps no output). The startup lines still go to stderr.
+        #[arg(long, value_name = "PATH")]
+        log_file: Option<PathBuf>,
     },
-    /// Keep `another serve` running in the background (macOS launchd LaunchAgent).
+    /// Keep `another serve` running in the background (launchd on macOS, a systemd user
+    /// unit on Linux, a Task Scheduler logon task on Windows).
     #[command(subcommand)]
     Daemon(DaemonCmd),
     /// Register projects or list them.
@@ -102,18 +111,42 @@ pub enum Command {
     /// Send a message.
     Send {
         /// Sender: name or name@project (default: $ANOTHER_AGENT).
-        #[arg(long, short = 'f', env = "ANOTHER_AGENT")]
-        from: String,
+        #[arg(
+            long,
+            short = 'f',
+            env = "ANOTHER_AGENT",
+            required_unless_present = "template"
+        )]
+        from: Option<String>,
         /// Recipients (repeat or comma-separate).
-        #[arg(long, short = 't', value_delimiter = ',', required = true)]
+        #[arg(
+            long,
+            short = 't',
+            value_delimiter = ',',
+            required_unless_present = "template"
+        )]
         to: Vec<String>,
+        /// CC recipients (more than one is allowed).
         #[arg(long, value_delimiter = ',')]
         cc: Vec<String>,
-        #[arg(long, short = 's')]
-        subject: String,
+        /// Subject line (optional).
+        #[arg(
+            long,
+            short = 's',
+            required_unless_present = "template",
+            conflicts_with = "template"
+        )]
+        subject: Option<String>,
         /// Message body; `-` reads stdin.
-        #[arg(long, short = 'b', default_value = "")]
+        #[arg(long, short = 'b', default_value = "", conflicts_with = "template")]
         body: String,
+        /// Open a request from a template (review | fix | research) that writes the subject
+        /// and body; `--template list` shows them and their fields. Implies --request.
+        #[arg(long)]
+        template: Option<String>,
+        /// A template field as key=value (repeatable), e.g. --field target="PR #170".
+        #[arg(long = "field", value_name = "KEY=VALUE", requires = "template")]
+        fields: Vec<String>,
         #[arg(long, short = 'i', default_value = "normal")]
         importance: String,
         /// Ask recipients to acknowledge.
@@ -131,7 +164,9 @@ pub enum Command {
     },
     /// Reply to a message within its thread.
     Reply {
+        /// Id of the message to reply to.
         message_id: String,
+        /// Reply-from agent name.
         #[arg(long, short = 'f', env = "ANOTHER_AGENT")]
         from: String,
         /// Reply body; `-` reads stdin.
@@ -300,20 +335,25 @@ pub enum Command {
     /// Show or rename this node.
     #[command(subcommand)]
     Node(NodeCmd),
-    /// Pair nodes for federation: invite (hub), join (spoke), revoke.
+    /// Pair nodes for federation: invite (hub), join (spoke), revoke, readmit, release-name.
     #[command(subcommand)]
     Pair(PairCmd),
     /// List paired nodes.
     Peers,
-    /// Spoke: push this node's events to the hub and pull everyone else's.
+    /// Spoke: push this node's events to the hub and pull everyone else's. An event too
+    /// large to send is skipped and reported after every sync until `sync ack`.
+    #[command(args_conflicts_with_subcommands = true)]
     Sync {
+        #[command(subcommand)]
+        cmd: Option<SyncCmd>,
         /// Keep syncing every --every seconds.
         #[arg(long)]
         watch: bool,
         #[arg(long, default_value_t = 30)]
         every: u64,
     },
-    /// Nudge agents with unread mail through tmux, cmux or Herdr (optional adapters).
+    /// Wake agents that have mail waiting, through Herdr or a transport configured in
+    /// transports.json (tmux, cmux, ...).
     #[command(args_conflicts_with_subcommands = true)]
     Wake {
         #[command(subcommand)]
@@ -321,6 +361,9 @@ pub enum Command {
         #[command(flatten)]
         run: WakeRun,
     },
+    /// Agent sessions inside a transport, as the daemon last saw them.
+    #[command(subcommand)]
+    Transport(TransportCmd),
     /// Open the local dashboard in a browser (loopback only).
     ///
     /// Useful when agents talk to Another over stdio and `another serve` is not running.
@@ -336,12 +379,13 @@ pub enum Command {
     },
     /// Show the activity feed (who is doing what), or a summary of it.
     Activity {
-        /// Start point: a duration (30m, 2h, 1d), an RFC 3339 time, or an event id cursor.
+        /// Start point: a duration (bare seconds, 30m, 2h, 1d), an RFC 3339 time, or an event id cursor.
         #[arg(long)]
         since: Option<String>,
         #[arg(long, default_value_t = 50)]
         limit: u32,
-        /// Only these categories: mail, request, hold, resource, session, system, federation.
+        /// Only these categories: mail, request, hold, resource, session, system, federation,
+        /// queue, sync.
         #[arg(long, value_delimiter = ',')]
         kinds: Vec<String>,
         /// Print a summary (counts, active agents, highlights) instead of items.
@@ -351,9 +395,17 @@ pub enum Command {
     /// Count coordination evidence: edits stopped by a hold, holds the edit hook took, mail
     /// pushed into running sessions and whether it was acted on, requests claimed and done.
     Stats {
-        /// Start point: a duration (30m, 48h, 2d), an RFC 3339 time, or an event id.
+        /// Start point: a duration (bare seconds, 30m, 48h, 2d), an RFC 3339 time, or an event id.
         #[arg(long, default_value = "24h")]
         since: String,
+    },
+    /// Check this installation: binary, home, database, hooks, server, daemon, peers. Read-only;
+    /// prints the command that fixes each problem. Exits 1 only when a check fails.
+    Doctor {
+        /// Loopback address to check for a running server (default: the daemon's, else
+        /// 127.0.0.1:7466). Non-loopback addresses are not contacted.
+        #[arg(long)]
+        bind: Option<String>,
     },
     /// Read-only work board, per project: who holds which paths and until when, which paths
     /// the edit hook claimed for each agent recently, edits it stopped, and what is waiting
@@ -362,17 +414,36 @@ pub enum Command {
         /// Only this project (slug or path) and sibling checkouts of the same repository.
         #[arg(long, short = 'p')]
         project: Option<String>,
-        /// Window for recent and stopped edits: a duration (30m, 24h, 2d) or an RFC 3339 time.
+        /// Window for recent and stopped edits: a duration (bare seconds, 30m, 24h, 2d) or an RFC 3339 time.
         #[arg(long, default_value = "24h")]
         since: String,
         /// Items per list (at most 200).
         #[arg(long, default_value_t = another_core::DEFAULT_BOARD_LIMIT)]
         limit: u32,
     },
+    /// What needs the owner, most urgent first, each with its next step: decisions that
+    /// wait, sessions that are blocked, stuck or unreachable, claims gone quiet and ready
+    /// items nobody can take. Read-only; exits 1 only when the list cannot be read.
+    Needs {
+        /// One line for a prompt or a status line: counts only, nothing when nothing waits.
+        #[arg(long)]
+        brief: bool,
+        /// Rows shown per kind (1 to 200). Counts are never cut.
+        #[arg(
+            long,
+            default_value_t = crate::needs::DEFAULT_LIMIT,
+            value_parser = clap::value_parser!(u32).range(1..=200)
+        )]
+        limit: u32,
+    },
+    /// The work queue: propose items, admit them, take the next one, record its result.
+    #[command(subcommand)]
+    Queue(crate::queue_cli::QueueCmd),
     /// Install, remove or run client hook packs.
     #[command(subcommand)]
     Hook(HookCmd),
-    /// Expire lapsed holds and mark overdue requests stale now.
+    /// Expire lapsed holds, mark overdue requests stale and release queue claims past the
+    /// grace period now.
     Sweep,
     /// Show the most recent event-log records.
     Events {
@@ -386,47 +457,69 @@ pub struct WakeRun {
     /// Agent to wake (default: $ANOTHER_AGENT); or use --all.
     #[arg(long, short = 'a', env = "ANOTHER_AGENT", conflicts_with = "all")]
     agent: Option<String>,
-    /// Wake every agent with a stored target that has unread mail or open requests.
+    /// One wake pass for every agent, by the daemon's rules: an idle Herdr session that
+    /// Another can identify, with mail no hook has announced yet.
     #[arg(long)]
     all: bool,
-    /// Adapter: tmux | cmux | herdr (default: the agent's stored target).
+    /// Transport: herdr, or a name configured in transports.json (default: the agent's
+    /// stored target).
     #[arg(long)]
     via: Option<String>,
-    /// tmux pane, cmux surface id (or `notify`), or Herdr agent name.
+    /// Where that transport delivers the line: a Herdr pane or agent name, a tmux pane,
+    /// a cmux surface id.
     #[arg(long)]
     target: Option<String>,
     /// Text to send (default: a one-line inbox summary).
     #[arg(long)]
     message: Option<String>,
-    /// Wake even when nothing is unread.
+    /// Wake even when nothing is unread. It does not override a wake that is refused
+    /// because the pane may not hold the agent: name the pane with --target for that.
     #[arg(long)]
     force: bool,
-    /// Print the adapter commands without running them.
+    /// Print the transport's commands without running them. A wake that would be refused
+    /// without asking the transport is reported as refused.
     #[arg(long)]
     dry_run: bool,
 }
 
 #[derive(Debug, Subcommand)]
+pub enum SyncCmd {
+    /// Acknowledge one skipped event on the node whose log holds it, so `another sync` and
+    /// `another needs` stop reporting it. Needs --owner, a terminal and a typed yes. It
+    /// deletes nothing and does not send the event; `another activity --kinds sync` keeps
+    /// listing it.
+    Ack {
+        /// The skipped event's id, as `another sync` and `another needs` print it.
+        event_id: String,
+        /// Act as the owner, at a terminal.
+        #[arg(long)]
+        owner: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum WakeCmd {
-    /// Store where to wake an agent (hooks capture tmux/cmux targets automatically).
+    /// Store where to wake an agent by hand (hooks record sessions by themselves).
     Set {
         #[command(flatten)]
         agent: AgentArg,
-        /// tmux | cmux | herdr
+        /// herdr, or a name configured in transports.json
         #[arg(long)]
         via: String,
         #[arg(long)]
         target: String,
     },
-    /// Forget an agent's wake target.
+    /// Forget an agent's wake target and its session rows (which also lifts a stop set
+    /// by a wake that did not start work).
     Clear {
         #[command(flatten)]
         agent: AgentArg,
     },
     /// List stored wake targets.
     List,
-    /// Drop automatically captured targets whose pane is gone or whose agent has left
-    /// (session ended, or not seen for a day). Targets set by hand are kept.
+    /// Drop automatically captured targets whose agent has left (session ended, or not
+    /// seen for a day) and session rows that have aged out. Asks no transport. Targets
+    /// set by hand are kept.
     Prune {
         /// Show what would be dropped without dropping it.
         #[arg(long)]
@@ -434,30 +527,43 @@ pub enum WakeCmd {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum TransportCmd {
+    /// One line per agent session: where it runs, its state, its last wake, and whether
+    /// it needs you. Reads what the daemon recorded; calls no transport.
+    Status {
+        /// Only sessions that need attention: blocked, stuck, gone, or not reachable.
+        #[arg(long)]
+        attention: bool,
+    },
+}
+
 #[derive(Debug, Args)]
 pub struct DaemonArgs {
-    /// launchd label (change it only to run a second, separate daemon).
+    /// Service label: launchd label, systemd unit name (without `.service`) or task name.
+    /// Change it only to run a second, separate daemon.
     #[arg(long, default_value = crate::daemon::DEFAULT_LABEL)]
     label: String,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum DaemonCmd {
-    /// Write the LaunchAgent and load it: `another serve` on loopback, restarted if it exits.
+    /// Write the service definition and load it: `another serve` on loopback, started at
+    /// login and restarted if it exits.
     Install {
         #[command(flatten)]
         args: DaemonArgs,
         /// Loopback address to serve on.
         #[arg(long, default_value = crate::serve::DEFAULT_BIND)]
         bind: String,
-        /// Write the plist but do not load it.
+        /// Write the definition but do not load it.
         #[arg(long)]
         no_load: bool,
         /// Show what would change without writing or loading anything.
         #[arg(long)]
         dry_run: bool,
     },
-    /// Unload the LaunchAgent and remove its plist.
+    /// Unload the service and remove its definition.
     Uninstall {
         #[command(flatten)]
         args: DaemonArgs,
@@ -469,7 +575,8 @@ pub enum DaemonCmd {
         #[command(flatten)]
         args: DaemonArgs,
     },
-    /// Restart the daemon (`launchctl kickstart -k`).
+    /// Restart the daemon (`launchctl kickstart -k`, `systemctl --user restart`, or
+    /// `schtasks /End` then `/Run`).
     Restart {
         #[command(flatten)]
         args: DaemonArgs,
@@ -480,8 +587,9 @@ pub enum DaemonCmd {
 pub enum NodeCmd {
     /// Show this node's id, name and key fingerprint.
     Show,
-    /// Rename this node (do this before pairing; names must be unique across nodes).
-    /// Without a name, prints the current one.
+    /// Rename this node (do this before pairing). A name is unique across nodes whatever
+    /// its case (`Alpha` and `alpha` are one name), and `local` is reserved: it means "not
+    /// named yet". Without a name, prints the current one.
     Name { name: Option<String> },
 }
 
@@ -503,10 +611,17 @@ pub enum PairCmd {
         #[arg(long, default_value = "1h")]
         expires: String,
     },
-    /// Spoke: redeem an invite code and record the hub.
+    /// Spoke: redeem an invite code and record the hub. The request is signed with this
+    /// node's key, and the hub's answer is checked against the hub key in the invite.
     Join { code: String },
     /// Stop accepting (or using) a paired node, by name or id.
     Revoke { node: String },
+    /// Hub: let a node this hub revoked sync again, by name or id, with the permissions it
+    /// had. An invite never does this.
+    Readmit { node: String },
+    /// Free the name a revoked node holds, by name or id: the node is then listed by its
+    /// id, and the name is free for any node at once.
+    ReleaseName { node: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -553,7 +668,7 @@ pub enum OauthCmd {
     },
     /// Reject a waiting client.
     Deny { user_code: String },
-    /// List grants (each one is a single agent).
+    /// List grants (each one is a single agent), and any stored client that can no longer be approved.
     List,
     /// Revoke a grant and every token issued for it.
     Revoke { grant_id: String },
@@ -575,23 +690,8 @@ pub enum RemoteCmd {
     },
 }
 
-fn parse_secs(raw: &str) -> anyhow::Result<i64> {
-    let raw = raw.trim();
-    let split = raw.find(|c: char| !c.is_ascii_digit()).unwrap_or(raw.len());
-    let (num, unit) = raw.split_at(split);
-    let n: i64 = num
-        .parse()
-        .map_err(|_| anyhow::anyhow!("invalid duration {raw:?}"))?;
-    let mult = match unit {
-        "" | "s" => 1,
-        "m" => 60,
-        "h" => 3600,
-        "d" => 86_400,
-        "w" => 604_800,
-        _ => anyhow::bail!("invalid duration {raw:?}: use s, m, h, d or w"),
-    };
-    n.checked_mul(mult)
-        .ok_or_else(|| anyhow::anyhow!("invalid duration {raw:?}: too large"))
+pub(crate) fn parse_secs(raw: &str) -> anyhow::Result<i64> {
+    another_core::parse_duration(raw, true).map_err(|error| anyhow::anyhow!("{error}"))
 }
 
 #[derive(Debug, Subcommand)]
@@ -683,7 +783,9 @@ pub enum HookCmd {
     Status,
     /// Called by the hook wrapper; reads the client's JSON on stdin. Always exits 0.
     Run {
+        /// Client event kind.
         event: HookEvent,
+        /// Which client emitted the event.
         #[arg(long)]
         client: Client,
     },
@@ -693,6 +795,7 @@ pub enum HookCmd {
 pub enum ProjectCmd {
     /// Register a project by path (default: current directory).
     Ensure {
+        /// Project directory.
         path: Option<PathBuf>,
     },
     List,
@@ -702,6 +805,7 @@ pub enum ProjectCmd {
 pub enum AgentCmd {
     /// Register or update an agent.
     Register {
+        /// Agent name.
         name: String,
         /// claude | grok | codex | cursor | grok_bot | other
         #[arg(long)]
@@ -709,13 +813,16 @@ pub enum AgentCmd {
         /// Project path to scope the name to (enables name@project).
         #[arg(long)]
         project: Option<PathBuf>,
+        /// Model name (optional).
         #[arg(long)]
         model: Option<String>,
+        /// Freeform agent description (optional).
         #[arg(long)]
         description: Option<String>,
     },
     List,
     Show {
+        /// Agent name.
         name: String,
     },
 }
@@ -742,6 +849,7 @@ pub enum HoldCmd {
         agent: AgentArg,
         #[command(flatten)]
         project: ProjectArg,
+        /// Files or globs.
         #[arg(required = true)]
         paths: Vec<String>,
         /// Lease seconds (default 1800).
@@ -750,10 +858,11 @@ pub enum HoldCmd {
         /// Shared instead of exclusive.
         #[arg(long)]
         shared: bool,
+        /// Short reason string to help a human decide whether to force a handoff.
         #[arg(long)]
         reason: Option<String>,
         /// Allow a pattern that covers the whole project (`**`, `.`, `**/*.rs`).
-        /// Refused without this flag because it blocks every other agent in the repository.
+        /// Refused without this flag because it blocks every other agent in the checkout.
         #[arg(long)]
         repo_wide: bool,
     },
@@ -763,8 +872,10 @@ pub enum HoldCmd {
         agent: AgentArg,
         #[command(flatten)]
         project: ProjectArg,
+        /// Files or globs.
         #[arg(required = true)]
         paths: Vec<String>,
+        /// Check as a shared hold (conflicts only with exclusive holds).
         #[arg(long)]
         shared: bool,
     },
@@ -772,13 +883,22 @@ pub enum HoldCmd {
     Renew {
         #[command(flatten)]
         agent: AgentArg,
+        /// Hold ids (empty means all of your live holds).
         hold_ids: Vec<String>,
     },
-    /// Release your holds (all, or the given ids).
+    /// Release your holds: all of them, the given hold ids, or the ones on the given files
+    /// and directories ("I am done with this file", so another agent can pick it up).
     Release {
         #[command(flatten)]
         agent: AgentArg,
-        hold_ids: Vec<String>,
+        /// Base directory for relative paths: a project path or slug (default: the current
+        /// directory). Nothing is registered.
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        /// Hold ids, files or directories. A file whose whole name looks like a hold id is
+        /// given as `./NAME`.
+        #[arg(value_name = "ID_OR_PATH")]
+        targets: Vec<String>,
     },
 }
 
@@ -788,20 +908,55 @@ pub enum HoldCmd {
 /// a request someone else owns), and bad arguments exit 2 (clap).
 pub const EXIT_CONFLICT: u8 = 3;
 
+/// Stack for the thread the binary runs on.
+const CLI_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+/// Run `f` (the whole binary: plugin dispatch, then the CLI) on a thread with a known stack.
+/// clap's derive builds the whole command tree in a few very large generated functions; in
+/// a debug build their frames use nearly all of a 1 MB stack, which is the main-thread
+/// default on Windows, so a pull request that adds a few arguments makes `another init`
+/// overflow there (seen on #170 and #177; reproduced on macOS with `ulimit -s 1024`).
+/// Plugin dispatch builds the same tree to check built-in names, so it runs on this thread
+/// too. If the thread cannot be started, `f` runs on the calling thread.
+pub fn with_cli_stack(f: fn() -> ExitCode) -> ExitCode {
+    match std::thread::Builder::new()
+        .name("another".into())
+        .stack_size(CLI_STACK_BYTES)
+        .spawn(f)
+    {
+        // A panic has already printed its message; exit as an uncaught panic would.
+        Ok(handle) => handle.join().unwrap_or(ExitCode::from(101)),
+        Err(_) => f(),
+    }
+}
+
+/// The CLI: parse the command line and run it. The binary calls it through
+/// [`with_cli_stack`].
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
-    init_tracing(matches!(
-        cli.command,
-        Command::Serve { .. } | Command::Dashboard { .. }
-    ));
+    let log_file = match &cli.command {
+        Command::Serve { log_file, .. } => log_file.as_deref(),
+        _ => None,
+    };
+    init_tracing(
+        matches!(
+            cli.command,
+            Command::Serve { .. } | Command::Dashboard { .. }
+        ),
+        log_file,
+    );
     let json = cli.json;
+    if cli.dev_migrate {
+        another_core::allow_dev_migrate();
+    }
     match run(cli) {
         Ok(code) => code,
         Err(err) => {
+            let usage = err.is::<crate::templates::UsageError>();
             let body = match err.downcast_ref::<another_core::Error>() {
                 Some(e) => e.body(),
                 None => another_core::ErrorBody {
-                    code: "error",
+                    code: if usage { "usage" } else { "error" },
                     message: format!("{err:#}"),
                 },
             };
@@ -813,13 +968,16 @@ pub fn main() -> ExitCode {
                 }
                 println!("{out}");
             } else {
-                eprintln!("another: {}", body.message);
+                eprintln!("another: {}", terminal_safe(&body.message));
                 if let Some(hint) = hint {
                     eprintln!("hint: {hint}");
                 }
             }
             if body.code == "conflict" {
                 ExitCode::from(EXIT_CONFLICT)
+            } else if usage {
+                // A template mistake is a bad command line, like clap's own errors.
+                ExitCode::from(2)
             } else {
                 ExitCode::FAILURE
             }
@@ -861,11 +1019,36 @@ fn cli_hint(code: &str, message: &str) -> Option<&'static str> {
     None
 }
 
-fn init_tracing(serving: bool) {
+fn init_tracing(serving: bool, log_file: Option<&Path>) {
     let default = if serving { "info" } else { "warn" };
     let filter = tracing_subscriber::EnvFilter::try_from_env("ANOTHER_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default));
-    // Colour only on a terminal: the daemon's log is a file under launchd.
+    if let Some(path) = log_file {
+        let opened = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+            });
+        match opened {
+            Ok(file) => {
+                let _ = tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_writer(std::sync::Mutex::new(file))
+                    .with_ansi(false)
+                    .try_init();
+                return;
+            }
+            Err(e) => eprintln!(
+                "another: cannot open log file {}: {e}; logging to stderr",
+                path.display()
+            ),
+        }
+    }
+    // Colour only on a terminal: the daemon's log is a file under launchd and systemd.
     use std::io::IsTerminal;
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -882,7 +1065,7 @@ fn open(home: Option<&Path>) -> anyhow::Result<Store> {
     Ok(Store::open(&home)?)
 }
 
-fn body_arg(body: String) -> anyhow::Result<String> {
+pub(crate) fn body_arg(body: String) -> anyhow::Result<String> {
     if body == "-" {
         let mut buf = String::new();
         std::io::stdin().read_to_string(&mut buf)?;
@@ -890,6 +1073,11 @@ fn body_arg(body: String) -> anyhow::Result<String> {
     } else {
         Ok(body)
     }
+}
+
+/// Whether a `--project` value names a directory rather than a project slug.
+fn looks_like_path(p: &str) -> bool {
+    p.contains('/') || p.contains('\\') || p == "." || p == ".."
 }
 
 fn abs(path: &Path) -> anyhow::Result<String> {
@@ -935,10 +1123,9 @@ fn board_command(
     let since_ms = match Since::parse(since, store.now())? {
         Since::Time(t) => t,
         Since::After(_) => anyhow::bail!(
-            "board --since takes a duration like 24h or an RFC 3339 time, not an event id"
+            "board --since takes bare seconds like 3600, a duration like 24h or an RFC 3339 time, not an event id"
         ),
     };
-    let looks_like_path = |p: &str| p.contains('/') || p.contains('\\') || p == "." || p == "..";
     let project = match project {
         Some(p) if looks_like_path(p) => Some(abs(Path::new(p))?),
         Some(p) => Some(p.to_string()),
@@ -955,7 +1142,6 @@ fn board_command(
 
 /// Resolve `--project`: a path (ensured on the fly) or an existing slug; default cwd.
 fn project_key(store: &Store, actor: &str, project: Option<String>) -> anyhow::Result<String> {
-    let looks_like_path = |p: &str| p.contains('/') || p.contains('\\') || p == "." || p == "..";
     match project {
         Some(p) if !looks_like_path(&p) => Ok(p),
         Some(p) => Ok(store
@@ -1013,7 +1199,134 @@ fn resolve_hold_paths(store: &Store, project: &str, paths: Vec<String>) -> Vec<S
         .collect()
 }
 
-fn emit<T: Serialize>(json: bool, value: &T, human: impl FnOnce(&T) -> String) -> ExitCode {
+/// Whether a `hold release` argument is shaped like a hold id: the 26 characters of a ULID
+/// (`store::new_id`), in the alphabet and case ids are printed in.
+fn is_hold_id(arg: &str) -> bool {
+    arg.len() == 26
+        && arg
+            .bytes()
+            .all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b))
+}
+
+/// `another hold release`: every hold of the agent's, or the ones its arguments name.
+/// Returns the released ids and what to tell the caller about paths that released nothing.
+///
+/// An argument is a hold id, a path or a glob:
+///
+/// - a hold id by its shape ([`is_hold_id`]);
+/// - a path when it names an existing file or directory, whatever characters it contains,
+///   and whenever it has no wildcard. It is resolved from the file, as the edit hook does
+///   it, so it works from any directory and for a file in another checkout. One that is
+///   letters and digits only and names nothing on disk may be a mistyped id: if no hold
+///   of the caller's names that path, covers it or lies below it, the command fails and
+///   releases nothing by path, where any other path with nothing held gets a note.
+///   `./NAME` is always a path;
+/// - otherwise a glob, which releases the caller's hold with exactly that pattern in the
+///   project at or nearest above the base directory.
+///
+/// `--project` only sets the directory relative arguments are joined to. Nothing here
+/// registers a project: this is a different path from [`project_key`].
+fn release_holds(
+    store: &Store,
+    agent: &str,
+    project: Option<String>,
+    targets: Vec<String>,
+) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+    if targets.is_empty() {
+        return Ok((store.release_holds(agent, &[])?, Vec::new()));
+    }
+    let base = match project {
+        None => std::env::current_dir()?,
+        Some(p) if looks_like_path(&p) => PathBuf::from(abs(Path::new(&p))?),
+        // A slug must exist; a path is used as a directory whether registered or not.
+        Some(slug) => PathBuf::from(store.project(&slug)?.abs_path),
+    };
+    let (mut ids, mut paths, mut globs) = (Vec::new(), Vec::new(), Vec::new());
+    for target in targets {
+        let full = base.join(&target);
+        let exists = std::fs::symlink_metadata(&full).is_ok();
+        if is_hold_id(&target) {
+            ids.push(target);
+        } else if exists || !target.contains(['*', '?', '[', '{']) {
+            paths.push(another_core::ReleasePath {
+                // Letters and digits only, and no such file: more likely a mistyped id.
+                maybe_id: !exists && target.bytes().all(|b| b.is_ascii_alphanumeric()),
+                shown: target,
+                path: full,
+            });
+        } else {
+            globs.push(target);
+        }
+    }
+    // Settled before anything is released, so a refused glob releases nothing.
+    let glob_project = if globs.is_empty() {
+        None
+    } else {
+        let here = hooks::resolve_existing(&base);
+        let nearest = store
+            .projects()?
+            .into_iter()
+            .map(|p| (hooks::resolve_existing(Path::new(&p.abs_path)), p))
+            .filter(|(real, _)| here.starts_with(real))
+            .max_by_key(|(real, _)| real.components().count());
+        match nearest {
+            Some((_, p)) => Some(p.abs_path),
+            None => anyhow::bail!("no project here; give a file, a directory or a hold id"),
+        }
+    };
+    let mut released: Vec<String> = Vec::new();
+    let mut notes = Vec::new();
+    // Ids, paths and each glob are released in transactions of their own, so an argument
+    // can be refused after earlier ones took effect. The error then says what is already
+    // released, so the exit status does not read as "nothing happened".
+    let with_released = |released: &[String], e: another_core::Error| {
+        use another_core::Error as E;
+        if released.is_empty() {
+            return e;
+        }
+        let add = |m: String| {
+            format!(
+                "{m}; {} hold(s) already released: {}",
+                released.len(),
+                released.join(", ")
+            )
+        };
+        match e {
+            E::NotFound(m) => E::NotFound(add(m)),
+            E::Invalid(m) => E::Invalid(add(m)),
+            E::Conflict(m) => E::Conflict(add(m)),
+            E::Ambiguous(m) => E::Ambiguous(add(m)),
+            E::Forbidden(m) => E::Forbidden(add(m)),
+            other => other,
+        }
+    };
+    if !ids.is_empty() {
+        released.extend(store.release_holds(agent, &ids)?);
+    }
+    if !paths.is_empty() {
+        let done = store
+            .release_paths(agent, &paths, None)
+            .map_err(|e| with_released(&released, e))?;
+        released.extend(done.released);
+        notes.extend(done.notes);
+    }
+    if let Some(project) = glob_project {
+        for glob in &globs {
+            let done = store
+                .release_pattern(agent, &project, glob)
+                .map_err(|e| with_released(&released, e))?;
+            released.extend(done.released);
+            notes.extend(done.notes);
+        }
+    }
+    Ok((released, notes))
+}
+
+pub(crate) fn emit<T: Serialize>(
+    json: bool,
+    value: &T,
+    human: impl FnOnce(&T) -> String,
+) -> ExitCode {
     if json {
         println!(
             "{}",
@@ -1022,15 +1335,56 @@ fn emit<T: Serialize>(json: bool, value: &T, human: impl FnOnce(&T) -> String) -
     } else {
         let text = human(value);
         if !text.is_empty() {
-            println!("{}", text.trim_end());
+            println!("{}", terminal_safe(text.trim_end()));
         }
     }
     ExitCode::SUCCESS
 }
 
+/// Text for a person's terminal. Names, paths, subjects and reasons in human output come
+/// from other agents and other machines, and a file name can hold ESC or BEL: an OSC or
+/// CSI sequence there would retitle, clear or rewrite the operator's terminal. Every
+/// control or bidi-override character except the line breaks and tabs the renderers use
+/// for layout becomes `?` (the D75 rule, applied where text reaches a terminal). `--json`
+/// output keeps the exact text: JSON escapes C0 controls, but DEL, C1 and bidi characters
+/// stay raw UTF-8, for the reading program to handle (D97).
+fn terminal_safe(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\n' | '\t' => c,
+            c if another_core::is_unsafe_text_char(c) => '?',
+            c => c,
+        })
+        .collect()
+}
+
+/// An OAuth client's name inside one row of the `another oauth` commands. The operator
+/// approves a client from these rows, and a name stored before registration refused
+/// control characters (D97) can hold a line break, which [`terminal_safe`] keeps. It is
+/// one shown line of at most 120 characters inside quotes it cannot close, as the hooks
+/// show a sender's text, so it cannot pass as the fields that follow it. A redirect host
+/// is shown by [`another_core::shown_redirect_host`].
+fn client_shown(text: &str) -> String {
+    hooks::quoted_to(text, 120)
+}
+
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     let json = cli.json;
     let home = cli.home.as_deref();
+    // The template listing needs no sender, recipient or database (FINDINGS-177 T1, T2).
+    if let Command::Send {
+        template: Some(t), ..
+    } = &cli.command
+    {
+        if t == "list" {
+            if json {
+                println!("{}", crate::templates::listing_json());
+            } else {
+                print!("{}", crate::templates::listing());
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
+    }
     if let Command::Serve {
         stdio,
         bind,
@@ -1044,6 +1398,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         sweep_secs,
         no_wake,
         wake_secs,
+        log_file: _,
     } = &cli.command
     {
         let store = open(home)?;
@@ -1146,6 +1501,23 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     {
         return board_command(&another_home()?, json, project.as_deref(), since, *limit);
     }
+    if let Command::Needs { brief, limit } = &cli.command {
+        // Before any Store::open, which would create the home and migrate the database.
+        return Ok(crate::needs::run(&another_home()?, json, *brief, *limit));
+    }
+    if let Command::Doctor { bind } = &cli.command {
+        // Before any Store::open, which would create the home and migrate the database.
+        let report = crate::doctor::run(&crate::doctor::Inputs {
+            another_home: another_home()?,
+            bind: bind.clone(),
+        });
+        let printed = emit(json, &report, crate::doctor::render);
+        return Ok(if report.ok {
+            printed
+        } else {
+            ExitCode::FAILURE
+        });
+    }
 
     let store = open(home)?;
     let code = match cli.command {
@@ -1154,6 +1526,8 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         | Command::Hook(_)
         | Command::Daemon(_)
         | Command::Board { .. }
+        | Command::Needs { .. }
+        | Command::Doctor { .. }
         | Command::Remote(_) => {
             unreachable!("handled above")
         }
@@ -1223,18 +1597,38 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             request,
             due,
             thread,
+            template,
+            fields,
         } => {
+            // Optional to clap only so that `--template list` works without it.
+            let Some(from) = from else {
+                return Err(crate::templates::UsageError(
+                    "no sender: pass --from or set ANOTHER_AGENT".into(),
+                )
+                .into());
+            };
+            // A template writes the subject and body, and always opens a request.
+            let (subject, body) = match &template {
+                Some(name) => {
+                    let fields = crate::templates::parse_fields(&fields)?;
+                    crate::templates::render(name, &fields)?
+                }
+                None => (subject.unwrap_or_default(), body_arg(body)?),
+            };
+            if to.is_empty() {
+                anyhow::bail!("no recipients: pass --to");
+            }
             let m = store.send_message(SendMessage {
                 from,
                 to,
                 cc,
                 subject,
-                body: body_arg(body)?,
+                body,
                 importance: importance.parse::<Importance>()?,
                 ack_required: ack,
                 reply_to: None,
                 thread_id: thread,
-                request: (request || due.is_some()).then_some(NewRequest {
+                request: (request || due.is_some() || template.is_some()).then_some(NewRequest {
                     due_in_seconds: due,
                 }),
             })?;
@@ -1383,13 +1777,22 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let holds = store.renew_holds(&agent.agent, &hold_ids)?;
             emit(json, &holds, |h| output::holds(h))
         }
-        Command::Hold(HoldCmd::Release { agent, hold_ids }) => {
-            let ids = store.release_holds(&agent.agent, &hold_ids)?;
+        Command::Hold(HoldCmd::Release {
+            agent,
+            project,
+            targets,
+        }) => {
+            let (ids, notes) = release_holds(&store, &agent.agent, project, targets)?;
+            // On stderr, so `--json` output stays the list of released ids.
+            for note in &notes {
+                eprintln!("another: {}", terminal_safe(note));
+            }
             emit(json, &ids, |ids| format!("released {} hold(s)", ids.len()))
         }
         Command::Holds { project, agent } => {
-            let holds = store.holds(HoldFilter { project, agent })?;
-            emit(json, &holds, |h| output::holds(h))
+            let here = std::env::current_dir().ok();
+            let holds = store.holds_seen_from(HoldFilter { project, agent }, here.as_deref())?;
+            emit(json, &holds, |h| output::listed_holds(h))
         }
         Command::Heartbeat {
             agent,
@@ -1553,7 +1956,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                         .map(|r| {
                             format!(
                                 "{}  {}  redirect host {}  expires {}",
-                                r.user_code, r.client_name, r.redirect_host, r.expires_at
+                                r.user_code,
+                                client_shown(&r.client_name),
+                                another_core::shown_redirect_host(&r.redirect_host),
+                                r.expires_at
                             )
                         })
                         .collect::<Vec<_>>()
@@ -1576,7 +1982,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             emit(json, &grant, |g| {
                 format!(
                     "approved {} (redirect host from the request) as {}\nprojects: {}\ngrant {}",
-                    g.client_name,
+                    client_shown(&g.client_name),
                     g.agent,
                     if g.project_globs.is_empty() {
                         "none: mailbox, heartbeat and the activity feed only".into()
@@ -1590,14 +1996,15 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Oauth(OauthCmd::Deny { user_code }) => {
             let row = store.deny_oauth(&user_code)?;
             emit(json, &row, |r| {
-                format!("denied {} ({})", r.user_code, r.client_name)
+                format!("denied {} ({})", r.user_code, client_shown(&r.client_name))
             })
         }
         Command::Oauth(OauthCmd::List) => {
             let grants = store.oauth_grants()?;
+            let not_plain = store.oauth_clients_not_plain()?;
             emit(json, &grants, |grants| {
-                if grants.is_empty() {
-                    "no OAuth grants".into()
+                let mut rows: Vec<String> = if grants.is_empty() {
+                    vec!["no OAuth grants".into()]
                 } else {
                     grants
                         .iter()
@@ -1608,21 +2015,35 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                                 "active"
                             };
                             format!(
-                                "{}  {}  {}  {}  projects {}",
+                                "{}  {}  {}  {}  projects {}{}",
                                 g.grant_id,
                                 state,
-                                g.client_name,
+                                client_shown(&g.client_name),
                                 g.agent,
                                 if g.project_globs.is_empty() {
                                     "none".into()
                                 } else {
                                     g.project_globs.join(",")
+                                },
+                                if g.client_redirect_not_plain.is_empty() {
+                                    ""
+                                } else {
+                                    "  [the redirect host of its client is not plain]"
                                 }
                             )
                         })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                }
+                        .collect()
+                };
+                // Clients a build before D100 stored. Each row is one shown line.
+                rows.extend(not_plain.iter().map(|c| {
+                    format!(
+                        "client {}  {}  redirect host {}  is not a plain host name or IP address: it can no longer be approved and must register again",
+                        client_shown(&c.client_id),
+                        client_shown(&c.client_name),
+                        c.redirect_hosts.join(",")
+                    )
+                }));
+                rows.join("\n")
             })
         }
         Command::Oauth(OauthCmd::Revoke { grant_id }) => {
@@ -1630,7 +2051,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             emit(json, &g, |g| {
                 format!(
                     "revoked grant {} ({}, {})",
-                    g.grant_id, g.client_name, g.agent
+                    g.grant_id,
+                    client_shown(&g.client_name),
+                    g.agent
                 )
             })
         }
@@ -1667,52 +2090,141 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 .collect::<Result<Vec<_>, _>>()?;
             let code = store.create_invite(&url, &perms, parse_secs(&expires)?)?;
             let node = store.node()?;
-            let out = serde_json::json!({ "code": code, "hub": node.display_name, "fingerprint": node.fingerprint });
-            emit(json, &out, |_| {
+            let mut out = serde_json::json!({ "code": code, "hub": node.display_name, "fingerprint": node.fingerprint });
+            let warning = crate::fed::invite_warning(&url);
+            if let Some(warning) = &warning {
+                out["warnings"] = serde_json::json!([warning]);
+            }
+            let emitted = emit(json, &out, |_| {
                 format!(
                     "invite for hub {} (key {}), single use:\n\n{code}\n\nOn the spoke: another pair join <code>",
                     node.display_name, node.fingerprint
                 )
-            })
+            });
+            // After the code, so the code stays easy to copy.
+            if let (false, Some(warning)) = (json, &warning) {
+                eprintln!("{}", terminal_safe(warning));
+            }
+            emitted
         }
         Command::Pair(PairCmd::Join { code }) => {
-            let peer = crate::fed::join(&store, &code)?;
-            emit(json, &peer, |p| {
-                format!(
+            let (peer, lifted) = crate::fed::join_reporting(&store, &code)?;
+            let warning = crate::fed::join_warning(&peer);
+            if let (true, Some(warning)) = (json, warning) {
+                let mut out = serde_json::to_value(&peer)?;
+                out["warnings"] = serde_json::json!([warning]);
+                return Ok(emit(json, &out, |_| String::new()));
+            }
+            let emitted = emit(json, &peer, |p| {
+                let paired = format!(
                     "paired with hub {} at {} (key {}); run `another sync`",
                     p.display_name,
                     p.url.as_deref().unwrap_or("-"),
                     p.fingerprint
-                )
-            })
+                );
+                // The invite may give the hub another name, so the hub this node revoked
+                // is named by its key and by the name it was stored under.
+                match &lifted {
+                    Some(previous_name) => format!(
+                        "{paired}\nthis join lifted this node's own revoke of hub \
+                         {previous_name} (key {}); it syncs with that hub again",
+                        p.fingerprint
+                    ),
+                    None => paired,
+                }
+            });
+            if let Some(warning) = warning {
+                eprintln!("{warning}");
+            }
+            emitted
         }
         Command::Pair(PairCmd::Revoke { node }) => {
             let p = store.revoke_peer(&node)?;
             emit(json, &p, |p| format!("revoked {}", p.display_name))
         }
+        Command::Pair(PairCmd::Readmit { node }) => {
+            let p = store.readmit_peer(&node)?;
+            emit(json, &p, |p| {
+                let perms: Vec<&str> = p.perms.iter().map(|x| x.as_str()).collect();
+                format!(
+                    "re-admitted {} (key {}); it can sync again with [{}]",
+                    p.display_name,
+                    p.fingerprint,
+                    perms.join(", ")
+                )
+            })
+        }
+        Command::Pair(PairCmd::ReleaseName { node }) => {
+            let (p, previous_name) = store.release_peer_name(&node)?;
+            emit(json, &p, |p| {
+                format!(
+                    "released the name {previous_name}; node {} (key {}) is now listed by its id\n\
+                     the name {previous_name} is now free for any node; give it to the intended node now",
+                    p.node_id, p.fingerprint
+                )
+            })
+        }
         Command::Peers => {
             let ps = store.peers()?;
-            emit(json, &ps, |p| output::peers(p))
+            let unchecked = crate::fed::hub_with_unchecked_address(&store).map(|p| p.node_id);
+            emit(json, &ps, |p| {
+                output::peers(p, store.node_id(), unchecked.as_deref())
+            })
         }
-        Command::Sync { watch, every } => loop {
-            let report = crate::fed::sync(&store);
-            match report {
-                Ok(r) => {
-                    let emitted = emit(json, &r, output::sync_report);
-                    if !watch {
-                        break emitted;
+        Command::Sync {
+            cmd: Some(SyncCmd::Ack { event_id, owner }),
+            ..
+        } => sync_ack(&store, &event_id, owner)?,
+        Command::Sync {
+            cmd: None,
+            watch,
+            every,
+        } => {
+            // Said once: after the first sync that succeeds.
+            let mut noted = false;
+            loop {
+                let report = crate::fed::sync(&store);
+                match report {
+                    Ok(r) => {
+                        let emitted = emit(json, &r, output::sync_report);
+                        if !noted {
+                            noted = true;
+                            if let Some(hub) = crate::fed::hub_with_unchecked_address(&store) {
+                                let note = format!(
+                                    "note: hub {} was joined before invites were signed, so \
+                                     its address {} was never checked; see another doctor",
+                                    hub.display_name,
+                                    crate::fed::shown_address(hub.url.as_deref().unwrap_or("-"))
+                                );
+                                eprintln!("{}", terminal_safe(&note));
+                            }
+                        }
+                        if !watch {
+                            break emitted;
+                        }
                     }
+                    // The message can quote the hub's error body (fed.rs).
+                    Err(e) if watch => {
+                        eprintln!("another: sync failed: {}", terminal_safe(&format!("{e:#}")))
+                    }
+                    Err(e) => return Err(e),
                 }
-                Err(e) if watch => eprintln!("another: sync failed: {e:#}"),
-                Err(e) => return Err(e),
+                std::thread::sleep(Duration::from_secs(every.max(5)));
             }
-            std::thread::sleep(Duration::from_secs(every.max(5)));
-        },
+        }
         Command::Wake {
             cmd: Some(WakeCmd::Set { agent, via, target }),
             ..
         } => {
-            let t = store.set_wake_target(&agent.agent, via.parse()?, &target, false)?;
+            let via = known_transport(&store, &via)?;
+            if crate::wake::is_old_cmux_notify(via.as_str(), &target) {
+                anyhow::bail!(
+                    "the cmux target `notify` no longer means a notification; define a \
+                     transport for it in transports.json (docs/WAKE.md has `cmux-notify`) \
+                     and use --via cmux-notify"
+                );
+            }
+            let t = store.set_wake_target(&agent.agent, &via, &target, false)?;
             emit(json, &t, |t| match t {
                 Some(t) => format!("wake {} via {} at {}", t.agent, t.via.as_str(), t.target),
                 None => String::new(),
@@ -1722,8 +2234,11 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             cmd: Some(WakeCmd::Clear { agent }),
             ..
         } => {
-            let cleared = store.clear_wake_target(&agent.agent)?;
-            emit(json, &serde_json::json!({ "cleared": cleared }), |_| {
+            let target = store.clear_wake_target(&agent.agent)?;
+            let sessions = store.clear_transport_sessions(&agent.agent)?;
+            let cleared = target || sessions > 0;
+            let report = serde_json::json!({ "cleared": cleared, "sessions": sessions });
+            emit(json, &report, |_| {
                 if cleared {
                     "cleared".into()
                 } else {
@@ -1731,11 +2246,23 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 }
             })
         }
+        Command::Transport(TransportCmd::Status { attention }) => {
+            let report = crate::transport::status_report(&store, attention)?;
+            emit(json, &report, crate::transport::render_status)
+        }
         Command::Wake {
             cmd: Some(WakeCmd::List),
             ..
         } => {
-            let ts = store.wake_targets()?;
+            let config = crate::transport::config_for(&store);
+            if let Some(refused) = config.refusal() {
+                eprintln!("another: {refused}");
+            }
+            let ts: Vec<output::WakeTargetRow> = store
+                .wake_targets()?
+                .into_iter()
+                .map(|target| output::WakeTargetRow::new(target, &config))
+                .collect();
             emit(json, &ts, |ts| output::wake_targets(ts))
         }
         Command::Wake {
@@ -1746,13 +2273,23 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             emit(json, &rows, |rows| output::prune_rows(rows, dry_run))
         }
         Command::Wake { cmd: None, run } => {
+            if let Some(refused) = crate::transport::config_for(&store).refusal() {
+                eprintln!("another: {refused}");
+            }
             let opts = crate::wake::WakeOptions {
-                via: run.via.as_deref().map(str::parse).transpose()?,
+                via: run
+                    .via
+                    .as_deref()
+                    .map(|via| known_transport(&store, via))
+                    .transpose()?,
                 target: run.target,
                 message: run.message,
                 force: run.force,
                 dry_run: run.dry_run,
                 cancel: None,
+                herdr: None,
+                wake_weak: None,
+                config: None,
             };
             let plans = if run.all {
                 crate::wake::wake_all(&store, &opts)?
@@ -1762,8 +2299,31 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 })?;
                 vec![crate::wake::wake(&store, &agent, &opts)?]
             };
-            emit(json, &plans, |p| output::wake_plans(p))
+            let code = emit(json, &plans, |p| output::wake_plans(p));
+            // `--all` reports a failed wake per agent and carries on; the exit status
+            // still says that something failed: a failed wake, or one that could not be
+            // attempted.
+            let failed: Vec<_> = plans
+                .iter()
+                .filter(|p| p.failure || p.error.is_some())
+                .collect();
+            if failed.is_empty() {
+                code
+            } else {
+                for p in failed {
+                    eprintln!(
+                        "another: wake failed for {}: {}",
+                        p.agent,
+                        p.error
+                            .as_deref()
+                            .or(p.detail.as_deref())
+                            .unwrap_or_default()
+                    );
+                }
+                ExitCode::FAILURE
+            }
         }
+        Command::Queue(cmd) => crate::queue_cli::run(&store, cmd, json)?,
         Command::Audit { limit } => {
             let entries = store.audit_log(limit)?;
             emit(json, &entries, |e| output::audit(e))
@@ -1796,12 +2356,30 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             emit(json, &stats, output::trial_stats)
         }
         Command::Sweep => {
-            let r = store.sweep()?;
+            #[derive(Serialize)]
+            struct Swept {
+                #[serde(flatten)]
+                sweep: another_core::SweepReport,
+                #[serde(flatten)]
+                queue: another_core::QueueSweepReport,
+            }
+            let r = Swept {
+                sweep: store.sweep()?,
+                queue: store.queue_sweep()?,
+            };
             emit(json, &r, |r| {
-                format!(
+                let mut line = format!(
                     "expired {} hold(s), {} request(s) went stale",
-                    r.expired_holds, r.stale_requests
-                )
+                    r.sweep.expired_holds, r.sweep.stale_requests
+                );
+                if !r.queue.released_claims.is_empty() {
+                    line.push_str(&format!(
+                        ", released {} queue claim(s) after the grace period: {}",
+                        r.queue.released_claims.len(),
+                        r.queue.released_claims.join(", ")
+                    ));
+                }
+                line
             })
         }
         Command::Events { limit } => {
@@ -1810,6 +2388,77 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
     };
     Ok(code)
+}
+
+/// A `--via` value: `herdr`, or a transport configured on this node. Anything else is
+/// refused with what to set, before anything is stored or run.
+/// `another sync ack <event-id> --owner`: the owner's gate of the queue (`--owner`, a
+/// terminal, a typed yes), with the id looked up before anything is asked. With `--json`
+/// the success line is the same text.
+fn sync_ack(store: &Store, event_id: &str, owner: bool) -> anyhow::Result<ExitCode> {
+    use another_core::SkipAck;
+    if !owner {
+        return Err(another_core::Error::Forbidden(
+            "another sync ack is the owner's alone: run it with --owner at a terminal".into(),
+        )
+        .into());
+    }
+    let already = |id: &str, at: &str| {
+        println!(
+            "{}",
+            terminal_safe(&format!(
+                "event {id} was acknowledged at {at}; nothing was changed"
+            ))
+        );
+        Ok(ExitCode::SUCCESS)
+    };
+    let shown_id = another_core::display_line(event_id, 40);
+    match store.skip_to_acknowledge(event_id)? {
+        SkipAck::Already { at } => return already(&shown_id, &at),
+        SkipAck::Skip {
+            event_id: id,
+            kind,
+            bytes,
+            actor,
+            larger_than_one,
+        } => {
+            crate::queue_cli::owner_terminal()?;
+            crate::queue_cli::owner_confirm(&format!(
+                "Acknowledge the skip of event {id} ({kind}, {bytes} bytes, written by {actor}) in this node's log.\n\
+                 It was not sent because it is larger than one {larger_than_one}. This does not send it and deletes nothing.\n\
+                 another sync and another needs stop reporting it, here and on the nodes that received the report."
+            ))?;
+        }
+    }
+    match store.acknowledge_skip(event_id)? {
+        SkipAck::Already { at } => already(&shown_id, &at),
+        SkipAck::Skip {
+            event_id: id,
+            kind,
+            bytes,
+            ..
+        } => {
+            println!(
+                "{}",
+                terminal_safe(&format!(
+                    "acknowledged: event {id} ({kind}, {bytes} bytes) stays in this node's log \
+                     and is still not sent; another sync and another needs no longer report it"
+                ))
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+fn known_transport(store: &Store, via: &str) -> anyhow::Result<another_core::WakeVia> {
+    let config = crate::transport::config_for(store);
+    if via != "rex" {
+        let name: another_core::WakeVia = via.parse()?;
+        if config.provides(via) {
+            return Ok(name);
+        }
+    }
+    anyhow::bail!("{}", config.why_missing(via))
 }
 
 fn daemon_command(cmd: &DaemonCmd, json: bool, another_home: PathBuf) -> anyhow::Result<ExitCode> {
@@ -1853,19 +2502,28 @@ fn hook_command(
 ) -> anyhow::Result<ExitCode> {
     match cmd {
         HookCmd::Run { event, client } => {
-            // Fail open: whatever happens, print what we have and exit 0.
+            // Print what we have and exit 0 (the wrapper also exits 0). post-tool and
+            // session hooks fail open. pre-edit may print a deny after a bounded lock wait.
             let home = another_home().ok();
-            // Tool hooks run on every tool call: open without migrating, with a short lock
-            // wait, so a busy or missing database costs milliseconds, not seconds.
+            // Tool hooks open without migrating, with a short first lock wait, so a missing
+            // database costs milliseconds. pre-edit then waits longer if the database is
+            // locked, and denies when that bound expires.
             let store = match &home {
-                Some(h) if event.is_tool_event() => {
+                Some(h) if event.is_tool_event() && *event != HookEvent::PreEdit => {
                     Store::open_quick(h, event.busy_timeout()).map_err(anyhow::Error::from)
                 }
-                Some(h) => Store::open(h).map_err(anyhow::Error::from),
+                Some(h) if *event != HookEvent::PreEdit => {
+                    Store::open(h).map_err(anyhow::Error::from)
+                }
+                Some(_) => Err(anyhow::anyhow!("pre-edit opens the store itself")),
                 None => Err(anyhow::anyhow!("no Another home directory")),
             };
             let env = another_home().and_then(HookEnv::detect);
-            let text = hooks::run_fail_open(store, env, home.as_deref(), *event, *client);
+            let text = if *event == HookEvent::PreEdit {
+                hooks::run_pre_edit(home.as_deref(), env, *client)
+            } else {
+                hooks::run_fail_open(store, env, home.as_deref(), *event, *client)
+            };
             if !text.is_empty() {
                 println!("{text}");
             }

@@ -2,6 +2,8 @@
 
 Before an agent starts a model server, dev server, database, container or long job, it asks Another whether one is already running and **borrows** it instead of spawning a duplicate. Resources carry an owner, a purpose and leases that expire unless renewed. Anything left without a lease shows up as an orphan, and only a human can reap it.
 
+**Status:** The resource registry is present, but frozen for v0.1.0 and treated as experimental. It stays in the tree and gets only admitted security and data-loss fixes.
+
 ## Kinds
 
 | Kind | Example name | Notes |
@@ -14,6 +16,8 @@ Before an agent starts a model server, dev server, database, container or long j
 | `long_job` | `eval-run-42` | Register the pid so it can be matched and reaped |
 
 A resource is addressed by its id or by `kind:name`, e.g. `model_server:ollama@11434`.
+
+Foreign resources need an IP-literal endpoint to be probed or borrowed; hostnames are not resolved. A listing probes at most eight live foreign endpoints with a shared 500 ms connect budget and at most 100 ms per endpoint. `reachable: false` includes endpoints skipped by those bounds, so it does not prove a server is down. Borrow probes its endpoint separately before the write transaction, then checks current resource state again before recording a lease. See [FEDERATION.md](FEDERATION.md) for the cross-node rules.
 
 ## Lifecycle
 
@@ -29,6 +33,7 @@ another borrow model_server:ollama@11434 --agent codex@shop
 another resource register model_server ollama@11434 --agent claude@shop --endpoint http://127.0.0.1:11434 --pid 4242 --purpose "local llm" --meta backend=metal
 ```
 
+- **Limits**: a name is at most 200 bytes, an endpoint 2 KiB, a purpose 1 KiB, and metadata 64 KiB as JSON. A larger value is refused as `invalid`, naming the field, its size and the limit, and nothing is registered. The same limits apply to a resource another node registered (see [FEDERATION.md](FEDERATION.md#model)).
 - **Leases**: the registering agent holds the **owner** lease; others take **borrower** leases (shared resources only; `--exclusive` refuses borrowers). `refcount` is the number of live leases.
 - **TTL**: default 30 minutes, clamped to 1 minute-24 hours. `another heartbeat` (and the session hooks) renew every lease the agent holds; `another resource heartbeat` renews just resources.
 - **Release**: `another release <target> --agent X`. If the owner leaves while others borrow, the oldest borrower becomes owner. After shutting a resource down, the owner runs `another release <target> --agent X --stopped`.
@@ -47,6 +52,8 @@ Two sources:
 2. **Unregistered listeners**: listening TCP sockets found by `lsof -nP -iTCP -sTCP:LISTEN` (macOS and Linux), or by `ss -ltnp` when `lsof` is missing, that no registered resource matches by pid or port. `ps` supplies each process's age and command line. System services (launchd, sshd, mDNSResponder, systemd, …) and Another itself are never listed.
 
 Pass `--no-scan` to skip the process scan.
+
+`another doctor` runs the same scan without changing anything and shows the counts: [DOCTOR.md](DOCTOR.md#the-orphan-scan).
 
 ## Reaping (human only)
 

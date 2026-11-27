@@ -90,6 +90,11 @@ pub struct Agent {
     pub last_seen_at: Option<String>,
 }
 
+/// Longest agent description a local caller may register, in bytes (D99).
+pub const MAX_AGENT_DESCRIPTION_BYTES: usize = 4 * 1024;
+/// Longest agent model name a local caller may register, in bytes (D99).
+pub const MAX_AGENT_MODEL_BYTES: usize = 200;
+
 /// Input for [`Store::register_agent`].
 #[derive(Debug, Clone)]
 pub struct RegisterAgent {
@@ -143,7 +148,10 @@ pub(crate) fn agent_from_row(r: &Row<'_>) -> rusqlite::Result<Agent> {
     })
 }
 
-fn validate_name(name: &str) -> Result<()> {
+/// The agent name rule, for a local registration and for a peer's `agent.registered` (see
+/// `federation::foreign_authority`). The refusal quotes at most the start of the name: a
+/// peer chose it, and the refusal is sent back to that peer and printed by `another sync`.
+pub(crate) fn validate_name(name: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name.len() <= 64
         && name
@@ -153,7 +161,8 @@ fn validate_name(name: &str) -> Result<()> {
         Ok(())
     } else {
         Err(Error::Invalid(format!(
-            "invalid agent name {name:?}: use 1-64 ASCII letters, digits, '-', '_' or '.'"
+            "invalid agent name {:?}: use 1-64 ASCII letters, digits, '-', '_' or '.'",
+            crate::mail::single_line(name, 80)
         )))
     }
 }
@@ -166,16 +175,14 @@ pub(crate) fn normalize_project_path(raw: &str) -> Result<String> {
             "project path must be absolute, got {raw:?}"
         )));
     }
-    let mut parts: Vec<String> = Vec::new();
-    for comp in path.components() {
-        match comp {
-            Component::Normal(s) => parts.push(s.to_string_lossy().into_owned()),
-            Component::ParentDir => {
-                parts.pop();
-            }
-            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
-        }
-    }
+    // `.` and `..` applied as text; the result is rebuilt with `/` whatever the platform.
+    let parts: Vec<String> = crate::repo::lexical(path)
+        .components()
+        .filter_map(|comp| match comp {
+            Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
     let prefix = match path.components().next() {
         Some(Component::Prefix(p)) => format!("{}\\", p.as_os_str().to_string_lossy()),
         _ => "/".to_string(),
@@ -460,6 +467,25 @@ impl Store {
     /// Register a new agent or update an existing one's details; touches `last_seen_at`.
     pub fn register_agent(&self, input: RegisterAgent) -> Result<Agent> {
         validate_name(&input.name)?;
+        for (what, field, text, max) in [
+            (
+                "an agent model",
+                "agent model",
+                &input.model,
+                MAX_AGENT_MODEL_BYTES,
+            ),
+            (
+                "an agent description",
+                "agent description",
+                &input.description,
+                MAX_AGENT_DESCRIPTION_BYTES,
+            ),
+        ] {
+            if let Some(text) = text {
+                crate::queue::within_bytes(field, text, max)?;
+                crate::queue::no_unsafe(what, text, false)?;
+            }
+        }
         self.write(|tx| {
             let project = match &input.project {
                 Some(path) => Some(ensure_project_tx(tx, &input.name, path)?),
