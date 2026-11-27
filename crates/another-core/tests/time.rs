@@ -19,7 +19,23 @@ fn duration_units_and_bare_seconds_policy() {
     }
     assert_eq!(parse_duration(" 90 ", true).unwrap(), 90);
     assert!(parse_duration("90", false).is_err());
-    assert!(Since::parse("90", 1_000_000).is_err());
+    assert_eq!(Since::parse("90", 1_000_000).unwrap(), Since::Time(910_000));
+    assert_eq!(
+        Since::parse("0", 1_000_000).unwrap(),
+        Since::Time(1_000_000)
+    );
+    assert_eq!(
+        Since::parse(" 90 ", 1_000_000).unwrap(),
+        Since::Time(910_000)
+    );
+    assert_eq!(
+        Since::parse("1970-01-01T00:00:01Z", 1_000_000).unwrap(),
+        Since::Time(1_000)
+    );
+    assert_eq!(
+        Since::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV", 1_000_000).unwrap(),
+        Since::After("01ARZ3NDEKTSV4RRFFQ69G5FAV".into())
+    );
 }
 
 #[test]
@@ -35,4 +51,5 @@ fn duration_validation_and_overflow_keep_seconds_and_milliseconds_distinct() {
     assert!(parse_duration("9223372036854775807m", true).is_err());
     assert!(parse_duration("9223372036854775808s", true).is_err());
     assert!(Since::parse("9223372036854775807s", 0).is_err());
+    assert!(Since::parse("9223372036854775807", 0).is_err());
 }
