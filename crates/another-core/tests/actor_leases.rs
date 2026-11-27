@@ -14,9 +14,15 @@ struct Fixture {
     root: RegisteredActor,
     child: RegisteredActor,
     sibling: RegisteredActor,
+    /// File subjects are exact absolute targets; relative ones are refused.
+    files: tempfile::TempDir,
 }
 
 impl Fixture {
+    fn file(&self, name: &str) -> String {
+        self.files.path().join(name).to_string_lossy().into_owned()
+    }
+
     fn new() -> Self {
         let (clock, now) = Clock::manual(1_800_000_000_000);
         let store = Store::open_in_memory(clock).unwrap();
@@ -36,6 +42,7 @@ impl Fixture {
             root,
             child,
             sibling,
+            files: tempfile::tempdir().unwrap(),
         }
     }
 
@@ -49,13 +56,18 @@ impl Fixture {
         key: &str,
         ttl: Option<i64>,
     ) -> another_core::RightLease {
+        let subject = if kind == SubjectKind::File {
+            self.file(key)
+        } else {
+            key.into()
+        };
         self.store
             .checkout_right(
                 proof,
                 key,
                 CheckoutRight {
                     subject_kind: kind,
-                    subject_key: key.into(),
+                    subject_key: subject,
                     ttl_seconds: ttl,
                 },
             )
@@ -89,7 +101,11 @@ fn every_subject_uses_checkout_duration_and_expiry_without_a_sweep() {
                 &key,
                 CheckoutRight {
                     subject_kind: kind,
-                    subject_key: key.clone(),
+                    subject_key: if kind == SubjectKind::File {
+                        f.file(&key)
+                    } else {
+                        key.clone()
+                    },
                     ttl_seconds: None
                 }
             )
@@ -155,7 +171,7 @@ fn pre_and_presence_and_work_on_b_never_renew_a() {
     let f = Fixture::new();
     let a = f
         .store
-        .begin_actor_edit(&f.root.proof, "pre-A", &["A".into()], None)
+        .begin_actor_edit(&f.root.proof, "pre-A", &[f.file("A")], None)
         .unwrap();
     let before = f
         .store
@@ -167,14 +183,14 @@ fn pre_and_presence_and_work_on_b_never_renew_a() {
     f.advance(70);
     f.store.actor_activity(&f.root.proof).unwrap();
     f.store
-        .begin_actor_edit(&f.root.proof, "repeat-A", &["A".into()], None)
+        .begin_actor_edit(&f.root.proof, "repeat-A", &[f.file("A")], None)
         .unwrap();
     f.store
         .complete_actor_edit(&f.root.proof, "pre-A", EditOutcome::PermissionDenied)
         .unwrap();
     let b = f
         .store
-        .begin_actor_edit(&f.root.proof, "pre-B", &["B".into()], Some(300))
+        .begin_actor_edit(&f.root.proof, "pre-B", &[f.file("B")], Some(300))
         .unwrap();
     f.advance(10);
     let completed = f
@@ -213,7 +229,7 @@ fn end_closes_dependent_tree_and_late_failure_cannot_restore_rights() {
             Some(3600),
         );
         f.store
-            .begin_actor_edit(proof, "pre", &[format!("file-{}", proof.actor_id)], None)
+            .begin_actor_edit(proof, "pre", &[f.file(&format!("file-{}", proof.actor_id))], None)
             .unwrap();
     }
     let released = f
@@ -234,7 +250,7 @@ fn end_closes_dependent_tree_and_late_failure_cannot_restore_rights() {
         .all(|l| l.release_reason.as_deref() == Some("session_end")));
     assert!(f
         .store
-        .begin_actor_edit(&f.root.proof, "after", &["new".into()], None)
+        .begin_actor_edit(&f.root.proof, "after", &[f.file("new")], None)
         .is_err());
     let resumed = f.store.resume_actor(&f.root.proof, None).unwrap();
     f.checkout(&resumed.proof, SubjectKind::Queue, "new-queue", None);
@@ -352,7 +368,7 @@ fn forged_proof_and_parent_substitution_fail_closed() {
             "forged",
             CheckoutRight {
                 subject_kind: SubjectKind::File,
-                subject_key: "A".into(),
+                subject_key: f.file("A"),
                 ttl_seconds: None
             }
         )
@@ -394,14 +410,14 @@ fn multi_target_admission_rolls_back_when_any_target_conflicts() {
     f.checkout(&f.child.proof, SubjectKind::File, "B", None);
     assert!(f
         .store
-        .begin_actor_edit(&f.root.proof, "atomic", &["A".into(), "B".into()], None)
+        .begin_actor_edit(&f.root.proof, "atomic", &[f.file("A"), f.file("B")], None)
         .is_err());
     assert!(!f
         .store
         .right_leases()
         .unwrap()
         .iter()
-        .any(|l| l.subject_key == "A"));
+        .any(|l| std::path::Path::new(&l.subject_key).ends_with("A")));
 }
 
 #[test]
@@ -409,7 +425,7 @@ fn cursor_newline_call_ids_and_late_outcomes_use_the_same_core() {
     let f = Fixture::new();
     let call = "first-id\nsecond-id";
     f.store
-        .begin_actor_edit(&f.child.proof, call, &["cursor-file".into()], None)
+        .begin_actor_edit(&f.child.proof, call, &[f.file("cursor-file")], None)
         .unwrap();
     f.store
         .end_actor_session(&f.root.proof, "cursor-end")
@@ -426,7 +442,7 @@ fn cursor_newline_call_ids_and_late_outcomes_use_the_same_core() {
 fn a_completion_after_resume_records_old_history_without_touching_the_new_epoch() {
     let f = Fixture::new();
     f.store
-        .begin_actor_edit(&f.root.proof, "old-call", &["A".into()], None)
+        .begin_actor_edit(&f.root.proof, "old-call", &[f.file("A")], None)
         .unwrap();
     f.store.end_actor_session(&f.root.proof, "end").unwrap();
     let resumed = f.store.resume_actor(&f.root.proof, None).unwrap();

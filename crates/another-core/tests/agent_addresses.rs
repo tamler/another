@@ -7,7 +7,7 @@ use std::path::Path;
 use another_core::*;
 
 fn store(dir: &Path, name: &str) -> Store {
-    let store = Store::open(&dir.join(name)).unwrap();
+    let store = Store::open(&dir.join(name)).unwrap().unguarded_repair();
     store.set_node_name(name).unwrap();
     store
 }

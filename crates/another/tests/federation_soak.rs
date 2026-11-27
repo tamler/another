@@ -34,7 +34,7 @@ struct Spoke {
 
 fn spoke(root: &Path, name: &str, clock: Clock) -> Spoke {
     let home = root.join(name);
-    let store = Store::open_with_clock(&home, clock).unwrap();
+    let store = Store::open_with_clock(&home, clock).unwrap().unguarded_repair();
     store.set_node_name(name).unwrap();
     Spoke { store, home }
 }
@@ -66,7 +66,7 @@ struct Hub {
 impl Hub {
     fn start(root: &Path) -> Hub {
         let home = root.join("hub");
-        let store = Store::open(&home).unwrap();
+        let store = Store::open(&home).unwrap().unguarded_repair();
         store.set_node_name("hub").unwrap();
         let mut hub = Hub {
             home,
@@ -126,7 +126,7 @@ impl Hub {
     /// Stop, reopen the same home, and serve again on the same port.
     fn restart(&mut self) {
         self.stop();
-        self.store = Store::open(&self.home).unwrap();
+        self.store = Store::open(&self.home).unwrap().unguarded_repair();
         self.serve();
     }
 

@@ -185,15 +185,17 @@ impl Store {
             }
             AgentOperation::Compatibility { actor, action } => {
                 let fingerprint = serde_json::to_value(&action)?;
-                crate::actor_leases::compatibility_call(self, &actor, id, &fingerprint, |key| {
+                crate::actor_leases::compatibility_call(self, &actor, id, &fingerprint, |scoped, key| {
+                    // `scoped` carries the typed proof; `key` is the public actor id
+                    // selecting it. Every called mutation revalidates proof and epoch
+                    // inside its own transaction.
                     let key = key.to_owned();
-                    // Every called mutation revalidates proof/epoch inside its transaction.
                     let projection = match action {
                         CompatibilityAction::Hold {
                             project,
                             paths,
                             ttl_seconds,
-                        } => serde_json::to_value(self.acquire_holds(crate::AcquireHolds {
+                        } => serde_json::to_value(scoped.acquire_holds(crate::AcquireHolds {
                             agent: key,
                             project,
                             paths,
@@ -203,17 +205,17 @@ impl Store {
                             repo_wide: false,
                         })?)?,
                         CompatibilityAction::RenewHolds { hold_ids } => {
-                            serde_json::to_value(self.renew_holds(&key, &hold_ids)?)?
+                            serde_json::to_value(scoped.renew_holds(&key, &hold_ids)?)?
                         }
                         CompatibilityAction::ReleaseHolds { hold_ids } => {
-                            serde_json::to_value(self.release_holds(&key, &hold_ids)?)?
+                            serde_json::to_value(scoped.release_holds(&key, &hold_ids)?)?
                         }
                         CompatibilityAction::RegisterResource {
                             name,
                             kind,
                             endpoint,
                             ttl_seconds,
-                        } => serde_json::to_value(self.register_resource(
+                        } => serde_json::to_value(scoped.register_resource(
                             crate::RegisterResource {
                                 agent: key,
                                 name,
@@ -231,13 +233,13 @@ impl Store {
                         CompatibilityAction::Borrow {
                             resource_id,
                             ttl_seconds,
-                        } => serde_json::to_value(self.borrow_resource(
+                        } => serde_json::to_value(scoped.borrow_resource(
                             &key,
                             &crate::ResourceRef::Id(resource_id),
                             ttl_seconds,
                         )?)?,
                         CompatibilityAction::ReleaseResource { resource_id, lease } => {
-                            serde_json::to_value(self.release_resource_with_lease(
+                            serde_json::to_value(scoped.release_resource_with_lease(
                                 &key,
                                 &crate::ResourceRef::Id(resource_id),
                                 false,
@@ -245,14 +247,14 @@ impl Store {
                             )?)?
                         }
                         CompatibilityAction::Next { ttl_seconds } => {
-                            serde_json::to_value(self.queue_next_with_ttl(&key, ttl_seconds)?)?
+                            serde_json::to_value(scoped.queue_next_with_ttl(&key, ttl_seconds)?)?
                         }
                         CompatibilityAction::Done {
                             item,
                             summary,
                             commit,
                             lease,
-                        } => serde_json::to_value(self.queue_done_with_lease(
+                        } => serde_json::to_value(scoped.queue_done_with_lease(
                             &key,
                             &item,
                             crate::DoneItem {
@@ -268,7 +270,7 @@ impl Store {
                             body,
                             create_request,
                             due_in_seconds,
-                        } => serde_json::to_value(self.send_message(crate::SendMessage {
+                        } => serde_json::to_value(scoped.send_message(crate::SendMessage {
                             from: key,
                             to,
                             subject,
@@ -277,7 +279,7 @@ impl Store {
                             ..Default::default()
                         })?)?,
                         CompatibilityAction::ClaimRequest { request_id } => {
-                            serde_json::to_value(self.update_request(crate::RequestUpdate {
+                            serde_json::to_value(scoped.update_request(crate::RequestUpdate {
                                 agent: key,
                                 request_id,
                                 action: crate::RequestAction::Claim,
@@ -291,7 +293,7 @@ impl Store {
                             ttl_seconds,
                             lease,
                             note,
-                        } => serde_json::to_value(self.update_request_with_lease(
+                        } => serde_json::to_value(scoped.update_request_with_lease(
                             crate::RequestUpdate {
                                 agent: key,
                                 request_id,

@@ -23,7 +23,29 @@ Optional minor additions are additive. JSON replies include authority time,
 request id and typed result/error. A timeout is unknown acknowledgement: query
 or retry the same request id, never create a second write. Compatibility business
 operations reserve their request id durably before execution; an interrupted
-pending acknowledgement refuses instead of executing twice.
+pending acknowledgement refuses instead of executing twice. A retry while the
+reservation is younger than 60 seconds is refused as `UNKNOWN_ACK` (still in
+flight). An older reservation belongs to an attempt that stopped (a crash or kill)
+before recording its outcome: it is settled once as `INTERRUPTED` and never re-run,
+because its effect may have committed. Check the business record, then use a new
+request id.
+
+File subjects (`checkout` of a file, `edit_begin` targets) are exact absolute
+paths. The serving process's folder is not the caller's, so core refuses a
+relative path instead of resolving it. `another adapter event` runs in its
+caller's folder and makes relative file targets absolute from there before
+admission; native hooks resolve from the hook payload's `cwd`.
+
+Inside Another the actor proof travels as a typed value bound to the call, never
+as text in an agent-name field, so no event, error, log line, federation event
+or database row can carry it. Only its hash is stored.
+
+The integration grant file is created with mode `0600` in a `0700` directory on
+Unix, and a grant readable by group or others is refused. On Windows there is no
+mode bit and Another adds no ACL code: the grant inherits the ACL of the Another
+home, which under the default per-user profile (`%USERPROFILE%\.another`) only
+that user and administrators can read. A home set with `ANOTHER_HOME` in a shared
+folder is not protected. That is a stated limit.
 
 Roots and dependent children register under private participant authority.
 Register/resolve returns canonical identity and private proof before admission.
@@ -149,7 +171,18 @@ assigned by the architect at merge, not reserved by this lane.
 
 `--unguarded-repair` is an explicit visible operator scope exit for historical
 records and observations. Its named labels cannot mutate a minted actor. It is
-never an automatic fallback or an installed hook option. Legacy repair fixtures
+never an automatic fallback or an installed hook option. The rule is enforced in
+the core library, not only at the CLI: a store handle refuses every mutation
+selected by a plain name (`NO_ACTOR`) unless it is the explicit repair handle
+(`Store::unguarded_repair`), which the CLI, MCP server and hook runner take only
+under `--unguarded-repair`. Repair-mode holds are pre-contract records, not
+contract leases. An actor's file lease from edit admission is not checked against
+repair-mode holds in either direction; only an actor hold taken through the
+compatibility `hold` operation shares the holds table with them and conflicts.
+That gap is why repair is a visible exit from guarded participation, never a
+mode to run alongside participating actors.
+Read filters and wake/delivery bookkeeping still select by name; those grant no
+right, and wake/delivery carriage is M-M work. Legacy repair fixtures
 test that compatibility surface, not guarded participation.
 
 Manual-clock core tests, CLI/MCP tests and native payload fixtures are separate

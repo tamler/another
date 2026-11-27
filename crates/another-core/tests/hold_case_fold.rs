@@ -53,7 +53,9 @@ fn conflict_in(rel: &[&str]) -> (bool, bool) {
     std::fs::create_dir_all(&project).unwrap();
     let folds = volume_folds_case(&project);
     let path = project.to_string_lossy().into_owned();
-    let store = Store::open_in_memory(Clock::manual(1_800_000_000_000).0).unwrap();
+    let store = Store::open_in_memory(Clock::manual(1_800_000_000_000).0)
+        .unwrap()
+        .unguarded_repair();
     store.ensure_project("t", &path).unwrap();
     register(&store, "alice");
     register(&store, "bob");
@@ -88,7 +90,9 @@ fn a_different_name_never_conflicts_on_any_volume() {
     let project = dir.path().join("Work").join("2026");
     std::fs::create_dir_all(&project).unwrap();
     let path = project.to_string_lossy().into_owned();
-    let store = Store::open_in_memory(Clock::manual(1_800_000_000_000).0).unwrap();
+    let store = Store::open_in_memory(Clock::manual(1_800_000_000_000).0)
+        .unwrap()
+        .unguarded_repair();
     store.ensure_project("t", &path).unwrap();
     register(&store, "alice");
     register(&store, "bob");

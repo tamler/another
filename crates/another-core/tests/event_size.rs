@@ -29,7 +29,7 @@ impl Node {
 
 fn node(name: &str) -> Node {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open(dir.path()).unwrap().unguarded_repair();
     store.set_node_name(name).unwrap();
     Node { dir, store }
 }
@@ -174,7 +174,9 @@ fn the_largest_honest_mail_to_one_recipient_is_under_the_cap() {
 /// anything is written, and the refusal names the kind of event and both sizes.
 #[test]
 fn a_local_event_over_the_cap_is_refused_and_nothing_is_written() {
-    let store = Store::open_in_memory(Clock::manual(1_800_000_000_000).0).unwrap();
+    let store = Store::open_in_memory(Clock::manual(1_800_000_000_000).0)
+        .unwrap()
+        .unguarded_repair();
     register(&store, "alice");
     let names: Vec<String> = (0..2500).map(|i| format!("{i:0>64}")).collect();
     for name in &names {

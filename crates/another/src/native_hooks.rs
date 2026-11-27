@@ -49,6 +49,12 @@ pub(crate) fn enroll(store: &Store, home: &Path) -> Result<Value> {
 
 /// Create once. A concurrent reader of an unfinished write refuses this event and
 /// retries on a later hook; it never invents a second identity or overwrites proof.
+///
+/// Privacy check: on Unix a grant readable or writable by group or others is refused.
+/// On Windows there is no mode bit to check and Another adds no ACL code: the grant
+/// inherits the ACL of the Another home, which under the default per-user profile
+/// (`%USERPROFILE%\.another`) only that user and administrators can read. A home
+/// placed in a shared folder (`ANOTHER_HOME`) is not protected; that is a stated limit.
 fn participant(store: &Store, path: &Path) -> Result<ParticipantProof> {
     if let Ok(meta) = fs::symlink_metadata(path) {
         if meta.file_type().is_symlink() {
@@ -368,4 +374,42 @@ pub fn event(
         (_, Some(text)) => text,
         _ => String::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use another_core::Clock;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_grant_readable_by_others_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory(Clock::System).unwrap();
+        let path = dir.path().join("participant.json");
+        participant(&store, &path).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let Err(refused) = participant(&store, &path) else {
+            panic!("a group- or world-readable grant was accepted");
+        };
+        let refused = refused.to_string();
+        assert!(refused.contains("not private"), "{refused}");
+    }
+
+    /// The stated Windows limit: no mode check exists, so the grant is created once,
+    /// read back unchanged and kept inside the Another home whose ACL it inherits.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_grant_stays_inside_the_home_and_is_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory(Clock::System).unwrap();
+        let path = dir.path().join("adapters").join("participant.json");
+        private_dir(path.parent().unwrap()).unwrap();
+        let first = participant(&store, &path).unwrap();
+        let again = participant(&store, &path).unwrap();
+        assert_eq!(first.participant_id, again.participant_id);
+        assert!(path.starts_with(dir.path()));
+    }
 }

@@ -2056,7 +2056,7 @@ impl Store {
     ) -> Result<Vec<HoldConflict>> {
         self.write(|tx| {
             sweep_tx(tx)?;
-            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_delivery_agent(tx, tx.node_id, agent)?;
             let project = find_project(tx, tx.node_id, project)?;
             let patterns = paths
                 .iter()
@@ -2266,7 +2266,7 @@ impl Store {
         paths: &[String],
     ) -> Result<Vec<HoldConflict>> {
         self.write(|tx| {
-            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_delivery_agent(tx, tx.node_id, agent)?;
             let project = find_project(tx, tx.node_id, project)?;
             let patterns = paths
                 .iter()
@@ -2364,7 +2364,7 @@ impl Store {
                 None => (None, String::new()),
             };
             let agent_id = match &filter.agent {
-                Some(a) => Some(crate::identity::resolve_acting_agent(tx, tx.node_id, a)?.id),
+                Some(a) => Some(crate::identity::resolve_delivery_agent(tx, tx.node_id, a)?.id),
                 None => None,
             };
             live_holds(
@@ -2408,14 +2408,16 @@ impl Store {
         info: SessionInfo,
         scope: Option<&TokenScope>,
     ) -> Result<HeartbeatReport> {
-        if let Some(encoded) = agent.strip_prefix("another-private:") {
-            let proof: crate::ActorProof = serde_json::from_slice(&crate::crypto::unb64(encoded)?)
-                .map_err(|_| {
-                    Error::Forbidden("NO_ACTOR: invalid private session context".into())
-                })?;
+        if let crate::store::Caller::Actor(proof) = self.caller() {
+            let proof: &crate::ActorProof = proof;
+            if agent != proof.actor_id {
+                return Err(Error::Forbidden(
+                    "NO_ACTOR: this call acts only as its authenticated actor".into(),
+                ));
+            }
             if phase == SessionPhase::End {
                 let released = self.end_actor_session(
-                    &proof,
+                    proof,
                     info.session_id.as_deref().unwrap_or("private-session-end"),
                 )?;
                 let leases = self.right_leases()?;
@@ -2449,7 +2451,7 @@ impl Store {
                     open_requests: 0,
                 });
             }
-            self.actor_activity(&proof)?;
+            self.actor_activity(proof)?;
         }
         self.write(|tx| {
             sweep_tx(tx)?;
@@ -2528,7 +2530,7 @@ mod tests {
     fn only_waits_with_an_ended_blocker_are_rechecked() {
         let dir = tempfile::tempdir().unwrap();
         let (clock, now) = crate::store::Clock::manual(1_800_000_000_000);
-        let store = Store::open_in_memory(clock).unwrap();
+        let store = Store::open_in_memory(clock).unwrap().unguarded_repair();
         for (name, program) in [("alice", Program::Claude), ("bob", Program::Codex)] {
             store
                 .register_agent(crate::RegisterAgent {

@@ -19,7 +19,7 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("work/app").to_string_lossy().into_owned();
         let (clock, handle) = Clock::manual(T0);
-        let store = Store::open_in_memory(clock).unwrap();
+        let store = Store::open_in_memory(clock).unwrap().unguarded_repair();
         let project = store.ensure_project("test", &path).unwrap();
         for (name, program) in [
             ("alice", Program::Claude),
@@ -890,8 +890,8 @@ fn heartbeat_end_releases_holds_and_reports_digest() {
 #[test]
 fn concurrent_connections_share_one_database() {
     let dir = tempfile::tempdir().unwrap();
-    let a = Store::open(dir.path()).unwrap();
-    let b = Store::open(dir.path()).unwrap();
+    let a = Store::open(dir.path()).unwrap().unguarded_repair();
+    let b = Store::open(dir.path()).unwrap().unguarded_repair();
     assert_eq!(a.node_id(), b.node_id());
     for name in ["x", "y"] {
         a.register_agent(RegisterAgent {

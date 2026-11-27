@@ -244,7 +244,7 @@ async fn mcp_reap_never_terminates() {
     let id = reg["resource"]["resource_id"].as_str().unwrap().to_string();
     json(&home, &["release", &id, "--agent", "alice"]);
 
-    let store = Store::open(&home).unwrap();
+    let store = Store::open(&home).unwrap().unguarded_repair();
     let (server_io, client_io) = tokio::io::duplex(64 * 1024);
     tokio::spawn(async move {
         let server = AnotherMcp::legacy_repair(store)

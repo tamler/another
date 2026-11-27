@@ -109,7 +109,7 @@ impl Fx {
     fn empty() -> Fx {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
-        let store = Store::open(&home).unwrap();
+        let store = Store::open(&home).unwrap().unguarded_repair();
         Fx {
             _dir: dir,
             home,

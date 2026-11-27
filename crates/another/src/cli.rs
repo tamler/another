@@ -1367,6 +1367,27 @@ pub(crate) fn emit<T: Serialize>(
 /// for layout becomes `?` (the D75 rule, applied where text reaches a terminal). `--json`
 /// output keeps the exact text: JSON escapes C0 controls, but DEL, C1 and bidi characters
 /// stay raw UTF-8, for the reading program to handle (D97).
+/// Make relative file subjects in a contract envelope absolute from `cwd`, the folder
+/// the caller ran `another adapter event` in.
+fn absolutize_file_targets(envelope: &mut another_core::AgentEnvelope, cwd: &Path) {
+    let absolute = |p: &mut String| {
+        if !Path::new(p.as_str()).is_absolute() {
+            *p = cwd.join(p.as_str()).to_string_lossy().into_owned();
+        }
+    };
+    match &mut envelope.operation {
+        another_core::AgentOperation::Checkout { checkout, .. }
+            if checkout.subject_kind == another_core::SubjectKind::File =>
+        {
+            absolute(&mut checkout.subject_key);
+        }
+        another_core::AgentOperation::EditBegin { targets, .. } => {
+            targets.iter_mut().for_each(absolute);
+        }
+        _ => {}
+    }
+}
+
 fn terminal_safe(text: &str) -> String {
     text.chars()
         .map(|c| match c {
@@ -1388,19 +1409,6 @@ fn client_shown(text: &str) -> String {
 }
 
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
-    let args: Vec<_> = std::env::args_os()
-        .map(|v| v.to_string_lossy().into_owned())
-        .collect();
-    let private_selector = args.windows(2).any(|w| {
-        matches!(w[0].as_str(), "--agent" | "-a" | "--from" | "-f")
-            && w[1].starts_with("another-private:")
-    }) || args.iter().any(|a| {
-        a.starts_with("--agent=another-private:") || a.starts_with("--from=another-private:")
-    }) || std::env::var("ANOTHER_AGENT")
-        .is_ok_and(|a| a.starts_with("another-private:"));
-    if private_selector {
-        anyhow::bail!("NO_ACTOR: private proof must use the private channel, never argv or ordinary environment");
-    }
     let json = cli.json;
     let home = cli.home.as_deref();
     // The template listing needs no sender, recipient or database (FINDINGS-177 T1, T2).
@@ -1569,7 +1577,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     .take(1024 * 1024 + 1)
                     .read_to_string(&mut raw)?;
                 anyhow::ensure!(raw.len() <= 1024 * 1024, "contract envelope exceeds 1 MiB");
-                serde_json::from_str::<another_core::AgentEnvelope>(&raw)?
+                let mut envelope = serde_json::from_str::<another_core::AgentEnvelope>(&raw)?;
+                // This process runs in its caller's working folder; core never guesses one.
+                absolutize_file_targets(&mut envelope, &std::env::current_dir()?);
+                envelope
             }
             AdapterCmd::Status => another_core::AgentEnvelope {
                 major: 1,
@@ -1593,6 +1604,12 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Store::open_quick(&another_home()?, Duration::from_millis(300))?
     } else {
         open(home)?
+    };
+    // Core refuses name-selected mutation unless the handle is the explicit repair one.
+    let store = if cli.unguarded_repair {
+        store.unguarded_repair()
+    } else {
+        store
     };
     let requires_actor = match &cli.command {
         Command::Send { .. }
@@ -2610,7 +2627,7 @@ fn hook_command(
             if unguarded_repair {
                 eprintln!("Another: UNGUARDED REPAIR of legacy observations; no contract actor rights are granted.");
                 let home = another_home()?;
-                let store = Store::open(&home)?;
+                let store = Store::open(&home)?.unguarded_repair();
                 let env = HookEnv::detect(home)?;
                 let input = HookInput::read_stdin();
                 let text = match crate::legacy_repair::event(&store, &env, *client, *event, &input)

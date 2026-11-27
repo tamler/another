@@ -47,7 +47,7 @@ fn sweep_reports_and_ends_lapsed_holds_and_overdue_requests() {
     {
         // An hour ago: a one-minute hold and a request due in a minute.
         let (clock, _) = Clock::manual(now_ms() - 3_600_000);
-        let store = Store::open_with_clock(&home, clock).unwrap();
+        let store = Store::open_with_clock(&home, clock).unwrap().unguarded_repair();
         for name in ["lead", "worker"] {
             store
                 .register_agent(RegisterAgent {

@@ -2266,7 +2266,7 @@ impl Store {
             let claimer = match caller {
                 QueueCaller::Agent { agent, .. } => {
                     let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
-                    if agent.starts_with("another-private:") {
+                    if matches!(tx.caller, crate::store::Caller::Actor(_)) {
                         return Err(Error::Invalid("NO_CALL_CONTEXT: queue handoff requires exact claim generation carriage; use exact lease release".into()));
                     }
                     (row.claimer_id.as_deref() == Some(me.id.as_str())).then_some(me)
@@ -3219,7 +3219,7 @@ mod tests {
     #[test]
     fn the_queue_sweep_skips_the_calling_agents_claims() {
         let (clock, now) = crate::store::Clock::manual(1_800_000_000_000);
-        let store = Store::open_in_memory(clock).unwrap();
+        let store = Store::open_in_memory(clock).unwrap().unguarded_repair();
         for name in ["ann", "bob"] {
             store
                 .register_agent(crate::RegisterAgent {

@@ -1133,7 +1133,7 @@ fn upgrade_drops_cross_checkout_blocks() {
     let db_path = home.join(DB_FILE);
     let path = |p: &Path| p.to_string_lossy().into_owned();
 
-    let store = Store::open_as(&home, RELEASE).unwrap();
+    let store = Store::open_as(&home, RELEASE).unwrap().unguarded_repair();
     for (name, program) in [
         ("alice", Program::Claude),
         ("bob", Program::Codex),
@@ -1247,8 +1247,9 @@ fn upgrade_drops_cross_checkout_blocks() {
     let (hold_before, rows_before) = (hold_row(&db), row_counts(&db));
     drop(db);
 
-    // The upgrade: a backup of the old schema first, then one additive step.
-    let store = Store::open_as(&home, RELEASE).unwrap();
+    // The upgrade: a backup of the old schema first, then one additive step. The legacy
+    // names below act through the explicit operator repair handle.
+    let store = Store::open_as(&home, RELEASE).unwrap().unguarded_repair();
     let db = Connection::open(&db_path).unwrap();
     assert_eq!(version(&db_path), current());
     let saved = backups(&home);

@@ -132,7 +132,7 @@ impl Fx {
         script(&root.join("herdr"), FAKE_HERDR, &root);
         let home = root.join("home");
         let (clock, handle) = Clock::manual(real_now());
-        let store = Store::open_with_clock(&home, clock).unwrap();
+        let store = Store::open_with_clock(&home, clock).unwrap().unguarded_repair();
         let fx = Fx {
             _dir: dir,
             root,

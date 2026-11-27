@@ -66,7 +66,7 @@ impl Fx {
     fn new() -> Fx {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
-        let store = Store::open(&home).unwrap();
+        let store = Store::open(&home).unwrap().unguarded_repair();
         for name in ["ann", "bob", "cy", "arch"] {
             register(&store, name);
         }
@@ -412,7 +412,7 @@ fn the_owners_yes_applies_only_to_what_was_shown() {
 fn fifty_processes_racing_for_next_never_share_an_item() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
-    let store = Store::open(&home).unwrap();
+    let store = Store::open(&home).unwrap().unguarded_repair();
     let names: Vec<String> = (0..50).map(|i| format!("w{i:02}")).collect();
     for name in &names {
         register(&store, name);
@@ -530,7 +530,7 @@ async fn no_cli_or_mcp_path_claims_a_proposed_item() {
     );
 
     // The MCP tools.
-    let client = in_process(Store::open(&fx.home).unwrap()).await;
+    let client = in_process(Store::open(&fx.home).unwrap().unguarded_repair()).await;
     let next = call_ok(&client, "queue_next", json!({ "agent": "bob" })).await;
     assert_eq!(next, json!({ "claimed": null, "refused": null }));
     for target in [q, id] {
@@ -1309,7 +1309,7 @@ async fn cli_and_mcp_shapes() {
     }
 
     // The MCP tools: the three results of queue_next are results, not tool errors.
-    let client = in_process(Store::open(&fx.home).unwrap()).await;
+    let client = in_process(Store::open(&fx.home).unwrap().unguarded_repair()).await;
     let made = call_ok(
         &client,
         "queue_propose",

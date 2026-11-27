@@ -138,7 +138,7 @@ impl Fx {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let home = root.join("home").join(".another");
         let (clock, handle) = Clock::manual(real_now());
-        let store = Store::open_with_clock(&home, clock).unwrap();
+        let store = Store::open_with_clock(&home, clock).unwrap().unguarded_repair();
         let fx = Fx {
             _dir: dir,
             root,
@@ -172,7 +172,9 @@ impl Fx {
 
     /// Another connection to the same home on the same clock, as a second process has.
     fn second_store(&self) -> Store {
-        Store::open_with_clock(&self.home, Clock::Manual(self.clock.clone())).unwrap()
+        Store::open_with_clock(&self.home, Clock::Manual(self.clock.clone()))
+            .unwrap()
+            .unguarded_repair()
     }
 
     /// The exact arguments of every `agent prompt` call so far, in order.

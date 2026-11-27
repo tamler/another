@@ -277,7 +277,7 @@ mod over_http {
 
     fn node(name: &str) -> Node {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path()).unwrap();
+        let store = Store::open(dir.path()).unwrap().unguarded_repair();
         store.set_node_name(name).unwrap();
         Node { dir, store }
     }

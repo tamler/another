@@ -22,7 +22,9 @@ impl Node {
     fn new(dir: &Path, name: &str) -> Node {
         let home = dir.join(name);
         let (clock, _) = Clock::manual(T0);
-        let store = Store::open_with_clock(&home, clock).unwrap();
+        let store = Store::open_with_clock(&home, clock)
+            .unwrap()
+            .unguarded_repair();
         store.set_node_name(name).unwrap();
         Node {
             store,

@@ -73,6 +73,12 @@ impl AnotherMcp {
 
     pub fn with_policy(store: Store, legacy_repair: bool) -> Self {
         let mut tool_router = Self::tool_router();
+        // Name-selected mutation needs the explicit repair handle in core too.
+        let store = if legacy_repair {
+            store.unguarded_repair()
+        } else {
+            store
+        };
         if !legacy_repair {
             for tool in tool_router.list_all() {
                 if !matches!(tool.name.as_ref(), "another_identity" | "another_lease") {

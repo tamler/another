@@ -76,7 +76,7 @@ fn seed() -> Home {
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let home = root.join("home");
-    let store = Store::open(&home).unwrap();
+    let store = Store::open(&home).unwrap().unguarded_repair();
     let mut projects = Vec::new();
     for p in 0..PROJECTS {
         let dir = root.join(format!("proj{p}"));

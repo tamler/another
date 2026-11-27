@@ -269,6 +269,18 @@ pub fn default_home() -> Result<PathBuf> {
 pub struct Store {
     inner: Arc<Inner>,
     io_deadline: Option<Instant>,
+    caller: Caller,
+}
+
+/// Who a mutation through this handle acts as. Plain names are selectors, never
+/// authority: they mutate only through an explicit [`Store::unguarded_repair`] handle.
+/// A minted actor's proof travels as this typed value, never inside a name field.
+#[derive(Clone, Default)]
+pub(crate) enum Caller {
+    #[default]
+    Guarded,
+    Repair,
+    Actor(Arc<crate::ActorProof>),
 }
 
 struct Inner {
@@ -508,6 +520,7 @@ impl Store {
             .ok_or_else(|| Error::Invalid("node key missing; a normal open creates it".into()))?;
         Ok(Store {
             io_deadline: None,
+            caller: Caller::Guarded,
             inner: Arc::new(Inner {
                 conn: Mutex::new(conn),
                 unauthenticated_audits: Mutex::new(std::collections::VecDeque::new()),
@@ -536,6 +549,7 @@ impl Store {
         let (node_id, key) = ensure_local_node(&mut conn, clock.now())?;
         Ok(Store {
             io_deadline: None,
+            caller: Caller::Guarded,
             inner: Arc::new(Inner {
                 conn: Mutex::new(conn),
                 unauthenticated_audits: Mutex::new(std::collections::VecDeque::new()),
@@ -652,12 +666,36 @@ impl Store {
             node_id: &self.inner.node_id,
             now: self.inner.clock.now(),
             key: &self.inner.key,
+            caller: &self.caller,
         };
         crate::actor_leases::sync_projections(&ctx)?;
         let out = f(&ctx)?;
         crate::actor_leases::sync_projections(&ctx)?;
         ctx.tx.commit()?;
         Ok(out)
+    }
+
+    /// A handle on which plain agent names may mutate pre-contract records. Only an
+    /// explicit operator `--unguarded-repair` path takes it; a minted actor's name or
+    /// id still refuses `NO_ACTOR` on it.
+    pub fn unguarded_repair(&self) -> Store {
+        Store {
+            caller: Caller::Repair,
+            ..self.clone()
+        }
+    }
+
+    /// A handle whose mutations act as the actor that `proof` authenticates. Each
+    /// mutation revalidates the proof inside its own transaction.
+    pub(crate) fn with_actor(&self, proof: &crate::ActorProof) -> Store {
+        Store {
+            caller: Caller::Actor(Arc::new(proof.clone())),
+            ..self.clone()
+        }
+    }
+
+    pub(crate) fn caller(&self) -> &Caller {
+        &self.caller
     }
 
     /// Bound subsequent connection waits to the remainder of one hook action.
@@ -690,6 +728,7 @@ pub(crate) struct Tx<'a> {
     pub node_id: &'a str,
     pub now: i64,
     pub key: &'a ed25519_dalek::SigningKey,
+    pub caller: &'a Caller,
 }
 
 impl std::ops::Deref for Tx<'_> {
@@ -1843,6 +1882,7 @@ fn ensure_local_node(
             node_id: &node_id,
             now,
             key: &key,
+            caller: &Caller::Guarded,
         };
         ctx.emit(
             "system",
@@ -2033,8 +2073,9 @@ mod upgrade_tests {
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/a.rs"), "fn a() {}\n").unwrap();
 
-        // Populate a home through the API, using only what v8 already had.
-        let store = Store::open(&home).unwrap();
+        // Populate a home through the API, using only what v8 already had. Plain names
+        // mutate only on the operator repair handle.
+        let store = Store::open(&home).unwrap().unguarded_repair();
         for (name, program) in [("alice", Program::Claude), ("bob", Program::Codex)] {
             store
                 .register_agent(RegisterAgent {
@@ -2168,6 +2209,22 @@ mod upgrade_tests {
             )
             .unwrap();
         assert_eq!(reason, "contract_cutover");
+        // After cutover a never-minted name is not authority on a normal handle.
+        let checkout = || AcquireHolds {
+            agent: "alice".into(),
+            project: project.clone(),
+            paths: vec!["src/a.rs".into()],
+            ttl_seconds: Some(600),
+            exclusive: true,
+            reason: Some("new checkout".into()),
+            repo_wide: false,
+        };
+        match store.acquire_holds(checkout()) {
+            Err(Error::Forbidden(m)) => assert!(m.starts_with("NO_ACTOR"), "{m}"),
+            other => panic!("a plain name took a hold after cutover: {:?}", other.ok()),
+        }
+        // The rest is explicit operator repair of pre-contract records.
+        let store = store.unguarded_repair();
         let hold = store
             .acquire_holds(AcquireHolds {
                 agent: "alice".into(),

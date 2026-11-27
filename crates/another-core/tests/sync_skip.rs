@@ -26,7 +26,9 @@ struct Node {
 fn node(name: &str) -> Node {
     let dir = tempfile::tempdir().unwrap();
     let (clock, handle) = Clock::manual(T0);
-    let store = Store::open_with_clock(dir.path(), clock).unwrap();
+    let store = Store::open_with_clock(dir.path(), clock)
+        .unwrap()
+        .unguarded_repair();
     store.set_node_name(name).unwrap();
     Node {
         dir,

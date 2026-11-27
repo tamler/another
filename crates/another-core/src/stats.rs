@@ -139,7 +139,7 @@ impl Store {
             return Ok(Vec::new());
         }
         self.write(|tx| {
-            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_delivery_agent(tx, tx.node_id, agent)?;
             claim_announcement_tx(tx, &me, message_ids, channel, client)
         })
     }
@@ -148,7 +148,7 @@ impl Store {
     /// announce those messages.
     pub fn release_announcement(&self, agent: &str, message_ids: &[String]) -> Result<()> {
         self.write(|tx| {
-            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_delivery_agent(tx, tx.node_id, agent)?;
             release_announcement_tx(tx, &me.id, message_ids)
         })
     }

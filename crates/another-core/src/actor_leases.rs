@@ -9,25 +9,19 @@ use crate::crypto::{request_nonce, sha256_hex};
 use crate::store::{new_id, Store, Tx};
 use crate::{checkout_ttl, Error, Result, DEFAULT_TTL_SECONDS};
 
+/// `now` is the store clock of the calling transaction, never the process clock.
 pub(crate) fn acting_agent(
     conn: &Connection,
+    now: i64,
     node: &str,
     proof: &ActorProof,
 ) -> Result<crate::identity::AgentRef> {
-    let now = crate::time::now_ms();
     let actor = check_actor(conn, proof, now, true)?;
     Ok(crate::identity::AgentRef {
         id: actor.actor_id,
         address: actor.name,
         node_id: node.into(),
     })
-}
-
-pub(crate) fn compatibility_key(proof: &ActorProof) -> Result<String> {
-    Ok(format!(
-        "another-private:{}",
-        crate::crypto::b64(&serde_json::to_vec(proof)?)
-    ))
 }
 
 pub(crate) fn prepare_business_subject(
@@ -96,32 +90,60 @@ pub(crate) fn validate_projection(
     Ok(())
 }
 
+/// A compatibility receipt still `pending` this long after it was written belongs to
+/// an attempt that stopped before recording its outcome. Every step of a live call
+/// finishes within its busy timeout, far inside this bound.
+pub(crate) const PENDING_ORPHAN_MS: i64 = 60_000;
+
+pub(crate) const INTERRUPTED_RECEIPT: &str = "INTERRUPTED: an earlier attempt with this request_id stopped before its outcome was recorded, and it is not re-run because its effect may have committed. Check the business record, then use a new request_id";
+
 pub(crate) fn compatibility_call(
     store: &Store,
     proof: &ActorProof,
     request: &str,
     action: &impl Serialize,
-    run: impl FnOnce(&str) -> Result<serde_json::Value>,
+    run: impl FnOnce(&Store, &str) -> Result<serde_json::Value>,
 ) -> Result<serde_json::Value> {
     let hash = fingerprint("compatibility", action)?;
+    let pending = format!("pending:{hash}");
+    let interrupted = format!("interrupted:{hash}");
     let cached = store.write(|tx| {
         let actor = check_actor(tx, proof, tx.now, false)?;
         let prior: Option<(String, String)> = tx.query_row("SELECT fingerprint, result FROM contract_receipts WHERE actor_id = ?1 AND session_epoch = ?2 AND request_id = ?3", params![actor.actor_id, actor.session_epoch, request], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
         if let Some((fingerprint, result)) = prior {
-            if fingerprint == format!("pending:{hash}") { return Err(Error::Conflict("UNKNOWN_ACK: this request is pending; query its durable business record before retrying".into())); }
+            if fingerprint == pending {
+                let since = serde_json::from_str::<serde_json::Value>(&result)
+                    .ok()
+                    .and_then(|v| v["pending_since"].as_i64())
+                    .unwrap_or(i64::MIN);
+                if tx.now.saturating_sub(since) < PENDING_ORPHAN_MS {
+                    return Err(Error::Conflict("UNKNOWN_ACK: this request is pending; query its durable business record before retrying".into()));
+                }
+                // The attempt that wrote this receipt stopped (a crash or kill) before
+                // recording its outcome. Settle it so it never reads as in flight; it is
+                // not re-run, because its business effect may already have committed.
+                tx.execute("UPDATE contract_receipts SET fingerprint = ?4 WHERE actor_id = ?1 AND session_epoch = ?2 AND request_id = ?3 AND fingerprint = ?5", params![actor.actor_id, actor.session_epoch, request, interrupted, pending])?;
+                return Ok(Err(()));
+            }
+            if fingerprint == interrupted {
+                return Ok(Err(()));
+            }
             if fingerprint != hash { return Err(Error::Conflict("request_id reused with different input".into())); }
-            return Ok(Some(serde_json::from_str(&result)?));
+            return Ok(Ok(Some(serde_json::from_str(&result)?)));
         }
         check_actor(tx, proof, tx.now, true)?;
-        tx.execute("INSERT INTO contract_receipts (actor_id, session_epoch, request_id, fingerprint, result) VALUES (?1, ?2, ?3, ?4, 'null')", params![actor.actor_id, actor.session_epoch, request, format!("pending:{hash}")])?;
-        Ok(None)
+        tx.execute("INSERT INTO contract_receipts (actor_id, session_epoch, request_id, fingerprint, result) VALUES (?1, ?2, ?3, ?4, ?5)", params![actor.actor_id, actor.session_epoch, request, pending, json!({"pending_since": tx.now}).to_string()])?;
+        Ok(Ok(None))
     })?;
-    if let Some(result) = cached {
-        return Ok(result);
+    match cached {
+        Ok(Some(result)) => return Ok(result),
+        Ok(None) => {}
+        // Reported outside the write so the settled receipt commits.
+        Err(()) => return Err(Error::Conflict(INTERRUPTED_RECEIPT.into())),
     }
-    let key = compatibility_key(proof)?;
+    let scoped = store.with_actor(proof);
     let result = store.actor_activity(proof).and_then(|reminder| {
-        run(&key).map(|mut value| {
+        run(&scoped, &proof.actor_id).map(|mut value| {
             value["reminder"] = serde_json::json!(reminder);
             value
         })
@@ -510,11 +532,15 @@ fn checkout_tx(
     }
     if input.subject_kind == SubjectKind::File {
         let path = std::path::Path::new(&input.subject_key);
-        let absolute = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir()?.join(path)
-        };
+        // The serving process's folder is not the caller's (a daemon or MCP server
+        // serves many callers), so a relative target is refused, never guessed. The
+        // caller makes it absolute from its own working folder.
+        if !path.is_absolute() {
+            return Err(Error::Invalid(
+                "exact absolute file target required; resolve relative paths from the caller's working folder".into(),
+            ));
+        }
+        let absolute = path.to_path_buf();
         let canonical =
             if std::fs::symlink_metadata(&absolute).is_ok_and(|m| m.file_type().is_symlink()) {
                 crate::repo::resolve_existing(
@@ -1118,4 +1144,63 @@ fn release_compatibility_tx(tx: &Tx<'_>, owner: &str, name: &str) -> Result<()> 
         [owner],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+    use crate::Clock;
+
+    /// A process killed between the pending receipt and its outcome leaves a
+    /// `pending:` row. A retry inside the bound still reads as in flight; after the bound
+    /// the receipt is settled as interrupted and never re-run, and a new request id works.
+    #[test]
+    fn a_crash_orphaned_pending_receipt_is_settled_not_left_in_flight() {
+        let (clock, now) = Clock::manual(1_800_000_000_000);
+        let store = Store::open_in_memory(clock).unwrap();
+        let participant = store.enroll_participant().unwrap();
+        let actor = store
+            .register_actor(&participant, "root", "codex", None)
+            .unwrap();
+        let action = json!({"action": "probe"});
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            compatibility_call(&store, &actor.proof, "req", &action, |_, _| {
+                panic!("process killed mid-call")
+            })
+        }));
+        assert!(crashed.is_err());
+        let runs = std::cell::Cell::new(0);
+        let retry = |id: &str| {
+            compatibility_call(&store, &actor.proof, id, &action, |_, _| {
+                runs.set(runs.get() + 1);
+                Ok(json!({"ran": true}))
+            })
+        };
+        match retry("req") {
+            Err(Error::Conflict(m)) => assert!(m.starts_with("UNKNOWN_ACK"), "{m}"),
+            other => panic!("expected UNKNOWN_ACK inside the bound: {:?}", other.ok()),
+        }
+        now.fetch_add(PENDING_ORPHAN_MS, Ordering::SeqCst);
+        for _ in 0..2 {
+            match retry("req") {
+                Err(Error::Conflict(m)) => assert!(m.starts_with("INTERRUPTED"), "{m}"),
+                other => panic!("expected INTERRUPTED after the bound: {:?}", other.ok()),
+            }
+        }
+        assert_eq!(runs.get(), 0, "an interrupted attempt is never re-run");
+        let settled: String = store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT fingerprint FROM contract_receipts WHERE request_id = 'req'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert!(settled.starts_with("interrupted:"), "{settled}");
+        assert_eq!(retry("fresh").unwrap()["ran"], true);
+        assert_eq!(runs.get(), 1);
+    }
 }

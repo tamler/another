@@ -19,7 +19,7 @@ impl Fx {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("work/app").to_string_lossy().into_owned();
         let (clock, handle) = Clock::manual(T0);
-        let store = Store::open_in_memory(clock).unwrap();
+        let store = Store::open_in_memory(clock).unwrap().unguarded_repair();
         store.ensure_project("test", &path).unwrap();
         for name in ["lead", "worker", "reviewer"] {
             store

@@ -28,7 +28,7 @@ impl Node {
 
 fn node(name: &str) -> Node {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open(dir.path()).unwrap().unguarded_repair();
     store.set_node_name(name).unwrap();
     Node { dir, store }
 }
@@ -1287,7 +1287,7 @@ fn a_hub_reset_does_not_report_a_skip_twice() {
         }
     }
     std::fs::copy(&backup, dir.path().join(DB_FILE)).unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open(dir.path()).unwrap().unguarded_repair();
     let hub = serve(Node { dir, store }, None, port, None);
     assert_eq!(markers(&hub.node, &a_id).len(), 0, "restored");
 

@@ -30,7 +30,7 @@ struct Server {
 
 async fn start() -> Server {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open(dir.path()).unwrap().unguarded_repair();
     let work = dir.path().join("work/shop").to_string_lossy().into_owned();
     let secret = dir
         .path()

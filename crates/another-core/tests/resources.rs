@@ -11,7 +11,7 @@ fn setup() -> (Store, Arc<AtomicI64>) {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("work/lab").to_string_lossy().into_owned();
     let (clock, handle) = Clock::manual(T0);
-    let store = Store::open_in_memory(clock).unwrap();
+    let store = Store::open_in_memory(clock).unwrap().unguarded_repair();
     store.ensure_project("t", &project).unwrap();
     for (name, program) in [
         ("alice", Program::Claude),

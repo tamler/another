@@ -92,7 +92,9 @@ fn session_end_releases_file_resource_queue_request_and_preserves_history() {
     )
     .unwrap()["projection"]["claimed"]
         .is_object());
-    let message = store.send_message(SendMessage {
+    // Pre-contract senders act only through the explicit operator repair handle.
+    let repair = store.unguarded_repair();
+    let message = repair.send_message(SendMessage {
         from: "operator".into(),
         to: vec![child.actor.name.clone()],
         subject: "request".into(),
@@ -111,7 +113,7 @@ fn session_end_releases_file_resource_queue_request_and_preserves_history() {
             description: None,
         })
         .unwrap();
-    let message = store
+    let message = repair
         .send_message(SendMessage {
             from: "operator".into(),
             to: vec![child.actor.name.clone()],
@@ -130,10 +132,14 @@ fn session_end_releases_file_resource_queue_request_and_preserves_history() {
         },
     )
     .unwrap();
-    assert!(
-        store.renew_holds(&child.actor.name, &[hold_id]).is_err(),
-        "public name is not authority"
-    );
+    for handle in [&store, &repair] {
+        assert!(
+            handle
+                .renew_holds(&child.actor.name, std::slice::from_ref(&hold_id))
+                .is_err(),
+            "public name is not authority, even on the repair handle"
+        );
+    }
     let before_end: std::collections::BTreeSet<_> = store
         .right_leases()
         .unwrap()

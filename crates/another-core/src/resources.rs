@@ -1441,7 +1441,9 @@ mod tests {
     }
 
     fn borrow_fixture() -> (Store, ResourceRef) {
-        let store = Store::open_in_memory(crate::Clock::manual(1_800_000_000_000).0).unwrap();
+        let store = Store::open_in_memory(crate::Clock::manual(1_800_000_000_000).0)
+            .unwrap()
+            .unguarded_repair();
         for name in ["alice", "bob"] {
             store
                 .register_agent(crate::RegisterAgent {

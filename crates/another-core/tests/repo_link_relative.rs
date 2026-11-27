@@ -154,7 +154,7 @@ fn a_link_cached_under_the_old_key_rules_is_recomputed() {
     std::fs::create_dir_all(&elsewhere).unwrap();
     std::os::unix::fs::symlink(dir.path().join("wt-a"), elsewhere.join("wt")).unwrap();
     let home = dir.path().join("home");
-    let store = Store::open(&home).unwrap();
+    let store = Store::open(&home).unwrap().unguarded_repair();
     let main = store
         .ensure_project("t", &dir.path().join("main").to_string_lossy())
         .unwrap();

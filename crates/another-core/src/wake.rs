@@ -159,7 +159,7 @@ impl Store {
     /// does not drop the capture a newer session made elsewhere.
     pub fn clear_auto_wake_target(&self, agent: &str, only: Option<(&str, &str)>) -> Result<bool> {
         self.write(|tx| {
-            let me = crate::identity::resolve_acting_agent(tx, tx.node_id, agent)?;
+            let me = crate::identity::resolve_delivery_agent(tx, tx.node_id, agent)?;
             let (via, target) = only.map_or((None, None), |(v, t)| (Some(v), Some(t)));
             Ok(tx.execute(
                 "DELETE FROM wake_targets WHERE agent_id = ?1 AND auto = 1

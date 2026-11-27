@@ -1044,7 +1044,9 @@ mod overlap_tests {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("work/shop").to_str().unwrap().to_owned();
         let (clock, _handle) = Clock::manual(T0_TEST);
-        let store = Store::open_with_clock(dir.path(), clock).unwrap();
+        let store = Store::open_with_clock(dir.path(), clock)
+            .unwrap()
+            .unguarded_repair();
         for (name, program) in [("alice", Program::Claude), ("bob", Program::Codex)] {
             store
                 .register_agent(RegisterAgent {
@@ -1107,7 +1109,7 @@ mod overlap_tests {
     fn active_with_no_last_seen_is_live_and_keeps_the_hold() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("work/shop").to_str().unwrap().to_owned();
-        let store = Store::open(dir.path()).unwrap();
+        let store = Store::open(dir.path()).unwrap().unguarded_repair();
         store
             .register_agent(RegisterAgent {
                 name: "alice".into(),

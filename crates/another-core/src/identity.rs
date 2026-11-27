@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::error::{Error, Result};
-use crate::store::{new_id, Store, Tx};
+use crate::store::{new_id, Caller, Store, Tx};
 use crate::time::{fmt_opt, fmt_ts};
 
 /// The coding-agent program behind an identity.
@@ -313,18 +313,34 @@ pub(crate) fn resolve_agent(conn: &Connection, node_id: &str, who: &str) -> Resu
     Ok(agent)
 }
 
-/// Mutations of minted actors require their private proof. Legacy names remain
-/// confined to the explicit unguarded repair namespace, never contract authority.
-pub(crate) fn resolve_acting_agent(
+/// The agent a mutation acts as. A minted actor acts only through its typed proof
+/// carried on the store handle; a plain name mutates only on an explicit
+/// [`crate::Store::unguarded_repair`] handle, and never as a minted actor.
+pub(crate) fn resolve_acting_agent(tx: &Tx<'_>, node_id: &str, who: &str) -> Result<AgentRef> {
+    match tx.caller {
+        Caller::Actor(proof) => {
+            if who != proof.actor_id {
+                return Err(Error::Forbidden(
+                    "NO_ACTOR: this call acts only as its authenticated actor".into(),
+                ));
+            }
+            crate::actor_leases::acting_agent(tx, tx.now, node_id, proof)
+        }
+        Caller::Repair => resolve_delivery_agent(tx, node_id, who),
+        Caller::Guarded => Err(Error::Forbidden(
+            "NO_ACTOR: names and --agent are not authority. Use the private another.agent/1 channel. An operator may explicitly leave guarded participation with --unguarded-repair for legacy records".into(),
+        )),
+    }
+}
+
+/// A plain pre-contract name as a selector: read filters and conflict checks, and wake
+/// and delivery bookkeeping, which has no actor carriage yet (M-M). It grants no right.
+/// A minted actor's name or id is refused here too.
+pub(crate) fn resolve_delivery_agent(
     conn: &Connection,
     node_id: &str,
     who: &str,
 ) -> Result<AgentRef> {
-    if let Some(encoded) = who.strip_prefix("another-private:") {
-        let proof: crate::ActorProof = serde_json::from_slice(&crate::crypto::unb64(encoded)?)
-            .map_err(|_| Error::Forbidden("NO_ACTOR: invalid private actor channel".into()))?;
-        return crate::actor_leases::acting_agent(conn, node_id, &proof);
-    }
     let agent = resolve_agent(conn, node_id, who)?;
     let minted = conn
         .query_row(

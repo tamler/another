@@ -96,7 +96,9 @@ impl Fx {
     fn new() -> Fx {
         let repos = Repos::new();
         let (clock, handle) = Clock::manual(T0);
-        let store = Store::open_with_clock(&repos.home, clock).unwrap();
+        let store = Store::open_with_clock(&repos.home, clock)
+            .unwrap()
+            .unguarded_repair();
         for (name, program) in [
             ("alice", Program::Claude),
             ("bob", Program::Codex),
@@ -968,7 +970,9 @@ fn blocked_retries_are_deduplicated_and_ping_once_after_release() {
         1
     );
     // The subscription survives opening another store connection.
-    let store = Store::open_with_clock(&fx.repos.home, Clock::Manual(fx.clock.clone())).unwrap();
+    let store = Store::open_with_clock(&fx.repos.home, Clock::Manual(fx.clock.clone()))
+        .unwrap()
+        .unguarded_repair();
     store.release_holds("alice", &[]).unwrap();
     store.sweep().unwrap();
     store.sweep().unwrap();
