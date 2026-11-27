@@ -1265,6 +1265,16 @@ async fn cli_and_mcp_shapes() {
     );
     let (code, _) = fx.json(&["queue", "audit", "--since", "1h"], &[]);
     assert_eq!(code, 0);
+    let (code, _) = fx.json(&["queue", "audit", "--since", "3600"], &[]);
+    assert_eq!(code, 0);
+    for bad in ["01ARZ3NDEKTSV4RRFFQ69G5FAV", "nonsense"] {
+        let (code, err) = fx.json(&["queue", "audit", "--since", bad], &[]);
+        assert_eq!(code, 1, "{bad}: {err}");
+        assert_eq!(err["error"]["code"], "invalid", "{bad}: {err}");
+        let msg = err["error"]["message"].as_str().unwrap_or("");
+        assert!(msg.contains("bare seconds"), "{bad}: {err}");
+        assert!(msg.contains("not an event id"), "{bad}: {err}");
+    }
     // `queue audit` exits 1 on any finding.
     let db = rusqlite::Connection::open(fx.home.join(another_core::DB_FILE)).unwrap();
     db.execute(

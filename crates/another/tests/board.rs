@@ -244,8 +244,20 @@ fn board_shows_what_the_edit_hook_recorded_and_what_waits() {
     assert_eq!(by_path["projects"].as_array().unwrap().len(), 2);
 
     let bad = env.run(&["board", "--since", "01ARZ3NDEKTSV4RRFFQ69G5FAV"]);
-    assert!(!bad.status.success());
+    assert_eq!(bad.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&bad.stderr).contains("not an event id"));
+
+    let bad_json = env.run(&["--json", "board", "--since", "01ARZ3NDEKTSV4RRFFQ69G5FAV"]);
+    assert_eq!(bad_json.status.code(), Some(1));
+    let err: Value = serde_json::from_slice(&bad_json.stdout).unwrap();
+    assert_eq!(err["error"]["code"], "invalid");
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not an event id"),
+        "{err}"
+    );
 }
 
 #[test]

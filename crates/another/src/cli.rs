@@ -1120,12 +1120,7 @@ fn board_command(
         );
     }
     let store = Store::open_quick(home, Duration::from_secs(5))?;
-    let since_ms = match Since::parse(since, store.now())? {
-        Since::Time(t) => t,
-        Since::After(_) => anyhow::bail!(
-            "board --since takes bare seconds like 3600, a duration like 24h or an RFC 3339 time, not an event id"
-        ),
-    };
+    let since_ms = Since::parse_time(since, store.now())?;
     let project = match project {
         Some(p) if looks_like_path(p) => Some(abs(Path::new(p))?),
         Some(p) => Some(p.to_string()),

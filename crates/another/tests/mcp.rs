@@ -295,15 +295,26 @@ async fn full_flow_over_mcp() {
         .unwrap()
         .len();
     assert_eq!(before, after);
-    assert_eq!(
-        call_err(
-            &client,
-            "work_board",
-            json!({ "since": "01ARZ3NDEKTSV4RRFFQ69G5FAV" })
-        )
-        .await,
-        "invalid"
-    );
+    let board_secs = call_ok(
+        &client,
+        "work_board",
+        json!({ "project": "site", "since": "3600" }),
+    )
+    .await;
+    assert_eq!(board_secs["project"], "site");
+    for bad in ["01ARZ3NDEKTSV4RRFFQ69G5FAV", "nonsense"] {
+        let err = call_error(&client, "work_board", json!({ "since": bad })).await;
+        assert_eq!(err["code"], "invalid", "{bad}: {err}");
+        let msg = err["message"].as_str().unwrap_or("");
+        assert!(msg.contains("bare seconds"), "{bad}: {err}");
+        assert!(msg.contains("not an event id"), "{bad}: {err}");
+        if let Some(hint) = err["hint"].as_str() {
+            assert!(
+                !hint.contains("next_since"),
+                "work_board must not tell callers to pass an event id: {err}"
+            );
+        }
+    }
     assert_eq!(
         call_err(&client, "work_board", json!({ "project": "nope" })).await,
         "not_found"

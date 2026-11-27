@@ -973,17 +973,11 @@ impl AnotherMcp {
         // patterns from other projects are hidden.
         let remote = crate::remote::current_scope().is_some();
         self.run(move |s| {
-            let since_ms = match a.since {
-                None => None,
-                Some(v) => match Since::parse(&v, s.now())? {
-                    Since::Time(t) => Some(t),
-                    Since::After(_) => {
-                        return Err(another_core::Error::Invalid(
-                            "work_board since takes bare seconds like 3600, a duration like 24h or an RFC 3339 time".into(),
-                        ))
-                    }
-                },
-            };
+            let since_ms = a
+                .since
+                .as_deref()
+                .map(|v| Since::parse_time(v, s.now()))
+                .transpose()?;
             s.board(another_core::BoardQuery {
                 project: a.project,
                 confined: remote,

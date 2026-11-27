@@ -46,12 +46,15 @@ OAuth for hosted MCP clients (ChatGPT, Claude.ai) is in this tree, and so is the
 
 The website source lives in [site/](site/README.md). `sh site/build.sh` checks the pages, and `python3 scripts/check-copy.py` rejects em dashes and a banned-phrase list.
 
-For Rust callers, `another_core` exports `now_ms`, `fmt_ts`, `parse_ts` and
-`parse_duration`. The duration helper returns seconds and lets the caller choose
-whether to accept bare numbers. CLI durations, including `--since`, accept bare
+For Rust callers, `another_core` exports `now_ms`, `fmt_ts`, `parse_ts`,
+`parse_duration`, and `Since::parse` / `Since::parse_time`. The duration helper
+returns seconds and lets the caller choose whether to accept bare numbers, and
+`Since::parse_time` parses bare seconds, a duration suffix, or an RFC 3339 time
+while refusing event ids. CLI durations, including `--since`, accept bare
 seconds or a suffix (`s`, `m`, `h`, `d` or `w`). Federation
 requests use the store's clock, including a manual clock supplied by a caller.
-MCP `since` inputs also accept bare seconds.
+MCP `since` inputs and dashboard timeline `since` / `until` filters also accept
+bare seconds, durations, or RFC 3339 times.
 
 ## Quickstart
 

@@ -785,17 +785,10 @@ pub fn run(store: &Store, cmd: QueueCmd, json: bool) -> anyhow::Result<ExitCode>
                     "--owner does not apply to queue audit: it only reads".into(),
                 ));
             }
-            let since = match since {
-                None => None,
-                Some(raw) => match Since::parse(&raw, store.now())? {
-                    Since::Time(t) => Some(t),
-                    Since::After(_) => {
-                        return Err(usage(
-                            "queue audit --since takes bare seconds like 3600, a duration like 2d or an RFC 3339 time, not an event id".into(),
-                        ))
-                    }
-                },
-            };
+            let since = since
+                .as_deref()
+                .map(|raw| Since::parse_time(raw, store.now()))
+                .transpose()?;
             let audit = store.queue_audit(since)?;
             let printed = emit(json, &audit, output::queue_audit);
             if audit.ok {
