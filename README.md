@@ -214,7 +214,8 @@ For Rust callers, `another_core` exports `now_ms`, `fmt_ts`, `parse_ts` and
 whether to accept bare numbers. CLI durations, including `--since`, accept bare
 seconds or a suffix (`s`, `m`, `h`, `d` or `w`). Federation
 requests use the store's clock, including a manual clock supplied by a caller.
-MCP `since` inputs also accept bare seconds.
+MCP `since` inputs also accept bare seconds. An unknown `--since` event id for
+`another stats` is a `not_found` error, as for `activity`.
 
 Bearer-token creation and OAuth approval reject project globs that cannot compile
 for matching, even when their syntax is valid. Existing stored globs that cannot

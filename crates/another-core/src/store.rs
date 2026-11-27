@@ -869,6 +869,23 @@ pub fn new_id() -> String {
     ulid::Ulid::new().to_string()
 }
 
+/// Sequence number of the event with `event_id`, or `None` when no such event exists.
+pub(crate) fn event_seq(conn: &Connection, event_id: &str) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT seq FROM events WHERE event_id = ?1",
+            [event_id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// Sequence number of the event with `event_id`, or [`Error::NotFound`] when missing.
+pub(crate) fn require_event_seq(conn: &Connection, event_id: &str) -> Result<i64> {
+    event_seq(conn, event_id)?
+        .ok_or_else(|| Error::NotFound(format!("unknown event id {event_id:?}")))
+}
+
 const MIGRATIONS: &[&str] = &[
     r#"
 CREATE TABLE nodes (
