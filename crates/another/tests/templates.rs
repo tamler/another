@@ -33,6 +33,110 @@ fn setup() -> tempfile::TempDir {
 }
 
 #[test]
+fn key_value_flags_trim_keys_and_preserve_values() {
+    let dir = setup();
+    let sent = another(
+        dir.path(),
+        &[
+            "--json",
+            "send",
+            "--from",
+            "lead",
+            "--to",
+            "bob",
+            "--template",
+            "fix",
+            "--field",
+            " issue =parser=a=b",
+        ],
+    );
+    assert!(sent.status.success(), "{sent:?}");
+    let sent: Value = serde_json::from_slice(&sent.stdout).unwrap();
+    assert_eq!(sent["subject"], "Fix: parser=a=b");
+
+    let registered = another(
+        dir.path(),
+        &[
+            "--json",
+            "resource",
+            "register",
+            "model_server",
+            "parser-test",
+            "--agent",
+            "lead",
+            "--meta",
+            " backend = metal=a=b ",
+            "--meta",
+            "empty=",
+        ],
+    );
+    assert!(registered.status.success(), "{registered:?}");
+    let registered: Value = serde_json::from_slice(&registered.stdout).unwrap();
+    assert_eq!(registered["resource"]["metadata"]["backend"], " metal=a=b ");
+    assert_eq!(registered["resource"]["metadata"]["empty"], "");
+}
+
+#[test]
+fn key_value_flags_refuse_malformed_and_duplicate_keys_with_usage_exit() {
+    let dir = setup();
+    for (base, flag, key) in [
+        (
+            vec!["send", "--from", "lead", "--to", "bob", "--template", "fix"],
+            "--field",
+            "issue",
+        ),
+        (
+            vec![
+                "resource",
+                "register",
+                "model_server",
+                "parser-test",
+                "--agent",
+                "lead",
+            ],
+            "--meta",
+            "backend",
+        ),
+    ] {
+        for (pairs, expected) in [
+            (vec!["noequals".to_string()], "key=value"),
+            (vec!["=value".to_string()], "empty"),
+            (vec![" \t =value".to_string()], "empty"),
+            (vec![format!("{key}=a"), format!("{key}=b")], "twice"),
+            (vec![format!(" {key} =a"), format!("{key}=b")], "twice"),
+        ] {
+            for json in [false, true] {
+                let mut args = Vec::new();
+                if json {
+                    args.push("--json");
+                }
+                args.extend(base.iter().copied());
+                for pair in &pairs {
+                    args.extend([flag, pair.as_str()]);
+                }
+                let out = another(dir.path(), &args);
+                assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+                let message = if json {
+                    let error: Value = serde_json::from_slice(&out.stdout).unwrap();
+                    assert_eq!(error["error"]["code"], "usage", "{error}");
+                    error["error"]["message"].as_str().unwrap().to_string()
+                } else {
+                    String::from_utf8_lossy(&out.stderr).into_owned()
+                };
+                assert!(message.contains(flag), "{message}");
+                assert!(message.contains(expected), "{message}");
+            }
+        }
+    }
+    let resources = another(dir.path(), &["--json", "resources"]);
+    assert!(resources.status.success(), "{resources:?}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&resources.stdout).unwrap(),
+        serde_json::json!([])
+    );
+}
+
+#[test]
 fn a_template_opens_a_request_with_its_subject_and_sections() {
     let dir = setup();
     let out = another(

@@ -49,7 +49,13 @@ Actual probe and IO budgets are diagnostics, not ownership clocks.
 Resource kind/name/id, endpoint, port, PID, purpose, sharing mode and metadata
 remain resource facts. A shared resource can have an owner and borrowers; an
 exclusive resource refuses borrowing. All temporary references use the same
-duration rule. Legacy foreign events are historical/informational and cannot
+duration rule.
+
+Repeat `--meta KEY=VALUE` for each metadata entry. Like `send --field`, keys are
+trimmed and must be nonempty and unique after trimming. A missing `=`, an empty
+key or a duplicate key is a `usage` error (exit 2), and nothing is registered.
+Metadata keys are stored in sorted order rather than argument order. Values keep
+their whitespace and any further `=` characters; an empty value is allowed. Legacy foreign events are historical/informational and cannot
 adopt a new local actor's rights.
 
 ## Physical cleanup

@@ -29,6 +29,10 @@ struct Server {
 }
 
 async fn start() -> Server {
+    start_with_federation(false).await
+}
+
+async fn start_with_federation(federation: bool) -> Server {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap().unguarded_repair();
     let work = dir.path().join("work/shop").to_string_lossy().into_owned();
@@ -64,6 +68,7 @@ async fn start() -> Server {
     let opts = HttpOptions {
         legacy_repair: true,
         auth: true,
+        federation,
         bound_port: addr.port(),
         ..Default::default()
     };
@@ -119,6 +124,24 @@ fn error_code(res: &CallToolResult) -> Option<String> {
 }
 
 #[tokio::test]
+async fn federated_listener_rejects_conflicting_mcp_heartbeat() {
+    let srv = start_with_federation(true).await;
+    let token = srv
+        .store
+        .create_token("grok-bot", std::slice::from_ref(&srv.work_glob), None, None)
+        .unwrap();
+    let client = connect(&srv.base, &token.secret).await;
+    let before = srv.store.agent("grok-bot").unwrap();
+    let conflict = call(&client, "heartbeat", json!({ "start": true, "end": true })).await;
+    assert_eq!(error_code(&conflict).as_deref(), Some("invalid"));
+    let after = srv.store.agent("grok-bot").unwrap();
+    assert_eq!(after.status, before.status);
+    assert_eq!(after.last_seen_at, before.last_seen_at);
+    client.cancel().await.unwrap();
+    srv.ct.cancel();
+}
+
+#[tokio::test]
 async fn bearer_tokens_scope_and_audit_remote_calls() {
     let srv = start().await;
     let http = reqwest::Client::new();
@@ -162,6 +185,13 @@ async fn bearer_tokens_scope_and_audit_remote_calls() {
         )
         .unwrap();
     let client = connect(&srv.base, &token.secret).await;
+
+    let before = srv.store.agent("grok-bot").unwrap();
+    let conflict = call(&client, "heartbeat", json!({ "start": true, "end": true })).await;
+    assert_eq!(error_code(&conflict).as_deref(), Some("invalid"));
+    let after = srv.store.agent("grok-bot").unwrap();
+    assert_eq!(after.status, before.status);
+    assert_eq!(after.last_seen_at, before.last_seen_at);
 
     // Acting agent is filled in, and only the token's agent is allowed.
     let inbox = call(&client, "fetch_inbox", json!({})).await;

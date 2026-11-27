@@ -170,6 +170,27 @@ mail and authentication records. Keep them owner-only and protect every copy.
 Unauthenticated refusal audits have a deliberate write budget during floods;
 individual refusals can be omitted after that budget is exhausted.
 
+Plain unauthenticated `another serve` and `another daemon install` print a
+warning on stderr: never tunnel or reverse-proxy this local-agent port. It checks
+no token, and a proxy that rewrites `Host` to loopback lets remote callers read
+the feed. Use a separate authenticated or federation-only listener for remote
+access ([docs/REMOTE.md](docs/REMOTE.md)). Federation-only listeners do not print
+this warning.
+
+`resource register --meta KEY=VALUE` and `send --field KEY=VALUE` trim keys and
+require nonempty, unique keys. Missing `=`, empty keys and duplicate keys produce
+a usage error (exit 2). Metadata keys are stored in sorted order; values keep
+whitespace and further `=` characters ([docs/RESOURCES.md](docs/RESOURCES.md)).
+On the repair MCP surface, a `heartbeat` call that sets both `start` and `end`
+returns `invalid`.
+
+An opt-in docs/quickstart clarity eval (a model plays a stranger seeing only the
+public docs) is documented in
+[evals/quickstart_clarity/README.md](evals/quickstart_clarity/README.md). It stays
+out of default CI, defaults to offline fixture mode (zero spend), and requires
+explicit live opt-in, an existing durable spend ledger, per-call/run caps and
+billing-confirmation flags before making paid API calls.
+
 ## Development
 
 ```sh
