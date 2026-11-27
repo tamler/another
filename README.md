@@ -216,6 +216,10 @@ For Rust callers, `another_core` exports `now_ms`, `fmt_ts`, `parse_ts` and `par
 
 Bearer-token creation and OAuth approval reject project globs that cannot compile for matching, even when their syntax is valid. Existing stored globs that cannot compile continue to grant no project access. Invalid-glob diagnostics show at most the first 80 characters of the pattern, followed by its character count when truncated.
 
+OAuth URI and HTTP Host/Origin ports must be 1 to 65535 written in ASCII decimal without a sign or leading zero; an empty port after `:` is refused. See [remote access](docs/REMOTE.md) for existing-client and allow-list compatibility.
+Malformed client metadata URLs report client metadata errors; `--public-url` errors retain their operator guidance.
+Stored-client warnings for invalid redirect ports show only the escaped authority, without the URI path or query.
+
 An opt-in docs/quickstart clarity eval (a model plays a stranger seeing only the public docs) is documented in [evals/quickstart_clarity/README.md](evals/quickstart_clarity/README.md). It stays out of default CI, defaults to offline fixture mode (zero spend), and requires explicit live opt-in, an existing durable spend ledger, per-call/run caps, and billing-confirmation flags before making paid API calls.
 
 ## Clean-room
