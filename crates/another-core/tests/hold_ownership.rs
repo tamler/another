@@ -493,7 +493,7 @@ fn foreign_project_holds_warn_without_blocking_but_local_holds_block() {
 #[test]
 fn reacquire_after_unswept_expiry_creates_a_new_hold() {
     let dir = tempfile::tempdir().unwrap();
-    let node = Node::new(dir.path(), "local");
+    let node = Node::new(dir.path(), "receiver");
     node.agent("alice");
     let project = node.project(dir.path(), "shop");
     let first = node.store.guard_edit("alice", &project.abs_path, &["file.rs".into()], "test").unwrap().held[0].hold_id.clone();
@@ -519,7 +519,7 @@ fn reacquire_after_unswept_expiry_creates_a_new_hold() {
 #[test]
 fn doctor_counts_orphan_holds_with_missing_references() {
     let dir = tempfile::tempdir().unwrap();
-    let node = Node::new(dir.path(), "local");
+    let node = Node::new(dir.path(), "receiver");
     let alice = node.agent("alice");
     let project = node.project(dir.path(), "shop");
     let sql = node.sql();
@@ -536,6 +536,12 @@ fn doctor_counts_orphan_holds_with_missing_references() {
     for id in ["missing-agent", "missing-project", "missing-node"] {
         assert!(sample.iter().any(|line| line.contains(id)), "{sample:?}");
     }
+    // A missing node must be reported even when all three stored node ids agree.
+    sql.execute("UPDATE agents SET node_id = 'absent-node' WHERE agent_id = ?1", [&alice]).unwrap();
+    sql.execute("UPDATE projects SET node_id = 'absent-node' WHERE project_id = ?1", [&project.project_id]).unwrap();
+    let (count, sample) = node.store.inconsistent_holds(5).unwrap();
+    assert_eq!(count, 3);
+    assert!(sample.iter().any(|line| line.contains("missing-node") && line.contains("missing node")));
     assert_eq!(node.store.inconsistent_holds(1).unwrap().1.len(), 1);
     assert_eq!(sql.query_row("SELECT count(*) FROM holds", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
 }
