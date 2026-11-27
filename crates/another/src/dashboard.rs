@@ -347,7 +347,7 @@ async fn activity(
         Some(raw) => match Since::parse(raw, now) {
             Ok(Since::Time(t)) => Some(t),
             Ok(Since::After(_)) => {
-                return invalid("since must be a duration like 1d or an RFC 3339 time");
+                return invalid("since must be bare seconds (3600), 1d or an RFC 3339 time");
             }
             Err(e) => return invalid(&e.to_string()),
         },

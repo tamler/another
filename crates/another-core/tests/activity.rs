@@ -155,14 +155,16 @@ fn feed_filters_pages_and_limits() {
     assert!(next.items[0].summary.ends_with("m1"));
 
     // Time window.
-    let recent = store
-        .activity(ActivityQuery {
-            since: Some(Since::parse("2s", store.now()).unwrap()),
-            kinds: vec![ActivityKind::Mail],
-            ..Default::default()
-        })
-        .unwrap();
-    assert_eq!(recent.items.len(), 3);
+    for since in ["2s", "2"] {
+        let recent = store
+            .activity(ActivityQuery {
+                since: Some(Since::parse(since, store.now()).unwrap()),
+                kinds: vec![ActivityKind::Mail],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(recent.items.len(), 3);
+    }
 
     let bad = store.activity(ActivityQuery {
         since: Some(Since::After("01ARZ3NDEKTSV4RRFFQ69G5FAV".into())),
