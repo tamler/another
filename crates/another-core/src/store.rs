@@ -844,7 +844,7 @@ impl Store {
         const WINDOW: Duration = Duration::from_secs(60);
         const MAX_ROWS: usize = 32;
         let now = budget_now();
-        let omitted = {
+        let reserved = {
             let mut budget = self
                 .inner
                 .unauthenticated_audits
@@ -858,10 +858,15 @@ impl Store {
                 return Ok(());
             }
             let omitted = budget.suppressed;
+            let previous_last = budget.last_summary;
+            let previous_first = budget.first_suppressed_at;
             budget.recent.push_back(now);
-            Some(omitted)
+            budget.suppressed = 0;
+            budget.last_summary = Some(now);
+            budget.first_suppressed_at = None;
+            Some((omitted, previous_last, previous_first))
         };
-        let Some(omitted) = omitted else {
+        let Some((omitted, previous_last, previous_first)) = reserved else {
             return Ok(());
         };
         tracing::warn!(
@@ -877,21 +882,7 @@ impl Store {
             ..Default::default()
         };
         match self.write_audit_row(row) {
-            Ok(()) => {
-                let mut budget = self
-                    .inner
-                    .unauthenticated_audits
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                budget.suppressed = budget.suppressed.saturating_sub(omitted);
-                budget.last_summary = Some(now);
-                if budget.suppressed == 0 {
-                    budget.first_suppressed_at = None;
-                } else {
-                    budget.first_suppressed_at = Some(now);
-                }
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(err) => {
                 let mut budget = self
                     .inner
@@ -902,6 +893,11 @@ impl Store {
                     if *at == now {
                         budget.recent.pop_back();
                     }
+                }
+                budget.suppressed = budget.suppressed.saturating_add(omitted);
+                budget.last_summary = previous_last;
+                if budget.first_suppressed_at.is_none() {
+                    budget.first_suppressed_at = previous_first;
                 }
                 Err(err)
             }
