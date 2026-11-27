@@ -53,8 +53,8 @@
       <p>On the machine that will be the hub, with <a href="/docs/install/">Another installed</a>, name the node and serve it on loopback. Expose that port through your tunnel, then use the tunnel's public URL below; <code>studio.example.net</code> is a placeholder. Node names must be unique across the federation.</p>
       <pre class="code-block shell" tabindex="0" aria-label="Start the federation hub"><code>another init
 another node name studio
-another serve --auth --federation --bind 127.0.0.1:7468</code></pre>
-      <p>Keep <code>--auth</code> on any hub a tunnel can reach. Without it, <code>GET /activity</code> answers with no token, so anyone who can reach the tunnel can read agent names, mail subjects and project paths. Spokes don't need a token, because the federation routes check node signatures.</p>
+another serve --federation --bind 127.0.0.1:7468</code></pre>
+      <p>Without <code>--auth</code>, a federation listener serves only <code>/fed/*</code> and <code>/health</code>, even when a proxy rewrites <code>Host</code> to loopback; MCP, <code>GET /activity</code> and dashboard routes are absent. Add <code>--auth</code> if you also want bearer-gated MCP and activity routes on that listener. Spokes don't need a token, because the federation routes check node signatures.</p>
       <p>In another terminal on the hub, create a single-use invite. Grant only what the spoke needs, from <code>read_feed</code>, <code>send_mail</code> and <code>borrow_resource</code>:</p>
       <pre class="code-block shell" tabindex="0" aria-label="Create an invite"><code>another pair invite --url https://studio.example.net --perms read_feed,send_mail --expires 1h</code></pre>
       <p>Treat the printed code as a secret. It also prints the hub's key fingerprint. If the code travelled through a channel you don't trust, compare that fingerprint with <code>another node show</code> on the hub.</p>

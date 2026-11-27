@@ -1,6 +1,6 @@
 # Verify a release archive
 
-No GitHub Release of Another has been published as of 23 Nov 2026. This page describes what the release workflow will publish and how to check it, and records a run of those checks against a local fixture archive, labeled as such. Until a release exists, install with Cargo or build from source ([README](../README.md#quickstart)).
+No GitHub Release of Another has been published as of 27 Nov 2026. This page describes what the release workflow will publish and how to check it, and records a run of those checks against a local fixture archive, labeled as such. Until a release exists, install with Cargo or build from source ([README](../README.md#quickstart)).
 
 ## What the workflow publishes
 
