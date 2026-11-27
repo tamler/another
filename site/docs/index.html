@@ -50,13 +50,13 @@
     </section>
     <section class="guide-section" id="quickstart" aria-labelledby="quickstart-title">
       <h2 id="quickstart-title">Quickstart</h2>
-      <p>From the first release, macOS and Linux users can download the SHA-256-verifying installer from GitHub Releases:</p>
-      <pre class="code-block shell" tabindex="0" aria-label="Install a prebuilt binary from the first release"><code>curl <span class="token">-fsSLO</span> <span class="token">https://github.com/tamler/another/releases/latest/download/install.sh</span> &amp;&amp;
-  sh install.sh</code></pre>
-      <p>From the first release, you can also run <code>cargo binstall --git https://github.com/tamler/another another</code> or download a macOS (arm64 or Intel), static Linux musl (x86_64 or arm64) or Windows x86_64 archive with its <code>.sha256</code> sidecar from <a href="https://github.com/tamler/another/releases">GitHub Releases</a>. See the <a href="/docs/install/">install guide</a> for verification, macOS quarantine and per-system setup.</p>
       <p>No GitHub Release is published yet. Install from source today with Rust 1.88 or newer, and make sure Cargo's bin directory is on your <code>PATH</code>:</p>
       <pre class="code-block shell" tabindex="0" aria-label="Install with Cargo"><code>cargo install <span class="token">--locked</span> <span class="token">--git</span> <span class="token">https://github.com/tamler/another</span> another
 another <span class="token">--version</span></code></pre>
+      <p>From the first release, macOS and Linux users can download the SHA-256-verifying installer (<code>scripts/install.sh</code>) from GitHub Releases:</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Install a prebuilt binary from the first release"><code>curl <span class="token">-fsSLO</span> <span class="token">https://github.com/tamler/another/releases/latest/download/install.sh</span> &amp;&amp;
+  sh install.sh</code></pre>
+      <p>From the first release, you can also run <code>cargo binstall --git https://github.com/tamler/another another</code> or download a macOS (arm64 or Intel), static Linux musl (x86_64 or arm64) or experimental Windows x86_64 archive with its <code>.sha256</code> sidecar from <a href="https://github.com/tamler/another/releases">GitHub Releases</a>. See the <a href="/docs/install/">install guide</a> for verification, macOS quarantine and per-system setup.</p>
       <p>In a test repository or shared checkout, initialize local state, register two agents, send a message and list unread messages:</p>
       <pre class="code-block shell" tabindex="0" aria-label="Initialize, register two agents, send and read a message"><code>another init
 another agent register alice <span class="token">--program</span> claude <span class="token">--project</span> .

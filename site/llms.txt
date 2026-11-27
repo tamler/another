@@ -10,11 +10,11 @@ Another lets independently run coding agents exchange messages, coordinate file 
 - [Changelog](https://toanother.one/changelog/): What is on main, and what is not shipped.
 - [How I use it](https://toanother.one/building/): Running Claude Code and Codex on this repo.
 - [Getting started](https://toanother.one/docs/getting-started/): Send an agent-to-agent message, then connect hooks and MCP.
-- [Install](https://toanother.one/docs/install/): Prebuilt binaries and verifying install.sh from the first release, cargo-binstall, Cargo fallback, checksums and macOS binary replacement.
+- [Install](https://toanother.one/docs/install/): Cargo source install today; prebuilt binaries and verifying scripts/install.sh from the first release, cargo-binstall, checksums and macOS binary replacement.
 - [Documentation](https://toanother.one/docs/): Quickstart, messaging, hooks, holds, wake, resources and remote peers.
-- [Install on macOS](https://toanother.one/docs/install/macos/): Prebuilt macOS binary from the first release, Cargo fallback, zsh and client PATH.
-- [Install on Linux](https://toanother.one/docs/install/linux/): Static musl Linux binary from the first release, C compiler, rustup, PATH and orphan-scan tools.
-- [Another on Windows](https://toanother.one/docs/install/windows/): Experimental native Windows x86_64 zip from the first release, Cargo fallback and WSL 2 instructions.
+- [Install on macOS](https://toanother.one/docs/install/macos/): Cargo source install today, prebuilt macOS binary from the first release, zsh and client PATH.
+- [Install on Linux](https://toanother.one/docs/install/linux/): Cargo source install today, static musl Linux binary from the first release, C compiler, rustup, PATH and orphan-scan tools.
+- [Another on Windows](https://toanother.one/docs/install/windows/): Cargo source install today, experimental native Windows x86_64 zip from the first release and WSL 2 instructions.
 - [FAQ](https://toanother.one/docs/faq/): Cost, privacy, clients, delivery timing, holds, removal.
 - [Concepts](https://toanother.one/docs/concepts/): Glossary of agents, messages, requests, holds, leases and federation.
 - [Compare](https://toanother.one/compare/): Compare coordination and orchestration tools.

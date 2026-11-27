@@ -45,11 +45,11 @@
           <p>Optional remote peers and a self-hosted federation hub can connect a second machine when you need one.</p>
         </div>
         <div class="install">
-          <p class="quiet">From the first release (macOS and Linux; verifies SHA-256):</p>
-          <pre class="shell" tabindex="0" aria-label="Install a prebuilt binary from the first release"><code>curl <span class="token">-fsSLO</span> <span class="token">https://github.com/tamler/another/releases/latest/download/install.sh</span> &amp;&amp; sh install.sh</code></pre>
-          <p class="quiet">No release is published yet. Install from source today with Rust 1.88 or newer:</p>
+          <p class="quiet">Install from source today (Rust 1.88 or newer; no release is published yet):</p>
           <pre class="shell" tabindex="0" aria-label="Install Another"><code>cargo install <span class="token">--locked</span> <span class="token">--git</span> <span class="token">https://github.com/tamler/another</span> another</code></pre>
-          <p class="quiet">From the first release, <code>cargo binstall</code> and archives with SHA-256 sidecars will cover macOS (arm64 and Intel), static Linux musl and Windows x86_64. <a href="/docs/install/">Install options</a>. Apache-2.0. No account, no telemetry.</p>
+          <p class="quiet">From the first release (macOS and Linux; verifies SHA-256 via <code>scripts/install.sh</code>):</p>
+          <pre class="shell" tabindex="0" aria-label="Install a prebuilt binary from the first release"><code>curl <span class="token">-fsSLO</span> <span class="token">https://github.com/tamler/another/releases/latest/download/install.sh</span> &amp;&amp; sh install.sh</code></pre>
+          <p class="quiet">From the first release, <code>cargo binstall</code> and archives with SHA-256 sidecars will cover macOS (arm64 and Intel), static Linux musl and experimental Windows x86_64. <a href="/docs/install/">Install options</a>. Apache-2.0. No account, no telemetry.</p>
         </div>
       </div>
     </section>
@@ -73,9 +73,12 @@
       <h2 id="minute-title">Quickstart</h2>
       <ol class="steps">
         <li>
-          <p>Install Another. From the first release, macOS and Linux users can run the SHA-256-verifying installer (<code>curl -fsSLO https://github.com/tamler/another/releases/latest/download/install.sh &amp;&amp; sh install.sh</code>), run <code>cargo binstall --git https://github.com/tamler/another another</code>, or download a macOS, static Linux musl or Windows x86_64 archive from <a href="https://github.com/tamler/another/releases">GitHub Releases</a>. No release is published yet; install with Cargo and Rust 1.88 or newer today:</p>
+          <p>Install from source today with Cargo and Rust 1.88 or newer (no GitHub Release is published yet):</p>
           <pre class="shell" tabindex="0" aria-label="Install Another with Cargo"><code>cargo install <span class="token">--locked</span> <span class="token">--git</span> <span class="token">https://github.com/tamler/another</span> another
 another <span class="token">--version</span></code></pre>
+          <p class="quiet">From the first release (macOS and Linux; verifies SHA-256 via <code>scripts/install.sh</code>):</p>
+          <pre class="shell" tabindex="0" aria-label="Install a prebuilt binary from the first release"><code>curl <span class="token">-fsSLO</span> <span class="token">https://github.com/tamler/another/releases/latest/download/install.sh</span> &amp;&amp; sh install.sh</code></pre>
+          <p class="quiet">From the first release, <code>cargo binstall --git https://github.com/tamler/another another</code> and archives with SHA-256 sidecars will also be on <a href="https://github.com/tamler/another/releases">GitHub Releases</a> for macOS, static Linux musl and experimental Windows x86_64.</p>
         </li>
         <li>
           <p>Make sure Cargo's bin directory is on your <code>PATH</code>. In a test repository or shared checkout, initialize local state, register two agents, send a message and see it:</p>
@@ -96,8 +99,16 @@ another hold release <span class="token">--agent</span> alice src/parser.rs</cod
           <pre class="shell" tabindex="0" aria-label="Preview hooks"><code>another hook install <span class="token">--client</span> claude,codex <span class="token">--dry-run</span></code></pre>
         </li>
         <li>
-          <p>Point each client at the stdio MCP server. For a shared loopback daemon instead, run <code>another serve</code> and connect to <code>http://127.0.0.1:7466/mcp</code>.</p>
-          <pre class="shell" tabindex="0" aria-label="MCP server config"><code>{ "mcpServers": { "another": { "command": "another", "args": ["serve", "--stdio"] } } }</code></pre>
+          <p>Configure each MCP client to launch <code>another serve --stdio</code> with the same project and data directory. Clients that use an <code>mcpServers</code> object can use:</p>
+          <pre class="shell" tabindex="0" aria-label="MCP server config"><code>{
+  "mcpServers": {
+    "another": {
+      "command": "another",
+      "args": ["serve", "--stdio"]
+    }
+  }
+}</code></pre>
+          <p class="quiet">For a shared loopback daemon instead, run <code>another daemon install</code> (or <code>another serve --bind 127.0.0.1:7466</code>) and connect HTTP MCP clients to <code>http://127.0.0.1:7466/mcp</code>. <a href="/docs/#connections">Client setup</a> and <a href="https://github.com/tamler/another/blob/main/docs/DAEMON.md">daemon guide</a>.</p>
         </li>
       </ol>
       <p class="quiet">State lives in <code>~/.another</code> (or <code>ANOTHER_HOME</code>). See <a href="/docs/getting-started/">getting started</a> and <a href="/docs/install/">install</a> for prebuilt binaries, checksums and per-system setup.</p>
@@ -156,11 +167,11 @@ opened request 01M6FMXVS73X1C5HPZKWSC7QZN</span></code></pre>
     <section class="section" aria-labelledby="install-title">
       <h2 id="install-title">Install Another</h2>
       <div class="install closing-install">
-        <p class="quiet">From the first release (macOS and Linux; verifies SHA-256):</p>
-        <pre class="shell" tabindex="0" aria-label="Install a prebuilt binary from the first release"><code>curl <span class="token">-fsSLO</span> <span class="token">https://github.com/tamler/another/releases/latest/download/install.sh</span> &amp;&amp; sh install.sh</code></pre>
-        <p class="quiet">No release is published yet. Install from source today with Rust 1.88 or newer:</p>
+        <p class="quiet">Install from source today (Rust 1.88 or newer; no release is published yet):</p>
         <pre class="shell" tabindex="0" aria-label="Install Another"><code>cargo install <span class="token">--locked</span> <span class="token">--git</span> <span class="token">https://github.com/tamler/another</span> another</code></pre>
-        <p class="quiet">Prebuilt archives, <code>cargo binstall</code>, checksums and Windows notes: <a href="/docs/install/">install guide</a>.</p>
+        <p class="quiet">From the first release (macOS and Linux; verifies SHA-256 via <code>scripts/install.sh</code>):</p>
+        <pre class="shell" tabindex="0" aria-label="Install a prebuilt binary from the first release"><code>curl <span class="token">-fsSLO</span> <span class="token">https://github.com/tamler/another/releases/latest/download/install.sh</span> &amp;&amp; sh install.sh</code></pre>
+        <p class="quiet">Prebuilt archives, <code>cargo binstall</code>, checksums and experimental Windows notes: <a href="/docs/install/">install guide</a>.</p>
       </div>
       <p class="star-link"><a href="https://github.com/tamler/another">Source on GitHub</a></p>
     </section>

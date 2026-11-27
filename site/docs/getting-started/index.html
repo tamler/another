@@ -39,13 +39,14 @@
     <div class="guide-hero"><h1>Your first agent handoff</h1><p class="definition">Send a message between two coding agents working in the same checkout.</p><nav class="guide-nav" aria-label="Guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/">Full guide</a> <a href="/guides/">Task guides</a></nav></div>
     <section class="guide-section" aria-labelledby="install-title">
       <h2 id="install-title">1. Install and initialize</h2>
-      <p>From the first release, macOS and Linux users can install a verified prebuilt binary with <code>install.sh</code>, run <code>cargo binstall --git https://github.com/tamler/another another</code>, or unpack a macOS, static Linux musl or Windows x86_64 archive from <a href="https://github.com/tamler/another/releases">GitHub Releases</a>:</p>
-      <pre class="code-block shell" tabindex="0" aria-label="Install a prebuilt binary from the first release"><code>curl -fsSLO https://github.com/tamler/another/releases/latest/download/install.sh &amp;&amp;
-  sh install.sh</code></pre>
       <p>No GitHub Release is published yet. Install from source today with Rust 1.88 or newer, make sure Cargo's bin directory is on your <code>PATH</code>, then initialize local state from the repository where your agents will work:</p>
       <pre class="code-block shell" tabindex="0" aria-label="Install and initialize"><code>cargo install --locked --git https://github.com/tamler/another another
 another --version
 another init</code></pre>
+      <p>From the first release, macOS and Linux users can install a verified prebuilt binary with <code>scripts/install.sh</code>:</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Install a prebuilt binary from the first release"><code>curl -fsSLO https://github.com/tamler/another/releases/latest/download/install.sh &amp;&amp;
+  sh install.sh</code></pre>
+      <p>From the first release, you will also be able to run <code>cargo binstall --git https://github.com/tamler/another another</code> or unpack a macOS, static Linux musl or experimental Windows x86_64 archive from <a href="https://github.com/tamler/another/releases">GitHub Releases</a>.</p>
       <p>The local database lives in <code>~/.another</code>, or the directory set in <code>ANOTHER_HOME</code>. No account or hosted service is needed. See <a href="/docs/install/">installation options</a>, with details for <a href="/docs/install/macos/">macOS</a>, <a href="/docs/install/linux/">Linux</a> and <a href="/docs/install/windows/">experimental native Windows</a>.</p>
     </section>
     <section class="guide-section" aria-labelledby="messages-title">
@@ -73,7 +74,7 @@ another hook install --client claude,codex</code></pre>
     </section>
     <section class="guide-section" aria-labelledby="mcp-title">
       <h2 id="mcp-title">4. Connect the MCP server</h2>
-      <p>Add a stdio MCP server to each client using its supported configuration format. The command is <code>another serve --stdio</code>; clients that use an <code>mcpServers</code> object can use:</p>
+      <p>Add a stdio MCP server to each client using its supported configuration format, with the same project and data directory (<code>~/.another</code> or <code>ANOTHER_HOME</code>). The command is <code>another serve --stdio</code>; clients that use an <code>mcpServers</code> object can use:</p>
       <pre class="code-block shell" tabindex="0" aria-label="MCP configuration"><code>{
   "mcpServers": {
     "another": {
@@ -82,7 +83,11 @@ another hook install --client claude,codex</code></pre>
     }
   }
 }</code></pre>
-      <p>Restart or reconnect the client as its MCP settings require. Ensure <code>another</code> is on that client's <code>PATH</code>. Hooks announce waiting messages. MCP tools let agents read and send messages, acknowledge receipt and claim requests. <a href="/docs/#connections">Client configuration details</a>.</p>
+      <p>Or run a shared loopback daemon instead, and connect HTTP-capable MCP clients to <code>http://127.0.0.1:7466/mcp</code>. On macOS (launchd) and Linux (systemd user unit), <code>another daemon install</code> keeps <code>another serve --bind 127.0.0.1:7466</code> running in the background; you can also start it directly:</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Start the shared loopback daemon"><code>another daemon install
+# Or run in the foreground:
+another serve --bind 127.0.0.1:7466</code></pre>
+      <p>Restart or reconnect the client as its MCP settings require. Ensure <code>another</code> is on that client's <code>PATH</code>. Hooks announce waiting messages. MCP tools let agents read and send messages, acknowledge receipt and claim requests. See <a href="/docs/#connections">client configuration details</a> and <a href="https://github.com/tamler/another/blob/main/docs/DAEMON.md">the daemon guide</a>.</p>
     </section>
     <section class="guide-section" aria-labelledby="next-title">
       <h2 id="next-title">Then add only what you need</h2>
