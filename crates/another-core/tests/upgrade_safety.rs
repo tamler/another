@@ -1436,6 +1436,10 @@ fn a_v13_home_upgrades_and_a_delegate_can_admit_a_security_item() {
 
     let db_path = home.join(DB_FILE);
     let db = Connection::open(&db_path).unwrap();
+    // SQLite ignores a foreign_keys change inside a transaction, and
+    // execute_batch is one transaction, so turn FKs off first. Otherwise
+    // DROP TABLE queue_items fails if another table references it.
+    db.pragma_update(None, "foreign_keys", "OFF").unwrap();
     db.execute_batch(
         r#"
 CREATE TABLE queue_items_v13 (
@@ -1483,6 +1487,7 @@ CREATE INDEX queue_claimed ON queue_items(claimer_id) WHERE state = 'claimed';
 "#,
     )
     .unwrap();
+    db.pragma_update(None, "foreign_keys", "ON").unwrap();
     db.pragma_update(None, "user_version", 13).unwrap();
     let sql: String = db
         .query_row(
