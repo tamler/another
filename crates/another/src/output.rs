@@ -730,7 +730,7 @@ pub fn trial_stats(s: &another_core::TrialStats) -> String {
         "  holds taken by the edit hook   {:>5}",
         s.holds_auto_acquired
     );
-    let _ = writeln!(out, "Mail pushed into running sessions");
+    let _ = writeln!(out, "Messages pushed into running sessions");
     let _ = writeln!(
         out,
         "  mid-task notices               {:>5}",
@@ -878,7 +878,7 @@ pub fn board(b: &another_core::Board) -> String {
     if b.agents.is_empty() {
         let _ = writeln!(
             out,
-            "  none with holds, unread mail, acknowledgements or requests"
+            "  none with holds, unread messages, acknowledgements or requests"
         );
     }
     for a in &b.agents {

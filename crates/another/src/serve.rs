@@ -438,7 +438,7 @@ pub async fn serve_http(
     if let Some(every) = opts.push_every {
         spawn_waker(store.clone(), every, ct.clone());
         eprintln!(
-            "another: push delivery on: idle Herdr agents with new mail are woken (every {}s)",
+            "another: push delivery on: idle Herdr agents with new messages are woken (every {}s)",
             every.as_secs().max(1)
         );
     }

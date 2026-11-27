@@ -897,7 +897,7 @@ impl std::fmt::Display for NotPlain {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "the address of this agent is not plain: \"{}\" holds a character outside A-Z, a-z, 0-9, \".\", \"_\", \"@\" and \"-\", so the hook printed nothing and claimed no mail",
+            "the address of this agent is not plain: \"{}\" holds a character outside A-Z, a-z, 0-9, \".\", \"_\", \"@\" and \"-\", so the hook printed nothing and claimed no messages",
             another_core::display_line(&self.0, MAX_SHOWN_ADDRESS)
         )
     }
