@@ -152,6 +152,11 @@ Or, while `another serve` is running, open <http://127.0.0.1:7466/ui>. The page 
 
 ## Status
 
+An [opt-in coordination scenario harness](docs/COORDINATION-EVALS.md) (Q43, M10)
+checks holds, claims and queue races with offline judge fixtures. It runs only
+when explicitly requested locally or through `workflow_dispatch`, outside default
+CI. Live paid judging remains disabled pending a separate reviewed integration.
+
 Hosted Windows CI runs the workspace tests, including CLI thread exit-status checks,
 and the fresh-install, hook-pack and daemon dry-run checks. The forced small-stack
 test uses Unix `ulimit`; Windows exercises the CLI with its native main-thread stack.

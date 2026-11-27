@@ -20,6 +20,12 @@ Clean-room: implement from this repo's docs only. Do not copy code or schemas fr
 
 Design calls not covered by SPEC, recorded as they were made.
 
+Q43 / M10 tooling decision (number assigned at merge): coordination scenario
+evaluation is opt-in, with ignored Rust scenarios and a fixture-only manual
+workflow. Deterministic assertions own the score. Judge spending controls use a
+separate fail-closed reservation ledger; live transport remains disabled until a
+separate reviewed change after merge and testing. See [COORDINATION-EVALS.md](COORDINATION-EVALS.md).
+
 | # | Milestone | Decision |
 |---|---|---|
 | D1 | M2 | **Activity feed never carries message bodies.** Items are one-line summaries plus ids, so any peer (including a remote Grok Bot later) can read the feed without seeing mail content. |
