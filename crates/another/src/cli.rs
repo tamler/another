@@ -1800,11 +1800,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             end,
             keep,
         } => {
-            let phase = match (start, end) {
-                (true, _) => SessionPhase::Start,
-                (_, true) => SessionPhase::End,
-                _ => SessionPhase::Beat,
-            };
+            let phase = SessionPhase::from_flags(start, end)?;
             let hb = store.session(
                 &agent.agent,
                 phase,
