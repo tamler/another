@@ -10,9 +10,27 @@ mod mcp_http;
 use another_core::{
     NewRequest, Program, RegisterAgent, RequestAction, RequestFilter, RequestUpdate, SendMessage,
 };
-use mcp_http::{call, connect, error_code, start_remote as start};
+use mcp_http::{call, connect, error_code, start_remote as start, start_remote_federated};
 use rmcp::model::CallToolRequestParams;
 use serde_json::{json, Value};
+
+#[tokio::test]
+async fn federated_listener_rejects_conflicting_mcp_heartbeat() {
+    let srv = start_remote_federated().await;
+    let token = srv
+        .store
+        .create_token("grok-bot", std::slice::from_ref(&srv.work_glob), None, None)
+        .unwrap();
+    let client = connect(srv.base(), &token.secret).await;
+    let before = srv.store.agent("grok-bot").unwrap();
+    let conflict = call(&client, "heartbeat", json!({ "start": true, "end": true })).await;
+    assert_eq!(error_code(&conflict).as_deref(), Some("invalid"));
+    let after = srv.store.agent("grok-bot").unwrap();
+    assert_eq!(after.status, before.status);
+    assert_eq!(after.last_seen_at, before.last_seen_at);
+    client.cancel().await.unwrap();
+    srv.cancel();
+}
 
 #[tokio::test]
 async fn bearer_tokens_scope_and_audit_remote_calls() {
@@ -58,6 +76,13 @@ async fn bearer_tokens_scope_and_audit_remote_calls() {
         )
         .unwrap();
     let client = connect(srv.base(), &token.secret).await;
+
+    let before = srv.store.agent("grok-bot").unwrap();
+    let conflict = call(&client, "heartbeat", json!({ "start": true, "end": true })).await;
+    assert_eq!(error_code(&conflict).as_deref(), Some("invalid"));
+    let after = srv.store.agent("grok-bot").unwrap();
+    assert_eq!(after.status, before.status);
+    assert_eq!(after.last_seen_at, before.last_seen_at);
 
     // Acting agent is filled in, and only the token's agent is allowed.
     let inbox = call(&client, "fetch_inbox", json!({})).await;

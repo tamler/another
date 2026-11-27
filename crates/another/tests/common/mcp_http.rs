@@ -126,6 +126,7 @@ impl RemoteServer {
 
 async fn start_fixture(
     with_oauth: bool,
+    federation: bool,
     extra_agents: &[(&str, Program, Option<&str>)],
 ) -> RemoteServer {
     let dir = tempfile::tempdir().unwrap();
@@ -170,6 +171,12 @@ async fn start_fixture(
     }
     let server = if with_oauth {
         start_oauth_http(store.clone()).await
+    } else if federation {
+        start_http(store.clone(), CancellationToken::new(), |_, opts| {
+            opts.auth = true;
+            opts.federation = true;
+        })
+        .await
     } else {
         start_auth_http(store.clone()).await
     };
@@ -185,12 +192,17 @@ async fn start_fixture(
 
 /// Start the shared remote fixture (`grok-bot`, `alice@shop`, `auth: true`).
 pub async fn start_remote() -> RemoteServer {
-    start_fixture(false, &[]).await
+    start_fixture(false, false, &[]).await
+}
+
+/// Start the shared remote fixture on a listener that also serves federation (`auth: true`).
+pub async fn start_remote_federated() -> RemoteServer {
+    start_fixture(false, true, &[]).await
 }
 
 /// Start the shared OAuth fixture (`chatgpt`, `grok-bot`, `alice@shop`, `auth: true`, OAuth on).
 pub async fn start_oauth() -> RemoteServer {
-    start_fixture(true, &[("chatgpt", Program::Other, None)]).await
+    start_fixture(true, false, &[("chatgpt", Program::Other, None)]).await
 }
 
 /// Connect an `rmcp` streamable HTTP client with a bearer token.
