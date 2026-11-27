@@ -2039,7 +2039,7 @@ fn brief_says_when_it_cannot_read() {
             let out = another(home, args, &[]);
             assert_eq!(out.status.code(), Some(1), "{what} {args:?}");
             if args.contains(&"--json") {
-                json_error(&out);
+                assert_eq!(json_error(&out)["error"]["hint"], "run another doctor");
             } else {
                 assert_eq!(text(&out.stdout), CANNOT_READ, "{what} {args:?}");
                 assert!(text(&out.stderr).contains("run another doctor"));
@@ -2074,7 +2074,7 @@ fn brief_says_when_it_cannot_read() {
     assert_eq!(text(&out.stdout), CANNOT_READ);
     assert!(text(&out.stderr).contains("run another doctor"));
     let out = another(&home, &["--json", "needs", "--brief"], &[]);
-    json_error(&out);
+    assert_eq!(json_error(&out)["error"]["hint"], "run another doctor");
     db.execute_batch("ROLLBACK").unwrap();
     drop(db);
     let out = another(&home, &["needs", "--brief"], &[]);
@@ -2231,6 +2231,7 @@ fn needs_never_creates_or_migrates_a_home() {
     let board = json_error(&another(&missing, &["--json", "board"], &[]));
     assert_eq!(needs, board);
     assert_eq!(needs["error"]["code"], "error");
+    assert_eq!(needs["error"]["hint"], "run another doctor");
     assert!(needs["error"]["message"]
         .as_str()
         .unwrap()

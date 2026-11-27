@@ -67,9 +67,11 @@ Pending requests
   open  Review the parser change  from claude@shop to codex@shop-review, opened 0s ago  [01M7H3C0K20TE0AY0CTEW62YT8]
 ```
 
-## It writes nothing
+## Read-only access requires an existing database
 
 `another board` and `another needs` open the database read-only. They do not create a data directory, migrate, sweep or write events. SQLite may create WAL side files in a writable directory. If there is no database yet, both commands say to run `another init` first.
+
+If the database cannot be opened, both commands exit 1. With `--json`, the CLI error object includes the hint `run another doctor`.
 
 Because nothing is swept, a hold past its expiry is left out by its expiry time, and a request past its due time that no sweep has marked `stale` yet is shown with `overdue: true` (`overdue` in the text output).
 

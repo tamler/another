@@ -146,6 +146,57 @@ fn board_needs_an_existing_database_and_creates_nothing() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("run `another init` first"), "{err}");
     assert!(!env.another_home.exists(), "board must not create a home");
+    std::fs::create_dir_all(&env.another_home).unwrap();
+    board_read_error(&env, "error", "run `another init` first");
+    assert!(env.another_home.read_dir().unwrap().next().is_none());
+}
+
+fn board_read_error(env: &Env, code: &str, message: &str) {
+    let out = env.run(&["--json", "board"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stderr.is_empty(), "{:?}", out.stderr);
+    let body: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let error = &body["error"];
+    assert_eq!(error["code"], code);
+    assert!(
+        error["message"].as_str().unwrap().contains(message),
+        "{body}"
+    );
+    assert_eq!(error["hint"], "run another doctor");
+}
+
+#[test]
+fn board_reports_an_exclusive_writer_lock() {
+    let env = Env::new();
+    env.ok(&["init"]);
+    let db = rusqlite::Connection::open(env.another_home.join(another_core::DB_FILE)).unwrap();
+    db.pragma_update(None, "journal_mode", "DELETE").unwrap();
+    db.execute_batch("BEGIN EXCLUSIVE; UPDATE nodes SET display_name = display_name;")
+        .unwrap();
+    board_read_error(&env, "db", "database is locked");
+    db.execute_batch("ROLLBACK").unwrap();
+    env.ok(&["board"]);
+}
+
+#[test]
+fn board_refuses_an_old_schema_without_migrating() {
+    let env = Env::new();
+    let current = Env::new();
+    current.ok(&["init"]);
+    let db_path = |env: &Env| env.another_home.join(another_core::DB_FILE);
+    let db = rusqlite::Connection::open(db_path(&current)).unwrap();
+    let version: i64 = db
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    std::fs::create_dir_all(&env.another_home).unwrap();
+    let db = rusqlite::Connection::open(db_path(&env)).unwrap();
+    another_core::apply_schema(&db, version - 1).unwrap();
+    drop(db);
+    let before = std::fs::read(db_path(&env)).unwrap();
+
+    board_read_error(&env, "invalid", "schema");
+    assert_eq!(std::fs::read(db_path(&env)).unwrap(), before);
+    assert!(!env.another_home.join(another_core::ORIGIN_FILE).exists());
 }
 
 #[test]

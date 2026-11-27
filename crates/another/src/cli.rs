@@ -952,6 +952,8 @@ pub fn main() -> ExitCode {
     match run(cli) {
         Ok(code) => code,
         Err(err) => {
+            let open_error = err.downcast_ref::<ReadOnlyOpenError>();
+            let err = open_error.map_or(&err, |error| &error.0);
             let usage = err.is::<crate::templates::UsageError>();
             let body = match err.downcast_ref::<another_core::Error>() {
                 Some(e) => e.body(),
@@ -960,7 +962,11 @@ pub fn main() -> ExitCode {
                     message: format!("{err:#}"),
                 },
             };
-            let hint = cli_hint(body.code, &body.message);
+            let hint = if json && open_error.is_some() {
+                Some("run another doctor")
+            } else {
+                cli_hint(body.code, &body.message)
+            };
             if json {
                 let mut out = serde_json::json!({ "error": body });
                 if let Some(hint) = hint {
@@ -1104,15 +1110,32 @@ fn project_dir(store: &Store, path: &Path) -> anyhow::Result<String> {
     Ok(real)
 }
 
+/// Marks database open failures so the JSON error can add a doctor hint.
+#[derive(Debug)]
+struct ReadOnlyOpenError(anyhow::Error);
+
+impl std::fmt::Display for ReadOnlyOpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for ReadOnlyOpenError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
+}
+
 /// Open an initialized database for a read-only CLI report without migrating or sweeping.
 pub(crate) fn open_read_only(home: &Path, busy: Duration) -> anyhow::Result<Store> {
     if !home.join(another_core::DB_FILE).exists() {
-        anyhow::bail!(
+        let error = anyhow::anyhow!(
             "no Another database in {}; run `another init` first",
             home.display()
         );
+        return Err(ReadOnlyOpenError(error).into());
     }
-    Ok(Store::open_read_only(home, busy)?)
+    Ok(Store::open_read_only(home, busy).map_err(|error| ReadOnlyOpenError(error.into()))?)
 }
 
 fn board_command(
