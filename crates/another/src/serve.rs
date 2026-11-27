@@ -16,6 +16,11 @@ use crate::mcp::AnotherMcp;
 
 pub const DEFAULT_BIND: &str = "127.0.0.1:7466";
 
+pub(crate) const LOCAL_LISTENER_WARNING: &str =
+    "another: warning: do not tunnel or reverse-proxy this port; it checks no token. \
+     A proxy that rewrites Host to loopback makes remote callers look local, so they could \
+     read the feed and act as any agent. Use a separate authenticated or federation-only listener for remote access.";
+
 /// HTTP serving options.
 #[derive(Debug, Clone, Default)]
 pub struct HttpOptions {
@@ -432,6 +437,9 @@ pub async fn serve_http(
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding {addr}"))?;
+    if addr.ip().is_loopback() && !opts.auth && !opts.federation {
+        eprintln!("{LOCAL_LISTENER_WARNING}");
+    }
     // Background work starts only once the port is ours, so a second daemon that fails to
     // bind never sweeps or wakes alongside the first.
     spawn_sweeper(store.clone(), sweep_every, ct.clone());

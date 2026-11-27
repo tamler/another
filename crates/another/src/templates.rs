@@ -10,7 +10,7 @@ use another_core::{is_unsafe_text_char, single_line, MAX_SUBJECT_CHARS};
 use anyhow::Result;
 use serde_json::{json, Value};
 
-/// A template mistake on the command line. The CLI reports it like clap's own errors: code
+/// A usage mistake on the command line. The CLI reports it like clap's own errors: code
 /// `usage`, exit status 2.
 #[derive(Debug)]
 pub struct UsageError(pub String);
@@ -178,16 +178,25 @@ pub fn listing_json() -> Value {
     )
 }
 
-/// Parse `key=value` pairs; a key may not repeat.
+/// Parse template fields with the shared flag grammar.
 pub fn parse_fields(raw: &[String]) -> Result<BTreeMap<String, String>> {
+    parse_key_values(raw, "--field")
+}
+
+/// Parse `key=value` pairs for a named flag. Trim keys, require nonempty unique keys,
+/// and preserve values verbatim, including empty values and further equals signs.
+pub fn parse_key_values(raw: &[String], flag: &str) -> Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
     for pair in raw {
         let Some((k, v)) = pair.split_once('=') else {
-            usage!("--field {pair:?} is not key=value");
+            usage!("{flag} {pair:?} is not key=value");
         };
         let k = k.trim();
+        if k.is_empty() {
+            usage!("{flag} {pair:?} has an empty key");
+        }
         if out.insert(k.to_string(), v.to_string()).is_some() {
-            usage!("--field {k} is given twice");
+            usage!("{flag} {k} is given twice");
         }
     }
     Ok(out)
