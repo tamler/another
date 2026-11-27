@@ -13,6 +13,7 @@ Implements the spend controls required by SPEND-RULES.md:
 """
 from __future__ import annotations
 
+import http.client
 import json
 import math
 import os
@@ -217,11 +218,35 @@ def get_model_spec(model: str, *, require_provider: str | None = None, role: str
     return spec
 
 
-def _read_mode_600_key_file(path: Path, label: str) -> str | None:
+def validate_api_key(raw_key: str, provider: str) -> str:
+    """Validate an API key before header construction; never include key bytes in errors.
+
+    Rejects empty keys, interior newlines/CR, whitespace, NUL/control bytes, and non-ASCII
+    characters so Python's http.client.putheader can never raise an exception containing the key.
+    """
+    if not isinstance(raw_key, str):
+        raise KeyConfigError(
+            f"Invalid {provider} API key type",
+            error_class="key_invalid_format",
+        )
+    key = raw_key.strip()
+    if not key:
+        raise KeyConfigError(f"Empty API key for provider {provider!r}", error_class="key_empty")
+    for ch in key:
+        code = ord(ch)
+        if code < 0x21 or code > 0x7E:
+            raise KeyConfigError(
+                f"Invalid {provider} API key format: contains whitespace, control, or non-ASCII characters",
+                error_class="key_invalid_format",
+            )
+    return key
+
+
+def _read_mode_600_key_file(path: Path, label: str, provider: str) -> str | None:
     """Read a key from a regular mode-0600 file without following symlinks.
 
     Returns None only if the file does not exist (ENOENT).
-    Raises KeyConfigError on permission violations, symlinks, empty files, or read errors.
+    Raises KeyConfigError on permission violations, symlinks, empty files, illegal characters, or read errors.
     """
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
@@ -258,10 +283,16 @@ def _read_mode_600_key_file(path: Path, label: str) -> str | None:
         raw = os.read(fd, MAX_KEY_FILE_BYTES + 1)
     finally:
         os.close(fd)
-    key = raw.decode("utf-8").strip()
-    if not key:
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise KeyConfigError(
+            f"{label} key file is not valid UTF-8",
+            error_class="key_invalid_format",
+        ) from None
+    if not decoded.strip():
         raise KeyConfigError(f"{label} key file is empty", error_class="key_file_empty")
-    return key
+    return validate_api_key(decoded, provider)
 
 
 def load_provider_key(
@@ -274,16 +305,16 @@ def load_provider_key(
 ) -> str:
     """Load an API key for the given provider following SPEND-RULES.md.
 
-    Keys are never logged or included in exception messages.
+    Keys are validated against HTTP header safety rules and never logged or included in exceptions.
     """
     source_env = os.environ if env is None else env
     home = Path.home() if home_dir is None else home_dir
 
     if provider == "openai":
-        env_key = source_env.get("OPENAI_API_KEY", "").strip()
-        if env_key:
-            return env_key
-        file_key = _read_mode_600_key_file(home / ".config" / "openai" / "key", "OpenAI")
+        env_raw = source_env.get("OPENAI_API_KEY", "")
+        if env_raw.strip():
+            return validate_api_key(env_raw, "openai")
+        file_key = _read_mode_600_key_file(home / ".config" / "openai" / "key", "OpenAI", "openai")
         if file_key:
             return file_key
         raise KeyConfigError(
@@ -293,10 +324,10 @@ def load_provider_key(
 
     if provider == "google":
         for var in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
-            env_key = source_env.get(var, "").strip()
-            if env_key:
-                return env_key
-        file_key = _read_mode_600_key_file(home / ".config" / "gemini" / "key", "Google")
+            env_raw = source_env.get(var, "")
+            if env_raw.strip():
+                return validate_api_key(env_raw, "google")
+        file_key = _read_mode_600_key_file(home / ".config" / "gemini" / "key", "Google", "google")
         if file_key:
             return file_key
         raise KeyConfigError(
@@ -329,16 +360,16 @@ def load_provider_key(
                     "ANTHROPIC_JUDGE_KEY_FILE must be an absolute path",
                     error_class="key_path_not_absolute",
                 )
-            file_key = _read_mode_600_key_file(key_path, "Anthropic judge")
+            file_key = _read_mode_600_key_file(key_path, "Anthropic judge", "anthropic")
             if file_key:
                 return file_key
             raise KeyConfigError(
                 "ANTHROPIC_JUDGE_KEY_FILE does not exist",
                 error_class="key_file_missing",
             )
-        judge_env_key = source_env.get("ANTHROPIC_JUDGE_API_KEY", "").strip()
-        if judge_env_key:
-            return judge_env_key
+        judge_env_raw = source_env.get("ANTHROPIC_JUDGE_API_KEY", "")
+        if judge_env_raw.strip():
+            return validate_api_key(judge_env_raw, "anthropic")
         raise KeyConfigError(
             "Anthropic judge key unavailable: set ANTHROPIC_JUDGE_KEY_FILE (mode 600) or "
             "ANTHROPIC_JUDGE_API_KEY (ANTHROPIC_API_KEY is intentionally ignored)",
@@ -457,11 +488,69 @@ def classify_http_error(provider: str, status: int, body: str) -> tuple[bool, bo
     return False, False, f"http_{status}"
 
 
+def init_ledger(ledger_path: str | Path) -> Path:
+    """Explicitly provision a durable mode-0600 spend ledger file before live runs.
+
+    Fails closed if path is relative, parent does not exist, or path is a symlink/non-regular file.
+    Idempotent if a valid regular ledger file already exists.
+    """
+    raw = str(ledger_path).strip()
+    if not raw or not os.path.isabs(raw):
+        raise LedgerError("Absolute ledger path is required (fail closed)", error_class="relative_ledger_path")
+    path = Path(raw)
+    if not path.parent.exists():
+        raise LedgerError(
+            f"Ledger parent directory does not exist: {path.parent}",
+            error_class="ledger_parent_missing",
+        )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(str(path), flags, 0o600)
+    except OSError as exc:
+        raise LedgerError(
+            "Unable to provision spend ledger file",
+            error_class="ledger_init_failed",
+        ) from exc
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise LedgerError("Ledger path is not a regular file", error_class="ledger_not_regular")
+        if st.st_size == 0:
+            header = {
+                "time": utc_now_iso(),
+                "product": "another",
+                "eval": "ledger-init",
+                "mode": "live",
+                "simulated": False,
+                "provider": "system",
+                "model": "none",
+                "reservation_id": "",
+                "reserved_micros": 0,
+                "reserved_usd": 0.0,
+                "spent_micros": 0,
+                "spent_usd": 0.0,
+                "status": "initialized",
+                "error_class": None,
+            }
+            payload = (json.dumps(header, sort_keys=True) + "\n").encode("utf-8")
+            written = 0
+            while written < len(payload):
+                written += os.write(fd, payload[written:])
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return path
+
+
 class SpendLedger:
     """Durable, fail-closed, lock-guarded reserve-then-spend JSONL ledger.
 
     Modeled on compoundinterest.ing `app/app/lib/analyst-budget.server.ts`.
-    A crashed lock fails closed; an operator reconciles it, never a stale timer.
+    A crashed lock fails closed on reserve; an operator reconciles it, never a stale timer.
+    Billing hard stops also write a lock-free atomic sidecar sentinel (`<ledger>.<provider>.hard_stop`)
+    so sibling lock contention or JSONL append failures never discard a billing stop.
     Reservations are permanent and conservative: crashes or timeouts never refund spend.
     """
 
@@ -474,6 +563,10 @@ class SpendLedger:
         max_call_usd: float = DEFAULT_PER_CALL_CAP_USD,
         max_run_usd: float = DEFAULT_RUN_CAP_USD,
         max_ledger_usd: float | None = None,
+        simulated: bool = False,
+        require_existing: bool = False,
+        outcome_lock_wait_s: float = 5.0,
+        lock_sleep_fn: Callable[[float], None] = time.sleep,
     ) -> None:
         raw = str(ledger_path).strip()
         if not raw or not os.path.isabs(raw):
@@ -492,6 +585,10 @@ class SpendLedger:
         self.lock_path = Path(f"{raw}.lock")
         self.product = product
         self.eval_name = eval_name
+        self.simulated = bool(simulated)
+        self.require_existing = bool(require_existing)
+        self.outcome_lock_wait_s = max(0.0, float(outcome_lock_wait_s))
+        self._lock_sleep_fn = lock_sleep_fn
         self.max_call_micros = math.floor(max_call_usd * MICROS_PER_USD)
         self.max_run_micros = math.floor(max_run_usd * MICROS_PER_USD)
         self.max_ledger_micros = (
@@ -500,24 +597,91 @@ class SpendLedger:
         self._run_reserved_micros = 0
         self._hard_stopped_providers: set[str] = set()
 
-    def _acquire_lock(self) -> None:
+    def hard_stop_sentinel_path(self, provider: str) -> Path:
+        safe_provider = "".join(ch for ch in provider if ch.isalnum() or ch in ("-", "_")) or "unknown"
+        return Path(f"{self.path}.{safe_provider}.hard_stop")
+
+    def _check_hard_stop_sentinel(self, provider: str) -> None:
+        sentinel = self.hard_stop_sentinel_path(provider)
+        try:
+            os.lstat(sentinel)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise BillingHardStopError(
+                f"Hard-stop sentinel for provider {provider!r} is unreadable (fail closed)",
+                error_class="billing_hard_stop_sentinel_unreadable",
+            ) from exc
+        self._hard_stopped_providers.add(provider)
+        raise BillingHardStopError(
+            f"Durable billing hard-stop sentinel exists for provider {provider!r}; "
+            "operator reconciliation required before resuming",
+            error_class="billing_hard_stop_sentinel",
+        )
+
+    def _write_hard_stop_sentinel(self, record: dict[str, Any]) -> None:
+        """Atomically persist a lock-free provider hard-stop sentinel with fsync."""
+        sentinel = self.hard_stop_sentinel_path(str(record["provider"]))
+        tmp_path = Path(f"{sentinel}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        payload = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
+        try:
+            fd = os.open(str(tmp_path), flags, 0o600)
+            try:
+                written = 0
+                while written < len(payload):
+                    written += os.write(fd, payload[written:])
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(str(tmp_path), str(sentinel))
+            try:
+                dir_fd = os.open(str(sentinel.parent), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
+        except OSError as exc:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
+            raise LedgerError(
+                f"Failed to persist billing hard-stop sentinel: {exc.strerror}",
+                error_class="hard_stop_sentinel_write_failed",
+            ) from exc
+
+    def _acquire_lock(self, *, wait_timeout_s: float = 0.0) -> None:
         if not self.path.parent.exists():
             raise LedgerError(
                 f"Ledger parent directory does not exist: {self.path.parent}",
                 error_class="ledger_parent_missing",
             )
-        try:
-            os.mkdir(self.lock_path, 0o700)
-        except FileExistsError as exc:
-            raise LedgerError(
-                f"Ledger lock already exists (fail closed; operator must reconcile): {self.lock_path}",
-                error_class="ledger_locked",
-            ) from exc
-        except OSError as exc:
-            raise LedgerError(
-                f"Unable to acquire ledger lock: {exc.strerror}",
-                error_class="ledger_lock_failed",
-            ) from exc
+        deadline = time.monotonic() + max(0.0, wait_timeout_s)
+        delay = 0.02
+        while True:
+            try:
+                os.mkdir(self.lock_path, 0o700)
+                return
+            except FileExistsError as exc:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise LedgerError(
+                        f"Ledger lock already exists (fail closed; operator must reconcile): {self.lock_path}",
+                        error_class="ledger_locked",
+                    ) from exc
+                self._lock_sleep_fn(min(delay, remaining))
+                delay = min(delay * 1.5, 0.1)
+            except OSError as exc:
+                raise LedgerError(
+                    f"Unable to acquire ledger lock: {exc.strerror}",
+                    error_class="ledger_lock_failed",
+                ) from exc
 
     def _release_lock(self) -> None:
         os.rmdir(self.lock_path)
@@ -528,7 +692,12 @@ class SpendLedger:
             flags |= os.O_NOFOLLOW
         try:
             fd = os.open(str(self.path), flags)
-        except FileNotFoundError:
+        except FileNotFoundError as exc:
+            if self.require_existing:
+                raise LedgerError(
+                    f"Required durable spend ledger does not exist (fail closed): {self.path}",
+                    error_class="ledger_missing",
+                ) from exc
             return []
         except OSError as exc:
             raise LedgerError(
@@ -581,7 +750,9 @@ class SpendLedger:
         return rows
 
     def _append_row_unlocked(self, row: dict[str, Any]) -> None:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        flags = os.O_WRONLY | os.O_APPEND
+        if not self.require_existing:
+            flags |= os.O_CREAT
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:
@@ -619,6 +790,7 @@ class SpendLedger:
                 f"Provider {provider!r} is in billing hard-stop state for this session",
                 error_class="billing_hard_stop_active",
             )
+        self._check_hard_stop_sentinel(provider)
 
         micros = estimate_reservation_micros(body_str, max_output_tokens, spec)
         if micros > self.max_call_micros:
@@ -634,11 +806,24 @@ class SpendLedger:
                 error_class="run_cap_exceeded",
             )
 
-        self._acquire_lock()
+        self._acquire_lock(wait_timeout_s=0.0)
         try:
+            self._check_hard_stop_sentinel(provider)
             rows = self._read_rows_unlocked()
+            expected_mode = "fixture" if self.simulated else "live"
             total_ledger_micros = 0
             for row in rows:
+                row_mode = str(row.get("mode") or "live")
+                if self.simulated and row_mode != "fixture":
+                    raise LedgerError(
+                        "Refusing to write fixture simulation into a live spend ledger",
+                        error_class="fixture_live_ledger_collision",
+                    )
+                if not self.simulated and row_mode == "fixture":
+                    raise LedgerError(
+                        "Refusing to write live spend into a fixture simulation ledger",
+                        error_class="fixture_live_ledger_collision",
+                    )
                 if row.get("provider") == provider and row.get("status") == "billing_hard_stop":
                     self._hard_stopped_providers.add(provider)
                     raise BillingHardStopError(
@@ -646,10 +831,10 @@ class SpendLedger:
                         "operator reconciliation required before resuming",
                         error_class="billing_hard_stop_recorded",
                     )
-                if row.get("status") == "reserved":
+                if row.get("status") == "reserved" and row_mode != "fixture":
                     total_ledger_micros += int(row["reserved_micros"])
 
-            if self.max_ledger_micros is not None and total_ledger_micros + micros > self.max_ledger_micros:
+            if self.max_ledger_micros is not None and not self.simulated and total_ledger_micros + micros > self.max_ledger_micros:
                 raise BudgetExceededError(
                     f"Cumulative ledger spend would reach "
                     f"${(total_ledger_micros + micros) / MICROS_PER_USD:.6f}, "
@@ -664,6 +849,8 @@ class SpendLedger:
                 "time": now,
                 "product": self.product,
                 "eval": self.eval_name,
+                "mode": expected_mode,
+                "simulated": self.simulated,
                 "provider": provider,
                 "model": model,
                 "reservation_id": reservation_id,
@@ -697,14 +884,21 @@ class SpendLedger:
         spent_micros: int | None = None,
         error_class: str | None = None,
     ) -> None:
-        """Append the final outcome row for a prior reservation (never refunds reserved_micros)."""
-        if status == "billing_hard_stop":
+        """Append the final outcome row for a prior reservation (never refunds reserved_micros).
+
+        For billing hard stops, writes a lock-free atomic sentinel FIRST so sibling lock
+        contention or a JSONL append failure can never lose the stop for future processes.
+        """
+        is_billing_stop = status == "billing_hard_stop"
+        if is_billing_stop:
             self._hard_stopped_providers.add(reservation.provider)
         spent_usd = round(spent_micros / MICROS_PER_USD, 6) if spent_micros is not None else None
         record = {
             "time": utc_now_iso(),
             "product": reservation.product,
             "eval": self.eval_name,
+            "mode": "fixture" if self.simulated else "live",
+            "simulated": self.simulated,
             "provider": reservation.provider,
             "model": reservation.model,
             "reservation_id": reservation.reservation_id,
@@ -715,11 +909,36 @@ class SpendLedger:
             "status": status,
             "error_class": error_class,
         }
-        self._acquire_lock()
+
+        sentinel_written = False
+        sentinel_error: Exception | None = None
+        if is_billing_stop:
+            try:
+                self._write_hard_stop_sentinel(record)
+                sentinel_written = True
+            except Exception as exc:
+                sentinel_error = exc
+
         try:
-            self._append_row_unlocked(record)
-        finally:
-            self._release_lock()
+            self._acquire_lock(wait_timeout_s=self.outcome_lock_wait_s)
+            try:
+                self._append_row_unlocked(record)
+            finally:
+                self._release_lock()
+        except LedgerError as exc:
+            if is_billing_stop:
+                if sentinel_written:
+                    raise BillingHardStopError(
+                        f"Billing hard stop persisted via durable sentinel for provider {reservation.provider!r} "
+                        f"(ledger append failed: {exc.error_class})",
+                        error_class=error_class or "billing_hard_stop_sentinel",
+                    ) from None
+                raise BillingHardStopError(
+                    f"Billing hard stop for provider {reservation.provider!r} could not persist to ledger "
+                    f"or sentinel ({exc.error_class})",
+                    error_class="billing_hard_stop_unpersisted",
+                ) from sentinel_error
+            raise
 
 
 ALLOWED_API_PREFIXES: tuple[str, ...] = (
@@ -751,13 +970,13 @@ def default_http_transport(url: str, headers: dict[str, str], body: str, timeout
             error_class="unapproved_endpoint",
             retryable=False,
         )
-    req = urllib.request.Request(
-        url=url,
-        data=body.encode("utf-8"),
-        headers=headers,
-        method="POST",
-    )
     try:
+        req = urllib.request.Request(
+            url=url,
+            data=body.encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
         with _NO_REDIRECT_OPENER.open(req, timeout=timeout_s) as resp:
             resp_body = resp.read().decode("utf-8", errors="replace")
             resp_headers = {k.lower(): v for k, v in resp.headers.items()}
@@ -768,6 +987,13 @@ def default_http_transport(url: str, headers: dict[str, str], body: str, timeout
         err_body = exc.read().decode("utf-8", errors="replace") if exc.fp is not None else ""
         resp_headers = {k.lower(): v for k, v in exc.headers.items()} if exc.headers else {}
         return HttpResponse(status=int(exc.code), body=err_body, headers=resp_headers)
+    except (ValueError, http.client.HTTPException):
+        # Never propagate raw http.client / putheader ValueError messages, which echo header values.
+        raise ProviderRequestError(
+            "HTTP client rejected request parameters (sanitized)",
+            error_class="http_client_error",
+            retryable=False,
+        ) from None
 
 
 def metered_chat_json(
@@ -795,15 +1021,14 @@ def metered_chat_json(
     same unchanged reservation.
     """
     spec = get_model_spec(model, require_provider=provider, role=role)
-    key = api_key if api_key is not None else load_provider_key(
+    raw_key = api_key if api_key is not None else load_provider_key(
         provider,
         env=env,
         home_dir=home_dir,
         role=role,
         anthropic_zero_cash_confirmed=anthropic_zero_cash_confirmed,
     )
-    if not key.strip():
-        raise KeyConfigError(f"Empty API key for provider {provider!r}", error_class="key_empty")
+    key = validate_api_key(raw_key, provider)
 
     if provider == "openai":
         url = "https://api.openai.com/v1/chat/completions"
@@ -985,42 +1210,57 @@ def _extract_response(provider: str, data: dict[str, Any]) -> tuple[str, int, in
 
 
 def summarize_ledger(ledger_path: str | Path) -> dict[str, Any]:
-    """Summarize a JSONL spend ledger into Fleshapron-ready weekly receipt fields."""
+    """Summarize a JSONL spend ledger into Fleshapron-ready weekly receipt fields.
+
+    Simulated fixture rows are strictly excluded from actual live `totals` and reported
+    separately under `simulated_totals`. Sidecar `*.hard_stop` sentinels are included so
+    receipts reflect billing stops even if a JSONL outcome append failed.
+    """
     path = Path(ledger_path)
     if not path.is_absolute():
         raise LedgerError("Absolute ledger path required", error_class="relative_ledger_path")
-    if not path.exists():
-        return {
-            "ledger_path": str(path),
-            "generated_at": utc_now_iso(),
-            "entries": [],
-            "totals": {
-                "reserved_usd": 0.0,
-                "spent_usd": 0.0,
-                "reservations": 0,
-                "completed": 0,
-                "billing_hard_stops": 0,
-                "failed": 0,
-            },
-        }
 
     rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            rows.append(json.loads(line))
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+
+    # Merge any durable sidecar hard-stop sentinels (e.g., if a JSONL outcome write lost the lock).
+    hard_stop_sentinels: list[dict[str, Any]] = []
+    if path.parent.exists():
+        prefix = f"{path.name}."
+        for sibling in sorted(path.parent.iterdir()):
+            if sibling.name.startswith(prefix) and sibling.name.endswith(".hard_stop"):
+                try:
+                    sentinel_row = json.loads(sibling.read_text(encoding="utf-8").strip())
+                    if isinstance(sentinel_row, dict):
+                        hard_stop_sentinels.append(sentinel_row)
+                        rows.append(sentinel_row)
+                except Exception:
+                    hard_stop_sentinels.append({"path": sibling.name, "status": "billing_hard_stop"})
 
     by_id: dict[str, dict[str, Any]] = {}
     for row in rows:
         rid = str(row.get("reservation_id") or "")
         if not rid:
             continue
-        if rid not in by_id or row.get("status") != "reserved":
+        is_sim = bool(row.get("simulated")) or row.get("mode") == "fixture"
+        prev = by_id.get(rid)
+        # Prefer terminal outcomes over reserved, and prefer billing_hard_stop over any other state.
+        if (
+            prev is None
+            or prev.get("status") == "reserved"
+            or row.get("status") == "billing_hard_stop"
+        ):
             by_id[rid] = {
                 "time": row.get("time"),
                 "product": row.get("product"),
                 "provider": row.get("provider"),
                 "model": row.get("model"),
+                "mode": "fixture" if is_sim else "live",
+                "simulated": is_sim,
                 "reserved_usd": row.get("reserved_usd"),
                 "spent_usd": row.get("spent_usd"),
                 "status": row.get("status"),
@@ -1029,29 +1269,48 @@ def summarize_ledger(ledger_path: str | Path) -> dict[str, Any]:
                 "_spent_micros": row.get("spent_micros"),
             }
 
-    total_reserved_micros = 0
-    total_spent_micros = 0
-    completed = 0
-    hard_stops = 0
-    failed = 0
+    live_reserved = 0
+    live_spent = 0
+    live_reservations = 0
+    live_completed = 0
+    live_hard_stops = 0
+    live_failed = 0
+
+    sim_reserved = 0
+    sim_spent = 0
+    sim_reservations = 0
+    sim_completed = 0
+
     entries: list[dict[str, Any]] = []
     for item in by_id.values():
-        total_reserved_micros += item["_reserved_micros"]
-        if isinstance(item["_spent_micros"], int):
-            total_spent_micros += item["_spent_micros"]
         st = item["status"]
-        if st == "completed":
-            completed += 1
-        elif st == "billing_hard_stop":
-            hard_stops += 1
-        elif st in ("failed", "transient_error"):
-            failed += 1
+        if item["simulated"]:
+            sim_reservations += 1
+            sim_reserved += item["_reserved_micros"]
+            if isinstance(item["_spent_micros"], int):
+                sim_spent += item["_spent_micros"]
+            if st == "completed":
+                sim_completed += 1
+        else:
+            live_reservations += 1
+            live_reserved += item["_reserved_micros"]
+            if isinstance(item["_spent_micros"], int):
+                live_spent += item["_spent_micros"]
+            if st == "completed":
+                live_completed += 1
+            elif st == "billing_hard_stop":
+                live_hard_stops += 1
+            elif st in ("failed", "transient_error"):
+                live_failed += 1
+
         entries.append(
             {
                 "time": item["time"],
                 "product": item["product"],
                 "provider": item["provider"],
                 "model": item["model"],
+                "mode": item["mode"],
+                "simulated": item["simulated"],
                 "reserved_usd": item["reserved_usd"],
                 "spent_usd": item["spent_usd"],
                 "status": st,
@@ -1064,11 +1323,18 @@ def summarize_ledger(ledger_path: str | Path) -> dict[str, Any]:
         "generated_at": utc_now_iso(),
         "entries": entries,
         "totals": {
-            "reserved_usd": round(total_reserved_micros / MICROS_PER_USD, 6),
-            "spent_usd": round(total_spent_micros / MICROS_PER_USD, 6),
-            "reservations": len(by_id),
-            "completed": completed,
-            "billing_hard_stops": hard_stops,
-            "failed": failed,
+            "reserved_usd": round(live_reserved / MICROS_PER_USD, 6),
+            "spent_usd": round(live_spent / MICROS_PER_USD, 6),
+            "reservations": live_reservations,
+            "completed": live_completed,
+            "billing_hard_stops": live_hard_stops,
+            "failed": live_failed,
         },
+        "simulated_totals": {
+            "reserved_usd": round(sim_reserved / MICROS_PER_USD, 6),
+            "spent_usd": round(sim_spent / MICROS_PER_USD, 6),
+            "reservations": sim_reservations,
+            "completed": sim_completed,
+        },
+        "hard_stop_sentinels": len(hard_stop_sentinels),
     }

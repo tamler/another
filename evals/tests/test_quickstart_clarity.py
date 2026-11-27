@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,7 +17,7 @@ from evals.quickstart_clarity.bundle import (
 )
 from evals.quickstart_clarity.runner import DEFAULT_FIXTURE_PATH, REPO_ROOT, run_eval
 from evals.quickstart_clarity.sandbox import verify_commands_in_sandbox
-from evals.spend_ledger import BillingHardStopError, HttpResponse
+from evals.spend_ledger import BillingHardStopError, HttpResponse, LedgerError, SpendLedger, init_ledger
 
 
 class QuickstartClarityTests(unittest.TestCase):
@@ -164,9 +166,12 @@ class QuickstartClarityTests(unittest.TestCase):
         self.assertEqual(report["stranger_call"]["model"], "gpt-5.4-nano")
         self.assertEqual(report["judge_call"]["provider"], "anthropic")
         self.assertEqual(report["judge_result"]["verdict"], "needs_doc_fixes")
-        self.assertEqual(report["spend_receipt"]["totals"]["reservations"], 2)
-        self.assertEqual(report["spend_receipt"]["totals"]["completed"], 2)
-        self.assertGreater(report["spend_receipt"]["totals"]["spent_usd"], 0.0)
+        # Fixture simulations are strictly excluded from actual live spend totals.
+        self.assertEqual(report["spend_receipt"]["totals"]["reservations"], 0)
+        self.assertEqual(report["spend_receipt"]["totals"]["spent_usd"], 0.0)
+        self.assertEqual(report["spend_receipt"]["simulated_totals"]["reservations"], 2)
+        self.assertEqual(report["spend_receipt"]["simulated_totals"]["completed"], 2)
+        self.assertGreater(report["spend_receipt"]["simulated_totals"]["spent_usd"], 0.0)
 
         # Verify manifest only contains public docs and no AGENTS/DECISIONS.
         manifest_paths = {item["path"] for item in report["public_docs_manifest"]}
@@ -299,6 +304,132 @@ class QuickstartClarityTests(unittest.TestCase):
 
         self.assertFalse(by_id["s11"]["executed"])
         self.assertEqual(by_id["s11"]["skip_reason"], "subcommand_not_in_sandbox_allowlist:doctor")
+
+    def test_cli_fixture_mode_ignores_live_ledger_env_and_refuses_ledger_flag(self) -> None:
+        live_ledger = self.root / "shared-live.jsonl"
+        live_obj = SpendLedger(live_ledger, simulated=False)
+        res = live_obj.reserve(
+            provider="openai",
+            model="gpt-5.4-nano",
+            body_str='{"real":true}',
+            max_output_tokens=100,
+        )
+        live_obj.record_outcome(res, status="completed", spent_micros=42)
+        before_bytes = live_ledger.read_bytes()
+
+        env = dict(os.environ)
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["ANOTHER_EVAL_LEDGER"] = str(live_ledger)
+
+        # Running CLI in fixture mode must ignore ANOTHER_EVAL_LEDGER and leave it untouched.
+        proc = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "evals/quickstart_clarity/runner.py"), "--mode", "fixture"],
+            cwd=str(REPO_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(live_ledger.read_bytes(), before_bytes)
+        self.assertIn("spent_usd=$0.000000", proc.stdout)
+
+        # Explicitly passing --ledger in fixture mode must be refused.
+        proc_flag = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "evals/quickstart_clarity/runner.py"),
+                "--mode",
+                "fixture",
+                "--ledger",
+                str(live_ledger),
+            ],
+            cwd=str(REPO_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(proc_flag.returncode, 2)
+        self.assertEqual(live_ledger.read_bytes(), before_bytes)
+
+        # Direct run_eval in fixture mode against an existing live ledger also fails closed.
+        with self.assertRaises(LedgerError) as ctx:
+            run_eval(
+                repo_root=REPO_ROOT,
+                ledger_path=live_ledger,
+                mode="fixture",
+                judge_provider="none",
+            )
+        self.assertEqual(ctx.exception.error_class, "fixture_live_ledger_collision")
+        self.assertEqual(live_ledger.read_bytes(), before_bytes)
+
+    def test_cli_live_mode_missing_ledger_and_malformed_key_stderr_is_sanitized(self) -> None:
+        missing_ledger = self.root / "nonexistent-live.jsonl"
+        secret = "SUPERSECRET_CLI_LEAK_GUARD_7788"
+
+        # Missing ledger in live mode fails closed without creating an empty file.
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "ANOTHER_EVAL_ALLOW_LIVE": "1",
+            "ANOTHER_EVAL_NO_AUTO_RECHARGE_CONFIRMED": "1",
+            "OPENAI_API_KEY": f"sk-valid-but-ledger-missing",
+        }
+        proc_missing = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "evals/quickstart_clarity/runner.py"),
+                "--mode",
+                "live",
+                "--ledger",
+                str(missing_ledger),
+            ],
+            cwd=str(REPO_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(proc_missing.returncode, 1)
+        self.assertIn("ledger_missing", proc_missing.stderr)
+        self.assertFalse(missing_ledger.exists())
+
+        # Provisioned ledger + multiline malformed key -> sanitized stderr, zero key leakage, no traceback.
+        init_ledger(missing_ledger)
+        before_bytes = missing_ledger.read_bytes()
+        env["OPENAI_API_KEY"] = f"sk-{secret}\nX-Evil: 1"
+        proc_bad_key = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "evals/quickstart_clarity/runner.py"),
+                "--mode",
+                "live",
+                "--ledger",
+                str(missing_ledger),
+            ],
+            cwd=str(REPO_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(proc_bad_key.returncode, 1)
+        self.assertIn("key_invalid_format", proc_bad_key.stderr)
+        self.assertNotIn(secret, proc_bad_key.stderr)
+        self.assertNotIn(secret, proc_bad_key.stdout)
+        self.assertNotIn("Traceback", proc_bad_key.stderr)
+        self.assertEqual(missing_ledger.read_bytes(), before_bytes)
+
+    def test_workflow_and_root_readme_enforce_durable_ledger_and_document_eval(self) -> None:
+        workflow = (REPO_ROOT / ".github/workflows/eval-quickstart-clarity.yml").read_text(encoding="utf-8")
+        self.assertNotIn("actions/cache", workflow)
+        self.assertIn("ANOTHER_EVAL_DURABLE_LEDGER", workflow)
+        self.assertIn("workflow_dispatch:", workflow)
+
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("evals/quickstart_clarity/README.md", readme)
+        self.assertIn("fixture", readme.lower())
 
 
 if __name__ == "__main__":

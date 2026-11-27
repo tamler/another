@@ -3,12 +3,18 @@ name: eval quickstart clarity
 # Opt-in docs/quickstart clarity eval (M10).
 # Kept out of default CI: manual workflow_dispatch only.
 # Never prints secrets, never dumps env, and never interpolates inputs into shell code.
+#
+# Hosted GitHub Actions runners and Actions caches are ephemeral and cannot guarantee
+# authoritative durable billing-stop continuity across dispatches. Live mode therefore
+# fails closed unless an authoritative pre-existing durable ledger path outside runner
+# temp dirs is supplied via repository variable ANOTHER_EVAL_DURABLE_LEDGER on a
+# persistent runner. Default hosted runs are fixture-only (zero spend).
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Run mode: fixture (offline, zero spend) or live (opt-in paid API)"
+        description: "Run mode: fixture (offline, zero spend) or live (requires authoritative pre-existing durable ledger)"
         required: true
         default: "fixture"
         type: choice
@@ -78,14 +84,32 @@ jobs:
       - name: Run offline unit and fixture tests
         run: python3 -m unittest discover -s evals/tests -v
 
-      - name: Restore persisted spend ledger (carries forward billing hard stops)
+      - name: Verify authoritative durable ledger continuity (fail closed in live mode)
         if: ${{ inputs.mode == 'live' }}
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ runner.temp }}/another-eval-ledger
-          key: another-eval-spend-ledger-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            another-eval-spend-ledger-
+        env:
+          ANOTHER_EVAL_DURABLE_LEDGER: ${{ vars.ANOTHER_EVAL_DURABLE_LEDGER }}
+        run: |
+          if [ -z "$ANOTHER_EVAL_DURABLE_LEDGER" ]; then
+            echo "error: live mode requires an authoritative pre-existing durable ledger in vars.ANOTHER_EVAL_DURABLE_LEDGER; GitHub Actions caches are ephemeral and cannot guarantee billing-stop continuity" >&2
+            exit 1
+          fi
+          case "$ANOTHER_EVAL_DURABLE_LEDGER" in
+            /*) ;;
+            *)
+              echo "error: ANOTHER_EVAL_DURABLE_LEDGER must be an absolute path" >&2
+              exit 1
+              ;;
+          esac
+          case "$ANOTHER_EVAL_DURABLE_LEDGER" in
+            "$RUNNER_TEMP"/*|/tmp/*|/var/tmp/*)
+              echo "error: refusing ephemeral/temp ledger path for live CI dispatch" >&2
+              exit 1
+              ;;
+          esac
+          if [ ! -f "$ANOTHER_EVAL_DURABLE_LEDGER" ] || [ -L "$ANOTHER_EVAL_DURABLE_LEDGER" ]; then
+            echo "error: authoritative durable ledger does not exist as a regular file on this runner (fail closed; never create an empty ledger in live mode)" >&2
+            exit 1
+          fi
 
       - name: Install Rust toolchain (only if sandbox binary verification is requested)
         if: ${{ inputs.verify_with_binary }}
@@ -106,14 +130,12 @@ jobs:
           ANOTHER_EVAL_ALLOW_LIVE: ${{ inputs.mode == 'live' && '1' || '0' }}
           ANOTHER_EVAL_NO_AUTO_RECHARGE_CONFIRMED: ${{ inputs.no_auto_recharge_confirmed && '1' || '0' }}
           ANOTHER_EVAL_ANTHROPIC_ZERO_CASH_CONFIRMED: ${{ inputs.anthropic_zero_cash_confirmed && '1' || '0' }}
-          ANOTHER_EVAL_LEDGER: ${{ runner.temp }}/another-eval-ledger/spend.jsonl
+          ANOTHER_EVAL_LEDGER: ${{ inputs.mode == 'live' && vars.ANOTHER_EVAL_DURABLE_LEDGER || '' }}
           OPENAI_API_KEY: ${{ inputs.mode == 'live' && secrets.OPENAI_API_KEY || '' }}
           ANTHROPIC_JUDGE_API_KEY: ${{ inputs.mode == 'live' && inputs.judge == 'anthropic' && secrets.ANTHROPIC_JUDGE_API_KEY || '' }}
         run: |
-          mkdir -p "$RUNNER_TEMP/another-eval-ledger"
           args=(
             --mode "$EVAL_MODE"
-            --ledger "$ANOTHER_EVAL_LEDGER"
             --player-model "$EVAL_PLAYER_MODEL"
             --judge "$EVAL_JUDGE"
             --max-call-usd "$EVAL_MAX_CALL_USD"
@@ -121,17 +143,13 @@ jobs:
             --output "$RUNNER_TEMP/quickstart-clarity-report.json"
             --receipt-out "$RUNNER_TEMP/quickstart-clarity-receipt.json"
           )
+          if [ "$EVAL_MODE" = "live" ]; then
+            args+=(--ledger "$ANOTHER_EVAL_LEDGER")
+          fi
           if [ "$EVAL_VERIFY_BIN" = "true" ]; then
             args+=(--verify-bin "$RUNNER_TEMP/another-bin/bin/another")
           fi
           python3 evals/quickstart_clarity/runner.py "${args[@]}"
-
-      - name: Persist updated spend ledger (even on billing hard stop)
-        if: ${{ always() && inputs.mode == 'live' }}
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ runner.temp }}/another-eval-ledger
-          key: another-eval-spend-ledger-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload eval report and spend receipt
         if: always()
@@ -141,5 +159,4 @@ jobs:
           path: |
             ${{ runner.temp }}/quickstart-clarity-report.json
             ${{ runner.temp }}/quickstart-clarity-receipt.json
-            ${{ runner.temp }}/another-eval-ledger/spend.jsonl
           if-no-files-found: ignore

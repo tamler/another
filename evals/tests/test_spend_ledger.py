@@ -18,9 +18,11 @@ from evals.spend_ledger import (
     SpendLedger,
     _NoRedirectHandler,
     default_http_transport,
+    init_ledger,
     load_provider_key,
     metered_chat_json,
     summarize_ledger,
+    validate_api_key,
 )
 
 
@@ -467,6 +469,261 @@ class SpendLedgerTests(unittest.TestCase):
             anthropic_zero_cash_confirmed=True,
         )
         self.assertEqual(loaded, "sk-ant-judge-promo")
+
+    def test_require_existing_ledger_fails_closed_until_provisioned(self) -> None:
+        missing = self.root / "must-exist.jsonl"
+        ledger = SpendLedger(missing, require_existing=True)
+        calls = 0
+
+        def transport(*_args):
+            nonlocal calls
+            calls += 1
+            return HttpResponse(200, "{}", {})
+
+        with self.assertRaises(LedgerError) as ctx:
+            metered_chat_json(
+                ledger=ledger,
+                provider="openai",
+                model="gpt-5.4-nano",
+                system_prompt="s",
+                user_prompt="u",
+                max_output_tokens=100,
+                api_key="sk-test-valid",
+                transport=transport,
+            )
+        self.assertEqual(ctx.exception.error_class, "ledger_missing")
+        self.assertEqual(calls, 0)
+        self.assertFalse(missing.exists())
+
+        # After explicit initialization, reservation succeeds.
+        init_ledger(missing)
+        self.assertTrue(missing.exists())
+        res = ledger.reserve(
+            provider="openai",
+            model="gpt-5.4-nano",
+            body_str='{"ok":1}',
+            max_output_tokens=100,
+        )
+        self.assertTrue(res.reservation_id)
+
+    def test_billing_hard_stop_survives_sibling_lock_contention_and_append_failure(self) -> None:
+        # Case 1: Brief sibling lock contention during outcome write resolves via bounded retry.
+        lp1 = self.root / "contended.jsonl"
+        lock1 = Path(f"{lp1}.lock")
+        sleep_calls = 0
+
+        def release_lock_on_second_sleep(_delay: float) -> None:
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls == 2 and lock1.exists():
+                os.rmdir(lock1)
+
+        ledger1 = SpendLedger(lp1, outcome_lock_wait_s=1.0, lock_sleep_fn=release_lock_on_second_sleep)
+
+        def transport_with_brief_lock(*_args):
+            # Simulate sibling acquiring lock while our HTTP request is in flight.
+            os.mkdir(lock1, 0o700)
+            return HttpResponse(402, '{"error":{"message":"Payment required"}}', {})
+
+        with self.assertRaises(BillingHardStopError):
+            metered_chat_json(
+                ledger=ledger1,
+                provider="openai",
+                model="gpt-5.4-nano",
+                system_prompt="s",
+                user_prompt="u",
+                max_output_tokens=100,
+                api_key="sk-test-valid",
+                transport=transport_with_brief_lock,
+            )
+        self.assertGreaterEqual(sleep_calls, 2)
+        rows1 = [json.loads(line) for line in lp1.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([r["status"] for r in rows1], ["reserved", "billing_hard_stop"])
+        self.assertTrue(ledger1.hard_stop_sentinel_path("openai").exists())
+
+        # Case 2: Lock remains stuck permanently during billing outcome write.
+        lp2 = self.root / "stuck-outcome.jsonl"
+        lock2 = Path(f"{lp2}.lock")
+        ledger2 = SpendLedger(lp2, outcome_lock_wait_s=0.0, lock_sleep_fn=lambda _d: None)
+
+        def transport_with_stuck_lock(*_args):
+            os.mkdir(lock2, 0o700)
+            return HttpResponse(402, '{"error":{"message":"Payment required"}}', {})
+
+        with self.assertRaises(BillingHardStopError):
+            metered_chat_json(
+                ledger=ledger2,
+                provider="openai",
+                model="gpt-5.4-nano",
+                system_prompt="s",
+                user_prompt="u",
+                max_output_tokens=100,
+                api_key="sk-test-valid",
+                transport=transport_with_stuck_lock,
+            )
+        # Even though JSONL only has the unresolved reservation, durable sentinel exists.
+        self.assertTrue(ledger2.hard_stop_sentinel_path("openai").exists())
+        os.rmdir(lock2)
+
+        # Fresh process opening the same ledger AFTER the lock clears must STILL refuse spending!
+        fresh = SpendLedger(lp2)
+        fresh_calls = 0
+
+        def should_not_run(*_args):
+            nonlocal fresh_calls
+            fresh_calls += 1
+            return HttpResponse(200, "{}", {})
+
+        with self.assertRaises(BillingHardStopError):
+            metered_chat_json(
+                ledger=fresh,
+                provider="openai",
+                model="gpt-5.4-nano",
+                system_prompt="s",
+                user_prompt="u",
+                max_output_tokens=100,
+                api_key="sk-test-valid",
+                transport=should_not_run,
+            )
+        self.assertEqual(fresh_calls, 0)
+        receipt = summarize_ledger(lp2)
+        self.assertEqual(receipt["totals"]["billing_hard_stops"], 1)
+        self.assertEqual(receipt["hard_stop_sentinels"], 1)
+
+        # Case 3: JSONL append itself fails (e.g. read-only ledger) during billing outcome write.
+        lp3 = self.root / "readonly-outcome.jsonl"
+        ledger3 = SpendLedger(lp3)
+
+        def transport_makes_ledger_readonly(*_args):
+            os.chmod(lp3, 0o400)
+            return HttpResponse(402, '{"error":{"message":"Payment required"}}', {})
+
+        try:
+            with self.assertRaises(BillingHardStopError):
+                metered_chat_json(
+                    ledger=ledger3,
+                    provider="openai",
+                    model="gpt-5.4-nano",
+                    system_prompt="s",
+                    user_prompt="u",
+                    max_output_tokens=100,
+                    api_key="sk-test-valid",
+                    transport=transport_makes_ledger_readonly,
+                )
+            self.assertTrue(ledger3.hard_stop_sentinel_path("openai").exists())
+            self.assertFalse(Path(f"{lp3}.lock").exists())
+        finally:
+            os.chmod(lp3, 0o600)
+
+        # Fresh process after restoring write perms still refuses spending due to durable sentinel.
+        fresh3 = SpendLedger(lp3)
+        with self.assertRaises(BillingHardStopError):
+            fresh3.reserve(
+                provider="openai",
+                model="gpt-5.4-nano",
+                body_str='{"retry":1}',
+                max_output_tokens=100,
+            )
+
+    def test_malformed_keys_rejected_without_leaking_secret_or_calling_transport(self) -> None:
+        secret = "SUPERSECRET_KEY_TOKEN_9942"
+        bad_keys = [
+            f"sk-{secret}\nX-Injected: evil",
+            f"sk-{secret}\r\nX-Injected: evil",
+            f"sk-{secret} extra",
+            f"sk-{secret}\x00tail",
+            f"sk-{secret}\u00e9",
+        ]
+        ledger = SpendLedger(self.ledger_path)
+        calls = 0
+
+        def transport(*_args):
+            nonlocal calls
+            calls += 1
+            return HttpResponse(200, "{}", {})
+
+        for bad_key in bad_keys:
+            with self.subTest(bad_key=repr(bad_key)):
+                with self.assertRaises(KeyConfigError) as ctx_val:
+                    validate_api_key(bad_key, "openai")
+                self.assertEqual(ctx_val.exception.error_class, "key_invalid_format")
+                self.assertNotIn(secret, str(ctx_val.exception))
+
+                # Direct api_key argument to metered_chat_json must also reject pre-header.
+                with self.assertRaises(KeyConfigError) as ctx_call:
+                    metered_chat_json(
+                        ledger=ledger,
+                        provider="openai",
+                        model="gpt-5.4-nano",
+                        system_prompt="s",
+                        user_prompt="u",
+                        max_output_tokens=100,
+                        api_key=bad_key,
+                        transport=transport,
+                    )
+                self.assertEqual(ctx_call.exception.error_class, "key_invalid_format")
+                self.assertNotIn(secret, str(ctx_call.exception))
+
+                # Env var loader must also reject without echoing secret.
+                with self.assertRaises(KeyConfigError) as ctx_env:
+                    load_provider_key("openai", env={"OPENAI_API_KEY": bad_key}, home_dir=self.root)
+                self.assertEqual(ctx_env.exception.error_class, "key_invalid_format")
+                self.assertNotIn(secret, str(ctx_env.exception))
+
+        # Mode-600 key file with interior newline must also reject without leaking secret.
+        fake_home = self.root / "badhome"
+        key_file = fake_home / ".config" / "openai" / "key"
+        key_file.parent.mkdir(parents=True)
+        key_file.write_text(f"sk-{secret}\nsecond-line\n", encoding="utf-8")
+        os.chmod(key_file, 0o600)
+        with self.assertRaises(KeyConfigError) as ctx_file:
+            load_provider_key("openai", env={}, home_dir=fake_home)
+        self.assertEqual(ctx_file.exception.error_class, "key_invalid_format")
+        self.assertNotIn(secret, str(ctx_file.exception))
+
+        self.assertEqual(calls, 0)
+        self.assertFalse(self.ledger_path.exists())
+
+    def test_fixture_and_live_ledgers_cannot_mix_and_receipt_excludes_simulations(self) -> None:
+        live_path = self.root / "live.jsonl"
+        live_ledger = SpendLedger(live_path, simulated=False)
+        res = live_ledger.reserve(
+            provider="openai",
+            model="gpt-5.4-nano",
+            body_str='{"live":1}',
+            max_output_tokens=100,
+        )
+        live_ledger.record_outcome(res, status="completed", spent_micros=50)
+        before_bytes = live_path.read_bytes()
+
+        # Fixture ledger attempting to write into existing live ledger fails closed!
+        fixture_ledger = SpendLedger(live_path, simulated=True)
+        with self.assertRaises(LedgerError) as ctx:
+            fixture_ledger.reserve(
+                provider="openai",
+                model="gpt-5.4-nano",
+                body_str='{"sim":1}',
+                max_output_tokens=100,
+            )
+        self.assertEqual(ctx.exception.error_class, "fixture_live_ledger_collision")
+        self.assertEqual(live_path.read_bytes(), before_bytes)
+
+        # Standalone fixture ledger excludes simulated spend from actual totals!
+        sim_path = self.root / "sim.jsonl"
+        sim_ledger = SpendLedger(sim_path, simulated=True)
+        sim_res = sim_ledger.reserve(
+            provider="openai",
+            model="gpt-5.4-nano",
+            body_str='{"sim":1}',
+            max_output_tokens=100,
+        )
+        sim_ledger.record_outcome(sim_res, status="completed", spent_micros=500)
+        receipt = summarize_ledger(sim_path)
+        self.assertEqual(receipt["totals"]["spent_usd"], 0.0)
+        self.assertEqual(receipt["totals"]["reserved_usd"], 0.0)
+        self.assertEqual(receipt["totals"]["reservations"], 0)
+        self.assertGreater(receipt["simulated_totals"]["spent_usd"], 0.0)
+        self.assertEqual(receipt["simulated_totals"]["reservations"], 1)
 
 
 if __name__ == "__main__":

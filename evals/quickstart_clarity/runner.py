@@ -38,9 +38,11 @@ from evals.spend_ledger import (
     DEFAULT_PER_CALL_CAP_USD,
     DEFAULT_RUN_CAP_USD,
     HttpResponse,
+    SpendError,
     SpendLedger,
     TransportFn,
     default_http_transport,
+    init_ledger,
     metered_chat_json,
     summarize_ledger,
     utc_now_iso,
@@ -125,6 +127,8 @@ def run_eval(
         eval_name="quickstart-clarity",
         max_call_usd=max_call_usd,
         max_run_usd=max_run_usd,
+        simulated=(mode == "fixture"),
+        require_existing=(mode == "live"),
     )
 
     if mode == "fixture":
@@ -230,10 +234,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Repository checkout root containing public docs.",
     )
     parser.add_argument(
+        "--init-ledger",
+        type=Path,
+        default=None,
+        help="Explicitly provision a durable mode-0600 spend ledger file at an absolute path and exit.",
+    )
+    parser.add_argument(
         "--ledger",
         type=Path,
         default=None,
-        help="Absolute path to the durable JSONL spend ledger (or set ANOTHER_EVAL_LEDGER).",
+        help="Absolute path to an existing durable JSONL spend ledger for live mode (or set ANOTHER_EVAL_LEDGER).",
     )
     parser.add_argument(
         "--fixture",
@@ -305,21 +315,39 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    if args.init_ledger is not None:
+        try:
+            provisioned = init_ledger(args.init_ledger)
+        except SpendError as exc:
+            print(f"error ({exc.error_class}): {exc}", file=sys.stderr)
+            return 1
+        print(f"initialized durable spend ledger: {provisioned}")
+        return 0
+
     tmp_ledger_dir: tempfile.TemporaryDirectory[str] | None = None
     try:
-        if args.ledger is not None:
-            ledger_path = args.ledger
-        elif os.environ.get("ANOTHER_EVAL_LEDGER", "").strip():
-            ledger_path = Path(os.environ["ANOTHER_EVAL_LEDGER"].strip())
-        elif args.mode == "fixture":
+        if args.mode == "fixture":
+            if args.ledger is not None:
+                print(
+                    "error: --ledger cannot be used with --mode fixture; fixture runs always use "
+                    "an isolated temporary ledger so simulated spend never touches a live ledger",
+                    file=sys.stderr,
+                )
+                return 2
+            # Always ignore ANOTHER_EVAL_LEDGER in fixture mode so live ledgers stay untouched.
             tmp_ledger_dir = tempfile.TemporaryDirectory(prefix="another-eval-fixture-ledger-")
-            ledger_path = Path(tmp_ledger_dir.name) / "spend-ledger.jsonl"
+            ledger_path = Path(tmp_ledger_dir.name) / "fixture-spend-ledger.jsonl"
         else:
-            print(
-                "error: live mode requires an explicit absolute --ledger or ANOTHER_EVAL_LEDGER path",
-                file=sys.stderr,
-            )
-            return 2
+            if args.ledger is not None:
+                ledger_path = args.ledger
+            elif os.environ.get("ANOTHER_EVAL_LEDGER", "").strip():
+                ledger_path = Path(os.environ["ANOTHER_EVAL_LEDGER"].strip())
+            else:
+                print(
+                    "error: live mode requires an explicit absolute --ledger or ANOTHER_EVAL_LEDGER path",
+                    file=sys.stderr,
+                )
+                return 2
 
         report = run_eval(
             repo_root=args.repo_root,
@@ -348,10 +376,13 @@ def main(argv: list[str] | None = None) -> int:
 
         summary = report["stranger_result"]["summary"]
         findings = report["stranger_result"]["findings"]
+        totals = report["spend_receipt"]["totals"]
+        sim_totals = report["spend_receipt"]["simulated_totals"]
         print(
             f"quickstart-clarity ({args.mode}): findings={len(findings)}, "
             f"clarity_score={summary.get('overall_clarity_score_1_to_5')}/5, "
-            f"spent_usd=${report['spend_receipt']['totals']['spent_usd']:.6f}"
+            f"spent_usd=${totals['spent_usd']:.6f}, "
+            f"simulated_usd=${sim_totals['spent_usd']:.6f}"
         )
         if report["judge_result"] is not None:
             print(
@@ -360,6 +391,13 @@ def main(argv: list[str] | None = None) -> int:
                 f"rejected={len(report['judge_result']['rejected_findings'])}"
             )
         return 0
+    except SpendError as exc:
+        # Print sanitized error without a traceback so malformed keys can never leak to stderr.
+        print(f"error ({exc.error_class}): {exc}", file=sys.stderr)
+        return 1
+    except (RuntimeError, ValueError, FileNotFoundError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     finally:
         if tmp_ledger_dir is not None:
             tmp_ledger_dir.cleanup()
