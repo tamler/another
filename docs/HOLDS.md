@@ -92,6 +92,8 @@ A marked hold is not a reason to leave a file alone in your own checkout. With `
 
 The checkout is found from files, without running git, and kept in a node-local cache that is filled the first time a project is used. Holds on other machines are still matched by project name and reported as warnings, never conflicts (D26).
 
+Nested registered directories outside git are related even when they are not the same checkout. If a shared notes folder is one project and a subfolder of it is registered as another, which happens when sessions start in both, holds in the two projects are compared as paths from the outer folder, so `sub/notes.md` held in the outer project stops an edit of `notes.md` in the inner one, and the other way round. Folders that only share a name prefix (`work/a` and `work/ab`) are not nested. A subfolder name with glob characters (`app/[id]`) is taken literally.
+
 `another holds --project X` and the board also list holds in other checkouts of the same repository. They are other work on that repository and will not block you. Another tells one repository from another by its `origin` remote with the scheme, user name, password or token, port and `.git` suffix removed and the host lowercased, or, with no `origin`, by the shared git directory every worktree points at. Credentials are never stored.
 
 ### A hold that points into another checkout

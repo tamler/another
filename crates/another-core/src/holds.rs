@@ -8,6 +8,8 @@
 //! directory it was taken in (see `repo.rs`, D92). Projects registered at different
 //! directories of one checkout share it, compared by paths from its top; worktrees, clones
 //! and nested checkouts of one repository are separate and never see each other's holds.
+//! Registered directories that are both outside git and nest on disk are compared as paths
+//! from the outer folder, and still never cross a Git checkout boundary.
 //! What follows from that for a pattern that points into another checkout, and release by
 //! path, is in `checkout.rs`.
 
@@ -211,11 +213,12 @@ const HOLD_SELECT: &str =
      JOIN agents a ON a.agent_id = h.agent_id
      LEFT JOIN projects ap ON ap.project_id = a.project_id";
 
-/// [`HOLD_SELECT`] plus the hold's project id (column 10) and that project's position in its
-/// checkout (column 11).
+/// [`HOLD_SELECT`] plus the hold's project id (column 10), that project's position in its
+/// checkout (column 11), its directory (column 12) and its checkout id (column 13).
 const HOLD_SELECT_REPO: &str =
     "SELECT h.hold_id, p.slug, a.address, NULL, h.pattern, h.exclusive, h.reason,
-       h.ttl_seconds, h.created_at, h.expires_at, h.project_id, coalesce(pr.repo_prefix, '')
+       h.ttl_seconds, h.created_at, h.expires_at, h.project_id, coalesce(pr.repo_prefix, ''),
+       p.abs_path, coalesce(pr.checkout, '')
      FROM holds h
      JOIN projects p ON p.project_id = h.project_id
      JOIN agents a ON a.agent_id = h.agent_id
@@ -520,6 +523,46 @@ fn overlap_on_volume(a: &str, b: &str, fold: bool) -> bool {
             && (literal_pattern(a).is_some() || !a.contains('['))
             && (literal_pattern(b).is_some() || !b.contains('['))
             && patterns_overlap(&a.to_lowercase(), &b.to_lowercase()))
+}
+
+/// `inner` relative to `outer`, `/`-separated (empty when they are the same directory),
+/// when `outer` is `inner` or one of its ancestors. Compared component by component, so
+/// `/a/b` is not an ancestor of `/a/bc`; letter case is ignored on a case-folding volume.
+fn dir_below(outer: &str, inner: &str, fold: bool) -> Option<String> {
+    let name = |c: std::path::Component<'_>| c.as_os_str().to_string_lossy().into_owned();
+    let outer: Vec<String> = Path::new(outer).components().map(name).collect();
+    let inner: Vec<String> = Path::new(inner).components().map(name).collect();
+    if outer.is_empty() || outer.len() > inner.len() {
+        return None;
+    }
+    let same = |a: &String, b: &String| {
+        if fold {
+            a.to_lowercase() == b.to_lowercase()
+        } else {
+            a == b
+        }
+    };
+    if !outer.iter().zip(&inner).all(|(a, b)| same(a, b)) {
+        return None;
+    }
+    Some(inner[outer.len()..].join("/"))
+}
+
+/// A literal path as a hold pattern that matches only itself: each glob metacharacter is
+/// written as a one-character class (`[*]`, `[[]`), the form hold patterns already use for
+/// literal names. A directory such as `app/[id]` then stays a literal prefix.
+fn glob_literal(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        if matches!(c, '*' | '?' | '[' | ']' | '{' | '}') {
+            out.push('[');
+            out.push(c);
+            out.push(']');
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Whether the volume holding the existing directory `dir` treats names that differ only
@@ -930,51 +973,116 @@ fn conflicts_for(
     link_unlinked(tx)?;
     let (checkout, my_prefix) = crate::repo::link_of(tx, project)?
         .map_or((String::new(), String::new()), |l| (l.checkout, l.prefix));
+    let fold = folds_case(Path::new(&project.abs_path));
     // This project's holds, plus holds in any local project of the same checkout: one
     // registered at another directory of it. Worktrees and clones of the repository are
-    // other checkouts and are never candidates (D92).
+    // other checkouts and are never candidates (D92). Also include a local project whose
+    // directory contains this one or lies inside it (a notes or lanes folder outside git
+    // and a subfolder registered as its own project).
+    let mut pstmt = tx.prepare(
+        "SELECT p.project_id, p.abs_path, coalesce(pr.checkout, '')
+         FROM projects p LEFT JOIN project_repos pr ON pr.project_id = p.project_id
+         WHERE p.node_id = ?1",
+    )?;
+    let mut nested: Vec<String> = Vec::new();
+    let rows = pstmt
+        .query_map(params![tx.node_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, dir, their_checkout) in rows {
+        if id == project.project_id {
+            continue;
+        }
+        let same_checkout = !checkout.is_empty() && their_checkout == checkout;
+        if same_checkout {
+            continue;
+        }
+        // Worktrees, clones, submodules and a git checkout inside a registered
+        // folder are other checkouts and are never nested candidates (D92), even
+        // when one directory lies inside the other. Nested comparison is only
+        // for registered directories that are both outside git.
+        if !checkout.is_empty() || !their_checkout.is_empty() {
+            continue;
+        }
+        if dir_below(&dir, &project.abs_path, fold).is_some()
+            || dir_below(&project.abs_path, &dir, fold).is_some()
+        {
+            nested.push(id);
+        }
+    }
+    let nested_sql = if nested.is_empty() {
+        "0".to_string()
+    } else {
+        vec!["?"; nested.len()].join(", ")
+    };
     let mut stmt = tx.prepare(&format!(
         "{HOLD_SELECT_REPO} WHERE h.released_at IS NULL AND h.expires_at > ?3
            AND h.agent_id != ?2
-           AND (h.project_id = ?1 OR (?4 != '' AND h.project_id IN
-                (SELECT project_id FROM project_repos WHERE checkout = ?4)))
+           AND (h.project_id = ?1
+                OR (?4 != '' AND h.project_id IN
+                    (SELECT project_id FROM project_repos WHERE checkout = ?4))
+                OR h.project_id IN ({nested_sql}))
          ORDER BY h.created_at"
     ))?;
+    let mut args: Vec<&dyn rusqlite::ToSql> =
+        vec![&project.project_id, &agent_id, &tx.now, &checkout];
+    args.extend(nested.iter().map(|id| id as &dyn rusqlite::ToSql));
     let others = stmt
-        .query_map(
-            params![project.project_id, agent_id, tx.now, checkout],
-            |r| {
-                Ok((
-                    hold_from_row(r)?,
-                    r.get::<_, String>(10)?,
-                    r.get::<_, String>(11)?,
-                ))
-            },
-        )?
+        .query_map(args.as_slice(), |r| {
+            Ok((
+                hold_from_row(r)?,
+                r.get::<_, String>(10)?,
+                r.get::<_, String>(11)?,
+                r.get::<_, String>(12)?,
+                r.get::<_, String>(13)?,
+            ))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let fold = folds_case(Path::new(&project.abs_path));
     let overlaps = |a: &str, b: &str| overlap_on_volume(a, b, fold);
     // A stored pattern that cannot be read (a row an older build wrote) fails closed: it
     // stands for every path of the project it is in, and for nothing outside that project.
     let unreadable: Vec<bool> = others
         .iter()
-        .map(|(held, _, _)| pattern_unreadable(&held.pattern))
+        .map(|(held, _, _, _, _)| pattern_unreadable(&held.pattern))
         .collect();
     let mut conflicts = Vec::new();
     for (requested, pattern) in patterns {
-        for ((held, held_project, held_prefix), unreadable) in others.iter().zip(&unreadable) {
+        for ((held, held_project, held_prefix, held_dir, held_checkout), unreadable) in
+            others.iter().zip(&unreadable)
+        {
             if !(exclusive || held.exclusive) {
                 continue;
             }
             let theirs = if *unreadable { "**" } else { &held.pattern };
             let overlap = if *held_project == project.project_id {
                 overlaps(pattern, theirs)
-            } else {
-                // Compare as paths from the top of the checkout.
+            } else if !checkout.is_empty() && *held_checkout == checkout {
+                // Compare as paths from the top of the checkout (D92).
                 overlaps(
                     &crate::repo::in_repo(&my_prefix, pattern),
                     &crate::repo::in_repo(held_prefix, theirs),
                 )
+            } else if checkout.is_empty() && held_checkout.is_empty() {
+                if let Some(below) = dir_below(held_dir, &project.abs_path, fold) {
+                    overlaps(
+                        &crate::repo::in_repo(&glob_literal(&below), pattern),
+                        theirs,
+                    )
+                } else if let Some(below) = dir_below(&project.abs_path, held_dir, fold) {
+                    overlaps(
+                        pattern,
+                        &crate::repo::in_repo(&glob_literal(&below), theirs),
+                    )
+                } else {
+                    false
+                }
+            } else {
+                false
             };
             if overlap && *unreadable {
                 conflicts.push(unreadable_conflict(tx, tx.node_id, requested, held)?);
