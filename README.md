@@ -36,8 +36,13 @@ Observed authenticated session end releases its dependent scope tree immediately
 There is no dormant countdown or keep-resource exception.
 
 Names, `ANOTHER_AGENT` and `--agent` are selectors, never actor authority.
-The default CLI refuses name-only mutation with `NO_ACTOR`. Private integrations
-use the versioned `another.agent/1` channel through `another adapter event`.
+Name-only mutation is refused with `NO_ACTOR` by the CLI, the MCP server and the
+core library itself; only the explicit repair handle described below accepts a
+plain name. Private integrations use the versioned `another.agent/1` channel
+through `another adapter event`. The actor proof is a typed value inside Another,
+never text in a name field, so events, errors, logs and federation sync cannot
+carry it. File targets are exact absolute paths; `another adapter event` makes a
+relative one absolute from the folder it runs in.
 File, resource, queue and request compatibility rows are projections of common
 leases, with authenticated scope cleanup. Results, messages and history survive.
 
@@ -58,8 +63,10 @@ runtime evidence. See [the contract and coverage](docs/AGENT-CONTRACT.md).
 
 Legacy records and experimental clients have an explicit operator repair mode:
 `--unguarded-repair`. It explicitly leaves guarded participation and
-cannot act as a minted actor by name. Installed hooks never select it and no
-error falls back to it. Old repair fixtures are not B7 conformance evidence.
+cannot act as a minted actor by name. Repair holds are not checked against actor
+file leases from edit admission, so repair is not a mode to run alongside
+participating actors. Installed hooks never select it and no error falls back to
+it. Old repair fixtures are not B7 conformance evidence.
 Historical queue grace controls affect repair records only; participating claims
 always use the common lease policy.
 
