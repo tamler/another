@@ -121,7 +121,6 @@ fn unauthenticated_audit_rows_are_bounded_across_store_clones() {
     );
 }
 
-#[test]
 fn flood_a_store(store: &Store, n: usize, tag: &str) {
     for i in 0..n {
         store
