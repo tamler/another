@@ -2575,17 +2575,17 @@ fn no_item_text_reaches_the_activity_feed() {
         .queue_propose(
             &agent("ann"),
             ProposeItem {
-                title: "MARK-title".into(),
-                body: "MARK-body".into(),
+                title: "MARK_title".into(),
+                body: "MARK_body".into(),
                 scope: Some("M1".into()),
-                done_when: Some("MARK-done".into()),
+                done_when: Some("MARK_done".into()),
                 ..Default::default()
             },
         )
         .unwrap();
-    let rejected = fx.propose("ann", "MARK-title two");
+    let rejected = fx.propose("ann", "MARK_title two");
     fx.store
-        .queue_reject(&arch, &rejected.label, "MARK-reason")
+        .queue_reject(&arch, &rejected.label, "MARK_reason")
         .unwrap();
     fx.store
         .queue_admit(&arch, &item.label, AdmitItem::default())
@@ -2595,14 +2595,14 @@ fn no_item_text_reaches_the_activity_feed() {
             &arch,
             &item.label,
             EditItem {
-                done_when: Some("MARK-done again".into()),
+                done_when: Some("MARK_done again".into()),
                 ..Default::default()
             },
         )
         .unwrap();
     fx.claim("ann");
     fx.store
-        .queue_note("bob", &item.label, "MARK-note")
+        .queue_note("bob", &item.label, "MARK_note")
         .unwrap();
     fx.store
         .queue_release(
@@ -2610,19 +2610,19 @@ fn no_item_text_reaches_the_activity_feed() {
             &item.label,
             ReleaseItem {
                 to: Some("bob".into()),
-                note: Some("MARK-handoff".into()),
+                note: Some("MARK_handoff".into()),
                 ..Default::default()
             },
         )
         .unwrap();
     fx.claim("bob");
-    break_mail(&fx.db(), "MARK-error");
+    break_mail(&fx.db(), "MARK_error");
     fx.store
         .queue_release(
             &arch,
             &item.label,
             ReleaseItem {
-                reason: Some("MARK-reason".into()),
+                reason: Some("MARK_reason".into()),
                 ..Default::default()
             },
         )
@@ -2634,21 +2634,28 @@ fn no_item_text_reaches_the_activity_feed() {
             "cy",
             &item.label,
             DoneItem {
-                summary: "MARK-summary".into(),
+                summary: "MARK_summary".into(),
                 pointer_kind: PointerKind::File,
-                pointer: "MARK-pointer".into(),
+                pointer: "MARK_pointer".into(),
             },
         )
         .unwrap();
     fx.store.queue_delegate_remove(&owner(), "arch").unwrap();
     // A kind a later build adds must not fall through to the payload.
-    seed_event(
+    let future_id = seed_event(
         &fx.db(),
         &node_of(&fx),
         T0,
         "queue.future",
-        json!({ "item_id": item.item_id, "seq": item.seq, "title": "MARK-future" }),
+        json!({ "item_id": item.item_id, "seq": item.seq, "title": "MARK_future" }),
     );
+    // A valid event ID can contain the original privacy marker.
+    fx.db()
+        .execute(
+            "UPDATE events SET event_id = '01M8EKQ3GTMARK20CW00000000' WHERE event_id = ?1",
+            [&future_id],
+        )
+        .unwrap();
 
     let feed = fx
         .store
@@ -2667,7 +2674,7 @@ fn no_item_text_reaches_the_activity_feed() {
     for i in &feed.items {
         assert_eq!(i.category, ActivityKind::Queue);
         let text = serde_json::to_string(i).unwrap();
-        assert!(!text.contains("MARK"), "{text}");
+        assert!(!text.contains("MARK_"), "{text}");
         let refs = i.refs.as_object().expect("refs is an object");
         let no_item = [
             "queue.limit_set",
@@ -2707,7 +2714,7 @@ fn no_item_text_reaches_the_activity_feed() {
     assert_eq!(line("queue.future"), "seed: queue.future");
     // The summary of a window and the catch-up digest carry no marker either.
     let summary = fx.store.activity_summary(Some(Since::Time(0))).unwrap();
-    assert!(!serde_json::to_string(&summary).unwrap().contains("MARK"));
+    assert!(!serde_json::to_string(&summary).unwrap().contains("MARK_"));
     assert_eq!(
         summary.counts.get("queue"),
         Some(&(feed.items.len() as u32))
