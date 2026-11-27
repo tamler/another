@@ -44,7 +44,7 @@ another hold release --agent alice src/parser.rs
 Run this in a fresh test database after registering Alice and Bob. Use the item number from the proposal in place of `Q1` if it differs. Run the admission command in an interactive terminal and type `yes` when prompted.
 
 ```sh
-another queue propose --agent alice --title "Review the parser" --scope M10 --done-when "Review recorded"
+another queue propose --agent alice --title "Review the parser" --scope parser-review --done-when "Review recorded"
 another queue admit Q1 --owner
 another queue next --agent bob
 another queue done Q1 --agent bob --summary "Review recorded" --file notes.md

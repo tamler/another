@@ -125,7 +125,7 @@ A delegate may admit its own proposal. Such an item is marked self-admitted in `
 
 ### The fast lane
 
-Items of kind `security` or `data-loss` are decided by the owner personally. A delegate is refused. They are admitted at `high` priority unless you pass `--priority normal`, and until your yes they cannot be claimed. Nothing is mailed: they reach you as the first section of `queue list --needs-owner`.
+Items of kind `security` or `data-loss` are decided by the owner personally. A delegate is refused. They are admitted at `high` priority unless you pass `--priority normal`, and until your yes they cannot be claimed. No message is sent: they reach you as the first section of `queue list --needs-owner`.
 
 While an item is `proposed`, any admitter may raise it from `work` to a fast-lane kind. On a `ready` item only the owner may raise the kind, and only if the owner admitted it; a `ready` item a delegate admitted is rejected and proposed again instead. Only the owner lowers a kind. The database enforces the result: a `ready` or `claimed` fast-lane row always carries the owner's approval.
 
@@ -137,12 +137,12 @@ While an item is `proposed`, any admitter may raise it from `work` to a fast-lan
 2. **Awaiting a decision:** other proposed items, oldest first.
 3. **Quiet claims:** a claimed item is listed for the first of three reasons that holds. `name_quiet`: no sign of life from the claimer's name for an hour or more, shown with how long and when the grace period would end. `session_quiet`: the name is active, and the session the claim is bound to has not been seen for an hour, shown with the time that session was last seen. `old_unbound`: the name is active, the claim is bound to no session, and the claim is at least one grace period old. An unbound claim younger than that under an active name is not listed, because nothing stored says which session made it; so an unbound claim whose session died while a sibling keeps the name active is not seen for up to one grace period. In the JSON each entry has `reason` and `session_quiet_for_seconds` (`null` when the claim has no session) beside `quiet_for_seconds`, `grace_ends_at`, `unbound` and `session_last_seen_at`. Listing releases nothing.
 4. **Ready with nobody to take them:** ready items that no agent with a seat can be offered, and ready items reserved for an agent not seen for an hour.
-5. **Failed notices:** notices that could not be mailed in the last 24 hours.
+5. **Failed notices:** notices that could not be sent in the last 24 hours.
 6. **Self-admitted:** items a delegate admitted for itself in the last 7 days, and the total.
 
 ### When an admitter releases a claim
 
-The former claimer is mailed: subject `Claim released: Q12`, with the time, the reason as fixed words, that the claim and notes are kept in the item's history, and that the item will not be offered to that agent again for the next hour unless an admitter reserves it for it. The notice comes from the delegate that released the claim; when the owner did it, it comes from the former claimer's own address, because the system has no agent. A handoff mails the named agent: `Handoff: Q12`. No free text goes into these mails: not the reason, not a note, not the title. If a notice cannot be sent, the release stands and the failure is recorded and shown in the owner list.
+The former claimer receives a message: subject `Claim released: Q12`, with the time, the reason as fixed words, that the claim and notes are kept in the item's history, and that the item will not be offered to that agent again for the next hour unless an admitter reserves it for it. The notice comes from the delegate that released the claim; when the owner did it, it comes from the former claimer's own address, because the system has no agent. A handoff sends the named agent a message: `Handoff: Q12`. No free text goes into these messages: not the reason, not a note, not the title. If a notice cannot be sent, the release stands and the failure is recorded and shown in the owner list.
 
 ### When a claim is released automatically
 

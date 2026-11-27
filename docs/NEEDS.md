@@ -129,7 +129,7 @@ Each row is one session, not one agent name. It is taken from the reason the dae
 |---|---|---|---|
 | `blocked` | The agent waits on a person at a dialog | The transport sees another state | Answer the dialog in the pane the row names |
 | `stuck` | The last wake did not start work | The session is seen working or blocked, or one of its hooks runs | In that pane, clear the input box, then send the agent any prompt |
-| `unreachable`, `gone` | The transport has not listed the session for 60 seconds, and the session holds a bound claim or its agent has messages no channel has announced | The claim is released or finished, the message is announced, the session is listed again, or its row is deleted | `another queue show` for each bound claim, then the release or the wait (below). With mail only: `another inbox --agent`, on one row per agent; further gone sessions of that agent that hold no claim are counted in the closing line |
+| `unreachable`, `gone` | The transport has not listed the session for 60 seconds, and the session holds a bound claim or its agent has messages no channel has announced | The claim is released or finished, the message is announced, the session is listed again, or its row is deleted | `another queue show` for each bound claim, then the release or the wait (below). With messages only: `another inbox --agent`, on one row per agent; further gone sessions of that agent that hold no claim are counted in the closing line |
 | `unreachable`, `unknown` | The transport sees a session it cannot identify for 10 minutes | It is seen in another state, or pruned after a day without hooks | Look at the pane: it may hold another session |
 | `unreachable`, `undelivered` | Three wakes in a row could not be delivered | A wake is delivered | `another doctor`, `another transport status` |
 | `transport_silent` | A transport has not answered for 10 minutes. One row per transport, however many sessions | The transport answers | `another doctor`; for Herdr also `herdr agent list` |
@@ -144,7 +144,7 @@ What a row shows of the queue:
 
 **A stuck session.** Sending any prompt in the pane runs the session's hook, which lifts the stop and announces its messages, and the row leaves the list at once. `another transport status --attention` keeps showing the row until the next check.
 
-**The release on a gone session** is printed only when all four hold: no hook of that session has run since it went gone; it has been gone for 15 minutes; a listing Another trusts had seen it live; and the row was checked in the last 5 minutes. One missed listing is not enough: after a Herdr restart every live session can read `gone` for a while. Otherwise the step is `wait: the session may come back`. The release needs `--owner`; the former claimer is mailed.
+**The release on a gone session** is printed only when all four hold: no hook of that session has run since it went gone; it has been gone for 15 minutes; a listing Another trusts had seen it live; and the row was checked in the last 5 minutes. One missed listing is not enough: after a Herdr restart every live session can read `gone` for a while. Otherwise the step is `wait: the session may come back`. The release needs `--owner`; the former claimer receives a message.
 
 ### Claims
 

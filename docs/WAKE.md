@@ -69,7 +69,7 @@ Herdr is never called bare and never to focus a pane. Its answers are read as He
 | any other error, exit 1 with no JSON, or Another's 12 second deadline | `unknown` |
 | exit 2, or the program could not be started | `undelivered` |
 
-Two things follow from how Herdr works. After `not_started` the line may still sit in the agent's input box, in front of whatever is typed next, so Another does not type into that session again by itself and tells you to clear it. And Herdr's wait tracks the agent's state, not a turn: if the agent was already working when the line landed, the answer is `started`. That is accepted, since a working agent gets its mail from its post-tool hook.
+Two things follow from how Herdr works. After `not_started` the line may still sit in the agent's input box, in front of whatever is typed next, so Another does not type into that session again by itself and tells you to clear it. And Herdr's wait tracks the agent's state, not a turn: if the agent was already working when the line landed, the answer is `started`. That is accepted, since a working agent gets its messages from its post-tool hook.
 
 ## Sessions
 
@@ -106,7 +106,7 @@ The daemon ([DAEMON.md](DAEMON.md)) asks each transport in use what it can see e
 | `refused_blocked`, `gone` | given back to the hooks | no change |
 | `undelivered` | given back to the hooks | tried again after 60 seconds; after three in a row, once per 10 minutes |
 
-**A line that was or may have been typed is never typed again by itself.** Typing blind into a menu can choose an option, and the input box may hold the earlier line. The stop on a session ends only when the transport sees it `working` or `blocked`, when a hook of that session runs, when you wake it by hand and it starts, or when you run `another wake clear`. Giving the messages back means the hooks announce it at the agent's next turn, so a failed wake never hides mail.
+**A line that was or may have been typed is never typed again by itself.** Typing blind into a menu can choose an option, and the input box may hold the earlier line. The stop on a session ends only when the transport sees it `working` or `blocked`, when a hook of that session runs, when you wake it by hand and it starts, or when you run `another wake clear`. Giving the messages back means the hooks announce them at the agent's next turn, so a failed wake never hides messages.
 
 The daemon wakes only sessions it can identify. A target set by hand, a bare Herdr agent name, and a session in a command transport are never woken automatically. A `blocked` agent is never prompted, and neither is one in any state other than `idle`.
 
@@ -178,7 +178,7 @@ another wake --agent codex@shop --dry-run
 
 - **`--agent`** is a direct action by you. The target is, in order: `--target`; a target you set with `another wake set`; the agent's session whose hooks ran last; a pane that a hook of an earlier build captured from tmux or cmux; and with `--via herdr`, the agent's bare name. When the target comes from a Herdr session, Another first asks `status` and types nothing unless the pane still shows that session. A command transport cannot say which session is in a pane, so a session there is typed into as recorded, unless something Another knows says the pane may not hold that agent now; then the wake is refused until you name the pane yourself with `--target` or `another wake set` (see [What a command transport cannot do](#what-a-command-transport-cannot-do)). It does not require `idle` (Herdr itself refuses a blocked agent; a command transport refuses one where its `status` can say `blocked`), and it ignores a stop and the 60 second gap. The outcome is recorded.
 - `--via` takes `herdr` or the name of a configured command transport. Any other name is refused with what to set; `--via rex` answers "the rex transport is not in this build".
-- **`--all`** is one wake pass of the daemon, run from the command line, which makes it suitable for a cron job or a Herdr action when no daemon runs: the same choice of session, the same check, the same claim on the message, the same stop and gap. It wakes for mail that no hook has announced yet, so after a hook has shown the message it wakes nobody. It no longer wakes targets set by hand or bare Herdr names, and it never wakes a session in a command transport. It prints why it skipped each agent.
+- **`--all`** is one wake pass of the daemon, run from the command line, which makes it suitable for a cron job or a Herdr action when no daemon runs: the same choice of session, the same check, the same claim on the message, the same stop and gap. It wakes for messages that no hook has announced yet, so after a hook has shown the message it wakes nobody. It no longer wakes targets set by hand or bare Herdr names, and it never wakes a session in a command transport. It prints why it skipped each agent.
 - The default line is a one-line message summary: unread count, urgent count, open requests and up to three subjects. Message bodies are never included. With nothing unread and no open requests, `--agent` skips the agent unless you pass `--force`. That is all `--force` does: it does not override a refused wake. `--message` replaces the text, and `--agent` with `--message` wakes whether or not anything is unread.
 - `--dry-run` prints the transport's commands and runs nothing. A wake to a command transport that would be refused because the pane may not hold the agent is reported as refused, with no command printed and a non-zero exit, as the wake itself would end. A refusal that needs an answer from the transport (Herdr's check of who is in the pane, a `status` that says `blocked` or `gone`) is not foreseen by a dry run.
 - The command exits non-zero when a wake failed (see the table of outcomes) or could not be attempted. For each wake it prints what happened in the words of that table, and what the transport answered.
@@ -188,7 +188,7 @@ another wake --agent codex@shop --dry-run
 Agents take custom text literally, so name commands that exist. There is no `another mail` command. For example:
 
 ```bash
-another wake --agent codex@shop --message "New mail in Another: run fetch_inbox (or another inbox --agent codex@shop), reply with another reply <message-id>, then another ack <message-id>."
+another wake --agent codex@shop --message "New messages in Another: run fetch_inbox (or another inbox --agent codex@shop), reply with another reply <message-id>, then another ack <message-id>."
 ```
 
 ## Targets set by hand

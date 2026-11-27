@@ -41,7 +41,7 @@
     <p>Messages are one part of coordination. Path holds help prevent covered edit conflicts, hooks announce new messages after a tool call, and resource records help agents find services already running. Holds are not disk locks: shell edits bypass the guard, Cursor has no edit guard, and hooks can fail open. This guide starts with a message exchange in isolated state.</p>
     <section class="guide-section" aria-labelledby="storage">
       <h2 id="storage">What stays on your machine</h2>
-      <p>Another stores agent registration, messages, requests, path holds and resource coordination in local SQLite state. The default home is <code>~/.another</code>; <code>ANOTHER_HOME</code> selects a different directory. CLI mail works without an always-on daemon or hosted account.</p>
+      <p>Another stores agent registration, messages, requests, path holds and resource coordination in local SQLite state. The default home is <code>~/.another</code>; <code>ANOTHER_HOME</code> selects a different directory. CLI messaging works without an always-on daemon or hosted account.</p>
       <p>Source installation needs Rust and access to dependencies. Local CLI messaging commands use the node's data. Your coding client retains its own model-provider and network settings.</p>
     </section>
     <section class="guide-section" aria-labelledby="demo">
