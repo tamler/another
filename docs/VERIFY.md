@@ -15,7 +15,9 @@ Pushing a tag `vX.Y.Z` runs [`.github/workflows/release.yml`](../.github/workflo
 | `another-VERSION-x86_64-pc-windows-msvc.zip` | PowerShell `Compress-Archive` of the same folder layout, with `another.exe` in place of `another` |
 | `another-VERSION-x86_64-pc-windows-msvc.zip.sha256` | PowerShell `Get-FileHash -Algorithm SHA256`, written in the same format |
 
-`TARGET` is `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl`. The checksum file is one line in the format both `shasum` and `sha256sum` write and read: the hex digest, two spaces, the archive's file name. The workflow does not publish a combined `SHA256SUMS` file; if one appears on a release page later, the same commands below read it, and `--ignore-missing` skips the archives you did not download.
+`TARGET` is `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` or `x86_64-pc-windows-msvc`. The checksum file is one line in the format both `shasum` and `sha256sum` write and read: the hex digest, two spaces, the archive's file name. The workflow does not publish a combined `SHA256SUMS` file; if one appears on a release page later, the same commands below read it, and `--ignore-missing` skips the archives you did not download.
+
+Each release also includes one `install.sh` asset for macOS and Linux. It verifies the selected archive against its sidecar before unpacking.
 
 Download the archive and its `.sha256` from the same release page, put them in one folder, and run the check from that folder. The file name in the checksum line must match the archive's name on disk, so do not rename the download.
 

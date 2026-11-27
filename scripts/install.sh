@@ -22,14 +22,20 @@ fetch() {
         --proto '=https' --proto-redir '=https' "$@"
 }
 
-release=$(fetch --output /dev/null --write-out '%{url_effective}' "$releases/latest") ||
-    fail 'Could not find or download a published release from GitHub.'
-case "$release" in
-    "$releases"/tag/v*) version=${release#"$releases/tag/v"} ;;
-    *) fail 'GitHub did not return a published release.' ;;
+[ "$#" -le 1 ] || fail 'Usage: sh install.sh [version or tag]'
+case "$#" in
+    0)
+        release=$(fetch --output /dev/null --write-out '%{url_effective}' "$releases/latest") ||
+            fail 'Could not find or download a published release from GitHub.'
+        case "$release" in
+            "$releases"/tag/v*) version=${release#"$releases/tag/v"} ;;
+            *) fail 'GitHub did not return a published release.' ;;
+        esac
+        ;;
+    1) version=${1#v} ;;
 esac
 case "$version" in
-    ''|*[!0-9A-Za-z.+-]*) fail 'GitHub returned an invalid release version.' ;;
+    ''|[!0-9]*|*[!0-9A-Za-z.+-]*) fail 'Use a release version or tag, such as 0.1.0 or v0.1.0.' ;;
 esac
 
 name=another-$version-$target

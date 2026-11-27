@@ -43,7 +43,7 @@
     </section>
     <section class="guide-section" aria-labelledby="prereq-title">
       <h2 id="prereq-title">1. Get a compiler and Rust</h2>
-      <p>Another builds from source today, and there is no published release yet. Cargo needs a C toolchain to link, and Another's SQLite is compiled from bundled C source. Apple's command line tools provide it:</p>
+      <p>No release has been published yet. Cargo needs a C toolchain to link, and Another's SQLite is compiled from bundled C source. Apple's command line tools provide it:</p>
       <pre class="code-block shell" tabindex="0" aria-label="Install command line tools"><code>xcode-select --install</code></pre>
       <p>That opens a system dialog, and it reports an error if the tools are already installed. Then install Rust with the official installer, or skip this if <code>rustc --version</code> already prints 1.88 or newer:</p>
       <pre class="code-block shell" tabindex="0" aria-label="Install Rust"><code>curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh

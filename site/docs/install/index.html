@@ -40,8 +40,9 @@
     <section class="guide-section" aria-labelledby="binaries-title">
       <h2 id="binaries-title">Install a prebuilt binary</h2>
       <p>Once a release is published, run this on macOS or Linux:</p>
-      <pre class="code-block shell" tabindex="0" aria-label="Install a prebuilt binary"><code>curl -fsSLO https://raw.githubusercontent.com/tamler/another/main/scripts/install.sh
-sh install.sh</code></pre>
+      <pre class="code-block shell" tabindex="0" aria-label="Install a prebuilt binary"><code>curl -fsSLO https://github.com/tamler/another/releases/latest/download/install.sh &amp;&amp;
+  sh install.sh</code></pre>
+      <p>The script defaults to the latest release. Pass a version or tag, such as <code>sh install.sh v0.1.0</code>, to select that release once it exists. Before the first tag, the <a href="https://raw.githubusercontent.com/tamler/another/main/scripts/install.sh">interim script on main</a> prints the Cargo fallback.</p>
       <p>The script verifies the archive and installs into <code>~/.local/bin</code>. Set <code>ANOTHER_INSTALL_DIR</code> to choose a different directory and make sure it is on your <code>PATH</code>.</p>
       <p>You can also run <code>cargo binstall --git https://github.com/tamler/another another</code> or download an archive from <a href="https://github.com/tamler/another/releases">GitHub Releases</a>. The workflow packages macOS and static musl Linux binaries for x86_64 and arm64, plus a <a href="/docs/install/windows/">Windows x86_64 zip</a>. <a href="#verify">Verify a manual download</a> before unpacking it, then put the binary on your <code>PATH</code>.</p>
       <p>On macOS, a verified download may need its quarantine attribute removed:</p>

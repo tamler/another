@@ -57,14 +57,16 @@ MCP `since` inputs also accept bare seconds.
 
 ## Quickstart
 
-**1. Install.** Once a release is published, macOS and Linux users can run:
+**1. Install.** Once the first tag and GitHub Release are published, macOS and Linux users can download the installer from the latest release:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/tamler/another/main/scripts/install.sh
-sh install.sh
+curl -fsSLO https://github.com/tamler/another/releases/latest/download/install.sh &&
+  sh install.sh
 ```
 
-The script checks the archive's SHA-256 before unpacking and installs into `~/.local/bin`. Set `ANOTHER_INSTALL_DIR` to use another directory. Put the install directory on your `PATH`.
+The script installs the latest release by default. Pass a version or tag as its only argument, for example `sh install.sh v0.1.0`, to select that release once it exists. The script checks the archive's SHA-256 before unpacking and installs into `~/.local/bin`. Set `ANOTHER_INSTALL_DIR` to use another directory. Put the install directory on your `PATH`.
+
+There is no release tag or installer asset yet. The interim script is at [`main/scripts/install.sh`](https://raw.githubusercontent.com/tamler/another/main/scripts/install.sh). Until release archives exist, it prints the Cargo fallback below.
 
 You can also install with `cargo binstall --git https://github.com/tamler/another another`, or download a macOS, Linux or Windows x86_64 archive from [GitHub Releases](https://github.com/tamler/another/releases). Follow [docs/VERIFY.md](docs/VERIFY.md) before unpacking, then put `another` (or `another.exe`) on your `PATH`. On macOS, a verified download may need its quarantine flag removed with `xattr -d com.apple.quarantine ./another`.
 
