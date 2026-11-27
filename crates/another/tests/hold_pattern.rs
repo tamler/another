@@ -3,6 +3,9 @@
 //! says whose hold it is and how to clear it, and a pattern over the limit is refused.
 #![cfg(unix)]
 
+#[path = "common/fed_hub.rs"]
+mod fed_hub;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -255,28 +258,15 @@ mod over_http {
     //! The finding end to end: a hub and two spokes over real loopback HTTP.
 
     use std::io::Write;
-    use std::net::SocketAddr;
     use std::path::Path;
     use std::process::{Command, Output, Stdio};
 
     use another::fed;
-    use another::serve::{http_router, HttpOptions};
     use another_core::*;
     use rusqlite::{params, Connection};
     use serde_json::{json, Value};
-    use tokio_util::sync::CancellationToken;
 
-    struct Node {
-        dir: tempfile::TempDir,
-        store: Store,
-    }
-
-    fn node(name: &str) -> Node {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path()).unwrap();
-        store.set_node_name(name).unwrap();
-        Node { dir, store }
-    }
+    use super::fed_hub::{join, node, start_fed_hub_with, start_http_hub, Node};
 
     /// Register `agent` in a project directory called `shop` under the node's own home.
     fn in_shop(n: &Node, agent: &str) -> String {
@@ -293,83 +283,6 @@ mod over_http {
             })
             .unwrap();
         shop
-    }
-
-    /// A hub served over loopback HTTP, as `another serve --federation` serves it, until the
-    /// value is dropped.
-    struct Hub {
-        node: Node,
-        url: String,
-        ct: CancellationToken,
-        _rt: tokio::runtime::Runtime,
-    }
-
-    impl Drop for Hub {
-        fn drop(&mut self) {
-            self.ct.cancel();
-        }
-    }
-
-    impl Hub {
-        fn join(&self, spoke: &Node) {
-            let code = self
-                .node
-                .store
-                .create_invite(&self.url, &Perm::ALL, 3600)
-                .unwrap();
-            fed::join(&spoke.store, &code).unwrap();
-        }
-    }
-
-    fn start_hub() -> Hub {
-        start_hub_with(None)
-    }
-
-    /// With a number, a hub that serves only the federation routes and closes a pull page
-    /// at that many bytes where the build's own budget is 8 MiB.
-    fn start_hub_with(pull_page_bytes: Option<usize>) -> Hub {
-        let node = node("hub");
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
-        let ct = CancellationToken::new();
-        let listener = rt
-            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-            .unwrap();
-        let addr = listener.local_addr().unwrap();
-        let opts = HttpOptions {
-            federation: true,
-            bound_port: addr.port(),
-            ..Default::default()
-        };
-        let app = match pull_page_bytes {
-            Some(pull_budget) => fed::router_with(
-                node.store.clone(),
-                fed::Limits {
-                    pull_budget,
-                    ..fed::Limits::CURRENT
-                },
-            ),
-            None => http_router(node.store.clone(), ct.clone(), &opts),
-        };
-        let stop = ct.clone();
-        rt.spawn(async move {
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .with_graceful_shutdown(async move { stop.cancelled_owned().await })
-            .await
-            .unwrap();
-        });
-        Hub {
-            node,
-            url: format!("http://{addr}"),
-            ct,
-            _rt: rt,
-        }
     }
 
     /// Mallory's agent `mal` takes a real hold on `src/x.rs` in its own project `shop`.
@@ -500,11 +413,11 @@ mod over_http {
     /// the row, and `another hold acquire` in that project works.
     #[test]
     fn a_peers_seven_megabyte_pattern_is_reported_by_sync_and_hold_acquire_works() {
-        let hub = start_hub();
+        let hub = start_http_hub();
         let mallory = node("mallory");
         let victim = node("victim");
-        hub.join(&mallory);
-        hub.join(&victim);
+        join(&hub, &mallory);
+        join(&hub, &victim);
         mallory_holds_a_file(&mallory);
         let shop = in_shop(&victim, "alice");
         let pattern = format!("src/{}", "*a".repeat(3_500_000));
@@ -610,11 +523,11 @@ mod over_http {
     /// does keep denying that edit, and the acquire ends at once with one count.
     #[test]
     fn a_hook_still_guards_while_hold_acquire_meets_a_thousand_cheap_peer_holds() {
-        let hub = start_hub();
+        let hub = start_http_hub();
         let mallory = node("mallory");
         let victim = node("victim");
-        hub.join(&mallory);
-        hub.join(&victim);
+        join(&hub, &mallory);
+        join(&hub, &victim);
         mallory_holds_a_file(&mallory);
         fed::sync(&mallory.store).unwrap();
 
@@ -777,11 +690,14 @@ mod over_http {
     /// outlasts the bound, the hook's deny keeps this test from letting a held file through.
     #[test]
     fn a_hook_still_guards_while_sync_pulls_a_peers_slow_globs() {
-        let hub = start_hub_with(Some(16 * 1024));
+        let hub = start_fed_hub_with(fed::Limits {
+            pull_budget: 16 * 1024,
+            ..fed::Limits::CURRENT
+        });
         let mallory = node("mallory");
         let victim = node("victim");
-        hub.join(&mallory);
-        hub.join(&victim);
+        join(&hub, &mallory);
+        join(&hub, &victim);
         mallory_holds_globs(&mallory, 2_000, |i| format!("{}{i:05}", "*?".repeat(2030)));
         fed::sync(&mallory.store).unwrap();
 

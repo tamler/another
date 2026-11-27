@@ -2,6 +2,9 @@
 //! agent and project names, subjects and reasons come from other agents and other
 //! machines; a file name can hold ESC or BEL.
 
+#[path = "common/fed_hub.rs"]
+mod fed_hub;
+
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
@@ -233,38 +236,10 @@ fn a_hub_error_in_sync_watch_cannot_retitle_the_terminal() {
 #[test]
 fn a_peers_marker_text_is_shown_escaped_and_bounded() {
     use another_core::crypto;
-    use std::net::SocketAddr;
 
-    let dir = tempfile::tempdir().unwrap();
-    let hub_home = dir.path().join("hub");
-    let spoke_home = dir.path().join("spoke");
-    let hub = another_core::Store::open(&hub_home).unwrap();
-    hub.set_node_name("hub").unwrap();
-    let spoke = another_core::Store::open(&spoke_home).unwrap();
-    spoke.set_node_name("spoke").unwrap();
-
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .unwrap();
-    let listener = rt
-        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-        .unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let app = another::fed::router(hub.clone());
-    rt.spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
-    let code = hub
-        .create_invite(&url, &another_core::Perm::ALL, 3600)
-        .unwrap();
-    another::fed::join(&spoke, &code).unwrap();
+    let hub = fed_hub::start_fed_hub();
+    let spoke = fed_hub::node("spoke");
+    fed_hub::join(&hub, &spoke);
 
     let pad = |head: &str, fill: char, chars: usize| -> String {
         let mut text = head.to_string();
@@ -277,7 +252,7 @@ fn a_peers_marker_text_is_shown_escaped_and_bounded() {
     let kind = pad("agent\u{202e}.registered\u{200b}", 'K', 80);
     let actor = pad("al\u{2066}ice\u{0}", 'A', 128);
     let about = pad("agent \u{1b}[2Jwor\u{202e}dy", 'B', 120);
-    let hub_id = hub.node_id().to_string();
+    let hub_id = hub.id();
     let payload = serde_json::json!({
         "event_id": event_id,
         "event_node": hub_id,
@@ -290,14 +265,14 @@ fn a_peers_marker_text_is_shown_escaped_and_bounded() {
         "route_nodes": [],
     })
     .to_string();
-    let db = rusqlite::Connection::open(hub_home.join(another_core::DB_FILE)).unwrap();
+    let db = hub.node.db();
     let secret: String = db
         .query_row("SELECT secret_key FROM nodes WHERE is_local = 1", [], |r| {
             r.get(0)
         })
         .unwrap();
     let key = crypto::decode_secret(&secret).unwrap();
-    let ts = hub.now();
+    let ts = hub.node.store.now();
     let sig = crypto::sign(
         &key,
         &crypto::event_message(
@@ -315,11 +290,24 @@ fn a_peers_marker_text_is_shown_escaped_and_bounded() {
         rusqlite::params![hub_id, ts, payload, sig],
     )
     .unwrap();
+    // Close the independent SQLite connection before dropping `hub` so its temp dir can be
+    // removed cleanly on Windows.
+    drop(db);
 
-    let synced = another(&spoke_home, dir.path(), &["sync"]);
-    let needs = another(&spoke_home, dir.path(), &["needs"]);
-    let feed = another(&spoke_home, dir.path(), &["activity", "--kinds", "sync"]);
-    rt.shutdown_timeout(std::time::Duration::from_secs(5));
+    let synced = another(spoke.dir.path(), spoke.dir.path(), &["sync"]);
+    let needs = another(spoke.dir.path(), spoke.dir.path(), &["needs"]);
+    let feed = another(
+        spoke.dir.path(),
+        spoke.dir.path(),
+        &["activity", "--kinds", "sync"],
+    );
+    let hub_dir = hub.node.dir.path().to_path_buf();
+    drop(hub);
+    assert!(
+        !hub_dir.exists(),
+        "hub temp dir still exists after drop: {}",
+        hub_dir.display()
+    );
 
     // Each unsafe character became a space, and each value was cut with `…`.
     let id = format!("01 ]0;pwned {}…", "I".repeat(27));

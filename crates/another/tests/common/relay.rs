@@ -5,133 +5,19 @@
 
 #![allow(dead_code)]
 
-use std::net::SocketAddr;
+#[path = "fed_hub.rs"]
+mod fed_hub;
+pub use fed_hub::*;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use another::fed;
 use another_core::*;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use serde_json::Value;
-use tokio_util::sync::CancellationToken;
-
-pub struct Node {
-    pub dir: tempfile::TempDir,
-    pub store: Store,
-}
-
-impl Node {
-    /// A second connection to this node's database, for reading rows and for edits a test
-    /// makes as an operator with a SQL shell would.
-    pub fn db(&self) -> rusqlite::Connection {
-        let conn = rusqlite::Connection::open(self.dir.path().join(DB_FILE)).unwrap();
-        conn.busy_timeout(Duration::from_secs(5)).unwrap();
-        conn
-    }
-
-    pub fn id(&self) -> String {
-        self.store.node_id().to_string()
-    }
-}
-
-pub fn node(name: &str) -> Node {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    store.set_node_name(name).unwrap();
-    Node { dir, store }
-}
-
-pub fn register(store: &Store, name: &str) {
-    store
-        .register_agent(RegisterAgent {
-            name: name.into(),
-            program: Program::Claude,
-            project: None,
-            model: None,
-            description: None,
-        })
-        .unwrap();
-}
-
-/// A router served on a loopback port until dropped.
-pub struct Served {
-    pub url: String,
-    ct: CancellationToken,
-    _rt: tokio::runtime::Runtime,
-}
-
-impl Drop for Served {
-    fn drop(&mut self) {
-        self.ct.cancel();
-    }
-}
-
-pub fn serve(app: axum::Router) -> Served {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .unwrap();
-    let ct = CancellationToken::new();
-    let listener = rt
-        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-        .unwrap();
-    let addr = listener.local_addr().unwrap();
-    let stop = ct.clone();
-    rt.spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move { stop.cancelled_owned().await })
-        .await
-        .unwrap();
-    });
-    Served {
-        url: format!("http://{addr}"),
-        ct,
-        _rt: rt,
-    }
-}
-
-pub struct Hub {
-    pub node: Node,
-    pub served: Served,
-}
-
-impl Hub {
-    pub fn url(&self) -> &str {
-        &self.served.url
-    }
-
-    pub fn id(&self) -> String {
-        self.node.id()
-    }
-}
-
-/// A hub of this build: the federation routes of `name`'s home.
-pub fn start_hub_named(name: &str) -> Hub {
-    let node = node(name);
-    let served = serve(fed::router(node.store.clone()));
-    Hub { node, served }
-}
-
-pub fn start_hub() -> Hub {
-    start_hub_named("hub")
-}
-
-/// Pair `spoke` with `hub` directly, at the hub's real address.
-pub fn join(hub: &Hub, spoke: &Node) {
-    let code = hub
-        .node
-        .store
-        .create_invite(hub.url(), &Perm::ALL, 3600)
-        .unwrap();
-    fed::join(&spoke.store, &code).unwrap();
-}
 
 /// Change the address `spoke` has stored for its hub, as an edited invite would have set it.
 pub fn point_at(spoke: &Node, url: &str) {
@@ -140,18 +26,6 @@ pub fn point_at(spoke: &Node, url: &str) {
         .execute("UPDATE peers SET url = ?1 WHERE role = 'hub'", [url])
         .unwrap();
     assert_eq!(changed, 1, "the spoke has one hub row");
-}
-
-pub fn decode_invite(code: &str) -> Value {
-    let raw = code.strip_prefix("another-invite:").unwrap();
-    serde_json::from_slice(&crypto::unb64(raw).unwrap()).unwrap()
-}
-
-pub fn encode_invite(invite: &Value) -> String {
-    format!(
-        "another-invite:{}",
-        crypto::b64(invite.to_string().as_bytes())
-    )
 }
 
 /// Everything about a spoke that a refused answer must leave as it was.
@@ -225,18 +99,6 @@ pub fn pinned_key(holder: &Node, node_id: &str) -> Option<Option<String>> {
         )
         .optional()
         .unwrap()
-}
-
-/// The audit rows of `store` for `operation`, oldest first.
-pub fn audit_rows(store: &Store, operation: &str) -> Vec<AuditEntry> {
-    let mut rows: Vec<AuditEntry> = store
-        .audit_log(500)
-        .unwrap()
-        .into_iter()
-        .filter(|a| a.operation == operation)
-        .collect();
-    rows.sort_by_key(|a| a.audit_id);
-    rows
 }
 
 /// One request as the relay received it.
