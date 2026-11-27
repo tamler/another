@@ -21,12 +21,7 @@ fn node(dir: &Path, name: &str) -> Store {
 }
 
 fn pair(hub: &Store, spoke: &Store) {
-    let code = hub
-        .create_invite("https://hub.example", &Perm::ALL, 3600)
-        .unwrap();
-    let (invite, req) = spoke.prepare_join(&code).unwrap();
-    let resp = hub.accept_pairing(&req).unwrap();
-    spoke.complete_join(&invite, &resp).unwrap();
+    test_support::pair(hub, spoke, &Perm::ALL);
 }
 
 fn entry(of: &Store, display_name: &str) -> NodeEntry {

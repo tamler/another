@@ -6,39 +6,20 @@
 
 use std::path::Path;
 
-use another_core::test_support::forge_event;
+use another_core::test_support::{forge_event, Node};
 use another_core::*;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 
 const T0: i64 = 1_800_000_000_000;
 
-struct Node {
-    store: Store,
-    db: std::path::PathBuf,
-}
-
-impl Node {
-    fn new(dir: &Path, name: &str) -> Node {
-        let home = dir.join(name);
-        let (clock, _) = Clock::manual(T0);
-        let store = Store::open_with_clock(&home, clock).unwrap();
-        store.set_node_name(name).unwrap();
-        Node {
-            store,
-            db: home.join(DB_FILE),
-        }
-    }
+fn node(dir: &Path, name: &str) -> Node {
+    let (clock, _) = Clock::manual(T0);
+    Node::open(&dir.join(name), name, clock)
 }
 
 fn pair(hub: &Node, spoke: &Node) {
-    let code = hub
-        .store
-        .create_invite("https://hub.example", &Perm::ALL, 3600)
-        .unwrap();
-    let (invite, req) = spoke.store.prepare_join(&code).unwrap();
-    let resp = hub.store.accept_pairing(&req).unwrap();
-    spoke.store.complete_join(&invite, &resp).unwrap();
+    test_support::pair(&hub.store, &spoke.store, &Perm::ALL);
 }
 
 /// An `agent.registered` signed by `spoke` for an agent called `name`, pushed to `hub`.
@@ -101,8 +82,8 @@ fn locally_valid(name: &str) -> bool {
 #[test]
 fn a_peer_agent_name_follows_the_local_name_rule() {
     let dir = tempfile::tempdir().unwrap();
-    let hub = Node::new(dir.path(), "hub");
-    let spoke = Node::new(dir.path(), "spoke");
+    let hub = node(dir.path(), "hub");
+    let spoke = node(dir.path(), "spoke");
     pair(&hub, &spoke);
 
     let long = "x".repeat(100_000);
@@ -155,8 +136,8 @@ fn a_peer_agent_name_follows_the_local_name_rule() {
 #[test]
 fn a_peer_agent_without_a_name_is_refused() {
     let dir = tempfile::tempdir().unwrap();
-    let hub = Node::new(dir.path(), "hub");
-    let spoke = Node::new(dir.path(), "spoke");
+    let hub = node(dir.path(), "hub");
+    let spoke = node(dir.path(), "spoke");
     pair(&hub, &spoke);
 
     let report = push_event(
@@ -184,8 +165,8 @@ fn a_peer_agent_without_a_name_is_refused() {
 #[test]
 fn a_refused_peer_agent_gets_no_mail_and_the_peers_other_agents_are_unaffected() {
     let dir = tempfile::tempdir().unwrap();
-    let hub = Node::new(dir.path(), "hub");
-    let spoke = Node::new(dir.path(), "spoke");
+    let hub = node(dir.path(), "hub");
+    let spoke = node(dir.path(), "spoke");
     pair(&hub, &spoke);
     let alice = hub
         .store

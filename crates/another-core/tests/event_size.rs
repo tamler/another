@@ -54,13 +54,7 @@ fn register(store: &Store, name: &str) {
 }
 
 fn pair(hub: &Node, spoke: &Node) {
-    let code = hub
-        .store
-        .create_invite("https://hub.example", &Perm::ALL, 3600)
-        .unwrap();
-    let (invite, req) = spoke.store.prepare_join(&code).unwrap();
-    let resp = hub.store.accept_pairing(&req).unwrap();
-    spoke.store.complete_join(&invite, &resp).unwrap();
+    test_support::pair(&hub.store, &spoke.store, &Perm::ALL);
 }
 
 /// Everything `spoke` may send, in one batch bounded by count only.

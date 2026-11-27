@@ -1768,12 +1768,7 @@ fn queue_events_never_leave_the_node() {
     };
     let hub = node("hub");
     let spoke = node("spoke");
-    let code = hub
-        .create_invite("https://hub.example", &[Perm::ReadFeed], 3600)
-        .unwrap();
-    let (invite, req) = spoke.prepare_join(&code).unwrap();
-    let resp = hub.accept_pairing(&req).unwrap();
-    spoke.complete_join(&invite, &resp).unwrap();
+    test_support::pair(&hub, &spoke, &[Perm::ReadFeed]);
 
     // The same run on both nodes: every queue event kind, and one direct request.
     let mut written = BTreeSet::new();

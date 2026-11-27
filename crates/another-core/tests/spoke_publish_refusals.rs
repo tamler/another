@@ -18,12 +18,8 @@ struct Node {
 impl Node {
     fn new(dir: &Path, name: &str) -> Node {
         let home = dir.join(name);
-        let store = Store::open(&home).unwrap();
-        store.set_node_name(name).unwrap();
-        Node {
-            store,
-            db: home.join(DB_FILE),
-        }
+        let test_support::Node { store, db } = test_support::Node::open(&home, name, Clock::System);
+        Node { store, db }
     }
 
     fn id(&self) -> String {
@@ -67,13 +63,7 @@ impl Node {
 }
 
 fn pair(hub: &Node, spoke: &Node) {
-    let code = hub
-        .store
-        .create_invite("https://hub.example", &Perm::ALL, 3600)
-        .unwrap();
-    let (invite, req) = spoke.store.prepare_join(&code).unwrap();
-    let resp = hub.store.accept_pairing(&req).unwrap();
-    spoke.store.complete_join(&invite, &resp).unwrap();
+    test_support::pair(&hub.store, &spoke.store, &Perm::ALL);
 }
 
 fn all_rejected(report: &IngestReport, n: usize, reason: &str) {

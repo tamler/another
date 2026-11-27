@@ -77,12 +77,7 @@ fn request_token_and_pairing_events_read_as_one_line_each() {
     let hub = store(&dir.path().join("hub"));
     hub.set_node_name("hub").unwrap();
     s.set_node_name("alpha").unwrap();
-    let code = hub
-        .create_invite("https://hub.example", &Perm::ALL, 3600)
-        .unwrap();
-    let (invite, req) = s.prepare_join(&code).unwrap();
-    let resp = hub.accept_pairing(&req).unwrap();
-    s.complete_join(&invite, &resp).unwrap();
+    test_support::pair(&hub, &s, &Perm::ALL);
     hub.revoke_peer(s.node_id()).unwrap();
 
     let feed = lines(&s);

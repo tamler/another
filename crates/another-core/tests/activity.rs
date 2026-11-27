@@ -233,12 +233,7 @@ fn kinds_sync_lists_only_sync_events() {
     };
     let (_hub_dir, hub) = open("hub");
     let (_spoke_dir, spoke) = open("spoke");
-    let code = hub
-        .create_invite("https://hub.example", &Perm::ALL, 3600)
-        .unwrap();
-    let (invite, req) = spoke.prepare_join(&code).unwrap();
-    let resp = hub.accept_pairing(&req).unwrap();
-    spoke.complete_join(&invite, &resp).unwrap();
+    test_support::pair(&hub, &spoke, &Perm::ALL);
     for (store, name) in [(&hub, "bob"), (&spoke, "alice")] {
         store
             .register_agent(RegisterAgent {
