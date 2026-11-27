@@ -1519,7 +1519,7 @@ fn a_delegate_key_is_refused_for_every_owner_only_action() {
     forbidden(fx.store.queue_delegate_add(&arch, "bob").map(|_| ()));
     forbidden(fx.store.queue_delegate_remove(&arch, "arch").map(|_| ()));
     forbidden(fx.store.queue_set_grace(&arch, 7200).map(|_| ()));
-    for (proposed, ready, claimed) in &fast {
+    for (_, ready, claimed) in &fast {
         forbidden(fx.store.queue_reject(&arch, ready, "no").map(|_| ()));
         let lower = EditItem {
             kind: Some(QueueKind::Work),

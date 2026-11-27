@@ -1556,6 +1556,14 @@ CREATE INDEX queue_claimed ON queue_items(claimer_id) WHERE state = 'claimed';
             [work_seq],
         )
         .unwrap();
+    // The probe only shows the v13 CHECK is gone. Put the work row back so
+    // admitted_by_delegate lists only the item the delegate actually admits.
+    after
+        .execute(
+            "UPDATE queue_items SET kind = 'work' WHERE seq = ?1",
+            [work_seq],
+        )
+        .unwrap();
     drop(after);
     let admitted = store
         .queue_admit(

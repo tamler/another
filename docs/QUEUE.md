@@ -114,12 +114,12 @@ A limit set for a name, above 0, is also what turns on the lines that tell its s
 
 `queue delegate add <agent> --owner` prints a key once (`adk_` and 64 hex characters) and stores only its SHA-256. The delegate acts with `--agent <itself>` and the key in `ANOTHER_ADMIT_KEY`, which is the only place the key is read from. Adding an agent whose delegation was removed gives it a new key.
 
-A delegate may admit, reject, edit and release another agent's claim, on `work` items only. The key never covers:
+A delegate may admit, reject, edit and release another agent's claim on `work` items. On a `security` or `data-loss` item, a keyed delegate may admit it, including a finding it proposed itself, but must pass `--reason`, cannot change the scope or the done condition, and cannot lower the priority (`--for` is allowed). The key never covers:
 
 - setting a limit or the default limit;
 - naming or removing a delegate;
 - changing the grace period;
-- any action on a `security` or `data-loss` item, including lowering its kind.
+- rejecting a `security` or `data-loss` item, editing one, or releasing another agent's claim on one, including lowering its kind.
 
 A delegate may admit its own proposal. Such an item is marked self-admitted in `queue list`, `queue show` and the JSON, stays listed by `queue list --self-admitted` for good, and appears in the owner list for seven days.
 
@@ -127,7 +127,7 @@ A delegate may admit its own proposal. Such an item is marked self-admitted in `
 
 Items of kind `security` or `data-loss` may be admitted by the owner or by a keyed delegate. A delegate must pass `--reason`, cannot change the scope or the done condition, and cannot lower the priority from `high` (`--for` is allowed). A delegate may admit a finding it proposed itself: that admit still needs a reason, and the item is listed as self-admitted as well as admitted by delegate. They are admitted at `high` priority unless the owner passes `--priority normal`, and until they are admitted they cannot be claimed. Nothing is mailed: proposed ones reach you as the first section of `queue list --needs-owner`, and each delegate admit is listed there as **Admitted by delegate** so you can see it after the fact. Rejecting one, editing one, or releasing another agent's claim on one is still yours. Adding or removing a delegate, and changing the grace period or a claim limit, still need `--owner`.
 
-While an item is `proposed`, any admitter may raise it from `work` to a fast-lane kind. On a `ready` item only the owner may raise the kind, and only if the owner admitted it; a `ready` item a delegate admitted is rejected and proposed again instead. Only the owner lowers a kind. The database enforces the result: a `ready` or `claimed` fast-lane row always carries the owner's approval.
+While an item is `proposed`, any admitter may raise it from `work` to a fast-lane kind. On a `ready` item only the owner may raise the kind, and only if the owner admitted it; a `ready` item a delegate admitted is rejected and proposed again instead. Only the owner lowers a kind. A `ready` or `claimed` fast-lane row may carry the owner's approval or a keyed delegate's; a delegate admit is listed under Admitted by delegate.
 
 ### What needs the owner
 

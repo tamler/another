@@ -97,7 +97,7 @@ impl std::str::FromStr for QueueState {
     }
 }
 
-/// What an item is. `Security` and `DataLoss` are the fast lane: only the owner decides them.
+/// What an item is. `Security` and `DataLoss` are the fast lane: a keyed delegate may admit them with a reason; only the owner may reject, edit, or release a claim.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]

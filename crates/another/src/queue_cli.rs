@@ -236,7 +236,7 @@ pub enum QueueCmd {
     /// How many claimed, unfinished items an agent may hold.
     #[command(subcommand)]
     Limit(QueueLimitCmd),
-    /// The agents that may admit work items with a key.
+    /// The agents that may admit work, security, and data-loss items with a key.
     #[command(subcommand)]
     Delegate(QueueDelegateCmd),
     /// Show the grace period, or set it (2h to 30d; --owner only).
@@ -737,7 +737,7 @@ pub fn run(store: &Store, cmd: QueueCmd, json: bool) -> anyhow::Result<ExitCode>
         QueueCmd::Delegate(QueueDelegateCmd::Add { agent, owner }) => {
             let caller = owner_only(owner, "naming a delegate", Ok(()), || {
                 format!(
-                    "Name {agent} a queue delegate as the owner. It will admit, reject, edit and release work items with a key that is printed once."
+                    "Name {agent} a queue delegate as the owner. It will admit, reject, edit and release work items, and may admit security and data-loss items with a reason, with a key that is printed once. Reject, edit, and release of a security or data-loss item stay the owner's."
                 )
             })?;
             let made = store.queue_delegate_add(&caller, &agent)?;

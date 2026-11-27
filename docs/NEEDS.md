@@ -117,7 +117,7 @@ A counted row exists only for a condition that stops agreed work or waits on a d
 
 | Kind | Raised | Cleared | Who |
 |---|---|---|---|
-| `decide_now` | A proposed item of kind `security` or `data-loss` | Admitted or rejected | The owner only |
+| `decide_now` | A proposed item of kind `security` or `data-loss` | Admitted or rejected | The owner, or a keyed delegate (admit needs `--reason`; reject stays the owner) |
 | `proposal` | A proposed item of kind `work` | Admitted or rejected | The owner, or a delegate |
 
 Next: `another queue show`, then `another queue admit` or `another queue reject`. A proposed item is the one way a decision reaches this list: mail and requests are not read.
