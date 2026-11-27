@@ -103,7 +103,7 @@ pub use store::{
 #[cfg(feature = "test-support")]
 pub use store::{apply_schema, Build};
 pub use sync_skip::{sync_skip_lines, Skip, SkipAck, SkippedEvent, SYNC_SKIPS_SHOWN};
-pub use time::{fmt_ts, parse_ts};
+pub use time::{fmt_ts, now_ms, parse_duration, parse_ts};
 pub use tokens::{AuditEntry, AuditRecord, NewToken, Token, TokenScope};
 pub use transport::{
     attention_reason, identify, newest_at_target, resolve_dir, session_file_key, shown_state,

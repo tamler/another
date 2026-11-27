@@ -95,15 +95,15 @@ pub const PULL_PAGE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 pub const PULL_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 /// Bytes of a push request body around its events: `{"events":[]}`.
 pub const PUSH_ENVELOPE_BYTES: usize = 13;
-/// The most a real sequence number adds to the one digit [`MAX_EVENT_WIRE_BYTES`] counts.
-const SEQ_EXTRA_BYTES: usize = 19;
 
 // One event at the cap fits a batch and a page, and each budget fits under its limit. An
 // event that arrived by push is at most the push limit, so a pull answer that carries it
 // alone has at least as much room again for the node directory: whatever a hub accepted,
 // it can relay. The build fails when a change breaks one of these.
 const _: () = {
-    let one_event = MAX_EVENT_WIRE_BYTES + SEQ_EXTRA_BYTES + PUSH_ENVELOPE_BYTES;
+    // The most a real sequence number adds to the one digit MAX_EVENT_WIRE_BYTES counts.
+    let seq_extra_bytes = 19;
+    let one_event = MAX_EVENT_WIRE_BYTES + seq_extra_bytes + PUSH_ENVELOPE_BYTES;
     assert!(one_event <= PUSH_BATCH_BUDGET_BYTES);
     assert!(one_event <= PULL_PAGE_BUDGET_BYTES);
     assert!(PUSH_BATCH_BUDGET_BYTES <= PUSH_BODY_LIMIT_BYTES);

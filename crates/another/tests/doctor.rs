@@ -190,6 +190,7 @@ fn a_fresh_home_is_ok_and_doctor_changes_nothing() {
 
 /// Every row of every table, read through one connection: a logical write by doctor that
 /// leaves the main file alone (it lands in a live WAL) still shows here.
+#[cfg(unix)]
 fn dump(conn: &rusqlite::Connection) -> Vec<String> {
     let tables: Vec<String> = conn
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")

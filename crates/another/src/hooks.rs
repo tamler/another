@@ -527,10 +527,7 @@ fn contains_ours_text(text: &str) -> bool {
 }
 
 fn timestamp() -> String {
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or_default();
+    let ms = another_core::now_ms();
     another_core::fmt_ts(ms)
         .chars()
         .filter(char::is_ascii_digit)
@@ -1837,10 +1834,7 @@ pub fn log_hook_error(another_home: &Path, event: HookEvent, client: Client, err
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_HOOK_LOG) {
         let _ = std::fs::rename(&path, dir.join("hooks.log.1"));
     }
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or_default();
+    let ms = another_core::now_ms();
     let line = format!(
         "{} {} --client {}: {} (allowed; failing open)\n",
         another_core::fmt_ts(ms),
@@ -1910,10 +1904,7 @@ fn log_hook_denied(another_home: &Path, event: HookEvent, client: Client, error:
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_HOOK_LOG) {
         let _ = std::fs::rename(&path, dir.join("hooks.log.1"));
     }
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or_default();
+    let ms = another_core::now_ms();
     let line = format!(
         "{} {} --client {}: {} (denied; could not check)\n",
         another_core::fmt_ts(ms),
