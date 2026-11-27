@@ -8,141 +8,65 @@
 
 Another is a background messaging system that helps coding agents work on the same project on the same machine at the same time. It helps reduce editing conflicts, exchange updates and reuse registered resources. Free and open source, always. [Measured resource use](docs/RESOURCE-MEASUREMENTS.md) records a sample on one Mac and its limits.
 
-Self-hosted federation hub/spoke sync is in scope for v0.1.0 (M9), including pairing the Mac and VPS and testing a hub backup restore. Authenticated remote peers are frozen for v0.1.0 and treated as experimental. When using these features: the hub can read mail it relays; remote peers cannot reap processes. The hub signs its invites and its answers to a push and a pull, so something between a spoke and its hub can make a sync fail and nothing else; secrecy on that link needs `https://` or a private network. Upgrade a hub and its spokes together: a hub and a spoke sync only when both run a build that signs. See [federation](docs/FEDERATION.md) and [remote access](docs/REMOTE.md).
-
-Claude Code and Codex cannot see each other without something shared. They can edit the same files, start the same fix twice, or launch duplicate model servers. Another combines path holds, messages and requests, activity, and a registry for ports and model servers. Its mailbox is a way to address agents and exchange messages. It does not launch agents or enforce a resource limit. A work queue for one node, where agents take work the owner has admitted, is on `main` ([docs/QUEUE.md](docs/QUEUE.md)): a claim returns to the queue when the session that made it ends or after a grace period of silence, and `another needs` lists what is waiting on the owner ([docs/NEEDS.md](docs/NEEDS.md)).
-
-**Home:** [toanother.one](https://toanother.one) · **License:** [Apache-2.0](LICENSE) · **Status:** The original build milestones (see [Status](#status)) are on `main`; no release is published yet. The v0.1.0 work queue for one node is built ([docs/QUEUE.md](docs/QUEUE.md)), a claim now returns to the queue when the session that made it ends or after a grace period of silence, and `another needs` is the one list of what needs the owner ([docs/NEEDS.md](docs/NEEDS.md)); the [Status](#status) table says what of the scope is built. Work now follows the [v0.1.0 scope](docs/V0.1.0-SCOPE.md), the single-node queue release. Hosted connectors (OAuth for ChatGPT, Claude, and other MCP clients) and the loopback dashboard are present but frozen for v0.1.0 and treated as experimental. See [docs/REMOTE.md](docs/REMOTE.md) and [docs/DASHBOARD.md](docs/DASHBOARD.md).
-
-`another serve --federation` without `--auth` serves only `/fed/*` and `/health`, even when a proxy rewrites `Host` to loopback. Add `--auth` for token-gated MCP and activity routes; an explicitly enabled dashboard on that federation listener also needs a token. Unauthenticated rejection audits are capped at 32 rows per server store per 60 seconds. Wake subjects and edit-denial hold values use the hook quoting rules. Foreign resource checks use IP literals only and a bounded probe budget; see [federation](docs/FEDERATION.md).
-
-## Why
-
-This is the failure I kept hitting:
-
-- Two agents write the same file and the last save wins. Git shows the wreck. It does not say which session was in the file.
-- Neither session can see the other, so both implement the fix.
-- The handoff is me, copying a paragraph from one terminal to the other.
-- A second agent starts another model server, or binds a port the first one already has.
-
-What they get instead:
-
-- **Path holds, taken at the edit.** With the hook pack, each file an agent edits gets an expiring hold, and a Claude Code, Codex or Grok CLI edit to a file another agent holds is stopped with the holder's name. A hold blocks only inside its own checkout, so agents in separate worktrees or clones never stop each other, and `another hold release <path>` frees a file as soon as its holder is done with it. `another hold check` exits 3 on overlap and grants nothing. Edits made from a shell command get past the hook, and Cursor has no edit guard, so use another checkout when you need a real boundary.
-- **Mail and requests.** `another send --request` opens work for an agent to claim. Claiming assigns an owner. An ack records receipt. If the request goes stale, someone else can take it.
-- **An activity feed**, so a session can ask who is doing what before it starts a duplicate.
-- **A resource registry (experimental; frozen for v0.1.0)**, so an agent borrows a running server instead of launching a duplicate. `another reap` needs a human `--confirm` on that machine. Remote peers cannot reap.
-
-![Diagram: codex@shop-review holds src/api/routes.rs. claude@shop's Edit tool call on that file is stopped by the edit hook, which names the holder, and claude@shop sends a release request instead. An edit from a shell command is not seen by the hook, so a hold is not a lock.](docs/assets/path-holds.svg)
-
-![Diagram: alice@shop sends "Review the parser" with --request to bob@shop. An ack records receipt, not completion. The request the message opened moves from open to claimed to done; release puts it back to open, and past its due time it goes stale and anyone may take it over.](docs/assets/handoff.svg)
-
-Hooks put a short digest in at session start, and a one-line notice after the next tool call when mail lands mid-task. That is why the agents look.
-
-![Diagram: on bob@shop's session timeline, mail from alice@shop lands between two tool calls. After the next tool call the post-tool hook adds a one-line notice naming the message. An idle agent makes no tool calls, so the loopback daemon wakes an idle Herdr agent; tmux and cmux panes are woken on demand. Each message is announced once.](docs/assets/mid-task-notice.svg)
-
-State is one SQLite database on the machine (`~/.another`, or `$ANOTHER_HOME`). A second machine can federate through a hub you host. The hub can read mail it relays.
-
-OAuth for hosted MCP clients (ChatGPT, Claude.ai) is in this tree, and so is the loopback dashboard (`another dashboard`, or `/ui` on a loopback `another serve`). See the [changelog](https://toanother.one/changelog/) and [how I run the agents on this repo](https://toanother.one/building/).
-
-The website source lives in [site/](site/README.md). `sh site/build.sh` checks the pages, and `python3 scripts/check-copy.py` rejects em dashes and a banned-phrase list.
-
 ## Quickstart
 
-**1. Install** with Rust 1.88 or newer:
+Install Git, Rust 1.88 or newer, and your platform's linker and build tools. See the instructions for [macOS](https://toanother.one/docs/install/macos/), [Linux](https://toanother.one/docs/install/linux/), or [experimental native Windows](https://toanother.one/docs/install/windows/). The project currently distributes source through GitHub.
 
-```bash
+```sh
 cargo install --locked --git https://github.com/tamler/another another
+another --version
 ```
 
-Or install from a checkout, which builds it and puts `another` in Cargo's bin directory (`~/.cargo/bin`):
+Make sure Cargo's bin directory is on your `PATH`. In a test repository or a shared checkout where both agents will work, run:
 
-```bash
-git clone https://github.com/tamler/another && cd another && cargo install --locked --path crates/another
-```
-
-You can also build it and copy the binary out yourself: `cargo build --release --locked`, then copy `target/release/another` to a directory on your `PATH`. Do not run it from `target/release`. A binary run from inside a Cargo build directory counts as a development build: it will not migrate an existing home to a newer schema without `--dev-migrate` (see [docs/DOCTOR.md](docs/DOCTOR.md#upgrades-and-backups)).
-
-Once v0.1.0 is published, prebuilt binaries for macOS (arm64, x86_64) and Linux (static, x86_64, arm64) will be on [GitHub Releases](https://github.com/tamler/another/releases): unpack one and put `another` on your `PATH`. On macOS a downloaded binary may need its quarantine flag removed: `xattr -d com.apple.quarantine ./another`.
-
-On macOS, when replacing an existing `another` with a new build, **remove the old binary first** (`rm "$(command -v another)"`) and then copy the new one in. Copying over the old file in place leaves a stale code signature cached, and macOS kills the new binary on launch. `cargo install` replaces it safely.
-
-After upgrading, restart every `another` process that was already running, since it keeps the old code: run `another daemon restart` (or `another daemon install` from the new binary if it lives at a different path), restart each client that runs `another serve --stdio` (or reconnect its MCP server), and restart any `another remote up`, `another serve --auth` or hand-started `another serve`. This matters most when the upgrade changes how repository keys and checkout ids are cached (`project_repos`). Current builds use `v4:`-prefixed cache keys; an older process may rewrite rows in an older format and then compare keys that never match, which can miss holds in this checkout (fail open). See [docs/DAEMON.md](docs/DAEMON.md#upgrading).
-
-After this build, a missing working directory used in a weak wake match is resolved through its existing physical parent, including on Windows where that can restore a verbatim prefix and on-disk letter case. A cwd value stored by an older process may miss that match until the session's hook runs again and restamps it. There is no schema change and no migration. See [docs/WAKE.md](docs/WAKE.md#sessions).
-
-If the machine is part of a federation, upgrade its hub and all its spokes together. A hub and a spoke on different sides of the build that signs answers do not sync: each `another sync` fails with a text that says which end to update, nothing is lost, and no node pairs again. See [docs/FEDERATION.md](docs/FEDERATION.md#upgrading).
-
-**2. Create the local node** (`~/.another`, or `$ANOTHER_HOME`):
-
-```bash
+```sh
 another init
+another agent register alice --program claude --project .
+another agent register bob --program codex --project .
+another send --from alice --to bob --subject "Review the parser" --body "Please check the error paths."
+another inbox --agent bob --unread
 ```
 
-**3. Let agents check mail automatically** (Claude Code, Codex, Grok CLI, Cursor). This installs **user-global** hooks in each client's home-directory config (e.g. `~/.claude/settings.json`, `~/.codex/hooks.json`), not per project. It is idempotent, backs up the files it changes, keeps their permissions (a `0600` settings file stays `0600`), and never overwrites your existing hooks:
+Bob should see Alice's unread message. Both demo identities use this checkout and the same database, stored in `~/.another` by default. Set `ANOTHER_HOME` before initialization to use a separate database. Each client that shares it must inherit the same setting.
 
-```bash
-another hook install --client all
+Check how path holds work in the same checkout. The second command should report Alice's hold and exit with status 3. Run the release even after that expected conflict.
+
+```sh
+another hold acquire --agent alice src/parser.rs
+another hold check --agent bob src/parser.rs
+another hold release --agent alice src/parser.rs
 ```
 
-For Codex, review and trust Another's new or changed hooks yourself in `/hooks`. In Codex's default trust flow, automatic mail delivery, heartbeats and edit holds do not run there until you do. Codex also offers `--dangerously-bypass-hook-trust`, which runs enabled hooks without persisted trust for that one invocation; Another does not recommend it. `another hook status` checks configuration presence, not trust or execution. Another cannot grant trust. See [Codex trust and coverage](docs/HOOKS.md#codex-trust-and-coverage).
+[Message delivery](docs/INBOX.md) shows how to acknowledge and reply. [Requests](docs/REQUESTS.md) cover work addressed to a particular agent.
 
-The same hooks show the work queue at session start and at a prompt: a session is told which items it holds, and a name the owner gave its own limit is told when `another queue next` would hand it an item ([Queue lines](docs/HOOKS.md#queue-lines)).
+### Try the work queue in a test database
 
-Besides session start, prompts and session end, the pack adds a hook after each tool call (new mail shows up mid-task) and, for Claude Code, Codex and Grok, one before each file edit (the edit takes a hold, or is stopped when another agent holds the file). The mail hook fails open. The edit hook waits 300 ms for a database lock, then up to 2.7 s more (3 s in all), and then denies the edit; a check that fails is also a deny. A missing database or an old schema still fails open. See [docs/HOOKS.md](docs/HOOKS.md).
+Run this in a fresh test database after registering Alice and Bob. Use the item number from the proposal in place of `Q1` if it differs. Run the admission command in an interactive terminal and type `yes` when prompted.
 
-**Optional: keep the daemon running** (a launchd LaunchAgent on macOS, a systemd user unit on Linux, a Task Scheduler logon task on Windows). It expires holds in the background and wakes idle Herdr agents when mail arrives:
-
-```bash
-another daemon install
+```sh
+another queue propose --agent alice --title "Review the parser" --scope M10 --done-when "Review recorded"
+another queue admit Q1 --owner
+another queue next --agent bob
+another queue done Q1 --agent bob --summary "Review recorded" --file notes.md
 ```
 
-**4. Give agents the MCP tools.** Add Another as a stdio MCP server in each client:
+Bob should receive the admitted item. The result records the summary and a file reference. See the [work queue guide](docs/QUEUE.md) for claim limits and handoffs.
 
-```json
-{ "mcpServers": { "another": { "command": "another", "args": ["serve", "--stdio"] } } }
+### Connect real agent sessions
+
+Preview the hooks for the clients you use, then install them. These commands write user-level client settings. The installer preserves existing hooks and backs up changed files.
+
+```sh
+another hook install --client claude,codex --dry-run
+another hook install --client claude,codex
+another hook status
 ```
 
-Or run one loopback daemon and point clients at `http://127.0.0.1:7466/mcp`:
+In Codex, review and trust the installed hooks in `/hooks`. Start new sessions in the same checkout. Hooks register client-based identities and show messages at session start, at prompts, and after a tool call. Run `another agent list` to find the actual addresses. A client can also use MCP to read and send messages itself. Configure it to launch `another serve --stdio` with the same project and data directory. See [client setup](docs/HOOKS.md) and [MCP connections](https://toanother.one/docs/#connections).
 
-```bash
-another serve
-```
+Path holds help Claude Code, Codex and Grok CLI avoid conflicting edits when the edit hook runs. Shell writes bypass the hook, Cursor has no edit guard, and separate checkouts have separate holds. The [daemon](docs/DAEMON.md) can expire holds and wake idle Herdr sessions. The experimental [resource registry](docs/RESOURCES.md) helps agents reuse model servers and ports.
 
-**ChatGPT desktop on this Mac** uses that same local server. In the app: Settings → MCP servers → Add server → STDIO, command `another`, arguments `serve --stdio`, then Restart. Or Streamable HTTP with the URL `http://127.0.0.1:7466/mcp` while `another serve` is running. No tunnel and no OAuth. The app writes this to `~/.codex/config.toml`, which Codex shares. A cloud ChatGPT chat, including developer-mode plugins, does not use that file; those connectors are called from OpenAI and need a public URL or OpenAI's Secure MCP Tunnel. Details and links: [docs/REMOTE.md](docs/REMOTE.md).
-
-**5. Try it from the shell:**
-
-```bash
-another agent register alice --program claude
-```
-
-```bash
-another agent register bob --program codex
-```
-
-```bash
-another send --from alice --to bob --subject "Review PR 12" --body "please" --request
-```
-
-```bash
-another inbox --agent bob
-```
-
-```bash
-another activity --summary
-```
-
-That exchange, recorded from a temporary home with a build of `main` (ids and timestamps will differ; the hold check exits 3 on purpose):
-
-![Terminal recording: another agent register alice and bob; another send --request opens a request; another inbox shows bob's unread message and the open request; another hold acquire for alice on src/parser.rs; another hold check for bob reports the conflict and exits 3; another reply and another ack; another holds lists alice's hold.](docs/assets/demo.gif)
-
-**6. Open the local dashboard** (loopback only, no extra install):
-
-```bash
-another dashboard
-```
-
-Or, while `another serve` is running, open <http://127.0.0.1:7466/ui>. The page is served by the binary. It does not call out to a CDN.
+For upgrades and local source installs, see the [install guide](https://toanother.one/docs/install/) and [upgrade checklist](docs/DAEMON.md#upgrading). For a second machine, see [self-hosted federation](docs/FEDERATION.md). A hub can read the messages it relays. [Authenticated remote peers](docs/REMOTE.md) and the [dashboard](docs/DASHBOARD.md) are experimental.
 
 ## Status
 
@@ -201,7 +125,7 @@ Task guides, all listed on the [guides hub](site/guides/index.html) (website sou
 | Area | Tools |
 |---|---|
 | Identity | `ensure_project`, `register_agent`, `heartbeat` (`start` / `end` record sessions) |
-| Mail | `send_message` (with `reply_to`, `create_request`), `fetch_inbox`, `threads`, `acknowledge` |
+| Messages | `send_message` (with `reply_to`, `create_request`), `fetch_inbox`, `threads`, `acknowledge` |
 | Requests | `claim_request` (`claim` / `release` / `complete` / `cancel`) |
 | Work queue | `queue_propose`, `queue_next` (returns `{claimed, refused}`), `queue_update` (`note` / `release` / `handoff` / `done`), `queue_list`. Local callers only; no tool admits, rejects or edits an item ([docs/QUEUE.md](docs/QUEUE.md)) |
 | Path holds | `hold_paths` (`acquire` / `check` / `renew` / `release` / `list`) |
@@ -221,7 +145,7 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 | Exit status | `0` success, `1` error, `2` bad arguments, `3` conflict (holds that overlap, acting on a closed request, claiming or completing a request another agent has claimed). A `forbidden` error, such as releasing a request someone else owns, exits 1. An error prints `another: <what happened>` and, when the next step is not obvious, a `hint:` line; `--json` prints `{"error": {"code", "message", "hint?"}}` on stdout |
 | Node | `another init`, `another status`, `another node show`, `another node name [<name>]` (no name prints the current one), `another events` |
 | Agents | `another agent register <name> --program claude\|codex\|grok\|cursor\|grok_bot\|other [--project PATH]`, `another agent list` |
-| Mail | `another send`, `another inbox`, `another reply <message-id>`, `another ack <message-id>`, `another threads`, `another thread <id>` (there is no `another mail` command) |
+| Messages | `another send`, `another inbox`, `another reply <message-id>`, `another ack <message-id>`, `another threads`, `another thread <id>` (there is no `another mail` command) |
 | Requests | `another requests`, `another request claim\|release\|complete\|cancel <id>` (recorded walkthrough: [docs/REQUESTS.md](docs/REQUESTS.md)) |
 | Work queue | `another queue propose\|list\|show\|next\|note\|release\|done` for agents; `another queue admit\|reject\|edit` for the owner (`--owner`, at a terminal) or a delegate (key in `$ANOTHER_ADMIT_KEY`); `another queue limit set\|default\|list`, `another queue delegate add\|remove\|list`, `another queue grace [<duration>]`, `another queue list --needs-owner`, `another queue audit` (`next` exits with status 3 when the agent is at its limit; [docs/QUEUE.md](docs/QUEUE.md)) |
 | What needs the owner | `another needs [--brief] [--limit N]` (read-only; exits 1 only when the list cannot be read; [docs/NEEDS.md](docs/NEEDS.md)) |
@@ -239,7 +163,7 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 ## Concepts
 
 - **Agents** are unique per project and addressed as `name@project`, or `name@project@node` on other nodes. A bare `name` works when it is unambiguous; once a second project registers the same name it stops resolving, and [docs/ADDRESSING.md](docs/ADDRESSING.md) shows the error and the fix.
-- **Mail** is immutable messages in threads, with per-recipient read and ack state. **Requests** go `open → claimed → done`; claiming assigns an owner. They become `stale` past their due time and anyone may take them over. An ack records receipt, not completion: [docs/REQUESTS.md](docs/REQUESTS.md) walks through a worker that acks, claims, and crashes.
+- **Messages** are immutable and grouped in threads, with per-recipient read and ack state. **Requests** go `open → claimed → done`; claiming assigns an owner. They become `stale` past their due time and anyone may take them over. An ack records receipt, not completion: [docs/REQUESTS.md](docs/REQUESTS.md) walks through a worker that acks, claims, and crashes.
 - **Path holds** are expiring leases on project-relative globs of at most 4,096 bytes. Exclusive holds conflict with overlapping holds inside the same checkout (working directory); other worktrees and clones of the repository are separate and never block each other. The edit hook enforces them for client file edits; across machines, a clash is a warning, never a lock.
 - **Resources** are model and dev servers, ports, GPUs, containers and jobs, held by owner and borrower leases with TTLs. Orphans are listed, and only a human can reap them (`another reap … --confirm`); reaping is never remote.
 - **Event log**: every change is appended to a signed, chained, append-only log, and the query tables are projections of it. That log is what federation syncs.
@@ -247,6 +171,7 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 
 ## Safety defaults
 
+- A federation-only listener serves `/fed/*` and `/health`. Federation signatures authenticate protocol data. Use HTTPS or a private network for transport confidentiality, and upgrade a hub and its spokes together. See [federation](docs/FEDERATION.md#upgrading).
 - Binds to loopback only, unless you pass `--auth` and `--allow-remote-bind`.
 - The dashboard is loopback-only. An `--auth` server does not serve it unless you pass `--dashboard`, and then it is read-only with message bodies omitted. Its `Host` must still be loopback on the bound port, not a tunnel name. A federation-only listener (`--federation` without `--auth`) never mounts the dashboard, and with both `--federation` and `--auth` an explicitly enabled dashboard also requires a bearer token.
 - Remote tokens and OAuth grants each act as a single agent within project globs. A hosted client is approved on this machine; it is never approved by an HTTP request. Every remote call is audited.

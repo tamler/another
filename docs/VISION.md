@@ -4,7 +4,7 @@ Status: approved by the project owner, 17 Nov 2026. This page and [V0.1.0-SCOPE.
 
 ## Purpose
 
-Another is the coordination layer for one developer's coding agents. Its job is to move agreed work forward without anyone losing or redoing work.
+Another is a background messaging system for coding agents working on the same project on one machine. Agents use it to exchange messages, coordinate edits and hand off agreed work. A self-hosted hub can connect machines.
 
 Three things together do that job:
 

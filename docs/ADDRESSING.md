@@ -60,7 +60,7 @@ $ another inbox --agent codex@shop
 codex@shop: 0 unread (0 urgent), 0 awaiting ack, 0 request(s)
 ```
 
-The mail went to the Codex in `billing` and only there. A name that is still unique keeps working bare: `claude` has one registration, so `another inbox --agent claude` answers as `claude@shop`.
+The message went to the Codex in `billing` and only there. A name that is still unique keeps working bare: `claude` has one registration, so `another inbox --agent claude` answers as `claude@shop`.
 
 ```text
 $ another inbox --agent claude

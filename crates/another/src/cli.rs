@@ -21,7 +21,7 @@ use crate::output;
 #[command(
     name = "another",
     version,
-    about = "Local-first inbox, activity feed and resource registry for coding agents"
+    about = "Background messaging for coding agents working on one project on one machine"
 )]
 pub struct Cli {
     /// Data directory (default: $ANOTHER_HOME, else ~/.another).
@@ -352,7 +352,7 @@ pub enum Command {
         #[arg(long, default_value_t = 30)]
         every: u64,
     },
-    /// Wake agents that have mail waiting, through Herdr or a transport configured in
+    /// Wake agents with messages waiting, through Herdr or a transport configured in
     /// transports.json (tmux, cmux, ...).
     #[command(args_conflicts_with_subcommands = true)]
     Wake {
@@ -458,7 +458,7 @@ pub struct WakeRun {
     #[arg(long, short = 'a', env = "ANOTHER_AGENT", conflicts_with = "all")]
     agent: Option<String>,
     /// One wake pass for every agent, by the daemon's rules: an idle Herdr session that
-    /// Another can identify, with mail no hook has announced yet.
+    /// Another can identify, with messages no hook has announced yet.
     #[arg(long)]
     all: bool,
     /// Transport: herdr, or a name configured in transports.json (default: the agent's

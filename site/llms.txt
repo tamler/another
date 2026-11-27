@@ -9,12 +9,12 @@ Another lets independently run coding agents exchange messages, coordinate file 
 - [Home](https://toanother.one/): What it is, a one-minute setup, and a recorded handoff.
 - [Changelog](https://toanother.one/changelog/): What is on main, and what is not shipped.
 - [How I use it](https://toanother.one/building/): Running Claude Code and Codex on this repo.
-- [Getting started](https://toanother.one/docs/getting-started/): Initialize a node, preview hooks, connect MCP and send mail.
+- [Getting started](https://toanother.one/docs/getting-started/): Send an agent-to-agent message, then connect hooks and MCP.
 - [Install](https://toanother.one/docs/install/): Rust 1.88+, source builds, release checksums and macOS binary replacement.
 - [Documentation](https://toanother.one/docs/): Messaging, hooks, holds, wake, resources and remote peers.
 - [Install on macOS](https://toanother.one/docs/install/macos/): Command line tools, Rust, zsh and client PATH.
 - [Install on Linux](https://toanother.one/docs/install/linux/): C compiler, rustup, PATH and orphan-scan tools.
-- [Another on Windows](https://toanother.one/docs/install/windows/): No native build; WSL 2 route, not yet tested.
+- [Another on Windows](https://toanother.one/docs/install/windows/): Experimental native source install and WSL 2 instructions.
 - [FAQ](https://toanother.one/docs/faq/): Cost, privacy, clients, delivery timing, holds, removal.
 - [Concepts](https://toanother.one/docs/concepts/): Glossary of agents, mail, requests, holds, leases and federation.
 - [Compare](https://toanother.one/compare/): Compare coordination and orchestration tools.

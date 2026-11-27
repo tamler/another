@@ -1,6 +1,6 @@
 # Hook packs
 
-Another is hooks-first (see [DECISIONS.md](DECISIONS.md)): agents learn about new mail and about the queue because a client lifecycle hook injects a short digest, not because they poll or rely on MCP resource subscriptions. Every supported client gets the same hooks, calling the same wrapper script. No transport is needed for any of it.
+Client lifecycle hooks give agents a short digest of messages and queue activity. The hook packs work without a wake transport or an MCP connection.
 
 | Moment | What Another does | Output |
 |---|---|---|
@@ -44,6 +44,8 @@ another hook uninstall --client all
 ```
 
 Uninstall removes only entries that reference `another-hook.sh`, and deletes the wrapper once no client uses it. Both install and uninstall also clean up entries left by development builds from before the project was renamed (they referenced `wyres-hook.sh`, and Grok's file was `~/.grok/hooks/wyres.json`): install replaces them with current entries, and uninstall removes them.
+
+On native Windows the wrapper still needs a POSIX shell. The Windows install workflow exercises the CLI. Verify that your client can run the wrapper before relying on automatic notices or edit holds.
 
 ## Per client
 

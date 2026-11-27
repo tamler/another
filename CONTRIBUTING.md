@@ -9,7 +9,7 @@ Thanks for helping. Another is free and open source, always: every feature ships
    - Prior art listed in SPEC is for ideas only.
 2. **Vendor-neutral.** Claude Code, Codex, Grok CLI, Grok Bot and Cursor are treated equally. Don't tune behaviour for one vendor; when clients differ, handle the difference explicitly and document it.
 3. **Safe defaults.**
-   - Bind to loopback unless authentication is on.
+   - Bind to loopback by default. A non-loopback bind requires both `--auth` and `--allow-remote-bind`.
    - Never terminate a process without a human confirmation flag.
    - Never allow remote reaping.
    - Agents act only on their own node.
@@ -39,6 +39,8 @@ Schema changes are new entries at the end of `MIGRATIONS` in `crates/another-cor
 
 ## Before you open a PR
 
+A PR needs a ready queue item and must name its scope ID. See [AGENTS.md](AGENTS.md) for admission rules and [the queue guide](docs/QUEUE.md) for commands.
+
 Run what CI runs:
 
 ```bash
@@ -60,6 +62,7 @@ cargo +1.88 check --workspace --all-targets --locked
 - Add tests for new behaviour. Core logic gets tests in `crates/another-core/tests`; CLI, MCP, hooks and HTTP get tests in `crates/another/tests`, which run the real binary, with a temporary `HOME` / `ANOTHER_HOME` where relevant.
 - Keep the **Status** section of [README.md](README.md) and the current [AGENTS.md](AGENTS.md) brief accurate when milestone progress changes.
 - Dependency updates must keep building on Rust 1.88. `resolver = "3"` in `Cargo.toml` makes `cargo update` prefer compatible versions.
+- Copy lint: `python3 scripts/check-copy.py`.
 - Website edits: `sh site/build.sh` with Python 3. That regenerates `site/dist`, checks links and SEO metadata, and runs `scripts/check-copy.py` (em dashes, en dashes, and banned phrases in `site/`, `docs/`, and CLI strings in `crates/another/src/cli.rs`). Deploying the site is a maintainer action.
 
 ## Releases
