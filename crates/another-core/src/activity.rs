@@ -99,16 +99,21 @@ pub enum Since {
 }
 
 impl Since {
+    fn try_parse_time(raw: &str, now: i64) -> Option<i64> {
+        if let Some(t) = crate::time::parse_duration(raw, true)
+            .ok()
+            .and_then(|secs| secs.checked_mul(1000))
+            .and_then(|ms| now.checked_sub(ms))
+        {
+            return Some(t);
+        }
+        crate::time::parse_ts(raw)
+    }
+
     /// Parse bare seconds or `15m` / `2h` / `1d` / `90s` (relative to `now`), an RFC 3339 time, or an event id.
     pub fn parse(raw: &str, now: i64) -> Result<Since> {
         let raw = raw.trim();
-        if let Some(ms) = crate::time::parse_duration(raw, true)
-            .ok()
-            .and_then(|secs| secs.checked_mul(1000))
-        {
-            return Ok(Since::Time(now - ms));
-        }
-        if let Some(ms) = crate::time::parse_ts(raw) {
+        if let Some(ms) = Self::try_parse_time(raw, now) {
             return Ok(Since::Time(ms));
         }
         if raw.len() == 26 && ulid::Ulid::from_string(raw).is_ok() {
@@ -116,6 +121,18 @@ impl Since {
         }
         Err(Error::Invalid(format!(
             "invalid since {raw:?}: use a duration like 3600 (bare seconds), 90m or 2h, an RFC 3339 time, or an event id"
+        )))
+    }
+
+    /// Parse bare seconds or `15m` / `2h` / `1d` / `90s` (relative to `now`), or an RFC 3339 time.
+    /// Event ids are refused.
+    pub fn parse_time(raw: &str, now: i64) -> Result<i64> {
+        let raw = raw.trim();
+        if let Some(ms) = Self::try_parse_time(raw, now) {
+            return Ok(ms);
+        }
+        Err(Error::Invalid(format!(
+            "invalid time {raw:?}: use a duration like 3600 (bare seconds), 90m or 2h, or an RFC 3339 time, not an event id"
         )))
     }
 }
@@ -1160,6 +1177,24 @@ mod tests {
         assert_eq!(Since::parse(&id, now).unwrap(), Since::After(id));
         assert!(Since::parse("yesterday", now).is_err());
         assert!(Since::parse("5y", now).is_err());
+    }
+
+    #[test]
+    fn parses_since_time() {
+        let now = 10_000_000;
+        assert_eq!(Since::parse_time("90", now).unwrap(), now - 90_000);
+        assert_eq!(Since::parse_time("15m", now).unwrap(), now - 900_000);
+        assert_eq!(Since::parse_time("2h", now).unwrap(), now - 7_200_000);
+        assert_eq!(
+            Since::parse_time("1970-01-01T00:00:01Z", now).unwrap(),
+            1000
+        );
+        let id = ulid::Ulid::new().to_string();
+        let err = Since::parse_time(&id, now).unwrap_err();
+        assert_eq!(err.code(), "invalid");
+        assert!(err.to_string().contains("not an event id"));
+        assert!(Since::parse_time("yesterday", now).is_err());
+        assert!(Since::parse_time("1s", i64::MIN).is_err());
     }
 
     #[test]

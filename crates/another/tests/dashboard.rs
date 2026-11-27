@@ -291,6 +291,115 @@ async fn local_dashboard_shows_bodies_and_requires_confirm() {
         .iter()
         .any(|i| i["body"].as_str().unwrap_or("").contains("SECRET BODY")));
 
+    // `since` and `until` both accept bare seconds, relative durations and RFC 3339 times,
+    // and refuse event ids and invalid text with an accurate `invalid` error.
+    let by_secs: Value = serde_json::from_str(
+        &http
+            .get(format!(
+                "{}/api/dash/activity?q=SECRET%20BODY&since=3600&until=0",
+                srv.base
+            ))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        by_secs["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["body"].as_str().unwrap_or("").contains("SECRET BODY")),
+        "since=3600&until=0 should include the just-sent message: {by_secs}"
+    );
+    let before_now: Value = serde_json::from_str(
+        &http
+            .get(format!(
+                "{}/api/dash/activity?q=SECRET%20BODY&until=1h",
+                srv.base
+            ))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        before_now["items"].as_array().unwrap().is_empty(),
+        "until=1h excludes events newer than an hour ago: {before_now}"
+    );
+    let rfc3339_until: Value = serde_json::from_str(
+        &http
+            .get(format!(
+                "{}/api/dash/activity?q=SECRET%20BODY&until=2099-01-01T00:00:00Z",
+                srv.base
+            ))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        rfc3339_until["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["body"].as_str().unwrap_or("").contains("SECRET BODY")),
+        "RFC 3339 until should include the just-sent message: {rfc3339_until}"
+    );
+    for (param, bad) in [
+        ("since", "01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+        ("since", "nonsense"),
+        ("since", "until"),
+        ("until", "01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+        ("until", "nonsense"),
+        ("until", "since"),
+    ] {
+        let resp = http
+            .get(format!("{}/api/dash/activity?{param}={bad}", srv.base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "{param}={bad}");
+        let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+        assert_eq!(body["error"]["code"], "invalid", "{param}={bad}: {body}");
+        let msg = body["error"]["message"].as_str().unwrap_or("");
+        assert!(
+            msg.starts_with(&format!("{param}: ")),
+            "diagnostic should name failing parameter {param}: {body}"
+        );
+        assert!(msg.contains("bare seconds"), "{param}={bad}: {body}");
+        assert!(msg.contains("not an event id"), "{param}={bad}: {body}");
+    }
+    for (query, failing) in [
+        ("since=1d&until=nonsense", "until"),
+        ("since=nonsense&until=1h", "since"),
+    ] {
+        let resp = http
+            .get(format!("{}/api/dash/activity?{query}", srv.base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "{query}");
+        let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+        assert_eq!(body["error"]["code"], "invalid", "{query}: {body}");
+        let msg = body["error"]["message"].as_str().unwrap_or("");
+        assert!(
+            msg.starts_with(&format!("{failing}: ")),
+            "{query} should name {failing}: {body}"
+        );
+        assert!(msg.contains("bare seconds"), "{query}: {body}");
+        assert!(msg.contains("not an event id"), "{query}: {body}");
+    }
+
     let denied = http
         .post(format!(
             "{}/api/dash/requests/{request_id}/expire",

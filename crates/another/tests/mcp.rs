@@ -346,15 +346,44 @@ async fn full_flow_over_mcp() {
         .unwrap()
         .len();
     assert_eq!(before, after);
-    assert_eq!(
-        call_err(
-            &client,
-            "work_board",
-            json!({ "since": "01ARZ3NDEKTSV4RRFFQ69G5FAV" })
-        )
-        .await,
-        "invalid"
-    );
+    let board_secs = call_ok(
+        &client,
+        "work_board",
+        json!({ "project": "site", "since": "3600" }),
+    )
+    .await;
+    assert_eq!(board_secs["project"], "site");
+    for bad in ["01ARZ3NDEKTSV4RRFFQ69G5FAV", "nonsense", "since", "agent"] {
+        let err = call_error(&client, "work_board", json!({ "since": bad })).await;
+        assert_eq!(err["code"], "invalid", "{bad}: {err}");
+        let msg = err["message"].as_str().unwrap_or("");
+        assert!(msg.contains("bare seconds"), "{bad}: {err}");
+        assert!(msg.contains("not an event id"), "{bad}: {err}");
+        if let Some(hint) = err["hint"].as_str() {
+            assert!(
+                !hint.contains("next_since"),
+                "work_board must not tell callers to pass an event id: {err}"
+            );
+            assert!(
+                !hint.contains("name@project"),
+                "work_board time error must not give an agent hint: {err}"
+            );
+        }
+    }
+    for (tool, args) in [
+        ("activity_feed", json!({ "since": "nonsense" })),
+        ("activity_feed", json!({ "since": "agent" })),
+        ("activity_summarize", json!({ "since": "nonsense" })),
+        ("whats_new", json!({ "agent": "codex-1", "since": "agent" })),
+    ] {
+        let err = call_error(&client, tool, args).await;
+        assert_eq!(err["code"], "invalid", "{tool}: {err}");
+        let hint = err["hint"].as_str().unwrap_or("");
+        assert!(
+            hint.contains("next_since"),
+            "{tool} should keep the cursor hint: {err}"
+        );
+    }
     assert_eq!(
         call_err(&client, "work_board", json!({ "project": "nope" })).await,
         "not_found"
@@ -766,4 +795,127 @@ async fn one_line_fields_are_described_and_their_refusal_has_a_fitting_hint() {
         }
     }
     client.cancel().await.unwrap();
+}
+
+#[test]
+fn stdio_work_board_never_gives_cursor_hint_for_time_filter() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_another"))
+        .args(["serve", "--stdio"])
+        .env("ANOTHER_HOME", dir.path())
+        .env_remove("ANOTHER_LOG")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "stdio-test", "version": "0.1.0" }
+            }
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+
+    let mut init_line = String::new();
+    stdout.read_line(&mut init_line).unwrap();
+    let init: Value = serde_json::from_str(init_line.trim()).unwrap();
+    assert_eq!(init["id"], 1, "initialize response: {init}");
+    assert!(init.get("error").is_none(), "initialize failed: {init}");
+
+    for msg in [
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": { "name": "work_board", "arguments": { "since": "since" } }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": { "name": "work_board", "arguments": { "since": "agent" } }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": { "name": "activity_feed", "arguments": { "since": "nonsense" } }
+        }),
+    ] {
+        writeln!(stdin, "{msg}").unwrap();
+    }
+    stdin.flush().unwrap();
+    drop(stdin);
+
+    let mut responses = std::collections::BTreeMap::<i64, Value>::new();
+    for line in stdout.lines() {
+        let line = line.unwrap();
+        if line.trim().is_empty() {
+            continue;
+        }
+        let msg: Value = serde_json::from_str(&line).unwrap();
+        if let Some(id) = msg["id"].as_i64() {
+            responses.insert(id, msg);
+        }
+    }
+
+    let status = child.wait().unwrap();
+    assert!(status.success(), "another serve --stdio exited {status}");
+
+    let extract_error = |id: i64| -> Value {
+        let resp = responses
+            .get(&id)
+            .unwrap_or_else(|| panic!("missing response for id {id}: {responses:?}"));
+        let result = &resp["result"];
+        assert_eq!(result["isError"], true, "id {id} should fail: {resp}");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        serde_json::from_str::<Value>(text).unwrap()["error"].clone()
+    };
+
+    let since_err = extract_error(2);
+    assert_eq!(since_err["code"], "invalid", "{since_err}");
+    let since_msg = since_err["message"].as_str().unwrap_or("");
+    assert!(since_msg.contains("bare seconds"), "{since_err}");
+    assert!(since_msg.contains("not an event id"), "{since_err}");
+    if let Some(hint) = since_err["hint"].as_str() {
+        assert!(
+            !hint.contains("next_since") && !hint.contains("event id"),
+            "work_board({{\"since\":\"since\"}}) must not recommend an event id: {since_err}"
+        );
+    }
+
+    let agent_err = extract_error(3);
+    assert_eq!(agent_err["code"], "invalid", "{agent_err}");
+    if let Some(hint) = agent_err["hint"].as_str() {
+        assert!(
+            !hint.contains("next_since") && !hint.contains("name@project"),
+            "work_board({{\"since\":\"agent\"}}) must not give cursor or agent hint: {agent_err}"
+        );
+    }
+
+    let feed_err = extract_error(4);
+    assert_eq!(feed_err["code"], "invalid", "{feed_err}");
+    let feed_hint = feed_err["hint"].as_str().unwrap_or("");
+    assert!(
+        feed_hint.contains("next_since"),
+        "activity_feed must keep cursor hint: {feed_err}"
+    );
 }

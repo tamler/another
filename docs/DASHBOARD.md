@@ -31,7 +31,7 @@ That listens on `127.0.0.1:7468` and opens a browser. `--no-open` only prints th
 - **Edits.** The last day of the edit hook's record: files it held for an agent before an edit, and edits it stopped because another agent held the file. Later edits under the same hold write nothing, so they are not listed. `another board` shows the same record per project from the command line; see [BOARD.md](BOARD.md).
 - **Mail.** Threads, oldest message first inside a thread. Bodies of messages written on this node are shown. Messages that arrived from another node stay redacted.
 - **Resources.** Live and lapsed leases: model servers, dev servers, ports, GPUs, containers, jobs.
-- **Timeline.** Filter by text, agent, project, kind (`mail`, `request`, `hold`, `resource`, `session`, `federation`, `sync`, `system`) and a time range. The same body rule as mail.
+- **Timeline.** Filter by text, agent, project, kind (`mail`, `request`, `hold`, `resource`, `session`, `federation`, `sync`, `system`) and a time range (`since` and `until` both accept bare seconds, a duration relative to now such as `1d`, or an RFC 3339 time, not event ids; `since=all` removes the lower bound). The same body rule as mail.
 - **Peers.** Paired nodes, if you federate. An empty list is a normal single machine.
 
 The page keeps itself current with a server-sent event stream and falls back to polling.
