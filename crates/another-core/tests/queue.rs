@@ -2832,6 +2832,9 @@ fn one_line_text_refuses_line_separators_and_carriage_returns_are_named() {
         assert_eq!(err.code(), "invalid", "{separator:?} in a title");
         assert!(err.to_string().contains("one line"), "{err}");
         assert_eq!(code(propose("t", "", &forged)), "invalid", "in a scope id");
+        let body = format!("para one{separator}para two");
+        propose(&format!("body-{separator:?}"), &body, "M1")
+            .expect("multi-line text may contain the Unicode line and paragraph separators");
     }
     let item = propose("t", "", "M1").unwrap();
     fx.store
