@@ -2,11 +2,14 @@
 
 use std::process::Command;
 
+#[path = "common/cli.rs"]
+mod cli;
+
+use cli::another_cmd;
+
 fn isolated(dir: &std::path::Path) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_another"));
-    cmd.env("HOME", dir)
-        .env("ANOTHER_HOME", dir.join(".another"))
-        .env_remove("XDG_CONFIG_HOME");
+    let mut cmd = another_cmd(&dir.join(".another"));
+    cmd.env("HOME", dir).env_remove("XDG_CONFIG_HOME");
     cmd
 }
 
