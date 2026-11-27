@@ -99,7 +99,8 @@ pub enum QueueCmd {
         /// The done condition: what must be true for the item to be finished.
         #[arg(long)]
         done_when: Option<String>,
-        /// security and data-loss items are decided by the owner personally.
+        /// security and data-loss items may be admitted by a keyed delegate;
+        /// they are listed for the owner afterwards.
         #[arg(long, value_enum, default_value = "work")]
         kind: QueueKindArg,
     },
@@ -120,7 +121,8 @@ pub enum QueueCmd {
         #[arg(long)]
         self_admitted: bool,
         /// What needs the owner: decisions waiting, quiet claims, ready items nobody can
-        /// take, failed notices and self-admitted items.
+        /// take, failed notices, security and data-loss items a delegate admitted, and
+        /// self-admitted items.
         #[arg(
             long,
             conflicts_with_all = ["state", "scope", "mine", "self_admitted"]

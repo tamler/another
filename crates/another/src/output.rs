@@ -1161,6 +1161,19 @@ pub fn queue_needs_owner(n: &QueueNeedsOwner) -> String {
             .collect(),
     );
     section(
+        "Admitted by delegate",
+        n.admitted_by_delegate
+            .recent
+            .iter()
+            .map(queue_line)
+            .collect(),
+    );
+    let _ = writeln!(
+        out,
+        "{} security or data-loss item(s) admitted by a delegate in all",
+        n.admitted_by_delegate.total
+    );
+    section(
         "Self-admitted, last 7 days",
         n.self_admitted.recent.iter().map(queue_line).collect(),
     );

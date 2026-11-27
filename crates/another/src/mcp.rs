@@ -419,7 +419,7 @@ pub struct QueueProposeArgs {
     pub scope: Option<String>,
     /// The done condition: what must be true for the item to be finished.
     pub done_when: Option<String>,
-    /// work (default) | security | data_loss. The last two are decided by the owner personally.
+    /// work (default) | security | data_loss. A keyed delegate may admit the last two; they are listed for the owner afterwards.
     pub kind: Option<QueueKind>,
 }
 

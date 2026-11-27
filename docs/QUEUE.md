@@ -45,7 +45,7 @@ another queue show Q12
 
 With `--json`, and from the MCP tool, the answer is `{"claimed": item or null, "refused": null or {"reason", "limit", "held", "message"}}`. A refusal is a normal result, not an error.
 
-If you find work nobody asked for, propose it and move on. A security or data-loss finding is proposed with `--kind security` or `--kind data-loss`; it goes to the owner personally and still waits for the owner's yes.
+If you find work nobody asked for, propose it and move on. A security or data-loss finding is proposed with `--kind security` or `--kind data-loss`. The owner or a keyed delegate may admit it; each delegate admit is listed for the owner afterwards as admitted by delegate.
 
 `queue done` takes a summary (up to 500 characters) and exactly one pointer: `--pr` (a number, with or without `#`, or an `https` URL), `--commit` (7 to 64 hex characters) or `--file` (a path; it is not checked on disk, because it may be in another checkout). Only the claimer can finish or give back its item.
 
@@ -125,7 +125,7 @@ A delegate may admit its own proposal. Such an item is marked self-admitted in `
 
 ### The fast lane
 
-Items of kind `security` or `data-loss` are decided by the owner personally. A delegate is refused. They are admitted at `high` priority unless you pass `--priority normal`, and until your yes they cannot be claimed. Nothing is mailed: they reach you as the first section of `queue list --needs-owner`.
+Items of kind `security` or `data-loss` may be admitted by the owner or by a keyed delegate. They are admitted at `high` priority unless you pass `--priority normal`, and until they are admitted they cannot be claimed. Nothing is mailed: proposed ones reach you as the first section of `queue list --needs-owner`, and each delegate admit is listed there as **Admitted by delegate** so you can see it after the fact. Rejecting one, lowering its kind, or releasing another agent's claim on one is still yours. Adding or removing a delegate, and changing the grace period or a claim limit, still need `--owner`.
 
 While an item is `proposed`, any admitter may raise it from `work` to a fast-lane kind. On a `ready` item only the owner may raise the kind, and only if the owner admitted it; a `ready` item a delegate admitted is rejected and proposed again instead. Only the owner lowers a kind. The database enforces the result: a `ready` or `claimed` fast-lane row always carries the owner's approval.
 
@@ -138,7 +138,8 @@ While an item is `proposed`, any admitter may raise it from `work` to a fast-lan
 3. **Quiet claims:** a claimed item is listed for the first of three reasons that holds. `name_quiet`: no sign of life from the claimer's name for an hour or more, shown with how long and when the grace period would end. `session_quiet`: the name is active, and the session the claim is bound to has not been seen for an hour, shown with the time that session was last seen. `old_unbound`: the name is active, the claim is bound to no session, and the claim is at least one grace period old. An unbound claim younger than that under an active name is not listed, because nothing stored says which session made it; so an unbound claim whose session died while a sibling keeps the name active is not seen for up to one grace period. In the JSON each entry has `reason` and `session_quiet_for_seconds` (`null` when the claim has no session) beside `quiet_for_seconds`, `grace_ends_at`, `unbound` and `session_last_seen_at`. Listing releases nothing.
 4. **Ready with nobody to take them:** ready items that no agent with a seat can be offered, and ready items reserved for an agent not seen for an hour.
 5. **Failed notices:** notices that could not be mailed in the last 24 hours.
-6. **Self-admitted:** items a delegate admitted for itself in the last 7 days, and the total.
+6. **Admitted by delegate:** security and data-loss items a keyed delegate admitted in the last 7 days, and the total.
+7. **Self-admitted:** items a delegate admitted for itself in the last 7 days, and the total.
 
 ### When an admitter releases a claim
 

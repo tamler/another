@@ -1106,6 +1106,8 @@ fn the_owner_list_shows_each_section() {
         (admitted.by.as_str(), admitted.self_admitted),
         ("arch", true)
     );
+    assert!(list.admitted_by_delegate.recent.is_empty());
+    assert_eq!(list.admitted_by_delegate.total, 0);
 
     // The JSON is one object with a list per section, in this order.
     let v = serde_json::to_value(&list).unwrap();
@@ -1117,7 +1119,8 @@ fn the_owner_list_shows_each_section() {
             "quiet_claims",
             "nobody_can_take",
             "failed_notices",
-            "self_admitted"
+            "self_admitted",
+            "admitted_by_delegate"
         ]
     );
     assert_eq!(
@@ -1677,15 +1680,11 @@ fn transitions_follow_the_table() {
         .queue_edit(&arch, &p.label, raise(QueueKind::Security))
         .unwrap();
     assert_eq!(raised.kind, QueueKind::Security);
-    // Only the owner lowers a kind, or does anything else to a fast-lane item.
+    // Only the owner lowers a kind, or rejects a fast-lane item. A keyed delegate
+    // may admit it (covered in a_delegate_may_admit_a_security_item_and_the_owner_sees_it).
     let err = fx
         .store
         .queue_edit(&arch, &p.label, raise(QueueKind::Work))
-        .unwrap_err();
-    assert_eq!(err.code(), "forbidden");
-    let err = fx
-        .store
-        .queue_admit(&arch, &p.label, AdmitItem::default())
         .unwrap_err();
     assert_eq!(err.code(), "forbidden");
     assert_eq!(
@@ -2557,6 +2556,133 @@ fn proposing_a_fast_lane_item_sends_no_mail() {
     assert_eq!(normal.priority, QueuePriority::Normal);
     assert_eq!(messages(&fx), before);
     assert_eq!(fx.claim("cy").label, "Q2");
+}
+
+#[test]
+fn a_delegate_may_admit_a_security_item_and_the_owner_sees_it() {
+    let fx = Fx::new();
+    let arch = fx.delegate();
+    let security = fx
+        .store
+        .queue_propose(
+            &agent("ann"),
+            ProposeItem {
+                title: "a leak".into(),
+                kind: QueueKind::Security,
+                scope: Some("M1".into()),
+                done_when: Some("the leak is closed".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    // A delegate without its key is still refused.
+    assert_eq!(
+        code(
+            fx.store
+                .queue_admit(&agent("arch"), &security.label, AdmitItem::default())
+        ),
+        "forbidden"
+    );
+    fx.advance(1000);
+    let admitted = fx
+        .store
+        .queue_admit(&arch, &security.label, AdmitItem::default())
+        .unwrap();
+    assert_eq!(admitted.state, QueueState::Ready);
+    assert_eq!(admitted.kind, QueueKind::Security);
+    assert_eq!(admitted.priority, QueuePriority::High);
+    let approval = admitted.admitted.as_ref().unwrap();
+    assert_eq!(approval.authority, "delegate");
+    assert_eq!(approval.by, "arch");
+    assert_eq!(
+        admitted.approval_line().as_deref(),
+        Some(format!("admitted by arch (delegate) at {}", approval.at).as_str())
+    );
+    let event = fx.events("queue.admitted").pop().unwrap();
+    assert_eq!(event.actor, "arch");
+    assert_eq!(event.payload["authority"], "delegate");
+    assert_eq!(event.payload["via"], "key");
+    assert_eq!(event.payload["kind"], "security");
+    assert_eq!(event.payload["owner_notice"], "admitted by delegate");
+    let history = admitted.history.clone().expect("history");
+    let row = history.last().unwrap();
+    assert_eq!(row.kind, "queue.admitted");
+    assert_eq!(
+        row.detail.as_ref().unwrap()["owner_notice"],
+        "admitted by delegate"
+    );
+
+    let list = fx.store.queue_needs_owner().unwrap();
+    assert!(
+        list.decide_now.is_empty(),
+        "an admitted item leaves decide now"
+    );
+    assert_eq!(
+        labels(&list.admitted_by_delegate.recent),
+        [security.label.as_str()]
+    );
+    assert_eq!(list.admitted_by_delegate.total, 1);
+
+    // A work item a delegate admits is not in that list.
+    let work = fx.propose("ann", "ordinary work");
+    fx.store
+        .queue_admit(&arch, &work.label, AdmitItem::default())
+        .unwrap();
+    let list = fx.store.queue_needs_owner().unwrap();
+    assert_eq!(
+        labels(&list.admitted_by_delegate.recent),
+        [security.label.as_str()]
+    );
+    assert_eq!(list.admitted_by_delegate.total, 1);
+
+    // A data-loss item is listed the same way, newest first.
+    let loss = fx
+        .store
+        .queue_propose(
+            &agent("ann"),
+            ProposeItem {
+                title: "rows vanish".into(),
+                kind: QueueKind::DataLoss,
+                scope: Some("M1".into()),
+                done_when: Some("no rows vanish".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    fx.advance(1000);
+    fx.store
+        .queue_admit(&arch, &loss.label, AdmitItem::default())
+        .unwrap();
+    let event = fx.events("queue.admitted").pop().unwrap();
+    assert_eq!(event.payload["kind"], "data_loss");
+    assert_eq!(event.payload["owner_notice"], "admitted by delegate");
+    let list = fx.store.queue_needs_owner().unwrap();
+    assert_eq!(
+        labels(&list.admitted_by_delegate.recent),
+        [loss.label.as_str(), security.label.as_str()]
+    );
+    assert_eq!(list.admitted_by_delegate.total, 2);
+
+    // An owner-admitted security item is not listed as admitted by delegate.
+    let by_owner = fx
+        .store
+        .queue_propose(
+            &agent("ann"),
+            ProposeItem {
+                title: "owner admits this".into(),
+                kind: QueueKind::Security,
+                scope: Some("M1".into()),
+                done_when: Some("closed".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    fx.store
+        .queue_admit(&owner(), &by_owner.label, AdmitItem::default())
+        .unwrap();
+    let list = fx.store.queue_needs_owner().unwrap();
+    assert_eq!(list.admitted_by_delegate.total, 2);
+    assert!(!labels(&list.admitted_by_delegate.recent).contains(&by_owner.label.as_str()));
 }
 
 /// Every `queue.*` activity line, with a marker in every free-text field: no marker and no

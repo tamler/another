@@ -442,7 +442,8 @@ fn nothing_waiting_is_one_short_line() {
     assert_eq!(
         v["closing"],
         json!({ "gone_idle": 0, "failed_notices": [],
-                "self_admitted": { "recent": [], "total": 0 } })
+                "self_admitted": { "recent": [], "total": 0 },
+                "admitted_by_delegate": { "recent": [], "total": 0 } })
     );
 }
 
@@ -1417,6 +1418,30 @@ fn self_admitted_names_its_items_and_is_not_counted() {
         format!(
             "nothing needs the owner\n\n1 self-admitted in the last 7 days ({}), 1 in all: another queue list --self-admitted\n",
             own.label
+        )
+    );
+    assert_eq!(fx.brief(), "");
+}
+
+#[test]
+fn admitted_by_delegate_is_a_closing_line_and_is_not_counted() {
+    let fx = Fx::new();
+    let arch = fx.delegate();
+    let item = fx.propose("ann", "A leaked token", QueueKind::Security);
+    fx.store
+        .queue_admit(&arch, &item.label, AdmitItem::default())
+        .unwrap();
+    let v = fx.json();
+    assert_eq!(v["total"], 0, "{v:#}");
+    assert_eq!(
+        v["closing"]["admitted_by_delegate"],
+        json!({ "recent": [item.label], "total": 1 })
+    );
+    assert_eq!(
+        fx.text(),
+        format!(
+            "nothing needs the owner\n\n1 admitted by delegate in the last 7 days ({}), 1 in all: another queue list --needs-owner\n",
+            item.label
         )
     );
     assert_eq!(fx.brief(), "");

@@ -566,6 +566,9 @@ pub struct QueueNeedsOwner {
     /// Notices that could not be sent in the last 24 hours.
     pub failed_notices: Vec<FailedNotice>,
     pub self_admitted: SelfAdmitted,
+    /// Security and data-loss items a keyed delegate admitted, so the owner can see
+    /// them after the fact. The last seven days, newest first, and the total at any age.
+    pub admitted_by_delegate: SelfAdmitted,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -1261,7 +1264,9 @@ impl Authority {
         }
     }
 
-    /// A delegate decides `work` items only.
+    /// A delegate may not reject a security or data-loss item, lower its kind, or
+    /// release another agent's claim on one. Admission of those items is allowed: the
+    /// owner is shown them afterwards.
     fn may_decide(&self, kind: QueueKind) -> Result<()> {
         match self {
             Authority::Delegate(_) if kind.is_fast_lane() => {
@@ -1694,8 +1699,10 @@ impl Store {
     }
 
     /// Admit a proposed item: it becomes `ready` with its scope, its done condition and the
-    /// record of who admitted it and when. Only the owner or a delegate may; a security or
-    /// data-loss item is the owner's alone.
+    /// record of who admitted it and when. Only the owner or a delegate may. A delegate
+    /// admit of a security or data-loss item is recorded on the `queue.admitted` event and
+    /// listed under `queue list --needs-owner` as admitted by delegate, so the owner can
+    /// see it after the fact.
     pub fn queue_admit(
         &self,
         caller: &QueueCaller,
@@ -1729,7 +1736,6 @@ impl Store {
             let authority = admitter(tx, tx.node_id, caller)?;
             let row = find_item(tx, tx.node_id, item)?;
             unchanged_since(tx, &row, shown)?;
-            authority.may_decide(row.kind)?;
             if row.state != QueueState::Proposed {
                 return Err(wrong_state(tx, &row, "only a proposed item is admitted")?);
             }
@@ -1762,30 +1768,38 @@ impl Store {
             });
             let admitted_by = authority.agent_id();
             let self_admitted = admitted_by.is_some() && admitted_by == row.proposed_by.as_deref();
+            let mut extra = json!({
+                "authority": authority.name(),
+                "admitted_by": admitted_by,
+                "self_admitted": self_admitted,
+                "via": authority.via(),
+                "scope": scope,
+                "done_condition": done_condition,
+                "priority": priority.as_str(),
+                "for_agent": for_agent,
+            });
+            let mut detail = json!({
+                "authority": authority.name(),
+                "admitted_by": admitted_by,
+                "self_admitted": self_admitted,
+                "via": authority.via(),
+                "priority": priority.as_str(),
+                "for_agent": for_agent,
+            });
+            if matches!(authority, Authority::Delegate(_)) && row.kind.is_fast_lane() {
+                extra["kind"] = json!(row.kind.as_str());
+                extra["owner_notice"] = json!("admitted by delegate");
+                detail["kind"] = json!(row.kind.as_str());
+                detail["owner_notice"] = json!("admitted by delegate");
+            }
             record_tx(
                 tx,
                 &row,
                 authority.actor(),
                 "queue.admitted",
-                json!({
-                    "authority": authority.name(),
-                    "admitted_by": admitted_by,
-                    "self_admitted": self_admitted,
-                    "via": authority.via(),
-                    "scope": scope,
-                    "done_condition": done_condition,
-                    "priority": priority.as_str(),
-                    "for_agent": for_agent,
-                }),
+                extra,
                 None,
-                Some(json!({
-                    "authority": authority.name(),
-                    "admitted_by": admitted_by,
-                    "self_admitted": self_admitted,
-                    "via": authority.via(),
-                    "priority": priority.as_str(),
-                    "for_agent": for_agent,
-                })),
+                Some(detail),
             )?;
             tx.execute(
                 "UPDATE queue_items SET state = 'ready', scope = ?2, done_condition = ?3,
@@ -2723,6 +2737,19 @@ impl Store {
                 [node],
                 |r| r.get(0),
             )?;
+            let delegate_fast = "admit_authority = 'delegate' AND kind != 'work'";
+            let admitted_recent = items(
+                &format!(
+                    "{delegate_fast} AND admitted_at >= {}",
+                    now - SELF_ADMITTED_RECENT_MS
+                ),
+                "admitted_at DESC, seq DESC",
+            )?;
+            let admitted_total: u32 = conn.query_row(
+                &format!("SELECT count(*) FROM queue_items WHERE node_id = ?1 AND {delegate_fast}"),
+                [node],
+                |r| r.get(0),
+            )?;
             Ok(QueueNeedsOwner {
                 decide_now,
                 awaiting,
@@ -2730,6 +2757,10 @@ impl Store {
                 nobody_can_take,
                 failed_notices,
                 self_admitted: SelfAdmitted { recent, total },
+                admitted_by_delegate: SelfAdmitted {
+                    recent: admitted_recent,
+                    total: admitted_total,
+                },
             })
         })
     }
