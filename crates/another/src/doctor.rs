@@ -417,6 +417,10 @@ fn hook_check(another_home: &Path) -> Check {
             )
             .fix(format!("another hook install --client {}", client.as_str()));
         }
+        if let Some(note) = hooks::missing_recorded_bin_note(&env) {
+            return check("hooks", Level::Warn, note)
+                .fix(format!("another hook install --client {}", client.as_str()));
+        }
         if let Some(other) = paths.iter().find(|p| !same_file(p, &ours)) {
             return check(
                 "hooks",

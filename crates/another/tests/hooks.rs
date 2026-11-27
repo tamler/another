@@ -532,6 +532,76 @@ fn installed_wrapper_script_runs_under_sh() {
 }
 
 #[cfg(unix)]
+#[test]
+fn deleted_recorded_exe_does_not_run_a_path_decoy() {
+    let env = Env::new();
+    env.ok(&["hook", "install", "--client", "codex"]);
+    let script = env.another_home.join("hooks/another-hook.sh");
+    let text = std::fs::read_to_string(&script).unwrap();
+    let gone = env.home.join("gone-another");
+    std::fs::write(&gone, "#!/bin/sh\necho GONE\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&gone, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let quoted = format!("'{}'", gone.display());
+    let mut patched = String::new();
+    let mut replaced = false;
+    for line in text.lines() {
+        if !replaced && line.starts_with("ANOTHER_BIN=") {
+            patched.push_str(&format!("ANOTHER_BIN={quoted}\n"));
+            replaced = true;
+        } else {
+            patched.push_str(line);
+            patched.push('\n');
+        }
+    }
+    assert!(replaced, "wrapper had no ANOTHER_BIN assignment");
+    std::fs::write(&script, patched).unwrap();
+    std::fs::remove_file(&gone).unwrap();
+
+    let decoy_dir = env.home.join("decoy-bin");
+    std::fs::create_dir_all(&decoy_dir).unwrap();
+    let decoy = decoy_dir.join("another");
+    let marker = env.home.join("decoy-ran");
+    std::fs::write(
+        &decoy,
+        format!("#!/bin/sh\necho DECOY > '{}'\nexit 0\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&decoy, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let path = format!("{}:/usr/bin:/bin", decoy_dir.display());
+    let out = Command::new("/bin/sh")
+        .arg(&script)
+        .env_clear()
+        .env("HOME", &env.home)
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "wrapper must still exit 0: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !marker.exists(),
+        "PATH decoy must not run when the recorded exe is gone"
+    );
+    let status: Value = serde_json::from_str(&env.ok(&["--json", "hook", "status"])).unwrap();
+    let notes: Vec<String> = status
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r.get("note").and_then(|n| n.as_str()).map(str::to_string))
+        .collect();
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("missing or not executable")),
+        "{status}"
+    );
+}
+
+#[cfg(unix)]
 fn mode(path: &Path) -> u32 {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path).unwrap().permissions().mode() & 0o777

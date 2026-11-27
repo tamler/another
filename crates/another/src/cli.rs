@@ -2537,16 +2537,19 @@ fn hook_command(
         }
         HookCmd::Status => {
             let env = HookEnv::detect(another_home()?)?;
+            let missing_bin = hooks::missing_recorded_bin_note(&env);
             let rows: Vec<output::HookStatus> = Client::ALL
                 .iter()
                 .map(|c| {
                     let path = c.config_path(&env.home);
+                    let installed =
+                        std::fs::read_to_string(&path).is_ok_and(|t| t.contains(hooks::MARKER));
                     output::HookStatus {
                         client: c.as_str().to_string(),
-                        installed: std::fs::read_to_string(&path)
-                            .is_ok_and(|t| t.contains(hooks::MARKER)),
+                        installed,
                         config: path.display().to_string(),
                         trust_note: (*c == Client::Codex).then_some(hooks::CODEX_TRUST_NOTE),
+                        note: installed.then(|| missing_bin.clone()).flatten(),
                     }
                 })
                 .collect();

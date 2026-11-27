@@ -242,6 +242,21 @@ impl HookEnv {
     }
 }
 
+/// When the wrapper exists but the recorded `another` path is gone, a short
+/// note for `hook status` (and the same condition doctor reports).
+pub fn missing_recorded_bin_note(env: &HookEnv) -> Option<String> {
+    let path = env.script_path();
+    let text = std::fs::read_to_string(&path).ok()?;
+    let bin = crate::bin_path::recorded_bin_from_wrapper(&text)?;
+    if crate::bin_path::is_runnable_exe(&bin) {
+        return None;
+    }
+    Some(format!(
+        "recorded another binary {} is missing or not executable; run another hook install",
+        bin.display()
+    ))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeKind {

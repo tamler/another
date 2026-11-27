@@ -331,13 +331,16 @@ pub struct HookStatus {
     /// Configuration presence does not verify whether Codex trusted or ran the hooks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trust_note: Option<&'static str>,
+    /// Set when the wrapper is installed but the recorded `another` binary is missing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 pub fn hook_status(rows: &[HookStatus]) -> String {
     rows.iter()
         .map(|r| {
             format!(
-                "{:<7} {:<13} {}\n{}",
+                "{:<7} {:<13} {}\n{}{}",
                 r.client,
                 if r.installed {
                     "installed"
@@ -346,6 +349,10 @@ pub fn hook_status(rows: &[HookStatus]) -> String {
                 },
                 r.config,
                 r.trust_note
+                    .map(|note| format!("  {note}\n"))
+                    .unwrap_or_default(),
+                r.note
+                    .as_deref()
                     .map(|note| format!("  {note}\n"))
                     .unwrap_or_default()
             )
