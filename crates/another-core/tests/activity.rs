@@ -216,3 +216,108 @@ fn summary_counts_and_digest() {
     assert_eq!(later.live_holds, 0);
     assert_eq!(later.requests.open, 1);
 }
+
+/// R15 (D-next): `sync` is a category of its own. It holds the events a sync skipped and
+/// their acknowledgements and nothing else; the records a sync writes about its cursors
+/// stay under `federation`.
+#[test]
+fn kinds_sync_lists_only_sync_events() {
+    let open = |name: &str| {
+        let dir = tempfile::tempdir().unwrap();
+        let (clock, _) = Clock::manual(T0);
+        let store = Store::open_with_clock(dir.path(), clock).unwrap();
+        store.set_node_name(name).unwrap();
+        (dir, store)
+    };
+    let (_hub_dir, hub) = open("hub");
+    let (_spoke_dir, spoke) = open("spoke");
+    let code = hub
+        .create_invite("https://hub.example", &Perm::ALL, 3600)
+        .unwrap();
+    let (invite, req) = spoke.prepare_join(&code).unwrap();
+    let resp = hub.accept_pairing(&req).unwrap();
+    spoke.complete_join(&invite, &resp).unwrap();
+    for (store, name) in [(&hub, "bob"), (&spoke, "alice")] {
+        store
+            .register_agent(RegisterAgent {
+                name: name.into(),
+                program: Program::Claude,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+    }
+    // One sync by hand, with a skip on the way: it leaves `peer.pushed`, `peer.anchored`
+    // and the marker in the spoke's log, beside the `peer.paired` of the pairing.
+    let skipped = SkippedEvent {
+        event_id: "01SKIPPED".into(),
+        event_node: spoke.node_id().into(),
+        event_kind: "agent.registered".into(),
+        event_actor: "system".into(),
+        bytes: 9_437_500,
+        about: Some("agent wordy".into()),
+        route: "directory".into(),
+        route_nodes: Vec::new(),
+    };
+    let (events, high) = spoke.outbound_events(0, 500).unwrap();
+    hub.ingest(spoke.node_id(), &events, &[]).unwrap();
+    let last = events.last().map(|e| e.event_id.as_str());
+    spoke
+        .advance_push_past(hub.node_id(), high, last, std::slice::from_ref(&skipped))
+        .unwrap();
+    let page = hub.pull_for(spoke.node_id(), 0, 500).unwrap();
+    spoke
+        .ingest(hub.node_id(), &page.events, &page.nodes)
+        .unwrap();
+    let last = page.events.last().map(|e| (e.event_id.as_str(), e.seq));
+    spoke
+        .advance_pull(hub.node_id(), page.cursor, last)
+        .unwrap();
+    spoke.acknowledge_skip("01SKIPPED").unwrap();
+
+    let feed = |kinds: Vec<ActivityKind>| {
+        spoke
+            .activity(ActivityQuery {
+                since: None,
+                limit: 500,
+                kinds,
+            })
+            .unwrap()
+            .items
+    };
+    let sync = feed(vec![ActivityKind::Sync]);
+    let kinds: Vec<&str> = sync.iter().map(|i| i.kind.as_str()).collect();
+    assert_eq!(kinds, ["sync.skipped", "sync.skip_acked"]);
+    assert!(sync.iter().all(|i| i.category == ActivityKind::Sync));
+    assert_eq!(
+        sync[0].summary,
+        "skipped event 01SKIPPED (agent.registered, 9437500 bytes, written by system): too \
+         large to send; agent wordy"
+    );
+    assert_eq!(
+        sync[0].refs,
+        serde_json::json!({ "event_id": "01SKIPPED", "event_node": spoke.node_id() })
+    );
+    assert_eq!(
+        sync[1].summary,
+        "acknowledged the skip of event 01SKIPPED; it stays in the log and is not sent"
+    );
+    assert_eq!(sync[1].refs, serde_json::json!({ "event_id": "01SKIPPED" }));
+
+    let federation = feed(vec![ActivityKind::Federation]);
+    let kinds: Vec<&str> = federation.iter().map(|i| i.kind.as_str()).collect();
+    for kind in ["peer.paired", "peer.pushed", "peer.anchored"] {
+        assert!(kinds.contains(&kind), "{kind} is missing from {kinds:?}");
+    }
+    assert!(kinds.iter().all(|k| k.starts_with("peer.")), "{kinds:?}");
+
+    assert_eq!(ActivityKind::of_event("sync.skipped"), ActivityKind::Sync);
+    assert_eq!(ActivityKind::of_event("sync.anything"), ActivityKind::Sync);
+    assert_eq!("sync".parse::<ActivityKind>().unwrap(), ActivityKind::Sync);
+    assert_eq!(
+        "nosuch".parse::<ActivityKind>().unwrap_err().to_string(),
+        "unknown activity kind \"nosuch\"; expected mail, request, hold, resource, session, \
+         system, federation, queue or sync"
+    );
+}

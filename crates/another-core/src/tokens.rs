@@ -7,8 +7,8 @@ use globset::GlobBuilder;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
+use crate::crypto::{random_hex, secrets_eq, sha256_hex};
 use crate::error::{Error, Result};
 use crate::identity::{address, normalize_project_path, resolve_agent};
 use crate::store::{new_id, Store};
@@ -76,20 +76,6 @@ pub struct AuditRecord {
     pub remote: Option<String>,
 }
 
-fn hash(secret: &str) -> String {
-    Sha256::digest(secret.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-fn random_hex(bytes: usize) -> Result<String> {
-    let mut buf = vec![0u8; bytes];
-    getrandom::fill(&mut buf)
-        .map_err(|e| Error::Invalid(format!("no system randomness available: {e}")))?;
-    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
-}
-
 /// Whether a token's project globs cover the project `project_id` (by path or slug).
 pub(crate) fn scope_allows_project(
     conn: &Connection,
@@ -130,7 +116,11 @@ fn glob_allows(globs: &[String], candidates: &[String]) -> bool {
         let Ok(glob) = GlobBuilder::new(g).literal_separator(true).build() else {
             return false;
         };
-        let m = glob.compile_matcher();
+        // A set of one glob: it returns an error where `compile_matcher` panics on a glob
+        // too large to compile. A glob that cannot be compiled allows nothing.
+        let Ok(m) = globset::GlobSetBuilder::new().add(glob).build() else {
+            return false;
+        };
         candidates.iter().any(|c| m.is_match(c))
     })
 }
@@ -214,7 +204,7 @@ impl Store {
                     me.id,
                     label,
                     serde_json::to_string(project_globs)?,
-                    hash(&secret),
+                    sha256_hex(secret.as_bytes()),
                     tx.now,
                     expires_at
                 ],
@@ -263,7 +253,26 @@ impl Store {
             .and_then(|rest| rest.split_once('_'))
             .map(|(id, _)| id.to_string())
             .ok_or_else(denied)?;
-        let digest = hash(bearer);
+        let digest = sha256_hex(bearer.as_bytes());
+        // Reject invalid candidates under a read lock. A request with a random token id or
+        // wrong secret must not wait for, or participate in, SQLite's write lock.
+        let valid = self.read(|conn| {
+            let row: Option<(String, Option<i64>, Option<i64>)> = conn
+                .query_row(
+                    "SELECT secret_hash, expires_at, revoked_at FROM tokens WHERE token_id = ?1",
+                    [&token_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            Ok(row.is_some_and(|(stored, expires_at, revoked_at)| {
+                secrets_eq(&stored, &digest)
+                    && revoked_at.is_none()
+                    && expires_at.is_none_or(|expires| expires > self.now())
+            }))
+        })?;
+        if !valid {
+            return Err(denied());
+        }
         self.write(|tx| {
             let row: Option<StoredToken> = tx
                 .query_row(
@@ -277,7 +286,7 @@ impl Store {
                 return Err(denied());
             };
             let expired = expires_at.is_some_and(|e| e <= tx.now);
-            if stored != digest || revoked_at.is_some() || expired {
+            if !secrets_eq(&stored, &digest) || revoked_at.is_some() || expired {
                 return Err(denied());
             }
             tx.execute(
@@ -409,5 +418,12 @@ mod tests {
         assert!(!glob_allows(&g, &["/other/shop".into()]));
         assert!(glob_allows(&["**".to_string()], &["/any/where".into()]));
         assert!(!glob_allows(&[], &["/work/shop".into()]));
+    }
+
+    /// A stored glob too large to compile allows nothing and does not panic (Q30).
+    #[test]
+    fn a_project_glob_too_large_to_compile_allows_nothing() {
+        let huge = format!("/work/{}", "*a".repeat(1 << 20));
+        assert!(!glob_allows(&[huge], &["/work/a".into()]));
     }
 }

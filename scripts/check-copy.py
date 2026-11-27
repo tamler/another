@@ -2,8 +2,8 @@
 """Fail if site copy, docs, or CLI strings use em/en dashes or banned phrases.
 
 ASCII hyphens are fine. The check is the prose, not the font license.
-`docs/` and `crates/another/src/cli.rs` are included so a dash in new
-spec text or in `another` command output fails CI.
+`docs/` and the CLI sources (`crates/another/src/cli.rs`, `queue_cli.rs`) are
+included so a dash in new spec text or in `another` command output fails CI.
 """
 from __future__ import annotations
 
@@ -56,10 +56,11 @@ def files():
     for path in sorted(docs.rglob("*")):
         if path.is_file() and path.suffix.lower() in TEXT_SUFFIXES:
             yield path
-    cli = ROOT / "crates" / "another" / "src" / "cli.rs"
-    if not cli.is_file():
-        raise SystemExit(f"missing {cli}")
-    yield cli
+    for name in ("cli.rs", "queue_cli.rs", "needs.rs"):
+        cli = ROOT / "crates" / "another" / "src" / name
+        if not cli.is_file():
+            raise SystemExit(f"missing {cli}")
+        yield cli
     site = ROOT / "site"
     for path in sorted(site.rglob("*")):
         if not path.is_file():
@@ -98,6 +99,8 @@ def assert_sources() -> None:
         "docs/PROMOTION.md",
         "docs/REMOTE.md",
         "crates/another/src/cli.rs",
+        "crates/another/src/queue_cli.rs",
+        "crates/another/src/needs.rs",
     ):
         if required not in rels:
             raise SystemExit(f"copy check does not scan {required}")

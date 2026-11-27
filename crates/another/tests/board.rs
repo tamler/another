@@ -161,8 +161,15 @@ fn board_shows_what_the_edit_hook_recorded_and_what_waits() {
     env.start("claude", &env.main);
     env.start("codex", &env.wt);
     assert_eq!(env.edit("claude", &env.main, "src/a.rs"), "");
-    // Codex in a sibling worktree is stopped on the same file.
-    let stopped = env.edit("codex", &env.wt, "src/a.rs");
+    // Codex works in a sibling worktree, where the same file is its own (D92): a hold blocks
+    // only inside its checkout.
+    assert_eq!(env.edit("codex", &env.wt, "src/a.rs"), "");
+    // Reaching into the main checkout by path, it is stopped on Claude's file there.
+    let stopped = env.edit(
+        "codex",
+        &env.wt,
+        env.main.join("src/a.rs").to_str().unwrap(),
+    );
     assert!(
         stopped.contains("held by claude@shop"),
         "the edit hook did not stop codex: {stopped:?}; holds: {}",
@@ -193,12 +200,15 @@ fn board_shows_what_the_edit_hook_recorded_and_what_waits() {
     assert_eq!(shop["holds"][0]["pattern"], "src/a.rs");
     assert_eq!(shop["holds"][0]["edit_hook"], true);
     assert_eq!(shop["edits"][0]["path"], "src/a.rs");
+    assert_eq!(shop["blocked"][0]["agent"], "codex@shop-review");
+    assert_eq!(shop["blocked"][0]["holder"], "claude@shop");
     let review = projects
         .iter()
         .find(|p| p["project"] == "shop-review")
         .expect("sibling checkout is on the board for --project shop");
-    assert_eq!(review["blocked"][0]["agent"], "codex@shop-review");
-    assert_eq!(review["blocked"][0]["holder"], "claude@shop");
+    assert_eq!(review["holds"][0]["agent"], "codex@shop-review");
+    assert_eq!(review["holds"][0]["pattern"], "src/a.rs");
+    assert!(review["blocked"].as_array().unwrap().is_empty());
 
     let codex = board["agents"]
         .as_array()

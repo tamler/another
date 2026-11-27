@@ -1,5 +1,7 @@
 # Remote peers
 
+**Status:** Remote peers and hosted OAuth connectors are present, but frozen for v0.1.0 and treated as experimental. They stay in the tree and get only admitted security and data-loss fixes.
+
 ## ChatGPT desktop app (this Mac): local, no tunnel
 
 The ChatGPT desktop app can run Another **on this computer**. OpenAI's MCP guide says the desktop app, the Codex CLI, and the IDE extension share one local MCP configuration (`~/.codex/config.toml` by default). A server configured there is started or dialed by the app, not by OpenAI's cloud.
@@ -56,7 +58,7 @@ A remote agent joins as a first-class peer through **authenticated streamable HT
 
 Both kinds of credential act as **exactly one agent**, may only touch projects matching their globs, and every call is recorded in the audit log. Reaping is never available remotely. Nothing here is a hosted relay: the server is still your machine, and TLS stops at a tunnel you run.
 
-Local agents stay on stdio or on a separate unauthenticated loopback server. With `--auth`, every request is checked, including ones that arrive from loopback, because a tunnel delivers from loopback.
+Local agents stay on stdio or on a separate unauthenticated loopback server. The unauthenticated loopback server answers every local account in that home: any local process that can connect can act as any agent. Treat it as a same-machine trust boundary. With `--auth`, every request is checked, including ones that arrive from loopback, because a tunnel delivers from loopback.
 
 ## Bearer tokens
 
@@ -138,6 +140,19 @@ another oauth revoke <grant-id>
 The server also prints the approve command when a client starts connecting. A waiting request expires after 10 minutes. The approval code is not a bearer credential: knowing it does not mint a token. Only the local command, against this database, does.
 
 Loopback redirect URIs (Claude Code, and other native clients) match any port on `127.0.0.1` or `localhost`, per RFC 8252. `localhost` and `127.0.0.1` are not aliases of each other. The consent page warns when the redirect is loopback.
+
+### Which redirect URIs a client may register
+
+Registration needs no authentication, so it accepts only a redirect URI whose host reads the same to a browser as it does to you (D100). That holds for dynamic client registration and for a Client ID Metadata Document:
+
+- the scheme is `https`, or `http` for a native client on `localhost`, `127.0.0.1` or `[::1]`;
+- the host is a plain name of ASCII letters, digits, `.` and `-` (at most 253 characters, no trailing dot, last label not a number), an IPv4 address written as four decimal parts, or an IPv6 address in brackets with no zone;
+- the port, if any, is decimal digits from 1 to 65535;
+- there is no white space, `#` or `@`.
+
+An internationalised name must be given in its punycode form (`xn--...`). Anything else is refused with 400 `invalid_redirect_uri`, and the answer does not repeat the URI. `https://claude.ai/...`, `https://chatgpt.com/...` and the loopback URIs above are all plain.
+
+A client that an older build stored with a host outside this rule is kept in the database but can no longer connect: its authorization request is refused before anything is listed for approval, `another serve` prints one line naming the client id, and `another oauth list` shows the client, with its host escaped, as one that must register again. A grant you already approved for such a client keeps working until you revoke it; `another oauth list` marks that grant.
 
 ## Publish the server
 
@@ -293,11 +308,11 @@ A client that is not using MCP can still poll the feed with a bearer token or an
 curl -H "Authorization: Bearer $ANOTHER_TOKEN" "https://another.example.com/activity?since=1h&kinds=mail,request"
 ```
 
-`GET /activity` takes `since` (a duration like `30m`, an RFC 3339 time, or an event-id cursor), `limit` and `kinds`. It never includes message bodies.
+`GET /activity` takes `since` (a duration like `30m`, an RFC 3339 time, or an event-id cursor), `limit` and `kinds`. The kinds are `mail`, `request`, `hold`, `resource`, `session`, `system`, `federation`, `queue` and `sync`; `sync` holds the events a sync skipped as too large to send and their acknowledgements ([FEDERATION.md](FEDERATION.md#an-event-that-is-too-large-to-send)). It never includes message bodies.
 
 ## Audit log
 
-Every authenticated or rejected remote request is recorded with time, token or grant id, agent, operation, outcome (`ok`, `error`, `denied`), redacted arguments (message bodies and notes are replaced by their size) and the forwarding header or peer address. OAuth events (`oauth.register`, `oauth.authorize`, `oauth.approve`, `oauth.deny`, `oauth.token`, `oauth.refresh`, `oauth.revoke`) are recorded the same way. The audit log does not contain authorization codes, redirect tokens, access tokens, refresh tokens, or PKCE verifiers.
+Every authenticated remote request and a bounded sample of unauthenticated failures are recorded with time, token or grant id, agent, operation, outcome (`ok`, `error`, `denied`), redacted arguments (message bodies and notes are replaced by their size) and the forwarding header or peer address. OAuth events (`oauth.register`, `oauth.authorize`, `oauth.approve`, `oauth.deny`, `oauth.token`, `oauth.refresh`, `oauth.revoke`) are recorded the same way. The audit log does not contain authorization codes, redirect tokens, access tokens, refresh tokens, or PKCE verifiers. Two rows come from a node's own sync, not from a remote request, with the node as the agent (`node:<id>`): `sync skip` with the outcome `skipped`, when the node steps past an event too large to send, and `sync ack` with the outcome `ok`, when the owner acknowledges that skip ([FEDERATION.md](FEDERATION.md#an-event-that-is-too-large-to-send)).
 
 The database stores only SHA-256 hashes of those secrets. The authorization code is not a column. The server mints it in memory on the first poll after `another oauth approve`, after checking the one-time redirect token from the browser URL (also stored only as a hash), and puts it in that one redirect. A later poll does not return it again.
 
@@ -305,7 +320,11 @@ The database stores only SHA-256 hashes of those secrets. The authorization code
 another audit --limit 50
 ```
 
-Unknown `Host` values are rejected on every HTTP route except `/fed`, including unauthenticated loopback `another serve` (DNS-rebinding protection). Loopback names are allowed only with the port this process bound: `localhost:7466`, `127.0.0.1:7466`, and `[::1]:7466` when the bind port is 7466. `--allowed-host` and the `--public-url` host are allowed too. An allow-list entry with no port matches only a Host header that also has no port, so `example.com` does not match `example.com:8443`. A state-changing request (POST, PUT, PATCH, DELETE) that sends an `Origin` header must match an allowed origin exactly: `http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`, or the `--public-url` issuer. A longer name that merely ends with one of those is rejected. Clients that are not browsers omit `Origin` and are unaffected. `/oauth/token`, `/oauth/register`, and `/authorize` are limited per client IP; past the limit the response is `429` with `Retry-After`. Federation routes (`/fed/`) keep their own node-signature checks.
+Unknown `Host` values are rejected on every HTTP route except `/fed`, including unauthenticated loopback `another serve` (DNS-rebinding protection). Loopback names are allowed only with the port this process bound: `localhost:7466`, `127.0.0.1:7466`, and `[::1]:7466` when the bind port is 7466. `--allowed-host` and the `--public-url` host are allowed too. An allow-list entry with no port matches only a Host header that also has no port, so `example.com` does not match `example.com:8443`. A state-changing request (POST, PUT, PATCH, DELETE) that sends an `Origin` header must match an allowed origin exactly: `http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`, or the `--public-url` issuer. A longer name that merely ends with one of those is rejected. Clients that are not browsers omit `Origin` and are unaffected. `/oauth/token`, `/oauth/register`, and `/authorize` are limited per client IP; past the limit the response is `429` with `Retry-After`. Federation routes (`/fed/`) keep their own node-signature checks. The hub signs its `200` answers to `/fed/push` and `/fed/pull`, and a spoke checks that signature over the answer body: a tunnel or proxy in front of a hub may compress those answers with gzip, but one that rewrites their bodies, or drops the `x-another-signature` answer header or the `x-another-nonce` request header, stops every sync through it (see [FEDERATION.md](FEDERATION.md)).
+
+**Proxy Host rewriting:** reverse proxies may replace the public `Host` with the loopback upstream address. Host checks cannot identify a remote caller in that setup, nor can a loopback peer IP. Expose only an `--auth` listener for MCP/activity access, or a federation-only listener (`--federation` without `--auth`), which has just `/fed/*` and `/health`. A dashboard explicitly enabled with both `--federation` and `--auth` also requires a token and stays redacted. Plain local listeners must stay private.
+
+Unauthenticated failures on bearer and federation routes share a fixed in-memory audit budget of 32 rows per server store per 60 seconds, including across cloned handles. Excess failures are refused without an audit write. The budget resets on restart. Authenticated operations retain their audit records. Invalid bearer and OAuth token candidates are checked without a SQLite write transaction; a valid candidate is checked again within the transaction that updates its last-use time.
 
 ## What still needs a live check
 

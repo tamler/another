@@ -2,7 +2,9 @@
 # "3" keeps every fresh resolve within `rust-version`, including `cargo install --git`,
 # which reads this file but not the lockfile or `.cargo/config.toml`.
 resolver = "3"
-members = ["crates/another-core", "crates/another"]
+members = ["crates/another-core", "crates/another", "crates/another-fuzz"]
+# `fuzz/` (cargo-fuzz, nightly) depends on crates/another-fuzz but is its own workspace.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -25,6 +27,8 @@ sha2 = "0.10"
 getrandom = "0.3"
 ed25519-dalek = "2"
 base64 = "0.22"
+# The URI type the HTTP client and server already use; the core parses a hub address with it.
+http = "1"
 ureq = { version = "3", features = ["json"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "io-std", "net", "sync"] }
 tokio-stream = "0.1"

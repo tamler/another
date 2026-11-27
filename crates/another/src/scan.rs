@@ -144,16 +144,20 @@ pub fn parse_lsof(text: &str) -> Vec<Listener> {
     let mut out = BTreeSet::new();
     let (mut pid, mut command, mut user) = (None::<u32>, String::new(), None::<String>);
     for line in text.lines() {
-        let (tag, value) = line.split_at(line.len().min(1));
+        // The tag is the first character, not the first byte: a line that is not field
+        // output may start with a multi-byte character.
+        let mut rest = line.chars();
+        let tag = rest.next();
+        let value = rest.as_str();
         match tag {
-            "p" => {
+            Some('p') => {
                 pid = value.parse().ok();
                 command.clear();
                 user = None;
             }
-            "c" => command = value.to_string(),
-            "L" => user = Some(value.to_string()),
-            "n" => {
+            Some('c') => command = value.to_string(),
+            Some('L') => user = Some(value.to_string()),
+            Some('n') => {
                 // `n` may carry `local->remote` for connected sockets; listeners have none.
                 let local = value.split("->").next().unwrap_or_default();
                 if let (Some(pid), Some(port)) = (pid, port_of(local)) {
@@ -297,12 +301,10 @@ pub fn process_info(pid: u32) -> Option<ProcInfo> {
 /// Whether a process is running (exited-but-unreaped zombies count as gone).
 #[cfg(not(windows))]
 pub fn alive(pid: u32) -> bool {
-    run("ps", &["-o", "stat=", "-p", &pid.to_string()])
-        .map(|out| {
-            let stat = out.trim();
-            !stat.is_empty() && !stat.starts_with('Z')
-        })
-        .unwrap_or(false)
+    run("ps", &["-o", "stat=", "-p", &pid.to_string()]).is_ok_and(|out| {
+        let stat = out.trim();
+        !stat.is_empty() && !stat.starts_with('Z')
+    })
 }
 
 #[cfg(windows)]
@@ -349,6 +351,15 @@ mod tests {
             1,
             "v4/v6 collapse"
         );
+    }
+
+    /// A line that starts with a multi-byte character has no ASCII tag to split off.
+    #[test]
+    fn lsof_lines_that_are_not_fields_are_skipped() {
+        let text = "\u{e9}x\n\n\u{1f600}\np\nn\np412\n\u{e9}\ncollama\nn127.0.0.1:11434\n";
+        let ls = parse_lsof(text);
+        assert_eq!(ls.len(), 1, "{ls:?}");
+        assert_eq!((ls[0].pid, ls[0].port), (412, 11434));
     }
 
     #[test]

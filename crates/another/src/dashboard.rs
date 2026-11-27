@@ -229,10 +229,14 @@ pub async fn serve_standalone(
     if open {
         open_browser(&url);
     }
-    let app = router(store, DashboardMode::Local, Some(local)).route(
-        "/health",
-        get(|| async { Json(json!({ "ok": true, "dashboard": "local" })) }),
-    );
+    let app = router(store, DashboardMode::Local, Some(local))
+        .route(
+            "/health",
+            get(|| async { Json(json!({ "ok": true, "dashboard": "local" })) }),
+        )
+        .layer(axum::extract::DefaultBodyLimit::max(
+            crate::serve::HTTP_BODY_LIMIT_BYTES,
+        ));
     axum::serve(listener, app.into_make_service())
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
@@ -418,8 +422,8 @@ async fn stream(
                 }
             }
             tokio::select! {
-                _ = tx.closed() => break,
-                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                () = tx.closed() => break,
+                () = tokio::time::sleep(Duration::from_secs(2)) => {}
             }
         }
     });

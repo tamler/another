@@ -18,11 +18,9 @@ use crate::identity::resolve_agent;
 use crate::mail::{load_message, Message};
 use crate::store::Store;
 use crate::time::fmt_ts;
-use crate::wake::WakeVia;
 
 /// Kinds this module writes.
 pub const NOTICE_EVENT: &str = "push.notified";
-pub const WAKE_EVENT: &str = "push.woke";
 pub const BLOCKED_EVENT: &str = "hold.blocked";
 
 /// How many recent items `stats` lists next to the counts.
@@ -49,7 +47,8 @@ pub struct WakeRecord {
     pub agent: String,
     pub via: String,
     pub target: String,
-    /// `sent` or `failed`.
+    /// A `transport.wake` outcome (`started`, `not_started`, ...); `sent` or `failed` on
+    /// events written before the transport interface.
     pub outcome: String,
     pub messages: u32,
 }
@@ -105,6 +104,21 @@ fn notice_fingerprint(mut message: Message) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
+/// Give back the claims on `message_ids`, inside the caller's transaction.
+pub(crate) fn release_announcement_tx(
+    tx: &crate::store::Tx<'_>,
+    agent_id: &str,
+    message_ids: &[String],
+) -> Result<()> {
+    for id in message_ids {
+        tx.execute(
+            "DELETE FROM announcements WHERE agent_id = ?1 AND (message_id = ?2 OR duplicate_of = ?2)",
+            params![agent_id, id],
+        )?;
+    }
+    Ok(())
+}
+
 impl Store {
     /// Claim the right to announce `message_ids` to `agent`. In one transaction, each id that
     /// is an unread delivery to the agent and has not been announced by any channel yet is
@@ -127,60 +141,7 @@ impl Store {
         }
         self.write(|tx| {
             let me = resolve_agent(tx, tx.node_id, agent)?;
-            let mut claimed = Vec::new();
-            for id in message_ids {
-                let eligible = tx.query_row(
-                    "SELECT 1 FROM deliveries d WHERE d.agent_id = ?1 AND d.message_id = ?2
-                     AND d.read_at IS NULL AND NOT EXISTS (SELECT 1 FROM announcements a
-                         WHERE a.agent_id = d.agent_id AND a.message_id = d.message_id)",
-                    params![me.id, id], |_| Ok(()),
-                ).optional()?.is_some();
-                if !eligible { continue; }
-                let closed: bool = tx.query_row(
-                    "SELECT EXISTS (SELECT 1 FROM requests r JOIN request_holds rh ON rh.request_id = r.request_id
-                     WHERE r.message_id = ?1 AND r.status IN ('done', 'cancelled'))",
-                    [id], |r| r.get(0),
-                )?;
-                let fingerprint = if closed { None } else { Some(notice_fingerprint(load_message(tx, id)?)?) };
-                let duplicate: Option<String> = if let Some(key) = &fingerprint {
-                    tx.query_row(
-                        "SELECT a.message_id FROM announcements a WHERE a.agent_id = ?1 AND a.fingerprint = ?2
-                         AND a.duplicate_of IS NULL AND a.announced_at > ?3
-                         AND NOT EXISTS (SELECT 1 FROM requests r WHERE r.message_id = a.message_id
-                             AND r.status IN ('done', 'cancelled'))
-                         ORDER BY a.announced_at DESC LIMIT 1",
-                        params![me.id, key, tx.now - 300_000], |r| r.get(0),
-                    ).optional()?
-                } else { None };
-                if closed || duplicate.is_some() {
-                    tx.emit(&me.address, "push.suppressed", json!({
-                        "agent_id": me.id, "message_id": id, "duplicate_of": duplicate,
-                        "reason": if closed { "hold request closed" } else { "identical push within five minutes" },
-                    }))?;
-                }
-                let n = tx.execute(
-                    "INSERT OR IGNORE INTO announcements (agent_id, message_id, channel, announced_at, fingerprint, duplicate_of)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![me.id, id, channel, tx.now, fingerprint, duplicate],
-                )?;
-                if n > 0 && !closed && duplicate.is_none() {
-                    claimed.push(id.clone());
-                }
-            }
-            if !claimed.is_empty() && matches!(channel, "post_tool" | "prompt") {
-                tx.emit(
-                    &me.address,
-                    NOTICE_EVENT,
-                    json!({
-                        "agent_id": me.id,
-                        "agent": me.address,
-                        "channel": channel,
-                        "client": client,
-                        "message_ids": ids(&claimed),
-                    }),
-                )?;
-            }
-            Ok(claimed)
+            claim_announcement_tx(tx, &me, message_ids, channel, client)
         })
     }
 
@@ -189,45 +150,88 @@ impl Store {
     pub fn release_announcement(&self, agent: &str, message_ids: &[String]) -> Result<()> {
         self.write(|tx| {
             let me = resolve_agent(tx, tx.node_id, agent)?;
-            for id in message_ids {
-                tx.execute(
-                    "DELETE FROM announcements WHERE agent_id = ?1 AND (message_id = ?2 OR duplicate_of = ?2)",
-                    params![me.id, id],
+            release_announcement_tx(tx, &me.id, message_ids)
+        })
+    }
+}
+
+/// [`Store::claim_announcement`], inside the caller's transaction.
+pub(crate) fn claim_announcement_tx(
+    tx: &crate::store::Tx<'_>,
+    me: &crate::identity::AgentRef,
+    message_ids: &[String],
+    channel: &str,
+    client: Option<&str>,
+) -> Result<Vec<String>> {
+    let mut claimed = Vec::new();
+    for id in message_ids {
+        let eligible = tx
+            .query_row(
+                "SELECT 1 FROM deliveries d WHERE d.agent_id = ?1 AND d.message_id = ?2
+                     AND d.read_at IS NULL AND NOT EXISTS (SELECT 1 FROM announcements a
+                         WHERE a.agent_id = d.agent_id AND a.message_id = d.message_id)",
+                params![me.id, id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !eligible {
+            continue;
+        }
+        let closed: bool = tx.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM requests r JOIN request_holds rh ON rh.request_id = r.request_id
+                     WHERE r.message_id = ?1 AND r.status IN ('done', 'cancelled'))",
+                    [id], |r| r.get(0),
                 )?;
-            }
-            Ok(())
-        })
+        let fingerprint = if closed {
+            None
+        } else {
+            Some(notice_fingerprint(load_message(tx, id)?)?)
+        };
+        let duplicate: Option<String> = if let Some(key) = &fingerprint {
+            tx.query_row(
+                        "SELECT a.message_id FROM announcements a WHERE a.agent_id = ?1 AND a.fingerprint = ?2
+                         AND a.duplicate_of IS NULL AND a.announced_at > ?3
+                         AND NOT EXISTS (SELECT 1 FROM requests r WHERE r.message_id = a.message_id
+                             AND r.status IN ('done', 'cancelled'))
+                         ORDER BY a.announced_at DESC LIMIT 1",
+                        params![me.id, key, tx.now - 300_000], |r| r.get(0),
+                    ).optional()?
+        } else {
+            None
+        };
+        if closed || duplicate.is_some() {
+            tx.emit(&me.address, "push.suppressed", json!({
+                        "agent_id": me.id, "message_id": id, "duplicate_of": duplicate,
+                        "reason": if closed { "hold request closed" } else { "identical push within five minutes" },
+                    }))?;
+        }
+        let n = tx.execute(
+                    "INSERT OR IGNORE INTO announcements (agent_id, message_id, channel, announced_at, fingerprint, duplicate_of)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![me.id, id, channel, tx.now, fingerprint, duplicate],
+                )?;
+        if n > 0 && !closed && duplicate.is_none() {
+            claimed.push(id.clone());
+        }
     }
-
-    /// Record a wake the daemon attempted for `agent`: `outcome` is `sent` or `failed`.
-    pub fn record_wake(
-        &self,
-        agent: &str,
-        via: WakeVia,
-        target: &str,
-        outcome: &str,
-        detail: &str,
-        message_ids: &[String],
-    ) -> Result<()> {
-        self.write(|tx| {
-            let me = resolve_agent(tx, tx.node_id, agent)?;
-            tx.emit(
-                &me.address,
-                WAKE_EVENT,
-                json!({
-                    "agent_id": me.id,
-                    "agent": me.address,
-                    "via": via.as_str(),
-                    "target": target,
-                    "outcome": outcome,
-                    "detail": detail,
-                    "message_ids": ids(message_ids),
-                }),
-            )?;
-            Ok(())
-        })
+    if !claimed.is_empty() && matches!(channel, "post_tool" | "prompt") {
+        tx.emit(
+            &me.address,
+            NOTICE_EVENT,
+            json!({
+                "agent_id": me.id,
+                "agent": me.address,
+                "channel": channel,
+                "client": client,
+                "message_ids": ids(&claimed),
+            }),
+        )?;
     }
+    Ok(claimed)
+}
 
+impl Store {
     /// Count this node's coordination evidence since `since` (default: everything).
     pub fn trial_stats(&self, since: Option<Since>) -> Result<TrialStats> {
         self.read(|conn| {
@@ -245,7 +249,7 @@ impl Store {
                 "SELECT ts, actor, kind, payload FROM events
                  WHERE node_id = ?1 AND seq > ?2 AND ts >= ?3
                    AND kind IN ('hold.blocked', 'hold.acquired', 'hold.updated',
-                                'push.notified', 'push.woke', 'request.created',
+                                'push.notified', 'push.woke', 'transport.wake', 'request.created',
                                 'request.claimed', 'request.completed')
                  ORDER BY seq DESC",
             )?;
@@ -344,6 +348,31 @@ impl Store {
                                 at: fmt_ts(ts),
                                 agent: actor.clone(),
                                 via: s("via"),
+                                target: s("target"),
+                                outcome: s("outcome"),
+                                messages: messages.len() as u32,
+                            });
+                        }
+                    }
+                    // Only the daemon wrote `push.woke`, so only its wakes are counted:
+                    // `started` where `sent` counted, a failure as a failed wake, and the
+                    // other outcomes as neither.
+                    "transport.wake" if s("trigger") == "daemon" => {
+                        let messages = message_ids();
+                        if s("outcome") == "started" {
+                            out.wakes_sent += 1;
+                            let agent_id = s("agent_id");
+                            for m in &messages {
+                                pushed.push((agent_id.clone(), m.clone(), ts));
+                            }
+                        } else if p.get("failure").and_then(Value::as_bool) == Some(true) {
+                            out.wakes_failed += 1;
+                        }
+                        if out.wakes.len() < MAX_ITEMS {
+                            out.wakes.push(WakeRecord {
+                                at: fmt_ts(ts),
+                                agent: actor.clone(),
+                                via: s("transport"),
                                 target: s("target"),
                                 outcome: s("outcome"),
                                 messages: messages.len() as u32,
