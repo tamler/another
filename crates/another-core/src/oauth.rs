@@ -331,7 +331,10 @@ pub fn canonical_resource(raw: &str) -> std::result::Result<String, String> {
     if authority.is_empty() {
         return Err("resource is missing a host".into());
     }
-    let (host, port) = split_host_port(authority).map_err(|e| e.to_string())?;
+    let (host, port) = split_host_port(authority).map_err(|error| match error {
+        OAuthAuthorityError::MissingHost => "resource is missing a host".to_string(),
+        other => other.to_string(),
+    })?;
     let port = match (scheme.as_str(), port) {
         ("https", Some(443)) | ("http", Some(80)) => None,
         (_, other) => other,
@@ -378,7 +381,7 @@ pub enum OAuthAuthorityError {
 impl std::fmt::Display for OAuthAuthorityError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::MissingHost => "resource is missing a host",
+            Self::MissingHost => "missing host",
             Self::InvalidHost | Self::UnbracketedIpv6 => "invalid host",
             Self::InvalidPort => "invalid port",
         })
@@ -526,7 +529,12 @@ pub fn not_plain_redirect(uri: &str) -> Option<String> {
     match parse_redirect(uri) {
         Some(p) if is_plain_host(&p.authority) => None,
         Some(p) => Some(escaped_host(&p.authority)),
-        None => Some(escaped_host(uri)),
+        None => {
+            let authority = uri.split_once("://").map_or(uri, |(_, rest)| {
+                rest.split(['/', '?']).next().unwrap_or(rest)
+            });
+            Some(escaped_host(authority))
+        }
     }
 }
 
@@ -2278,6 +2286,21 @@ mod tests {
     }
 
     #[test]
+    fn authority_missing_host_message_is_neutral() {
+        for authority in ["", "[]", ":443"] {
+            let error = split_host_port(authority).unwrap_err();
+            assert_eq!(error, OAuthAuthorityError::MissingHost);
+            assert_eq!(error.to_string(), "missing host");
+        }
+        for uri in ["https:///mcp", "https://[]/mcp", "https://:443/mcp"] {
+            assert_eq!(
+                canonical_resource(uri).unwrap_err(),
+                "resource is missing a host"
+            );
+        }
+    }
+
+    #[test]
     fn resource_and_cimd() {
         assert_eq!(
             canonical_resource("HTTPS://MCP.Example.com:443/mcp/").unwrap(),
@@ -3024,6 +3047,17 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert!(shown_redirect_host(&listed[0].redirect_host).starts_with(NOT_A_PLAIN_HOST));
         store.deny_oauth(&waiting.user_code).unwrap();
+    }
+
+    #[test]
+    fn stored_invalid_redirect_port_displays_only_the_authority() {
+        for authority in ["localhost:+443", "localhost:0443", "[::1]:0080"] {
+            for suffix in ["/private/path?code=secret", "?code=secret", ""] {
+                let uri = format!("https://{authority}{suffix}");
+                assert_eq!(not_plain_redirect(&uri), Some(escaped_host(authority)));
+                assert!(validate_redirect_uri(&uri, "web").is_err());
+            }
+        }
     }
 
     #[test]

@@ -342,6 +342,18 @@ fn public_url_authority_error(error: OAuthAuthorityError) -> anyhow::Error {
     })
 }
 
+fn client_metadata_authority_error(error: OAuthAuthorityError) -> String {
+    match error {
+        OAuthAuthorityError::MissingHost => "client metadata URL is missing a host",
+        OAuthAuthorityError::InvalidHost => "invalid host in client metadata URL",
+        OAuthAuthorityError::UnbracketedIpv6 => {
+            "invalid host in client metadata URL; wrap IPv6 addresses in brackets"
+        }
+        OAuthAuthorityError::InvalidPort => "invalid port in client metadata URL",
+    }
+    .to_string()
+}
+
 /// Split a `Host` header into a lowercase host and an optional port.
 ///
 /// `+80` and `0080` are rejected. `Authority` would otherwise read `0080` as
@@ -853,7 +865,7 @@ fn cimd_target(url: &str, allow_loopback: bool) -> Result<(String, String, u16),
         return Err("client_id URL must contain a path".into());
     }
     let (host, explicit_port) =
-        split_host_port(authority).map_err(|e| public_url_authority_error(e).to_string())?;
+        split_host_port(authority).map_err(client_metadata_authority_error)?;
     let https = scheme == "https";
     let loopback_http = scheme == "http" && allow_loopback && is_loopback_name(&host);
     if !https && !loopback_http {
@@ -1632,6 +1644,7 @@ mod tests {
             assert!(parse_public_url(&origin).is_err(), "{authority}");
             assert!(split_host_header(authority).is_none(), "{authority}");
             assert!(canonical_origin(&origin).is_none(), "{authority}");
+            assert!(cimd_target(&uri, false).is_err(), "{authority}");
         }
     }
 
@@ -1656,6 +1669,27 @@ mod tests {
                 Ok(_) => panic!("authority must be refused: {authority}"),
             };
             assert_eq!(error.to_string(), message);
+        }
+    }
+
+    #[test]
+    fn metadata_url_has_its_own_authority_errors() {
+        for (authority, message) in [
+            ("", "client metadata URL is missing a host"),
+            ("[]", "client metadata URL is missing a host"),
+            ("[::1", "invalid host in client metadata URL"),
+            ("[::1]x", "invalid host in client metadata URL"),
+            (
+                "::1",
+                "invalid host in client metadata URL; wrap IPv6 addresses in brackets",
+            ),
+            ("example.com:", "invalid port in client metadata URL"),
+            ("example.com:0080", "invalid port in client metadata URL"),
+        ] {
+            assert_eq!(
+                cimd_target(&format!("https://{authority}/client.json"), false).unwrap_err(),
+                message,
+            );
         }
     }
 
