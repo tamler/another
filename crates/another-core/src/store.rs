@@ -1701,7 +1701,9 @@ const CATALOGS: &[&str] = &[
     "b07ccde4e870699aff968c4508b5944ac3cc5ae157acfb336bfdc3a16e5f6325",
     "fce5179014aaff7d53c71882bfe3870e21d1ff697464193ebeb2c1512327a89a",
     "64dbec6f2d3fd1bbe217ca67bfa028fd5d918904278683eefa7032ed96e89c9e",
-    "PENDING_V14_DIGEST",
+    // v14 drops a CHECK on queue_items; CHECKs are not in the catalog shape, so the digest
+    // is unchanged.
+    "64dbec6f2d3fd1bbe217ca67bfa028fd5d918904278683eefa7032ed96e89c9e",
 ];
 
 /// The digest this build holds for schema `version`.
