@@ -9,6 +9,19 @@
 
 Waking through a transport is a core part of Another, and hooks are the fallback everywhere (D84). Hooks work without the daemon: holds still expire when the next command looks at them, and a message still reaches a session at its next tool call or prompt. Without the daemon an idle agent is not woken, no session is checked, and `another transport status` says so.
 
+## Separate test daemons
+
+`ANOTHER_HOME` selects the database, but does not change the default per-user daemon label (`one.toanother.another`) or bind (`127.0.0.1:7466`). Running `another daemon install` from a test home with those defaults can replace the daemon for your usual home and restart it against the test database.
+
+For a separate test daemon, set the test `ANOTHER_HOME`, choose a distinct label and an unused loopback port, and preview the install first:
+
+```bash
+another daemon install --label one.toanother.another-test --bind 127.0.0.1:47466 --dry-run
+another daemon install --label one.toanother.another-test --bind 127.0.0.1:47466
+```
+
+Use the same `ANOTHER_HOME` and `--label` for its status, restart and uninstall commands. Keep that label and bind when reinstalling it. To test only foreground serving, run `another serve --bind 127.0.0.1:47466` instead.
+
 ## Run it in the background (macOS)
 
 ```bash
