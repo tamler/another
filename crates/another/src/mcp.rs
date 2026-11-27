@@ -28,31 +28,51 @@ pub struct AnotherMcp {
 
 type ToolResult<T> = Result<Json<T>, String>;
 
-fn tool_error(e: &another_core::Error) -> String {
-    let mut body = serde_json::json!({ "error": e.body() });
+enum ToolErr {
+    Core(another_core::Error),
+    SinceCursor(another_core::Error),
+    SinceTime(another_core::Error),
+}
+
+impl From<another_core::Error> for ToolErr {
+    fn from(err: another_core::Error) -> Self {
+        Self::Core(err)
+    }
+}
+
+fn tool_error(e: &ToolErr) -> String {
+    let core = match e {
+        ToolErr::Core(err) | ToolErr::SinceCursor(err) | ToolErr::SinceTime(err) => err,
+    };
+    let mut body = serde_json::json!({ "error": core.body() });
     let hint = match e {
-        another_core::Error::Ambiguous(_) => {
-            Some("Pass the agent as name@project so it is unambiguous.")
-        }
-        another_core::Error::NotFound(m) if m.contains("agent") || m.contains("no client") => {
-            Some("Register the agent with register_agent, or check the name. Hosted grants are approved with `another oauth approve`.")
-        }
-        another_core::Error::Invalid(m) if m.contains("since") => {
+        ToolErr::SinceCursor(_) => {
             Some("Pass since as bare seconds like 3600, a duration like 1h or 1d, an RFC 3339 time, or an event id from next_since.")
         }
+        ToolErr::SinceTime(_) => {
+            Some("Pass since as bare seconds like 3600, a duration like 24h, or an RFC 3339 time.")
+        }
+        ToolErr::Core(another_core::Error::Ambiguous(_)) => {
+            Some("Pass the agent as name@project so it is unambiguous.")
+        }
+        ToolErr::Core(another_core::Error::NotFound(m))
+            if m.contains("agent") || m.contains("no client") =>
+        {
+            Some("Register the agent with register_agent, or check the name. Hosted grants are approved with `another oauth approve`.")
+        }
         // Before the agent hint: "an agent description must be one line" names no address.
-        another_core::Error::Invalid(m)
+        ToolErr::Core(another_core::Error::Invalid(m))
             if m.contains("must be one line of text") || m.contains("text-direction") =>
         {
             Some("Send this field as one line: no line breaks, tabs, other control characters or text-direction characters.")
         }
-        another_core::Error::Invalid(m) if m.contains("agent") => {
+        ToolErr::Core(another_core::Error::Invalid(m)) if m.contains("agent") => {
             Some("Pass agent as name or name@project. On a hosted connection, omit agent.")
         }
-        another_core::Error::Forbidden(_) => {
+        ToolErr::Core(another_core::Error::Forbidden(_)) => {
             Some("This connection can only act as its own agent, inside its project globs.")
         }
-        _ => None,
+        ToolErr::Core(_) => None,
     };
     if let Some(hint) = hint {
         body["error"]["hint"] = serde_json::json!(hint);
@@ -73,6 +93,15 @@ impl AnotherMcp {
     where
         T: Send + 'static,
         F: FnOnce(&Store) -> another_core::Result<T> + Send + 'static,
+    {
+        self.run_tool(move |s| f(s).map_err(ToolErr::Core)).await
+    }
+
+    /// Run a tool handler with typed error context so hints key off the failing parser/field.
+    async fn run_tool<T, F>(&self, f: F) -> ToolResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Store) -> Result<T, ToolErr> + Send + 'static,
     {
         let store = self.store.clone();
         match tokio::task::spawn_blocking(move || f(&store)).await {
@@ -902,17 +931,18 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<WhatsNewArgs>,
     ) -> ToolResult<another_core::WhatsNew> {
-        self.run(move |s| {
+        self.run_tool(move |s| {
             let agent = a.agent.ok_or_else(|| {
                 another_core::Error::Invalid(
                     "pass agent (name or name@project). On a hosted connection, omit agent and this grant's agent is used".into(),
                 )
             })?;
-            let since = match a.since {
-                Some(v) => Some(Since::parse(&v, s.now())?),
-                None => None,
-            };
-            s.whats_new(&agent, since, a.limit.unwrap_or(10))
+            let since = a
+                .since
+                .as_deref()
+                .map(|v| Since::parse(v, s.now()).map_err(ToolErr::SinceCursor))
+                .transpose()?;
+            Ok(s.whats_new(&agent, since, a.limit.unwrap_or(10))?)
         })
         .await
     }
@@ -926,13 +956,17 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<ActivityFeedArgs>,
     ) -> ToolResult<ActivityFeed> {
-        self.run(move |s| {
-            let since = a.since.map(|v| Since::parse(&v, s.now())).transpose()?;
-            s.activity(ActivityQuery {
+        self.run_tool(move |s| {
+            let since = a
+                .since
+                .as_deref()
+                .map(|v| Since::parse(v, s.now()).map_err(ToolErr::SinceCursor))
+                .transpose()?;
+            Ok(s.activity(ActivityQuery {
                 since,
                 limit: a.limit.unwrap_or(50),
                 kinds: a.kinds,
-            })
+            })?)
         })
         .await
     }
@@ -945,9 +979,13 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<ActivitySummarizeArgs>,
     ) -> ToolResult<ActivitySummary> {
-        self.run(move |s| {
-            let since = a.since.map(|v| Since::parse(&v, s.now())).transpose()?;
-            s.activity_summary(since)
+        self.run_tool(move |s| {
+            let since = a
+                .since
+                .as_deref()
+                .map(|v| Since::parse(v, s.now()).map_err(ToolErr::SinceCursor))
+                .transpose()?;
+            Ok(s.activity_summary(since)?)
         })
         .await
     }
@@ -966,18 +1004,18 @@ impl AnotherMcp {
         // runs). Its board is confined: no sibling checkouts, and agent names, projects and
         // patterns from other projects are hidden.
         let remote = crate::remote::current_scope().is_some();
-        self.run(move |s| {
+        self.run_tool(move |s| {
             let since_ms = a
                 .since
                 .as_deref()
-                .map(|v| Since::parse_time(v, s.now()))
+                .map(|v| Since::parse_time(v, s.now()).map_err(ToolErr::SinceTime))
                 .transpose()?;
-            s.board(another_core::BoardQuery {
+            Ok(s.board(another_core::BoardQuery {
                 project: a.project,
                 confined: remote,
                 since_ms,
                 limit: a.limit.unwrap_or(0),
-            })
+            })?)
         })
         .await
     }
