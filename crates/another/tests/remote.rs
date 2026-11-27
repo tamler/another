@@ -359,12 +359,14 @@ async fn work_board_is_one_project_inside_the_globs() {
     srv.ct.cancel();
 }
 
-/// Review round 1, P1: the holder of a stopped edit in a project outside the token's globs
-/// is not named, though the stopped edit itself is in view. Since D92 a hold blocks only
-/// inside its checkout, so the holder's project is the top of the checkout that
-/// `work/shop` is a subdirectory project of.
+/// The holder of a stopped edit, in the top-level project of the checkout that `work/shop`
+/// is a subdirectory project of (D92: a hold blocks only inside its checkout). Review round
+/// 1 hid it because its project is outside the token's globs. FLE-23 M-H (owner decision
+/// Q2) judges a hold by what it covers instead: this one covers a file of `work/shop`, so
+/// the token sees it, its holder and its pattern, as `hold_paths list` and the feed do.
+/// Holds of the top project that stay outside `work/shop` are still hidden.
 #[tokio::test]
-async fn work_board_hides_a_holder_outside_the_globs() {
+async fn work_board_names_a_parent_holder_whose_hold_covers_the_project() {
     let srv = start().await;
     let top = srv._dir.path();
     std::fs::create_dir_all(top.join(".git")).unwrap();
@@ -423,26 +425,174 @@ async fn work_board_hides_a_holder_outside_the_globs() {
     let res = call(&client, "work_board", json!({ "project": srv.work })).await;
     assert_eq!(error_code(&res), None);
     let board = res.structured_content.unwrap();
-    let blocked = &board["projects"][0]["blocked"][0];
-    assert_eq!(blocked["agent"], "alice@shop");
-    assert_eq!(blocked["path"], "src/internal.rs");
-    assert!(blocked["holder"].is_null() && blocked["holder_project"].is_null());
-    assert!(blocked["pattern"].is_null());
-    let text = board.to_string();
-    assert!(!text.contains("private-holder"), "{text}");
-    assert!(!text.contains("work/shop/src/internal.rs"), "{text}");
-    // Nor is the holder's project named, as a project, in an address or in a hold key: it
-    // lies outside the token's globs. The slug is looked for as a whole value, since the
-    // board's own project path runs through that directory.
     let slug = srv.store.project(top.to_str().unwrap()).unwrap().slug;
     assert_eq!(holder.address, format!("private-holder@{slug}"));
-    for named in [
-        format!("\"{slug}\""),
-        format!("@{slug}"),
-        format!("\"{slug}:"),
-    ] {
-        assert!(!text.contains(&named), "{named} in {text}");
+    let shop = board["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["project"] == "shop")
+        .expect("the named project's section");
+    let blocked = &shop["blocked"][0];
+    assert_eq!(blocked["agent"], "alice@shop");
+    assert_eq!(blocked["path"], "src/internal.rs");
+    assert_eq!(blocked["holder"], holder.address.as_str());
+    assert_eq!(blocked["holder_project"], slug.as_str());
+    assert!(blocked["pattern"].is_string());
+    // The covering hold is listed in its own project's section.
+    let top_section = board["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["project"] == slug.as_str())
+        .expect("the top project's section, for its covering hold");
+    assert_eq!(top_section["holds"].as_array().unwrap().len(), 1);
+
+    // A hold of the top project outside `work/shop` stays hidden.
+    srv.store
+        .acquire_holds(another_core::AcquireHolds {
+            agent: holder.address.clone(),
+            project: top.to_string_lossy().into_owned(),
+            paths: vec!["private/plans.md".into()],
+            ttl_seconds: None,
+            exclusive: true,
+            reason: None,
+            repo_wide: false,
+        })
+        .unwrap();
+    let res = call(&client, "work_board", json!({ "project": srv.work })).await;
+    let text = res.structured_content.unwrap().to_string();
+    assert!(!text.contains("private/plans.md"), "{text}");
+    client.cancel().await.unwrap();
+    srv.ct.cancel();
+}
+
+/// FLE-23 M-H end to end over `/mcp` and `GET /activity`: a token allowed on `work/shop`
+/// sees the top project's hold that covers it, and neither the top project's other hold nor
+/// a hold in a sibling checkout of the same repository.
+#[tokio::test]
+async fn remote_hold_reads_follow_the_checkout_rule() {
+    let srv = start().await;
+    let top = srv._dir.path();
+    std::fs::write(top.join("README"), "top\n").unwrap();
+    std::fs::create_dir_all(top.join(".git")).unwrap();
+    std::fs::write(
+        top.join(".git/config"),
+        "[remote \"origin\"]\nurl = https://example.com/team/shop.git\n",
+    )
+    .unwrap();
+    // A linked worktree: another checkout of the same repository.
+    let wt = top.join("wt");
+    let wt_git = top.join(".git/worktrees/wt");
+    std::fs::create_dir_all(&wt_git).unwrap();
+    std::fs::create_dir_all(&wt).unwrap();
+    std::fs::write(wt.join(".git"), format!("gitdir: {}\n", wt_git.display())).unwrap();
+    std::fs::write(wt_git.join("commondir"), "../..\n").unwrap();
+    srv.store.ensure_project("t", &srv.work).unwrap();
+    let mut addresses = Vec::new();
+    for (name, dir) in [("lead", top.to_path_buf()), ("wanda", wt.clone())] {
+        addresses.push(
+            srv.store
+                .register_agent(RegisterAgent {
+                    name: name.into(),
+                    program: Program::Claude,
+                    project: Some(dir.to_string_lossy().into_owned()),
+                    model: None,
+                    description: None,
+                })
+                .unwrap()
+                .address,
+        );
     }
+    let hold = |agent: &str, dir: &Path, path: &str| {
+        let got = srv
+            .store
+            .acquire_holds(another_core::AcquireHolds {
+                agent: agent.into(),
+                project: dir.to_string_lossy().into_owned(),
+                paths: vec![path.into()],
+                ttl_seconds: None,
+                exclusive: true,
+                reason: None,
+                repo_wide: false,
+            })
+            .unwrap();
+        assert_eq!(got.granted.len(), 1, "{got:?}");
+        got.granted[0].hold_id.clone()
+    };
+    let covering = hold(&addresses[0], top, "work/shop/src/**");
+    let elsewhere = hold(&addresses[0], top, "private/**");
+    let sibling = hold(&addresses[1], &wt, "work/shop/src/a.rs");
+    // Link `work/shop` to its checkout, as using it does.
+    srv.store
+        .check_holds("alice@shop", &srv.work, &["warm-up".to_string()], true)
+        .unwrap();
+
+    let token = srv
+        .store
+        .create_token("grok-bot", std::slice::from_ref(&srv.work_glob), None, None)
+        .unwrap();
+    let client = connect(&srv.base, &token.secret).await;
+    let shows_only_covering = |what: &str, text: &str| {
+        assert!(text.contains(&covering), "{what}: {text}");
+        assert!(!text.contains(&elsewhere), "{what}: {text}");
+        assert!(!text.contains(&sibling), "{what}: {text}");
+        // Agent names outside holds (the summary's agents, session events) stay node-wide
+        // (FOLLOWUP, D3), so only hold ids and patterns are checked here.
+        assert!(!text.contains("private/**"), "{what}: {text}");
+    };
+
+    let list = call(
+        &client,
+        "hold_paths",
+        json!({ "action": "list", "project": srv.work }),
+    )
+    .await;
+    assert_eq!(error_code(&list), None);
+    let list = list.structured_content.unwrap();
+    assert_eq!(list["holds"].as_array().unwrap().len(), 1, "{list}");
+    shows_only_covering("list", &list.to_string());
+
+    let feed = call(&client, "activity_feed", json!({ "kinds": ["hold"] })).await;
+    assert_eq!(error_code(&feed), None);
+    shows_only_covering("activity_feed", &feed.structured_content.unwrap().to_string());
+
+    let sum = call(&client, "activity_summarize", json!({})).await;
+    assert_eq!(error_code(&sum), None);
+    let sum = sum.structured_content.unwrap();
+    assert_eq!(sum["live_holds"], 1, "{sum}");
+    assert_eq!(sum["counts"]["hold"], 1, "{sum}");
+    assert!(!sum.to_string().contains("private/**"), "{sum}");
+
+    // `whats_new` pages oldest first within 20 items, so only the hidden ones are checked.
+    let new = call(&client, "whats_new", json!({ "limit": 20 })).await;
+    assert_eq!(error_code(&new), None);
+    let new = new.structured_content.unwrap().to_string();
+    assert!(!new.contains(&elsewhere) && !new.contains(&sibling), "{new}");
+    assert!(!new.contains("private/**"), "{new}");
+
+    let board = call(&client, "work_board", json!({ "project": srv.work })).await;
+    assert_eq!(error_code(&board), None);
+    shows_only_covering("work_board", &board.structured_content.unwrap().to_string());
+
+    let r = reqwest::Client::new()
+        .get(format!("{}/activity?kinds=hold", srv.base))
+        .header("authorization", format!("Bearer {}", token.secret))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    shows_only_covering("GET /activity", &r.text().await.unwrap());
+
+    // The node's own CLI-side reads are unchanged.
+    let local = srv
+        .store
+        .holds(another_core::HoldFilter {
+            project: Some(srv.work.clone()),
+            agent: None,
+        })
+        .unwrap();
+    assert_eq!(local.len(), 3, "{local:?}");
     client.cancel().await.unwrap();
     srv.ct.cancel();
 }

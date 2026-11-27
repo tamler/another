@@ -29,6 +29,7 @@ pub mod test_support;
 mod time;
 mod tokens;
 mod transport;
+mod visibility;
 mod wake;
 
 pub use activity::{

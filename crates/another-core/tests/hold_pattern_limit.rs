@@ -1011,3 +1011,82 @@ fn overlapping_holds_of_a_peer_are_listed_up_to_ten_and_then_counted() {
     let listed: usize = snap.holds.iter().map(|h| h.remote_warnings.len()).sum();
     assert_eq!(listed, 10);
 }
+
+/// FLE-23 M-H (rulings D1 and D2): a remote caller never sees another node's holds. A
+/// warning keeps telling it that the path overlaps a hold on another node, and names
+/// nothing; holds that were not compared are one anonymous count, so a short list never
+/// reads as "no clash". The other node's hold events are left out of its feed. A local
+/// caller still gets every name.
+#[test]
+fn a_remote_caller_gets_other_nodes_warnings_without_names() {
+    let fed = Fed::new();
+    let (_, report) = fed.forge_hold("mine", "src/a.rs");
+    assert_eq!(report.accepted, 1);
+    let token = TokenScope {
+        token_id: "t".into(),
+        agent_id: "a".into(),
+        agent: "alice".into(),
+        project_globs: vec![fed.shop.clone()],
+    };
+    let acquire = |path: &str, scope: Option<&TokenScope>| {
+        fed.hub
+            .store
+            .acquire_holds_scoped(
+                AcquireHolds {
+                    agent: "alice".into(),
+                    project: fed.shop.clone(),
+                    paths: vec![path.into()],
+                    ttl_seconds: None,
+                    exclusive: true,
+                    reason: None,
+                    repo_wide: false,
+                },
+                scope,
+            )
+            .unwrap()
+    };
+    let got = acquire("src/a.rs", Some(&token));
+    assert_eq!(got.granted.len(), 1, "a foreign hold never blocks");
+    assert_eq!(got.warnings.len(), 1, "{got:?}");
+    let warning = &got.warnings[0];
+    assert_eq!(
+        warning.hidden.as_deref(),
+        Some("the requested path overlaps a hold on another node")
+    );
+    assert_eq!(warning.path, "src/a.rs");
+    assert!(warning.held.hold_id.is_empty() && warning.held.agent.is_empty());
+    assert!(warning.held.project.is_empty() && warning.held.pattern.is_empty());
+    let json = serde_json::to_string(&got).unwrap();
+    assert!(!json.contains("mallory") && !json.contains("mine"), "{json}");
+
+    let feed = |scope: Option<&TokenScope>| {
+        fed.hub
+            .store
+            .activity_scoped(
+                ActivityQuery {
+                    since: None,
+                    limit: 500,
+                    kinds: vec![ActivityKind::Hold],
+                },
+                scope,
+            )
+            .unwrap()
+            .items
+    };
+    let mallory = fed.mallory.id();
+    assert!(feed(Some(&token)).iter().all(|i| i.node_id != mallory));
+    assert!(feed(None).iter().any(|i| i.node_id == mallory));
+
+    fed.hub.plant_copies("mine", 30_000, "src/unrelated.rs");
+    let got = acquire("src/b.rs", Some(&token));
+    let left = not_compared(&got);
+    let rows = left.as_array().expect("some holds were not compared");
+    assert_eq!(rows.len(), 1, "{left}");
+    assert_eq!(rows[0]["node"], "");
+    assert!(rows[0]["holds"].as_u64().unwrap() > 0, "{left}");
+    assert!(!serde_json::to_string(&got).unwrap().contains("mallory"));
+
+    // Locally, the names stay.
+    let local = acquire("src/c.rs", None);
+    assert_eq!(not_compared(&local)[0]["node"], "mallory");
+}

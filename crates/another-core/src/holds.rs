@@ -72,6 +72,10 @@ pub struct HoldConflict {
     /// then a short prefix and a length, never the stored pattern.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unreadable: Option<String>,
+    /// Set only for a remote caller, when the existing hold is outside what its token may
+    /// see: `held` then names nothing (empty strings) and this is the whole explanation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -502,7 +506,7 @@ fn overlap_within(a: &str, b: &str, budget: &mut usize) -> Touch {
 /// on-disk case; this catches new ones. Folding only ever adds overlaps, and it is skipped
 /// when either pattern has a character class: lowercasing `[!a-z]` would change which
 /// names the class excludes.
-fn overlap_on_volume(a: &str, b: &str, fold: bool) -> bool {
+pub(crate) fn overlap_on_volume(a: &str, b: &str, fold: bool) -> bool {
     patterns_overlap(a, b)
         || (fold
             && (literal_pattern(a).is_some() || !a.contains('['))
@@ -971,11 +975,32 @@ fn conflicts_for(
                     path: requested.clone(),
                     held: held.clone(),
                     unreadable: None,
+                    hidden: None,
                 });
             }
         }
     }
     Ok(conflicts)
+}
+
+/// `conflicts` as a remote caller (`scope`) may see them: a hold its token may not see is
+/// reported with no names (FLE-23 M-H). Unchanged for a local caller.
+fn remote_conflicts(
+    tx: &Tx<'_>,
+    scope: Option<&TokenScope>,
+    conflicts: Vec<HoldConflict>,
+) -> Result<Vec<HoldConflict>> {
+    let Some(scope) = scope else {
+        return Ok(conflicts);
+    };
+    if conflicts.is_empty() {
+        return Ok(conflicts);
+    }
+    let view = crate::visibility::HoldView::of(tx, tx.node_id, scope)?;
+    conflicts
+        .into_iter()
+        .map(|c| view.conflict(tx, c, crate::visibility::HIDDEN_HOLD))
+        .collect()
 }
 
 /// The conflict a hold makes when its stored pattern cannot be read. The note names the
@@ -1022,6 +1047,7 @@ fn unreadable_conflict(
             ..held.clone()
         },
         unreadable: Some(crate::mail::display_line(&note, 700)),
+        hidden: None,
     })
 }
 
@@ -1218,6 +1244,7 @@ pub(crate) fn foreign_clashes(
                     path: requested.clone(),
                     held,
                     unreadable: None,
+                    hidden: None,
                 }
             };
             found.listed.push((i, clash, node.to_string()));
@@ -1959,6 +1986,9 @@ impl Store {
                 }
             }
             let conflicts = conflicts_for(tx, &project, &me.id, &patterns, input.exclusive)?;
+            // Still refused against every hold of the checkout; a remote caller is told
+            // only what its token may see.
+            let conflicts = remote_conflicts(tx, scope, conflicts)?;
             let report = |granted, conflicts| HoldReport {
                 granted,
                 conflicts,
@@ -2008,6 +2038,24 @@ impl Store {
         report.warnings = found.listed.into_iter().map(|(_, c, _)| c).collect();
         report.warnings_more = found.more;
         report.not_compared = found.not_compared;
+        if scope.is_some() {
+            // Another node's holds are never shown to a remote caller: the warning stays,
+            // its names go, and the nodes not compared are one anonymous count.
+            report.warnings = report
+                .warnings
+                .into_iter()
+                .map(|c| crate::visibility::redact(c, crate::visibility::HIDDEN_FOREIGN_HOLD))
+                .collect();
+            let skipped: u32 = report.not_compared.iter().map(|n| n.holds).sum();
+            report.not_compared = if report.not_compared.is_empty() {
+                Vec::new()
+            } else {
+                vec![NotCompared {
+                    node: String::new(),
+                    holds: skipped,
+                }]
+            };
+        }
         Ok(report)
     }
 
@@ -2052,7 +2100,8 @@ impl Store {
                     Ok((raw.clone(), p))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            conflicts_for(tx, &project, &me.id, &patterns, exclusive)
+            let conflicts = conflicts_for(tx, &project, &me.id, &patterns, exclusive)?;
+            remote_conflicts(tx, scope, conflicts)
         })
     }
 
@@ -2320,6 +2369,12 @@ impl Store {
     /// holds in sibling checkouts of the same repository, for anyone who looks: they are
     /// other work on the repository and block nothing in this checkout (D92).
     pub fn holds(&self, filter: HoldFilter) -> Result<Vec<Hold>> {
+        self.holds_scoped(filter, None)
+    }
+
+    /// [`Store::holds`] for a caller that may be remote (`scope`): only holds its token may
+    /// see (see `visibility`), so a sibling checkout outside its globs is left out.
+    pub fn holds_scoped(&self, filter: HoldFilter, scope: Option<&TokenScope>) -> Result<Vec<Hold>> {
         self.write(|tx| {
             sweep_tx(tx)?;
             let (project_id, repo_key) = match &filter.project {
@@ -2337,13 +2392,24 @@ impl Store {
                 Some(a) => Some(resolve_agent(tx, tx.node_id, a)?.id),
                 None => None,
             };
-            live_holds(
+            let holds = live_holds(
                 tx,
                 "h.node_id = ?1 AND (?3 IS NULL OR h.agent_id = ?3)
                  AND (?2 IS NULL OR h.project_id = ?2 OR (?4 != '' AND h.project_id IN
                       (SELECT project_id FROM project_repos WHERE repo_key = ?4)))",
                 &[&tx.node_id, &project_id, &agent_id, &repo_key],
-            )
+            )?;
+            let Some(scope) = scope else {
+                return Ok(holds);
+            };
+            let view = crate::visibility::HoldView::of(tx, tx.node_id, scope)?;
+            let mut shown = Vec::with_capacity(holds.len());
+            for hold in holds {
+                if view.shows_hold(tx, &hold.hold_id)? {
+                    shown.push(hold);
+                }
+            }
+            Ok(shown)
         })
     }
 

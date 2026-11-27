@@ -1136,6 +1136,7 @@ fn board_command(
         since_ms: Some(since_ms),
         limit,
         confined: false,
+        scope: None,
     })?;
     Ok(emit(json, &board, output::board))
 }

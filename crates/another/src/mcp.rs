@@ -721,11 +721,16 @@ impl AnotherMcp {
                     out.released.extend(done.released);
                     out.notes = done.notes;
                 }
+                // Remote callers: only holds their token may see (no sibling checkout
+                // outside its globs).
                 HoldAction::List => {
-                    out.holds = s.holds(HoldFilter {
-                        project: a.project.clone(),
-                        agent: None,
-                    })?
+                    out.holds = s.holds_scoped(
+                        HoldFilter {
+                            project: a.project.clone(),
+                            agent: None,
+                        },
+                        scope.as_ref(),
+                    )?
                 }
             }
             Ok(out)
@@ -908,6 +913,7 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<WhatsNewArgs>,
     ) -> ToolResult<another_core::WhatsNew> {
+        let scope = crate::remote::current_scope();
         self.run(move |s| {
             let agent = a.agent.ok_or_else(|| {
                 another_core::Error::Invalid(
@@ -918,7 +924,8 @@ impl AnotherMcp {
                 Some(v) => Some(Since::parse(&v, s.now())?),
                 None => None,
             };
-            s.whats_new(&agent, since, a.limit.unwrap_or(10))
+            // Remote callers: hold activity only for holds their token may see.
+            s.whats_new_scoped(&agent, since, a.limit.unwrap_or(10), scope.as_ref())
         })
         .await
     }
@@ -932,13 +939,18 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<ActivityFeedArgs>,
     ) -> ToolResult<ActivityFeed> {
+        let scope = crate::remote::current_scope();
         self.run(move |s| {
             let since = a.since.map(|v| Since::parse(&v, s.now())).transpose()?;
-            s.activity(ActivityQuery {
-                since,
-                limit: a.limit.unwrap_or(50),
-                kinds: a.kinds,
-            })
+            // Remote callers: hold events only for holds their token may see.
+            s.activity_scoped(
+                ActivityQuery {
+                    since,
+                    limit: a.limit.unwrap_or(50),
+                    kinds: a.kinds,
+                },
+                scope.as_ref(),
+            )
         })
         .await
     }
@@ -951,9 +963,10 @@ impl AnotherMcp {
         &self,
         Parameters(a): Parameters<ActivitySummarizeArgs>,
     ) -> ToolResult<ActivitySummary> {
+        let scope = crate::remote::current_scope();
         self.run(move |s| {
             let since = a.since.map(|v| Since::parse(&v, s.now())).transpose()?;
-            s.activity_summary(since)
+            s.activity_summary_scoped(since, scope.as_ref())
         })
         .await
     }
@@ -969,9 +982,10 @@ impl AnotherMcp {
         Parameters(a): Parameters<WorkBoardArgs>,
     ) -> ToolResult<another_core::Board> {
         // A remote caller is held to the one project its globs allowed (checked before this
-        // runs). Its board is confined: no sibling checkouts, and agent names, projects and
-        // patterns from other projects are hidden.
-        let remote = crate::remote::current_scope().is_some();
+        // runs). Its board is confined: agents and requests of that project only, holds of
+        // its checkout only when the token may see them, other names hidden.
+        let scope = crate::remote::current_scope();
+        let remote = scope.is_some();
         self.run(move |s| {
             let since_ms = match a.since {
                 None => None,
@@ -987,6 +1001,7 @@ impl AnotherMcp {
             s.board(another_core::BoardQuery {
                 project: a.project,
                 confined: remote,
+                scope,
                 since_ms,
                 limit: a.limit.unwrap_or(0),
             })
@@ -1203,5 +1218,52 @@ impl ServerHandler for AnotherMcp {
         }
         remote::audit(&self.store, record).await;
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tools a remote connection is denied by `remote::authorize`'s catch-all arm, on
+    /// purpose: the queue is the owner's and the node's agents' (QUEUE.md).
+    const DENIED_BY_DEFAULT: &[&str] = &["queue_list", "queue_next", "queue_propose", "queue_update"];
+
+    /// FLE-23 I3 (folded into M-H): every tool this server offers has a decision for remote
+    /// callers. A tool reaches `authorize`'s catch-all arm only if it is listed above, so a
+    /// new tool cannot become remote-denied, or remote-allowed, by accident; the list holds
+    /// no stale names.
+    #[test]
+    fn every_tool_has_a_remote_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let scope = another_core::TokenScope {
+            token_id: "t".into(),
+            agent_id: "a".into(),
+            agent: "bot".into(),
+            project_globs: Vec::new(),
+        };
+        let tools: Vec<String> = AnotherMcp::new(store.clone())
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        assert!(tools.len() > DENIED_BY_DEFAULT.len(), "{tools:?}");
+        for name in DENIED_BY_DEFAULT {
+            assert!(tools.iter().any(|t| t == name), "{name} is not a tool");
+        }
+        for tool in &tools {
+            let mut args = serde_json::Map::new();
+            let fell_through = match remote::authorize(&store, &scope, tool, &mut args) {
+                Err(reason) => reason.starts_with(&format!("tool {tool:?} is not available")),
+                Ok(()) => false,
+            };
+            assert_eq!(
+                fell_through,
+                DENIED_BY_DEFAULT.contains(&tool.as_str()),
+                "{tool}: give it an arm in remote::authorize, or list it in DENIED_BY_DEFAULT"
+            );
+        }
     }
 }

@@ -20,6 +20,8 @@ use crate::error::Result;
 use crate::identity::find_project;
 use crate::store::Store;
 use crate::time::{fmt_opt, fmt_ts};
+use crate::tokens::TokenScope;
+use crate::visibility::HoldView;
 
 /// The reason the edit hook writes on the holds it takes. Must match
 /// `another::hooks::AUTO_HOLD_REASON`; a test in the `another` crate checks that.
@@ -46,6 +48,11 @@ pub struct BoardQuery {
     /// other projects (the holder of a stopped edit; request senders, recipients and owners
     /// registered elsewhere). Requires `project`.
     pub confined: bool,
+    /// With `confined`, the remote caller's token. Holds, edits and stopped edits are then
+    /// read from every local project of the named project's checkout and kept only when
+    /// the token may see them (see `visibility`), so a parent project's hold over this
+    /// project is shown. Agents and requests stay those of the named project.
+    pub scope: Option<TokenScope>,
     /// Edits and stopped edits at or after this time (ms). Default: the last 24 hours.
     pub since_ms: Option<i64>,
     /// Items per list (default 20, at most 200).
@@ -211,6 +218,21 @@ impl Store {
                 Some(key) => Some(project_scope(conn, &local, key, !query.confined)?),
             };
             let in_scope = |id: &str| scope.as_ref().map(|s| s.contains(id)).unwrap_or(true);
+            // A confined board for a remote token: holds may come from any local project of
+            // the named project's checkout, each kept only when the token may see it. The
+            // participants (agents, requests, initial sections) stay `scope`.
+            let view = match (&query.scope, query.confined) {
+                (Some(token), true) => Some(HoldView::of(conn, &local, token)?),
+                _ => None,
+            };
+            let candidates: Option<HashSet<String>> = match (&view, &query.project) {
+                (Some(_), Some(key)) => Some(checkout_projects(conn, &local, key)?),
+                _ => None,
+            };
+            let hold_source = |id: &str| match &candidates {
+                Some(c) => c.contains(id),
+                None => in_scope(id),
+            };
             let by_id: HashMap<&str, &ProjectRow> =
                 projects.iter().map(|p| (p.id.as_str(), p)).collect();
             // Slugs of the projects in view, for details that name a project by slug.
@@ -284,8 +306,13 @@ impl Store {
                     let Some(p) = by_id.get(project_id.as_str()) else {
                         continue;
                     };
-                    if !in_scope(&project_id) {
+                    if !hold_source(&project_id) {
                         continue;
+                    }
+                    if let Some(view) = &view {
+                        if !view.shows_hold(conn, &id)? {
+                            continue;
+                        }
                     }
                     section(&mut sections, p);
                     *holders.entry(agent_id).or_default() += 1;
@@ -313,8 +340,9 @@ impl Store {
             // stopped edits, in the window, in a project in view.
             let mut history_truncated = false;
             {
-                let scope_json: Option<String> = scope
+                let scope_json: Option<String> = candidates
                     .as_ref()
+                    .or(scope.as_ref())
                     .map(|s| serde_json::to_string(&s.iter().collect::<Vec<_>>()))
                     .transpose()?;
                 let mut stmt = conn.prepare(
@@ -327,19 +355,28 @@ impl Store {
                                           IN (SELECT value FROM json_each(?3)))
                      ORDER BY seq DESC LIMIT ?4",
                 )?;
-                let rows = stmt
-                    .query_map(
-                        params![local, since, scope_json, BOARD_EVENT_SCAN_CAP + 1],
-                        |r| {
-                            Ok((
-                                r.get::<_, i64>(0)?,
-                                r.get::<_, String>(1)?,
-                                r.get::<_, String>(2)?,
-                                r.get::<_, String>(3)?,
-                            ))
-                        },
-                    )?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                // With a token's view, an event it may not see neither appears nor counts
+                // toward the cap, so the SQL cannot stop at the cap itself (-1: no limit).
+                let sql_limit: i64 = match view {
+                    Some(_) => -1,
+                    None => i64::from(BOARD_EVENT_SCAN_CAP) + 1,
+                };
+                let mut rows: Vec<(i64, String, String, String)> = Vec::new();
+                let mut found = stmt.query(params![local, since, scope_json, sql_limit])?;
+                while let Some(r) = found.next()? {
+                    let (ts, actor, kind) = (r.get(0)?, r.get(1)?, r.get::<_, String>(2)?);
+                    let mut payload: String = r.get(3)?;
+                    if let Some(view) = &view {
+                        match view.hold_event(conn, &local, &kind, &payload)? {
+                            Some(shown) => payload = shown,
+                            None => continue,
+                        }
+                    }
+                    rows.push((ts, actor, kind, payload));
+                    if rows.len() > BOARD_EVENT_SCAN_CAP as usize {
+                        break;
+                    }
+                }
                 if rows.len() > BOARD_EVENT_SCAN_CAP as usize {
                     history_truncated = true;
                 }
@@ -355,7 +392,7 @@ impl Store {
                     let Some(project) = by_id.get(project_id.as_str()) else {
                         continue;
                     };
-                    if !in_scope(&project_id) {
+                    if !hold_source(&project_id) {
                         continue;
                     }
                     if kind == "hold.blocked" {
@@ -373,7 +410,12 @@ impl Store {
                                 break;
                             }
                             let holder_project = text(c, "project");
-                            let shown = show_project(&holder_project);
+                            // A token's view has already removed the holder of a hold it
+                            // may not see.
+                            let shown = match view {
+                                Some(_) => c.get("hold_id").is_some(),
+                                None => show_project(&holder_project),
+                            };
                             s.blocked.push(BoardBlocked {
                                 at: fmt_ts(ts),
                                 agent: actor.clone(),
@@ -497,6 +539,29 @@ fn load_projects(conn: &Connection, local: &str) -> Result<Vec<ProjectRow>> {
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// The named project plus every local project of its checkout (another directory of the
+/// same working tree), from the link cache as it is.
+fn checkout_projects(conn: &Connection, local: &str, key: &str) -> Result<HashSet<String>> {
+    let project = find_project(conn, local, key)?;
+    let mut out = HashSet::from([project.project_id.clone()]);
+    let checkout = crate::repo::cached(conn, &project.project_id)?
+        .flatten()
+        .map(|l| l.checkout)
+        .unwrap_or_default();
+    if checkout.is_empty() {
+        return Ok(out);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT pr.project_id FROM project_repos pr
+         JOIN projects p ON p.project_id = pr.project_id
+         WHERE pr.checkout = ?1 AND p.node_id = ?2",
+    )?;
+    for id in stmt.query_map(params![checkout, local], |r| r.get::<_, String>(0))? {
+        out.insert(id?);
+    }
+    Ok(out)
 }
 
 /// The named project plus, with `siblings`, checkouts already linked to the same
