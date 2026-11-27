@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
+use another_core::test_support::{fake_checkout, fake_worktree};
 use another_core::*;
 
 const T0: i64 = 1_800_000_000_000;
@@ -51,22 +52,14 @@ impl Repos {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let main = root.join("shop");
-        write(
-            &main.join(".git/config"),
-            "[remote \"origin\"]\n\turl = git@example.com:me/shop.git\n",
-        );
+        fake_checkout(&main, Some("git@example.com:me/shop.git"));
         std::fs::create_dir_all(main.join("src")).unwrap();
         let wt = root.join("shop-wt");
-        let wt_git = main.join(".git/worktrees/shop-wt");
-        write(&wt.join(".git"), &format!("gitdir: {}\n", wt_git.display()));
-        write(&wt_git.join("commondir"), "../..\n");
+        fake_worktree(&main, &wt);
         let twin = root.join("shop-twin");
         link_dir(&main, &twin);
         let other = root.join("blog");
-        write(
-            &other.join(".git/config"),
-            "[remote \"origin\"]\n\turl = https://example.com/me/blog\n",
-        );
+        fake_checkout(&other, Some("https://example.com/me/blog"));
         Repos {
             home: root.join("home"),
             _dir: dir,

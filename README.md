@@ -305,6 +305,11 @@ cargo fmt --all -- --check
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). The minimum supported Rust version is 1.88.
 
+Workspace tests share schema and file-only checkout/worktree fixtures through
+`another_core::test_support` (the `test-support` feature). `older_home(home, behind)`
+returns the older schema version and leaves build records and scenario data to the caller.
+Tests that need the system clock use `another_core::now_ms`.
+
 An opt-in docs/quickstart clarity eval (a model plays a stranger seeing only the public docs) is documented in [evals/quickstart_clarity/README.md](evals/quickstart_clarity/README.md). It stays out of default CI, defaults to offline fixture mode (zero spend), and requires explicit live opt-in, an existing durable spend ledger, per-call/run caps, and billing-confirmation flags before making paid API calls.
 
 ## Clean-room

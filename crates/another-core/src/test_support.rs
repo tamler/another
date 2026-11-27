@@ -1,10 +1,76 @@
-//! For this workspace's tests only: build wire events as a node really signs them, so a
-//! test can forge, re-sign or replay one. Signing goes through [`crate::crypto`]; nothing
-//! here is a second implementation of the signed bytes.
+//! For this workspace's tests only: schema and checkout fixtures, and wire events a test
+//! can forge, re-sign or replay. Signing goes through [`crate::crypto`]; nothing here is a
+//! second implementation of the signed bytes.
 
 use rusqlite::Connection;
+use std::path::Path;
 
 use crate::{crypto, WireEvent};
+
+/// Read a fixture database's migration version without creating a missing database.
+pub fn schema_version(db: &Path) -> i64 {
+    Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap()
+}
+
+/// The schema produced by this build, without creating a home on disk.
+pub fn current_schema_version() -> i64 {
+    static VERSION: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *VERSION.get_or_init(|| {
+        let (clock, _) = crate::Clock::manual(0);
+        crate::Store::open_in_memory(clock)
+            .unwrap()
+            .read(|conn| Ok(conn.pragma_query_value(None, "user_version", |r| r.get(0))?))
+            .unwrap()
+    })
+}
+
+/// Create an empty WAL home `behind` migrations before this build. Returns the
+/// older version, with no build record or node rows; callers add scenario-specific data.
+/// The destination must not already contain a database or build record.
+pub fn older_home(home: &Path, behind: i64) -> i64 {
+    let current = current_schema_version();
+    assert!(
+        behind > 0 && behind <= current,
+        "invalid migration distance: behind={behind}, current={current}"
+    );
+    let version = current.checked_sub(behind).unwrap();
+    assert!(!home.join(crate::DB_FILE).exists());
+    assert!(!home.join(crate::ORIGIN_FILE).exists());
+    std::fs::create_dir_all(home).unwrap();
+    let conn = Connection::open(home.join(crate::DB_FILE)).unwrap();
+    conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+    crate::apply_schema(&conn, version).unwrap();
+    version
+}
+
+/// A file-only checkout, with an optional origin. No Git process runs.
+pub fn fake_checkout(dir: &Path, origin: Option<&str>) {
+    let config = match origin {
+        Some(url) => format!("[remote \"origin\"]\n\turl = {url}\n"),
+        None => "[core]\n\tbare = false\n".into(),
+    };
+    write_fixture(&dir.join(".git/config"), &config);
+}
+
+/// A linked worktree at `at`, using an absolute gitdir and relative commondir.
+/// Callers create any source directories their scenario needs.
+pub fn fake_worktree(main: &Path, at: &Path) {
+    let git_dir = main.join(".git/worktrees").join(at.file_name().unwrap());
+    let git_dir = std::path::absolute(git_dir).unwrap();
+    write_fixture(
+        &at.join(".git"),
+        &format!("gitdir: {}\n", git_dir.display()),
+    );
+    write_fixture(&git_dir.join("commondir"), "../..\n");
+}
+
+fn write_fixture(path: &Path, text: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
 
 /// `ev`, signed with the secret key of the local node of the home `conn` is open on. The
 /// incoming `sig` is ignored. `ev.node_id` should be that local node's id for the event to

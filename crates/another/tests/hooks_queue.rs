@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, SystemTime};
 
+use another_core::now_ms;
 #[path = "common/cli.rs"]
 mod cli;
 
@@ -1784,13 +1785,6 @@ fn hook_cost() {
         std::fs::read_dir(env.state_dir()).unwrap().count(),
         percentile_95(due).as_secs_f64() * 1000.0,
     );
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
 }
 
 /// A seated `claude@shop` that holds one file, with an item ready: the state the two

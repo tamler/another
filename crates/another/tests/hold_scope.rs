@@ -7,6 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use another_core::test_support::{fake_checkout, fake_worktree};
 #[path = "common/cli.rs"]
 mod cli;
 
@@ -45,20 +46,14 @@ impl Env {
     fn repo(&self, rel: &str) -> PathBuf {
         let main = self.root.join(rel);
         let name = main.file_name().unwrap().to_string_lossy().into_owned();
-        write(
-            &main.join(".git/config"),
-            &format!("[remote \"origin\"]\n\turl = git@example.com:team/{name}.git\n"),
-        );
+        fake_checkout(&main, Some(&format!("git@example.com:team/{name}.git")));
         std::fs::create_dir_all(main.join("src")).unwrap();
         main
     }
 
     /// A linked worktree of `main` at `at`, as `git worktree add` lays it out.
     fn worktree(&self, main: &Path, at: &Path) -> PathBuf {
-        let name = at.file_name().unwrap().to_string_lossy().into_owned();
-        let wt_git = main.join(".git/worktrees").join(&name);
-        write(&at.join(".git"), &format!("gitdir: {}\n", wt_git.display()));
-        write(&wt_git.join("commondir"), "../..\n");
+        fake_worktree(main, at);
         std::fs::create_dir_all(at.join("src")).unwrap();
         at.to_path_buf()
     }

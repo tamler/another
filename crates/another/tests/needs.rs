@@ -11,6 +11,7 @@ mod transports;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use another_core::now_ms;
 use another_core::{
     AdmitItem, Program, ProposeItem, QueueCaller, QueueItem, QueueKind, RegisterAgent, ReleaseItem,
     SendMessage, Store, TransportWake, WakeKind, WakeOutcome, DB_FILE,
@@ -32,13 +33,6 @@ const KINDS: [&str; 11] = [
     "no_taker",
     "proposal",
 ];
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
-}
 
 fn text(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
@@ -1992,26 +1986,11 @@ fn brief_is_one_line_or_nothing() {
 
 /// A home as an earlier build left it, one schema behind. Returns the older version.
 fn older_home(home: &Path) -> i64 {
-    let current: i64 = {
-        let dir = tempfile::tempdir().unwrap();
-        Store::open(dir.path()).unwrap();
-        rusqlite::Connection::open(dir.path().join(DB_FILE))
-            .unwrap()
-            .pragma_query_value(None, "user_version", |r| r.get(0))
-            .unwrap()
-    };
-    std::fs::create_dir_all(home).unwrap();
-    let c = rusqlite::Connection::open(home.join(DB_FILE)).unwrap();
-    c.pragma_update(None, "journal_mode", "WAL").unwrap();
-    another_core::apply_schema(&c, current - 1).unwrap();
-    current - 1
+    another_core::test_support::older_home(home, 1)
 }
 
 fn user_version(home: &Path) -> i64 {
-    rusqlite::Connection::open(home.join(DB_FILE))
-        .unwrap()
-        .pragma_query_value(None, "user_version", |r| r.get(0))
-        .unwrap()
+    another_core::test_support::schema_version(&home.join(DB_FILE))
 }
 
 #[test]
