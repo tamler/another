@@ -102,7 +102,19 @@ pub(crate) fn compile_project_glob(pattern: &str) -> Result<GlobSet> {
         // Unlike compile_matcher, building a set reports compilation errors without panic.
         GlobSetBuilder::new().add(glob).build()
     };
-    compile().map_err(|e| Error::Invalid(format!("invalid project glob {pattern:?}: {e}")))
+    compile().map_err(|e| {
+        let length = pattern.chars().count();
+        let shown = if length > 80 {
+            format!(
+                "{}... ({length} characters)",
+                pattern.chars().take(80).collect::<String>()
+            )
+        } else {
+            pattern.to_string()
+        };
+        // Displaying the full error would echo the original pattern again.
+        Error::Invalid(format!("invalid project glob {shown:?}: {}", e.kind()))
+    })
 }
 
 /// Whether a token's project globs cover the project `project_id` (by path or slug).
@@ -461,6 +473,20 @@ mod tests {
     fn a_project_glob_too_large_to_compile_allows_nothing() {
         let huge = format!("/work/{}", "*a".repeat(1 << 20));
         assert!(!glob_allows(&[huge], &["/work/a".into()]));
+    }
+
+    #[test]
+    fn project_glob_errors_bound_the_echoed_pattern() {
+        let pattern = format!("{}[", "é".repeat(212));
+        let message = compile_project_glob(&pattern).unwrap_err().to_string();
+        let prefix = "é".repeat(80);
+        assert!(message.contains(&format!("{prefix}... (213 characters)")));
+        assert!(!message.contains(&"é".repeat(81)));
+        assert!(message.chars().count() < 300);
+
+        let short = compile_project_glob("[").unwrap_err().to_string();
+        assert!(short.contains("invalid project glob \"[\""));
+        assert!(!short.contains("characters"));
     }
 
     #[test]

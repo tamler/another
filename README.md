@@ -54,7 +54,8 @@ requests use the store's clock, including a manual clock supplied by a caller.
 
 Bearer-token creation and OAuth approval reject project globs that cannot compile
 for matching, even when their syntax is valid. Existing stored globs that cannot
-compile continue to grant no project access.
+compile continue to grant no project access. Invalid-glob diagnostics show at most
+the first 80 characters of the pattern, followed by its character count when truncated.
 
 ## Quickstart
 

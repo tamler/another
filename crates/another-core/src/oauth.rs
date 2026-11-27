@@ -1937,6 +1937,90 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn oauth_approval_rejects_an_uncompileable_glob_without_storing_changes() {
+        use crate::identity::{Program, RegisterAgent};
+        use crate::store::Clock;
+
+        let (clock, _) = Clock::manual(1_700_000_000_000);
+        let store = Store::open_in_memory(clock).unwrap();
+        store
+            .register_agent(RegisterAgent {
+                name: "helper".into(),
+                program: Program::Other,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+        let client = store
+            .register_oauth_client(ClientRegistration {
+                client_name: "Helper".into(),
+                redirect_uris: vec!["https://client.example/callback".into()],
+                application_type: Some("web".into()),
+                remote: None,
+            })
+            .unwrap();
+        let pending = store
+            .begin_authorization(AuthorizeInput {
+                client: ClientProfile {
+                    client_id: client.client_id,
+                    client_name: client.client_name,
+                    redirect_uris: client.redirect_uris.clone(),
+                },
+                redirect_uri: client.redirect_uris[0].clone(),
+                state: None,
+                scope: None,
+                resource: "https://another.example/mcp".into(),
+                code_challenge: pkce_s256("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk").unwrap(),
+                code_challenge_method: "S256".into(),
+                remote: None,
+            })
+            .unwrap();
+        let snapshot = || {
+            store
+                .read(|conn| {
+                    let request: (String, Option<String>, Option<String>, Option<i64>) = conn
+                        .query_row(
+                            "SELECT status, grant_id, code_hash, code_expires_at
+                         FROM oauth_requests WHERE request_id = ?1",
+                            [&pending.request_id],
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                        )?;
+                    let audit: i64 =
+                        conn.query_row("SELECT count(*) FROM audit_log", [], |r| r.get(0))?;
+                    let events: i64 =
+                        conn.query_row("SELECT count(*) FROM events", [], |r| r.get(0))?;
+                    let tokens: i64 =
+                        conn.query_row("SELECT count(*) FROM oauth_tokens", [], |r| r.get(0))?;
+                    Ok((request, audit, events, tokens))
+                })
+                .unwrap()
+        };
+        let before = snapshot();
+        let huge = format!("/work/{}", "*a".repeat(1 << 20));
+        assert!(globset::GlobBuilder::new(&huge).build().is_ok());
+        assert!(matches!(
+            store.approve_oauth(Approval {
+                user_code: pending.user_code.clone(),
+                agent: "helper".into(),
+                project_globs: vec![huge],
+                label: None,
+            }),
+            Err(Error::Invalid(message)) if message.starts_with("invalid project glob")
+        ));
+        assert!(store.oauth_grants().unwrap().is_empty());
+        assert_eq!(snapshot(), before);
+        store
+            .approve_oauth(Approval {
+                user_code: pending.user_code,
+                agent: "helper".into(),
+                project_globs: vec!["/work/*".into()],
+                label: None,
+            })
+            .unwrap();
+    }
+
     /// The part of a shown host after Another's warning. It must hold nothing but ASCII
     /// letters, digits, `.`, `-` and whole `\u{XXXX}` escapes.
     fn escaped_part(shown: &str) -> &str {
