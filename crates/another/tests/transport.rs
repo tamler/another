@@ -2838,7 +2838,13 @@ fn pre_edit_stamps_the_session_and_renews_no_hold() {
 /// name still reaches it. The shipped value is on.
 #[test]
 fn weak_matches_are_woken_only_while_the_switch_is_on() {
-    const { assert!(another::transport::herdr::HERDR_WAKES_WEAK_MATCH) };
+    #[allow(
+        clippy::assertions_on_constants,
+        reason = "Keep a compile-time check of the shipped default"
+    )]
+    const {
+        assert!(another::transport::herdr::HERDR_WAKES_WEAK_MATCH)
+    };
     let codex_fx = || {
         let fx = Fx::new();
         let codex = fx.agent("codex", Program::Codex);

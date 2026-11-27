@@ -130,10 +130,7 @@ fn a_peer_agent_name_follows_the_local_name_rule() {
             reason.len()
         );
         if let Some((len, address)) = stored(&hub, n) {
-            kept.push(format!(
-                "case {n}: {len}-byte name, address {:.40}",
-                address
-            ));
+            kept.push(format!("case {n}: {len}-byte name, address {address:.40}"));
         }
     }
     assert!(

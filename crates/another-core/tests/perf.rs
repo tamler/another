@@ -341,10 +341,7 @@ fn hot_paths_stay_fast_at_ten_thousand_events() {
         ),
     ];
 
-    println!(
-        "seeded {events} events, {AGENTS} agents, {PROJECTS} projects in {:.1?}",
-        seeded
-    );
+    println!("seeded {events} events, {AGENTS} agents, {PROJECTS} projects in {seeded:.1?}");
     println!("{:<24} {:>12} {:>12}", "call", "median", "ceiling");
     for (name, took, ceiling) in &cases {
         println!("{name:<24} {took:>12.2?} {ceiling:>12.0?}");
