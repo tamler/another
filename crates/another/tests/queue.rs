@@ -6,19 +6,17 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use another::mcp::AnotherMcp;
+#[path = "common/mcp_http.rs"]
+mod mcp_http;
+
 #[cfg(unix)]
 use another_core::QueuePriority;
 use another_core::{
     AdmitItem, DoneItem, EditItem, PointerKind, Program, ProposeItem, QueueCaller, QueueFilter,
     QueueItem, QueueKind, QueueState, RegisterAgent, ReleaseItem, Store,
 };
-use rmcp::model::{CallToolRequestParams, CallToolResult, ClientConfig};
-use rmcp::service::RunningService;
-use rmcp::{RoleClient, ServiceExt};
+use mcp_http::{call_err, call_ok, in_process};
 use serde_json::{json, Value};
-
-type Client = RunningService<RoleClient, ClientConfig>;
 
 fn text(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
@@ -183,42 +181,6 @@ impl Fx {
         })
         .to_string()
     }
-}
-
-async fn in_process(store: Store) -> Client {
-    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
-    tokio::spawn(async move {
-        let server = AnotherMcp::new(store).serve(server_io).await.unwrap();
-        let _ = server.waiting().await;
-    });
-    ClientConfig::default().serve(client_io).await.unwrap()
-}
-
-async fn call(client: &Client, tool: &str, args: Value) -> CallToolResult {
-    client
-        .call_tool(
-            CallToolRequestParams::new(tool.to_string())
-                .with_arguments(args.as_object().cloned().expect("object args")),
-        )
-        .await
-        .expect("tool call")
-}
-
-async fn call_ok(client: &Client, tool: &str, args: Value) -> Value {
-    let res = call(client, tool, args).await;
-    assert_ne!(res.is_error, Some(true), "{tool} failed: {res:?}");
-    res.structured_content.expect("structured output")
-}
-
-async fn call_err(client: &Client, tool: &str, args: Value) -> String {
-    let res = call(client, tool, args).await;
-    assert_eq!(res.is_error, Some(true), "{tool} should fail: {res:?}");
-    let text = serde_json::to_value(&res.content).unwrap()[0]["text"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let body: Value = serde_json::from_str(&text).unwrap();
-    body["error"]["code"].as_str().unwrap().to_string()
 }
 
 /// Run the binary on a pseudo-terminal with `typed` as the keys pressed. Returns what the

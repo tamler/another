@@ -1,40 +1,32 @@
+#[path = "common/mcp_http.rs"]
+mod mcp_http;
+
 use another::dashboard::DashboardMode;
-use another::serve::{http_router, HttpOptions};
 use another_core::Store;
+use mcp_http::{start_http, TestServer};
 use tokio_util::sync::CancellationToken;
 
-async fn server(auth: bool) -> (tempfile::TempDir, Store, String, CancellationToken) {
+async fn server(auth: bool) -> (TestServer, Store, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let ct = CancellationToken::new();
-    let opts = HttpOptions {
-        federation: true,
-        auth,
-        bound_port: addr.port(),
-        dashboard: if auth {
+    let srv = start_http(store.clone(), CancellationToken::new(), |addr, opts| {
+        opts.federation = true;
+        opts.auth = auth;
+        opts.dashboard = if auth {
             DashboardMode::Redacted
         } else {
             DashboardMode::Local
-        },
-        dashboard_bound: Some(addr),
-        ..Default::default()
-    };
-    let app = http_router(store.clone(), ct.clone(), &opts);
-    let stop = ct.clone();
-    tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(stop.cancelled_owned())
-            .await
-            .unwrap();
-    });
-    (dir, store, format!("http://{addr}"), ct)
+        };
+        opts.dashboard_bound = Some(addr);
+    })
+    .await;
+    (srv, store, dir)
 }
 
 #[tokio::test]
 async fn federation_only_has_no_local_routes_even_with_rewritten_host() {
-    let (_dir, _store, base, ct) = server(false).await;
+    let (srv, _store, _dir) = server(false).await;
+    let base = &srv.base;
     let client = reqwest::Client::new();
     for path in ["/mcp", "/activity", "/ui", "/api/dash", "/api/dash/events"] {
         for method in [reqwest::Method::GET, reqwest::Method::POST] {
@@ -76,12 +68,14 @@ async fn federation_only_has_no_local_routes_even_with_rewritten_host() {
             .status(),
         401
     );
-    ct.cancel();
+    drop(client);
+    srv.stop().await;
 }
 
 #[tokio::test]
 async fn authenticated_federation_keeps_local_routes_token_gated() {
-    let (_dir, store, base, ct) = server(true).await;
+    let (srv, store, _dir) = server(true).await;
+    let base = &srv.base;
     store
         .register_agent(another_core::RegisterAgent {
             name: "reader".into(),
@@ -118,12 +112,14 @@ async fn authenticated_federation_keeps_local_routes_token_gated() {
             "{path}"
         );
     }
-    ct.cancel();
+    drop(client);
+    srv.stop().await;
 }
 
 #[tokio::test]
 async fn unauthenticated_failure_burst_has_a_bounded_audit_log() {
-    let (_dir, store, base, ct) = server(true).await;
+    let (srv, store, _dir) = server(true).await;
+    let base = &srv.base;
     let client = reqwest::Client::new();
     for _ in 0..40 {
         assert_eq!(
@@ -162,5 +158,6 @@ async fn unauthenticated_failure_burst_has_a_bounded_audit_log() {
         }
     }
     assert!(store.audit_log(1000).unwrap().len() <= 32);
-    ct.cancel();
+    drop(client);
+    srv.stop().await;
 }

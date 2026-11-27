@@ -1,51 +1,13 @@
 //! MCP tools exercised through real rmcp clients: in-process and over loopback HTTP.
 
-use another::mcp::AnotherMcp;
+#[path = "common/mcp_http.rs"]
+mod mcp_http;
+
 use another_core::{Clock, Store};
-use rmcp::model::{CallToolRequestParams, CallToolResult, ClientConfig};
-use rmcp::service::RunningService;
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::{RoleClient, ServiceExt};
+use mcp_http::{call_err, call_error, call_ok, connect_unauth, in_process, start_http};
+use rmcp::model::CallToolRequestParams;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
-
-type Client = RunningService<RoleClient, ClientConfig>;
-
-async fn call(client: &Client, tool: &str, args: Value) -> CallToolResult {
-    let args = args.as_object().cloned().expect("object args");
-    client
-        .call_tool(CallToolRequestParams::new(tool.to_string()).with_arguments(args))
-        .await
-        .expect("tool call")
-}
-
-async fn call_ok(client: &Client, tool: &str, args: Value) -> Value {
-    let res = call(client, tool, args).await;
-    assert_ne!(res.is_error, Some(true), "{tool} failed: {res:?}");
-    res.structured_content.expect("structured output")
-}
-
-/// Error results carry `{"error": {"code", "message"}}` as text.
-async fn call_err(client: &Client, tool: &str, args: Value) -> String {
-    let res = call(client, tool, args).await;
-    assert_eq!(res.is_error, Some(true), "{tool} should fail: {res:?}");
-    let text = serde_json::to_value(&res.content).unwrap()[0]["text"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let body: Value = serde_json::from_str(&text).unwrap();
-    body["error"]["code"].as_str().unwrap().to_string()
-}
-
-async fn in_process(store: Store) -> Client {
-    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
-    tokio::spawn(async move {
-        let server = AnotherMcp::new(store).serve(server_io).await.unwrap();
-        let _ = server.waiting().await;
-    });
-    ClientConfig::default().serve(client_io).await.unwrap()
-}
 
 #[tokio::test]
 async fn heartbeat_rejects_start_and_end_without_releasing_holds() {
@@ -524,31 +486,9 @@ async fn streamable_http_on_loopback() {
     let dir = tempfile::tempdir().unwrap();
     let project_path = dir.path().join("site");
     let store = Store::open(dir.path()).unwrap();
-    let ct = CancellationToken::new();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let app = another::serve::http_router(
-        store.clone(),
-        ct.clone(),
-        &another::serve::HttpOptions {
-            bound_port: addr.port(),
-            ..Default::default()
-        },
-    );
-    let server = tokio::spawn({
-        let ct = ct.clone();
-        async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async move { ct.cancelled_owned().await })
-                .await
-                .unwrap();
-        }
-    });
+    let srv = start_http(store.clone(), CancellationToken::new(), |_, _| {}).await;
 
-    let transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp")),
-    );
-    let client = ClientConfig::default().serve(transport).await.unwrap();
+    let client = connect_unauth(&srv.base).await;
     let agent = call_ok(
         &client,
         "register_agent",
@@ -572,19 +512,7 @@ async fn streamable_http_on_loopback() {
     assert_eq!(after.last_seen_at, before.last_seen_at);
 
     client.cancel().await.unwrap();
-    ct.cancel();
-    server.await.unwrap();
-}
-
-/// The whole error body of a failed call: `{"code", "message", "hint"?}`.
-async fn call_error(client: &Client, tool: &str, args: Value) -> Value {
-    let res = call(client, tool, args).await;
-    assert_eq!(res.is_error, Some(true), "{tool} should fail: {res:?}");
-    let text = serde_json::to_value(&res.content).unwrap()[0]["text"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    serde_json::from_str::<Value>(&text).unwrap()["error"].clone()
+    srv.stop().await;
 }
 
 /// Q20: a resource's endpoint, purpose and metadata are size limited. Over MCP, in process

@@ -2,34 +2,42 @@
 //! real HTTP routes of a server on loopback in a temp home. No request leaves loopback, no
 //! redirect is followed, and no test host name is ever contacted.
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
-use another::oauth_http::parse_public_url;
-use another::serve::{http_router, HttpOptions};
+#[path = "common/cli.rs"]
+mod cli;
+#[path = "common/mcp_http.rs"]
+mod mcp_http;
+#[path = "common/oauth_client.rs"]
+mod oauth_client;
+
 use another_core::{Approval, Program, RegisterAgent, Store, DB_FILE};
-use rmcp::model::{CallToolRequestParams, ClientConfig};
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::ServiceExt;
+use mcp_http::{call, connect, start_oauth_http, TestServer};
+use oauth_client::{
+    form, no_redirect_http as http, query_param, serve_cimd_document, PKCE_CHALLENGE as CHALLENGE,
+    PKCE_VERIFIER as VERIFIER,
+};
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_util::sync::CancellationToken;
 
-const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
-const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 const REFUSED: &str = "redirect URI is not allowed: it must be an https or http URI with no white space, `#` or `@`, and its host must be a plain host name or IP address with an optional port from 1 to 65535. An internationalised name must be given in its punycode form.";
 const CLIENT_REFUSED: &str = "this client is registered with a redirect host that is not a plain host name or IP address. It must register again.";
 
 struct Server {
+    server: TestServer,
     store: Store,
     dir: tempfile::TempDir,
-    base: String,
-    ct: CancellationToken,
 }
 
 impl Server {
+    fn base(&self) -> &str {
+        &self.server.base
+    }
+
+    async fn stop(self) {
+        self.server.stop().await;
+    }
+
     fn home(&self) -> PathBuf {
         self.dir.path().join("home")
     }
@@ -64,12 +72,9 @@ impl Server {
 
     /// The standard output of the built `another` against this server's home.
     fn cli(&self, args: &[&str]) -> String {
-        let out = Command::new(env!("CARGO_BIN_EXE_another"))
+        let out = cli::another_cmd(&self.home())
             .args(args)
             .current_dir(self.dir.path())
-            .env("ANOTHER_HOME", self.home())
-            .env_remove("ANOTHER_AGENT")
-            .env_remove("ANOTHER_LOG")
             .stdin(Stdio::null())
             .output()
             .expect("run another");
@@ -90,69 +95,8 @@ async fn start() -> Server {
             description: None,
         })
         .unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let base = format!("http://{addr}");
-    let ct = CancellationToken::new();
-    let opts = HttpOptions {
-        auth: true,
-        bound_port: addr.port(),
-        oauth: Some(parse_public_url(&base).unwrap()),
-        ..Default::default()
-    };
-    let app = http_router(store.clone(), ct.clone(), &opts);
-    let stop = ct.clone();
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move { stop.cancelled_owned().await })
-        .await
-        .unwrap();
-    });
-    Server {
-        store,
-        dir,
-        base,
-        ct,
-    }
-}
-
-fn http() -> reqwest::Client {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap()
-}
-
-fn encode(s: &str) -> String {
-    s.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
-}
-
-fn form(pairs: &[(&str, &str)]) -> String {
-    pairs
-        .iter()
-        .map(|(k, v)| format!("{}={}", encode(k), encode(v)))
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-fn query_param(url: &str, key: &str) -> String {
-    url.split(&format!("{key}="))
-        .nth(1)
-        .unwrap()
-        .split('&')
-        .next()
-        .unwrap()
-        .to_string()
+    let server = start_oauth_http(store.clone()).await;
+    Server { server, store, dir }
 }
 
 /// The host parts the reviews of pull request 273 found registration to accept, the
@@ -216,14 +160,14 @@ async fn authorize(
     http()
         .get(format!(
             "{}/authorize?{}",
-            srv.base,
+            srv.base(),
             form(&[
                 ("response_type", "code"),
                 ("client_id", client_id),
                 ("redirect_uri", redirect_uri),
                 ("code_challenge", CHALLENGE),
                 ("code_challenge_method", "S256"),
-                ("resource", &format!("{}/mcp", srv.base)),
+                ("resource", &format!("{}/mcp", srv.base())),
                 ("state", "from-the-app"),
                 ("scope", scope),
             ])
@@ -235,7 +179,7 @@ async fn authorize(
 
 async fn register(srv: &Server, application_type: &str, uris: &[&str]) -> reqwest::Response {
     http()
-        .post(format!("{}/oauth/register", srv.base))
+        .post(format!("{}/oauth/register", srv.base()))
         .json(&json!({
             "client_name": "ChatGPT",
             "redirect_uris": uris,
@@ -251,7 +195,7 @@ async fn register(srv: &Server, application_type: &str, uris: &[&str]) -> reqwes
 
 async fn token(srv: &Server, pairs: &[(&str, &str)]) -> reqwest::Response {
     http()
-        .post(format!("{}/oauth/token", srv.base))
+        .post(format!("{}/oauth/token", srv.base()))
         .header("content-type", "application/x-www-form-urlencoded")
         .body(form(pairs))
         .send()
@@ -263,7 +207,7 @@ async fn token(srv: &Server, pairs: &[(&str, &str)]) -> reqwest::Response {
 /// a refusal.
 async fn mcp_agent(srv: &Server, access: &str) -> Result<String, u16> {
     let probe = http()
-        .post(format!("{}/mcp", srv.base))
+        .post(format!("{}/mcp", srv.base()))
         .header("authorization", format!("Bearer {access}"))
         .header("content-type", "application/json")
         .header("accept", "application/json, text/event-stream")
@@ -274,18 +218,8 @@ async fn mcp_agent(srv: &Server, access: &str) -> Result<String, u16> {
     if probe.status() == 401 {
         return Err(401);
     }
-    let transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(format!("{}/mcp", srv.base))
-            .auth_header(access),
-    );
-    let client = ClientConfig::default().serve(transport).await.unwrap();
-    let res = client
-        .call_tool(
-            CallToolRequestParams::new("whats_new".to_string())
-                .with_arguments(json!({}).as_object().cloned().unwrap()),
-        )
-        .await
-        .unwrap();
+    let client = connect(srv.base(), access).await;
+    let res = call(&client, "whats_new", json!({})).await;
     assert_ne!(res.is_error, Some(true), "{res:?}");
     Ok(res.structured_content.unwrap()["agent"]
         .as_str()
@@ -307,7 +241,7 @@ async fn approve(srv: &Server, authorized: reqwest::Response) -> String {
     assert!(wait.starts_with("/oauth/wait/"), "{wait}");
     let pending_url = format!(
         "{}{}",
-        srv.base,
+        srv.base(),
         wait.replacen("/oauth/wait/", "/oauth/pending/", 1)
     );
     let pending: Value = http()
@@ -365,7 +299,7 @@ async fn registration_over_http_refuses_a_redirect_host_that_is_not_plain() {
         }
         assert_eq!(srv.client_rows(), 0);
         assert!(srv.store.audit_log(100).unwrap().is_empty());
-        srv.ct.cancel();
+        srv.stop().await;
     }
 }
 
@@ -437,7 +371,7 @@ async fn ordinary_clients_register_and_complete_a_flow() {
         let back = approve(&srv, authorized).await;
         assert!(back.starts_with(requested), "{requested}");
         let code = query_param(&back, "code");
-        let resource = format!("{}/mcp", srv.base);
+        let resource = format!("{}/mcp", srv.base());
         let issued = token(
             &srv,
             &[
@@ -474,7 +408,7 @@ async fn ordinary_clients_register_and_complete_a_flow() {
         assert!(!listed.contains("not plain"), "{listed}");
 
         let revoked = http()
-            .post(format!("{}/oauth/revoke", srv.base))
+            .post(format!("{}/oauth/revoke", srv.base()))
             .header("content-type", "application/x-www-form-urlencoded")
             .body(form(&[("token", &access)]))
             .send()
@@ -482,7 +416,7 @@ async fn ordinary_clients_register_and_complete_a_flow() {
             .unwrap();
         assert_eq!(revoked.status(), 200);
         assert_eq!(mcp_agent(&srv, &access).await, Err(401), "{requested}");
-        srv.ct.cancel();
+        srv.stop().await;
     }
 }
 
@@ -574,7 +508,7 @@ async fn a_stored_client_with_a_host_that_is_not_plain_is_refused_at_authorize()
                 "client \"{client_id}\"  \"ChatGPT\"  redirect host {escaped}  is not a plain host name or IP address: it can no longer be approved and must register again"
             )
         );
-        srv.ct.cancel();
+        srv.stop().await;
     }
 }
 
@@ -589,7 +523,7 @@ async fn a_grant_issued_before_the_rule_keeps_working_and_is_marked() {
     let res = register(&srv, "web", &[plain]).await;
     let client: Value = res.json().await.unwrap();
     let client_id = client["client_id"].as_str().unwrap().to_string();
-    let resource = format!("{}/mcp", srv.base);
+    let resource = format!("{}/mcp", srv.base());
 
     let authorized = authorize(&srv, &client_id, plain, "another offline_access").await;
     let back = approve(&srv, authorized).await;
@@ -667,32 +601,7 @@ async fn a_grant_issued_before_the_rule_keeps_working_and_is_marked() {
         )
         .unwrap();
     assert_eq!(stored, serde_json::to_string(&[hostile]).unwrap());
-    srv.ct.cancel();
-}
-
-/// Serve one client metadata document on loopback, once, and return its URL.
-async fn serve_document(redirect_uris: &[&str]) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let client_id = format!("http://{}/client.json", listener.local_addr().unwrap());
-    let doc = json!({
-        "client_id": client_id,
-        "client_name": "Claude",
-        "redirect_uris": redirect_uris,
-        "token_endpoint_auth_method": "none"
-    })
-    .to_string();
-    tokio::spawn(async move {
-        let (mut sock, _) = listener.accept().await.unwrap();
-        let mut buf = [0u8; 2048];
-        let _ = sock.read(&mut buf).await;
-        let head = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-            doc.len()
-        );
-        let _ = sock.write_all(head.as_bytes()).await;
-        let _ = sock.write_all(doc.as_bytes()).await;
-    });
-    client_id
+    srv.stop().await;
 }
 
 /// A client metadata document is held to the same rule: one hostile redirect URI in it
@@ -705,7 +614,7 @@ async fn a_client_metadata_document_is_held_to_the_same_rule() {
         for authority in chunk {
             let uri = format!("https://{authority}/cb");
             let plain = "https://claude.ai/api/mcp/auth_callback";
-            let client_id = serve_document(&[plain, &uri]).await;
+            let client_id = serve_cimd_document("Claude", &[plain, &uri]).await;
             let res = authorize(&srv, &client_id, plain, "another").await;
             assert_eq!(res.status(), 400, "{uri:?}");
             assert!(res.headers().get("location").is_none(), "{uri:?}");
@@ -720,11 +629,14 @@ async fn a_client_metadata_document_is_held_to_the_same_rule() {
             assert_eq!(srv.request_rows(), 0, "{uri:?}");
         }
         // The documents main serves are still accepted.
-        let client_id = serve_document(&[
-            "https://claude.ai/api/mcp/auth_callback",
-            "http://127.0.0.1/callback",
-            "http://localhost/callback",
-        ])
+        let client_id = serve_cimd_document(
+            "Claude",
+            &[
+                "https://claude.ai/api/mcp/auth_callback",
+                "http://127.0.0.1/callback",
+                "http://localhost/callback",
+            ],
+        )
         .await;
         let res = authorize(
             &srv,
@@ -735,6 +647,6 @@ async fn a_client_metadata_document_is_held_to_the_same_rule() {
         .await;
         assert_eq!(res.status(), 303);
         assert_eq!(srv.request_rows(), 1);
-        srv.ct.cancel();
+        srv.stop().await;
     }
 }

@@ -5,46 +5,26 @@
 //! list is kept, cut to 64 characters; an empty claim counts as no header; and
 //! `cf-connecting-ip` (set by the Cloudflare tunnel) wins over the others.
 
-use std::net::SocketAddr;
+#[path = "common/mcp_http.rs"]
+mod mcp_http;
 
-use another::serve::{http_router, HttpOptions};
 use another_core::Store;
-use tokio_util::sync::CancellationToken;
+use mcp_http::{start_auth_http, TestServer};
 
 struct Server {
-    _dir: tempfile::TempDir,
+    server: TestServer,
     store: Store,
-    base: String,
-    _ct: CancellationToken,
+    _dir: tempfile::TempDir,
 }
 
 async fn start() -> Server {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let ct = CancellationToken::new();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let opts = HttpOptions {
-        auth: true,
-        bound_port: addr.port(),
-        ..Default::default()
-    };
-    let app = http_router(store.clone(), ct.clone(), &opts);
-    let stop = ct.clone();
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move { stop.cancelled_owned().await })
-        .await
-        .unwrap();
-    });
+    let server = start_auth_http(store.clone()).await;
     Server {
-        _dir: dir,
+        server,
         store,
-        base: format!("http://{addr}"),
-        _ct: ct,
+        _dir: dir,
     }
 }
 
@@ -52,7 +32,7 @@ async fn start() -> Server {
 async fn origin(srv: &Server, headers: &[(&str, &str)]) -> Option<String> {
     let before = srv.store.audit_log(1000).unwrap().len();
     let mut req = reqwest::Client::new()
-        .post(format!("{}/mcp", srv.base))
+        .post(format!("{}/mcp", srv.server.base))
         .header("authorization", "Bearer ano_nope_nope")
         .header("content-type", "application/json")
         .body("{}");
@@ -123,6 +103,7 @@ async fn a_proxy_header_is_recorded_as_a_labelled_claim() {
         empty.starts_with("127.0.0.1:") && !empty.contains(": "),
         "{empty}"
     );
+    srv.server.stop().await;
 }
 
 /// adv231 (FINDINGS-231-w9W, applied as-is apart from this comment): a proxy header is a
@@ -143,4 +124,5 @@ async fn adv231_gap_a_proxy_claim_keeps_the_socket_address() {
         kept.is_empty(),
         "the socket address is replaced by the client's claim: {kept:?}"
     );
+    srv.server.stop().await;
 }

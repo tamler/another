@@ -2,25 +2,18 @@
 //! named after its bug number. An authenticated server in process, on an ephemeral loopback
 //! port, with a temporary home.
 
-use std::net::SocketAddr;
+#[path = "common/mcp_http.rs"]
+mod mcp_http;
 
-use another::serve::{http_router, HttpOptions};
 use another_core::{Program, RegisterAgent, Store};
-use rmcp::model::{CallToolRequestParams, CallToolResult, ClientConfig};
-use rmcp::service::RunningService;
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::{RoleClient, ServiceExt};
+use mcp_http::{call, connect, in_process, start_auth_http, TestServer};
+use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
-use tokio_util::sync::CancellationToken;
-
-type Client = RunningService<RoleClient, ClientConfig>;
 
 struct Server {
-    _dir: tempfile::TempDir,
+    server: TestServer,
     store: Store,
-    base: String,
-    ct: CancellationToken,
+    _dir: tempfile::TempDir,
 }
 
 fn agent(store: &Store, name: &str, program: Program, project: Option<&str>) {
@@ -49,33 +42,11 @@ async fn start() -> Server {
     agent(&store, "worker", Program::Claude, Some(inside));
     agent(&store, "insider", Program::Claude, Some(outside));
     agent(&store, "colleague", Program::Claude, Some(outside));
-    let ct = CancellationToken::new();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let app = http_router(
-        store.clone(),
-        ct.clone(),
-        &HttpOptions {
-            auth: true,
-            bound_port: addr.port(),
-            ..Default::default()
-        },
-    );
-    let stop = ct.clone();
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move { stop.cancelled_owned().await })
-        .await
-        .unwrap();
-    });
+    let server = start_auth_http(store.clone()).await;
     Server {
-        _dir: dir,
+        server,
         store,
-        base: format!("http://{addr}"),
-        ct,
+        _dir: dir,
     }
 }
 
@@ -93,23 +64,6 @@ impl Server {
     }
 }
 
-async fn connect(base: &str, token: &str) -> Client {
-    let transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(format!("{base}/mcp")).auth_header(token),
-    );
-    ClientConfig::default().serve(transport).await.unwrap()
-}
-
-async fn call(client: &Client, tool: &str, args: Value) -> CallToolResult {
-    client
-        .call_tool(
-            CallToolRequestParams::new(tool.to_string())
-                .with_arguments(args.as_object().cloned().unwrap()),
-        )
-        .await
-        .unwrap()
-}
-
 fn text(result: &CallToolResult) -> String {
     serde_json::to_string(&result.content).unwrap()
 }
@@ -119,7 +73,7 @@ fn text(result: &CallToolResult) -> String {
 #[tokio::test]
 async fn bh1_dot_dot_does_not_escape_a_tokens_project_globs() {
     let srv = start().await;
-    let client = connect(&srv.base, &srv.token().secret).await;
+    let client = connect(&srv.server.base, &srv.token().secret).await;
     let escape = srv.path("sandbox/w/../../private/data");
     let outside = srv.path("private/data");
     let new_outside = srv.path("sandbox/w/../../brand/new");
@@ -178,7 +132,7 @@ async fn bh1_dot_dot_does_not_escape_a_tokens_project_globs() {
     )
     .await;
     assert_ne!(inside.is_error, Some(true), "{inside:?}");
-    srv.ct.cancel();
+    srv.server.ct.cancel();
 }
 
 /// BH-3. `claim_request` only checks who is acting: a token can claim or complete any request
@@ -186,7 +140,7 @@ async fn bh1_dot_dot_does_not_escape_a_tokens_project_globs() {
 #[tokio::test]
 async fn bh3_a_token_cannot_touch_requests_outside_its_scope() {
     let srv = start().await;
-    let client = connect(&srv.base, &srv.token().secret).await;
+    let client = connect(&srv.server.base, &srv.token().secret).await;
     let ask = |from: &str, to: &str, subject: &str| {
         srv.store
             .send_message(another_core::SendMessage {
@@ -241,7 +195,7 @@ async fn bh3_a_token_cannot_touch_requests_outside_its_scope() {
     .await;
     assert_ne!(ok.is_error, Some(true), "{ok:?}");
     assert_eq!(srv.store.request(&mine).unwrap().status.as_str(), "done");
-    srv.ct.cancel();
+    srv.server.ct.cancel();
 }
 
 /// BH-12. `threads` is limited to threads the token's agent is in, but `send_message` lets it
@@ -249,7 +203,7 @@ async fn bh3_a_token_cannot_touch_requests_outside_its_scope() {
 #[tokio::test]
 async fn bh12_a_reply_does_not_open_a_thread_the_token_cannot_read() {
     let srv = start().await;
-    let client = connect(&srv.base, &srv.token().secret).await;
+    let client = connect(&srv.server.base, &srv.token().secret).await;
     let private = srv
         .store
         .send_message(another_core::SendMessage {
@@ -325,7 +279,7 @@ async fn bh12_a_reply_does_not_open_a_thread_the_token_cannot_read() {
     )
     .await;
     assert_ne!(reply.is_error, Some(true), "{reply:?}");
-    srv.ct.cancel();
+    srv.server.ct.cancel();
 }
 
 /// BH-13. `authorize` checks the `project` argument, but renew and release ignore it and act on
@@ -333,7 +287,7 @@ async fn bh12_a_reply_does_not_open_a_thread_the_token_cannot_read() {
 #[tokio::test]
 async fn bh13_renew_and_release_stay_inside_the_tokens_globs() {
     let srv = start().await;
-    let client = connect(&srv.base, &srv.token().secret).await;
+    let client = connect(&srv.server.base, &srv.token().secret).await;
     let hold = |project: &str, path: &str| acquire(&srv.store, "worker@a", project, path);
     let outside = hold(&srv.path("private/data"), "local-work.rs");
     let outside_expiry = live_holds(&srv.store)[0].1.clone();
@@ -411,7 +365,7 @@ async fn bh13_renew_and_release_stay_inside_the_tokens_globs() {
     assert_ne!(end.is_error, Some(true), "{end:?}");
     assert_eq!(out(&end)["released_holds"], json!([again]), "{end:?}");
     assert_eq!(live_holds(&srv.store), untouched(), "heartbeat end");
-    srv.ct.cancel();
+    srv.server.ct.cancel();
 }
 
 /// BH-13, for resource leases. A remote heartbeat renews, and its end releases, only the
@@ -419,7 +373,7 @@ async fn bh13_renew_and_release_stay_inside_the_tokens_globs() {
 #[tokio::test]
 async fn bh13_heartbeat_leases_stay_inside_the_tokens_globs() {
     let srv = start().await;
-    let client = connect(&srv.base, &srv.token().secret).await;
+    let client = connect(&srv.server.base, &srv.token().secret).await;
     let register = |project: &str, name: &str| {
         srv.store
             .register_resource(another_core::RegisterResource {
@@ -471,22 +425,10 @@ async fn bh13_heartbeat_leases_stay_inside_the_tokens_globs() {
         hidden_leases,
         "end released a hidden lease"
     );
-    srv.ct.cancel();
+    srv.server.ct.cancel();
 }
 
 /// A local MCP caller: the server in process, with no token.
-async fn in_process(store: Store) -> Client {
-    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
-    tokio::spawn(async move {
-        let server = another::mcp::AnotherMcp::new(store)
-            .serve(server_io)
-            .await
-            .unwrap();
-        let _ = server.waiting().await;
-    });
-    ClientConfig::default().serve(client_io).await.unwrap()
-}
-
 /// A8 (D92). `hold_paths` with `action: "release"` and `paths` frees the files an agent is
 /// done with. A remote caller stays inside its token: a path outside its projects is
 /// refused before the disk is read, and nothing it is told names a checkout directory.
@@ -564,7 +506,7 @@ async fn mcp_release_with_paths() {
 
     // A remote caller. `private` is a git checkout it has no business learning about.
     std::fs::create_dir_all(srv._dir.path().join("private/.git")).unwrap();
-    let client = connect(&srv.base, &srv.token().secret).await;
+    let client = connect(&srv.server.base, &srv.token().secret).await;
     let hidden = hold(&outside, "local-work.rs");
     let visible = hold(&inside, "remote-work.rs");
     let release = |paths: Value| {
@@ -681,7 +623,7 @@ async fn mcp_release_with_paths() {
         assert!(!said.contains("loose"), "{said}");
     }
     assert_eq!(live_holds(&srv.store).len(), 1);
-    srv.ct.cancel();
+    srv.server.ct.cancel();
 }
 
 fn out(result: &CallToolResult) -> Value {
