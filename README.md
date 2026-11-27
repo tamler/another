@@ -146,6 +146,11 @@ Or, while `another serve` is running, open <http://127.0.0.1:7466/ui>. The page 
 
 ## Status
 
+Hosted Windows CI runs the workspace tests, including CLI thread exit-status checks,
+and the fresh-install, hook-pack and daemon dry-run checks. The forced small-stack
+test uses Unix `ulimit`; Windows exercises the CLI with its native main-thread stack.
+Install upgrades from the pre-Windows schema-v8 build are checked on Linux and macOS.
+
 | Milestone | Scope | Status |
 |---|---|---|
 | 1 | Local core: SQLite event log, agents, mail, requests, path holds, MCP (stdio + loopback HTTP), CLI | ✅ tamler/another#1 |
