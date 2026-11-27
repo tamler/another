@@ -2475,17 +2475,23 @@ mod tests {
         let stale_a = dir
             .path()
             .join("settings.json.another-tmp.99999.0.deadbeef");
-        let stale_b = dir.path().join("settings.json.another-tmp.stale");
+        let stale_b = dir
+            .path()
+            .join("settings.json.another-tmp.88888.12.cafebabe");
         std::fs::write(&stale_a, "crashed-1").unwrap();
         std::fs::write(&stale_b, "crashed-2").unwrap();
 
         let other_target_tmp = dir.path().join("other.json.another-tmp.99999.0.deadbeef");
+        let malformed_backup = dir.path().join("settings.json.another-tmp.backup");
+        let malformed_stale = dir.path().join("settings.json.another-tmp.stale");
         let backup = dir.path().join("settings.json.another-backup-20261127");
         let bare_suffix = dir.path().join("settings.json.another-tmp");
         let old_ext = dir.path().join("settings.another-tmp");
         let unrelated = dir.path().join("notes.txt");
         for p in [
             &other_target_tmp,
+            &malformed_backup,
+            &malformed_stale,
             &backup,
             &bare_suffix,
             &old_ext,
@@ -2494,14 +2500,18 @@ mod tests {
             std::fs::write(p, "keep").unwrap();
         }
 
-        let stale_dir = dir.path().join("settings.json.another-tmp.dir");
+        let stale_dir = dir
+            .path()
+            .join("settings.json.another-tmp.77777.0.feedface");
         std::fs::create_dir(&stale_dir).unwrap();
 
         #[cfg(unix)]
         let (victim, stale_link) = {
             let victim = dir.path().join("victim.txt");
             std::fs::write(&victim, "do-not-touch").unwrap();
-            let link = dir.path().join("settings.json.another-tmp.link");
+            let link = dir
+                .path()
+                .join("settings.json.another-tmp.66666.0.badc0ffe");
             std::os::unix::fs::symlink(&victim, &link).unwrap();
             (victim, link)
         };
@@ -2512,6 +2522,8 @@ mod tests {
         assert!(!stale_b.exists(), "stale sibling temp file should be swept");
         for p in [
             &other_target_tmp,
+            &malformed_backup,
+            &malformed_stale,
             &backup,
             &bare_suffix,
             &old_ext,

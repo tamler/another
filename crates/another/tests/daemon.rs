@@ -400,11 +400,13 @@ fn linux_uninstall_sweeps_stale_temp_siblings_and_leaves_unrelated_files() {
     assert!(unit.exists());
 
     let stale = unit_dir.join(format!("{unit_name}.another-tmp.99999.0.deadbeef"));
+    let malformed_backup = unit_dir.join(format!("{unit_name}.another-tmp.backup"));
     let other_tmp = unit_dir.join("other.service.another-tmp.99999.0.deadbeef");
     let unrelated = unit_dir.join("keep.txt");
     let victim = unit_dir.join("victim.txt");
-    let stale_link = unit_dir.join(format!("{unit_name}.another-tmp.symlink"));
+    let stale_link = unit_dir.join(format!("{unit_name}.another-tmp.66666.0.badc0ffe"));
     std::fs::write(&stale, "stale").unwrap();
+    std::fs::write(&malformed_backup, "backup").unwrap();
     std::fs::write(&other_tmp, "other").unwrap();
     std::fs::write(&unrelated, "keep").unwrap();
     std::fs::write(&victim, "do-not-touch").unwrap();
@@ -417,6 +419,10 @@ fn linux_uninstall_sweeps_stale_temp_siblings_and_leaves_unrelated_files() {
     env.json(&["daemon", "uninstall", "--label", &label]);
     assert!(!unit.exists());
     assert!(!stale.exists(), "daemon uninstall must sweep stale temp");
+    assert!(
+        malformed_backup.exists(),
+        "non-writer suffix backup must remain"
+    );
     assert!(other_tmp.exists(), "other unit temp must remain");
     assert!(unrelated.exists(), "unrelated file must remain");
     assert!(std::fs::symlink_metadata(&stale_link)

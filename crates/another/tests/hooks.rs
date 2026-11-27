@@ -647,7 +647,7 @@ fn uninstall_sweeps_stale_temp_siblings_and_leaves_unrelated_files() {
         std::fs::write(&victim, "do-not-touch").unwrap();
         let link = env
             .home
-            .join(".grok/hooks/another.json.another-tmp.symlink");
+            .join(".grok/hooks/another.json.another-tmp.66666.0.badc0ffe");
         std::os::unix::fs::symlink(&victim, &link).unwrap();
         (victim, link)
     };
@@ -742,14 +742,14 @@ fn symlink_target_near_name_max_installs_and_uninstalls() {
 
     let target_hash = &another_core::crypto::sha256_hex(long_name.as_bytes())[..16];
     let sibling_hash = &another_core::crypto::sha256_hex(sibling_long_name.as_bytes())[..16];
-    let stale_prefix = format!("{}.{target_hash}.another-tmp.", &long_name[..60]);
+    let stale_prefix = format!("{}.another-tmp-long.{target_hash}.", &long_name[..60]);
     let sibling_stale = dotfiles.join(format!(
-        "{}.{sibling_hash}.another-tmp.99999.0.deadbeef",
+        "{}.another-tmp-long.{sibling_hash}.99999.0.deadbeef",
         &sibling_long_name[..60]
     ));
     let unrelated = dotfiles.join("keep.txt");
     let victim = dotfiles.join("victim.txt");
-    let stale_link = dotfiles.join(format!("{stale_prefix}symlink"));
+    let stale_link = dotfiles.join(format!("{stale_prefix}66666.0.badc0ffe"));
     std::fs::write(&sibling_stale, "other-target-stale").unwrap();
     std::fs::write(&unrelated, "keep").unwrap();
     std::fs::write(&victim, "do-not-touch").unwrap();
@@ -824,6 +824,92 @@ fn symlink_target_near_name_max_installs_and_uninstalls() {
         .file_type()
         .is_symlink());
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "do-not-touch");
+}
+
+#[test]
+fn hook_install_and_uninstall_preserve_backup_and_short_sibling_temp() {
+    let env = Env::new();
+    env.write(".claude/settings.json", &json!({ "model": "x" }));
+
+    let backup = env.home.join(".claude/settings.json.another-tmp.backup");
+    let short_rand = env
+        .home
+        .join(".claude/settings.json.another-tmp.123.0.abcd");
+    let upper_hex = env
+        .home
+        .join(".claude/settings.json.another-tmp.123.0.DEADBEEF");
+    let valid_stale = env
+        .home
+        .join(".claude/settings.json.another-tmp.99999.0.deadbeef");
+    for p in [&backup, &short_rand, &upper_hex, &valid_stale] {
+        std::fs::write(p, "data").unwrap();
+    }
+
+    env.ok(&["hook", "install", "--client", "claude"]);
+    assert!(!valid_stale.exists(), "valid stale temp must be swept");
+    assert!(
+        backup.exists(),
+        "settings.json.another-tmp.backup must survive install"
+    );
+    assert!(
+        short_rand.exists(),
+        "4-hex-digit suffix must survive install"
+    );
+    assert!(
+        upper_hex.exists(),
+        "uppercase hex suffix must survive install"
+    );
+
+    env.ok(&["hook", "uninstall", "--client", "claude"]);
+    assert!(
+        backup.exists(),
+        "settings.json.another-tmp.backup must survive uninstall"
+    );
+    assert!(
+        short_rand.exists(),
+        "4-hex-digit suffix must survive uninstall"
+    );
+    assert!(
+        upper_hex.exists(),
+        "uppercase hex suffix must survive uninstall"
+    );
+
+    #[cfg(unix)]
+    {
+        let env = Env::new();
+        let dotfiles = env.home.join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+
+        let long_name = format!("{}.json", "a".repeat(245));
+        assert_eq!(long_name.len(), 250);
+        let long_hash = &another_core::crypto::sha256_hex(long_name.as_bytes())[..16];
+        let short_sibling = format!("{}.{long_hash}", &long_name[..60]);
+        assert_eq!(short_sibling.len(), 77);
+
+        let real = dotfiles.join(&long_name);
+        std::fs::write(&real, "{\"theme\": \"dark\"}").unwrap();
+        set_mode(&real, 0o600);
+
+        let short_sibling_temp =
+            dotfiles.join(format!("{short_sibling}.another-tmp.99999.0.deadbeef"));
+        std::fs::write(&short_sibling_temp, "short-sibling-valid-temp").unwrap();
+
+        std::fs::create_dir_all(env.home.join(".claude")).unwrap();
+        let link = env.home.join(".claude/settings.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        env.ok(&["hook", "install", "--client", "claude"]);
+        assert!(
+            short_sibling_temp.exists(),
+            "installing through 250-byte symlink must preserve 77-byte sibling's valid temp"
+        );
+
+        env.ok(&["hook", "uninstall", "--client", "claude"]);
+        assert!(
+            short_sibling_temp.exists(),
+            "uninstalling through 250-byte symlink must preserve 77-byte sibling's valid temp"
+        );
+    }
 }
 
 /// Hook entries written by development builds from before the rename (DECISIONS D35).

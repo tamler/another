@@ -1366,21 +1366,34 @@ mod tests {
             .join("one.toanother.another.plist.another-tmp.99999.0.deadbeef");
         let stale_b = dir
             .path()
-            .join("one.toanother.another.plist.another-tmp.stale");
+            .join("one.toanother.another.plist.another-tmp.88888.12.cafebabe");
         std::fs::write(&stale_a, "crashed-1").unwrap();
         std::fs::write(&stale_b, "crashed-2").unwrap();
 
         let other_target_tmp = dir.path().join("other.plist.another-tmp.99999.0.deadbeef");
+        let malformed_backup = dir
+            .path()
+            .join("one.toanother.another.plist.another-tmp.backup");
+        let malformed_stale = dir
+            .path()
+            .join("one.toanother.another.plist.another-tmp.stale");
         let bare_suffix = dir.path().join("one.toanother.another.plist.another-tmp");
         let old_ext = dir.path().join("one.toanother.another.another-tmp");
         let unrelated = dir.path().join("notes.txt");
-        for p in [&other_target_tmp, &bare_suffix, &old_ext, &unrelated] {
+        for p in [
+            &other_target_tmp,
+            &malformed_backup,
+            &malformed_stale,
+            &bare_suffix,
+            &old_ext,
+            &unrelated,
+        ] {
             std::fs::write(p, "keep").unwrap();
         }
 
         let stale_dir = dir
             .path()
-            .join("one.toanother.another.plist.another-tmp.dir");
+            .join("one.toanother.another.plist.another-tmp.77777.0.feedface");
         std::fs::create_dir(&stale_dir).unwrap();
 
         #[cfg(unix)]
@@ -1389,7 +1402,7 @@ mod tests {
             std::fs::write(&victim, "do-not-touch").unwrap();
             let link = dir
                 .path()
-                .join("one.toanother.another.plist.another-tmp.link");
+                .join("one.toanother.another.plist.another-tmp.66666.0.badc0ffe");
             std::os::unix::fs::symlink(&victim, &link).unwrap();
             (victim, link)
         };
@@ -1398,7 +1411,14 @@ mod tests {
 
         assert!(!stale_a.exists(), "stale sibling temp file should be swept");
         assert!(!stale_b.exists(), "stale sibling temp file should be swept");
-        for p in [&other_target_tmp, &bare_suffix, &old_ext, &unrelated] {
+        for p in [
+            &other_target_tmp,
+            &malformed_backup,
+            &malformed_stale,
+            &bare_suffix,
+            &old_ext,
+            &unrelated,
+        ] {
             assert!(p.exists(), "unrelated file must remain: {}", p.display());
         }
         assert!(stale_dir.is_dir(), "directory matching prefix must remain");
