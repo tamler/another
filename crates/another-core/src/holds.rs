@@ -1008,12 +1008,8 @@ fn conflicts_for(
                 OR h.project_id IN ({nested_sql}))
          ORDER BY h.created_at"
     ))?;
-    let mut args: Vec<&dyn rusqlite::ToSql> = vec![
-        &project.project_id,
-        &agent_id,
-        &tx.now,
-        &checkout,
-    ];
+    let mut args: Vec<&dyn rusqlite::ToSql> =
+        vec![&project.project_id, &agent_id, &tx.now, &checkout];
     args.extend(nested.iter().map(|id| id as &dyn rusqlite::ToSql));
     let others = stmt
         .query_map(args.as_slice(), |r| {
@@ -1051,9 +1047,15 @@ fn conflicts_for(
                     &crate::repo::in_repo(held_prefix, theirs),
                 )
             } else if let Some(below) = dir_below(held_dir, &project.abs_path, fold) {
-                overlaps(&crate::repo::in_repo(&glob_literal(&below), pattern), theirs)
+                overlaps(
+                    &crate::repo::in_repo(&glob_literal(&below), pattern),
+                    theirs,
+                )
             } else if let Some(below) = dir_below(&project.abs_path, held_dir, fold) {
-                overlaps(pattern, &crate::repo::in_repo(&glob_literal(&below), theirs))
+                overlaps(
+                    pattern,
+                    &crate::repo::in_repo(&glob_literal(&below), theirs),
+                )
             } else {
                 false
             };
