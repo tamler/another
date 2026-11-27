@@ -1009,13 +1009,7 @@ pub fn restart(env: &DaemonEnv) -> Result<()> {
 }
 
 fn healthy(bind: &str) -> bool {
-    let agent = ureq::Agent::new_with_config(
-        ureq::Agent::config_builder()
-            .proxy(None)
-            .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(2)))
-            .build(),
-    );
+    let agent = ureq::Agent::new_with_config(crate::http_client::HttpClient::Daemon.config());
     agent
         .get(&format!("http://{bind}/health"))
         .call()

@@ -14,8 +14,9 @@ use ureq::unversioned::resolver::{ResolvedSocketAddrs, Resolver};
 use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 
 use another_core::{
-    canonical_resource, error_redirect, redirect_matches, validate_cimd, AuthorizeInput,
-    ClientProfile, ClientRegistration, CodeExchange, OAuthFail, RefreshExchange, Store,
+    canonical_resource, error_redirect, is_loopback_host, redirect_matches, validate_cimd,
+    AuthorizeInput, ClientProfile, ClientRegistration, CodeExchange, OAuthFail, RefreshExchange,
+    Store,
 };
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -304,7 +305,7 @@ pub fn parse_public_url(raw: &str) -> anyhow::Result<OAuthConfig> {
         anyhow::bail!("--public-url is an origin with no path, query or userinfo");
     }
     let (host, port) = split_authority(rest)?;
-    let loopback = is_loopback_name(&host);
+    let loopback = is_loopback_host(&host);
     if scheme == "http" && !loopback {
         anyhow::bail!("--public-url must be https (http is only allowed for loopback tests)");
     }
@@ -325,10 +326,6 @@ pub fn parse_public_url(raw: &str) -> anyhow::Result<OAuthConfig> {
         loopback,
         cimd: Arc::new(Mutex::new(HashMap::new())),
     })
-}
-
-fn is_loopback_name(host: &str) -> bool {
-    host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 fn format_host(host: &str, port: Option<u16>) -> String {
@@ -860,21 +857,17 @@ fn load_cimd_document(
 ) -> Result<(ClientProfile, Duration), String> {
     let (scheme, host, port) = cimd_target(url, allow_loopback)?;
     let pinned = pin_public_address(&host, port, allow_loopback)?;
-    let mut config = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(5)))
-        .max_redirects(0);
-    if scheme == "https" {
-        config = config.https_only(true);
+    let config = crate::http_client::HttpClient::Cimd {
+        https_only: scheme == "https",
     }
+    .config();
     let agent = ureq::Agent::with_parts(
-        config.build(),
+        config,
         DefaultConnector::default(),
         PinnedResolver { addr: pinned },
     );
     let mut resp = agent
         .get(url)
-        .header("user-agent", "another-oauth")
         .header("accept", "application/json")
         .call()
         .map_err(|_| "client metadata document could not be fetched".to_string())?;
@@ -929,7 +922,7 @@ fn cimd_target(url: &str, allow_loopback: bool) -> Result<(String, String, u16),
     }
     let (host, explicit_port) = split_authority(authority).map_err(|e| e.to_string())?;
     let https = scheme == "https";
-    let loopback_http = scheme == "http" && allow_loopback && is_loopback_name(&host);
+    let loopback_http = scheme == "http" && allow_loopback && is_loopback_host(&host);
     if !https && !loopback_http {
         return Err("client_id must be an https URL".into());
     }

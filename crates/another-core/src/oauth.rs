@@ -458,8 +458,29 @@ fn parse_redirect(raw: &str) -> Option<ParsedRedirect> {
     })
 }
 
-fn is_loopback_host(host: &str) -> bool {
-    host == "localhost" || host == "127.0.0.1" || host == "::1"
+/// Match the canonical loopback host aliases. Pass a lowercase host without a port.
+/// IPv6 may retain the brackets used in a URI authority.
+pub fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
+#[cfg(test)]
+#[test]
+fn canonical_loopback_hosts() {
+    for host in ["127.0.0.1", "::1", "[::1]", "localhost"] {
+        assert!(is_loopback_host(host), "{host}");
+    }
+    for host in [
+        "127.0.0.2",
+        "192.0.2.1",
+        "[2001:db8::1]",
+        "localhost.",
+        "localhost.example",
+        "127.0.0.1.example",
+        "localhost:80",
+    ] {
+        assert!(!is_loopback_host(host), "{host}");
+    }
 }
 
 /// What registration answers for a redirect URI it cannot read or whose host is not plain.

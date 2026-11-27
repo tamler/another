@@ -70,7 +70,7 @@ After upgrading, restart every `another` process that was already running, since
 
 After this build, a missing working directory used in a weak wake match is resolved through its existing physical parent, including on Windows where that can restore a verbatim prefix and on-disk letter case. A cwd value stored by an older process may miss that match until the session's hook runs again and restamps it. There is no schema change and no migration. See [docs/WAKE.md](docs/WAKE.md#sessions).
 
-If the machine is part of a federation, upgrade its hub and all its spokes together. A hub and a spoke on different sides of the build that signs answers do not sync: each `another sync` fails with a text that says which end to update, nothing is lost, and no node pairs again. See [docs/FEDERATION.md](docs/FEDERATION.md#upgrading).
+If the machine is part of a federation, upgrade its hub and all its spokes together. A hub and a spoke on different sides of the build that signs answers do not sync: each `another sync` fails with a text that says which end to update, nothing is lost, and no node pairs again. Use the final hub URL for pairing and sync, since federation refuses HTTP redirects. See [docs/FEDERATION.md](docs/FEDERATION.md#upgrading).
 
 **2. Create the local node** (`~/.another`, or `$ANOTHER_HOME`):
 

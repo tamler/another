@@ -12,11 +12,9 @@
 //! unsigned mode: a spoke applies no unsigned answer, and a hub serves no push or pull
 //! that carries no nonce.
 
-use std::time::Duration;
-
 use another_core::{
-    AuditRecord, IngestReport, PairRequest, PairResponse, Peer, PullAnchors, PullResponse,
-    PushRequest, Rejected, Skip, Store,
+    is_loopback_host, AuditRecord, IngestReport, PairRequest, PairResponse, Peer, PullAnchors,
+    PullResponse, PushRequest, Rejected, Skip, Store,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use axum::body::Bytes;
@@ -512,16 +510,47 @@ async fn pull(
 // Spoke client
 
 fn agent_for(url: &str) -> ureq::Agent {
-    let loopback = ["http://127.0.0.1", "http://localhost", "http://[::1]"]
-        .iter()
-        .any(|p| url.starts_with(p));
-    let mut config = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(30)));
-    if loopback {
-        config = config.proxy(None);
-    }
-    ureq::Agent::new_with_config(config.build())
+    let direct = plain_http_loopback(url) == Some(true);
+    ureq::Agent::new_with_config(crate::http_client::HttpClient::Federation { direct }.config())
+}
+
+fn plain_http_loopback(url: &str) -> Option<bool> {
+    let uri = url.parse::<ureq::http::Uri>().ok()?;
+    (uri.scheme_str() == Some("http")).then(|| uri.host().is_some_and(is_loopback_host))
+}
+
+#[cfg(test)]
+#[test]
+fn federation_refuses_http_redirects() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/fed/pull", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(&mut socket);
+        loop {
+            let mut line = String::new();
+            assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+            if line == "\r\n" {
+                break;
+            }
+        }
+        socket
+            .write_all(
+                b"HTTP/1.1 302 Found\r\nLocation: /elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+    });
+
+    let response = agent_for(&url).get(&url).call();
+    server.join().unwrap();
+    assert_eq!(response.unwrap().status().as_u16(), 302);
 }
 
 fn now_ms() -> i64 {
@@ -803,10 +832,7 @@ fn read_answer<T: serde::de::DeserializeOwned>(
 /// the network path can then read what a sync carries. Loopback is the parsed host being
 /// exactly `127.0.0.1`, `localhost` or `[::1]`, so `http://localhost.example` is not it.
 pub fn plain_http_off_loopback(url: &str) -> bool {
-    url.parse::<ureq::http::Uri>().is_ok_and(|uri| {
-        uri.scheme_str() == Some("http")
-            && !matches!(uri.host(), Some("127.0.0.1" | "localhost" | "[::1]"))
-    })
+    plain_http_loopback(url) == Some(false)
 }
 
 /// A hub address as a warning or a refusal shows it: one line, cut.

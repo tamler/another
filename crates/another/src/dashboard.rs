@@ -10,7 +10,9 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use another_core::{ActivityKind, DashActivityQuery, DashboardView, Since, Store};
+use another_core::{
+    is_loopback_host, ActivityKind, DashActivityQuery, DashboardView, Since, Store,
+};
 use axum::body::Bytes;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -169,7 +171,7 @@ fn loopback_host(host: &str, bound: Option<&SocketAddr>) -> bool {
     let Some((name, _)) = crate::oauth_http::split_host_header(host) else {
         return false;
     };
-    name == "127.0.0.1" || name == "localhost" || name == "::1"
+    is_loopback_host(&name)
 }
 
 /// `http://` plus a loopback host on the exact bound port.
@@ -198,10 +200,7 @@ fn loopback_origin(origin: &str, bound: Option<&SocketAddr>) -> bool {
     if port != Some(bound.port()) {
         return false;
     }
-    host.eq_ignore_ascii_case(&bound.to_string())
-        || name == "127.0.0.1"
-        || name.eq_ignore_ascii_case("localhost")
-        || name == "::1"
+    host.eq_ignore_ascii_case(&bound.to_string()) || is_loopback_host(&name)
 }
 
 /// Dashboard-only server used by `another dashboard`. Always local, always loopback.

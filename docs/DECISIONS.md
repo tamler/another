@@ -22,6 +22,7 @@ Design calls not covered by SPEC, recorded as they were made.
 
 | # | Milestone | Decision |
 |---|---|---|
+| D-next | M9 (FLE-23 M-D, Q6) | **Federation pairing and sync refuse HTTP redirects.** Use the final hub URL. Federation checks the parsed host against the loopback aliases before bypassing proxy settings for plain HTTP. Doctor and client metadata fetching also refuse redirects. |
 | D1 | M2 | **Activity feed never carries message bodies.** Items are one-line summaries plus ids, so any peer (including a remote Grok Bot later) can read the feed without seeing mail content. |
 | D2 | M2 | **Plain heartbeats are presence, not events.** `session.started` / `session.ended`, hold renewals and every other mutation are logged; a bare heartbeat only updates `last_seen_at`, so per-prompt hooks do not flood the log. |
 | D3 | M2 | **Default hook identity is `<client>@<project>`** (project = nearest git root of the client's cwd), auto-registered on first use; `$ANOTHER_AGENT` overrides. Same rule for every client. |

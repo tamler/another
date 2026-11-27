@@ -60,6 +60,8 @@ The hub enforces permissions on what spokes push, and each node checks them agai
 
 ## Set up
 
+Use the final hub URL in the invite. Pairing and sync fail if the hub or its proxy sends an HTTP redirect. Plain HTTP requests to the loopback aliases `127.0.0.1`, `localhost` and `[::1]` bypass proxy settings. A name such as `localhost.example` uses the configured proxy rules.
+
 Upgrade a hub and all its spokes together, and make invites after the hub's upgrade: a hub and a spoke sync only when both run a build that signs answers, a hub accepts only signed pairing requests, and a spoke joins only with an invite its hub signed (see "Upgrading" below). Nodes that are already paired stay paired; they do not pair again.
 
 Name each node first; names must be unique across the federation, whatever their case:
