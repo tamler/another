@@ -1,13 +1,13 @@
 //! The binary must not depend on a large main-thread stack. Windows gives a debug build's
 //! main thread 1 MB, and clap's derive uses nearly all of it, so the CLI runs on its own
 //! thread (`cli::with_cli_stack`). A 256 KB limit here (via `ulimit -s`) leaves no doubt.
-#![cfg(unix)]
 
 use std::process::{Command, Stdio};
 
 const BIN: &str = env!("CARGO_BIN_EXE_another");
 
 #[test]
+#[cfg(unix)]
 fn the_cli_runs_with_a_small_main_thread_stack() {
     let dir = tempfile::tempdir().unwrap();
     for args in [
