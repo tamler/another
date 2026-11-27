@@ -51,7 +51,8 @@ pub use federation::{
     hub_url_is_http, reachable, validate_node_id, IngestReport, Invite, KeyConflict, NodeEntry,
     PairRefusal, PairRequest, PairResponse, Peer, Perm, PullAnchors, PullResponse, PushRequest,
     Rejected, WireEvent, MAX_EVENT_WIRE_BYTES, PULL_BODY_LIMIT_BYTES, PULL_PAGE_BUDGET_BYTES,
-    PUSH_BATCH_BUDGET_BYTES, PUSH_BODY_LIMIT_BYTES, PUSH_ENVELOPE_BYTES,
+    PUSH_BATCH_BUDGET_BYTES, PUSH_BODY_LIMIT_BYTES, PUSH_ENVELOPE_BYTES, REPLAY_RETAIN_MS,
+    REPLAY_ROWS_PER_NODE,
 };
 pub use holds::{
     is_repo_wide, patterns_overlap, AcquireHolds, EditGuard, HeartbeatReport, Hold, HoldConflict,

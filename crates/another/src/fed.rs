@@ -1,8 +1,13 @@
 //! Federation transport: hub endpoints (`/fed/pair`, `/fed/push`, `/fed/pull`) and the spoke
 //! client that dials out to them (`another pair join`, `another sync`).
 //!
-//! Node-to-node requests are signed with the sending node's key over method, path, time and
-//! body; the hub checks them against the key it pinned at pairing.
+//! Node-to-node requests are signed with the sending node's key. The signature a hub of this
+//! build checks, `x-another-signature-v2`, covers the hub's id, the node's id, method, path,
+//! time, the request's nonce and body; the hub checks it against the key it pinned at
+//! pairing and uses up the nonce in the same transaction, so a captured request is served
+//! once and by that hub only. A spoke also sends the older signature, `x-another-signature`
+//! (method, path, time and body), so a hub of the build before keeps serving it; a hub of
+//! this build never serves a request on that one.
 //!
 //! The hub's answers to a push and a pull are signed too. A spoke sends a fresh nonce with
 //! each of those requests, the hub signs its `200` answer over its id, the spoke's id, the
@@ -30,9 +35,22 @@ const H_NODE: &str = "x-another-node";
 const H_TIME: &str = "x-another-time";
 const H_SIG: &str = "x-another-signature";
 const H_NONCE: &str = "x-another-nonce";
+const H_SIG_V2: &str = "x-another-signature-v2";
 /// The `Upgrade` header of the `426` a hub gives a push or pull without a nonce. It names
 /// the signed exchange; nothing reads it.
 const SIGNED_SYNC: &str = "another-signed-sync/1";
+/// The `Upgrade` header of the `426` a hub gives a push or pull with a nonce but without a
+/// version 2 request signature.
+const SIGNED_REQUEST: &str = "another-signed-request/2";
+/// What a hub tells a node whose push or pull carries a nonce but no version 2 request
+/// signature: the build after signed answers and before replay-proof requests.
+const NO_SIG_V2: &str = "this hub serves only requests signed for it with their nonce \
+                         (x-another-signature-v2), so a captured request cannot be sent \
+                         again, and this request was not. Update this node to the hub's \
+                         build, then run `another sync`. Nothing was stored, nothing is lost, \
+                         and the node does not need to pair again";
+const NO_SIG_V2_AUDIT: &str = "no x-another-signature-v2 header: the node runs an older \
+                               build, or something on the path removed it";
 /// What a hub tells a node whose push or pull carries no nonce. An older spoke prints it.
 const NO_NONCE: &str = "this hub signs its answers and serves only nodes that ask for that, \
                         and this request did not. Update this node to the hub's build, then \
@@ -111,9 +129,14 @@ impl Limits {
 /// feature also allow unsigned exchange to simulate an older build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exchange {
-    /// A spoke sends a nonce and applies only an answer the hub signed for its request; a
-    /// hub refuses a push or pull without a nonce and signs every `200` answer.
+    /// A spoke sends a nonce, signs its request for its hub and that nonce, and applies
+    /// only an answer the hub signed for its request; a hub serves a push or pull only on
+    /// that signature, uses up its nonce, and signs every `200` answer.
     Signed,
+    /// What a build after signed answers and before replay-proof requests did: a spoke
+    /// sends a nonce and only the older request signature, and checks the answer; a hub
+    /// checks only the older signature, records no nonce, and signs every `200` answer.
+    SignedAnswersOnly,
     /// What a build before signed answers did: a spoke sends no nonce and checks no
     /// answer; a hub asks for no nonce, signs no answer and records no contact.
     #[cfg(any(test, feature = "test-support"))]
@@ -258,15 +281,32 @@ async fn pair(State(store): State<Store>, body: Bytes) -> Response {
     }
 }
 
-/// Verify the signature headers; returns the calling node id and the text of the signature
-/// header that verified.
+/// A push or pull that authenticated.
+struct Authed {
+    /// The calling node.
+    node: String,
+    /// The text of the signature header that was checked; the answer is signed over it.
+    signature: String,
+    /// The request's nonce; `None` only as [`Exchange::Unsigned`].
+    nonce: Option<String>,
+}
+
+/// Verify the signature headers of a push or pull as a hub of the build `exchange` names.
+///
+/// As [`Exchange::Signed`], a request is served only on its `x-another-signature-v2`, whose
+/// nonce is used up as it is checked: a second copy of the same request is refused. A
+/// request without that header is answered `426` once its older signature verifies, so an
+/// older node is told to update; nothing is served on the older signature, which a
+/// captured request still carries, and its refusals go through the rate-limited audit path
+/// for that reason.
 async fn authenticate(
     store: &Store,
+    exchange: Exchange,
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
     body: &[u8],
-) -> Result<(String, String), Box<Response>> {
+) -> Result<Authed, Box<Response>> {
     let get = |h: &str| {
         headers
             .get(h)
@@ -282,6 +322,44 @@ async fn authenticate(
         .path_and_query()
         .map(|p| p.as_str().to_string())
         .unwrap_or_default();
+    let operation = format!("{method} {}", uri.path());
+    let (who, op) = (&node, &operation);
+    let denied = |e: another_core::Error| async move {
+        record_unauthenticated(store, Some(who.clone()), op, "denied", e.to_string()).await;
+        let status = match e {
+            another_core::Error::Forbidden(_) => StatusCode::UNAUTHORIZED,
+            _ => status_for(&e),
+        };
+        Box::new(error(status, &e))
+    };
+    // A request with a version 2 signature and a well-formed nonce is judged on that
+    // signature alone. Any other is first authenticated by the older one, so that a caller
+    // that is not the node gets a `401` and the node learns what to fix.
+    let nonce_v2 = get(H_NONCE).filter(|n| another_core::crypto::is_request_nonce(n));
+    if exchange == Exchange::Signed {
+        if let (Some(sig_v2), Some(nonce)) = (get(H_SIG_V2), nonce_v2) {
+            let (s, m, b, n, g, c) = (
+                store.clone(),
+                method.to_string(),
+                body.to_vec(),
+                node.clone(),
+                sig_v2.clone(),
+                nonce.clone(),
+            );
+            return match blocking(move || {
+                s.verify_and_consume_peer_request(&n, &m, &path, time, &c, &b, &g)
+            })
+            .await
+            {
+                Ok(_) => Ok(Authed {
+                    node: node.clone(),
+                    signature: sig_v2,
+                    nonce: Some(nonce),
+                }),
+                Err(e) => Err(denied(e).await),
+            };
+        }
+    }
     let (s, m, b, n, g) = (
         store.clone(),
         method.to_string(),
@@ -289,20 +367,37 @@ async fn authenticate(
         node.clone(),
         sig.clone(),
     );
-    match blocking(move || s.verify_peer_request(&n, &m, &path, time, &b, &g)).await {
-        Ok(_) => Ok((node, sig)),
-        Err(e) => {
-            record_unauthenticated(
-                store,
-                Some(node),
-                &format!("{method} {}", uri.path()),
-                "denied",
-                e.to_string(),
-            )
-            .await;
-            Err(Box::new(error(StatusCode::UNAUTHORIZED, &e)))
-        }
+    if let Err(e) = blocking(move || s.verify_peer_request(&n, &m, &path, time, &b, &g)).await {
+        return Err(denied(e).await);
     }
+    let nonce = match exchange {
+        Exchange::Unsigned => None,
+        Exchange::SignedAnswersOnly => {
+            Some(nonce_of(store, &node, &operation, headers, true).await?)
+        }
+        Exchange::Signed => {
+            // No nonce: `426` for the build before signed answers; a malformed one: `400`.
+            // A well-formed nonce without a version 2 signature: the build before this one.
+            nonce_of(store, &node, &operation, headers, false).await?;
+            // `401`, not `426`: a spoke of the build before shows its own fixed text for a
+            // `426` (that a header was removed on the way), and quotes the hub's text for
+            // any other refusal, so this is how it learns to update. A spoke of this build
+            // knows the refusal by its `Upgrade` header.
+            let e = another_core::Error::Forbidden(NO_SIG_V2.into());
+            let detail = NO_SIG_V2_AUDIT.to_string();
+            record_unauthenticated(store, Some(node.clone()), &operation, "denied", detail).await;
+            let mut refusal = error(StatusCode::UNAUTHORIZED, &e);
+            refusal
+                .headers_mut()
+                .insert(header::UPGRADE, HeaderValue::from_static(SIGNED_REQUEST));
+            return Err(Box::new(refusal));
+        }
+    };
+    Ok(Authed {
+        node: node.clone(),
+        signature: sig,
+        nonce,
+    })
 }
 
 /// Refuse a push before its body is read when the node header names no paired, unrevoked
@@ -338,25 +433,32 @@ async fn known_sender(
     }
 }
 
-/// A nonce as a spoke writes it: 32 lowercase hex characters.
-fn is_nonce(text: &str) -> bool {
-    text.len() == 32 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-}
-
-/// The nonce of an authenticated push or pull. A request without one is answered `426`
-/// and one with a malformed one `400`, each audited, before anything is stored or read
-/// from the log: this hub has no unsigned answer for these routes, and a node that sends
-/// no nonce would not check a signed one.
+/// The nonce of a push or pull. A request without one is answered `426` and one with a
+/// malformed one `400`, each audited, before anything is stored or read from the log: this
+/// hub has no unsigned answer for these routes, and a node that sends no nonce would not
+/// check a signed one. `authenticated` is whether the request's signature already
+/// verified in a form that cannot be replayed; otherwise the row goes through the
+/// rate-limited path.
 async fn nonce_of(
     store: &Store,
     node: &str,
     operation: &str,
     headers: &HeaderMap,
+    authenticated: bool,
 ) -> Result<String, Box<Response>> {
+    let audit = |detail: String| {
+        record_checked(
+            store,
+            Some(node.to_string()),
+            operation,
+            "denied",
+            detail,
+            authenticated,
+        )
+    };
     let Some(value) = headers.get(H_NONCE) else {
         let e = another_core::Error::Invalid(NO_NONCE.into());
-        let detail = NO_NONCE_AUDIT.to_string();
-        record(store, Some(node.to_string()), operation, "denied", detail).await;
+        audit(NO_NONCE_AUDIT.to_string()).await;
         let mut refusal = error(StatusCode::UPGRADE_REQUIRED, &e);
         refusal
             .headers_mut()
@@ -364,17 +466,10 @@ async fn nonce_of(
         return Err(Box::new(refusal));
     };
     match value.to_str() {
-        Ok(nonce) if is_nonce(nonce) => Ok(nonce.to_string()),
+        Ok(nonce) if another_core::crypto::is_request_nonce(nonce) => Ok(nonce.to_string()),
         _ => {
             let e = another_core::Error::Invalid(BAD_NONCE.into());
-            record(
-                store,
-                Some(node.to_string()),
-                operation,
-                "denied",
-                e.to_string(),
-            )
-            .await;
+            audit(e.to_string()).await;
             Err(Box::new(error(StatusCode::BAD_REQUEST, &e)))
         }
     }
@@ -388,17 +483,13 @@ async fn push(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let (node, signature) = match authenticate(&store, &method, &uri, &headers, &body).await {
-        Ok(n) => n,
+    let Authed {
+        node,
+        signature,
+        nonce,
+    } = match authenticate(&store, exchange, &method, &uri, &headers, &body).await {
+        Ok(a) => a,
         Err(r) => return *r,
-    };
-    let nonce = match exchange {
-        Exchange::Signed => match nonce_of(&store, &node, "POST /fed/push", &headers).await {
-            Ok(nonce) => Some(nonce),
-            Err(r) => return *r,
-        },
-        #[cfg(any(test, feature = "test-support"))]
-        Exchange::Unsigned => None,
     };
     let req: PushRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -473,17 +564,13 @@ async fn pull(
     uri: Uri,
     headers: HeaderMap,
 ) -> Response {
-    let (node, signature) = match authenticate(&store, &method, &uri, &headers, b"").await {
-        Ok(n) => n,
+    let Authed {
+        node,
+        signature,
+        nonce,
+    } = match authenticate(&store, exchange, &method, &uri, &headers, b"").await {
+        Ok(a) => a,
         Err(r) => return *r,
-    };
-    let nonce = match exchange {
-        Exchange::Signed => match nonce_of(&store, &node, "GET /fed/pull", &headers).await {
-            Ok(nonce) => Some(nonce),
-            Err(r) => return *r,
-        },
-        #[cfg(any(test, feature = "test-support"))]
-        Exchange::Unsigned => None,
     };
     let mut after = 0i64;
     let mut limit = BATCH;
@@ -653,6 +740,8 @@ struct Sent {
     nonce: Option<String>,
     /// The text of the request's signature header.
     signature: String,
+    /// The text of its version 2 signature header; `None` unless [`Exchange::Signed`].
+    signature_v2: Option<String>,
 }
 
 fn signed(
@@ -666,12 +755,22 @@ fn signed(
     let time = store.now();
     let bytes = body.clone().unwrap_or_default();
     let signature = store.sign_request(method, path_and_query, time, &bytes);
-    // A new nonce for every request, a retry included. It is not part of the request
-    // signature: the hub signs it into its answer.
+    // A new nonce for every request, a retry included. The version 2 signature covers it
+    // and the hub's id, and the hub signs it into its answer. The older signature, which
+    // covers neither, is still sent for a hub of the build before; a hub of this build
+    // serves nothing on it.
     let nonce = match to.exchange {
-        Exchange::Signed => Some(another_core::crypto::request_nonce()?),
+        Exchange::Signed | Exchange::SignedAnswersOnly => {
+            Some(another_core::crypto::request_nonce()?)
+        }
         #[cfg(any(test, feature = "test-support"))]
         Exchange::Unsigned => None,
+    };
+    let signature_v2 = match (&nonce, to.exchange) {
+        (Some(nonce), Exchange::Signed) => {
+            Some(store.sign_request_v2(to.hub, method, path_and_query, time, nonce, &bytes))
+        }
+        _ => None,
     };
     let url = format!("{}{path_and_query}", base.trim_end_matches('/'));
     let node = store.node_id().to_string();
@@ -688,6 +787,9 @@ fn signed(
             if let Some(nonce) = &nonce {
                 request = request.header(H_NONCE, nonce);
             }
+            if let Some(sig) = &signature_v2 {
+                request = request.header(H_SIG_V2, sig);
+            }
             request.send(&b[..])
         }
         None => {
@@ -699,6 +801,9 @@ fn signed(
                 .header(H_SIG, &signature);
             if let Some(nonce) = &nonce {
                 request = request.header(H_NONCE, nonce);
+            }
+            if let Some(sig) = &signature_v2 {
+                request = request.header(H_SIG_V2, sig);
             }
             request.call()
         }
@@ -722,6 +827,7 @@ fn signed(
         resp,
         nonce,
         signature,
+        signature_v2,
     })
 }
 
@@ -768,11 +874,17 @@ fn read_answer<T: serde::de::DeserializeOwned>(
         mut resp,
         nonce,
         signature,
+        signature_v2,
     } = sent;
     let status = resp.status();
     let answer_signature = resp
         .headers()
         .get(H_SIG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let resp_upgrade = resp
+        .headers()
+        .get(header::UPGRADE)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     let body = read_body(&mut resp, what, limit)?;
@@ -784,6 +896,26 @@ fn read_answer<T: serde::de::DeserializeOwned>(
         return serde_json::from_slice(&body).with_context(|| format!("decoding {what} response"));
     };
     let address = shown_address(to.url);
+    let asks_for_v2 =
+        status == StatusCode::UNAUTHORIZED && resp_upgrade.as_deref() == Some(SIGNED_REQUEST);
+    if signature_v2.is_some() && (status == StatusCode::UPGRADE_REQUIRED || asks_for_v2) {
+        // The hub's own text for these tells an older node to update, which this node is
+        // not: it sent the nonce and the version 2 signature, so a header was lost on the
+        // way or the refusal is not the hub's.
+        return Err(refuse(
+            store,
+            to,
+            what,
+            "refused as carrying no nonce or no version 2 signature, although both were sent",
+            format!(
+                "the hub at {address} refused the {what} as carrying no nonce or no request \
+                 signature for it, but this node sent both; nothing was applied. Something \
+                 between this node and the hub removed a header, or the refusal is not the \
+                 hub's; if a proxy in front of the hub demands TLS, the hub's address may \
+                 need to be https://"
+            ),
+        ));
+    }
     if status == StatusCode::UPGRADE_REQUIRED {
         // The hub's own text for this status tells an older node to update, which this
         // node is not: it sent a nonce, so the header was lost on the way or the refusal
@@ -818,7 +950,18 @@ fn read_answer<T: serde::de::DeserializeOwned>(
             ),
         ));
     };
-    match store.verify_hub_answer(to.hub, &nonce, &signature, &body, &answer_signature) {
+    // A hub of this build signs its answer over the version 2 signature it served the
+    // request on; a hub of the build before over the older one. Both are this node's own,
+    // made for this request, and the answer covers the nonce either way.
+    let verified = match &signature_v2 {
+        Some(v2) => store
+            .verify_hub_answer(to.hub, &nonce, v2, &body, &answer_signature)
+            .or_else(|_| {
+                store.verify_hub_answer(to.hub, &nonce, &signature, &body, &answer_signature)
+            }),
+        None => store.verify_hub_answer(to.hub, &nonce, &signature, &body, &answer_signature),
+    };
+    match verified {
         Ok(()) => {}
         Err(another_core::Error::Forbidden(_)) => {
             return Err(refuse(

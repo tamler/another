@@ -50,12 +50,14 @@ fn u2(address: &str, what: &str, fingerprint: &str) -> String {
     )
 }
 
+/// What a spoke of this build says for a `426`: it sent both the nonce and the version 2
+/// signature (P3-1).
 fn u3(address: &str, what: &str) -> String {
     format!(
-        "the hub at {address} refused the {what} as carrying no nonce, but this node sent one; \
-         nothing was applied. Something between this node and the hub removed the header, or \
-         the refusal is not the hub's; if a proxy in front of the hub demands TLS, the hub's \
-         address may need to be https://"
+        "the hub at {address} refused the {what} as carrying no nonce or no request \
+         signature for it, but this node sent both; nothing was applied. Something between \
+         this node and the hub removed a header, or the refusal is not the hub's; if a proxy \
+         in front of the hub demands TLS, the hub's address may need to be https://"
     )
 }
 
@@ -218,7 +220,8 @@ struct Raw {
     signature: Option<String>,
     upgrade: Option<String>,
     body: Vec<u8>,
-    /// The text of the request's own signature header.
+    /// The text of the request's own signature header the hub answers for: the version 2
+    /// one when it was sent.
     request_signature: String,
 }
 
@@ -235,7 +238,8 @@ impl Raw {
 /// How a hand-made request differs from the one a spoke of this build sends.
 #[derive(Clone, Copy)]
 enum Signing {
-    /// Signed by the node, as a spoke signs.
+    /// Signed by the node, as a spoke signs: with the older signature, and with the
+    /// version 2 one when a nonce is sent.
     Good,
     /// No signature headers at all.
     None,
@@ -255,9 +259,10 @@ fn request(
         .unwrap()
         .as_millis() as i64;
     let method = if body.is_some() { "POST" } else { "GET" };
-    let request_signature = spoke
-        .store
-        .sign_request(method, path, time, body.unwrap_or_default());
+    let mut request_signature =
+        spoke
+            .store
+            .sign_request(method, path, time, body.unwrap_or_default());
     let mut headers: Vec<(&str, String)> = Vec::new();
     if let Signing::Good = signing {
         headers.push(("x-another-node", spoke.id()));
@@ -266,6 +271,24 @@ fn request(
     }
     if let Some(nonce) = nonce {
         headers.push(("x-another-nonce", nonce.to_string()));
+        if let Signing::Good = signing {
+            // A node that never paired signs for no hub in particular.
+            let hub_id = spoke
+                .store
+                .hub()
+                .unwrap()
+                .map(|(id, _)| id)
+                .unwrap_or_default();
+            request_signature = spoke.store.sign_request_v2(
+                &hub_id,
+                method,
+                path,
+                time,
+                nonce,
+                body.unwrap_or_default(),
+            );
+            headers.push(("x-another-signature-v2", request_signature.clone()));
+        }
     }
     let url = format!("{hub_url}{path}");
     let agent = client();
@@ -310,6 +333,8 @@ fn push_body(spoke: &Node) -> Vec<u8> {
 }
 
 const NONCE: &str = "00112233445566778899aabbccddeeff";
+const NONCE_2: &str = "102132435465768798a9bacbdcedfe0f";
+const NONCE_3: &str = "2031425364758697a8b9cadbecfd0e1f";
 
 /// Run the built binary on a temporary home. Every run has its own `ANOTHER_HOME`.
 fn run(home: &Path, args: &[&str]) -> (Option<i32>, String, String) {
@@ -440,11 +465,12 @@ fn the_hub_signs_exactly_the_bytes_it_sends() {
     register(&vic.store, "v1");
     let hub_key = hub.node.store.node_entry().unwrap().public_key;
     let body = push_body(&vic);
-    for (path, body) in [
-        ("/fed/push", Some(&body[..])),
-        ("/fed/pull?after=0&limit=500", None),
+    // Each request has its own nonce: the hub serves a nonce once.
+    for (path, body, sent) in [
+        ("/fed/push", Some(&body[..]), NONCE),
+        ("/fed/pull?after=0&limit=500", None, NONCE_2),
     ] {
-        let answer = request(hub.url(), &vic, path, body, Some(NONCE), Signing::Good);
+        let answer = request(hub.url(), &vic, path, body, Some(sent), Signing::Good);
         assert_eq!(answer.status, 200, "{path}");
         let signature = answer.signature.expect("a signature on every 200");
         let signed = |nonce: &str, request_signature: &str, body: &[u8]| {
@@ -455,7 +481,7 @@ fn the_hub_signs_exactly_the_bytes_it_sends() {
             )
         };
         assert!(
-            signed(NONCE, &answer.request_signature, &answer.body),
+            signed(sent, &answer.request_signature, &answer.body),
             "{path}: the body received is the body signed, for the signature header sent"
         );
         assert!(!signed(
@@ -463,10 +489,10 @@ fn the_hub_signs_exactly_the_bytes_it_sends() {
             &answer.request_signature,
             &answer.body
         ));
-        assert!(!signed(NONCE, "another-signature", &answer.body));
+        assert!(!signed(sent, "another-signature", &answer.body));
         let mut changed = answer.body.clone();
         changed.push(b' ');
-        assert!(!signed(NONCE, &answer.request_signature, &changed));
+        assert!(!signed(sent, &answer.request_signature, &changed));
         // The body is the answer itself, unchanged in form.
         let parsed: Value = serde_json::from_slice(&answer.body).unwrap();
         assert!(parsed.get("accepted").is_some() || parsed.get("events").is_some());
@@ -697,7 +723,8 @@ fn a_refused_answer_writes_an_audit_row_and_applies_nothing() {
         last_audit("sync POST /fed/push"),
         (
             2,
-            "refused as carrying no nonce, although one was sent".to_string()
+            "refused as carrying no nonce or no version 2 signature, although both were sent"
+                .to_string()
         )
     );
 
@@ -983,13 +1010,13 @@ fn the_hub_records_a_spokes_completed_push_and_pull() {
         .execute_batch("DROP TRIGGER refuse_events")
         .unwrap();
 
-    // A signed 200 to a push sets it.
+    // A signed 200 to a push sets it. The failed push used up its nonce.
     let pushed = request(
         hub.url(),
         &vic,
         "/fed/push",
         Some(&body),
-        Some(NONCE),
+        Some(NONCE_2),
         Signing::Good,
     );
     assert_eq!(pushed.status, 200);
@@ -1000,7 +1027,7 @@ fn the_hub_records_a_spokes_completed_push_and_pull() {
         .db()
         .execute("UPDATE peers SET last_sync_at = NULL", [])
         .unwrap();
-    let pulled = request(hub.url(), &vic, pull, None, Some(NONCE), Signing::Good);
+    let pulled = request(hub.url(), &vic, pull, None, Some(NONCE_3), Signing::Good);
     assert_eq!(pulled.status, 200);
     assert!(seen().is_some(), "a completed pull is recorded");
 }

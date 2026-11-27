@@ -24,7 +24,11 @@ const J2: &str = "signature does not match its contents";
 const U1_PUSH: &str = "answered the push without a signature";
 const U2_PUSH: &str = "answered the push with a signature that is not the hub's";
 const U2_PULL: &str = "answered the pull with a signature that is not the hub's";
-const U3: &str = "as carrying no nonce, but this node sent one";
+const U3: &str = "as carrying no nonce or no request signature for it, but this node sent both";
+/// The hub's own refusal of a request whose version 2 signature does not cover what it
+/// carries (P3-1): the request is refused before anything is served.
+const H1_PUSH: &str = "push failed (401 Unauthorized): request not signed by a paired node";
+const H1_PULL: &str = "pull failed (401 Unauthorized): request not signed by a paired node";
 
 /// The sync must fail, and say `fragment`.
 fn refused(spoke: &Node, fragment: &str) -> String {
@@ -335,8 +339,10 @@ fn an_earlier_request_sent_in_place_of_this_one_is_refused() {
             hub.send(&req)
         }
     });
+    // The nonce is in the request's version 2 signature, so the hub refuses the request
+    // itself before it serves anything (P3-1); before that, the spoke refused the answer.
     let before = sync_state(&vic, &hub.id());
-    refused(&vic, U2_PULL);
+    refused(&vic, H1_PULL);
     assert_eq!(sync_state(&vic, &hub.id()).pull_cursor, before.pull_cursor);
 
     register(&vic.store, "v2");
@@ -348,7 +354,7 @@ fn an_earlier_request_sent_in_place_of_this_one_is_refused() {
         }
     });
     let before = sync_state(&vic, &hub.id());
-    refused(&vic, U2_PUSH);
+    refused(&vic, H1_PUSH);
     let after = sync_state(&vic, &hub.id());
     assert_eq!(after.push_cursor, before.push_cursor);
     assert_eq!(after.pull_cursor, before.pull_cursor);
@@ -455,7 +461,8 @@ fn a_relay_that_changes_the_nonce_fails_the_sync() {
     });
     let before = sync_state(&vic, &hub.id());
 
-    refused(&vic, U2_PUSH);
+    // The changed nonce no longer matches the request's version 2 signature (P3-1).
+    refused(&vic, H1_PUSH);
     assert_eq!(sync_state(&vic, &hub.id()), before);
 }
 

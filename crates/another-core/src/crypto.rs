@@ -135,6 +135,35 @@ pub fn request_message(method: &str, path_and_query: &str, time_ms: i64, body: &
     .into_bytes()
 }
 
+/// Whether `text` is a request nonce as [`request_nonce`] writes it: 32 lowercase hex
+/// characters.
+pub fn is_request_nonce(text: &str) -> bool {
+    text.len() == 32 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The bytes a node-to-node HTTP request signature of version 2 covers: the receiving hub's
+/// id, the sending node's id, the method, the path with its query, the request time, the
+/// request's nonce and the hash of its body. Bound to one hub and one nonce, so a hub that
+/// records the nonces it accepted serves each signed request once, and no other hub serves
+/// it at all. Fields are joined by one newline; none may contain one (the ids are node ids,
+/// the nonce is checked by [`is_request_nonce`], and a request target holds no newline).
+pub fn request_message_v2(
+    hub_node_id: &str,
+    node_id: &str,
+    method: &str,
+    path_and_query: &str,
+    time_ms: i64,
+    nonce: &str,
+    body: &[u8],
+) -> Vec<u8> {
+    format!(
+        "another-request-v2\n{hub_node_id}\n{node_id}\n{method}\n{path_and_query}\n{time_ms}\n\
+         {nonce}\n{}",
+        sha256_hex(body)
+    )
+    .into_bytes()
+}
+
 /// The bytes a pairing request signature covers, signed by the joining node's key. The hub
 /// builds them from its own id and key and the secret hash it stored for the invite, so one
 /// valid signature shows that the signer holds the node key, knows the hash of the invite's
@@ -297,6 +326,38 @@ mod tests {
         assert_ne!(random_hex(32).unwrap(), hex);
         let nonce = request_nonce().unwrap();
         assert_eq!(nonce.len(), 32);
+        assert!(is_request_nonce(&nonce));
+        for bad in [
+            "",
+            "00112233445566778899AABBCCDDEEFF",
+            "0011",
+            "0011223344556677889\naabbccddeeff",
+        ] {
+            assert!(!is_request_nonce(bad), "{bad:?}");
+        }
+    }
+
+    /// Every field of a v2 request message changes the bytes, the hub and the nonce among
+    /// them: a signature over one never verifies for another hub or another nonce.
+    #[test]
+    fn request_message_v2_binds_every_field() {
+        let base = || request_message_v2("H", "N", "GET", "/fed/pull", 1, "n", b"");
+        let variants = [
+            request_message_v2("H2", "N", "GET", "/fed/pull", 1, "n", b""),
+            request_message_v2("H", "N2", "GET", "/fed/pull", 1, "n", b""),
+            request_message_v2("H", "N", "POST", "/fed/pull", 1, "n", b""),
+            request_message_v2("H", "N", "GET", "/fed/push", 1, "n", b""),
+            request_message_v2("H", "N", "GET", "/fed/pull", 2, "n", b""),
+            request_message_v2("H", "N", "GET", "/fed/pull", 1, "m", b""),
+            request_message_v2("H", "N", "GET", "/fed/pull", 1, "n", b"x"),
+            request_message("GET", "/fed/pull", 1, b""),
+        ];
+        for v in variants {
+            assert_ne!(v, base());
+        }
+        assert!(String::from_utf8(base())
+            .unwrap()
+            .starts_with("another-request-v2\nH\nN\n"));
     }
 
     #[test]
