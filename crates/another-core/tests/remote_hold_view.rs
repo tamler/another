@@ -740,3 +740,97 @@ fn a_hidden_blocker_still_refuses_and_names_nothing() {
     assert!(shown[0].hidden.is_none() && shown[0].unreadable.is_some());
     assert_eq!(shown[0].held.agent, "alice@shop");
 }
+
+/// bob's edit in `sub` is stopped and a wait recorded; when the blocker ends, Another sends
+/// bob a "Hold free" notice. The notice can reach a remote reader (bob's token reads bob's
+/// inbox, and the feed lists the message), so it is judged by the same rule, from bob's
+/// project.
+fn wait_then_free(fx: &Fx, rewrite: Option<&str>) -> (String, Message) {
+    let star = fx.hold("alice@shop", &fx.shop, "**", true);
+    let blocked = fx
+        .store
+        .guard_edit("bob@sub", &path(&fx.sub), &["a.rs".into()], "auto")
+        .unwrap();
+    assert_eq!(blocked.conflicts.len(), 1, "{blocked:?}");
+    if let Some(pattern) = rewrite {
+        fx.sql()
+            .execute(
+                "UPDATE holds SET pattern = ?2 WHERE hold_id = ?1",
+                [&star, &pattern.to_string()],
+            )
+            .unwrap();
+    }
+    fx.store.release_holds("alice@shop", &[star.clone()]).unwrap();
+    fx.store.sweep().unwrap();
+    let inbox = fx.store.inbox("bob@sub", InboxQuery::default()).unwrap();
+    let free: Vec<Message> = inbox
+        .messages
+        .into_iter()
+        .map(|i| i.message)
+        .filter(|m| m.subject.starts_with("Hold free"))
+        .collect();
+    assert_eq!(free.len(), 1, "{free:?}");
+    (star, free.into_iter().next().unwrap())
+}
+
+/// The usual case is unchanged: the blocker covered bob's file, so the notice comes from
+/// its holder and names the hold that ended.
+#[test]
+fn a_hold_free_notice_still_names_a_holder_the_project_may_see() {
+    let fx = Fx::new();
+    let (star, notice) = wait_then_free(&fx, None);
+    assert_eq!(notice.from, "alice@shop");
+    assert!(notice.body.contains(&star), "{}", notice.body);
+}
+
+/// A blocker that bob's project may not see (here a stored row rewritten in place, so it no
+/// longer reaches `sub`): the notice names neither its holder nor its hold id. Another has
+/// no system mailbox, so the notice is addressed from bob to bob.
+#[test]
+fn a_hold_free_notice_names_no_hidden_holder() {
+    let fx = Fx::new();
+    let (star, notice) = wait_then_free(&fx, Some("docs/**"));
+    assert_eq!(notice.from, "bob@sub");
+    assert!(!notice.body.contains(&star), "{}", notice.body);
+    assert!(!notice.body.contains("alice"), "{}", notice.body);
+    assert!(
+        notice.body.contains("no conflicting hold remains in this checkout"),
+        "{}",
+        notice.body
+    );
+}
+
+/// A remote board's history scan is bounded in rows read, not only in rows kept: past the
+/// bound the board stops and says it is truncated, however few rows it kept.
+#[test]
+fn a_remote_boards_history_scan_is_bounded() {
+    let fx = Fx::new();
+    let shop = fx.project_id(&fx.shop);
+    let edit = |pattern: &str| {
+        json!({ "hold_id": "e", "agent_id": "x", "project_id": shop, "pattern": pattern,
+                "exclusive": true, "auto": true })
+    };
+    fx.forge("hold.acquired", edit("sub/old.rs"));
+    let rows: u32 = 50_000 + 10;
+    fx.sql()
+        .execute(
+            "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < ?1)
+             INSERT INTO events (event_id, node_id, ts, actor, kind, payload)
+             SELECT 'hidden-' || x, ?2, ?3, 'alice@shop', 'hold.acquired', ?4 FROM n",
+            rusqlite::params![
+                rows,
+                fx.store.node_id(),
+                T0,
+                edit("docs/hidden.md").to_string()
+            ],
+        )
+        .unwrap();
+    let b = fx.board(&fx.sub, Some(fx.sub_only()));
+    assert!(b.history_truncated, "the scan stopped at its bound");
+    let edits: Vec<&str> = b
+        .projects
+        .iter()
+        .flat_map(|p| p.edits.iter().map(|e| e.path.as_str()))
+        .collect();
+    assert!(edits.is_empty(), "the old edit is past the bound: {edits:?}");
+}
