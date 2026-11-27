@@ -19,7 +19,7 @@ use crate::identity::{agent_from_row, AGENT_COLUMNS};
 use crate::requests::{self, Request, RequestStatus};
 use crate::resources::{Resource, ResourceFilter};
 use crate::store::Store;
-use crate::time::fmt_ts;
+use crate::time::{fmt_ts, parse_ts};
 use crate::Peer;
 
 /// An agent seen within this window, with status `active`, is live.
@@ -256,12 +256,6 @@ pub struct DashActivityPage {
     pub next_before: Option<String>,
     /// The scan stopped at the cap; older matches may exist outside this page.
     pub scanned_limit: bool,
-}
-
-fn parse_ts(ts: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(ts)
-        .ok()
-        .map(|t| t.timestamp_millis())
 }
 
 pub(crate) fn presence(status: &str, last_seen_at: Option<&str>, now: i64) -> (&'static str, bool) {

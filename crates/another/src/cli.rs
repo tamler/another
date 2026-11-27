@@ -691,22 +691,7 @@ pub enum RemoteCmd {
 }
 
 pub(crate) fn parse_secs(raw: &str) -> anyhow::Result<i64> {
-    let raw = raw.trim();
-    let split = raw.find(|c: char| !c.is_ascii_digit()).unwrap_or(raw.len());
-    let (num, unit) = raw.split_at(split);
-    let n: i64 = num
-        .parse()
-        .map_err(|_| anyhow::anyhow!("invalid duration {raw:?}"))?;
-    let mult = match unit {
-        "" | "s" => 1,
-        "m" => 60,
-        "h" => 3600,
-        "d" => 86_400,
-        "w" => 604_800,
-        _ => anyhow::bail!("invalid duration {raw:?}: use s, m, h, d or w"),
-    };
-    n.checked_mul(mult)
-        .ok_or_else(|| anyhow::anyhow!("invalid duration {raw:?}: too large"))
+    another_core::parse_duration(raw, true).map_err(|error| anyhow::anyhow!("{error}"))
 }
 
 #[derive(Debug, Subcommand)]

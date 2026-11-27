@@ -524,13 +524,6 @@ fn agent_for(url: &str) -> ureq::Agent {
     ureq::Agent::new_with_config(config.build())
 }
 
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or_default()
-}
-
 /// A sync request or answer that was over a size limit of the other side or of this one.
 /// The caller sends or asks for less and tries again.
 #[derive(Debug)]
@@ -622,7 +615,7 @@ fn signed(
     body: Option<Vec<u8>>,
 ) -> Result<Sent> {
     let base = to.url;
-    let time = now_ms();
+    let time = store.now();
     let bytes = body.clone().unwrap_or_default();
     let signature = store.sign_request(method, path_and_query, time, &bytes);
     // A new nonce for every request, a retry included. It is not part of the request
@@ -1161,4 +1154,56 @@ fn sync_pass(
         }
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    #[test]
+    fn signed_request_uses_manual_store_clock() {
+        let (clock, _) = another_core::Clock::manual(1_234_567_890_000);
+        let store = Store::open_in_memory(clock).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut headers = Vec::new();
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                headers.push(line.trim().to_ascii_lowercase());
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            headers
+        });
+        let agent = agent_for(&url);
+        let to = Dial {
+            agent: &agent,
+            hub: "test-hub",
+            hub_key: "test-key",
+            url: &url,
+            limits: &Limits::CURRENT,
+            exchange: Exchange::Unsigned,
+        };
+        let sent = signed(&store, &to, "GET", "/fed/pull", None);
+        let headers = server.join().unwrap();
+        let sent = sent.unwrap();
+        assert!(headers.contains(&format!("{H_TIME}: {}", store.now())));
+        assert_eq!(
+            sent.signature,
+            store.sign_request("GET", "/fed/pull", store.now(), &[])
+        );
+    }
 }
