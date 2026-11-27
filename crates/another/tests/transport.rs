@@ -18,6 +18,9 @@ mod hosted_ci;
 #[path = "common/transports.rs"]
 mod transports;
 
+#[path = "common/cli.rs"]
+mod cli;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -347,22 +350,12 @@ impl Fx {
 
     /// The real binary on this home, with the fake Herdr.
     fn cmd(&self, args: &[&str]) -> Command {
-        let mut c = {
-            let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
-            legacy_fixture_command.arg("--unguarded-repair");
-            legacy_fixture_command
-        };
+        let mut c = cli::another_cmd(&self.home);
+        c.arg("--unguarded-repair");
         c.args(args)
             .env("HOME", self.root.join("home"))
-            .env("ANOTHER_HOME", &self.home)
             .env("HERDR_BIN_PATH", self.herdr_dir.join("herdr"))
             .env("ANOTHER_LOG", "off")
-            .env_remove("ANOTHER_AGENT")
-            .env_remove("GROK_HOOK_EVENT")
-            .env_remove("HERDR_PANE_ID")
-            .env_remove("TMUX_PANE")
-            .env_remove("CMUX_SURFACE_ID")
-            .env_remove("TERM_PROGRAM")
             .stdin(Stdio::null());
         c
     }

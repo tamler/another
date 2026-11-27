@@ -10,6 +10,30 @@ const EVIL: &str = "fine\u{1b}]52;c;ZXZpbA==\u{7}\u{1b}[2J";
 /// A right-to-left override.
 const BIDI: &str = "fine\u{202e}gpj.rs";
 
+#[test]
+fn unicode_line_separators_are_flattened() {
+    for separator in ['\u{2028}', '\u{2029}', '\u{85}'] {
+        let text = format!("first{separator}second");
+        assert_eq!(single_line(&text, 100), "first second");
+        assert!(is_unsafe_text_char(separator));
+    }
+}
+
+#[test]
+fn subjects_with_unicode_line_separators_are_refused() {
+    let fx = fx();
+    for separator in ['\u{2028}', '\u{2029}', '\u{85}'] {
+        let result = fx.store.send_message(SendMessage {
+            from: "alice".into(),
+            to: vec!["alice".into()],
+            subject: format!("first{separator}second"),
+            body: "body".into(),
+            ..Default::default()
+        });
+        assert_eq!(result.unwrap_err().code(), "invalid");
+    }
+}
+
 struct Fx {
     _dir: tempfile::TempDir,
     store: Store,

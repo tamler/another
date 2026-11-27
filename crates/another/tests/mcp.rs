@@ -55,13 +55,24 @@ async fn exposes_the_tool_surface() {
     let client = in_process(Store::open_in_memory(Clock::System).unwrap()).await;
     let info = client.peer_info().expect("server info");
     assert_eq!(info.server_info.as_ref().unwrap().name, "another");
-    let mut names: Vec<String> = client
-        .list_all_tools()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|t| t.name.to_string())
-        .collect();
+    let tools = client.list_all_tools().await.unwrap();
+    for name in [
+        "whats_new",
+        "activity_feed",
+        "activity_summarize",
+        "work_board",
+    ] {
+        let tool = tools.iter().find(|t| t.name == name).unwrap();
+        let schema = serde_json::to_value(&tool.input_schema).unwrap();
+        let description = schema["properties"]["since"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(
+            description.contains("bare seconds"),
+            "{name}: {description}"
+        );
+    }
+    let mut names: Vec<String> = tools.into_iter().map(|t| t.name.to_string()).collect();
     names.sort();
     assert_eq!(
         names,

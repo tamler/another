@@ -2094,13 +2094,28 @@ impl Store {
                 "pairing request time is more than 5 minutes off; check the clocks".into(),
             ));
         }
-        self.write(|tx| {
-            let denied = |why: PairRefusal| {
-                *cause.borrow_mut() = Some(why);
-                Error::Forbidden(
-                    "invalid, used or expired invite, or the request is not signed for it".into(),
+        let denied = |why: PairRefusal| {
+            *cause.borrow_mut() = Some(why);
+            Error::Forbidden(
+                "invalid, used or expired invite, or the request is not signed for it".into(),
+            )
+        };
+        // Refuse unknown invites without contending with writers. A known invite is
+        // still checked in the write transaction: two joiners cannot consume it twice.
+        let known = self.read(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT 1 FROM invites WHERE invite_id = ?1",
+                    [&req.invite_id],
+                    |_| Ok(()),
                 )
-            };
+                .optional()?
+                .is_some())
+        })?;
+        if !known {
+            return Err(denied(PairRefusal::UnknownInvite));
+        }
+        self.write(|tx| {
             type InviteRow = (String, String, i64, Option<i64>, Option<String>);
             let row: Option<InviteRow> = tx
                 .query_row(

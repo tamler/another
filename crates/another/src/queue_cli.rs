@@ -258,7 +258,7 @@ pub enum QueueCmd {
     },
     /// Check the queue's events against themselves and the tables. Exit code 1 on a finding.
     Audit {
-        /// Report only findings since a duration (2d) or an RFC 3339 time.
+        /// Report only findings since a duration (bare seconds, 2d) or an RFC 3339 time.
         #[arg(long)]
         since: Option<String>,
         #[arg(long, hide = true)]
@@ -805,7 +805,7 @@ pub fn run(store: &Store, cmd: QueueCmd, json: bool) -> anyhow::Result<ExitCode>
                     Since::Time(t) => Some(t),
                     Since::After(_) => {
                         return Err(usage(
-                            "queue audit --since takes a duration like 2d or an RFC 3339 time, not an event id".into(),
+                            "queue audit --since takes bare seconds like 3600, a duration like 2d or an RFC 3339 time, not an event id".into(),
                         ))
                     }
                 },

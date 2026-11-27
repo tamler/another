@@ -153,6 +153,23 @@ rejection audits are capped at 32 rows per server store per 60 seconds. Wake
 subjects and edit-denial hold values use the hook quoting rules. Foreign
 resource checks use IP literals only and a bounded probe budget.
 
+Normal builds expose only signed federation exchange. Library compatibility tests
+can enable the `another` crate's `test-support` feature to simulate an older
+unsigned node; workspace tests enable it automatically. Keep that feature off in
+shipped builds.
+
+Security hardening: local listener scans match only local resource registrations,
+and terminal text flattens Unicode line and paragraph separators. On Unix,
+database files and build records are created owner-only (0600), and normal
+database opens tighten those existing files too. Federation hub calls refuse
+redirects, and unknown pairing invites are refused before taking the write
+transaction.
+
+Hub backups are secret material: they contain the node's private signing key,
+mail and authentication records. Keep them owner-only and protect every copy.
+Unauthenticated refusal audits have a deliberate write budget during floods;
+individual refusals can be omitted after that budget is exhausted.
+
 ## Development
 
 ```sh
@@ -173,9 +190,10 @@ separate evidence.
 
 For Rust callers, `another_core` exports `now_ms`, `fmt_ts`, `parse_ts` and
 `parse_duration`. The duration helper returns seconds and lets the caller choose
-whether to accept bare numbers. CLI durations still accept bare seconds; activity
-`--since` durations still require a suffix (`s`, `m`, `h`, `d` or `w`). Federation
+whether to accept bare numbers. CLI durations, including `--since`, accept bare
+seconds or a suffix (`s`, `m`, `h`, `d` or `w`). Federation
 requests use the store's clock, including a manual clock supplied by a caller.
+MCP `since` inputs also accept bare seconds.
 
 The website source lives in [site/](site/README.md). `sh site/build.sh` checks
 the pages, and `python3 scripts/check-copy.py` rejects em dashes and a

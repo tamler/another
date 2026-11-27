@@ -181,10 +181,11 @@ pub struct AckOutcome {
 }
 
 /// Characters that must never reach a terminal from text another agent chose: C0 and C1
-/// controls and DEL (CR, LF, ESC, tab, …), plus Unicode bidirectional overrides and
+/// controls and DEL (CR, LF, ESC, tab, …), Unicode line and paragraph separators, plus bidirectional overrides and
 /// isolates, which can make text display in a different order than it is typed.
 pub fn is_unsafe_text_char(c: char) -> bool {
-    c.is_control() || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+    c.is_control()
+        || matches!(c, '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 /// `text` as one line that is safe to type into or print on a terminal: every unsafe

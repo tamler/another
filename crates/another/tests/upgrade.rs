@@ -3,21 +3,18 @@
 //! older schema it must refuse and write nothing, until `--dev-migrate` says otherwise.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
+
+#[path = "common/cli.rs"]
+mod cli;
 
 fn another(home: &Path, args: &[&str]) -> Output {
-    {
-        let mut legacy_fixture_command = Command::new(env!("CARGO_BIN_EXE_another"));
-        legacy_fixture_command.arg("--unguarded-repair");
-        legacy_fixture_command
-    }
-    .args(args)
-    .env("ANOTHER_HOME", home)
-    .env_remove("ANOTHER_AGENT")
-    .env_remove("ANOTHER_LOG")
-    .stdin(Stdio::null())
-    .output()
-    .expect("run another")
+    cli::another_cmd(home)
+        .arg("--unguarded-repair")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run another")
 }
 
 fn version(db: &Path) -> i64 {
@@ -98,9 +95,8 @@ fn refused_schema_denies_participating_edits_without_migration() {
     let (home, _) = older_home(dir.path());
     let db = home.join("another.db");
     let before = std::fs::read(&db).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_another"))
+    let out = cli::another_cmd(&home)
         .args(["hook", "run", "pre-edit", "--client", "claude"])
-        .env("ANOTHER_HOME", &home)
         .stdin(Stdio::null())
         .output()
         .unwrap();

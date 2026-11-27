@@ -865,11 +865,12 @@ pub(crate) fn within_bytes(what: &str, text: &str, max: usize) -> Result<()> {
 }
 
 pub(crate) fn no_unsafe(what: &str, text: &str, multi_line: bool) -> Result<()> {
-    // The Unicode line and paragraph separators end a line for some readers, so one-line
-    // text refuses them as it refuses a line feed.
+    // The Unicode line and paragraph separators end a line for some readers, so
+    // one-line text refuses them as it refuses a line feed. Multi-line text
+    // allows them, the same way it allows a line feed and a tab.
     let bad = |c: char| {
-        (is_unsafe_text_char(c) && !(multi_line && (c == '\n' || c == '\t')))
-            || (!multi_line && matches!(c, '\u{2028}' | '\u{2029}'))
+        is_unsafe_text_char(c)
+            && !(multi_line && matches!(c, '\n' | '\t' | '\u{2028}' | '\u{2029}'))
     };
     if !text.chars().any(bad) {
         return Ok(());

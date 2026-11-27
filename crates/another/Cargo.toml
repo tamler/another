@@ -35,7 +35,12 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }
 
+[features]
+# Older unsigned federation nodes for compatibility tests. Off in shipped builds.
+test-support = ["another-core/test-support"]
+
 [dev-dependencies]
+another = { path = ".", features = ["test-support"] }
 # Upgrade tests build a home as an earlier build left it.
 another-core = { workspace = true, features = ["test-support"] }
 reqwest = { version = "0.13", default-features = false }
