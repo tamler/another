@@ -239,3 +239,40 @@ fn a_recorded_wake_gives_the_claim_back_only_when_its_outcome_says_so() {
         assert_eq!(waiting(&store), after, "{outcome:?}");
     }
 }
+
+/// An unknown `--since` event id returns `Error::NotFound`, matching `activity` and
+/// `dashboard_activity`, while a known event id counts only events strictly after it.
+#[test]
+fn stats_since_unknown_event_is_not_found_and_known_event_filters_after() {
+    let (_dir, store) = store();
+    let unknown = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let err = store
+        .trial_stats(Some(Since::After(unknown.into())))
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::NotFound(_)),
+        "expected Error::NotFound, got {err:?}"
+    );
+    assert_eq!(err.code(), "not_found", "{err}");
+    let want = format!("unknown event id {unknown:?}");
+    assert!(err.to_string().contains(&want), "{err}");
+
+    wake(&store, WakeOutcome::Started, "daemon", Vec::new());
+    let first_wake = store
+        .activity(ActivityQuery {
+            since: None,
+            limit: 1,
+            kinds: Vec::new(),
+        })
+        .unwrap()
+        .items
+        .remove(0)
+        .event_id;
+    wake(&store, WakeOutcome::NotStarted, "daemon", Vec::new());
+
+    let s = store
+        .trial_stats(Some(Since::After(first_wake.clone())))
+        .unwrap();
+    assert_eq!(s.since, format!("after event {first_wake}"));
+    assert_eq!((s.wakes_sent, s.wakes_failed), (0, 1));
+}
