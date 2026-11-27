@@ -117,6 +117,11 @@ fn a_home_this_build_created_needs_no_flag() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     assert!(another(&home, &["init"]).status.success());
+    assert_eq!(
+        version(&home.join("another.db")),
+        another_core::test_support::current_schema_version(),
+        "the fixture schema must match the real binary's init"
+    );
     let record: serde_json::Value =
         serde_json::from_slice(&std::fs::read(home.join("build.json")).unwrap()).unwrap();
     assert_eq!(record["created"]["build"], "development", "{record}");

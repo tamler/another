@@ -31,8 +31,12 @@ pub fn current_schema_version() -> i64 {
 /// older version, with no build record or node rows; callers add scenario-specific data.
 /// The destination must not already contain a database or build record.
 pub fn older_home(home: &Path, behind: i64) -> i64 {
-    let version = current_schema_version().checked_sub(behind).unwrap();
-    assert!(behind > 0 && version >= 0, "invalid migration distance");
+    let current = current_schema_version();
+    assert!(
+        behind > 0 && behind <= current,
+        "invalid migration distance: behind={behind}, current={current}"
+    );
+    let version = current.checked_sub(behind).unwrap();
     assert!(!home.join(crate::DB_FILE).exists());
     assert!(!home.join(crate::ORIGIN_FILE).exists());
     std::fs::create_dir_all(home).unwrap();
