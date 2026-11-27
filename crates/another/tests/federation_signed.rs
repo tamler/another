@@ -388,11 +388,7 @@ fn every_request_carries_a_fresh_nonce() {
         pull_budget: 1,
         ..Limits::CURRENT
     };
-    let hub_node = node("hub");
-    let hub = Hub {
-        served: serve(fed::router_with(hub_node.store.clone(), one_event)),
-        node: hub_node,
-    };
+    let hub = start_fed_hub_with(one_event);
     let vic = node("vic");
     let late = node("late");
     join(&hub, &vic);
@@ -434,7 +430,7 @@ fn every_request_carries_a_fresh_nonce() {
 
 #[test]
 fn the_hub_signs_exactly_the_bytes_it_sends() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let vic = node("vic");
     join(&hub, &vic);
     register(&vic.store, "v1");
@@ -512,7 +508,7 @@ fn gzip(bytes: &[u8]) -> Vec<u8> {
 #[test]
 fn a_gzip_encoded_answer_verifies() {
     let (hub, vic, late) = {
-        let hub = start_hub();
+        let hub = start_fed_hub();
         let (vic, late) = (node("vic"), node("late"));
         join(&hub, &vic);
         join(&hub, &late);
@@ -540,7 +536,7 @@ fn a_gzip_encoded_answer_verifies() {
 
 #[test]
 fn a_request_without_a_nonce_is_refused_before_anything_is_stored() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let vic = node("vic");
     join(&hub, &vic);
     register(&vic.store, "v1");
@@ -575,7 +571,7 @@ fn a_request_without_a_nonce_is_refused_before_anything_is_stored() {
 
 #[test]
 fn a_malformed_nonce_is_answered_400_before_ingest() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let vic = node("vic");
     join(&hub, &vic);
     register(&vic.store, "v1");
@@ -614,7 +610,7 @@ fn a_malformed_nonce_is_answered_400_before_ingest() {
 
 #[test]
 fn the_nonce_checks_come_after_authentication() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let vic = node("vic");
     join(&hub, &vic);
     register(&vic.store, "v1");
@@ -641,7 +637,7 @@ fn the_nonce_checks_come_after_authentication() {
 
 #[test]
 fn a_refused_answer_writes_an_audit_row_and_applies_nothing() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let vic = node("vic");
     let other = node("other");
     join(&hub, &vic);
@@ -729,7 +725,7 @@ fn a_refused_answer_writes_an_audit_row_and_applies_nothing() {
 
 #[test]
 fn a_listed_key_that_differs_from_the_pinned_one_is_refused_with_both_fingerprints() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let vic = node("vic");
     let other = node("other");
     join(&hub, &vic);
@@ -780,7 +776,7 @@ fn a_listed_key_that_differs_from_the_pinned_one_is_refused_with_both_fingerprin
 
 #[test]
 fn an_unsigned_error_body_is_shown_as_one_bounded_line() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let vic = node("vic");
     join(&hub, &vic);
     register(&vic.store, "v1");
@@ -837,7 +833,7 @@ fn an_unsigned_error_body_is_shown_as_one_bounded_line() {
 
 #[test]
 fn a_forged_oversize_pull_answer_only_fails_the_sync() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let vic = node("vic");
     let late = node("late");
     join(&hub, &vic);
@@ -877,7 +873,7 @@ fn a_forged_oversize_pull_answer_only_fails_the_sync() {
 
 #[test]
 fn last_sync_at_is_written_only_by_a_completed_sync() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let vic = node("vic");
     let late = node("late");
     join(&hub, &vic);
@@ -932,7 +928,7 @@ fn last_sync_at_is_written_only_by_a_completed_sync() {
 
 #[test]
 fn the_hub_records_a_spokes_completed_push_and_pull() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let vic = node("vic");
     join(&hub, &vic);
     register(&vic.store, "v1");
@@ -1007,7 +1003,7 @@ fn the_hub_records_a_spokes_completed_push_and_pull() {
 
 #[test]
 fn the_hub_answers_200_when_recording_the_contact_fails() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let vic = node("vic");
     join(&hub, &vic);
     register(&vic.store, "v1");
@@ -1036,7 +1032,7 @@ fn the_hub_answers_200_when_recording_the_contact_fails() {
 
 #[test]
 fn doctor_reports_a_hub_whose_pulls_keep_failing_as_stale() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let vic = node("vic");
     join(&hub, &vic);
     fed::sync(&vic.store).unwrap();
@@ -1074,7 +1070,7 @@ fn doctor_reports_a_hub_whose_pulls_keep_failing_as_stale() {
 
 #[test]
 fn a_hubs_doctor_is_ok_after_a_sync_and_names_the_right_fix_for_a_stale_spoke() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let vic = node("vic");
     join(&hub, &vic);
     let check = doctor_peers(hub.node.dir.path());
@@ -1105,7 +1101,7 @@ fn a_hubs_doctor_is_ok_after_a_sync_and_names_the_right_fix_for_a_stale_spoke() 
     assert!(!text(&check["fix"]).contains("another sync, and check the hub URL"));
 
     // A node that is a hub and a spoke, with both stale, gets both fixes.
-    let top = start_hub_named("top");
+    let top = start_fed_hub_named("top");
     join(&top, &hub.node);
     let check = doctor_peers(hub.node.dir.path());
     assert_eq!(
@@ -1121,7 +1117,7 @@ fn a_hubs_doctor_is_ok_after_a_sync_and_names_the_right_fix_for_a_stale_spoke() 
 /// A hub whose invites name the relay's address, so that the relay counts what a joiner
 /// sends. The hub signs that address; nothing edits it.
 fn hub_behind_a_relay() -> (Hub, Relay) {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let relay = Relay::start(hub.url());
     (hub, relay)
 }
@@ -1332,10 +1328,10 @@ fn a_signed_invite_of_an_unknown_version_is_refused() {
 /// again with that key, is a valid invite to another hub. Only the fingerprint shows it.
 #[test]
 fn a_self_consistent_invite_from_another_key_joins_that_key_only() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let vic = node("vic");
     // The attacker's own hub, under the same name.
-    let attacker = start_hub_named("hub");
+    let attacker = start_fed_hub_named("hub");
     let (_, genuine) = invite_at(&hub, hub.url());
     let (_, theirs) = invite_at(&attacker, &attacker.served.url);
     let mut forged = genuine.clone();
@@ -1368,7 +1364,7 @@ fn a_self_consistent_invite_from_another_key_joins_that_key_only() {
 
 #[test]
 fn doctor_warns_for_a_hub_joined_before_invites_were_signed() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let old = node("old");
     let code = hub
         .node
@@ -1401,7 +1397,7 @@ fn doctor_warns_for_a_hub_joined_before_invites_were_signed() {
 
 #[test]
 fn sync_and_peers_show_a_hub_joined_before_invites_were_signed() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let old = node("old");
     let code = hub
         .node
@@ -1539,7 +1535,7 @@ fn plain_http_off_loopback_warns_at_invite_join_and_doctor() {
     }
 
     // `pair invite`.
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let home = hub.node.dir.path();
     for url in warns {
         let warning = format!(
@@ -1795,7 +1791,7 @@ fn a_new_spoke_refuses_an_older_hubs_unsigned_answers() {
     // one address.
     let hub_node = node("hub");
     let older = serve(older_router(&hub_node));
-    let newer = serve(fed::router(hub_node.store.clone()));
+    let newer = serve_store(hub_node.store.clone(), HubMode::FedRoutes);
     let relay = Relay::start(&older.url);
     let vic = node("vic");
     let code = hub_node
@@ -1844,7 +1840,7 @@ fn a_new_spoke_refuses_an_older_hubs_unsigned_answers() {
 
 #[test]
 fn a_new_hub_refuses_an_older_spoke_and_loses_nothing() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let old = node("old");
     join(&hub, &old);
     register(&old.store, "o1");
@@ -1875,7 +1871,7 @@ fn a_new_hub_refuses_an_older_spoke_and_loses_nothing() {
 #[test]
 fn pairing_is_untouched_by_either_refusal() {
     // A hub of this build and a spoke of the older one.
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let old = node("old");
     join(&hub, &old);
     register(&old.store, "o1");
@@ -1897,7 +1893,7 @@ fn pairing_is_untouched_by_either_refusal() {
 
 #[test]
 fn an_older_joiner_accepts_a_signed_invite_and_is_then_refused_at_sync() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let old = node("old");
     let code = hub
         .node
@@ -1944,12 +1940,12 @@ fn chain(top_is_older: bool, mid_is_older: bool) -> Chain {
     let top = if top_is_older {
         start_older_hub("top")
     } else {
-        start_hub_named("top")
+        start_fed_hub_named("top")
     };
     let mid = if mid_is_older {
         start_older_hub("mid")
     } else {
-        start_hub_named("mid")
+        start_fed_hub_named("mid")
     };
     let leaf = node("leaf");
     join(&top, &mid.node);

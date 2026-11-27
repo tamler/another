@@ -3,65 +3,21 @@
 //! is still refused, and a node on this build syncs with a node on a build before D99 in
 //! both directions.
 
+#[path = "common/fed_hub.rs"]
+mod fed_hub;
+
 use std::io::Read;
-use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use another::fed::{self, Limits};
-use another::serve::{http_router, HttpOptions};
 use another_core::*;
+use fed_hub::{
+    join, join_with, node, register, serve_node, serve_node_layered, start_fed_hub_with,
+    start_http_hub, Hub, HubMode, Node,
+};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
-use tokio_util::sync::CancellationToken;
-
-struct Node {
-    dir: tempfile::TempDir,
-    store: Store,
-}
-
-impl Node {
-    fn db(&self) -> PathBuf {
-        self.dir.path().join(DB_FILE)
-    }
-}
-
-fn node(name: &str) -> Node {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    store.set_node_name(name).unwrap();
-    Node { dir, store }
-}
-
-fn register(store: &Store, name: &str) {
-    store
-        .register_agent(RegisterAgent {
-            name: name.into(),
-            program: Program::Claude,
-            project: None,
-            model: None,
-            description: None,
-        })
-        .unwrap();
-}
-
-struct Hub {
-    node: Node,
-    url: String,
-    port: u16,
-    ct: CancellationToken,
-    rt: tokio::runtime::Runtime,
-}
-
-impl Hub {
-    /// Stop serving and wait for the listener to close. The node, and the port it was
-    /// served on, are handed back so it can be served again.
-    fn stop(self) -> (Node, u16) {
-        self.ct.cancel();
-        self.rt.shutdown_timeout(std::time::Duration::from_secs(5));
-        (self.node, self.port)
-    }
-}
 
 /// The bodies a recording hub saw on the wire: every `/fed/push` request and every
 /// `/fed/pull` answer, byte for byte.
@@ -97,79 +53,14 @@ async fn record(
     axum::response::Response::from_parts(parts, axum::body::Body::from(answered))
 }
 
-/// A hub on this build, served as `another serve --federation` serves it.
-fn start_hub() -> Hub {
-    start_hub_with(None)
-}
-
-/// With limits given, a hub that serves only the federation routes under them:
-/// `Limits::BEFORE_D99` is a hub on a build before D99.
-fn start_hub_with(limits: Option<Limits>) -> Hub {
-    serve(node("hub"), limits, 0, None)
-}
-
 /// A hub on this build whose pushes and pull answers are recorded.
 fn start_recording_hub() -> (Hub, Recording) {
     let recording = Recording::default();
-    (
-        serve(node("hub"), None, 0, Some(recording.clone())),
-        recording,
-    )
-}
-
-/// Serve `node` as a hub on `port` (0: any free port).
-fn serve(node: Node, limits: Option<Limits>, port: u16, recording: Option<Recording>) -> Hub {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .unwrap();
-    let ct = CancellationToken::new();
-    let listener = rt
-        .block_on(tokio::net::TcpListener::bind(("127.0.0.1", port)))
-        .unwrap();
-    let addr = listener.local_addr().unwrap();
-    let app = match limits {
-        Some(limits) => fed::router_with(node.store.clone(), limits),
-        None => {
-            let opts = HttpOptions {
-                federation: true,
-                bound_port: addr.port(),
-                ..Default::default()
-            };
-            http_router(node.store.clone(), ct.clone(), &opts)
-        }
-    };
-    let app = match recording {
-        Some(recording) => app.layer(axum::middleware::from_fn_with_state(recording, record)),
-        None => app,
-    };
-    let stop = ct.clone();
-    rt.spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move { stop.cancelled_owned().await })
-        .await
-        .unwrap();
+    let layer = recording.clone();
+    let hub = serve_node_layered(node("hub"), HubMode::HttpFederation, 0, move |app| {
+        app.layer(axum::middleware::from_fn_with_state(layer, record))
     });
-    Hub {
-        node,
-        url: format!("http://{addr}"),
-        port: addr.port(),
-        ct,
-        rt,
-    }
-}
-
-fn join(hub: &Hub, spoke: &Node) {
-    join_with(hub, spoke, &Perm::ALL);
-}
-
-fn join_with(hub: &Hub, spoke: &Node, perms: &[Perm]) {
-    let code = hub.node.store.create_invite(&hub.url, perms, 3600).unwrap();
-    fed::join(&spoke.store, &code).unwrap();
+    (hub, recording)
 }
 
 fn send(store: &Store, from: &str, to: &str, subject: &str, body: String) {
@@ -205,7 +96,7 @@ fn inbox_subjects(store: &Store, agent: &str) -> Vec<String> {
     subjects
 }
 
-fn count(db: &PathBuf, sql: &str) -> i64 {
+fn count(db: &Path, sql: &str) -> i64 {
     Connection::open(db)
         .unwrap()
         .query_row(sql, [], |r| r.get(0))
@@ -216,7 +107,7 @@ fn count(db: &PathBuf, sql: &str) -> i64 {
 fn round_trips(hub: &Hub) -> (i64, i64) {
     let of = |op: &str| {
         count(
-            &hub.node.db(),
+            &hub.node.db_path(),
             &format!("SELECT count(*) FROM audit_log WHERE operation = '{op}' AND outcome = 'ok'"),
         )
     };
@@ -226,7 +117,7 @@ fn round_trips(hub: &Hub) -> (i64, i64) {
 /// The events of `origin` in `n`'s log, in the order `n` stored them: a message by its
 /// subject, anything else by its kind.
 fn stored_from(n: &Node, origin: &str) -> Vec<String> {
-    let c = Connection::open(n.db()).unwrap();
+    let c = Connection::open(n.db_path()).unwrap();
     let mut stmt = c
         .prepare("SELECT kind, payload FROM events WHERE node_id = ?1 ORDER BY seq")
         .unwrap();
@@ -304,7 +195,7 @@ fn each_budget_fits_one_event_and_stays_under_its_limit() {
 /// fails with 413.
 #[test]
 fn nine_largest_messages_in_one_push_batch_sync() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let a = node("spokea");
     join(&hub, &a);
     register(&hub.node.store, "bob");
@@ -322,7 +213,6 @@ fn nine_largest_messages_in_one_push_batch_sync() {
     let first = fed::sync(&a.store).map(|r| r.pushed);
     let second = fed::sync(&a.store).map(|r| r.pushed);
     let got = inbox_subjects(&hub.node.store, "bob").len();
-    hub.ct.cancel();
     assert!(
         first.is_ok(),
         "first sync: {:#}; second sync: {:?}; bob has {got} of 9",
@@ -337,7 +227,7 @@ fn nine_largest_messages_in_one_push_batch_sync() {
 /// client's read limit.
 #[test]
 fn forty_five_largest_messages_in_one_pull_page_sync() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let c = node("spokec");
     join(&hub, &c);
     register(&hub.node.store, "bob");
@@ -355,7 +245,6 @@ fn forty_five_largest_messages_in_one_pull_page_sync() {
     let first = fed::sync(&c.store).map(|r| r.applied);
     let second = fed::sync(&c.store).map(|r| r.applied);
     let got = inbox_subjects(&c.store, "carol").len();
-    hub.ct.cancel();
     assert!(
         first.is_ok(),
         "first sync: {:#}; second sync: {:?}; carol has {got} of 45",
@@ -369,7 +258,7 @@ fn forty_five_largest_messages_in_one_pull_page_sync() {
 /// a build before D99 could have written it, signed with the node's own key. Returns the
 /// event id and its size on the wire.
 fn grow_last_registration(n: &Node, bytes: usize) -> (String, usize) {
-    let c = Connection::open(n.db()).unwrap();
+    let c = Connection::open(n.db_path()).unwrap();
     let (seq, event_id, node_id, ts, actor, payload, prev_id): (
         i64,
         String,
@@ -437,7 +326,7 @@ fn grow_last_registration(n: &Node, bytes: usize) -> (String, usize) {
 /// every spoke receives it and the mail before and after it.
 #[test]
 fn a_3_mib_event_in_a_hubs_log_reaches_every_spoke_with_the_mail_around_it() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let a = node("spokea");
     let c = node("spokec");
     join(&hub, &a);
@@ -463,12 +352,11 @@ fn a_3_mib_event_in_a_hubs_log_reaches_every_spoke_with_the_mail_around_it() {
     ];
     let stored = [&a, &c].map(|n| {
         count(
-            &n.db(),
+            &n.db_path(),
             &format!("SELECT count(*) FROM events WHERE event_id = '{event_id}'"),
         )
     });
     let known = [&a, &c].map(|n| n.store.agent("wordy@@hub").is_ok());
-    hub.ct.cancel();
     assert!(size > 3 * MIB);
     for report in reports {
         let report = report.map_err(|e| format!("{e:#}")).unwrap();
@@ -492,7 +380,7 @@ fn a_3_mib_event_in_a_hubs_log_reaches_every_spoke_with_the_mail_around_it() {
 #[test]
 fn a_3_mib_event_in_a_spokes_log_reaches_the_hub_and_a_second_spoke() {
     for spoke_limits in [Limits::CURRENT, Limits::BEFORE_D99] {
-        let hub = start_hub();
+        let hub = start_http_hub();
         let a = node("spokea");
         let c = node("spokec");
         join(&hub, &a);
@@ -521,12 +409,11 @@ fn a_3_mib_event_in_a_spokes_log_reaches_the_hub_and_a_second_spoke() {
         ];
         let stored = [&hub.node, &c].map(|n| {
             count(
-                &n.db(),
+                &n.db_path(),
                 &format!("SELECT count(*) FROM events WHERE event_id = '{event_id}'"),
             )
         });
         let known = [&hub.node.store, &c.store].map(|s| s.agent("wordy@@spokea").is_ok());
-        hub.ct.cancel();
         assert!(size > 3 * MIB);
         let pushed = pushed.map_err(|e| format!("{e:#}")).unwrap();
         assert!(
@@ -558,7 +445,7 @@ fn a_3_mib_event_in_a_spokes_log_reaches_the_hub_and_a_second_spoke() {
 #[test]
 fn a_3_mib_event_with_one_side_on_a_build_before_d99() {
     // Older hub, new spoke: pull delivers, push of the spoke's own is refused by the hub.
-    let hub = start_hub_with(Some(Limits::BEFORE_D99));
+    let hub = start_fed_hub_with(Limits::BEFORE_D99);
     let a = node("spokea");
     join(&hub, &a);
     register(&hub.node.store, "bob");
@@ -582,23 +469,22 @@ fn a_3_mib_event_with_one_side_on_a_build_before_d99() {
     let first = format!("{:#}", fed::sync(&a.store).unwrap_err());
     let second = format!("{:#}", fed::sync(&a.store).unwrap_err());
     let bob = inbox_subjects(&hub.node.store, "bob");
-    let url = hub.url.clone();
+    let url = hub.url().to_string();
     // An event this build can send and an older hub refuses is not skipped (D-next): no
     // marker is written and the push cursor stays before the event.
     let markers = count(
-        &a.db(),
+        &a.db_path(),
         "SELECT count(*) FROM events WHERE kind = 'sync.skipped'",
     );
     let skip_rows = count(
-        &a.db(),
+        &a.db_path(),
         "SELECT count(*) FROM audit_log WHERE operation = 'sync skip'",
     );
     let event_seq = count(
-        &a.db(),
+        &a.db_path(),
         &format!("SELECT seq FROM events WHERE event_id = '{event_id}'"),
     );
     let push_cursor = a.store.push_cursor(hub.node.store.node_id()).unwrap().0;
-    hub.ct.cancel();
     assert_eq!((markers, skip_rows), (0, 0));
     assert!(push_cursor < event_seq, "{push_cursor} >= {event_seq}");
     assert_eq!(pulled.map_err(|e| format!("{e:#}")), Ok(0));
@@ -618,7 +504,7 @@ fn a_3_mib_event_with_one_side_on_a_build_before_d99() {
     assert_eq!(bob, ["before"]);
 
     // New hub, older spoke: the hub's own 3 MiB event fits the 10 MiB the spoke reads.
-    let hub = start_hub();
+    let hub = start_http_hub();
     let c = node("spokec");
     join(&hub, &c);
     register(&hub.node.store, "bob");
@@ -635,7 +521,6 @@ fn a_3_mib_event_with_one_side_on_a_build_before_d99() {
     );
     let pulled = fed::sync_with(&c.store, &Limits::BEFORE_D99).map(|r| r.pull_rejected.len());
     let carol = inbox_subjects(&c.store, "carol");
-    hub.ct.cancel();
     assert_eq!(pulled.map_err(|e| format!("{e:#}")), Ok(0));
     assert_eq!(carol, ["from the hub"]);
 }
@@ -649,7 +534,7 @@ fn markers(n: &Node, origin: &str) -> Vec<Value> {
 }
 
 fn payloads(n: &Node, kind: &str, origin: &str) -> Vec<Value> {
-    let c = Connection::open(n.db()).unwrap();
+    let c = Connection::open(n.db_path()).unwrap();
     let mut stmt = c
         .prepare("SELECT payload FROM events WHERE kind = ?1 AND node_id = ?2 ORDER BY seq")
         .unwrap();
@@ -666,7 +551,7 @@ fn id_of(n: &Node) -> String {
 
 fn holds_event(n: &Node, event_id: &str) -> bool {
     count(
-        &n.db(),
+        &n.db_path(),
         &format!("SELECT count(*) FROM events WHERE event_id = '{event_id}'"),
     ) == 1
 }
@@ -674,7 +559,7 @@ fn holds_event(n: &Node, event_id: &str) -> bool {
 /// Audit rows of `operation` in `n`'s audit log.
 fn audit_rows(n: &Node, operation: &str) -> i64 {
     count(
-        &n.db(),
+        &n.db_path(),
         &format!("SELECT count(*) FROM audit_log WHERE operation = '{operation}'"),
     )
 }
@@ -710,7 +595,7 @@ fn err(o: &std::process::Output) -> String {
 /// Write a signed event of `kind` into `n`'s own log, as a changed build of that node
 /// could. `id` is its event id.
 fn plant(n: &Node, id: &str, kind: &str, payload: &Value) {
-    let c = Connection::open(n.db()).unwrap();
+    let c = Connection::open(n.db_path()).unwrap();
     let secret: String = c
         .query_row("SELECT secret_key FROM nodes WHERE is_local = 1", [], |r| {
             r.get(0)
@@ -852,7 +737,6 @@ fn an_event_over_the_push_limit_is_stepped_past_and_everything_after_it_arrives(
         .map(|body| serde_json::from_slice(body).unwrap())
         .collect();
     let again = fed::sync(&a.store).map(|r| (r.pushed, r.push_duplicates));
-    hub.ct.cancel();
 
     assert!(size > 9 * MIB);
     let report = report.map_err(|e| format!("{e:#}")).unwrap();
@@ -899,7 +783,7 @@ fn an_event_over_the_push_limit_is_stepped_past_and_everything_after_it_arrives(
 /// carries it; the cursor moves, the marker is written, and the same sync pushes it.
 #[test]
 fn an_oversized_event_last_in_the_log_is_marked_and_the_marker_pushed_in_one_sync() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let a = node("spokea");
     join(&hub, &a);
     register(&a.store, "alice");
@@ -912,7 +796,6 @@ fn an_oversized_event_last_in_the_log_is_marked_and_the_marker_pushed_in_one_syn
     let own = markers(&a, &a_id);
     let on_hub = markers(&hub.node, &a_id);
     let event_on_hub = holds_event(&hub.node, &event_id);
-    hub.ct.cancel();
 
     assert_eq!(report.map_err(|e| format!("{e:#}")), Ok(0));
     assert_eq!(own.len(), 1);
@@ -925,7 +808,7 @@ fn an_oversized_event_last_in_the_log_is_marked_and_the_marker_pushed_in_one_syn
 /// everything after both is delivered.
 #[test]
 fn two_oversized_events_in_a_row_are_both_stepped_past_and_marked() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let a = node("spokea");
     join(&hub, &a);
     register(&hub.node.store, "bob");
@@ -947,7 +830,6 @@ fn two_oversized_events_in_a_row_are_both_stepped_past_and_marked() {
     let on_hub = markers(&hub.node, &a_id).len();
     let got = inbox_subjects(&hub.node.store, "bob");
     let rows = audit_rows(&a, "sync skip");
-    hub.ct.cancel();
 
     assert_eq!(report.map_err(|e| format!("{e:#}")), Ok(2));
     assert_eq!(named, [json!(first), json!(second)]);
@@ -1026,7 +908,6 @@ fn an_event_over_the_pull_limit_is_stepped_past_and_everything_after_it_arrives(
         .collect();
     let again = fed::sync(&c.store).map(|r| (r.pulled, r.skipped.len()));
     let markers_after = markers(&hub.node, &hub_id).len();
-    hub.ct.cancel();
 
     assert!(size > 33 * MIB);
     let report = report.map_err(|e| format!("{e:#}")).unwrap();
@@ -1066,7 +947,7 @@ fn an_event_over_the_pull_limit_is_stepped_past_and_everything_after_it_arrives(
 /// the hub writes one marker and one audit row.
 #[test]
 fn a_push_that_fails_leaves_no_marker_and_no_moved_cursor() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let a = node("spokea");
     spoke_with_an_oversized_event(&hub, &a);
     let hub_id = id_of(&hub.node);
@@ -1078,11 +959,10 @@ fn a_push_that_fails_leaves_no_marker_and_no_moved_cursor() {
     let cursor_after = a.store.push_cursor(&hub_id).unwrap().0;
     let left = (markers(&a, &a_id).len(), audit_rows(&a, "sync skip"));
 
-    let hub = serve(hub_node, None, port, None);
+    let hub = serve_node(hub_node, HubMode::HttpFederation, port);
     let back = fed::sync(&a.store).map(|r| r.push_rejected.len());
     let then = (markers(&a, &a_id).len(), audit_rows(&a, "sync skip"));
     let got = inbox_subjects(&hub.node.store, "bob");
-    hub.ct.cancel();
 
     assert!(failed.is_err(), "{failed:?}");
     assert_eq!(cursor_after, cursor);
@@ -1096,7 +976,7 @@ fn a_push_that_fails_leaves_no_marker_and_no_moved_cursor() {
 /// exactly what a spoke reads is sent; one byte more is skipped and marked.
 #[test]
 fn an_event_one_byte_over_the_pull_limit_is_skipped_and_one_at_it_is_sent() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let c = node("spokec");
     join(&hub, &c);
     register(&c.store, "carol");
@@ -1145,7 +1025,6 @@ fn an_event_one_byte_over_the_pull_limit_is_skipped_and_one_at_it_is_sent() {
         .map(|m| m["event_id"].clone())
         .collect();
     let last_known = c.store.agent("last@@hub").is_ok();
-    hub.ct.cancel();
 
     assert_eq!(at.map_err(|e| format!("{e:#}")), Ok(0));
     assert!(at_arrived);
@@ -1159,13 +1038,12 @@ fn an_event_one_byte_over_the_pull_limit_is_skipped_and_one_at_it_is_sent() {
 /// 4.3: a marker names the event and never carries its large field.
 #[test]
 fn a_marker_names_the_event_and_never_carries_its_large_field() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let a = node("spokea");
     let (event_id, size) = spoke_with_an_oversized_event(&hub, &a);
     fed::sync(&a.store).unwrap();
-    hub.ct.cancel();
     let a_id = id_of(&a);
-    let raw: String = Connection::open(a.db())
+    let raw: String = Connection::open(a.db_path())
         .unwrap()
         .query_row(
             "SELECT payload FROM events WHERE kind = 'sync.skipped'",
@@ -1191,7 +1069,7 @@ fn a_marker_names_the_event_and_never_carries_its_large_field() {
         })
     );
     assert_eq!(keys(&p).len(), 9);
-    let (actor,): (String,) = Connection::open(a.db())
+    let (actor,): (String,) = Connection::open(a.db_path())
         .unwrap()
         .query_row(
             "SELECT actor FROM events WHERE kind = 'sync.skipped'",
@@ -1207,7 +1085,7 @@ fn a_marker_names_the_event_and_never_carries_its_large_field() {
 /// the same moment.
 #[test]
 fn stepping_past_the_same_event_again_writes_no_second_marker() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let a = node("spokea");
     spoke_with_an_oversized_event(&hub, &a);
     let hub_id = id_of(&hub.node);
@@ -1219,12 +1097,11 @@ fn stepping_past_the_same_event_again_writes_no_second_marker() {
     let rescanned = fed::sync(&a.store).map(|r| r.push_rejected.len());
     let on_spoke = (markers(&a, &a_id).len(), audit_rows(&a, "sync skip"));
     let relayed = markers(&hub.node, &a_id).len();
-    hub.ct.cancel();
     assert_eq!(rescanned.map_err(|e| format!("{e:#}")), Ok(0));
     assert_eq!(on_spoke, (1, 1));
     assert_eq!(relayed, 1);
 
-    let hub = start_hub();
+    let hub = start_http_hub();
     let c = node("spokec");
     let d = node("spoked");
     hub_with_an_oversized_event(&hub, &c);
@@ -1240,7 +1117,6 @@ fn stepping_past_the_same_event_again_writes_no_second_marker() {
         audit_rows(&hub.node, "sync skip"),
     );
     let seen = [&c, &d].map(|n| markers(n, &hub_id).len());
-    hub.ct.cancel();
     assert_eq!(first.map_err(|e| format!("{e:#}")), Ok(1));
     assert_eq!(second.map_err(|e| format!("{e:#}")), Ok(1));
     assert_eq!(on_hub, (1, 1));
@@ -1252,14 +1128,14 @@ fn stepping_past_the_same_event_again_writes_no_second_marker() {
 /// and the hub holds it once.
 #[test]
 fn a_hub_reset_does_not_report_a_skip_twice() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let a = node("spokea");
     join(&hub, &a);
     register(&hub.node.store, "bob");
     register(&a.store, "alice");
     fed::sync(&a.store).unwrap();
     let backup = hub.node.dir.path().join("backup.db");
-    Connection::open(hub.node.db())
+    Connection::open(hub.node.db_path())
         .unwrap()
         .execute("VACUUM INTO ?1", [backup.to_string_lossy()])
         .unwrap();
@@ -1283,7 +1159,7 @@ fn a_hub_reset_does_not_report_a_skip_twice() {
     }
     std::fs::copy(&backup, dir.path().join(DB_FILE)).unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let hub = serve(Node { dir, store }, None, port, None);
+    let hub = serve_node(Node { dir, store }, HubMode::HttpFederation, port);
     assert_eq!(markers(&hub.node, &a_id).len(), 0, "restored");
 
     let resynced = fed::sync(&a.store).map(|r| (r.hub_reset, r.skipped.len()));
@@ -1291,7 +1167,6 @@ fn a_hub_reset_does_not_report_a_skip_twice() {
     let on_hub = markers(&hub.node, &a_id);
     let got = inbox_subjects(&hub.node.store, "bob");
     let event_on_hub = holds_event(&hub.node, &event_id);
-    hub.ct.cancel();
 
     assert_eq!(resynced.map_err(|e| format!("{e:#}")), Ok((true, 1)));
     assert_eq!(on_spoke, (1, 1));
@@ -1306,7 +1181,7 @@ fn a_hub_reset_does_not_report_a_skip_twice() {
 /// with no rejection.
 #[test]
 fn a_spoke_that_pairs_later_pulls_the_marker_and_not_the_event() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let a = node("spokea");
     let (pushed_id, _) = spoke_with_an_oversized_event(&hub, &a);
     register(&hub.node.store, "huge");
@@ -1326,7 +1201,6 @@ fn a_spoke_that_pairs_later_pulls_the_marker_and_not_the_event() {
     let known =
         ["alice@@spokea", "bob@@hub", "last@@hub"].map(|agent| late.store.agent(agent).is_ok());
     let hub_markers = markers(&hub.node, &hub_id).len();
-    hub.ct.cancel();
 
     let report = report.map_err(|e| format!("{e:#}")).unwrap();
     assert!(
@@ -1351,7 +1225,7 @@ fn a_spoke_that_pairs_later_pulls_the_marker_and_not_the_event() {
 /// repeat only this node's skips and its hub's.
 #[test]
 fn a_directory_marker_from_a_spoke_reaches_a_spoke_without_read_feed_as_a_feed_line_only() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let a = node("spokea");
     let (event_id, size) = spoke_with_an_oversized_event(&hub, &a);
     fed::sync(&a.store).unwrap();
@@ -1362,7 +1236,6 @@ fn a_directory_marker_from_a_spoke_reaches_a_spoke_without_read_feed_as_a_feed_l
     let stored = markers(&plain, &a_id).len();
     let feed = cli(&plain, &["activity", "--kinds", "sync"]);
     let needs = cli(&plain, &["--json", "needs"]);
-    hub.ct.cancel();
 
     assert!(synced.status.success(), "{}", err(&synced));
     assert_eq!(stored, 1);
@@ -1383,7 +1256,7 @@ fn a_directory_marker_from_a_spoke_reaches_a_spoke_without_read_feed_as_a_feed_l
 /// spoke give the hub and another spoke fifty feed lines and no report.
 #[test]
 fn a_spokes_markers_are_not_repeated_by_other_nodes() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let m = node("mallory");
     let b = node("spokeb");
     join(&hub, &m);
@@ -1405,7 +1278,6 @@ fn a_spokes_markers_are_not_repeated_by_other_nodes() {
         v["counts"]["skipped_event"].clone()
     });
     let feed = cli(&b, &["activity", "--kinds", "sync", "--limit", "200"]);
-    hub.ct.cancel();
 
     assert_eq!(pushed.map_err(|e| format!("{e:#}")), Ok(0));
     assert!(synced.status.success(), "{}", err(&synced));
@@ -1427,13 +1299,13 @@ fn a_spokes_markers_are_not_repeated_by_other_nodes() {
 /// make a spoke report as missing an event the spoke has.
 #[test]
 fn a_hubs_marker_for_an_event_this_node_holds_is_not_reported() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let c = node("spokec");
     join(&hub, &c);
     register(&hub.node.store, "bob");
     fed::sync(&c.store).unwrap();
     let hub_id = id_of(&hub.node);
-    let held: String = Connection::open(c.db())
+    let held: String = Connection::open(c.db_path())
         .unwrap()
         .query_row(
             "SELECT event_id FROM events WHERE kind = 'agent.registered' AND node_id = ?1",
@@ -1458,7 +1330,6 @@ fn a_hubs_marker_for_an_event_this_node_holds_is_not_reported() {
         &marker_for("01N0THE1D00000000000000000", &hub_id, "pull"),
     );
     let again = cli(&c, &["sync"]);
-    hub.ct.cancel();
 
     assert!(synced.status.success(), "{}", err(&synced));
     assert_eq!(stored, 1);
@@ -1477,15 +1348,14 @@ fn a_hubs_marker_for_an_event_this_node_holds_is_not_reported() {
 /// exits 0; `--json` carries it in `skipped` and its other keys are unchanged.
 #[test]
 fn another_sync_reports_an_unacknowledged_skip_every_time_and_exits_zero() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let a = node("spokea");
     let (event_id, size) = spoke_with_an_oversized_event(&hub, &a);
     let runs = [0, 1, 2].map(|_| cli(&a, &["sync"]));
     let as_json = cli(&a, &["--json", "sync"]);
     let a_id = id_of(&a);
     let hub_id = id_of(&hub.node);
-    let url = hub.url.clone();
-    hub.ct.cancel();
+    let url = hub.url().to_string();
 
     let want = own_block(&event_id, size);
     for run in &runs {
@@ -1562,11 +1432,10 @@ fn another_sync_reports_an_unacknowledged_skip_every_time_and_exits_zero() {
 /// 4.8: a spoke prints the block for a skip in its hub's log after every sync.
 #[test]
 fn a_spoke_reports_its_hubs_skip_every_time() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let c = node("spokec");
     let (event_id, size) = hub_with_an_oversized_event(&hub, &c);
     let runs = [0, 1].map(|_| cli(&c, &["sync"]));
-    hub.ct.cancel();
     let want = hub_block(&event_id, size, "node hub");
     for run in &runs {
         assert_eq!(run.status.code(), Some(0), "{}", err(run));
@@ -1580,7 +1449,7 @@ fn a_spoke_reports_its_hubs_skip_every_time() {
 /// that spoke for the remedy and to the hub for the acknowledgement.
 #[test]
 fn a_hubs_marker_for_a_relayed_event_sends_the_reader_to_the_events_node() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let s = node("spokes");
     let t = node("spoket");
     join(&hub, &s);
@@ -1594,7 +1463,6 @@ fn a_hubs_marker_for_a_relayed_event_sends_the_reader_to_the_events_node() {
     );
     let on_s = cli(&s, &["sync"]);
     let on_t = cli(&t, &["sync"]);
-    hub.ct.cancel();
     for (run, place) in [(&on_s, "node spoket"), (&on_t, "this node")] {
         assert_eq!(run.status.code(), Some(0), "{}", err(run));
         let text = out(run);
@@ -1609,7 +1477,7 @@ fn a_hubs_marker_for_a_relayed_event_sends_the_reader_to_the_events_node() {
 /// 4.8: at most five skips are printed in full, then a count.
 #[test]
 fn more_than_five_skips_print_five_and_a_count() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let a = node("spokea");
     join(&hub, &a);
     let a_id = id_of(&a);
@@ -1667,7 +1535,6 @@ fn more_than_five_skips_print_five_and_a_count() {
     let as_json = cli(&a, &["--json", "sync"]);
     let needs = cli(&a, &["--json", "needs", "--limit", "200"]);
     let feed = cli(&a, &["activity", "--kinds", "sync", "--limit", "500"]);
-    hub.ct.cancel();
     assert!(
         out(&run).ends_with("\nand 302 more skipped event(s): another needs\n"),
         "{}",
@@ -1701,7 +1568,7 @@ fn more_than_five_skips_print_five_and_a_count() {
 /// every hold under the directory it is run in.
 #[test]
 fn a_hubs_marker_puts_no_text_of_its_own_into_a_printed_command() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let c = node("spokec");
     join(&hub, &c);
     let c_id = id_of(&c);
@@ -1715,7 +1582,6 @@ fn a_hubs_marker_puts_no_text_of_its_own_into_a_printed_command() {
     let run = cli(&c, &["sync"]);
     let needs = cli(&c, &["needs"]);
     let as_json = cli(&c, &["--json", "sync"]);
-    hub.ct.cancel();
     assert_eq!(run.status.code(), Some(0), "{}", err(&run));
     let text = out(&run);
 
@@ -1799,7 +1665,7 @@ fn a_hubs_marker_puts_no_text_of_its_own_into_a_printed_command() {
 /// else, however many syncs have run since; `--kinds federation` lists none of them.
 #[test]
 fn kinds_sync_lists_only_sync_events() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let a = node("spokea");
     join(&hub, &a);
     register(&hub.node.store, "bob");
@@ -1820,14 +1686,13 @@ fn kinds_sync_lists_only_sync_events() {
         fed::sync(&a.store).unwrap();
     }
     let records = count(
-        &a.db(),
+        &a.db_path(),
         "SELECT count(*) FROM events WHERE kind LIKE 'peer.%'",
     );
     let sync = cli(&a, &["activity", "--kinds", "sync"]);
     let as_json = cli(&a, &["--json", "activity", "--kinds", "sync"]);
     let federation = cli(&a, &["activity", "--kinds", "federation", "--limit", "500"]);
     let unknown = cli(&a, &["activity", "--kinds", "nosuch"]);
-    hub.ct.cancel();
 
     assert!(records > 50, "{records}");
     let lines: Vec<String> = out(&sync).lines().map(str::to_string).collect();
@@ -1933,7 +1798,7 @@ fn node_with_a_skip() -> Node {
 fn acknowledgements(n: &Node) -> (i64, i64) {
     (
         count(
-            &n.db(),
+            &n.db_path(),
             "SELECT count(*) FROM events WHERE kind = 'sync.skip_acked'",
         ),
         audit_rows(n, "sync ack"),
@@ -2067,7 +1932,7 @@ fn ack_takes_exactly_one_id_and_has_no_all() {
 /// already acknowledged is reported and nothing is written.
 #[test]
 fn ack_refuses_before_asking_for_an_unknown_id_and_on_a_node_that_is_not_the_holder() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let c = node("spokec");
     join(&hub, &c);
     let hub_id = id_of(&hub.node);
@@ -2078,7 +1943,6 @@ fn ack_refuses_before_asking_for_an_unknown_id_and_on_a_node_that_is_not_the_hol
         &marker_for("01HB5J0G000000000000000000", &hub_id, "pull"),
     );
     fed::sync(&c.store).unwrap();
-    hub.ct.cancel();
     assert_eq!(c.store.unacknowledged_skips().unwrap().len(), 1);
 
     let unknown = cli(&c, &["sync", "ack", "01NOSUCH", "--owner"]);
@@ -2131,7 +1995,7 @@ fn ack_refuses_before_asking_for_an_unknown_id_and_on_a_node_that_is_not_the_hol
     n.store
         .acknowledge_skip("01SK1PPED00000000000000000")
         .unwrap();
-    let at: i64 = Connection::open(n.db())
+    let at: i64 = Connection::open(n.db_path())
         .unwrap()
         .query_row(
             "SELECT ts FROM events WHERE kind = 'sync.skip_acked'",
@@ -2157,7 +2021,7 @@ fn ack_refuses_before_asking_for_an_unknown_id_and_on_a_node_that_is_not_the_hol
 
 #[cfg(unix)]
 fn rows_of(n: &Node, sql: &str) -> Vec<String> {
-    let c = Connection::open(n.db()).unwrap();
+    let c = Connection::open(n.db_path()).unwrap();
     let mut stmt = c.prepare(sql).unwrap();
     let columns = stmt.column_count();
     let rows = stmt
@@ -2177,11 +2041,10 @@ fn rows_of(n: &Node, sql: &str) -> Vec<String> {
 #[cfg(unix)]
 #[test]
 fn acknowledging_deletes_nothing_and_writes_one_event_and_one_audit_row() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let a = node("spokea");
     let (event_id, size) = spoke_with_an_oversized_event(&hub, &a);
     fed::sync(&a.store).unwrap();
-    hub.ct.cancel();
     // Every column of every row, the 9 MiB payload included, byte for byte.
     let events = "SELECT seq, event_id, node_id, ts, actor, kind, payload, prev_id, sig \
                   FROM events ORDER BY seq";
@@ -2218,7 +2081,7 @@ fn acknowledging_deletes_nothing_and_writes_one_event_and_one_audit_row() {
         [json!({ "event_id": event_id, "route": "directory", "route_nodes": [] })]
     );
     let (actor, operation, outcome, agent, detail): (String, String, String, String, String) =
-        Connection::open(a.db())
+        Connection::open(a.db_path())
             .unwrap()
             .query_row(
                 "SELECT (SELECT actor FROM events WHERE kind = 'sync.skip_acked'),
@@ -2247,7 +2110,7 @@ fn acknowledging_deletes_nothing_and_writes_one_event_and_one_audit_row() {
 #[test]
 fn after_an_acknowledgement_sync_is_quiet_and_the_skip_stays_readable() {
     // A spoke that holds the event.
-    let hub = start_hub();
+    let hub = start_http_hub();
     let a = node("spokea");
     let (event_id, size) = spoke_with_an_oversized_event(&hub, &a);
     let loud = cli(&a, &["sync"]);
@@ -2256,7 +2119,6 @@ fn after_an_acknowledgement_sync_is_quiet_and_the_skip_stays_readable() {
     let needs = cli(&a, &["needs", "--brief"]);
     let feed = cli(&a, &["activity", "--kinds", "sync"]);
     let hub_feed = cli(&hub.node, &["activity", "--kinds", "sync"]);
-    hub.ct.cancel();
     assert!(out(&loud).contains("\nskipped "), "{}", out(&loud));
     assert_eq!(code, Some(0), "{shown}");
     assert_eq!(quiet.status.code(), Some(0));
@@ -2287,7 +2149,7 @@ fn after_an_acknowledgement_sync_is_quiet_and_the_skip_stays_readable() {
     );
 
     // A hub that holds the event, and a spoke that reported the hub's skip.
-    let hub = start_hub();
+    let hub = start_http_hub();
     let c = node("spokec");
     let (event_id, size) = hub_with_an_oversized_event(&hub, &c);
     let loud = cli(&c, &["sync"]);
@@ -2299,7 +2161,6 @@ fn after_an_acknowledgement_sync_is_quiet_and_the_skip_stays_readable() {
     let needs = cli(&c, &["needs", "--brief"]);
     let feed = cli(&c, &["activity", "--kinds", "sync"]);
     let hub_feed = cli(&hub.node, &["activity", "--kinds", "sync"]);
-    hub.ct.cancel();
     assert!(out(&loud).contains("\nskipped "), "{}", out(&loud));
     assert_eq!(out(&hub_loud), "needs you: 1 (1 skipped event)\n");
     assert_eq!(code, Some(0), "{shown}");
@@ -2341,7 +2202,7 @@ fn after_an_acknowledgement_sync_is_quiet_and_the_skip_stays_readable() {
 /// 4.9: the audit rows of a skip and of an acknowledgement, as `another audit` prints them.
 #[test]
 fn the_audit_rows_have_the_stated_text() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let a = node("spokea");
     let (pushed_id, pushed_size) = spoke_with_an_oversized_event(&hub, &a);
     register(&hub.node.store, "huge");
@@ -2352,7 +2213,6 @@ fn the_audit_rows_have_the_stated_text() {
     let hub_audit = out(&cli(&hub.node, &["audit"]));
     let a_id = id_of(&a);
     let hub_id = id_of(&hub.node);
-    hub.ct.cancel();
 
     let skip_row = format!(
         "  skipped node:{a_id} {:<32} event {pushed_id} (agent.registered, {pushed_size} bytes, \
@@ -2390,7 +2250,7 @@ fn the_audit_rows_have_the_stated_text() {
 /// older spoke, whose sync then succeeds.
 #[test]
 fn a_skip_with_one_side_on_limits_before_d99() {
-    let hub = start_hub_with(Some(Limits::BEFORE_D99));
+    let hub = start_fed_hub_with(Limits::BEFORE_D99);
     let a = node("spokea");
     let b = node("spokeb");
     let (event_id, _) = spoke_with_an_oversized_event(&hub, &a);
@@ -2401,7 +2261,6 @@ fn a_skip_with_one_side_on_limits_before_d99() {
     let on_hub = markers(&hub.node, &a_id);
     let on_b = markers(&b, &a_id);
     let got = inbox_subjects(&hub.node.store, "bob");
-    hub.ct.cancel();
     assert_eq!(pushed.map_err(|e| format!("{e:#}")), Ok(0));
     assert_eq!(pulled.map_err(|e| format!("{e:#}")), Ok(0));
     assert_eq!(on_hub.len(), 1);
@@ -2409,7 +2268,7 @@ fn a_skip_with_one_side_on_limits_before_d99() {
     assert_eq!(on_b, on_hub);
     assert_eq!(got, ["after", "before"]);
 
-    let hub = start_hub();
+    let hub = start_http_hub();
     let c = node("spokec");
     let old = Limits::BEFORE_D99;
     join(&hub, &c);
@@ -2436,7 +2295,6 @@ fn a_skip_with_one_side_on_limits_before_d99() {
     let hub_id = id_of(&hub.node);
     let on_c = markers(&c, &hub_id);
     let got = inbox_subjects(&c.store, "carol");
-    hub.ct.cancel();
     assert_eq!(pulled.map_err(|e| format!("{e:#}")), Ok(0));
     assert_eq!(on_c.len(), 1);
     assert_eq!(on_c[0]["event_id"], json!(event_id));
@@ -2456,7 +2314,7 @@ struct Relayed {
 /// Spoke A writes thirty messages to an agent on spoke C, large and small in turn, and
 /// they travel A to hub to C under `limits`.
 fn relay_through_the_hub(limits: Limits) -> Relayed {
-    let hub = start_hub_with(Some(limits));
+    let hub = start_fed_hub_with(limits);
     let a = node("spokea");
     let c = node("spokec");
     join(&hub, &a);
@@ -2510,7 +2368,7 @@ fn relay_through_the_hub(limits: Limits) -> Relayed {
     assert_eq!(
         c.store.push_cursor(&hub_id).unwrap().1,
         count(
-            &hub.node.db(),
+            &hub.node.db_path(),
             &format!("SELECT max(seq) FROM events WHERE node_id != '{c_id}'")
         )
     );
@@ -2518,7 +2376,7 @@ fn relay_through_the_hub(limits: Limits) -> Relayed {
         inbox_subjects(&c.store, "carol"),
         (0..30).map(|i| format!("m{i:02}")).collect::<Vec<_>>()
     );
-    let out = Relayed {
+    Relayed {
         on_a: stored_from(&a, &a_id)
             .into_iter()
             .filter(|k| !k.starts_with("peer."))
@@ -2526,9 +2384,7 @@ fn relay_through_the_hub(limits: Limits) -> Relayed {
         on_hub: stored_from(&hub.node, &a_id),
         on_c: stored_from(&c, &a_id),
         trips: (after.0 - before.0, after.1 - before.1),
-    };
-    hub.ct.cancel();
-    out
+    }
 }
 
 /// Ordering and cursors do not depend on how the events are cut into batches and pages:
@@ -2569,7 +2425,7 @@ fn many_batches_and_pages_keep_the_order_of_one_through_a_relay() {
 /// push that names none is refused before its body is looked at (the next test).
 #[test]
 fn a_body_over_a_routes_limit_is_refused() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let a = node("spokea");
     join(&hub, &a);
     let agent = http();
@@ -2587,7 +2443,7 @@ fn a_body_over_a_routes_limit_is_refused() {
     let post = |path: &str, bytes: usize| -> Option<u16> {
         status(
             agent
-                .post(&format!("{}{path}", hub.url))
+                .post(&format!("{}{path}", hub.url()))
                 .header("content-type", "application/json")
                 .header("x-another-node", a.store.node_id())
                 .send(&vec![b' '; bytes][..]),
@@ -2599,7 +2455,7 @@ fn a_body_over_a_routes_limit_is_refused() {
     // Without a declared length the hub stops reading at the limit.
     let streamed = status(
         agent
-            .post(&format!("{}/fed/push", hub.url))
+            .post(&format!("{}/fed/push", hub.url()))
             .header("content-type", "application/json")
             .header("x-another-node", a.store.node_id())
             .send(ureq::SendBody::from_reader(
@@ -2614,7 +2470,7 @@ fn a_body_over_a_routes_limit_is_refused() {
         .as_millis() as i64;
     let signed = status(
         agent
-            .post(&format!("{}/fed/push", hub.url))
+            .post(&format!("{}/fed/push", hub.url()))
             .header("x-another-node", a.store.node_id())
             .header("x-another-time", time.to_string())
             .header(
@@ -2625,7 +2481,6 @@ fn a_body_over_a_routes_limit_is_refused() {
     );
     let pair_over = post("/fed/pair", fed::PAIR_BODY_LIMIT_BYTES + 1);
     let pair_at = post("/fed/pair", fed::PAIR_BODY_LIMIT_BYTES);
-    hub.ct.cancel();
     for refused in [over, streamed, signed, pair_over] {
         assert!(matches!(refused, None | Some(413)), "{refused:?}");
     }
@@ -2644,7 +2499,7 @@ fn a_body_over_a_routes_limit_is_refused() {
 /// for the body.
 fn push_head_only(hub: &Hub, headers: &[(&str, String)]) -> Option<u16> {
     use std::io::Write;
-    let addr = hub.url.strip_prefix("http://").unwrap();
+    let addr = hub.url().strip_prefix("http://").unwrap();
     let mut stream = std::net::TcpStream::connect(addr).unwrap();
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(2)))
@@ -2672,7 +2527,7 @@ fn push_head_only(hub: &Hub, headers: &[(&str, String)]) -> Option<u16> {
 /// checked with the signature, after the body.
 #[test]
 fn a_push_that_names_no_paired_spoke_is_refused_before_its_body_is_read() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let a = node("spokea");
     let b = node("spokeb");
     join(&hub, &a);
@@ -2695,10 +2550,9 @@ fn a_push_that_names_no_paired_spoke_is_refused_before_its_body_is_read() {
     let paired = push_head_only(&hub, &headers(a.store.node_id(), now));
     let paired_stale = push_head_only(&hub, &headers(a.store.node_id(), now - 3_600_000));
     let denied = count(
-        &hub.node.db(),
+        &hub.node.db_path(),
         "SELECT count(*) FROM audit_log WHERE operation = 'POST /fed/push' AND outcome = 'denied'",
     );
-    hub.ct.cancel();
     assert_eq!(none, Some(401));
     assert_eq!(unknown, Some(401));
     assert_eq!(revoked, Some(401));
@@ -2711,10 +2565,10 @@ fn a_push_that_names_no_paired_spoke_is_refused_before_its_body_is_read() {
 /// 300 KiB are refused together and delivered one at a time.
 #[test]
 fn a_refused_batch_of_two_is_sent_one_event_at_a_time() {
-    let hub = start_hub_with(Some(Limits {
+    let hub = start_fed_hub_with(Limits {
         push_body: 300 * 1024,
         ..Limits::BEFORE_D99
-    }));
+    });
     let a = node("spokea");
     join(&hub, &a);
     register(&hub.node.store, "bob");
@@ -2733,7 +2587,6 @@ fn a_refused_batch_of_two_is_sent_one_event_at_a_time() {
     let pushed = fed::sync(&a.store).map(|r| r.pushed);
     let trips = round_trips(&hub).0 - before;
     let bob = inbox_subjects(&hub.node.store, "bob");
-    hub.ct.cancel();
     assert_eq!(pushed.map_err(|e| format!("{e:#}")), Ok(2));
     assert_eq!(bob, ["one", "two"]);
     assert_eq!(trips, 2);
@@ -2745,7 +2598,7 @@ fn a_refused_batch_of_two_is_sent_one_event_at_a_time() {
 /// cannot read one asks for half as many events.
 #[test]
 fn a_new_spoke_syncs_with_a_hub_on_a_build_before_d99() {
-    let hub = start_hub_with(Some(Limits::BEFORE_D99));
+    let hub = start_fed_hub_with(Limits::BEFORE_D99);
     let a = node("spokea");
     join(&hub, &a);
     register(&hub.node.store, "bob");
@@ -2804,7 +2657,6 @@ fn a_new_spoke_syncs_with_a_hub_on_a_build_before_d99() {
         .into_iter()
         .filter(|k| k.starts_with("page "))
         .collect();
-    hub.ct.cancel();
 
     assert_eq!(pushed.map_err(|e| format!("{e:#}")), Ok(9));
     assert_eq!(got.len(), 9);
@@ -2828,14 +2680,14 @@ fn one_event_over_the_other_sides_limit_is_reported_not_retried_forever() {
         push_body: 100 * 1024,
         ..Limits::BEFORE_D99
     };
-    let hub = start_hub_with(Some(tiny));
+    let hub = start_fed_hub_with(tiny);
     let a = node("spokea");
     join(&hub, &a);
     register(&hub.node.store, "bob");
     register(&a.store, "alice");
     fed::sync(&a.store).unwrap();
     send(&a.store, "alice", "bob@@hub", "one", "x".repeat(BODY));
-    let event_id: String = Connection::open(a.db())
+    let event_id: String = Connection::open(a.db_path())
         .unwrap()
         .query_row(
             "SELECT event_id FROM events WHERE kind = 'message.sent'",
@@ -2862,19 +2714,18 @@ fn one_event_over_the_other_sides_limit_is_reported_not_retried_forever() {
     );
     let cursor = c.store.push_cursor(hub.node.store.node_id()).unwrap().1;
     let pull = format!("{:#}", fed::sync_with(&c.store, &deaf).unwrap_err());
-    hub.ct.cancel();
 
     // The hub answers 413 without reading the body and closes. The spoke sees the answer,
     // or (on Linux, usually) the closed connection; each has its message.
     let refused = format!(
         "the hub at {} refused event {event_id} (message.sent) as too large: it alone makes \
          a push of ",
-        hub.url
+        hub.url()
     );
     let dropped = format!(
         "the connection to the hub at {} failed while event {event_id} (message.sent) was \
          sent alone in a push of ",
-        hub.url
+        hub.url()
     );
     if push.starts_with(&refused) {
         assert!(
@@ -2904,7 +2755,7 @@ fn one_event_over_the_other_sides_limit_is_reported_not_retried_forever() {
              not help; the hub runs an older build or holds an event over the size limit; a \
              hub on this build or later steps past such an event and reports it, so update \
              the hub (the pull response is larger than the 102400 bytes this node reads)",
-            hub.url
+            hub.url()
         )
     );
 }
@@ -2915,7 +2766,7 @@ fn one_event_over_the_other_sides_limit_is_reported_not_retried_forever() {
 #[test]
 fn an_older_spoke_syncs_with_a_hub_on_this_build() {
     let old = Limits::BEFORE_D99;
-    let hub = start_hub();
+    let hub = start_http_hub();
     let a = node("spokea");
     join(&hub, &a);
     register(&hub.node.store, "bob");
@@ -2944,7 +2795,6 @@ fn an_older_spoke_syncs_with_a_hub_on_this_build() {
     let trips = round_trips(&hub);
     let bob = inbox_subjects(&hub.node.store, "bob").len();
     let alice = inbox_subjects(&a.store, "alice").len();
-    hub.ct.cancel();
     assert_eq!(report.map_err(|e| format!("{e:#}")), Ok((9, 45)));
     assert_eq!((bob, alice), (9, 45));
     // The nine went in one request, as the older spoke sends them.
@@ -2954,7 +2804,7 @@ fn an_older_spoke_syncs_with_a_hub_on_this_build() {
 /// Requests the hub answers while 2,000 small messages travel from spoke A through the hub
 /// to spoke C, under `limits` on all three: (pushes by A, pulls by C).
 fn trips_for_two_thousand(limits: Limits) -> (i64, i64) {
-    let hub = start_hub_with(Some(limits));
+    let hub = start_fed_hub_with(limits);
     let a = node("spokea");
     let c = node("spokec");
     join(&hub, &a);
@@ -2978,7 +2828,6 @@ fn trips_for_two_thousand(limits: Limits) -> (i64, i64) {
     let mid = round_trips(&hub);
     let pulled = fed::sync_with(&c.store, &limits).unwrap();
     let end = round_trips(&hub);
-    hub.ct.cancel();
     assert_eq!((pushed.pushed, pulled.applied), (2000, 2000));
     (mid.0 - start.0, end.1 - mid.1)
 }
@@ -3047,7 +2896,7 @@ fn run_json(n: &Node, cwd: &std::path::Path, args: &[&str]) -> Value {
 /// and by release, and the id `another resources` prints in brackets is what works.
 #[test]
 fn kind_and_name_is_refused_for_another_nodes_resource_and_its_id_is_taken() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let s = node("spokes");
     join(&hub, &s);
     let (resource_id, _listener) = hub_resource(&hub);
@@ -3055,8 +2904,8 @@ fn kind_and_name_is_refused_for_another_nodes_resource_and_its_id_is_taken() {
     fed::sync(&s.store).unwrap();
     let state = |n: &Node| {
         (
-            count(&n.db(), "SELECT count(*) FROM events"),
-            count(&n.db(), "SELECT count(*) FROM resource_leases"),
+            count(&n.db_path(), "SELECT count(*) FROM events"),
+            count(&n.db_path(), "SELECT count(*) FROM resource_leases"),
         )
     };
     let before = state(&s);
@@ -3082,7 +2931,6 @@ fn kind_and_name_is_refused_for_another_nodes_resource_and_its_id_is_taken() {
         s.dir.path(),
         &["borrow", &resource_id, "--agent", "wordy"],
     );
-    hub.ct.cancel();
     assert_eq!(borrowed["outcome"], json!("borrowed"));
     assert_eq!(borrowed["lease"]["role"], json!("borrower"));
 }
@@ -3095,7 +2943,7 @@ fn kind_and_name_is_refused_for_another_nodes_resource_and_its_id_is_taken() {
 /// before it registered again is not delivered (asserted, so the loss stays documented).
 #[test]
 fn the_steps_for_a_skipped_first_registration_restore_all_but_the_mail() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let s = node("spokes");
     join(&hub, &s);
     register(&hub.node.store, "bob");
@@ -3176,7 +3024,7 @@ fn the_steps_for_a_skipped_first_registration_restore_all_but_the_mail() {
     );
 
     let wordy = s.store.agent("wordy").unwrap().agent_id;
-    let own_resource_id: String = Connection::open(s.db())
+    let own_resource_id: String = Connection::open(s.db_path())
         .unwrap()
         .query_row(
             "SELECT resource_id FROM resources WHERE name = 'ownsvc'",
@@ -3185,7 +3033,7 @@ fn the_steps_for_a_skipped_first_registration_restore_all_but_the_mail() {
         )
         .unwrap();
     let hold_id = |n: &Node| -> Vec<(String, i64, Option<String>)> {
-        let c = Connection::open(n.db()).unwrap();
+        let c = Connection::open(n.db_path()).unwrap();
         let mut stmt = c
             .prepare(
                 "SELECT hold_id, exclusive, reason FROM holds
@@ -3198,7 +3046,7 @@ fn the_steps_for_a_skipped_first_registration_restore_all_but_the_mail() {
         rows.map(|r| r.unwrap()).collect()
     };
     let leases = |n: &Node| -> Vec<(String, String)> {
-        let c = Connection::open(n.db()).unwrap();
+        let c = Connection::open(n.db_path()).unwrap();
         let mut stmt = c
             .prepare(
                 "SELECT resource_id, role FROM resource_leases
@@ -3211,7 +3059,7 @@ fn the_steps_for_a_skipped_first_registration_restore_all_but_the_mail() {
         rows.map(|r| r.unwrap()).collect()
     };
     let on_hub = |column: &str| -> Option<String> {
-        Connection::open(hub.node.db())
+        Connection::open(hub.node.db_path())
             .unwrap()
             .query_row(
                 &format!("SELECT {column} FROM agents WHERE agent_id = ?1"),
@@ -3307,6 +3155,5 @@ fn the_steps_for_a_skipped_first_registration_restore_all_but_the_mail() {
     );
     run_json(&s, &elsewhere, &["sync"]);
     let got = inbox_subjects(&hub.node.store, "bob");
-    hub.ct.cancel();
     assert_eq!(got, ["late"]);
 }

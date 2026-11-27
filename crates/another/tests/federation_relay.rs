@@ -39,7 +39,7 @@ fn refused(spoke: &Node, fragment: &str) -> String {
 /// A hub with two spokes paired at its real address: `vic`, whose traffic the relay will
 /// sit on, and `late`, another node whose events reach `vic` through the hub.
 fn hub_and_two() -> (Hub, Node, Node) {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let vic = node("vic");
     let late = node("late");
     join(&hub, &vic);
@@ -49,7 +49,7 @@ fn hub_and_two() -> (Hub, Node, Node) {
 
 #[test]
 fn an_invite_with_an_edited_address_is_refused_before_sending() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let vic = node("vic");
     let relay = Relay::start(hub.url());
     let code = hub
@@ -86,7 +86,7 @@ fn an_invite_with_an_edited_address_is_refused_before_sending() {
 
 #[test]
 fn a_relay_that_answers_a_push_itself_cannot_report_it_pushed() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let vic = node("vic");
     join(&hub, &vic);
     register(&vic.store, "v1");
@@ -191,7 +191,7 @@ fn a_relay_cannot_reorder_events_in_a_pull() {
 
 #[test]
 fn a_relay_cannot_add_a_node_with_its_own_key() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let vic = node("vic");
     let fourth = node("fourth");
     join(&hub, &vic);
@@ -356,7 +356,7 @@ fn an_earlier_request_sent_in_place_of_this_one_is_refused() {
 
 #[test]
 fn answers_swapped_between_two_spokes_are_refused() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let alpha = node("alpha");
     let beta = node("beta");
     join(&hub, &alpha);
@@ -408,7 +408,7 @@ fn answers_swapped_between_two_spokes_are_refused() {
 
 #[test]
 fn a_relay_that_removes_the_nonce_fails_the_sync() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let vic = node("vic");
     join(&hub, &vic);
     register(&vic.store, "v1");
@@ -443,7 +443,7 @@ fn a_relay_that_removes_the_nonce_fails_the_sync() {
 
 #[test]
 fn a_relay_that_changes_the_nonce_fails_the_sync() {
-    let hub = start_hub();
+    let hub = start_fed_hub();
     let vic = node("vic");
     join(&hub, &vic);
     register(&vic.store, "v1");
@@ -478,7 +478,7 @@ fn a_relay_cannot_hide_a_reset() {
     // The hub restored from that copy, behind the relay.
     let restored = Store::open(restored_home.path()).unwrap();
     assert_eq!(restored.node_id(), hub.id());
-    let restored_hub = serve(fed::router(restored));
+    let restored_hub = serve_store(restored, HubMode::FedRoutes);
     let relay = Relay::start(&restored_hub.url);
     point_at(&vic, relay.url());
     let saw_reset = Arc::new(AtomicBool::new(false));

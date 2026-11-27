@@ -7,16 +7,17 @@
 //! the spoke's clock starts days in the past and catches up to now, so its backlog
 //! carries genuinely old timestamps.
 
+#[path = "common/fed_hub.rs"]
+mod fed_hub;
+
 use std::collections::HashSet;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use another::fed;
-use another::serve::{http_router, HttpOptions};
 use another_core::*;
-use tokio_util::sync::CancellationToken;
+use fed_hub::{serve_store_on, HubMode, Served};
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
@@ -59,8 +60,7 @@ struct Hub {
     home: PathBuf,
     port: u16,
     store: Store,
-    ct: CancellationToken,
-    rt: Option<tokio::runtime::Runtime>,
+    served: Option<Served>,
 }
 
 impl Hub {
@@ -72,8 +72,7 @@ impl Hub {
             home,
             port: 0,
             store,
-            ct: CancellationToken::new(),
-            rt: None,
+            served: None,
         };
         hub.serve();
         hub
@@ -84,41 +83,20 @@ impl Hub {
     }
 
     fn serve(&mut self) {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
-        let listener = rt
-            .block_on(tokio::net::TcpListener::bind(("127.0.0.1", self.port)))
-            .unwrap();
-        self.port = listener.local_addr().unwrap().port();
-        let ct = CancellationToken::new();
-        let opts = HttpOptions {
-            federation: true,
-            bound_port: self.port,
-            ..Default::default()
-        };
-        let app = http_router(self.store.clone(), ct.clone(), &opts);
-        let stop = ct.clone();
-        rt.spawn(async move {
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .with_graceful_shutdown(async move { stop.cancelled_owned().await })
-            .await
-            .unwrap();
-        });
-        self.ct = ct;
-        self.rt = Some(rt);
+        let served = serve_store_on(
+            self.store.clone(),
+            HubMode::HttpFederation,
+            self.port,
+            |app| app,
+        );
+        self.port = served.port;
+        self.served = Some(served);
     }
 
     /// Stop the server and close the database, as a process exit would.
     fn stop(&mut self) {
-        self.ct.cancel();
-        if let Some(rt) = self.rt.take() {
-            rt.shutdown_timeout(std::time::Duration::from_secs(5));
+        if let Some(served) = self.served.take() {
+            served.stop();
         }
     }
 

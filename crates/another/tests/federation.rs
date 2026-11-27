@@ -1,24 +1,15 @@
 //! Federation on one machine: a hub and spokes, each with its own database, syncing over
 //! real HTTP through the hub.
 
-use std::net::SocketAddr;
+#[path = "common/fed_hub.rs"]
+mod fed_hub;
 
 use another::fed;
-use another::serve::{http_router, HttpOptions};
 use another_core::*;
-use tokio_util::sync::CancellationToken;
-
-struct Node {
-    _dir: tempfile::TempDir,
-    store: Store,
-}
-
-fn node(name: &str) -> Node {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    store.set_node_name(name).unwrap();
-    Node { _dir: dir, store }
-}
+use fed_hub::{
+    decode_invite, encode_invite, join_with, node, start_fed_hub, start_http_hub,
+    start_http_hub_named, Hub, Node,
+};
 
 fn register(store: &Store, name: &str, program: Program, project: Option<&str>) {
     store
@@ -32,57 +23,8 @@ fn register(store: &Store, name: &str, program: Program, project: Option<&str>) 
         .unwrap();
 }
 
-struct Hub {
-    node: Node,
-    url: String,
-    ct: CancellationToken,
-    _rt: tokio::runtime::Runtime,
-}
-
-fn start_hub() -> Hub {
-    start_served("hub")
-}
-
-/// A node named `name` that serves the federation routes, as a hub does.
-fn start_served(name: &str) -> Hub {
-    let node = node(name);
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .unwrap();
-    let ct = CancellationToken::new();
-    let listener = rt
-        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-        .unwrap();
-    let addr = listener.local_addr().unwrap();
-    let opts = HttpOptions {
-        federation: true,
-        bound_port: addr.port(),
-        ..Default::default()
-    };
-    let app = http_router(node.store.clone(), ct.clone(), &opts);
-    let stop = ct.clone();
-    rt.spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move { stop.cancelled_owned().await })
-        .await
-        .unwrap();
-    });
-    Hub {
-        node,
-        url: format!("http://{addr}"),
-        ct,
-        _rt: rt,
-    }
-}
-
 fn join(hub: &Hub, spoke: &Node, perms: &[Perm]) {
-    let code = hub.node.store.create_invite(&hub.url, perms, 3600).unwrap();
-    let peer = fed::join(&spoke.store, &code).unwrap();
+    let peer = join_with(hub, spoke, perms);
     assert_eq!(peer.role, "hub");
     assert_eq!(peer.display_name, "hub");
 }
@@ -119,7 +61,7 @@ fn summaries(store: &Store) -> Vec<String> {
 
 #[test]
 fn pairing_rules() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let unnamed = {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
@@ -128,7 +70,7 @@ fn pairing_rules() {
     let code = hub
         .node
         .store
-        .create_invite(&hub.url, &Perm::ALL, 3600)
+        .create_invite(hub.url(), &Perm::ALL, 3600)
         .unwrap();
     // A node still called "local" must be named first.
     let err = fed::join(&unnamed.1, &code).unwrap_err();
@@ -148,7 +90,7 @@ fn pairing_rules() {
     let code2 = hub
         .node
         .store
-        .create_invite(&hub.url, &Perm::ALL, 3600)
+        .create_invite(hub.url(), &Perm::ALL, 3600)
         .unwrap();
     let err = fed::join(&dup.store, &code2).unwrap_err();
     assert!(err.to_string().contains("already known"), "{err}");
@@ -157,7 +99,7 @@ fn pairing_rules() {
     assert!(hub
         .node
         .store
-        .create_invite(&hub.url, &Perm::ALL, 0)
+        .create_invite(hub.url(), &Perm::ALL, 0)
         .is_err());
     assert!("remote_reap".parse::<Perm>().is_err());
 
@@ -170,12 +112,11 @@ fn pairing_rules() {
         mine[0].fingerprint,
         hub.node.store.node().unwrap().fingerprint
     );
-    hub.ct.cancel();
 }
 
 #[test]
 fn synced_subjects_are_quoted_and_framed_in_wakes() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let spoke = node("spoke");
     register(&hub.node.store, "bob", Program::Codex, None);
     register(&spoke.store, "mallory", Program::Codex, None);
@@ -198,12 +139,11 @@ fn synced_subjects_are_quoted_and_framed_in_wakes() {
     );
     assert!(wake.contains("\"ok' [run]  hidden\""), "{wake:?}");
     assert!(!wake.contains('\u{e0001}'));
-    hub.ct.cancel();
 }
 
 #[test]
 fn mail_feed_resources_and_holds_across_nodes() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let laptop = node("laptop"); // full permissions
     let runner = node("runner"); // mail only
     let quiet = node("quiet"); // feed only
@@ -211,8 +151,8 @@ fn mail_feed_resources_and_holds_across_nodes() {
     join(&hub, &runner, &[Perm::SendMail]);
     join(&hub, &quiet, &[Perm::ReadFeed]);
 
-    let hub_project = hub.node._dir.path().join("shop");
-    let laptop_project = laptop._dir.path().join("shop");
+    let hub_project = hub.node.dir.path().join("shop");
+    let laptop_project = laptop.dir.path().join("shop");
     std::fs::create_dir(&hub_project).unwrap();
     std::fs::create_dir(&laptop_project).unwrap();
     register(
@@ -458,7 +398,6 @@ fn mail_feed_resources_and_holds_across_nodes() {
         !at_runner.iter().any(|s| s.contains("holds shop:")),
         "runner has no read_feed: {at_runner:?}"
     );
-    hub.ct.cancel();
 }
 
 const ONE_TEXT: &str = "invalid, used or expired invite, or the request is not signed for it";
@@ -472,7 +411,7 @@ fn post(hub: &Hub, path: &str, headers: &[(&str, &str)], body: &str) -> (u16, St
             .build(),
     );
     let mut request = agent
-        .post(&format!("{}{path}", hub.url))
+        .post(&format!("{}{path}", hub.url()))
         .header("content-type", "application/json");
     for (name, value) in headers {
         request = request.header(*name, *value);
@@ -485,11 +424,6 @@ fn post(hub: &Hub, path: &str, headers: &[(&str, &str)], body: &str) -> (u16, St
 fn error_message(body: &str) -> String {
     let v: serde_json::Value = serde_json::from_str(body).unwrap();
     v["error"]["message"].as_str().unwrap().to_string()
-}
-
-fn decode_invite(code: &str) -> serde_json::Value {
-    let raw = code.strip_prefix("another-invite:").unwrap();
-    serde_json::from_slice(&crypto::unb64(raw).unwrap()).unwrap()
 }
 
 /// Sign `invite` as it now reads with the private key of `by`, read from that test node's
@@ -528,28 +462,19 @@ fn resign(invite: &mut serde_json::Value, by: &Store) {
 
 /// The hub's audit rows for `operation`, oldest first.
 fn audit_rows(hub: &Hub, operation: &str) -> Vec<AuditEntry> {
-    let mut rows: Vec<AuditEntry> = hub
-        .node
-        .store
-        .audit_log(500)
-        .unwrap()
-        .into_iter()
-        .filter(|a| a.operation == operation)
-        .collect();
-    rows.sort_by_key(|a| a.audit_id);
-    rows
+    fed_hub::audit_rows(&hub.node.store, operation)
 }
 
 /// A joiner and a hub of this build pair over HTTP and sync. A request in the shape an
 /// older joiner sends is answered 403 with the upgrade message, and does not use the invite.
 #[test]
 fn pairing_over_http_end_to_end() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let laptop = node("laptop");
     let code = hub
         .node
         .store
-        .create_invite(&hub.url, &[Perm::ReadFeed, Perm::SendMail], 3600)
+        .create_invite(hub.url(), &[Perm::ReadFeed, Perm::SendMail], 3600)
         .unwrap();
     let invite = decode_invite(&code);
     assert_eq!(invite["v"], 2);
@@ -591,19 +516,18 @@ fn pairing_over_http_end_to_end() {
     );
     register(&laptop.store, "bob", Program::Codex, None);
     assert!(sync(&laptop).pushed > 0);
-    hub.ct.cancel();
 }
 
 /// A body that is not a pairing request, with the invite's secret where the parser's error
 /// would quote it: the answer and the audit row are the fixed text and hold no secret.
 #[test]
 fn a_bad_pairing_body_answers_and_audits_fixed_text() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let laptop = node("laptop");
     let code = hub
         .node
         .store
-        .create_invite(&hub.url, &Perm::ALL, 3600)
+        .create_invite(hub.url(), &Perm::ALL, 3600)
         .unwrap();
     let invite = decode_invite(&code);
     let secret = invite["secret"].as_str().unwrap();
@@ -638,19 +562,18 @@ fn a_bad_pairing_body_answers_and_audits_fixed_text() {
     );
     // Nothing was used up.
     fed::join(&laptop.store, &code).unwrap();
-    hub.ct.cancel();
 }
 
 /// The node id in a pairing request or in the `x-another-node` header is the caller's
 /// text. It is written to the audit log only when it is a node id.
 #[test]
 fn an_invalid_node_id_is_not_written_to_the_audit_log() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let laptop = node("laptop");
     let code = hub
         .node
         .store
-        .create_invite(&hub.url, &Perm::ALL, 3600)
+        .create_invite(hub.url(), &Perm::ALL, 3600)
         .unwrap();
     let (_, honest) = laptop.store.prepare_join(&code).unwrap();
 
@@ -711,14 +634,13 @@ fn an_invalid_node_id_is_not_written_to_the_audit_log() {
         let detail = row.detail.unwrap();
         assert!(!detail.contains('\n') && detail.len() < 300, "{detail:?}");
     }
-    hub.ct.cancel();
 }
 
 /// Every failure of the invite check answers the one text; the hub's audit row says which
 /// of the four it was.
 #[test]
 fn a_refused_pairing_audits_its_cause_over_http() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let laptop = node("laptop");
     let runner = node("runner");
     let last_detail = |hub: &Hub| -> String {
@@ -736,7 +658,7 @@ fn a_refused_pairing_audits_its_cause_over_http() {
     let code = hub
         .node
         .store
-        .create_invite(&hub.url, &Perm::ALL, 3600)
+        .create_invite(hub.url(), &Perm::ALL, 3600)
         .unwrap();
     let (_, honest) = runner.store.prepare_join(&code).unwrap();
 
@@ -768,7 +690,7 @@ fn a_refused_pairing_audits_its_cause_over_http() {
     let short = hub
         .node
         .store
-        .create_invite(&hub.url, &Perm::ALL, 1)
+        .create_invite(hub.url(), &Perm::ALL, 1)
         .unwrap();
     let (_, late) = runner.store.prepare_join(&short).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(1200));
@@ -776,7 +698,6 @@ fn a_refused_pairing_audits_its_cause_over_http() {
     assert_eq!(last_detail(&hub), "expired invite");
 
     assert_eq!(hub.node.store.peers().unwrap().len(), 1);
-    hub.ct.cancel();
 }
 
 /// The hub's `peers` row for `node_id`.
@@ -791,9 +712,9 @@ fn row_of(hub: &Hub, node_id: &str) -> Peer {
 /// name-released one stays revoked and unnamed), and the invite is not used.
 #[test]
 fn a_join_on_an_invite_from_this_nodes_own_spoke_is_refused_over_http() {
-    let hub = start_hub();
-    let mallory = start_served("mallory");
-    let plain = start_served("plain");
+    let hub = start_http_hub();
+    let mallory = start_http_hub_named("mallory");
+    let plain = start_http_hub_named("plain");
     join(&hub, &mallory.node, &Perm::ALL);
     join(&hub, &plain.node, &[Perm::ReadFeed]);
     let mallory_id = mallory.node.store.node_id().to_string();
@@ -807,7 +728,7 @@ fn a_join_on_an_invite_from_this_nodes_own_spoke_is_refused_over_http() {
         let code = spoke
             .node
             .store
-            .create_invite(&spoke.url, &Perm::ALL, 3600)
+            .create_invite(spoke.url(), &Perm::ALL, 3600)
             .unwrap();
         let err = fed::join(&hub.node.store, &code).unwrap_err();
         assert_eq!(
@@ -830,9 +751,6 @@ fn a_join_on_an_invite_from_this_nodes_own_spoke_is_refused_over_http() {
     // The revoked spoke is still refused by the hub.
     let err = fed::sync(&mallory.node.store).unwrap_err();
     assert!(err.to_string().contains("401"), "{err}");
-    hub.ct.cancel();
-    mallory.ct.cancel();
-    plain.ct.cancel();
 }
 
 /// Review R2, P2-A, over HTTP: an invite whose hub id is the joining node's own id, made by
@@ -841,21 +759,18 @@ fn a_join_on_an_invite_from_this_nodes_own_spoke_is_refused_over_http() {
 /// its own hub at the inviter's URL.
 #[test]
 fn a_join_on_an_invite_naming_this_node_itself_is_refused_over_http() {
-    let mallory = start_served("mallory");
+    let mallory = start_http_hub_named("mallory");
     let solo = node("solo");
     let code = mallory
         .node
         .store
-        .create_invite(&mallory.url, &Perm::ALL, 3600)
+        .create_invite(mallory.url(), &Perm::ALL, 3600)
         .unwrap();
     let mut forged = decode_invite(&code);
     forged["hub"]["node_id"] = serde_json::json!(solo.store.node_id());
     forged["hub"]["display_name"] = serde_json::json!("evil");
     resign(&mut forged, &mallory.node.store);
-    let forged = format!(
-        "another-invite:{}",
-        crypto::b64(forged.to_string().as_bytes())
-    );
+    let forged = encode_invite(&forged);
 
     let err = fed::join(&solo.store, &forged).unwrap_err();
     assert_eq!(
@@ -869,7 +784,6 @@ fn a_join_on_an_invite_naming_this_node_itself_is_refused_over_http() {
     assert!(err.to_string().contains("no hub"), "{err}");
     // The node can still join an honest hub.
     fed::join(&solo.store, &code).unwrap();
-    mallory.ct.cancel();
 }
 
 /// The address in an invite must be an `http://` or `https://` URL with a host, or nothing
@@ -878,12 +792,12 @@ fn a_join_on_an_invite_naming_this_node_itself_is_refused_over_http() {
 /// check of the form refuses them.
 #[test]
 fn a_hub_address_that_is_not_http_is_refused_before_sending() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let laptop = node("laptop");
     let code = hub
         .node
         .store
-        .create_invite(&hub.url, &Perm::ALL, 3600)
+        .create_invite(hub.url(), &Perm::ALL, 3600)
         .unwrap();
     for url in [
         "ftp://attacker.example/x",
@@ -899,10 +813,7 @@ fn a_hub_address_that_is_not_http_is_refused_before_sending() {
         let mut edited = decode_invite(&code);
         edited["hub_url"] = serde_json::json!(url);
         resign(&mut edited, &hub.node.store);
-        let edited = format!(
-            "another-invite:{}",
-            crypto::b64(edited.to_string().as_bytes())
-        );
+        let edited = encode_invite(&edited);
         let err = match fed::join(&laptop.store, &edited) {
             Ok(peer) => panic!("joined through the address {url:?}: {peer:?}"),
             Err(e) => e,
@@ -916,7 +827,6 @@ fn a_hub_address_that_is_not_http_is_refused_before_sending() {
     }
     assert!(audit_rows(&hub, "POST /fed/pair").is_empty());
     fed::join(&laptop.store, &code).unwrap();
-    hub.ct.cancel();
 }
 
 /// A home that an older build left with a pairing row for the node itself. The row is
@@ -924,9 +834,9 @@ fn a_hub_address_that_is_not_http_is_refused_before_sending() {
 /// and an honest join then works and syncs.
 #[test]
 fn a_planted_pairing_row_for_this_node_itself_is_inert_cli() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     // Where the planted row points. Nothing may arrive there.
-    let trap = start_served("trap");
+    let trap = start_http_hub_named("trap");
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_another"))
@@ -950,7 +860,7 @@ fn a_planted_pairing_row_for_this_node_itself_is_inert_cli() {
         .execute(
             "INSERT INTO peers (node_id, role, url, perms, paired_at)
              VALUES (?1, 'hub', ?2, '[\"read_feed\"]', 0)",
-            [own_id, trap.url.as_str()],
+            [own_id, trap.url()],
         )
         .unwrap();
 
@@ -992,14 +902,14 @@ fn a_planted_pairing_row_for_this_node_itself_is_inert_cli() {
     let code = hub
         .node
         .store
-        .create_invite(&hub.url, &Perm::ALL, 3600)
+        .create_invite(hub.url(), &Perm::ALL, 3600)
         .unwrap();
     let (ok, out, err) = run(&["pair", "join", &code]);
     assert!(ok, "{err}");
     assert!(out.starts_with("paired with hub hub at "), "{out}");
     let (ok, out, err) = run(&["sync"]);
     assert!(ok, "{err}");
-    assert!(out.contains(&hub.url), "{out}");
+    assert!(out.contains(hub.url()), "{out}");
     assert!(trap.node.store.audit_log(100).unwrap().is_empty());
     let (_, out, _) = run(&["peers"]);
     assert_eq!(out.lines().count(), 2, "{out}");
@@ -1014,22 +924,20 @@ fn a_planted_pairing_row_for_this_node_itself_is_inert_cli() {
         check["detail"],
         format!("1 paired, all synced recently; {self_row}")
     );
-    hub.ct.cancel();
-    trap.ct.cancel();
 }
 
 /// Review R2, P3-B, over HTTP: a node that already syncs with a hub is refused a second one
 /// before anything is sent, so the second hub's invite is not used up.
 #[test]
 fn a_second_hub_join_sends_nothing_over_http() {
-    let first = start_hub();
-    let second = start_served("second");
+    let first = start_http_hub();
+    let second = start_http_hub_named("second");
     let laptop = node("laptop");
     join(&first, &laptop, &Perm::ALL);
     let code = second
         .node
         .store
-        .create_invite(&second.url, &Perm::ALL, 3600)
+        .create_invite(second.url(), &Perm::ALL, 3600)
         .unwrap();
     let err = fed::join(&laptop.store, &code).unwrap_err();
     assert_eq!(
@@ -1042,8 +950,6 @@ fn a_second_hub_join_sends_nothing_over_http() {
     laptop.store.revoke_peer("hub").unwrap();
     let peer = fed::join(&laptop.store, &code).unwrap();
     assert_eq!(peer.display_name, "second");
-    first.ct.cancel();
-    second.ct.cancel();
 }
 
 /// Review R2, P3-A and ruling 3, through the command line: a join that lifts this node's
@@ -1051,7 +957,7 @@ fn a_second_hub_join_sends_nothing_over_http() {
 /// name it was stored under; and the pair commands refuse this node's own id.
 #[test]
 fn a_join_that_lifts_a_revoke_says_so_and_pair_commands_refuse_this_node_cli() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_another"))
@@ -1069,7 +975,7 @@ fn a_join_that_lifts_a_revoke_says_so_and_pair_commands_refuse_this_node_cli() {
     let invite = |hub: &Hub| {
         hub.node
             .store
-            .create_invite(&hub.url, &Perm::ALL, 3600)
+            .create_invite(hub.url(), &Perm::ALL, 3600)
             .unwrap()
     };
     let fp = hub.node.store.node().unwrap().fingerprint;
@@ -1079,7 +985,7 @@ fn a_join_that_lifts_a_revoke_says_so_and_pair_commands_refuse_this_node_cli() {
     assert!(ok, "{err}");
     let first = format!(
         "paired with hub hub at {} (key {fp}); run `another sync`",
-        hub.url
+        hub.url()
     );
     assert_eq!(out.trim_end(), first);
     // A second join to a hub that is not revoked: still one line.
@@ -1097,7 +1003,7 @@ fn a_join_that_lifts_a_revoke_says_so_and_pair_commands_refuse_this_node_cli() {
         format!(
             "paired with hub studio at {} (key {fp}); run `another sync`\n\
              this join lifted this node's own revoke of hub hub (key {fp}); it syncs with that hub again",
-            hub.url
+            hub.url()
         )
     );
 
@@ -1129,7 +1035,6 @@ fn a_join_that_lifts_a_revoke_says_so_and_pair_commands_refuse_this_node_cli() {
     let (_, shown, _) = run(&["--json", "node", "show"]);
     let after: serde_json::Value = serde_json::from_str(&shown).unwrap();
     assert_eq!(after["display_name"], "laptop");
-    hub.ct.cancel();
 }
 
 /// `another pair readmit` and `another pair release-name`: the text and JSON of both, and
@@ -1243,7 +1148,7 @@ fn pair_readmit_and_release_name_cli() {
 
 #[test]
 fn signatures_authority_and_revocation() {
-    let hub = start_hub();
+    let hub = start_http_hub();
     let laptop = node("laptop");
     join(&hub, &laptop, &Perm::ALL);
     register(&laptop.store, "bob", Program::Codex, None);
@@ -1291,7 +1196,6 @@ fn signatures_authority_and_revocation() {
     assert!(audit
         .iter()
         .any(|a| a.operation.contains("/fed/") && a.outcome == "denied"));
-    hub.ct.cancel();
 }
 
 #[test]
@@ -1355,4 +1259,45 @@ fn federation_cli() {
     let (ok, _, err) = run(&["sync"]);
     assert!(!ok);
     assert!(err.contains("no hub"), "{err}");
+}
+
+/// The shared federation hub fixture keeps both router modes explicit and distinct:
+/// `HttpFederation` serves `http_router(federation: true)` (with `/health` and `Host`
+/// enforcement), while `FedRoutes` serves only `fed::router`.
+#[test]
+fn hub_modes_serve_distinct_routers() {
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .proxy(None)
+            .build(),
+    );
+
+    let full = start_http_hub();
+    let mut health = agent.get(&format!("{}/health", full.url())).call().unwrap();
+    assert_eq!(health.status().as_u16(), 200);
+    let body: serde_json::Value =
+        serde_json::from_str(&health.body_mut().read_to_string().unwrap()).unwrap();
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["dashboard"], "off");
+    let bad_host = agent
+        .get(&format!("{}/health", full.url()))
+        .header("host", "evil.example")
+        .call()
+        .unwrap();
+    assert_eq!(bad_host.status().as_u16(), 403);
+    let fed_pull = agent
+        .get(&format!("{}/fed/pull", full.url()))
+        .call()
+        .unwrap();
+    assert_eq!(fed_pull.status().as_u16(), 401);
+
+    let bare = start_fed_hub();
+    let bare_health = agent.get(&format!("{}/health", bare.url())).call().unwrap();
+    assert_eq!(bare_health.status().as_u16(), 404);
+    let bare_pull = agent
+        .get(&format!("{}/fed/pull", bare.url()))
+        .call()
+        .unwrap();
+    assert_eq!(bare_pull.status().as_u16(), 401);
 }
