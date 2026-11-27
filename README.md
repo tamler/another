@@ -205,6 +205,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). The minimum supported Rust version is 1.
 
 For Rust callers, `another_core` exports `now_ms`, `fmt_ts`, `parse_ts` and `parse_duration`. The duration helper returns seconds and lets the caller choose whether to accept bare numbers. CLI durations, including `--since`, accept bare seconds or a suffix (`s`, `m`, `h`, `d` or `w`). Federation requests use the store's clock, including a manual clock supplied by a caller. MCP `since` inputs also accept bare seconds.
 
+An opt-in docs/quickstart clarity eval (a model plays a stranger seeing only the public docs) is documented in [evals/quickstart_clarity/README.md](evals/quickstart_clarity/README.md). It stays out of default CI, defaults to offline fixture mode (zero spend), and requires explicit live opt-in, an existing durable spend ledger, per-call/run caps, and billing-confirmation flags before making paid API calls.
+
 ## Clean-room
 
 Written from this repository's own spec. Do **not** copy code from MCP Agent Mail or any other project with a non-permissive license or license rider.

@@ -1,0 +1,1354 @@
+"""Shared reserve-then-spend ledger and metered LLM transports for Another evals.
+
+Implements the spend controls required by SPEND-RULES.md:
+1. Durable reserve-then-spend JSONL ledger at an explicit absolute path, fail closed.
+2. Conservative pre-call reservations (never refunded on crash or timeout) and per-call caps.
+3. Hard stop on any insufficient-credit or billing error, persisted to the ledger.
+4. Zero retries into billing or ambiguous 429 errors; transient non-billing retries reuse
+   the existing reservation without reserving again.
+5. Per-product key loading from mode-600 files or explicit env vars, never printed or logged.
+   Anthropic judge keys are read ONLY from ANTHROPIC_JUDGE_KEY_FILE or
+   ANTHROPIC_JUDGE_API_KEY (never ANTHROPIC_API_KEY).
+6. Fleshapron weekly receipt fields on every ledger row and summary helper.
+"""
+from __future__ import annotations
+
+import http.client
+import json
+import math
+import os
+import socket
+import stat
+import time
+import urllib.error
+import urllib.request
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
+
+MICROS_PER_USD = 1_000_000
+MAX_KEY_FILE_BYTES = 4096
+MAX_REQUEST_BODY_BYTES = 250_000
+MAX_OUTPUT_TOKENS_CEILING = 8192
+INPUT_FRAMING_MARGIN_TOKENS = 4096
+
+DEFAULT_OPENAI_MODEL = "gpt-5.4-nano"
+DEFAULT_ANTHROPIC_JUDGE_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_PER_CALL_CAP_USD = 0.10
+DEFAULT_RUN_CAP_USD = 0.25
+
+# Explicit retired/disallowed models that must be rejected before reservation.
+RETIRED_MODELS: dict[str, str] = {
+    "gpt-5-mini": "shuts down 11 Dec 2026; use gpt-5.4-nano or gpt-5.4-mini",
+}
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    provider: str
+    model: str
+    input_per_million: float
+    output_per_million: float
+    judge_only: bool = False
+
+
+# Conservative pricing ceilings (USD per 1M tokens). Unlisted models fail closed.
+MODEL_CATALOG: dict[str, ModelSpec] = {
+    "gpt-5.4-nano": ModelSpec("openai", "gpt-5.4-nano", 0.20, 1.25),
+    "gpt-5.4-mini": ModelSpec("openai", "gpt-5.4-mini", 0.75, 4.50),
+    "claude-haiku-4-5-20251001": ModelSpec(
+        "anthropic", "claude-haiku-4-5-20251001", 1.00, 5.00, judge_only=True
+    ),
+    "claude-sonnet-4-5-20250929": ModelSpec(
+        "anthropic", "claude-sonnet-4-5-20250929", 3.00, 15.00, judge_only=True
+    ),
+    "claude-sonnet-4-6": ModelSpec(
+        "anthropic", "claude-sonnet-4-6", 3.00, 15.00, judge_only=True
+    ),
+    "gemini-3.1-flash-lite": ModelSpec("google", "gemini-3.1-flash-lite", 0.25, 1.50),
+}
+
+
+class SpendError(RuntimeError):
+    """Base error for spend-control failures."""
+
+    def __init__(self, message: str, *, error_class: str = "spend_error") -> None:
+        super().__init__(message)
+        self.error_class = error_class
+
+
+class LedgerError(SpendError):
+    """Raised when the ledger path, lock, or contents are invalid (fail closed)."""
+
+
+class BudgetExceededError(SpendError):
+    """Raised when a per-call or cumulative budget cap would be exceeded."""
+
+
+class KeyConfigError(SpendError):
+    """Raised when a provider key is missing, insecurely permissioned, or misconfigured."""
+
+
+class BillingHardStopError(SpendError):
+    """Raised on any provider billing or insufficient-credit error. Never retry."""
+
+
+class ProviderRequestError(SpendError):
+    """Raised on non-billing provider or transport failures."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_class: str,
+        retryable: bool = False,
+        status_code: int | None = None,
+    ) -> None:
+        super().__init__(message, error_class=error_class)
+        self.retryable = retryable
+        self.status_code = status_code
+
+
+@dataclass(frozen=True)
+class HttpResponse:
+    status: int
+    body: str
+    headers: dict[str, str]
+
+
+TransportFn = Callable[[str, dict[str, str], str, float], HttpResponse]
+
+
+@dataclass(frozen=True)
+class Reservation:
+    reservation_id: str
+    time: str
+    product: str
+    provider: str
+    model: str
+    reserved_micros: int
+    reserved_usd: float
+
+
+@dataclass(frozen=True)
+class CallResult:
+    reservation_id: str
+    provider: str
+    model: str
+    text: str
+    input_tokens: int
+    output_tokens: int
+    reserved_usd: float
+    spent_usd: float
+    attempts: int
+
+
+BILLING_ERROR_CODES = frozenset(
+    {
+        "insufficient_quota",
+        "billing_hard_limit_reached",
+        "billing_not_active",
+        "account_deactivated",
+        "credit_balance_too_low",
+        "insufficient_credits",
+        "payment_required",
+        "billing_error",
+        "billing_disabled",
+    }
+)
+
+BILLING_MESSAGE_MARKERS = (
+    "insufficient_quota",
+    "exceeded your current quota",
+    "credit balance is too low",
+    "insufficient credits",
+    "billing hard limit",
+    "billing_hard_limit",
+    "billing is not active",
+    "plan and billing",
+    "add credits",
+    "purchase credits",
+    "payment required",
+    "payment method",
+    "account balance",
+    "out of credits",
+    "spending limit",
+    "usage limit reached",
+    "billing_disabled",
+    "credit balance",
+)
+
+NON_BILLING_RATE_LIMIT_CODES = frozenset(
+    {
+        "rate_limit_exceeded",
+        "rate_limit_error",
+        "overloaded_error",
+    }
+)
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def get_model_spec(model: str, *, require_provider: str | None = None, role: str = "player") -> ModelSpec:
+    if model in RETIRED_MODELS:
+        raise SpendError(
+            f"Model {model!r} is disallowed: {RETIRED_MODELS[model]}",
+            error_class="retired_model",
+        )
+    spec = MODEL_CATALOG.get(model)
+    if spec is None:
+        raise SpendError(
+            f"Unreviewed or unpriced model {model!r}; add an explicit pricing ceiling to MODEL_CATALOG",
+            error_class="unreviewed_model",
+        )
+    if require_provider is not None and spec.provider != require_provider:
+        raise SpendError(
+            f"Model {model!r} belongs to provider {spec.provider!r}, expected {require_provider!r}",
+            error_class="provider_mismatch",
+        )
+    if spec.judge_only and role != "judge":
+        raise SpendError(
+            f"Model {model!r} ({spec.provider}) is restricted to judge role only (SPEND-RULES.md)",
+            error_class="judge_only_model",
+        )
+    return spec
+
+
+def validate_api_key(raw_key: str, provider: str) -> str:
+    """Validate an API key before header construction; never include key bytes in errors.
+
+    Rejects empty keys, interior newlines/CR, whitespace, NUL/control bytes, and non-ASCII
+    characters so Python's http.client.putheader can never raise an exception containing the key.
+    """
+    if not isinstance(raw_key, str):
+        raise KeyConfigError(
+            f"Invalid {provider} API key type",
+            error_class="key_invalid_format",
+        )
+    key = raw_key.strip()
+    if not key:
+        raise KeyConfigError(f"Empty API key for provider {provider!r}", error_class="key_empty")
+    for ch in key:
+        code = ord(ch)
+        if code < 0x21 or code > 0x7E:
+            raise KeyConfigError(
+                f"Invalid {provider} API key format: contains whitespace, control, or non-ASCII characters",
+                error_class="key_invalid_format",
+            )
+    return key
+
+
+def _read_mode_600_key_file(path: Path, label: str, provider: str) -> str | None:
+    """Read a key from a regular mode-0600 file without following symlinks.
+
+    Returns None only if the file does not exist (ENOENT).
+    Raises KeyConfigError on permission violations, symlinks, empty files, illegal characters, or read errors.
+    """
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    try:
+        fd = os.open(str(path), flags)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise KeyConfigError(
+            f"{label} key file unavailable (check regular file / no symlink)",
+            error_class="key_file_unavailable",
+        ) from exc
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise KeyConfigError(
+                f"{label} key path must be a regular file",
+                error_class="key_file_not_regular",
+            )
+        mode = stat.S_IMODE(st.st_mode)
+        if mode != 0o600:
+            raise KeyConfigError(
+                f"{label} key file must have mode 0600 (found {oct(mode)})",
+                error_class="key_file_bad_mode",
+            )
+        if st.st_size > MAX_KEY_FILE_BYTES:
+            raise KeyConfigError(
+                f"{label} key file exceeds {MAX_KEY_FILE_BYTES} bytes",
+                error_class="key_file_too_large",
+            )
+        raw = os.read(fd, MAX_KEY_FILE_BYTES + 1)
+    finally:
+        os.close(fd)
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise KeyConfigError(
+            f"{label} key file is not valid UTF-8",
+            error_class="key_invalid_format",
+        ) from None
+    if not decoded.strip():
+        raise KeyConfigError(f"{label} key file is empty", error_class="key_file_empty")
+    return validate_api_key(decoded, provider)
+
+
+def load_provider_key(
+    provider: str,
+    *,
+    env: dict[str, str] | None = None,
+    home_dir: Path | None = None,
+    role: str = "player",
+    anthropic_zero_cash_confirmed: bool = False,
+) -> str:
+    """Load an API key for the given provider following SPEND-RULES.md.
+
+    Keys are validated against HTTP header safety rules and never logged or included in exceptions.
+    """
+    source_env = os.environ if env is None else env
+    home = Path.home() if home_dir is None else home_dir
+
+    if provider == "openai":
+        env_raw = source_env.get("OPENAI_API_KEY", "")
+        if env_raw.strip():
+            return validate_api_key(env_raw, "openai")
+        file_key = _read_mode_600_key_file(home / ".config" / "openai" / "key", "OpenAI", "openai")
+        if file_key:
+            return file_key
+        raise KeyConfigError(
+            "OpenAI key unavailable: set OPENAI_API_KEY or create mode-600 ~/.config/openai/key",
+            error_class="key_missing",
+        )
+
+    if provider == "google":
+        for var in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+            env_raw = source_env.get(var, "")
+            if env_raw.strip():
+                return validate_api_key(env_raw, "google")
+        file_key = _read_mode_600_key_file(home / ".config" / "gemini" / "key", "Google", "google")
+        if file_key:
+            return file_key
+        raise KeyConfigError(
+            "Google key unavailable: set GEMINI_API_KEY, GOOGLE_API_KEY, or mode-600 ~/.config/gemini/key",
+            error_class="key_missing",
+        )
+
+    if provider == "anthropic":
+        if role != "judge":
+            raise KeyConfigError(
+                "Anthropic promo key is allowed for judge role only (SPEND-RULES.md)",
+                error_class="anthropic_judge_only",
+            )
+        confirmed = anthropic_zero_cash_confirmed or (
+            source_env.get("ANOTHER_EVAL_ANTHROPIC_ZERO_CASH_CONFIRMED", "").strip() == "1"
+        )
+        if not confirmed:
+            raise KeyConfigError(
+                "Refusing Anthropic judge call without explicit confirmation that cash balance is $0 "
+                "and auto-recharge is off (--confirm-anthropic-zero-cash or "
+                "ANOTHER_EVAL_ANTHROPIC_ZERO_CASH_CONFIRMED=1)",
+                error_class="anthropic_zero_cash_unconfirmed",
+            )
+        # Never read ANTHROPIC_API_KEY (per SPEND-RULES.md).
+        key_file_raw = source_env.get("ANTHROPIC_JUDGE_KEY_FILE", "").strip()
+        if key_file_raw:
+            key_path = Path(key_file_raw)
+            if not key_path.is_absolute():
+                raise KeyConfigError(
+                    "ANTHROPIC_JUDGE_KEY_FILE must be an absolute path",
+                    error_class="key_path_not_absolute",
+                )
+            file_key = _read_mode_600_key_file(key_path, "Anthropic judge", "anthropic")
+            if file_key:
+                return file_key
+            raise KeyConfigError(
+                "ANTHROPIC_JUDGE_KEY_FILE does not exist",
+                error_class="key_file_missing",
+            )
+        judge_env_raw = source_env.get("ANTHROPIC_JUDGE_API_KEY", "")
+        if judge_env_raw.strip():
+            return validate_api_key(judge_env_raw, "anthropic")
+        raise KeyConfigError(
+            "Anthropic judge key unavailable: set ANTHROPIC_JUDGE_KEY_FILE (mode 600) or "
+            "ANTHROPIC_JUDGE_API_KEY (ANTHROPIC_API_KEY is intentionally ignored)",
+            error_class="key_missing",
+        )
+
+    raise KeyConfigError(f"Unsupported provider {provider!r}", error_class="unsupported_provider")
+
+
+def estimate_reservation_micros(body_str: str, max_output_tokens: int, spec: ModelSpec) -> int:
+    body_bytes = len(body_str.encode("utf-8"))
+    if body_bytes <= 0 or body_bytes > MAX_REQUEST_BODY_BYTES:
+        raise BudgetExceededError(
+            f"Request body size ({body_bytes} bytes) out of bounds (1..{MAX_REQUEST_BODY_BYTES})",
+            error_class="request_too_large",
+        )
+    if not isinstance(max_output_tokens, int) or max_output_tokens < 1 or max_output_tokens > MAX_OUTPUT_TOKENS_CEILING:
+        raise BudgetExceededError(
+            f"max_output_tokens ({max_output_tokens}) out of bounds (1..{MAX_OUTPUT_TOKENS_CEILING})",
+            error_class="invalid_max_output_tokens",
+        )
+    # Conservative ceiling: 1 token per UTF-8 byte + framing margin; full max_output_tokens.
+    micros = math.ceil(
+        (body_bytes + INPUT_FRAMING_MARGIN_TOKENS) * spec.input_per_million
+        + max_output_tokens * spec.output_per_million
+    )
+    if micros <= 0:
+        raise BudgetExceededError("Computed reservation must be positive", error_class="invalid_reservation")
+    return micros
+
+
+def compute_spent_micros(input_tokens: int, output_tokens: int, spec: ModelSpec) -> int:
+    if not isinstance(input_tokens, int) or input_tokens < 0:
+        raise ProviderRequestError(
+            "Provider returned invalid input_tokens",
+            error_class="invalid_usage",
+            retryable=False,
+        )
+    if not isinstance(output_tokens, int) or output_tokens < 0:
+        raise ProviderRequestError(
+            "Provider returned invalid output_tokens",
+            error_class="invalid_usage",
+            retryable=False,
+        )
+    return math.ceil(
+        input_tokens * spec.input_per_million + output_tokens * spec.output_per_million
+    )
+
+
+def classify_http_error(provider: str, status: int, body: str) -> tuple[bool, bool, str]:
+    """Classify a non-2xx HTTP error.
+
+    Returns (is_billing_hard_stop, is_retryable_transient, error_class).
+    Never returns raw response body text.
+    """
+    code_str = ""
+    type_str = ""
+    msg_lower = ""
+    parsed_json = False
+
+    try:
+        parsed = json.loads(body) if body.strip() else None
+        if isinstance(parsed, dict):
+            err = parsed.get("error")
+            if isinstance(err, dict):
+                parsed_json = True
+                code_str = str(err.get("code") or "").strip().lower()
+                type_str = str(err.get("type") or "").strip().lower()
+                msg_lower = str(err.get("message") or "").strip().lower()
+            elif isinstance(err, str):
+                parsed_json = True
+                msg_lower = err.strip().lower()
+            elif "message" in parsed:
+                parsed_json = True
+                msg_lower = str(parsed.get("message") or "").strip().lower()
+    except json.JSONDecodeError:
+        parsed_json = False
+
+    raw_lower = body.lower() if body else ""
+
+    if status == 402:
+        return True, False, "billing_payment_required"
+
+    if code_str in BILLING_ERROR_CODES:
+        return True, False, f"billing_{code_str}"
+    if type_str in BILLING_ERROR_CODES:
+        return True, False, f"billing_{type_str}"
+
+    for marker in BILLING_MESSAGE_MARKERS:
+        if marker in msg_lower or marker in raw_lower:
+            return True, False, "billing_credit_or_quota_exhausted"
+
+    if status == 429:
+        # Only retry a 429 when it explicitly identifies a non-billing rate limit.
+        has_billing_word = any(
+            word in msg_lower or word in raw_lower
+            for word in ("quota", "billing", "credit", "balance", "payment", "plan", "spend")
+        )
+        if parsed_json and not has_billing_word and (
+            code_str in NON_BILLING_RATE_LIMIT_CODES or type_str in NON_BILLING_RATE_LIMIT_CODES
+        ):
+            return False, True, f"transient_rate_limit_{provider}"
+        # Ambiguous 429 fails closed with zero retries to prevent retrying into billing.
+        return False, False, f"http_429_ambiguous_{provider}"
+
+    # Only retry explicit pre-execution non-billing rejections (502, 503, 529).
+    # HTTP 500 and 504 may occur after upstream execution/billing, so fail closed without retry.
+    if status in (502, 503, 529):
+        return False, True, f"transient_http_{status}"
+
+    if status == 500:
+        return False, False, "http_500_no_retry"
+
+    if status == 504:
+        # Gateway timeout may have already executed upstream; fail closed without retry.
+        return False, False, "http_504_timeout_no_retry"
+
+    if status in (401, 403):
+        return False, False, f"auth_http_{status}"
+
+    return False, False, f"http_{status}"
+
+
+def init_ledger(ledger_path: str | Path) -> Path:
+    """Explicitly provision a durable mode-0600 spend ledger file before live runs.
+
+    Fails closed if path is relative, parent does not exist, or path is a symlink/non-regular file.
+    Idempotent if a valid regular ledger file already exists.
+    """
+    raw = str(ledger_path).strip()
+    if not raw or not os.path.isabs(raw):
+        raise LedgerError("Absolute ledger path is required (fail closed)", error_class="relative_ledger_path")
+    path = Path(raw)
+    if not path.parent.exists():
+        raise LedgerError(
+            f"Ledger parent directory does not exist: {path.parent}",
+            error_class="ledger_parent_missing",
+        )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(str(path), flags, 0o600)
+    except OSError as exc:
+        raise LedgerError(
+            "Unable to provision spend ledger file",
+            error_class="ledger_init_failed",
+        ) from exc
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise LedgerError("Ledger path is not a regular file", error_class="ledger_not_regular")
+        if st.st_size == 0:
+            header = {
+                "time": utc_now_iso(),
+                "product": "another",
+                "eval": "ledger-init",
+                "mode": "live",
+                "simulated": False,
+                "provider": "system",
+                "model": "none",
+                "reservation_id": "",
+                "reserved_micros": 0,
+                "reserved_usd": 0.0,
+                "spent_micros": 0,
+                "spent_usd": 0.0,
+                "status": "initialized",
+                "error_class": None,
+            }
+            payload = (json.dumps(header, sort_keys=True) + "\n").encode("utf-8")
+            written = 0
+            while written < len(payload):
+                written += os.write(fd, payload[written:])
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return path
+
+
+class SpendLedger:
+    """Durable, fail-closed, lock-guarded reserve-then-spend JSONL ledger.
+
+    Modeled on compoundinterest.ing `app/app/lib/analyst-budget.server.ts`.
+    A crashed lock fails closed on reserve; an operator reconciles it, never a stale timer.
+    Billing hard stops also write a lock-free atomic sidecar sentinel (`<ledger>.<provider>.hard_stop`)
+    so sibling lock contention or JSONL append failures never discard a billing stop.
+    Reservations are permanent and conservative: crashes or timeouts never refund spend.
+    """
+
+    def __init__(
+        self,
+        ledger_path: str | Path,
+        *,
+        product: str = "another",
+        eval_name: str = "quickstart-clarity",
+        max_call_usd: float = DEFAULT_PER_CALL_CAP_USD,
+        max_run_usd: float = DEFAULT_RUN_CAP_USD,
+        max_ledger_usd: float | None = None,
+        simulated: bool = False,
+        require_existing: bool = False,
+        reserve_lock_wait_s: float = 1.0,
+        outcome_lock_wait_s: float = 5.0,
+        lock_sleep_fn: Callable[[float], None] = time.sleep,
+    ) -> None:
+        raw = str(ledger_path).strip()
+        if not raw or not os.path.isabs(raw):
+            raise LedgerError(
+                "Absolute ledger path is required (fail closed)",
+                error_class="relative_ledger_path",
+            )
+        if not math.isfinite(max_call_usd) or max_call_usd <= 0:
+            raise BudgetExceededError("max_call_usd must be finite and > 0", error_class="invalid_cap")
+        if not math.isfinite(max_run_usd) or max_run_usd <= 0:
+            raise BudgetExceededError("max_run_usd must be finite and > 0", error_class="invalid_cap")
+        if max_ledger_usd is not None and (not math.isfinite(max_ledger_usd) or max_ledger_usd <= 0):
+            raise BudgetExceededError("max_ledger_usd must be finite and > 0", error_class="invalid_cap")
+
+        self.path = Path(raw)
+        self.lock_path = Path(f"{raw}.lock")
+        self.product = product
+        self.eval_name = eval_name
+        self.simulated = bool(simulated)
+        self.require_existing = bool(require_existing)
+        self.reserve_lock_wait_s = max(0.0, float(reserve_lock_wait_s))
+        self.outcome_lock_wait_s = max(0.0, float(outcome_lock_wait_s))
+        self._lock_sleep_fn = lock_sleep_fn
+        self.max_call_micros = math.floor(max_call_usd * MICROS_PER_USD)
+        self.max_run_micros = math.floor(max_run_usd * MICROS_PER_USD)
+        self.max_ledger_micros = (
+            math.floor(max_ledger_usd * MICROS_PER_USD) if max_ledger_usd is not None else None
+        )
+        self._run_reserved_micros = 0
+        self._hard_stopped_providers: set[str] = set()
+
+    def hard_stop_sentinel_path(self, provider: str) -> Path:
+        safe_provider = "".join(ch for ch in provider if ch.isalnum() or ch in ("-", "_")) or "unknown"
+        return Path(f"{self.path}.{safe_provider}.hard_stop")
+
+    def _check_hard_stop_sentinel(self, provider: str) -> None:
+        sentinel = self.hard_stop_sentinel_path(provider)
+        try:
+            os.lstat(sentinel)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise BillingHardStopError(
+                f"Hard-stop sentinel for provider {provider!r} is unreadable (fail closed)",
+                error_class="billing_hard_stop_sentinel_unreadable",
+            ) from exc
+        self._hard_stopped_providers.add(provider)
+        raise BillingHardStopError(
+            f"Durable billing hard-stop sentinel exists for provider {provider!r}; "
+            "operator reconciliation required before resuming",
+            error_class="billing_hard_stop_sentinel",
+        )
+
+    def _write_hard_stop_sentinel(self, record: dict[str, Any]) -> None:
+        """Atomically persist a lock-free provider hard-stop sentinel with fsync."""
+        sentinel = self.hard_stop_sentinel_path(str(record["provider"]))
+        tmp_path = Path(f"{sentinel}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        payload = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
+        try:
+            fd = os.open(str(tmp_path), flags, 0o600)
+            try:
+                written = 0
+                while written < len(payload):
+                    written += os.write(fd, payload[written:])
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(str(tmp_path), str(sentinel))
+            try:
+                dir_fd = os.open(str(sentinel.parent), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
+        except OSError as exc:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
+            raise LedgerError(
+                f"Failed to persist billing hard-stop sentinel: {exc.strerror}",
+                error_class="hard_stop_sentinel_write_failed",
+            ) from exc
+
+    def _acquire_lock(self, *, wait_timeout_s: float = 0.0) -> None:
+        if not self.path.parent.exists():
+            raise LedgerError(
+                f"Ledger parent directory does not exist: {self.path.parent}",
+                error_class="ledger_parent_missing",
+            )
+        deadline = time.monotonic() + max(0.0, wait_timeout_s)
+        delay = 0.02
+        while True:
+            try:
+                os.mkdir(self.lock_path, 0o700)
+                return
+            except FileExistsError as exc:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise LedgerError(
+                        f"Ledger lock already exists (fail closed; operator must reconcile): {self.lock_path}",
+                        error_class="ledger_locked",
+                    ) from exc
+                self._lock_sleep_fn(min(delay, remaining))
+                delay = min(delay * 1.5, 0.1)
+            except OSError as exc:
+                raise LedgerError(
+                    f"Unable to acquire ledger lock: {exc.strerror}",
+                    error_class="ledger_lock_failed",
+                ) from exc
+
+    def _release_lock(self) -> None:
+        os.rmdir(self.lock_path)
+
+    def _read_rows_unlocked(self) -> list[dict[str, Any]]:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(str(self.path), flags)
+        except FileNotFoundError as exc:
+            if self.require_existing:
+                raise LedgerError(
+                    f"Required durable spend ledger does not exist (fail closed): {self.path}",
+                    error_class="ledger_missing",
+                ) from exc
+            return []
+        except OSError as exc:
+            raise LedgerError(
+                "Ledger file unavailable or symlink rejected",
+                error_class="ledger_unreadable",
+            ) from exc
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise LedgerError("Ledger path is not a regular file", error_class="ledger_not_regular")
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        finally:
+            os.close(fd)
+
+        content = b"".join(chunks).decode("utf-8").strip()
+        if not content:
+            return []
+        rows: list[dict[str, Any]] = []
+        for idx, line in enumerate(content.splitlines(), 1):
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise LedgerError(
+                    f"Malformed JSON in spend ledger at line {idx}",
+                    error_class="ledger_corrupt",
+                ) from exc
+            if not isinstance(value, dict):
+                raise LedgerError(
+                    f"Invalid ledger row at line {idx}: expected JSON object",
+                    error_class="ledger_corrupt",
+                )
+            for req in ("time", "product", "provider", "model", "status"):
+                if not isinstance(value.get(req), str) or not value[req]:
+                    raise LedgerError(
+                        f"Invalid ledger row at line {idx}: missing {req}",
+                        error_class="ledger_corrupt",
+                    )
+            reserved_micros = value.get("reserved_micros")
+            if not isinstance(reserved_micros, int) or isinstance(reserved_micros, bool) or reserved_micros < 0:
+                raise LedgerError(
+                    f"Invalid ledger row at line {idx}: invalid reserved_micros",
+                    error_class="ledger_corrupt",
+                )
+            rows.append(value)
+        return rows
+
+    def _append_row_unlocked(self, row: dict[str, Any]) -> None:
+        flags = os.O_WRONLY | os.O_APPEND
+        if not self.require_existing:
+            flags |= os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(str(self.path), flags, 0o600)
+        except OSError as exc:
+            raise LedgerError(
+                "Unable to open spend ledger for durable append",
+                error_class="ledger_append_failed",
+            ) from exc
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise LedgerError("Ledger path is not a regular file", error_class="ledger_not_regular")
+            payload = (json.dumps(row, sort_keys=True) + "\n").encode("utf-8")
+            written = 0
+            while written < len(payload):
+                written += os.write(fd, payload[written:])
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def reserve(
+        self,
+        *,
+        provider: str,
+        model: str,
+        body_str: str,
+        max_output_tokens: int,
+        role: str = "player",
+    ) -> Reservation:
+        """Conservatively reserve spend before any network request is made."""
+        spec = get_model_spec(model, require_provider=provider, role=role)
+        if provider in self._hard_stopped_providers:
+            raise BillingHardStopError(
+                f"Provider {provider!r} is in billing hard-stop state for this session",
+                error_class="billing_hard_stop_active",
+            )
+        self._check_hard_stop_sentinel(provider)
+
+        micros = estimate_reservation_micros(body_str, max_output_tokens, spec)
+        if micros > self.max_call_micros:
+            raise BudgetExceededError(
+                f"Estimated reservation ${micros / MICROS_PER_USD:.6f} exceeds per-call cap "
+                f"${self.max_call_micros / MICROS_PER_USD:.6f}",
+                error_class="per_call_cap_exceeded",
+            )
+        if self._run_reserved_micros + micros > self.max_run_micros:
+            raise BudgetExceededError(
+                f"Run reservation would reach ${(self._run_reserved_micros + micros) / MICROS_PER_USD:.6f}, "
+                f"exceeding run cap ${self.max_run_micros / MICROS_PER_USD:.6f}",
+                error_class="run_cap_exceeded",
+            )
+
+        self._acquire_lock(wait_timeout_s=self.reserve_lock_wait_s)
+        try:
+            self._check_hard_stop_sentinel(provider)
+            rows = self._read_rows_unlocked()
+            expected_mode = "fixture" if self.simulated else "live"
+            total_ledger_micros = 0
+            for row in rows:
+                row_mode = str(row.get("mode") or "live")
+                if self.simulated and row_mode != "fixture":
+                    raise LedgerError(
+                        "Refusing to write fixture simulation into a live spend ledger",
+                        error_class="fixture_live_ledger_collision",
+                    )
+                if not self.simulated and row_mode == "fixture":
+                    raise LedgerError(
+                        "Refusing to write live spend into a fixture simulation ledger",
+                        error_class="fixture_live_ledger_collision",
+                    )
+                if row.get("provider") == provider and row.get("status") == "billing_hard_stop":
+                    self._hard_stopped_providers.add(provider)
+                    raise BillingHardStopError(
+                        f"Ledger records an active billing hard stop for provider {provider!r}; "
+                        "operator reconciliation required before resuming",
+                        error_class="billing_hard_stop_recorded",
+                    )
+                if row.get("status") == "reserved" and row_mode != "fixture":
+                    total_ledger_micros += int(row["reserved_micros"])
+
+            if self.max_ledger_micros is not None and not self.simulated and total_ledger_micros + micros > self.max_ledger_micros:
+                raise BudgetExceededError(
+                    f"Cumulative ledger spend would reach "
+                    f"${(total_ledger_micros + micros) / MICROS_PER_USD:.6f}, "
+                    f"exceeding ledger cap ${self.max_ledger_micros / MICROS_PER_USD:.6f}",
+                    error_class="ledger_cap_exceeded",
+                )
+
+            reservation_id = uuid.uuid4().hex
+            now = utc_now_iso()
+            reserved_usd = round(micros / MICROS_PER_USD, 6)
+            record = {
+                "time": now,
+                "product": self.product,
+                "eval": self.eval_name,
+                "mode": expected_mode,
+                "simulated": self.simulated,
+                "provider": provider,
+                "model": model,
+                "reservation_id": reservation_id,
+                "reserved_micros": micros,
+                "reserved_usd": reserved_usd,
+                "spent_micros": None,
+                "spent_usd": None,
+                "status": "reserved",
+                "error_class": None,
+            }
+            # Charge in-memory run total before append so a failed fsync cannot refund.
+            self._run_reserved_micros += micros
+            self._append_row_unlocked(record)
+            return Reservation(
+                reservation_id=reservation_id,
+                time=now,
+                product=self.product,
+                provider=provider,
+                model=model,
+                reserved_micros=micros,
+                reserved_usd=reserved_usd,
+            )
+        finally:
+            self._release_lock()
+
+    def record_outcome(
+        self,
+        reservation: Reservation,
+        *,
+        status: str,
+        spent_micros: int | None = None,
+        error_class: str | None = None,
+    ) -> None:
+        """Append the final outcome row for a prior reservation (never refunds reserved_micros).
+
+        For billing hard stops, writes a lock-free atomic sentinel FIRST so sibling lock
+        contention or a JSONL append failure can never lose the stop for future processes.
+        """
+        is_billing_stop = status == "billing_hard_stop"
+        if is_billing_stop:
+            self._hard_stopped_providers.add(reservation.provider)
+        spent_usd = round(spent_micros / MICROS_PER_USD, 6) if spent_micros is not None else None
+        record = {
+            "time": utc_now_iso(),
+            "product": reservation.product,
+            "eval": self.eval_name,
+            "mode": "fixture" if self.simulated else "live",
+            "simulated": self.simulated,
+            "provider": reservation.provider,
+            "model": reservation.model,
+            "reservation_id": reservation.reservation_id,
+            "reserved_micros": reservation.reserved_micros,
+            "reserved_usd": reservation.reserved_usd,
+            "spent_micros": spent_micros,
+            "spent_usd": spent_usd,
+            "status": status,
+            "error_class": error_class,
+        }
+
+        sentinel_written = False
+        sentinel_error: Exception | None = None
+        if is_billing_stop:
+            try:
+                self._write_hard_stop_sentinel(record)
+                sentinel_written = True
+            except Exception as exc:
+                sentinel_error = exc
+
+        try:
+            self._acquire_lock(wait_timeout_s=self.outcome_lock_wait_s)
+            try:
+                self._append_row_unlocked(record)
+            finally:
+                self._release_lock()
+        except LedgerError as exc:
+            if is_billing_stop:
+                if sentinel_written:
+                    raise BillingHardStopError(
+                        f"Billing hard stop persisted via durable sentinel for provider {reservation.provider!r} "
+                        f"(ledger append failed: {exc.error_class})",
+                        error_class=error_class or "billing_hard_stop_sentinel",
+                    ) from None
+                raise BillingHardStopError(
+                    f"Billing hard stop for provider {reservation.provider!r} could not persist to ledger "
+                    f"or sentinel ({exc.error_class})",
+                    error_class="billing_hard_stop_unpersisted",
+                ) from sentinel_error
+            raise
+
+
+ALLOWED_API_PREFIXES: tuple[str, ...] = (
+    "https://api.openai.com/",
+    "https://api.anthropic.com/",
+)
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse all HTTP redirects so Authorization / x-api-key headers never cross origins."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(
+            req.full_url,
+            code,
+            f"HTTP redirect ({code}) refused for credential safety",
+            headers,
+            fp,
+        )
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler())
+
+
+def default_http_transport(url: str, headers: dict[str, str], body: str, timeout_s: float) -> HttpResponse:
+    if not url.startswith(ALLOWED_API_PREFIXES):
+        raise ProviderRequestError(
+            "Refusing request to unapproved API endpoint",
+            error_class="unapproved_endpoint",
+            retryable=False,
+        )
+    try:
+        req = urllib.request.Request(
+            url=url,
+            data=body.encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with _NO_REDIRECT_OPENER.open(req, timeout=timeout_s) as resp:
+            resp_body = resp.read().decode("utf-8", errors="replace")
+            resp_headers = {k.lower(): v for k, v in resp.headers.items()}
+            return HttpResponse(status=int(resp.status), body=resp_body, headers=resp_headers)
+    except urllib.error.HTTPError as exc:
+        # Let socket timeouts / I/O failures while reading the error body propagate so the
+        # caller fails closed without retrying a possibly-billed request.
+        err_body = exc.read().decode("utf-8", errors="replace") if exc.fp is not None else ""
+        resp_headers = {k.lower(): v for k, v in exc.headers.items()} if exc.headers else {}
+        return HttpResponse(status=int(exc.code), body=err_body, headers=resp_headers)
+    except (ValueError, http.client.HTTPException):
+        # Never propagate raw http.client / putheader ValueError messages, which echo header values.
+        raise ProviderRequestError(
+            "HTTP client rejected request parameters (sanitized)",
+            error_class="http_client_error",
+            retryable=False,
+        ) from None
+
+
+def metered_chat_json(
+    *,
+    ledger: SpendLedger,
+    provider: str,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    max_output_tokens: int = 3000,
+    role: str = "player",
+    api_key: str | None = None,
+    env: dict[str, str] | None = None,
+    home_dir: Path | None = None,
+    anthropic_zero_cash_confirmed: bool = False,
+    transport: TransportFn = default_http_transport,
+    timeout_s: float = 60.0,
+    max_transient_retries: int = 1,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> CallResult:
+    """Execute one metered JSON completion against OpenAI or Anthropic (judge only).
+
+    Reserves spend before any HTTP call. Never retries on billing errors, ambiguous 429s,
+    HTTP 500, HTTP 504, timeouts, or dropped connections.
+
+    Retry / reservation policy (SPEND-RULES.md rule 4):
+    Transient non-billing retries intentionally reuse the SINGLE unchanged reservation rather
+    than reserving again per attempt. Retries are restricted strictly to explicit pre-execution
+    server rejections (HTTP 502, 503, 529, or parsed non-billing rate_limit_exceeded 429) where
+    the provider rejected the request before executing or billing it. Any failure where upstream
+    execution could have occurred (timeout, connection drop, HTTP 500, HTTP 504) fails closed
+    with zero retries and keeps the conservative reservation permanent.
+    """
+    spec = get_model_spec(model, require_provider=provider, role=role)
+    raw_key = api_key if api_key is not None else load_provider_key(
+        provider,
+        env=env,
+        home_dir=home_dir,
+        role=role,
+        anthropic_zero_cash_confirmed=anthropic_zero_cash_confirmed,
+    )
+    key = validate_api_key(raw_key, provider)
+
+    if provider == "openai":
+        url = "https://api.openai.com/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        }
+        payload: dict[str, Any] = {
+            "model": model,
+            "temperature": 0,
+            "max_completion_tokens": max_output_tokens,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+    elif provider == "anthropic":
+        url = "https://api.anthropic.com/v1/messages"
+        headers = {
+            "x-api-key": key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        payload = {
+            "model": model,
+            "max_tokens": max_output_tokens,
+            "temperature": 0,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": user_prompt}],
+        }
+    else:
+        raise SpendError(f"Unsupported chat provider {provider!r}", error_class="unsupported_provider")
+
+    body_str = json.dumps(payload, ensure_ascii=False)
+    reservation = ledger.reserve(
+        provider=provider,
+        model=model,
+        body_str=body_str,
+        max_output_tokens=max_output_tokens,
+        role=role,
+    )
+
+    attempts = 0
+    total_allowed = 1 + max(0, max_transient_retries)
+    while attempts < total_allowed:
+        attempts += 1
+        try:
+            resp = transport(url, headers, body_str, timeout_s)
+        except (TimeoutError, socket.timeout, urllib.error.URLError, ConnectionError, OSError) as exc:
+            # Never retry after a timeout or dropped connection on a POST: the provider may
+            # already have accepted and billed the first request, so retrying under one
+            # reservation could double-charge. Fail closed and keep the reservation permanent.
+            error_class = "transient_timeout" if isinstance(exc, (TimeoutError, socket.timeout)) else "transient_network"
+            ledger.record_outcome(reservation, status="transient_error", spent_micros=None, error_class=error_class)
+            raise ProviderRequestError(
+                f"{provider} request aborted on {error_class}; no retry attempted to avoid double-billing",
+                error_class=error_class,
+                retryable=False,
+            ) from exc
+
+        if 200 <= resp.status < 300:
+            try:
+                data = json.loads(resp.body)
+            except json.JSONDecodeError as exc:
+                ledger.record_outcome(
+                    reservation, status="failed", spent_micros=None, error_class="invalid_json_response"
+                )
+                raise ProviderRequestError(
+                    f"{provider} returned non-JSON response",
+                    error_class="invalid_json_response",
+                    retryable=False,
+                    status_code=resp.status,
+                ) from exc
+
+            text, input_tokens, output_tokens = _extract_response(provider, data)
+            spent_micros = compute_spent_micros(input_tokens, output_tokens, spec)
+            if spent_micros > reservation.reserved_micros:
+                ledger.record_outcome(
+                    reservation,
+                    status="failed",
+                    spent_micros=spent_micros,
+                    error_class="usage_exceeded_reservation",
+                )
+                raise BudgetExceededError(
+                    f"{provider} reported spend ${spent_micros / MICROS_PER_USD:.6f} "
+                    f"exceeding reservation ${reservation.reserved_usd:.6f}",
+                    error_class="usage_exceeded_reservation",
+                )
+
+            ledger.record_outcome(
+                reservation, status="completed", spent_micros=spent_micros, error_class=None
+            )
+            return CallResult(
+                reservation_id=reservation.reservation_id,
+                provider=provider,
+                model=model,
+                text=text,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                reserved_usd=reservation.reserved_usd,
+                spent_usd=round(spent_micros / MICROS_PER_USD, 6),
+                attempts=attempts,
+            )
+
+        is_billing, is_retryable, error_class = classify_http_error(provider, resp.status, resp.body)
+        if is_billing:
+            ledger.record_outcome(
+                reservation,
+                status="billing_hard_stop",
+                spent_micros=0,
+                error_class=error_class,
+            )
+            raise BillingHardStopError(
+                f"Hard stop: {provider} returned billing/credit error ({error_class}, HTTP {resp.status}); "
+                "no retries attempted",
+                error_class=error_class,
+            )
+
+        if is_retryable and attempts < total_allowed:
+            sleep_fn(0.5 * attempts)
+            continue
+
+        final_status = "transient_error" if is_retryable else "failed"
+        ledger.record_outcome(reservation, status=final_status, spent_micros=None, error_class=error_class)
+        raise ProviderRequestError(
+            f"{provider} request failed with HTTP {resp.status} ({error_class})",
+            error_class=error_class,
+            retryable=is_retryable,
+            status_code=resp.status,
+        )
+
+    # Unreachable loop guard
+    raise ProviderRequestError("Unexpected retry termination", error_class="unexpected_retry_end")
+
+
+def _extract_response(provider: str, data: dict[str, Any]) -> tuple[str, int, int]:
+    if not isinstance(data, dict):
+        raise ProviderRequestError(f"{provider} response must be a JSON object", error_class="invalid_response")
+    usage = data.get("usage")
+    if not isinstance(usage, dict):
+        raise ProviderRequestError(f"{provider} response missing usage object", error_class="missing_usage")
+
+    if provider == "openai":
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise ProviderRequestError("OpenAI response missing choices", error_class="invalid_response")
+        msg = choices[0].get("message") if isinstance(choices[0], dict) else None
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, str):
+            raise ProviderRequestError("OpenAI response missing text content", error_class="invalid_response")
+        in_tok = usage.get("prompt_tokens", usage.get("input_tokens"))
+        out_tok = usage.get("completion_tokens", usage.get("output_tokens"))
+        if not isinstance(in_tok, int) or not isinstance(out_tok, int):
+            raise ProviderRequestError("OpenAI usage missing integer token counts", error_class="invalid_usage")
+        return content, in_tok, out_tok
+
+    if provider == "anthropic":
+        content_blocks = data.get("content")
+        if not isinstance(content_blocks, list) or not content_blocks:
+            raise ProviderRequestError("Anthropic response missing content blocks", error_class="invalid_response")
+        parts = [
+            block.get("text", "")
+            for block in content_blocks
+            if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        text = "\n".join(part for part in parts if isinstance(part, str)).strip()
+        if not text:
+            raise ProviderRequestError("Anthropic response contained no text block", error_class="invalid_response")
+        in_tok = usage.get("input_tokens")
+        out_tok = usage.get("output_tokens")
+        cache_create = usage.get("cache_creation_input_tokens", 0) or 0
+        cache_read = usage.get("cache_read_input_tokens", 0) or 0
+        if not isinstance(in_tok, int) or not isinstance(out_tok, int):
+            raise ProviderRequestError("Anthropic usage missing integer token counts", error_class="invalid_usage")
+        return text, in_tok + int(cache_create) + int(cache_read), out_tok
+
+    raise ProviderRequestError(f"Unsupported provider {provider!r}", error_class="unsupported_provider")
+
+
+def summarize_ledger(ledger_path: str | Path) -> dict[str, Any]:
+    """Summarize a JSONL spend ledger into Fleshapron-ready weekly receipt fields.
+
+    Simulated fixture rows are strictly excluded from actual live `totals` and reported
+    separately under `simulated_totals`. Sidecar `*.hard_stop` sentinels are included so
+    receipts reflect billing stops even if a JSONL outcome append failed.
+    """
+    path = Path(ledger_path)
+    if not path.is_absolute():
+        raise LedgerError("Absolute ledger path required", error_class="relative_ledger_path")
+
+    rows: list[dict[str, Any]] = []
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+
+    # Merge any durable sidecar hard-stop sentinels (e.g., if a JSONL outcome write lost the lock).
+    hard_stop_sentinels: list[dict[str, Any]] = []
+    if path.parent.exists():
+        prefix = f"{path.name}."
+        for sibling in sorted(path.parent.iterdir()):
+            if sibling.name.startswith(prefix) and sibling.name.endswith(".hard_stop"):
+                try:
+                    sentinel_row = json.loads(sibling.read_text(encoding="utf-8").strip())
+                    if isinstance(sentinel_row, dict):
+                        hard_stop_sentinels.append(sentinel_row)
+                        rows.append(sentinel_row)
+                except Exception:
+                    hard_stop_sentinels.append({"path": sibling.name, "status": "billing_hard_stop"})
+
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        rid = str(row.get("reservation_id") or "")
+        if not rid:
+            continue
+        is_sim = bool(row.get("simulated")) or row.get("mode") == "fixture"
+        prev = by_id.get(rid)
+        # Prefer terminal outcomes over reserved, and prefer billing_hard_stop over any other state.
+        if (
+            prev is None
+            or prev.get("status") == "reserved"
+            or row.get("status") == "billing_hard_stop"
+        ):
+            by_id[rid] = {
+                "time": row.get("time"),
+                "product": row.get("product"),
+                "provider": row.get("provider"),
+                "model": row.get("model"),
+                "mode": "fixture" if is_sim else "live",
+                "simulated": is_sim,
+                "reserved_usd": row.get("reserved_usd"),
+                "spent_usd": row.get("spent_usd"),
+                "status": row.get("status"),
+                "error_class": row.get("error_class"),
+                "_reserved_micros": int(row.get("reserved_micros") or 0),
+                "_spent_micros": row.get("spent_micros"),
+            }
+
+    live_reserved = 0
+    live_spent = 0
+    live_reservations = 0
+    live_completed = 0
+    live_hard_stops = 0
+    live_failed = 0
+
+    sim_reserved = 0
+    sim_spent = 0
+    sim_reservations = 0
+    sim_completed = 0
+
+    entries: list[dict[str, Any]] = []
+    for item in by_id.values():
+        st = item["status"]
+        if item["simulated"]:
+            sim_reservations += 1
+            sim_reserved += item["_reserved_micros"]
+            if isinstance(item["_spent_micros"], int):
+                sim_spent += item["_spent_micros"]
+            if st == "completed":
+                sim_completed += 1
+        else:
+            live_reservations += 1
+            live_reserved += item["_reserved_micros"]
+            if isinstance(item["_spent_micros"], int):
+                live_spent += item["_spent_micros"]
+            if st == "completed":
+                live_completed += 1
+            elif st == "billing_hard_stop":
+                live_hard_stops += 1
+            elif st in ("failed", "transient_error"):
+                live_failed += 1
+
+        entries.append(
+            {
+                "time": item["time"],
+                "product": item["product"],
+                "provider": item["provider"],
+                "model": item["model"],
+                "mode": item["mode"],
+                "simulated": item["simulated"],
+                "reserved_usd": item["reserved_usd"],
+                "spent_usd": item["spent_usd"],
+                "status": st,
+                "error_class": item["error_class"],
+            }
+        )
+
+    return {
+        "ledger_path": str(path),
+        "generated_at": utc_now_iso(),
+        "entries": entries,
+        "totals": {
+            "reserved_usd": round(live_reserved / MICROS_PER_USD, 6),
+            "spent_usd": round(live_spent / MICROS_PER_USD, 6),
+            "reservations": live_reservations,
+            "completed": live_completed,
+            "billing_hard_stops": live_hard_stops,
+            "failed": live_failed,
+        },
+        "simulated_totals": {
+            "reserved_usd": round(sim_reserved / MICROS_PER_USD, 6),
+            "spent_usd": round(sim_spent / MICROS_PER_USD, 6),
+            "reservations": sim_reservations,
+            "completed": sim_completed,
+        },
+        "hard_stop_sentinels": len(hard_stop_sentinels),
+    }
