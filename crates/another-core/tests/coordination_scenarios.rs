@@ -291,14 +291,14 @@ fn claim_release_requires_owning_session_end_or_silent_grace() {
 
     let grace_claim = store.queue_next("claimant").unwrap().claimed.unwrap();
     assert_eq!(grace_claim.label, session_item.label);
-    let claim_was_unbound = store
+    let session_bound = store
         .queue_item(&grace_claim.item_id)
         .unwrap()
         .claim
         .unwrap()
         .session_bound;
     assert!(
-        !claim_was_unbound,
+        !session_bound,
         "ended session cannot bind the new claim"
     );
     clock_handle.fetch_add(GRACE_MS - 1, Ordering::SeqCst);
@@ -345,71 +345,92 @@ fn claim_release_requires_owning_session_end_or_silent_grace() {
 #[test]
 #[ignore = "opt-in multi-agent coordination evaluation"]
 fn admission_racing_next_never_claims_before_admission() {
-    let dir = tempdir();
-    let home = dir.path().join("home");
-    let setup = Store::open(&home).unwrap();
-    register(&setup, "admitter", None);
-    register(&setup, "worker", None);
-    let item = propose(&setup, "admitter", "admission race");
-    let store = Store::open(&home).unwrap();
-    let (ready_tx, ready_rx) = mpsc::channel::<()>();
-    let (admission_go_tx, admission_go_rx) = mpsc::channel::<()>();
-    let admission_item = item.clone();
-    let admission_store = Store::open(&home).unwrap();
-    let admission_ready = ready_tx.clone();
-    let admission = thread::spawn(move || {
-        admission_ready.send(()).unwrap();
-        admission_go_rx
-            .recv_timeout(WAIT_LIMIT)
-            .expect("bounded admission gate");
-        admission_store
-            .queue_admit(
-                &QueueCaller::Owner,
-                &admission_item.label,
-                AdmitItem::default(),
-            )
-            .unwrap();
-    });
-    let next_store = Store::open(&home).unwrap();
-    let next_ready = ready_tx.clone();
-    let (next_go_tx, next_go_rx) = mpsc::channel::<()>();
-    let next = thread::spawn(move || {
-        next_ready.send(()).unwrap();
-        next_go_rx
-            .recv_timeout(WAIT_LIMIT)
-            .expect("bounded next gate");
-        next_store.queue_next("worker").unwrap()
-    });
-    drop(ready_tx);
-    let ready =
-        ready_rx.recv_timeout(WAIT_LIMIT).is_ok() && ready_rx.recv_timeout(WAIT_LIMIT).is_ok();
-    let _ = admission_go_tx.send(());
-    let _ = next_go_tx.send(());
-    admission.join().expect("admission actor completed");
-    let next = next.join().expect("next actor completed");
-    assert!(ready, "both actors reached bounded start gate");
-    let events = store.events(1000).unwrap();
-    let admitted_seq = events
-        .iter()
-        .find(|event| event.kind == "queue.admitted" && event.payload["item_id"] == item.item_id)
-        .unwrap()
-        .seq;
-    if let Some(claimed) = next.claimed {
-        assert_eq!(claimed.item_id, item.item_id);
-        let claimed_seq = events
+    // A single interleaving can miss the admit-then-claim ordering. Loop and
+    // always assert the post-join state: either admitted-then-claimed, or
+    // admitted and still Ready if next ran first.
+    for attempt in 0..32 {
+        let dir = tempdir();
+        let home = dir.path().join("home");
+        let setup = Store::open(&home).unwrap();
+        register(&setup, "admitter", None);
+        register(&setup, "worker", None);
+        let item = propose(&setup, "admitter", "admission race");
+        let store = Store::open(&home).unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel::<()>();
+        let (admission_go_tx, admission_go_rx) = mpsc::channel::<()>();
+        let admission_item = item.clone();
+        let admission_store = Store::open(&home).unwrap();
+        let admission_ready = ready_tx.clone();
+        let admission = thread::spawn(move || {
+            admission_ready.send(()).unwrap();
+            admission_go_rx
+                .recv_timeout(WAIT_LIMIT)
+                .expect("bounded admission gate");
+            admission_store
+                .queue_admit(
+                    &QueueCaller::Owner,
+                    &admission_item.label,
+                    AdmitItem::default(),
+                )
+                .unwrap();
+        });
+        let next_store = Store::open(&home).unwrap();
+        let next_ready = ready_tx.clone();
+        let (next_go_tx, next_go_rx) = mpsc::channel::<()>();
+        let next = thread::spawn(move || {
+            next_ready.send(()).unwrap();
+            next_go_rx
+                .recv_timeout(WAIT_LIMIT)
+                .expect("bounded next gate");
+            next_store.queue_next("worker").unwrap()
+        });
+        drop(ready_tx);
+        let ready =
+            ready_rx.recv_timeout(WAIT_LIMIT).is_ok() && ready_rx.recv_timeout(WAIT_LIMIT).is_ok();
+        let _ = admission_go_tx.send(());
+        let _ = next_go_tx.send(());
+        admission.join().expect("admission actor completed");
+        let next = next.join().expect("next actor completed");
+        assert!(ready, "attempt {attempt}: both actors reached bounded start gate");
+        let events = store.events(1000).unwrap();
+        let admitted_seq = events
             .iter()
-            .find(|event| event.kind == "queue.claimed" && event.payload["item_id"] == item.item_id)
+            .find(|event| event.kind == "queue.admitted" && event.payload["item_id"] == item.item_id)
             .unwrap()
             .seq;
-        assert!(
-            admitted_seq < claimed_seq,
-            "admission must linearize before claim"
-        );
+        let item_row = store.queue_item(&item.item_id).unwrap();
+        if let Some(claimed) = next.claimed {
+            assert_eq!(claimed.item_id, item.item_id);
+            assert_eq!(
+                item_row.state,
+                QueueState::Claimed,
+                "attempt {attempt}: a successful next must leave the item claimed"
+            );
+            let claimed_seq = events
+                .iter()
+                .find(|event| event.kind == "queue.claimed" && event.payload["item_id"] == item.item_id)
+                .unwrap()
+                .seq;
+            assert!(
+                admitted_seq < claimed_seq,
+                "attempt {attempt}: admission must linearize before claim"
+            );
+        } else {
+            assert_eq!(
+                item_row.state,
+                QueueState::Ready,
+                "attempt {attempt}: if next did not claim, the item must still be admitted"
+            );
+            assert!(
+                item_row.claim.is_none(),
+                "attempt {attempt}: Ready item must have no claim"
+            );
+        }
+        assert!(!events.iter().any(|event| {
+            event.kind == "queue.claimed"
+                && event.payload["item_id"] == item.item_id
+                && event.seq < admitted_seq
+        }));
+        assert!(setup.queue_audit(None).unwrap().ok);
     }
-    assert!(!events.iter().any(|event| {
-        event.kind == "queue.claimed"
-            && event.payload["item_id"] == item.item_id
-            && event.seq < admitted_seq
-    }));
-    assert!(setup.queue_audit(None).unwrap().ok);
 }

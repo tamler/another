@@ -88,6 +88,33 @@ class LedgerTests(unittest.TestCase):
                         else "billing_or_provider_error")
             self.assertEqual(receipt["error_class"], expected)
 
+    def test_billing_error_finishes_the_ledger_once(self):
+        calls = []
+        real_finish = self.ledger.finish
+
+        def counted_finish(*args, **kwargs):
+            calls.append(1)
+            return real_finish(*args, **kwargs)
+
+        self.ledger.finish = counted_finish
+        with self.assertRaises(evals.Refused):
+            evals.judge(
+                self.ledger, "openai", evals.MODELS["openai"], "fixture",
+                lambda _: {"error": {"type": "insufficient_credit"}},
+            )
+        self.assertEqual(len(calls), 1)
+        receipt = self.ledger.receipts()[0]
+        self.assertEqual(receipt["status"], "stopped")
+        self.assertEqual(receipt["error_class"], "insufficient_credit")
+
+    def test_judge_prompt_strips_retained_root(self):
+        prompt = evals.judge_prompt([
+            {"scenario": "s", "passed": False, "retained_root": "/tmp/another-eval-secret"},
+        ])
+        self.assertNotIn("retained_root", prompt)
+        self.assertNotIn("/tmp/another-eval-secret", prompt)
+        self.assertIn('"scenario": "s"', prompt)
+
     def test_failed_billing_stop_persistence_leaves_unresolved_call_and_blocks_retry(self):
         calls = []
         ledger = evals.Ledger(self.path)

@@ -32,8 +32,10 @@ not recorded provider calls or evidence of model quality. The default judge
 profile is OpenAI's small-task `gpt-6-luna`; `--second-family` adds the Anthropic
 `claude-haiku-5-5` fixture. No model controls the actors in this version.
 The current profiles follow the public [OpenAI model guide](https://developers.openai.com/api/docs/models/gpt-6-luna)
-and [Anthropic catalog](https://platform.claude.com/docs/en/models/overview), checked
-27 Nov 2026. GPT-5-mini is not used. Availability must be rechecked before live use.
+and [Claude Haiku 5.5 overview](https://platform.claude.com/docs/en/models/haiku-5-5/overview).
+Rechecked 27 Nov 2026, 5:52 PM Asia/Manila: `gpt-6-luna` and `claude-haiku-5-5` are
+still the public API ids. GPT-5-mini is not used. Recheck both ids before any live
+transport is enabled.
 
 Each run gets a recorded temporary root through `ANOTHER_EVAL_ROOT`, `ANOTHER_HOME`
 and `TMPDIR`. Successful completed runs remove it. Failed runs retain their logs

@@ -136,6 +136,13 @@ def live_judge(*_args, **_kwargs):
     raise Refused("live calls disabled pending merged and tested spend controls")
 
 
+def judge_prompt(scenarios):
+    """JSON prompt for the judge, without local retained_root paths."""
+    cleaned = [{key: value for key, value in row.items() if key != "retained_root"}
+               for row in scenarios]
+    return json.dumps(cleaned)
+
+
 def judge(ledger, provider, model, prompt, transport, reserve=1000, cap=1000):
     if MODELS.get(provider) != model:
         raise Refused("unknown judge model")
@@ -144,6 +151,7 @@ def judge(ledger, provider, model, prompt, transport, reserve=1000, cap=1000):
     if not callable(transport):
         raise Refused("only injected offline transports are supported")
     call = ledger.reserve(provider, model, reserve, cap)
+    settled = False
     try:
         # Exactly one attempt, after durable reservation. No retry or fallback.
         response = transport(prompt)
@@ -154,13 +162,16 @@ def judge(ledger, provider, model, prompt, transport, reserve=1000, cap=1000):
             code = error.get("type") if isinstance(error, dict) else None
             category = "insufficient_credit" if code == "insufficient_credit" else "billing_or_provider_error"
             ledger.finish(call, "stopped", category)
+            settled = True
             raise Refused(category)
         if set(response) != {"verdict"} or type(response["verdict"]) is not bool:
             raise Refused("invalid judge response")
         ledger.finish(call, "fixture-completed")
+        settled = True
         return response["verdict"]
     except Refused:
-        ledger.finish(call, "stopped", "judge_failure")
+        if not settled:
+            ledger.finish(call, "stopped", "judge_failure")
         raise
     except Exception:
         ledger.finish(call, "stopped", "uncertain_provider_failure")
@@ -268,7 +279,7 @@ def main():
         judge_error = False
         for provider in providers:
             try:
-                verdicts.append(judge(ledger, provider, MODELS[provider], json.dumps(scenarios),
+                verdicts.append(judge(ledger, provider, MODELS[provider], judge_prompt(scenarios),
                                       lambda _, p=provider: fixtures[p]))
             except (Refused, OSError, sqlite3.Error, ValueError):
                 judge_error = True
