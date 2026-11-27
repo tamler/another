@@ -1011,12 +1011,12 @@ pub fn restart(env: &DaemonEnv) -> Result<()> {
     Ok(())
 }
 
-fn healthy(bind: &str, local_node: &str) -> bool {
+fn healthy(bind: &str, local_node: &str) -> Result<()> {
     if !bind
         .parse::<std::net::SocketAddr>()
         .is_ok_and(|address| address.ip().is_loopback())
     {
-        return false;
+        bail!("{bind} is not a numeric loopback address; /health was not checked");
     }
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
@@ -1026,19 +1026,24 @@ fn healthy(bind: &str, local_node: &str) -> bool {
             .timeout_global(Some(Duration::from_secs(2)))
             .build(),
     );
-    agent
+    let mut response = agent
         .get(&format!("http://{bind}/health"))
         .call()
-        .is_ok_and(|mut r| {
-            r.status().is_success()
-                && r.body_mut()
-                    .with_config()
-                    .limit(16 * 1024)
-                    .read_to_string()
-                    .ok()
-                    .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
-                    .is_some_and(|body| body["node_id"].as_str() == Some(local_node))
-        })
+        .with_context(|| format!("could not reach /health on {bind}"))?;
+    if response.status().is_success()
+        && response
+            .body_mut()
+            .with_config()
+            .limit(16 * 1024)
+            .read_to_string()
+            .ok()
+            .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+            .is_some_and(|body| body["node_id"].as_str() == Some(local_node))
+    {
+        Ok(())
+    } else {
+        bail!("/health on {bind} did not identify this home's node {local_node}")
+    }
 }
 
 /// `loaded` and `pid` from `systemctl --user show --property=...` output.
@@ -1056,6 +1061,37 @@ fn systemd_state(show: &str) -> (bool, Option<u32>) {
     (loaded, pid)
 }
 
+/// The quoted Environment line emitted by `another daemon install`, reversing its
+/// backslash escapes and doubled literal percent signs, not expanding specifiers.
+pub(crate) fn systemd_home(unit: &str) -> Option<PathBuf> {
+    let encoded = unit
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("Environment=\"ANOTHER_HOME="))?
+        .strip_suffix('"')?;
+    let mut value = String::new();
+    let mut chars = encoded.chars();
+    while let Some(c) = chars.next() {
+        value.push(match c {
+            '\\' => match chars.next()? {
+                c @ ('\\' | '"') => c,
+                _ => return None,
+            },
+            '%' if chars.next()? == '%' => '%',
+            '%' | '"' => return None,
+            c => c,
+        });
+    }
+    (!value.is_empty()).then(|| PathBuf::from(value))
+}
+
+fn same_home(recorded: &Path, home: &Path) -> bool {
+    match (recorded.canonicalize(), home.canonicalize()) {
+        (Ok(recorded), Ok(home)) => recorded == home,
+        _ => recorded == home,
+    }
+}
+
 /// Is the service installed, loaded, running and answering?
 pub fn status(env: &DaemonEnv) -> Result<DaemonStatus> {
     let mut s = service(env)?;
@@ -1063,13 +1099,8 @@ pub fn status(env: &DaemonEnv) -> Result<DaemonStatus> {
         if let Some(bind) = &s.bind {
             match another_core::Store::open_read_only(&env.another_home, Duration::from_secs(2)) {
                 Ok(store) => {
-                    s.healthy = healthy(bind, store.node_id());
-                    if !s.healthy {
-                        s.detail = Some(format!(
-                            "/health on {bind} did not identify this home's node {}",
-                            store.node_id()
-                        ));
-                    }
+                    s.detail = healthy(bind, store.node_id()).err().map(|e| e.to_string());
+                    s.healthy = s.detail.is_none();
                 }
                 Err(e) => s.detail = Some(format!("could not read this home's node: {e}")),
             }
@@ -1094,11 +1125,7 @@ fn launchd_state(text: &str, home: &Path) -> (bool, Option<u32>, Option<String>)
         );
     };
     let recorded = Path::new(recorded_home);
-    let same_home = match (recorded.canonicalize(), home.canonicalize()) {
-        (Ok(recorded), Ok(home)) => recorded == home,
-        _ => recorded == home,
-    };
-    if !same_home {
+    if !same_home(recorded, home) {
         return (
             false,
             None,
@@ -1121,7 +1148,7 @@ pub fn service(env: &DaemonEnv) -> Result<DaemonStatus> {
     let path = env.file_path();
     let installed_text = read_definition(env.manager, &path);
     let mut detail = None;
-    let (loaded, pid) = match env.manager {
+    let (mut loaded, mut pid) = match env.manager {
         Manager::Launchd => {
             let out = exec(&argv(&[
                 "launchctl",
@@ -1155,6 +1182,20 @@ pub fn service(env: &DaemonEnv) -> Result<DaemonStatus> {
         }
         Manager::TaskScheduler => (task_presence(&env.label) == Presence::Present, None),
     };
+    if env.manager == Manager::Systemd && (installed_text.is_some() || loaded || pid.is_some()) {
+        detail = match installed_text.as_deref().and_then(systemd_home) {
+            Some(home) if same_home(&home, &env.another_home) => None,
+            Some(home) => Some(format!(
+                "systemd unit belongs to a different home: {:?}",
+                home.display().to_string()
+            )),
+            None => Some("systemd unit's ANOTHER_HOME could not be verified".into()),
+        };
+        if detail.is_some() {
+            loaded = false;
+            pid = None;
+        }
+    }
     let bind = installed_text
         .as_deref()
         .and_then(|t| bind_in(env.manager, t));
@@ -1203,7 +1244,7 @@ mod tests {
     #[test]
     fn health_requires_this_homes_node() {
         let (bind, server) = health_fixture(r#"{"ok":true,"node_id":"other-node"}"#);
-        let result = healthy(&bind, "this-node");
+        let result = healthy(&bind, "this-node").is_ok();
         server.join().unwrap();
         assert!(
             !result,
@@ -1219,10 +1260,30 @@ mod tests {
             ("not json", false),
         ] {
             let (bind, server) = health_fixture(body);
-            let result = healthy(&bind, "this-node");
+            let result = healthy(&bind, "this-node").is_ok();
             server.join().unwrap();
             assert_eq!(result, expected, "{body}");
         }
+    }
+
+    #[test]
+    fn health_reports_a_closed_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let bind = listener.local_addr().unwrap().to_string();
+        drop(listener);
+        let error = healthy(&bind, "this-node").unwrap_err().to_string();
+        assert_eq!(error, format!("could not reach /health on {bind}"));
+    }
+
+    #[test]
+    fn health_rejects_a_non_numeric_bind() {
+        let error = healthy("localhost:7466", "this-node")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "localhost:7466 is not a numeric loopback address; /health was not checked"
+        );
     }
 
     #[test]

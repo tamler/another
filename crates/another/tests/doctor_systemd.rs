@@ -70,8 +70,36 @@ fn doctor_checks_the_systemd_user_unit() {
         }
         assert_eq!(std::fs::read(&unit).unwrap(), before);
     }
+    let foreign = dir.path().join("other home");
+    let foreign_unit = String::from_utf8(before).unwrap().replace(
+        &format!("ANOTHER_HOME={}", data.display()),
+        &format!("ANOTHER_HOME={}", foreign.display()),
+    );
+    std::fs::write(&unit, &foreign_unit).unwrap();
+    for state in ["enabled", "disabled"] {
+        let out = run(&["--json", "doctor", "--bind", &bind], state);
+        assert!(out.status.success());
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let daemon = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == "daemon")
+            .unwrap();
+        assert_eq!(daemon["status"], "info", "{daemon}");
+        assert_eq!(
+            daemon["detail"],
+            format!(
+                "one.toanother.another serves {}, not {}",
+                foreign.display(),
+                data.display()
+            )
+        );
+        assert!(daemon["fix"].is_null(), "{daemon}");
+        assert_eq!(std::fs::read_to_string(&unit).unwrap(), foreign_unit);
+    }
     let calls = std::fs::read_to_string(home.join("calls")).unwrap();
-    assert_eq!(calls.lines().count(), 2, "{calls}");
+    assert_eq!(calls.lines().count(), 4, "{calls}");
     assert!(
         calls.lines().all(|line| line.starts_with("--user show ")),
         "{calls}"

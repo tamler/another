@@ -41,11 +41,9 @@ fn status_attributes_health_to_the_current_database() {
     ] {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let bind = listener.local_addr().unwrap().to_string();
-        std::fs::write(
-            env.file_path(),
-            format!("ExecStart=/work/another serve --bind {bind}\n"),
-        )
-        .unwrap();
+        let mut unit_env = env.clone();
+        unit_env.bind = bind.clone();
+        std::fs::write(env.file_path(), daemon::systemd_unit(&unit_env).unwrap()).unwrap();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             stream
@@ -79,6 +77,46 @@ fn status_attributes_health_to_the_current_database() {
             before
         );
     }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed_bind = listener.local_addr().unwrap().to_string();
+    drop(listener);
+    let mut failures = Vec::new();
+    for (bind, detail) in [
+        (closed_bind.as_str(), "could not reach /health"),
+        ("localhost:7466", "not a numeric loopback address"),
+    ] {
+        let mut unit_env = env.clone();
+        unit_env.bind = bind.into();
+        std::fs::write(env.file_path(), daemon::systemd_unit(&unit_env).unwrap()).unwrap();
+        let status = daemon::status(&env).unwrap();
+        assert!(!status.healthy);
+        if !status.detail.as_deref().unwrap().contains(detail) {
+            failures.push(format!(
+                "{bind}: expected {detail:?}, got {:?}",
+                status.detail
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let mut foreign_env = env.clone();
+    foreign_env.another_home = dir.path().join("other home");
+    foreign_env.bind = closed_bind;
+    std::fs::write(env.file_path(), daemon::systemd_unit(&foreign_env).unwrap()).unwrap();
+    let status = daemon::status(&env).unwrap();
+    assert!(!status.loaded, "{status:?}");
+    assert_eq!(status.pid, None);
+    assert!(!status.healthy);
+    assert!(status.detail.as_deref().unwrap().contains("different home"));
+    std::fs::write(env.file_path(), "ExecStart=/work/another serve\n").unwrap();
+    let status = daemon::status(&env).unwrap();
+    assert!(!status.loaded);
+    assert_eq!(status.pid, None);
+    assert!(!status.healthy);
+    assert!(status
+        .detail
+        .as_deref()
+        .unwrap()
+        .contains("could not be verified"));
     match old_path {
         Some(path) => std::env::set_var("PATH", path),
         None => std::env::remove_var("PATH"),

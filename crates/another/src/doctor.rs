@@ -619,11 +619,14 @@ fn daemon_check(
         return check("daemon", Level::Info, "not installed")
             .fix("another daemon install, if you want another serve running in the background");
     }
-    let served = (s.manager == crate::daemon::Manager::Launchd)
-        .then(|| std::fs::read_to_string(&s.file).ok())
-        .flatten()
+    let served = std::fs::read_to_string(&s.file)
+        .ok()
         .as_deref()
-        .and_then(plist_home);
+        .and_then(|text| match s.manager {
+            crate::daemon::Manager::Launchd => plist_home(text),
+            crate::daemon::Manager::Systemd => crate::daemon::systemd_home(text),
+            crate::daemon::Manager::TaskScheduler => None,
+        });
     if let Some(served) = served.filter(|h| !same_file(h, another_home)) {
         return check(
             "daemon",
@@ -1048,4 +1051,55 @@ pub fn render(r: &Report) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::{DaemonEnv, DaemonStatus, Manager};
+
+    #[test]
+    fn daemon_check_reads_the_home_from_a_systemd_unit_fixture() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = DaemonEnv {
+            manager: Manager::Systemd,
+            home: dir.path().join("user"),
+            config_home: None,
+            another_home: dir.path().join("other home % with \\\"quotes\""),
+            exe: PathBuf::from("/work/another"),
+            path: None,
+            user: None,
+            label: "one.toanother.fixture".into(),
+            bind: "127.0.0.1:7466".into(),
+        };
+        let unit = dir.path().join("fixture.service");
+        std::fs::write(&unit, crate::daemon::systemd_unit(&env).unwrap()).unwrap();
+        let status = DaemonStatus {
+            manager: Manager::Systemd,
+            label: env.label.clone(),
+            file: unit.display().to_string(),
+            plist: None,
+            installed: true,
+            loaded: true,
+            detail: None,
+            pid: Some(4242),
+            bind: Some(env.bind.clone()),
+            healthy: false,
+            log: "fixture.log".into(),
+        };
+        let current = dir.path().join("current");
+        let row = daemon_check(Ok(status.clone()), &current, Some(&env.bind));
+        assert_eq!(row.status, Level::Info);
+        assert_eq!(
+            row.detail,
+            format!(
+                "{} serves {}, not {}",
+                env.label,
+                env.another_home.display(),
+                current.display()
+            )
+        );
+        let row = daemon_check(Ok(status), &env.another_home, Some(&env.bind));
+        assert_eq!(row.status, Level::Ok);
+    }
 }
