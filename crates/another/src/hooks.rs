@@ -467,13 +467,27 @@ fn contains_ours(root: &Map<String, Value>) -> bool {
 
 /// Whether `client`'s config has Another hooks, current or from a development build (the
 /// same test `drift` uses, so a pack is never "not installed" and "out of date" at once).
+/// For Grok, a leftover pre-rename `wyres.json` also counts, because install removes it.
 pub fn installed(env: &HookEnv, client: Client) -> bool {
-    std::fs::read_to_string(client.config_path(&env.home)).is_ok_and(|t| contains_ours_text(&t))
+    if std::fs::read_to_string(client.config_path(&env.home)).is_ok_and(|t| contains_ours_text(&t)) {
+        return true;
+    }
+    client == Client::Grok && grok_legacy_mentions_ours(env)
 }
 
-/// The wrapper scripts that Another's current-name hook commands in `config` run: the
-/// first word of each command, undoing the single quoting `command_for` writes.
-fn wrapper_paths(config: &Value) -> Vec<PathBuf> {
+fn grok_legacy_path(env: &HookEnv) -> PathBuf {
+    env.home.join(".grok").join("hooks").join(LEGACY_GROK_FILE)
+}
+
+fn grok_legacy_mentions_ours(env: &HookEnv) -> bool {
+    std::fs::read_to_string(grok_legacy_path(env)).is_ok_and(|t| mentions_ours(&t))
+}
+
+/// The wrapper scripts that Another's current-name hook commands in the managed event
+/// entries of `root` run: the first word of each command, undoing the single quoting
+/// `command_for` writes. Command-valued keys outside those events are ignored, matching
+/// what `install_into` inspects.
+fn wrapper_paths(client: Client, root: &Map<String, Value>) -> Vec<PathBuf> {
     fn walk(v: &Value, out: &mut Vec<PathBuf>) {
         match v {
             Value::Object(m) => {
@@ -492,7 +506,14 @@ fn wrapper_paths(config: &Value) -> Vec<PathBuf> {
         }
     }
     let mut out = Vec::new();
-    walk(config, &mut out);
+    let Some(hooks) = root.get("hooks").and_then(Value::as_object) else {
+        return out;
+    };
+    for spec in client.specs() {
+        if let Some(v) = hooks.get(spec.key) {
+            walk(v, &mut out);
+        }
+    }
     out
 }
 
@@ -519,74 +540,111 @@ fn first_sh_word(command: &str) -> Option<String> {
 }
 
 /// How an installed hook pack differs from what `hook install` would write now: missing
-/// events, changed entries (command, timeout, matcher, labels), and a missing, stale or
-/// non-executable wrapper. Empty when the client has no Another hooks, or none differ.
+/// events, changed entries (command, timeout, matcher, labels), a missing, stale or
+/// non-executable wrapper, an invalid managed-event shape, and a leftover pre-rename
+/// Grok hook file. Empty when the client has no Another hooks, or none differ.
 /// Compares parsed JSON, so formatting alone is never drift. Reads only.
 pub fn drift(env: &HookEnv, client: Client) -> Vec<String> {
     let path = client.config_path(&env.home);
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Vec::new();
-    };
-    if !contains_ours_text(&text) {
+    let text = std::fs::read_to_string(&path).ok();
+    let current_ours = text.as_deref().is_some_and(contains_ours_text);
+    let legacy_ours = client == Client::Grok && grok_legacy_mentions_ours(env);
+    if !current_ours && !legacy_ours {
         return Vec::new();
     }
+
     let install = format!("another hook install --client {}", client.as_str());
+    let mut out = Vec::new();
+    if legacy_ours {
+        out.push(format!(
+            "a pre-rename Grok hook file {} is still present; `{install}` or `another hook uninstall --client grok` removes it",
+            grok_legacy_path(env).display()
+        ));
+    }
+    if !current_ours {
+        return out;
+    }
+
     let root = match read_json(&path) {
         Ok(Some((_, root))) => root,
         _ => {
-            return vec![format!(
+            out.push(format!(
                 "{} is not a JSON object; fix it, then run `{install}`",
                 path.display()
-            )]
-        }
-    };
-    // Hooks installed for another Another home run that home's wrapper. Comparing them with
-    // this home would advise a reinstall that silently moves them here (#163 F2).
-    let here = env.script_path();
-    let used = wrapper_paths(&Value::Object(root.clone()));
-    if let Some(theirs) = used.iter().find(|p| **p != here) {
-        if !used.contains(&here) {
-            let home = theirs
-                .parent()
-                .and_then(Path::parent)
-                .unwrap_or(theirs.as_path());
-            let mut out = vec![format!(
-                "these hooks run {} (Another home {}), not this one ({})",
-                theirs.display(),
-                home.display(),
-                env.another_home.display()
-            )];
-            if !theirs.is_file() {
-                out.push(format!("the wrapper {} is missing", theirs.display()));
-            }
-            out.push(format!(
-                "to keep that home, run `ANOTHER_HOME={} {install}`; `{install}` from here moves the hooks to {}",
-                home.display(),
-                env.another_home.display()
             ));
             return out;
         }
-    }
-    let mut out = Vec::new();
-    let hooks = root.get("hooks").and_then(Value::as_object);
-    for spec in client.specs() {
-        let present = hooks
-            .and_then(|h| h.get(spec.key))
-            .is_some_and(|v| mentions_ours(&v.to_string()));
-        if !present {
-            out.push(format!("no Another hook for {}", spec.key));
+    };
+
+    // Hooks installed for another Another home run that home's wrapper. Comparing them with
+    // this home would advise a reinstall that silently moves them here (#163 F2).
+    let here = env.script_path();
+    let used = wrapper_paths(client, &root);
+    let foreign = used.iter().find(|p| **p != here).filter(|_| !used.contains(&here));
+    let foreign_env = foreign.map(|theirs| {
+        let home = theirs
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(theirs.as_path());
+        HookEnv {
+            home: env.home.clone(),
+            another_home: home.to_path_buf(),
+            exe: env.exe.clone(),
         }
-    }
-    let mut wanted = root.clone();
-    if out.is_empty() && install_into(client, env, &mut wanted).is_ok() && wanted != root {
+    });
+    if let (Some(theirs), Some(foreign_env)) = (foreign, foreign_env.as_ref()) {
         out.push(format!(
-            "Another's entries differ from what `{install}` writes (command, timeout, matcher or label)"
+            "these hooks run {} (Another home {}), not this one ({})",
+            theirs.display(),
+            foreign_env.another_home.display(),
+            env.another_home.display()
         ));
     }
-    let script = env.script_path();
+    let compare = foreign_env.as_ref().unwrap_or(env);
+
+    let hooks = root.get("hooks");
+    let mut shape_bad = false;
+    if matches!(hooks, Some(value) if !value.is_object()) {
+        shape_bad = true;
+        out.push(format!(
+            "\"hooks\" is not an object; fix the config, then run `{install}`"
+        ));
+    }
+    let hooks_obj = hooks.and_then(Value::as_object);
+    for spec in client.specs() {
+        match hooks_obj.and_then(|h| h.get(spec.key)) {
+            None => out.push(format!("no Another hook for {}", spec.key)),
+            Some(v) if !v.is_array() => {
+                shape_bad = true;
+                out.push(format!(
+                    "hooks.{} is not an array; fix the config, then run `{install}`",
+                    spec.key
+                ));
+            }
+            Some(v) if !mentions_ours(&v.to_string()) => {
+                out.push(format!("no Another hook for {}", spec.key));
+            }
+            Some(_) => {}
+        }
+    }
+
+    let mut wanted = root.clone();
+    match install_into(client, compare, &mut wanted) {
+        Err(error) => {
+            if !shape_bad {
+                out.push(format!("{error}; fix the config, then run `{install}`"));
+            }
+        }
+        Ok(()) if wanted != root => out.push(format!(
+            "Another's entries differ from what `{install}` writes (command, timeout, matcher or label)"
+        )),
+        Ok(()) => {}
+    }
+
+    let script = compare.script_path();
     match std::fs::read_to_string(&script) {
         Err(_) => out.push(format!("the wrapper {} is missing", script.display())),
-        Ok(t) if t != script_text(env) => out.push(format!(
+        Ok(t) if t != script_text(compare) => out.push(format!(
             "the wrapper {} calls a different another binary or home than this one",
             script.display()
         )),
@@ -603,8 +661,17 @@ pub fn drift(env: &HookEnv, client: Client) -> Vec<String> {
             }
         }
     }
+
     if !out.is_empty() {
-        out.push(format!("run `{install}` to repair"));
+        if let Some(foreign_env) = foreign_env.as_ref() {
+            out.push(format!(
+                "to keep that home, run `ANOTHER_HOME={} {install}`; `{install}` from here moves the hooks to {}",
+                sh_quote(&foreign_env.another_home.display().to_string()),
+                env.another_home.display()
+            ));
+        } else if !shape_bad {
+            out.push(format!("run `{install}` to repair"));
+        }
     }
     out
 }

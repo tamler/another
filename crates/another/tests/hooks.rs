@@ -1080,3 +1080,150 @@ fn adv163_drift_names_the_home_the_hooks_use() {
         "drift does not say the hooks use {used}: {text}"
     );
 }
+
+
+#[test]
+fn status_reports_a_malformed_event_value_and_does_not_call_it_current() {
+    let env = Env::new();
+    env.ok(&["hook", "install", "--client", "claude"]);
+    let mut claude = env.read(".claude/settings.json");
+    let command = claude["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    claude["hooks"]["PreToolUse"] = json!(command);
+    env.write(".claude/settings.json", &claude);
+    let d = drift(&env, "claude");
+    assert!(
+        d.iter()
+            .any(|l| l.contains("hooks.PreToolUse is not an array")),
+        "{d:?}"
+    );
+    assert!(d.iter().any(|l| l.contains("fix the config")), "{d:?}");
+    assert!(
+        !d.iter()
+            .any(|l| l == "run `another hook install --client claude` to repair"),
+        "must not recommend a reinstall that still refuses: {d:?}"
+    );
+
+    // The same invalid shape without the wrapper marker also has to name the
+    // prerequisite fix: install refuses either way.
+    claude["hooks"]["PreToolUse"] = json!("not-an-array");
+    env.write(".claude/settings.json", &claude);
+    let d = drift(&env, "claude");
+    assert!(
+        d.iter()
+            .any(|l| l.contains("hooks.PreToolUse is not an array")),
+        "{d:?}"
+    );
+    assert!(d.iter().any(|l| l.contains("fix the config")), "{d:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn status_reports_foreign_home_event_and_mode_drift_and_quotes_the_home() {
+    let env = Env::new();
+    let used_home = env.home.join("Jacob's other home");
+    std::fs::create_dir_all(&used_home).unwrap();
+    let out = env
+        .cmd(&["hook", "install", "--client", "claude"])
+        .env("ANOTHER_HOME", &used_home)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let mut claude = env.read(".claude/settings.json");
+    claude["hooks"].as_object_mut().unwrap().remove("PreToolUse");
+    env.write(".claude/settings.json", &claude);
+    let script = used_home.join("hooks/another-hook.sh");
+    set_mode(&script, 0o644);
+
+    let other = env.home.join("status-home");
+    let out = env
+        .cmd(&["--json", "hook", "status"])
+        .env("ANOTHER_HOME", &other)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rows: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let claude = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["client"] == "claude")
+        .unwrap();
+    let text = claude["drift"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let used = used_home.to_string_lossy().into_owned();
+    assert!(
+        text.contains(&used),
+        "drift does not say the hooks use {used}: {text}"
+    );
+    assert!(
+        text.contains("no Another hook for PreToolUse"),
+        "{text}"
+    );
+    assert!(text.contains("is not executable"), "{text}");
+    let quoted = format!("ANOTHER_HOME='{}'", used.replace('\'', r"'\''"));
+    assert!(
+        text.contains(&quoted),
+        "repair command does not quote the home: {text}"
+    );
+}
+
+#[test]
+fn status_reports_a_legacy_grok_file_whether_or_not_the_new_pack_is_present() {
+    let env = Env::new();
+    let legacy = json!({ "hooks": { "SessionStart": [{ "hooks": [{
+        "type": "command", "command": legacy_command("session-start", "grok") }] }] } });
+    env.write(".grok/hooks/wyres.json", &legacy);
+    let rows: Value = serde_json::from_str(&env.ok(&["--json", "hook", "status"])).unwrap();
+    let grok = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["client"] == "grok")
+        .unwrap();
+    assert_eq!(
+        grok["installed"], true,
+        "a leftover Grok file must not look uninstalled: {grok}"
+    );
+    let d = grok["drift"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        d.iter().any(|l| l.contains("wyres.json")),
+        "{d:?}"
+    );
+    assert!(env.ok(&["hook", "status"]).contains("out of date"));
+
+    env.ok(&["hook", "install", "--client", "grok"]);
+    assert!(
+        !env.home.join(".grok/hooks/wyres.json").exists(),
+        "install should still remove the leftover file"
+    );
+    env.write(".grok/hooks/wyres.json", &legacy);
+    let d = drift(&env, "grok");
+    assert!(
+        d.iter().any(|l| l.contains("wyres.json")),
+        "a healthy new pack must still report the leftover file: {d:?}"
+    );
+}

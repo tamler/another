@@ -43,9 +43,12 @@ another hook status
 - **What counts as drift:**
   - an event with no Another hook;
   - an Another entry whose command, timeout, matcher or label was changed;
-  - a wrapper that is missing, not executable, or calls a different `another` binary or home than the one running `status`.
-- **How it shows:** such a client reads `out of date` in text, with one line per difference and the install command that repairs it. JSON gives a `drift` list, empty when current.
-- **What does not count:** formatting, other tools' hooks and other keys in the file.
+  - a wrapper that is missing, not executable, or calls a different `another` binary or home than the one running `status`;
+  - a managed event whose config value is the wrong shape (for example a string where an array is required);
+  - install-managed top-level defaults that `hook install` would write when they are missing (Cursor `version`, a blank Codex `description`);
+  - a leftover pre-rename Grok hook file (`~/.grok/hooks/wyres.json`) that install or uninstall for Grok would remove.
+- **How it shows:** such a client reads `out of date` in text, with one line per difference. JSON gives a `drift` list, empty when current. When `hook install` can repair the pack, the last line is that command; for a pack that belongs to another Another home, the `ANOTHER_HOME` value is shell-quoted. When a managed event has the wrong shape, status names the problem and says to fix the config first: `hook install` will still refuse until the shape is valid.
+- **What does not count:** formatting, other tools' hooks, and other keys the installer does not manage.
 - **Reading only:** status reads the files and writes nothing.
 
 ```bash
