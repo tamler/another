@@ -2,74 +2,29 @@
 //! authenticated server no queue tool is available, and no route returns the text of an
 //! item: not its title, body, done condition, notes, reasons, result or a notice error.
 
-use std::net::SocketAddr;
+#[path = "common/mcp_http.rs"]
+mod mcp_http;
 
 use another::dashboard::DashboardMode;
-use another::serve::{http_router, HttpOptions};
+use another::serve::HttpOptions;
 use another_core::{
     AdmitItem, DoneItem, EditItem, PointerKind, Program, ProposeItem, QueueCaller, RegisterAgent,
     ReleaseItem, Store,
 };
-use rmcp::model::{CallToolRequestParams, CallToolResult, ClientConfig};
-use rmcp::service::RunningService;
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::{RoleClient, ServiceExt};
+use mcp_http::{call, connect, error_code, start_http, TestServer};
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
-
-type Client = RunningService<RoleClient, ClientConfig>;
 
 /// Every free text in the run starts with this.
 const MARK: &str = "ZQMARK";
 
-async fn serve(store: Store, opts: HttpOptions, ct: &CancellationToken) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let mut opts = opts;
-    opts.bound_port = addr.port();
-    opts.dashboard_bound = Some(addr);
-    let app = http_router(store, ct.clone(), &opts);
-    let stop = ct.clone();
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move { stop.cancelled_owned().await })
-        .await
-        .unwrap();
-    });
-    format!("http://{addr}")
-}
-
-async fn connect(base: &str, token: &str) -> Client {
-    let transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(format!("{base}/mcp")).auth_header(token),
-    );
-    ClientConfig::default().serve(transport).await.unwrap()
-}
-
-async fn call(client: &Client, tool: &str, args: Value) -> CallToolResult {
-    client
-        .call_tool(
-            CallToolRequestParams::new(tool.to_string())
-                .with_arguments(args.as_object().cloned().unwrap()),
-        )
-        .await
-        .unwrap()
-}
-
-fn error_code(res: &CallToolResult) -> Option<String> {
-    if res.is_error != Some(true) {
-        return None;
-    }
-    let text = serde_json::to_value(&res.content).unwrap()[0]["text"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let v: Value = serde_json::from_str(&text).unwrap();
-    v["error"]["code"].as_str().map(str::to_string)
+async fn serve(store: Store, opts: HttpOptions, ct: &CancellationToken) -> TestServer {
+    start_http(store, ct.clone(), |addr, o| {
+        *o = opts;
+        o.bound_port = addr.port();
+        o.dashboard_bound = Some(addr);
+    })
+    .await
 }
 
 /// Write every `queue.*` event kind, with [`MARK`] in every free text. Returns the id and
@@ -279,7 +234,7 @@ async fn remote_callers_cannot_act_on_or_read_queue_text() {
     let token = store
         .create_token("grok-bot", std::slice::from_ref(&work_glob), None, None)
         .unwrap();
-    let client = connect(&remote, &token.secret).await;
+    let client = connect(&remote.base, &token.secret).await;
 
     // A ready item exists, so a remote `next` would have something to take.
     let waiting = store
@@ -402,7 +357,7 @@ async fn remote_callers_cannot_act_on_or_read_queue_text() {
         "/api/dash/activity?q=completed",
         "/api/dash/revision",
     ];
-    for (base, bearer) in [(&remote, Some(&token.secret)), (&local, None)] {
+    for (base, bearer) in [(&remote.base, Some(&token.secret)), (&local.base, None)] {
         for route in routes {
             let mut req = http.get(format!("{base}{route}"));
             if let Some(secret) = bearer {
@@ -541,7 +496,7 @@ async fn needs_is_not_reachable_remotely() {
         .create_token("grok-bot", std::slice::from_ref(&work_glob), None, None)
         .unwrap();
 
-    for (base, secret) in [(&remote, token.secret.as_str()), (&local, "")] {
+    for (base, secret) in [(&remote.base, token.secret.as_str()), (&local.base, "")] {
         let client = connect(base, secret).await;
         let tools: Vec<String> = client
             .list_all_tools()
@@ -559,7 +514,7 @@ async fn needs_is_not_reachable_remotely() {
     }
 
     let http = reqwest::Client::new();
-    for (base, bearer) in [(&remote, Some(&token.secret)), (&local, None)] {
+    for (base, bearer) in [(&remote.base, Some(&token.secret)), (&local.base, None)] {
         for route in ["/needs", "/api/needs", "/api/dash/needs"] {
             let mut req = http.get(format!("{base}{route}"));
             if let Some(secret) = bearer {
