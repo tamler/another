@@ -247,7 +247,7 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 | Dashboard | `another dashboard` (loopback UI), or `GET /ui` on a loopback `another serve` |
 | External commands | `another <name> [args]` runs `another-<name>` from `PATH` when `<name>` is not built in, like git ([docs/PLUGINS.md](docs/PLUGINS.md)) |
 
-`resource register --meta KEY=VALUE` and `send --field KEY=VALUE` trim keys and require nonempty, unique keys. Missing `=`, empty keys and duplicate keys produce a usage error (exit 2). Metadata values retain whitespace and further `=` characters; see [resources](docs/RESOURCES.md).
+`resource register --meta KEY=VALUE` and `send --field KEY=VALUE` trim keys and require nonempty, unique keys. Missing `=`, empty keys and duplicate keys produce a usage error (exit 2). Metadata keys are stored in sorted order rather than argument order. Metadata values retain whitespace and further `=` characters; see [resources](docs/RESOURCES.md).
 
 ## Concepts
 
