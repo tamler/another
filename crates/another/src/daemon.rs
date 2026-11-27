@@ -594,6 +594,7 @@ pub fn install(env: &DaemonEnv, load: bool, dry_run: bool) -> Result<DaemonRepor
     } else {
         Vec::new()
     };
+    eprintln!("{}", crate::serve::LOCAL_LISTENER_WARNING);
     if !dry_run {
         std::fs::create_dir_all(env.another_home.join("logs"))?;
         if change != "unchanged" {
