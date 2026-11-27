@@ -96,7 +96,7 @@ For upgrades and local source installs, see the [install guide](https://toanothe
 1. Run `another hook uninstall --client all` to remove Another's hooks while preserving other hooks and settings. [Hook removal](docs/HOOKS.md) explains the config files and backups left behind.
 2. Remove the Another MCP entry from each client and restart or reconnect that client to stop its server.
 3. If you installed the daemon, run `another daemon uninstall` before removing the binary. For a custom daemon label, pass the same `--label` you installed with. Stop any other Another servers you started.
-4. Run `cargo uninstall another`, or remove the prebuilt binary if that is how you installed it.
+4. Run `cargo uninstall another`. Once release archives exist, remove the prebuilt binary instead if that is how you installed it.
 5. Delete `~/.another` only if you no longer need its local database, messages and history. If you set `ANOTHER_HOME`, remove that directory instead.
 
 ## Status
