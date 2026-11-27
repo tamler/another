@@ -63,9 +63,9 @@ runtime evidence. See [the contract and coverage](docs/AGENT-CONTRACT.md).
 
 Legacy records and experimental clients have an explicit operator repair mode:
 `--unguarded-repair`. It explicitly leaves guarded participation and
-cannot act as a minted actor by name. Repair holds are not checked against actor
-file leases from edit admission, so repair is not a mode to run alongside
-participating actors. Installed hooks never select it and no error falls back to
+cannot act as a minted actor by name. Actors never treat repair holds as
+conflicts, and repair holds do not see actor file leases from edit admission, so
+repair is not a mode to run alongside participating actors. Installed hooks never select it and no error falls back to
 it. Old repair fixtures are not B7 conformance evidence.
 Historical queue grace controls affect repair records only; participating claims
 always use the common lease policy.

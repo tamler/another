@@ -149,21 +149,37 @@ fn repair_holds_meet_only_compatibility_holds_not_edit_admission_leases() {
         1,
         "a repair hold does not consult edit-admission leases"
     );
+    // An actor never treats a repair hold as a conflict (legacy names are not authority
+    // over it), so its compatibility hold on the repair-held path is granted.
     let compat = act(
         &store,
         &actor.proof,
         "compat-hold",
         CompatibilityAction::Hold {
             project: project.clone(),
+            paths: vec!["src/c.rs".into()],
+            ttl_seconds: Some(600),
+        },
+    )
+    .unwrap();
+    assert_eq!(compat["projection"]["granted"].as_array().unwrap().len(), 1);
+    // A repair hold does see an actor's compatibility hold.
+    let blocked = repair.acquire_holds(hold("src/c.rs")).unwrap();
+    assert!(blocked.granted.is_empty(), "a repair hold yields to an actor hold");
+    assert_eq!(blocked.conflicts.len(), 1);
+    // And an actor's compatibility hold over an existing repair hold is granted.
+    let over = act(
+        &store,
+        &actor.proof,
+        "compat-over-repair",
+        CompatibilityAction::Hold {
+            project: project.clone(),
             paths: vec!["src/a.rs".into()],
             ttl_seconds: Some(600),
         },
-    );
-    let granted = compat
-        .as_ref()
-        .map(|v| v["projection"]["granted"].as_array().map_or(0, Vec::len))
-        .unwrap_or(0);
-    assert_eq!(granted, 0, "a compatibility hold conflicts with a repair hold");
+    )
+    .unwrap();
+    assert_eq!(over["projection"]["granted"].as_array().unwrap().len(), 1);
 }
 
 #[test]

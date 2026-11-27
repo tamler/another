@@ -176,11 +176,11 @@ the core library, not only at the CLI: a store handle refuses every mutation
 selected by a plain name (`NO_ACTOR`) unless it is the explicit repair handle
 (`Store::unguarded_repair`), which the CLI, MCP server and hook runner take only
 under `--unguarded-repair`. Repair-mode holds are pre-contract records, not
-contract leases. An actor's file lease from edit admission is not checked against
-repair-mode holds in either direction; only an actor hold taken through the
-compatibility `hold` operation shares the holds table with them and conflicts.
-That gap is why repair is a visible exit from guarded participation, never a
-mode to run alongside participating actors.
+contract leases. An actor never treats a repair hold as a conflict, for edit
+admission or for a compatibility `hold`. A repair hold yields only to an actor
+hold taken through the compatibility `hold` operation; it does not see actor file
+leases from edit admission. That gap is why repair is a visible exit from guarded
+participation, never a mode to run alongside participating actors.
 Read filters and wake/delivery bookkeeping still select by name; those grant no
 right, and wake/delivery carriage is M-M work. Legacy repair fixtures
 test that compatibility surface, not guarded participation.
